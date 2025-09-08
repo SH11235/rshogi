@@ -689,9 +689,13 @@ struct Cli {
     /// Reports to print (repeatable)
     #[arg(long = "report", value_enum)]
     report: Vec<ReportKind>,
-    /// Expected MultiPV for invariants
-    #[arg(long = "expected-multipv", alias = "expected-mpv", default_value_t = 2)]
-    expected_mpv: usize,
+    /// Expected MultiPV for invariants (auto|N). auto prefers manifest values.
+    #[arg(
+        long = "expected-multipv",
+        alias = "expected-mpv",
+        default_value = "auto"
+    )]
+    expected_mpv: String,
     /// Print human-readable summary
     #[arg(long = "summary")]
     summary: bool,
@@ -766,7 +770,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let input = &cli.input;
     let reports: Vec<ReportKind> = cli.report.clone();
-    let expected_mpv: usize = cli.expected_mpv.max(1);
     let want_summary = cli.summary;
     let want_json = cli.json;
     let want_csv = cli.csv;
@@ -871,6 +874,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    // Decide expected_mpv after we resolved manifest_json
+    fn resolve_expected_mpv(cli_val: &str, manifest_json: &Option<Value>) -> usize {
+        // CLI numeric overrides everything
+        if let Ok(v) = cli_val.parse::<usize>() {
+            return v.max(1);
+        }
+        if cli_val.eq_ignore_ascii_case("auto") {
+            if let Some(ref v) = manifest_json {
+                if let Some(mv) =
+                    v.get("aggregated").and_then(|a| a.get("multipv")).and_then(|x| x.as_u64())
+                {
+                    return (mv as usize).max(1);
+                }
+                if let Some(mv) = v.get("multipv").and_then(|x| x.as_u64()) {
+                    return (mv as usize).max(1);
+                }
+            }
+            // fallback default when manifest absent or missing field
+            return 2;
+        }
+        // Unrecognized value: fallback safe default
+        2
+    }
+    let expected_mpv: usize = resolve_expected_mpv(&cli.expected_mpv, &manifest_json);
 
     if !dedup_by_sfen {
         let mut seen: usize = 0;
@@ -1654,12 +1682,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let r4 = agg.inv_fallback_true_no_reason as f64 / total as f64;
             let r5 = agg.inv_mate_mixed_into_no_mate as f64 / total as f64;
             println!(
-                "  invariants: mpv_lt_expected={}({:.3}) gap_with_non_exact={}({:.3}) no_legal_but_empty={}({:.3}) fallback_true_no_reason={}({:.3}) mate_mixed_into_no_mate={}({:.3})",
+                "  invariants: mpv_lt_expected={}({:.3}) gap_with_non_exact={}({:.3}) no_legal_but_empty={}({:.3}) fallback_true_no_reason={}({:.3}) mate_mixed_into_no_mate={}({:.3}) expected_mpv={}",
                 agg.inv_mpv_lt_expected, r1,
                 agg.inv_gap_with_non_exact, r2,
                 agg.inv_no_legal_but_empty, r3,
                 agg.inv_fallback_true_no_reason, r4,
-                agg.inv_mate_mixed_into_no_mate, r5
+                agg.inv_mate_mixed_into_no_mate, r5,
+                expected_mpv
             );
             if agg.non_exact_total > 0 {
                 let t = agg.non_exact_total as f64;

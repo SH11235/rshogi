@@ -1218,6 +1218,7 @@ fn main() -> Result<()> {
         gen_args.push("--nodes".into());
         gen_args.push(n.to_string());
     }
+    // Respect generator defaults: only forward when user specifies.
     if let Some(ms) = cli.time_limit_ms {
         gen_args.push("--time-limit-ms".into());
         gen_args.push(ms.to_string());

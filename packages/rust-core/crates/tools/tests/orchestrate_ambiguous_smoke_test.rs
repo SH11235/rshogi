@@ -60,6 +60,9 @@ fn orchestrate_ambiguous_end_to_end_smoke() {
             pass1.to_string_lossy().as_ref(),
             "--final",
             final_out.to_string_lossy().as_ref(),
+            // Use a safe fixed time to avoid TimeManager opt=0 issues
+            "--time-limit-ms",
+            "100",
             "--gap-threshold",
             "9999",
             "--engine",

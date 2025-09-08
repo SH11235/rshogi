@@ -6,10 +6,13 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tools::common::io::open_reader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LabelKind {
@@ -1249,10 +1252,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
-    let input_file = File::open(&input_path)?;
-    let reader = BufReader::new(input_file);
-    let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
-
     fn extract_sfen(line: &str) -> Option<String> {
         let start = line.find("sfen ")? + 5;
         // normalize tabs to spaces to robustly detect " moves"
@@ -1268,14 +1267,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         tools::common::sfen::normalize_4t(sfen)
     }
-    let sfen_positions: Vec<(usize, String)> = lines
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, line)| extract_sfen(line.trim()).map(|s| (idx, s)))
-        .collect();
-
-    let total_positions = sfen_positions.len();
+    // First pass: count positions and optionally collect samples for calibration
+    let mut total_positions: usize = 0;
+    let mut calib_samples: Vec<String> = Vec::new();
+    let need_calib_samples = opts.nodes.is_none() && opts.nodes_autocalibrate_ms.is_some();
+    let sample_cap = if need_calib_samples {
+        opts.calibrate_sample.max(10)
+    } else {
+        0
+    };
+    // When reading from stdin ("-"), we tee the stream into a temporary file during pass-1
+    // so that pass-2 can re-read the same data. This keeps memory bounded while preserving
+    // the two-pass behavior (counting + processing).
+    struct TeeGuard(Option<PathBuf>);
+    impl Drop for TeeGuard {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let is_stdin = input_path.to_string_lossy() == "-";
+    let mut tee_tmp_path: Option<PathBuf> = None;
+    let mut tee_writer: Option<BufWriter<File>> = None;
+    let mut tee_guard = TeeGuard(None);
+    if is_stdin {
+        // Try a small number of unique suffixes to avoid leftovers blocking creation
+        let base = format!("generate_nnue_training_data.stdin.{}.tmp", std::process::id());
+        let mut opened: Option<(File, PathBuf)> = None;
+        for attempt in 0..5 {
+            let cand = if attempt == 0 {
+                std::env::temp_dir().join(&base)
+            } else {
+                std::env::temp_dir().join(format!("{base}.{}", attempt))
+            };
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                opts.mode(0o600);
+            }
+            match opts.open(&cand) {
+                Ok(f) => {
+                    opened = Some((f, cand));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Error: failed to create temporary tee file for STDIN: {}. Cannot safely re-read in pass-2.",
+                        e
+                    );
+                    eprintln!(
+                        "Hint: set TMPDIR to a writable filesystem or provide an input file instead of '-'"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        let (f, path) = opened.unwrap_or_else(|| {
+            eprintln!("Error: failed to create unique temporary tee file after retries.");
+            eprintln!(
+                "Hint: set TMPDIR to a writable filesystem or provide an input file instead of '-'"
+            );
+            std::process::exit(1);
+        });
+        tee_writer = Some(BufWriter::with_capacity(1 << 20, f));
+        tee_tmp_path = Some(path.clone());
+        tee_guard.0 = Some(path.clone());
+        human_log!(
+            "Teeing STDIN to temporary file: {} (writing entire STDIN to disk; ensure TMPDIR has enough free space)",
+            path.display()
+        );
+    }
+    {
+        let mut reader = open_reader(&input_path)?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = std::io::BufRead::read_line(&mut reader, &mut line)?;
+            if n == 0 {
+                break;
+            }
+            if let Some(w) = tee_writer.as_mut() {
+                // Write original line (includes newline from read_line)
+                w.write_all(line.as_bytes())?;
+            }
+            if let Some(s) = extract_sfen(line.trim()) {
+                total_positions += 1;
+                if need_calib_samples && calib_samples.len() < sample_cap {
+                    calib_samples.push(s);
+                }
+            }
+        }
+    }
+    if let Some(mut w) = tee_writer.take() {
+        w.flush()?;
+    }
     human_log!("\nFound {total_positions} positions in input file");
+
+    // Effective input path for pass-2 (use tee temp for stdin, else original path)
+    let effective_input_path: PathBuf =
+        tee_tmp_path.as_ref().cloned().unwrap_or_else(|| input_path.clone());
 
     // Optional: calibrate nodes from NPS if requested and nodes not explicitly set
     let mut manifest_existing: Option<Manifest> = None;
@@ -1336,7 +1431,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if opts.nodes.is_none() {
                 human_log!("Starting nodes auto-calibration: target {} ms", target_ms);
-                let sample_n = opts.calibrate_sample.min(total_positions).max(10);
                 // Prepare a reusable engine for calibration
                 let mut engine = Engine::new(opts.engine);
                 engine.set_hash_size(opts.hash_mb);
@@ -1351,7 +1445,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut total_nodes: u64 = 0;
                 let mut total_ms: u64 = 0;
-                for (i, (_idx, sfen)) in sfen_positions.iter().take(sample_n).enumerate() {
+                let sample_n = calib_samples.len().min(opts.calibrate_sample.max(10));
+                for (i, sfen) in calib_samples.iter().take(sample_n).enumerate() {
                     if global_stop.load(Ordering::Relaxed) {
                         break;
                     }
@@ -1426,14 +1521,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Skip based on the maximum of skip_count and actual_progress to avoid double-skip
     let positions_to_skip = skip_count.max(actual_progress);
-    let sfen_positions = if positions_to_skip > 0 {
+    if positions_to_skip > 0 {
         human_log!("Skipping first {positions_to_skip} positions (already attempted)");
-        sfen_positions.into_iter().skip(positions_to_skip).collect()
-    } else {
-        sfen_positions
-    };
-
-    let remaining_positions = sfen_positions.len();
+    }
+    let remaining_positions = total_positions.saturating_sub(positions_to_skip);
     human_log!("Processing {remaining_positions} remaining positions");
 
     // Statistics - include already processed count
@@ -1471,102 +1562,205 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Overall timer for elapsed seconds in summary
     let overall_start = std::time::Instant::now();
 
-    // Process in batches (optionally inside a local rayon thread pool)
+    // Process in batches (optionally inside a local rayon thread pool) from a streaming reader
     let mut run_batches = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        for (batch_idx, chunk) in sfen_positions.chunks(batch_size).enumerate() {
+        let mut reader = open_reader(&effective_input_path)?;
+        let mut line = String::new();
+        let mut seen_valid: usize = 0; // valid SFENs seen so far
+        let mut batch: Vec<(usize, String)> = Vec::with_capacity(batch_size.min(1024));
+        let total_batches = remaining_positions.div_ceil(batch_size);
+        let mut batch_idx: usize = 0;
+        loop {
             if global_stop.load(Ordering::Relaxed) {
                 break;
             }
-            let batch_start = std::time::Instant::now();
-
-            human_log!(
-                "\nBatch {}/{}: Processing {} positions...",
-                batch_idx + 1,
-                remaining_positions.div_ceil(batch_size),
-                chunk.len()
-            );
-
-            let batch_results: Vec<_> = chunk
-                .par_iter()
-                .map_init(
-                    || {
-                        let mut eng = Engine::new(opts.engine);
-                        eng.set_hash_size(opts.hash_mb);
-                        eng.set_threads(1);
-                        eng.set_multipv_persistent(opts.multipv);
-                        eng.set_teacher_profile(opts.teacher_profile);
-                        if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
-                            if let Some(ref path) = opts.nnue_weights {
-                                if let Err(e) = eng.load_nnue_weights(path) {
-                                    eprintln!("Failed to load NNUE weights ({}): {}", path, e);
+            line.clear();
+            let n = std::io::BufRead::read_line(&mut reader, &mut line)?;
+            if n == 0 {
+                // EOF: flush remaining batch if any
+                if !batch.is_empty() {
+                    batch_idx += 1;
+                    let batch_start = std::time::Instant::now();
+                    human_log!(
+                        "\nBatch {}/{}: Processing {} positions...",
+                        batch_idx,
+                        total_batches,
+                        batch.len()
+                    );
+                    let batch_results: Vec<_> = batch
+                        .par_iter()
+                        .map_init(
+                            || {
+                                let mut eng = Engine::new(opts.engine);
+                                eng.set_hash_size(opts.hash_mb);
+                                eng.set_threads(1);
+                                eng.set_multipv_persistent(opts.multipv);
+                                eng.set_teacher_profile(opts.teacher_profile);
+                                if matches!(
+                                    opts.engine,
+                                    EngineType::Nnue | EngineType::EnhancedNnue
+                                ) {
+                                    if let Some(ref path) = opts.nnue_weights {
+                                        if let Err(e) = eng.load_nnue_weights(path) {
+                                            eprintln!(
+                                                "Failed to load NNUE weights ({}): {}",
+                                                path, e
+                                            );
+                                        }
+                                    }
                                 }
+                                eng
+                            },
+                            |eng, (idx, sfen)| process_position_with_engine(*idx, sfen, &env, eng),
+                        )
+                        .collect();
+                    let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
+                    if use_parted_output {
+                        if let Some(pm) = part_mgr.as_mut() {
+                            pm.write_lines(&successful_results)?;
+                            if let Err(e) = pm.update_part_progress() {
+                                eprintln!("Warning: failed to write part progress: {}", e);
                             }
                         }
-                        eng
-                    },
-                    |eng, (idx, sfen)| process_position_with_engine(*idx, sfen, &env, eng),
-                )
-                .collect();
-
-            // Separate successful results from skipped ones
-            let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
-
-            // Write successful results
-            if use_parted_output {
-                if let Some(pm) = part_mgr.as_mut() {
-                    pm.write_lines(&successful_results)?;
-                    if let Err(e) = pm.update_part_progress() {
-                        eprintln!("Warning: failed to write part progress: {}", e);
+                    } else if let Some(ref of) = output_file {
+                        let mut file = of.lock().unwrap();
+                        for result in &successful_results {
+                            writeln!(file, "{result}")?;
+                        }
+                        file.flush()?;
                     }
+                    let new_processed = processed_count
+                        .fetch_add(successful_results.len(), Ordering::Relaxed)
+                        + successful_results.len();
+                    let new_attempted =
+                        total_attempted.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
+                    write_atomic_best_effort(&progress_path, &new_attempted.to_string());
+                    let batch_time = batch_start.elapsed();
+                    let positions_per_sec = batch.len() as f64 / batch_time.as_secs_f64();
+                    human_log!(
+                        "Batch complete: {} results in {:.1}s ({:.0} pos/sec)",
+                        successful_results.len(),
+                        batch_time.as_secs_f32(),
+                        positions_per_sec
+                    );
+                    human_log!(
+                        "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
+                        (new_processed as f64 / total_positions as f64) * 100.0
+                    );
+                    if let Some(ref lg) = structured_logger {
+                        let rec = serde_json::json!({
+                            "kind": "batch",
+                            "version": 1,
+                            "batch_index": batch_idx - 1,
+                            "size": batch.len(),
+                            "success": successful_results.len(),
+                            "elapsed_sec": batch_time.as_secs_f64(),
+                            "sps": positions_per_sec,
+                            "attempted_sps": positions_per_sec,
+                            "processed_total": new_processed,
+                            "attempted_total": new_attempted,
+                            "percent": (new_processed as f64 / total_positions as f64) * 100.0,
+                        });
+                        lg.write_json(&rec);
+                    }
+                    batch.clear();
                 }
-            } else if let Some(ref of) = output_file {
-                let mut file = of.lock().unwrap();
-                for result in &successful_results {
-                    writeln!(file, "{result}")?;
-                }
-                file.flush()?;
+                break;
             }
-
-            // Update progress
-            let new_processed = processed_count
-                .fetch_add(successful_results.len(), Ordering::Relaxed)
-                + successful_results.len();
-            let new_attempted =
-                total_attempted.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
-
-            // Save progress to file (total positions attempted, including skipped)
-            write_atomic_best_effort(&progress_path, &new_attempted.to_string());
-
-            let batch_time = batch_start.elapsed();
-            let positions_per_sec = chunk.len() as f64 / batch_time.as_secs_f64();
-
-            human_log!(
-                "Batch complete: {} results in {:.1}s ({:.0} pos/sec)",
-                successful_results.len(),
-                batch_time.as_secs_f32(),
-                positions_per_sec
-            );
-            human_log!(
-                "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
-                (new_processed as f64 / total_positions as f64) * 100.0
-            );
-
-            // Structured log per batch (optional)
-            if let Some(ref lg) = structured_logger {
-                let rec = serde_json::json!({
-                    "kind": "batch",
-                    "version": 1,
-                    "batch_index": batch_idx,
-                    "size": chunk.len(),
-                    "success": successful_results.len(),
-                    "elapsed_sec": batch_time.as_secs_f64(),
-                    "sps": positions_per_sec,
-                    "attempted_sps": positions_per_sec,
-                    "processed_total": new_processed,
-                    "attempted_total": new_attempted,
-                    "percent": (new_processed as f64 / total_positions as f64) * 100.0,
-                });
-                lg.write_json(&rec);
+            if let Some(sfen) = extract_sfen(line.trim()) {
+                seen_valid += 1;
+                if seen_valid <= positions_to_skip {
+                    continue;
+                }
+                let idx0 = seen_valid - 1; // zero-based index
+                batch.push((idx0, sfen));
+                if batch.len() >= batch_size {
+                    batch_idx += 1;
+                    let batch_start = std::time::Instant::now();
+                    human_log!(
+                        "\nBatch {}/{}: Processing {} positions...",
+                        batch_idx,
+                        total_batches,
+                        batch.len()
+                    );
+                    let batch_results: Vec<_> = batch
+                        .par_iter()
+                        .map_init(
+                            || {
+                                let mut eng = Engine::new(opts.engine);
+                                eng.set_hash_size(opts.hash_mb);
+                                eng.set_threads(1);
+                                eng.set_multipv_persistent(opts.multipv);
+                                eng.set_teacher_profile(opts.teacher_profile);
+                                if matches!(
+                                    opts.engine,
+                                    EngineType::Nnue | EngineType::EnhancedNnue
+                                ) {
+                                    if let Some(ref path) = opts.nnue_weights {
+                                        if let Err(e) = eng.load_nnue_weights(path) {
+                                            eprintln!(
+                                                "Failed to load NNUE weights ({}): {}",
+                                                path, e
+                                            );
+                                        }
+                                    }
+                                }
+                                eng
+                            },
+                            |eng, (idx, sfen)| process_position_with_engine(*idx, sfen, &env, eng),
+                        )
+                        .collect();
+                    let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
+                    if use_parted_output {
+                        if let Some(pm) = part_mgr.as_mut() {
+                            pm.write_lines(&successful_results)?;
+                            if let Err(e) = pm.update_part_progress() {
+                                eprintln!("Warning: failed to write part progress: {}", e);
+                            }
+                        }
+                    } else if let Some(ref of) = output_file {
+                        let mut file = of.lock().unwrap();
+                        for result in &successful_results {
+                            writeln!(file, "{result}")?;
+                        }
+                        file.flush()?;
+                    }
+                    let new_processed = processed_count
+                        .fetch_add(successful_results.len(), Ordering::Relaxed)
+                        + successful_results.len();
+                    let new_attempted =
+                        total_attempted.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
+                    write_atomic_best_effort(&progress_path, &new_attempted.to_string());
+                    let batch_time = batch_start.elapsed();
+                    let positions_per_sec = batch.len() as f64 / batch_time.as_secs_f64();
+                    human_log!(
+                        "Batch complete: {} results in {:.1}s ({:.0} pos/sec)",
+                        successful_results.len(),
+                        batch_time.as_secs_f32(),
+                        positions_per_sec
+                    );
+                    human_log!(
+                        "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
+                        (new_processed as f64 / total_positions as f64) * 100.0
+                    );
+                    if let Some(ref lg) = structured_logger {
+                        let rec = serde_json::json!({
+                            "kind": "batch",
+                            "version": 1,
+                            "batch_index": batch_idx - 1,
+                            "size": batch.len(),
+                            "success": successful_results.len(),
+                            "elapsed_sec": batch_time.as_secs_f64(),
+                            "sps": positions_per_sec,
+                            "attempted_sps": positions_per_sec,
+                            "processed_total": new_processed,
+                            "attempted_total": new_attempted,
+                            "percent": (new_processed as f64 / total_positions as f64) * 100.0,
+                        });
+                        lg.write_json(&rec);
+                    }
+                    batch.clear();
+                }
             }
         }
         Ok(())
@@ -1646,9 +1840,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Provenance: compute input file hash/bytes and NNUE weights hash (if provided)
-    let (input_sha256, input_bytes) = compute_sha_and_bytes(&input_path)
-        .map(|(h, b)| (Some(h), Some(b)))
-        .unwrap_or((None, None));
+    let (input_sha256, input_bytes) = if is_stdin {
+        tee_tmp_path
+            .as_ref()
+            .and_then(|p| compute_sha_and_bytes(p))
+            .map(|(h, b)| (Some(h), Some(b)))
+            .unwrap_or((None, None))
+    } else {
+        compute_sha_and_bytes(&input_path)
+            .map(|(h, b)| (Some(h), Some(b)))
+            .unwrap_or((None, None))
+    };
     let nnue_weights_sha256: Option<String> = opts
         .nnue_weights
         .as_ref()
@@ -2166,7 +2368,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rec = serde_json::json!({ "kind": "final", "version": 1, "summary": &summary_obj });
         lg.write_json(&rec);
     }
-
     Ok(())
 }
 
@@ -2258,7 +2459,7 @@ fn process_position_with_engine(
                 "depth_reached": result.stats.depth,
                 "reason": "time_overrun",
                 "mode": "time",
-                "index": idx + 1,
+                "index": idx,
             });
             let _ = writeln!(file, "{}", obj);
         }
@@ -2289,7 +2490,7 @@ fn process_position_with_engine(
                 "search_error": "empty_or_missing_pv",
                 "depth_reached": depth_reached,
                 "mode": "search",
-                "index": idx + 1,
+                "index": idx,
             });
             let _ = writeln!(file, "{}", obj);
         }
@@ -2304,7 +2505,7 @@ fn process_position_with_engine(
                 "search_error": "nonexact_top1",
                 "depth_reached": depth_reached,
                 "mode": "search",
-                "index": idx + 1,
+                "index": idx,
             });
             let _ = writeln!(file, "{}", obj);
         }
