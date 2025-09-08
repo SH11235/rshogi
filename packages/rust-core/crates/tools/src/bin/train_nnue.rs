@@ -611,8 +611,8 @@ impl StreamCacheLoader {
             let inner_reader: Box<dyn Read> = match payload_encoding {
                 0 => Box::new(f),
                 1 => {
-                    use flate2::read::GzDecoder;
-                    Box::new(GzDecoder::new(f))
+                    use flate2::read::MultiGzDecoder;
+                    Box::new(MultiGzDecoder::new(f))
                 }
                 2 => {
                     #[cfg(feature = "zstd")]
@@ -1319,8 +1319,8 @@ fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::er
     let reader: Box<dyn Read> = match payload_encoding {
         0 => Box::new(f),
         1 => {
-            use flate2::read::GzDecoder;
-            Box::new(GzDecoder::new(f))
+            use flate2::read::MultiGzDecoder;
+            Box::new(MultiGzDecoder::new(f))
         }
         2 => {
             #[cfg(feature = "zstd")]

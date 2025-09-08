@@ -72,6 +72,10 @@ struct CacheConfig {
     payload_encoding: PayloadEncodingKind,
     compress_level: Option<i32>,
     dedup_features: bool,
+    // I/O and metrics
+    io_buf_bytes: usize,
+    metrics_interval: u64,
+    report_rss: bool,
 }
 
 // No concrete header struct; header is written field-by-field for stability.
@@ -150,6 +154,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .required(false),
         )
         .arg(arg!(--"dedup-features" "Sort & deduplicate active features per sample (slower)"))
+        .arg(
+            arg!(--"io-buf-mb" <MB> "I/O buffer size in MB (reader/writer)")
+                .value_parser(clap::value_parser!(u32).range(1..))
+                .required(false),
+        )
+        .arg(
+            arg!(--"metrics-interval" <N> "Progress/metrics log interval (positions)")
+                .value_parser(clap::value_parser!(u64).range(1..))
+                .default_value("10000"),
+        )
+        .arg(arg!(--"report-rss" "Report current/peak RSS on Linux"))
         .get_matches();
 
     let input_path = app.get_one::<String>("input").unwrap();
@@ -207,6 +222,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Compression level: {}", lvl);
     }
     let dedup_features = app.get_flag("dedup-features");
+    let io_buf_bytes: usize = app
+        .get_one::<u32>("io-buf-mb")
+        .map(|mb| (*mb as usize) * 1024 * 1024)
+        .unwrap_or(4 * 1024 * 1024); // default 4MB
+    let metrics_interval: u64 = *app.get_one::<u64>("metrics-interval").unwrap();
+    let report_rss = app.get_flag("report-rss");
 
     let start_time = Instant::now();
 
@@ -228,6 +249,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         payload_encoding,
         compress_level,
         dedup_features,
+        io_buf_bytes,
+        metrics_interval,
+        report_rss,
     };
 
     let (num_samples, total_features) =
@@ -270,9 +294,9 @@ fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
     1.0 / (1.0 + (-cp as f32 / scale).exp())
 }
 
-fn write_samples_to_sink<W: Write>(
+fn write_samples_stream<R: BufRead, W: Write>(
+    mut reader: R,
     mut sink: W,
-    reader: BufReader<File>,
     config: &CacheConfig,
 ) -> Result<(u64, u64, u64, u64), Box<dyn std::error::Error>> {
     let mut num_samples: u64 = 0;
@@ -284,20 +308,30 @@ fn write_samples_to_sink<W: Write>(
     // Reusable u8 scratch for big-endian fallback writes
     #[cfg(target_endian = "big")]
     let mut u8_buf: Vec<u8> = Vec::with_capacity(4096);
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    loop {
+        line_buf.clear();
+        let n = reader.read_until(b'\n', &mut line_buf)?;
+        if n == 0 {
+            break;
+        }
+        if line_buf.iter().all(|b| b.is_ascii_whitespace()) {
             continue;
         }
 
         processed += 1;
-        if processed % 10000 == 0 {
+        if processed % config.metrics_interval == 0 {
             print!("\rProcessed {} positions...", processed);
+            #[cfg(target_os = "linux")]
+            if config.report_rss {
+                if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
+                    print!(" | RSS={}MB HWM={}MB", rss_kb / 1024, hwm_kb / 1024);
+                }
+            }
             std::io::stdout().flush()?;
         }
 
-        let pos_data: TrainingPosition = match serde_json::from_str(&line) {
+        let pos_data: TrainingPosition = match serde_json::from_slice(&line_buf) {
             Ok(data) => data,
             Err(_) => {
                 skipped += 1;
@@ -463,47 +497,171 @@ fn write_cache_file_streaming(
     // Payload starts here
     let payload_offset = file.stream_position()?;
 
-    // Prepare input reader
-    let input_file = File::open(input_path)?;
-    let reader = BufReader::new(input_file);
+    // Prepare input reader (supports .jsonl, .jsonl.gz, .jsonl.zst[feature])
+    let reader = open_input_reader(input_path, config.io_buf_bytes)?;
 
     // Write samples either raw or compressed
-    let (num_samples, total_features, skipped, processed) = match config.payload_encoding {
+    // Writer with optional chunked compression
+    let mut num_samples: u64 = 0;
+    let mut total_features: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut processed: u64 = 0;
+
+    match config.payload_encoding {
         PayloadEncodingKind::None => {
-            // Uncompressed payload
-            let sink = BufWriter::new(file);
-            write_samples_to_sink(sink, reader, config)?
+            let sink = BufWriter::with_capacity(config.io_buf_bytes, file);
+            let (ns, tf, sk, pr) = write_samples_stream(reader, sink, config)?;
+            num_samples = ns;
+            total_features = tf;
+            skipped = sk;
+            processed = pr;
         }
         PayloadEncodingKind::Gzip => {
-            // Gzip compressed payload
             use flate2::write::GzEncoder;
             use flate2::Compression;
             let level = config.compress_level.map(|l| l.clamp(0, 9) as u32).unwrap_or(6);
-            // Buffer the file under the gzip encoder for better I/O throughput
-            let sink = BufWriter::new(file);
-            let mut encoder = GzEncoder::new(sink, Compression::new(level));
-            let (num_samples, total_features, skipped, processed) =
-                write_samples_to_sink(&mut encoder, reader, config)?;
-            // Ensure encoder is finished (flush data to file)
-            let _file = encoder.finish()?;
-            (num_samples, total_features, skipped, processed)
+            let sink = BufWriter::with_capacity(config.io_buf_bytes, file);
+
+            // We'll iterate JSONL manually to control chunk boundaries
+            let mut r = reader; // BufRead
+            let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+            let mut in_chunk: u32 = 0;
+            let mut enc = GzEncoder::new(sink, Compression::new(level));
+
+            // Reusable buffers
+            let mut features_buf: Vec<u32> = Vec::with_capacity(256);
+
+            loop {
+                line_buf.clear();
+                let n = r.read_until(b'\n', &mut line_buf)?;
+                if n == 0 {
+                    break;
+                }
+                if line_buf.iter().all(|b| b.is_ascii_whitespace()) {
+                    continue;
+                }
+
+                processed += 1;
+                if processed % config.metrics_interval == 0 {
+                    print!("\rProcessed {} positions...", processed);
+                    #[cfg(target_os = "linux")]
+                    if config.report_rss {
+                        if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
+                            print!(" | RSS={}MB HWM={}MB", rss_kb / 1024, hwm_kb / 1024);
+                        }
+                    }
+                    std::io::stdout().flush()?;
+                }
+
+                let pos_data: TrainingPosition = match serde_json::from_slice(&line_buf) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                if config.exclude_no_legal_move && pos_data.no_legal_move.unwrap_or(false) {
+                    skipped += 1;
+                    continue;
+                }
+                if config.exclude_fallback && pos_data.fallback_used.unwrap_or(false) {
+                    skipped += 1;
+                    continue;
+                }
+
+                let (written, feats) =
+                    write_position_samples(&pos_data, &mut enc, config, &mut features_buf)?;
+                if written == 0 {
+                    continue;
+                }
+
+                num_samples += written as u64;
+                total_features += feats as u64;
+
+                in_chunk += written as u32;
+                if in_chunk >= config.chunk_size {
+                    // Close current gzip member and start a new one
+                    let finished_sink = enc.finish()?; // returns BufWriter<File>
+                    enc = GzEncoder::new(finished_sink, Compression::new(level));
+                    in_chunk = 0;
+                }
+            }
+
+            // finish open encoder and flush
+            let mut sink = enc.finish()?;
+            sink.flush()?;
         }
         #[cfg(feature = "zstd")]
         PayloadEncodingKind::Zstd => {
-            // Zstd compressed payload
             let level = config.compress_level.unwrap_or(0);
-            // Buffer the file under the zstd encoder for better I/O throughput
-            let sink = BufWriter::new(file);
-            let mut encoder = zstd::Encoder::new(sink, level)?; // 0 = default level
-            let (num_samples, total_features, skipped, processed) = {
-                // zstd::Encoder implements Write
-                write_samples_to_sink(&mut encoder, reader, config)?
-            };
-            // Finish encoder, retrieving the underlying BufWriter<File>
-            let _sink = encoder.finish()?;
-            (num_samples, total_features, skipped, processed)
+            let mut sink = BufWriter::with_capacity(config.io_buf_bytes, file);
+
+            let mut r = reader; // BufRead
+            let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+            let mut in_chunk: u32 = 0;
+            let mut enc = zstd::Encoder::new(sink, level)?;
+
+            // Reusable buffers
+            let mut features_buf: Vec<u32> = Vec::with_capacity(256);
+
+            loop {
+                line_buf.clear();
+                let n = r.read_until(b'\n', &mut line_buf)?;
+                if n == 0 {
+                    break;
+                }
+                if line_buf.iter().all(|b| b.is_ascii_whitespace()) {
+                    continue;
+                }
+
+                processed += 1;
+                if processed % config.metrics_interval == 0 {
+                    print!("\rProcessed {} positions...", processed);
+                    #[cfg(target_os = "linux")]
+                    if config.report_rss {
+                        if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
+                            print!(" | RSS={}MB HWM={}MB", rss_kb / 1024, hwm_kb / 1024);
+                        }
+                    }
+                    std::io::stdout().flush()?;
+                }
+
+                let pos_data: TrainingPosition = match serde_json::from_slice(&line_buf) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                if config.exclude_no_legal_move && pos_data.no_legal_move.unwrap_or(false) {
+                    skipped += 1;
+                    continue;
+                }
+                if config.exclude_fallback && pos_data.fallback_used.unwrap_or(false) {
+                    skipped += 1;
+                    continue;
+                }
+
+                let (written, feats) =
+                    write_position_samples(&pos_data, &mut enc, config, &mut features_buf)?;
+                if written == 0 {
+                    continue;
+                }
+                num_samples += written as u64;
+                total_features += feats as u64;
+                in_chunk += (written as u32);
+                if in_chunk >= config.chunk_size {
+                    // close current frame and start a new one
+                    let finished_sink = enc.finish()?; // returns BufWriter<File>
+                    enc = zstd::Encoder::new(finished_sink, level)?;
+                    in_chunk = 0;
+                }
+            }
+
+            let mut sink = enc.finish()?;
+            sink.flush()?;
         }
-    };
+    }
 
     println!("\rProcessed {} positions (skipped {})", processed, skipped);
 
@@ -534,6 +692,173 @@ fn write_cache_file_streaming(
     }
 
     Ok((num_samples, total_features))
+}
+
+// Helper: write both perspective samples for one position; returns number of samples written and total features added
+fn write_position_samples<W: Write>(
+    pos_data: &TrainingPosition,
+    sink: &mut W,
+    config: &CacheConfig,
+    features_buf: &mut Vec<u32>,
+) -> std::io::Result<(usize, usize)> {
+    // Determine CP from eval/lines
+    let cp = if let Some(eval) = pos_data.eval {
+        eval
+    } else if let Some(line) = pos_data.lines.first() {
+        line.score_cp.unwrap_or(0)
+    } else {
+        return Ok((0, 0));
+    };
+
+    // Create position
+    let position = match Position::from_sfen(&pos_data.sfen) {
+        Ok(pos) => pos,
+        Err(_) => return Ok((0, 0)),
+    };
+
+    let black_king = match position.board.king_square(Color::Black) {
+        Some(sq) => sq,
+        None => return Ok((0, 0)),
+    };
+    let white_king = match position.board.king_square(Color::White) {
+        Some(sq) => sq,
+        None => return Ok((0, 0)),
+    };
+
+    // Build flags
+    let mut base_flags = 0u8;
+    let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
+    if both_exact {
+        base_flags |= FLAG_BOTH_EXACT;
+    }
+    if pos_data.mate_boundary.unwrap_or(false) {
+        base_flags |= FLAG_MATE_BOUNDARY;
+    }
+    let stm = position.side_to_move;
+    let cp_black = if stm == Color::Black { cp } else { -cp };
+    let cp_white = -cp_black;
+
+    let mut samples_written = 0usize;
+    let mut features_total = 0usize;
+
+    // local helper to write one perspective
+    let mut write_one = |perspective: Color, king_sq| -> std::io::Result<()> {
+        let feats = extract_features(&position, king_sq, perspective);
+        features_buf.clear();
+        features_buf.extend(feats.as_slice().iter().map(|&f| f as u32));
+        if config.dedup_features {
+            features_buf.sort_unstable();
+            features_buf.dedup();
+        }
+        #[cfg(debug_assertions)]
+        {
+            let max_dim = (SHOGI_BOARD_SIZE * FE_END) as u32;
+            debug_assert!(
+                features_buf.iter().all(|&f| f < max_dim),
+                "feature index OOB: some index >= {}",
+                max_dim
+            );
+        }
+
+        let cp_oriented = if perspective == Color::Black {
+            cp_black
+        } else {
+            cp_white
+        };
+        let label = match config.label_type.as_str() {
+            "wdl" => cp_to_wdl(cp_oriented, config.scale),
+            "cp" => (cp_oriented.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
+            _ => return Ok(()),
+        };
+        let mut flags = base_flags;
+        if perspective == Color::Black {
+            flags |= FLAG_PERSPECTIVE_BLACK;
+        }
+        if stm == Color::Black {
+            flags |= FLAG_STM_BLACK;
+        }
+
+        let n_features = features_buf.len() as u32;
+        sink.write_all(&n_features.to_le_bytes())?;
+        if !features_buf.is_empty() {
+            #[cfg(target_endian = "little")]
+            {
+                use bytemuck::cast_slice;
+                sink.write_all(cast_slice::<u32, u8>(features_buf))?;
+            }
+            #[cfg(target_endian = "big")]
+            {
+                let mut u8_buf: Vec<u8> = Vec::with_capacity(features_buf.len() * 4);
+                for &feat in &features_buf {
+                    u8_buf.extend_from_slice(&feat.to_le_bytes());
+                }
+                sink.write_all(&u8_buf)?;
+            }
+        }
+        sink.write_all(&label.to_le_bytes())?;
+        let gap = pos_data.best2_gap_cp.unwrap_or(0).clamp(0, u16::MAX as i32) as u16;
+        sink.write_all(&gap.to_le_bytes())?;
+        sink.write_all(&[pos_data.depth.unwrap_or(0)])?;
+        sink.write_all(&[pos_data.seldepth.unwrap_or(0)])?;
+        sink.write_all(&[flags])?;
+        features_total += features_buf.len();
+        samples_written += 1;
+        Ok(())
+    };
+
+    // Black and White perspectives
+    write_one(Color::Black, black_king)?;
+    write_one(Color::White, white_king)?;
+
+    Ok((samples_written, features_total))
+}
+
+fn open_input_reader(
+    input_path: &str,
+    io_buf_bytes: usize,
+) -> Result<Box<dyn BufRead>, Box<dyn std::error::Error>> {
+    let file = File::open(input_path)?;
+    if input_path.ends_with(".gz") {
+        use flate2::read::MultiGzDecoder;
+        let gz = MultiGzDecoder::new(file);
+        Ok(Box::new(BufReader::with_capacity(io_buf_bytes, gz)))
+    } else if input_path.ends_with(".zst") {
+        #[cfg(feature = "zstd")]
+        {
+            let dec = zstd::Decoder::new(file)?;
+            Ok(Box::new(BufReader::with_capacity(io_buf_bytes, dec)))
+        }
+        #[cfg(not(feature = "zstd"))]
+        {
+            Err("zst input requires building 'tools' with feature 'zstd'".into())
+        }
+    } else {
+        Ok(Box::new(BufReader::with_capacity(io_buf_bytes, file)))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_rss_kb() -> Option<(u64, u64)> {
+    use std::fs::File;
+    let f = File::open("/proc/self/status").ok()?;
+    let r = BufReader::new(f);
+    let mut rss: Option<u64> = None;
+    let mut hwm: Option<u64> = None;
+    for line in r.lines().map_while(Result::ok) {
+        if let Some(v) = line.strip_prefix("VmRSS:") {
+            if let Some(kb) = v.split_whitespace().next().and_then(|s| s.parse().ok()) {
+                rss = Some(kb);
+            }
+        } else if let Some(v) = line.strip_prefix("VmHWM:") {
+            if let Some(kb) = v.split_whitespace().next().and_then(|s| s.parse().ok()) {
+                hwm = Some(kb);
+            }
+        }
+    }
+    match (rss, hwm) {
+        (Some(r), Some(h)) => Some((r, h)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -601,7 +926,7 @@ mod tests {
 
         let reader: Box<dyn Read> = match enc {
             0 => Box::new(f),
-            1 => Box::new(flate2::read::GzDecoder::new(f)),
+            1 => Box::new(flate2::read::MultiGzDecoder::new(f)),
             2 => {
                 #[cfg(feature = "zstd")]
                 {
@@ -656,6 +981,9 @@ mod tests {
             payload_encoding: PayloadEncodingKind::None,
             compress_level: None,
             dedup_features: false,
+            io_buf_bytes: 1 * 1024 * 1024,
+            metrics_interval: 10_000,
+            report_rss: false,
         };
 
         let (num, _feat) =
@@ -695,6 +1023,9 @@ mod tests {
             payload_encoding: PayloadEncodingKind::Gzip,
             compress_level: Some(6),
             dedup_features: false,
+            io_buf_bytes: 1 * 1024 * 1024,
+            metrics_interval: 10_000,
+            report_rss: false,
         };
 
         let (num, _feat) =
@@ -729,6 +1060,9 @@ mod tests {
             payload_encoding: PayloadEncodingKind::None,
             compress_level: None,
             dedup_features: false,
+            io_buf_bytes: 1 * 1024 * 1024,
+            metrics_interval: 10_000,
+            report_rss: false,
         };
         let (_num, _feat) =
             write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
@@ -761,6 +1095,9 @@ mod tests {
                 payload_encoding: PayloadEncodingKind::Gzip,
                 compress_level: Some(lvl),
                 dedup_features: false,
+                io_buf_bytes: 1 * 1024 * 1024,
+                metrics_interval: 10_000,
+                report_rss: false,
             };
             let (num, _feat) =
                 write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
@@ -770,6 +1107,35 @@ mod tests {
             assert_eq!(ns, 4);
             assert!(samples.iter().all(|(n, _)| *n > 0));
         }
+    }
+
+    // gzip: chunked multi-member (chunk_size=1) を読めること
+    #[test]
+    fn v1_gzip_chunked_members_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let jsonl = write_minimal_jsonl(&dir);
+        let out = dir.join("out_gz_chunked.cache");
+        let cfg = CacheConfig {
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            chunk_size: 1, // force member per sample
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            payload_encoding: PayloadEncodingKind::Gzip,
+            compress_level: Some(6),
+            dedup_features: false,
+            io_buf_bytes: 1 * 1024 * 1024,
+            metrics_interval: 10_000,
+            report_rss: false,
+        };
+        let (num, _feat) =
+            write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
+                .unwrap();
+        assert_eq!(num, 4);
+        let (ns, _samples) = parse_cache_labels(&out);
+        assert_eq!(ns, 4);
     }
 
     // zstd 圧縮のレベル 1,3,10 で往復（feature 有効時）
@@ -791,6 +1157,9 @@ mod tests {
                 payload_encoding: PayloadEncodingKind::Zstd,
                 compress_level: Some(lvl),
                 dedup_features: false,
+                io_buf_bytes: 1 * 1024 * 1024,
+                metrics_interval: 10_000,
+                report_rss: false,
             };
             let (num, _feat) =
                 write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
@@ -821,6 +1190,9 @@ mod tests {
             payload_encoding: PayloadEncodingKind::None,
             compress_level: None,
             dedup_features: false,
+            io_buf_bytes: 1 * 1024 * 1024,
+            metrics_interval: 10_000,
+            report_rss: false,
         };
         let (_num_off, _feat_off) = write_cache_file_streaming(
             jsonl.to_str().unwrap(),
