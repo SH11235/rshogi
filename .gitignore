@@ -58,3 +58,5 @@ packages/core/ai-benchmark-*.json
 # Opening book data (copied from core during build)
 packages/web/public/data/*.binz
 packages/web/public/data/*.bin.binz
+
+packages/rust-core/runs/*

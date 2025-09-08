@@ -223,6 +223,45 @@ cargo run -p tools --bin train_nnue -- \
 - **JSONL Support**: Direct training from annotated game data
 - **Feature extraction**: HalfKP feature generation from positions
 
+#### Training Data Generation (Streaming SFEN)
+
+The generator now streams SFEN input to keep peak memory nearly constant, even for very large corpora. The manifest format and orchestrator integration remain unchanged.
+
+- Input: plain text lines containing `sfen ...` (optionally with trailing `moves`), supports `-` (stdin) and compressed files (`.gz`, `.zst` when built with `zstd` feature).
+- Output: JSONL or text, optional part-splitting and compression, plus v2 manifest next to outputs.
+- Resume: If the output file and `<out>.progress` exist, the tool resumes automatically (skips already attempted positions and appends).
+
+Example (streaming from stdin, JSONL output, split every 1M lines):
+```bash
+zcat runs/pass2_input.sfens.gz \
+  | cargo run --release -p tools --bin generate_nnue_training_data -- \
+      - runs/pass2.jsonl \
+      --engine enhanced-nnue --output-format jsonl \
+      --hash-mb 512 --multipv 2 --min-depth 3 \
+      --split 1000000 --compress zst
+```
+
+Notes:
+- Memory usage is bounded by the batch size, engine TT size, and output buffers — it does not grow with input size.
+- When reading from `-` (stdin), input hash/size are omitted in the manifest (verification remains available for file inputs).
+
+#### Teaching Quality Analyzer (Expected MultiPV Auto)
+
+`analyze_teaching_quality` supports automatic MultiPV expectation resolution. The CLI accepts `--expected-multipv auto|<N>` (default: `auto`).
+
+Resolution order when `auto`:
+- Prefer final manifest field `aggregated.multipv` associated with the input
+- Fallback to the (per-file) `multipv` in the nearest manifest
+- If no manifest is present or fields are missing, fallback to `2`
+- If a numeric value is specified at CLI, it always overrides the manifest
+
+Example:
+```bash
+cargo run --release -p tools --bin analyze_teaching_quality -- \
+  runs/final.jsonl --summary --manifest-autoload-mode strict
+# summary line includes: "expected_mpv=<resolved>"
+```
+
 ## Performance Considerations
 
 - Use `--release` flag for production builds

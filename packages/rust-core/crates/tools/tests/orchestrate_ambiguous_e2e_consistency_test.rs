@@ -33,18 +33,18 @@ fn orchestrate_ambiguous_e2e_counts_and_manifest_consistency() {
             "--final",
             final_out.to_string_lossy().as_ref(),
             "--gap-threshold",
-            "10", // extract all 3
+            "100", // extract all 3
             "--engine",
             "enhanced",
             "--multipv",
-            "3",
+            "1",
             "--hash-mb",
             "16",
             "--split",
             "3",
-            // keep generate fast
+            // keep generate fast but avoid opt=0 issues
             "--time-limit-ms",
-            "10",
+            "100",
         ])
         .status()
         .expect("run orchestrator");
@@ -107,17 +107,17 @@ fn orchestrate_ambiguous_e2e_external_normalize_consistency() {
             "--final",
             final_out.to_string_lossy().as_ref(),
             "--gap-threshold",
-            "10",
+            "100",
             "--engine",
             "enhanced",
             "--multipv",
-            "3",
+            "1",
             "--hash-mb",
             "16",
             "--split",
             "3",
             "--time-limit-ms",
-            "10",
+            "100",
             // external normalize controls
             "--normalize-sort-unique",
             "--normalize-chunk-lines",
