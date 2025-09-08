@@ -2,7 +2,7 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -87,6 +87,7 @@ fn generate_split_gz_smoke_parts_and_manifests_consistent() {
             "--output-format",
             "jsonl",
         ])
+        .timeout(std::time::Duration::from_secs(30))
         .assert();
     assert.success();
 
