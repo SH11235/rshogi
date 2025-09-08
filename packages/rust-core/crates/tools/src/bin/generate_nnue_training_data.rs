@@ -1285,9 +1285,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if is_stdin {
         let mut tmp = std::env::temp_dir();
         tmp.push(format!("generate_nnue_training_data.stdin.{}.tmp", std::process::id()));
-        // Create with conservative permissions on Unix
+        // Create with conservative permissions; use create_new(O_EXCL) to avoid symlink/race
         let mut opts = OpenOptions::new();
-        opts.create(true).write(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             opts.mode(0o600);
@@ -1323,7 +1323,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(w) = tee_writer.as_mut() {
                 // Write original line (includes newline from read_line)
-                let _ = w.write_all(line.as_bytes());
+                use std::io::Write as _;
+                w.write_all(line.as_bytes())?;
             }
             if let Some(s) = extract_sfen(line.trim()) {
                 total_positions += 1;
@@ -1334,7 +1335,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(mut w) = tee_writer.take() {
-        let _ = w.flush();
+        use std::io::Write as _;
+        w.flush()?;
     }
     human_log!("\nFound {total_positions} positions in input file");
 
