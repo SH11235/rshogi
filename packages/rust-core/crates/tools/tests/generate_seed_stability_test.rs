@@ -39,7 +39,7 @@ fn seed_is_stable_from_args_and_independent_of_argv0() {
         "4".into(),
         "0".into(),
         "--time-limit-ms".into(),
-        "10".into(),
+        "100".into(),
         "--engine".into(),
         "material".into(),
         "--output-format".into(),

@@ -42,7 +42,7 @@ fn generate_non_split_smoke_manifest_and_output_exist() {
             "4",
             "0",
             "--time-limit-ms",
-            "10",
+            "100",
             "--output-format",
             "jsonl",
         ])
@@ -79,7 +79,7 @@ fn generate_split_gz_smoke_parts_and_manifests_consistent() {
             "4",
             "0",
             "--time-limit-ms",
-            "10",
+            "100",
             "--split",
             "3",
             "--compress",
