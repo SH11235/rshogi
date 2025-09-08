@@ -274,7 +274,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
-    1.0 / (1.0 + (-cp as f32 / scale).exp())
+    let x = (cp as f32 / scale).clamp(-20.0, 20.0);
+    1.0 / (1.0 + (-x).exp())
 }
 
 fn write_samples_stream<R: BufRead, W: Write>(

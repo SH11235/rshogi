@@ -1044,7 +1044,8 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
 }
 
 fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
-    1.0 / (1.0 + (-cp as f32 / scale).exp())
+    let x = (cp as f32 / scale).clamp(-20.0, 20.0);
+    1.0 / (1.0 + (-x).exp())
 }
 
 #[inline]
@@ -1182,11 +1183,11 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         weight *= (gap as f32 / 50.0).min(1.0);
 
         // Exact bound weight
-        let both_exact = (flags & 1) != 0;
+        let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
         weight *= if both_exact { 1.0 } else { 0.7 };
 
         // Mate boundary weight
-        if (flags & 2) != 0 {
+        if (flags & fc_flags::MATE_BOUNDARY) != 0 {
             weight *= 0.5;
         }
 
@@ -1421,9 +1422,9 @@ fn train_model_stream_cache(
                     let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
                     let mut weight = 1.0f32;
                     weight *= (gap as f32 / 50.0).min(1.0);
-                    let both_exact = (flags & 1) != 0;
+                    let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                     weight *= if both_exact { 1.0 } else { 0.7 };
-                    if (flags & 2) != 0 {
+                    if (flags & fc_flags::MATE_BOUNDARY) != 0 {
                         weight *= 0.5;
                     }
                     if seldepth < depth.saturating_add(6) {
