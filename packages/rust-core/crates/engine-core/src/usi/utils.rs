@@ -234,7 +234,9 @@ pub fn append_usi_score_and_bound(out: &mut String, view: ScoreView, bound: Node
             out.push_str(&format!(" score cp {}", cp));
         }
         ScoreView::Mate(d) => {
-            out.push_str(&format!(" score mate {}", d));
+            // Normalize -0 to 0 to avoid "-0"
+            let dz = if d == 0 { 0 } else { d };
+            out.push_str(&format!(" score mate {}", dz));
         }
     }
 
