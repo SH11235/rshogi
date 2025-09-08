@@ -55,7 +55,7 @@ pub fn open_maybe_compressed_reader(
             }
             #[cfg(not(feature = "zstd"))]
             {
-                return Err("zst input requires building 'tools' with feature 'zstd'".into());
+                return Err("input looks like zstd (magic 28 B5 2F FD), but this binary was built without 'zstd' feature".into());
             }
         }
     };
