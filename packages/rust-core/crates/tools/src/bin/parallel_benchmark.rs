@@ -117,7 +117,7 @@ struct Args {
     threads: Vec<usize>,
 
     /// Search depth
-    #[arg(short, long, default_value = "8")]
+    #[arg(short, long, default_value_t = 8)]
     depth: u8,
 
     /// Fixed time per search in milliseconds (overrides depth if set)
@@ -125,11 +125,11 @@ struct Args {
     fixed_total_ms: Option<u64>,
 
     /// Number of iterations per position
-    #[arg(short, long, default_value = "3")]
+    #[arg(short, long, default_value_t = 3)]
     iterations: usize,
 
     /// TT size in MB
-    #[arg(long, default_value = "256")]
+    #[arg(long, default_value_t = 256)]
     tt_size: usize,
 
     /// Skip positions (comma-separated indices)
@@ -423,6 +423,21 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Sanity checks / normalization
+    let threads: Vec<usize> = args.threads.iter().copied().filter(|&t| t > 0).collect();
+    if threads.is_empty() {
+        anyhow::bail!("--threads must contain at least one positive value");
+    }
+    if args.depth < 1 {
+        anyhow::bail!("--depth must be >= 1");
+    }
+    if args.iterations < 1 {
+        anyhow::bail!("--iterations must be >= 1");
+    }
+    if args.tt_size < 1 {
+        anyhow::bail!("--tt-size must be >= 1");
+    }
+
     // Initialize logger
     env_logger::Builder::from_default_env()
         .filter_level(args.log_level.parse()?)
@@ -456,7 +471,7 @@ fn main() -> Result<()> {
     let baseline_effective_nps = Arc::new(std::sync::Mutex::new(None::<f64>));
 
     // Run benchmarks for each thread count
-    for &thread_count in &args.threads {
+    for &thread_count in &threads {
         info!("\n=== Testing with {thread_count} thread(s) ===");
 
         let mut all_nps_values = Vec::new();

@@ -32,7 +32,7 @@
 //! speed for sparse feature sets like HalfKP.
 
 use std::fs::{create_dir_all, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -91,22 +91,19 @@ struct Config {
     accumulator_dim: usize,
     relu_clip: i32,
     shuffle: bool,
+    // Data filters (align with build_feature_cache)
+    exclude_no_legal_move: bool,
+    exclude_fallback: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Sample {
     features: Vec<u32>, // Active feature indices for both perspectives
     label: f32,
     weight: f32,
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
-struct CacheHeader {
-    version: u32,
-    num_samples: u64,
-    feature_dim: u32,
-}
+// CacheHeader schema is parsed ad-hoc (v1 only). No struct kept to avoid drift.
 
 /// NNUE Network structure with single-channel accumulator
 ///
@@ -376,12 +373,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(arg!(--lr <RATE> "Learning rate").default_value("0.001"))
         .arg(arg!(--opt <TYPE> "Optimizer: sgd, adam").default_value("adam"))
         .arg(arg!(--l2 <RATE> "L2 regularization").default_value("0.000001"))
-        .arg(arg!(-l --label <TYPE> "Label type: wdl, cp").default_value("wdl"))
-        .arg(arg!(--scale <N> "Scale for cp->wdl conversion").default_value("600"))
-        .arg(arg!(--"cp-clip" <N> "Clip CP values to this range").default_value("1200"))
+        .arg(
+            arg!(-l --label <TYPE> "Label type: wdl, cp")
+                .value_parser(["wdl", "cp"]) // strict accepted values
+                .default_value("wdl"),
+        )
+        .arg(
+            arg!(--scale <N> "Scale for cp->wdl conversion")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("600"),
+        )
+        .arg(
+            arg!(--"cp-clip" <N> "Clip CP values to this range")
+                .value_parser(clap::value_parser!(i32).range(0..))
+                .default_value("1200"),
+        )
         .arg(arg!(--"acc-dim" <N> "Accumulator dimension").default_value("256"))
         .arg(arg!(--"relu-clip" <N> "ReLU clipping value").default_value("127"))
         .arg(arg!(--shuffle "Shuffle training data"))
+        .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves (JSONL input)"))
+        .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used (JSONL input)"))
         .arg(arg!(--"save-every" <N> "Save checkpoint every N batches"))
         .arg(arg!(--quantized "Save quantized (int8) version of the model"))
         .arg(arg!(--seed <SEED> "Random seed for reproducibility"))
@@ -395,12 +406,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         optimizer: app.get_one::<String>("opt").unwrap().to_string(),
         l2_reg: app.get_one::<String>("l2").unwrap().parse()?,
         label_type: app.get_one::<String>("label").unwrap().to_string(),
-        scale: app.get_one::<String>("scale").unwrap().parse()?,
-        cp_clip: app.get_one::<String>("cp-clip").unwrap().parse()?,
+        scale: *app.get_one::<f32>("scale").unwrap(),
+        cp_clip: *app.get_one::<i32>("cp-clip").unwrap(),
         accumulator_dim: app.get_one::<String>("acc-dim").unwrap().parse()?,
         relu_clip: app.get_one::<String>("relu-clip").unwrap().parse()?,
         shuffle: app.get_flag("shuffle"),
+        exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
+        exclude_fallback: app.get_flag("exclude-fallback"),
     };
+
+    if config.scale <= 0.0 {
+        return Err("Invalid --scale: must be > 0".into());
+    }
 
     let input_path = app.get_one::<String>("input").unwrap();
     let validation_path = app.get_one::<String>("validation");
@@ -544,8 +561,12 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
             }
         };
 
-        // Skip positions with no legal moves or fallback
-        if pos_data.no_legal_move.unwrap_or(false) || pos_data.fallback_used.unwrap_or(false) {
+        // Optional filters (align with build_feature_cache)
+        if config.exclude_no_legal_move && pos_data.no_legal_move.unwrap_or(false) {
+            skipped += 1;
+            continue;
+        }
+        if config.exclude_fallback && pos_data.fallback_used.unwrap_or(false) {
             skipped += 1;
             continue;
         }
@@ -577,34 +598,45 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
             skipped += 1;
             continue;
         };
+        // Oriented CP (black perspective)
+        let stm = position.side_to_move;
+        let cp_black = if stm == Color::Black { cp } else { -cp };
+        let cp_white = -cp_black;
 
-        let mut features = Vec::new();
-        // Extract features from black's perspective
-        let black_features = extract_features(&position, black_king, Color::Black);
-        for &f in black_features.as_slice() {
-            features.push(f as u32);
-        }
-        // Extract features from white's perspective
-        let white_features = extract_features(&position, white_king, Color::White);
-        for &f in white_features.as_slice() {
-            features.push(f as u32);
-        }
-
-        // Calculate label
-        let label = match config.label_type.as_str() {
-            "wdl" => cp_to_wdl(cp, config.scale),
-            "cp" => (cp.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
-            _ => continue,
-        };
-
-        // Calculate sample weight
+        // Calculate sample weight once (shared)
         let weight = calculate_weight(&pos_data, config);
 
-        samples.push(Sample {
-            features,
-            label,
-            weight,
-        });
+        // Black perspective sample
+        {
+            let feats = extract_features(&position, black_king, Color::Black);
+            let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
+            let label = match config.label_type.as_str() {
+                "wdl" => cp_to_wdl(cp_black, config.scale),
+                "cp" => (cp_black.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
+                _ => continue,
+            };
+            samples.push(Sample {
+                features,
+                label,
+                weight,
+            });
+        }
+
+        // White perspective sample
+        {
+            let feats = extract_features(&position, white_king, Color::White);
+            let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
+            let label = match config.label_type.as_str() {
+                "wdl" => cp_to_wdl(cp_white, config.scale),
+                "cp" => (cp_white.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
+                _ => continue,
+            };
+            samples.push(Sample {
+                features,
+                label,
+                weight,
+            });
+        }
     }
 
     if skipped > 0 {
@@ -618,6 +650,14 @@ fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
     1.0 / (1.0 + (-cp as f32 / scale).exp())
 }
 
+#[inline]
+fn is_exact_opt(s: &Option<String>) -> bool {
+    s.as_deref()
+        .map(|t| t.trim())
+        .map(|t| t.eq_ignore_ascii_case("Exact"))
+        .unwrap_or(false)
+}
+
 fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
     let mut weight = 1.0;
 
@@ -627,8 +667,7 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
     }
 
     // Bound-based weight
-    let both_exact =
-        pos_data.bound1.as_deref() == Some("Exact") && pos_data.bound2.as_deref() == Some("Exact");
+    let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
     weight *= if both_exact { 1.0 } else { 0.7 };
 
     // Mate boundary weight
@@ -649,42 +688,122 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
 fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let mut f = File::open(path)?;
 
-    // Read header - matches build_feature_cache.rs format
+    // Read header - matches build_feature_cache.rs v1 extended header
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != b"NNFC" {
-        return Err("Invalid cache file: bad magic".into());
+        return Err(format!("Invalid cache file: bad magic (file {})", path).into());
     }
 
     let mut u32b = [0u8; 4];
     let mut u64b = [0u8; 8];
 
-    // Version
+    // Version (v1 only)
     f.read_exact(&mut u32b)?;
     let version = u32::from_le_bytes(u32b);
     if version != 1 {
-        return Err(format!("Unsupported cache version: {version}").into());
+        return Err(format!(
+            "Unsupported cache version: {} (v1 required) for file {}",
+            version, path
+        )
+        .into());
     }
 
-    // Feature set ID
+    // feature set id, num samples, chunk size
     f.read_exact(&mut u32b)?;
-    let _feature_set_id = u32::from_le_bytes(u32b);
+    let feature_set_id = u32::from_le_bytes(u32b);
+    const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
+    if feature_set_id != FEATURE_SET_ID_HALF {
+        return Err(format!(
+            "Unsupported feature_set_id: 0x{:08x} for file {}",
+            feature_set_id, path
+        )
+        .into());
+    }
 
-    // Number of samples
     f.read_exact(&mut u64b)?;
     let num_samples = u64::from_le_bytes(u64b);
 
-    // Chunk size
     f.read_exact(&mut u32b)?;
     let _chunk_size = u32::from_le_bytes(u32b);
 
-    // Reserved
-    let mut reserved = [0u8; 16];
-    f.read_exact(&mut reserved)?;
+    // header_size
+    f.read_exact(&mut u32b)?; // header_size
+    let header_size = u32::from_le_bytes(u32b);
+    if !(40..=4096).contains(&header_size) {
+        return Err(format!("Unreasonable header_size: {} for file {}", header_size, path).into());
+    }
+    // endianness
+    let mut b = [0u8; 1];
+    f.read_exact(&mut b)?;
+    let endianness = b[0];
+    if endianness != 0 {
+        return Err(format!(
+            "Unsupported endianness in cache header (expected LE=0) for file {}",
+            path
+        )
+        .into());
+    }
+    // payload_encoding
+    f.read_exact(&mut b)?;
+    let payload_encoding = b[0];
+    // reserved16
+    let mut _r16 = [0u8; 2];
+    f.read_exact(&mut _r16)?;
+    // payload_offset
+    f.read_exact(&mut u64b)?;
+    let payload_offset = u64::from_le_bytes(u64b);
+    // Validate payload_offset against header end (magic(4) + header_size)
+    let header_end = 4u64 + header_size as u64;
+    if payload_offset < header_end {
+        return Err(format!(
+            "payload_offset ({}) is smaller than header end ({}); file {} may be corrupted",
+            payload_offset, header_end, path
+        )
+        .into());
+    }
+    // sample_flags_mask
+    f.read_exact(&mut u32b)?;
+    let flags_mask = u32::from_le_bytes(u32b);
+    // Skip to payload_offset if header had extra bytes
+    let current = f.stream_position()?;
+    if current < payload_offset {
+        f.seek(SeekFrom::Start(payload_offset))?;
+    }
+
+    // Prepare reader for payload (gzip/zstd)
+    let reader: Box<dyn Read> = match payload_encoding {
+        0 => Box::new(f),
+        1 => {
+            use flate2::read::GzDecoder;
+            Box::new(GzDecoder::new(f))
+        }
+        2 => {
+            #[cfg(feature = "zstd")]
+            {
+                Box::new(zstd::Decoder::new(f)?)
+            }
+            #[cfg(not(feature = "zstd"))]
+            {
+                return Err(format!(
+                    "zstd payload requires building with 'zstd' feature (file {})",
+                    path
+                )
+                .into());
+            }
+        }
+        other => {
+            return Err(format!("Unknown payload encoding: {} for file {}", other, path).into())
+        }
+    };
+
+    let mut r = BufReader::new(reader);
 
     println!("Loading cache: {num_samples} samples");
 
     let mut samples = Vec::with_capacity(num_samples as usize);
+    let mut unknown_flag_samples: u64 = 0;
+    let mut unknown_flag_bits_accum: u32 = 0;
 
     for i in 0..num_samples {
         if i % 100000 == 0 && i > 0 {
@@ -693,41 +812,65 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
 
         // Read number of features
         let mut nb = [0u8; 4];
-        f.read_exact(&mut nb)?;
+        r.read_exact(&mut nb)?;
         let n_features = u32::from_le_bytes(nb) as usize;
+        // Guard against unreasonable feature counts (OOM/corruption)
+        const MAX_FEATURES_PER_SAMPLE: usize = SHOGI_BOARD_SIZE * FE_END;
+        if n_features > MAX_FEATURES_PER_SAMPLE {
+            return Err(format!(
+                "n_features={} exceeds sane limit {}; file {} may be corrupted",
+                n_features, MAX_FEATURES_PER_SAMPLE, path
+            )
+            .into());
+        }
 
-        // Read features in bulk
-        let mut buf = vec![0u8; n_features * 4];
-        f.read_exact(&mut buf)?;
-        let features: Vec<u32> = buf
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        // Read features in bulk (bytemuck fast path on LE; safe fallback on BE)
+        let mut features: Vec<u32> = vec![0u32; n_features];
+        #[cfg(target_endian = "little")]
+        {
+            use bytemuck::cast_slice_mut;
+            r.read_exact(cast_slice_mut::<u32, u8>(&mut features))?;
+        }
+        #[cfg(target_endian = "big")]
+        {
+            let mut buf = vec![0u8; n_features * 4];
+            r.read_exact(&mut buf)?;
+            for (dst, chunk) in features.iter_mut().zip(buf.chunks_exact(4)) {
+                *dst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let max_dim = (SHOGI_BOARD_SIZE * FE_END) as u32;
+            debug_assert!(features.iter().all(|&f| f < max_dim), "feature index OOB");
+        }
 
         // Read label
         let mut lb = [0u8; 4];
-        f.read_exact(&mut lb)?;
+        r.read_exact(&mut lb)?;
         let label = f32::from_le_bytes(lb);
 
         // Read metadata: gap, depth, seldepth, flags, padding
         let mut gapb = [0u8; 2];
-        f.read_exact(&mut gapb)?;
+        r.read_exact(&mut gapb)?;
         let gap = u16::from_le_bytes(gapb);
 
         let mut depth = [0u8; 1];
-        f.read_exact(&mut depth)?;
+        r.read_exact(&mut depth)?;
         let depth = depth[0];
 
         let mut seldepth = [0u8; 1];
-        f.read_exact(&mut seldepth)?;
+        r.read_exact(&mut seldepth)?;
         let seldepth = seldepth[0];
 
         let mut flags = [0u8; 1];
-        f.read_exact(&mut flags)?;
+        r.read_exact(&mut flags)?;
         let flags = flags[0];
-
-        let mut _pad = [0u8; 1];
-        f.read_exact(&mut _pad)?;
+        let unknown = (flags as u32) & !flags_mask;
+        if unknown != 0 {
+            unknown_flag_samples += 1;
+            unknown_flag_bits_accum |= unknown;
+        }
 
         // Calculate weight using same policy as JSONL loading
         let mut weight = 1.0;
@@ -754,6 +897,13 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
             label,
             weight,
         });
+    }
+
+    if unknown_flag_samples > 0 {
+        eprintln!(
+            "Warning: {} samples contained unknown flag bits (mask=0x{:08x}, seen=0x{:08x})",
+            unknown_flag_samples, flags_mask, unknown_flag_bits_accum
+        );
     }
 
     Ok(samples)
@@ -1231,4 +1381,428 @@ fn save_network(network: &Network, path: &Path) -> Result<(), Box<dyn std::error
 
     file.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom, Write};
+    use tempfile::tempdir;
+
+    fn write_v1_header(
+        f: &mut File,
+        feature_set_id: u32,
+        num_samples: u64,
+        chunk_size: u32,
+        header_size: u32,
+        endianness: u8,
+        payload_encoding: u8,
+        sample_flags_mask: u32,
+    ) -> u64 {
+        // Magic
+        f.write_all(b"NNFC").unwrap();
+        // version
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        // feature_set_id
+        f.write_all(&feature_set_id.to_le_bytes()).unwrap();
+        // num_samples
+        f.write_all(&num_samples.to_le_bytes()).unwrap();
+        // chunk_size
+        f.write_all(&chunk_size.to_le_bytes()).unwrap();
+        // header_size
+        f.write_all(&header_size.to_le_bytes()).unwrap();
+        // endianness
+        f.write_all(&[endianness]).unwrap();
+        // payload_encoding
+        f.write_all(&[payload_encoding]).unwrap();
+        // reserved16
+        f.write_all(&[0u8; 2]).unwrap();
+        // payload_offset = after magic (4 bytes) + header_size
+        let payload_offset = 4u64 + header_size as u64;
+        f.write_all(&payload_offset.to_le_bytes()).unwrap();
+        // sample_flags_mask
+        f.write_all(&sample_flags_mask.to_le_bytes()).unwrap();
+        // pad header tail to header_size
+        let written = 40usize; // fields after magic
+        let pad = (header_size as usize).saturating_sub(written);
+        if pad > 0 {
+            f.write_all(&vec![0u8; pad]).unwrap();
+        }
+        payload_offset
+    }
+
+    #[test]
+    fn header_errors_and_ok_cases() {
+        // bad magic
+        {
+            let td = tempdir().unwrap();
+            let path = td.path().join("bad_magic.cache");
+            let mut f = File::create(&path).unwrap();
+            f.write_all(b"BAD!").unwrap();
+            f.flush().unwrap();
+            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            assert!(format!("{}", err).contains("bad magic"));
+        }
+
+        // unknown version
+        {
+            let td = tempdir().unwrap();
+            let path = td.path().join("bad_version.cache");
+            let mut f = File::create(&path).unwrap();
+            f.write_all(b"NNFC").unwrap();
+            f.write_all(&2u32.to_le_bytes()).unwrap(); // version=2 (unsupported)
+                                                       // Fill rest with zeros to avoid EOF early
+            f.write_all(&[0u8; 64]).unwrap();
+            f.flush().unwrap();
+            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            assert!(format!("{}", err).contains("v1 required"));
+        }
+
+        // endianness error
+        {
+            let td = tempdir().unwrap();
+            let path = td.path().join("endianness.cache");
+            let mut f = File::create(&path).unwrap();
+            let _off = write_v1_header(
+                &mut f, 0x48414C46, 0, 1024, 48, 1, // BE
+                0, 0,
+            );
+            f.flush().unwrap();
+            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            assert!(format!("{}", err).contains("Unsupported endianness"));
+        }
+
+        // unknown encoding
+        {
+            let td = tempdir().unwrap();
+            let path = td.path().join("encoding.cache");
+            let mut f = File::create(&path).unwrap();
+            let _off = write_v1_header(&mut f, 0x48414C46, 0, 1024, 48, 0, 3, 0);
+            f.flush().unwrap();
+            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            assert!(format!("{}", err).contains("Unknown payload encoding"));
+        }
+
+        // feature_set_id mismatch
+        {
+            let td = tempdir().unwrap();
+            let path = td.path().join("featureset.cache");
+            let mut f = File::create(&path).unwrap();
+            let _off = write_v1_header(&mut f, 0x00000000, 0, 1024, 48, 0, 0, 0);
+            f.flush().unwrap();
+            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            assert!(format!("{}", err).contains("Unsupported feature_set_id"));
+        }
+
+        // header_size 極端値（0/8/4097）でエラー
+        for bad_size in [0u32, 8u32, 4097u32] {
+            let td = tempdir().unwrap();
+            let path = td.path().join(format!("bad_hs_{bad_size}.cache"));
+            let mut f = File::create(&path).unwrap();
+            let _off = write_v1_header(&mut f, 0x48414C46, 0, 1024, bad_size, 0, 0, 0);
+            f.flush().unwrap();
+            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            assert!(format!("{}", err).contains("header_size"));
+        }
+
+        // 破損 payload_offset（header_end より小さい）でエラー
+        {
+            let td = tempdir().unwrap();
+            let path = td.path().join("broken_offset.cache");
+            let mut f = File::create(&path).unwrap();
+            // Magic + version + feature_set_id + num_samples + chunk_size
+            f.write_all(b"NNFC").unwrap();
+            f.write_all(&1u32.to_le_bytes()).unwrap();
+            f.write_all(&0x48414C46u32.to_le_bytes()).unwrap();
+            f.write_all(&1u64.to_le_bytes()).unwrap(); // num_samples
+            f.write_all(&1024u32.to_le_bytes()).unwrap(); // chunk_size
+                                                          // header_size=48, endianness=0, encoding=0, reserved16=0
+            f.write_all(&48u32.to_le_bytes()).unwrap();
+            f.write_all(&[0u8, 0u8]).unwrap();
+            f.write_all(&[0u8; 2]).unwrap();
+            // payload_offset を header_end より小さくする（壊れ）
+            // header_end = magic(4) + header_size(48) = 52
+            let bad_off = 36u64;
+            f.write_all(&bad_off.to_le_bytes()).unwrap();
+            // sample_flags_mask
+            f.write_all(&0u32.to_le_bytes()).unwrap();
+            // 余りを header_size まで埋める
+            let written = 40usize; // after magic
+            let pad = (48usize).saturating_sub(written);
+            if pad > 0 {
+                f.write_all(&vec![0u8; pad]).unwrap();
+            }
+            // payload 仮書き
+            f.write_all(&0u32.to_le_bytes()).unwrap();
+            f.flush().unwrap();
+
+            let res = load_samples_from_cache(path.to_str().unwrap());
+            assert!(res.is_err(), "broken payload_offset should error");
+        }
+
+        // header_size larger with payload_offset respected and num_samples=0
+        {
+            let td = tempdir().unwrap();
+            let path = td.path().join("ok_zero.cache");
+            let mut f = File::create(&path).unwrap();
+            let _off = write_v1_header(&mut f, 0x48414C46, 0, 1024, 64, 0, 0, 0);
+            f.flush().unwrap();
+            let v = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+            assert!(v.is_empty());
+        }
+    }
+
+    #[test]
+    fn weight_consistency_jsonl_vs_cache() {
+        // JSONL with both_exact, gap=50, depth=20, seldepth=30
+        let td = tempdir().unwrap();
+        let json_path = td.path().join("w.jsonl");
+        let mut jf = File::create(&json_path).unwrap();
+        writeln!(
+            jf,
+            "{{\"sfen\":\"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\",\"eval\":0,\"depth\":20,\"seldepth\":30,\"bound1\":\"Exact\",\"bound2\":\"Exact\",\"best2_gap_cp\":50}}"
+        )
+        .unwrap();
+        jf.flush().unwrap();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+        let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        // Two-sample orientation -> take first weight
+        let w_json = json_samples[0].weight;
+
+        // Build cache with a single sample (n_features=0) carrying same meta
+        let cache_path = td.path().join("w.cache");
+        {
+            let mut f = File::create(&cache_path).unwrap();
+            let payload_offset = write_v1_header(&mut f, 0x48414C46, 1, 1024, 48, 0, 0, 1u8 as u32);
+            // seek to payload_offset
+            f.seek(SeekFrom::Start(payload_offset)).unwrap();
+            // n_features = 0
+            f.write_all(&0u32.to_le_bytes()).unwrap();
+            // no features body
+            // label (cp irrelevant for weight)
+            f.write_all(&0.0f32.to_le_bytes()).unwrap();
+            // gap=50
+            f.write_all(&(50u16).to_le_bytes()).unwrap();
+            // depth=20, seldepth=30
+            f.write_all(&[20u8]).unwrap();
+            f.write_all(&[30u8]).unwrap();
+            // flags: both_exact (bit0)
+            f.write_all(&[1u8]).unwrap();
+            f.flush().unwrap();
+        }
+
+        let cache_samples = load_samples_from_cache(cache_path.to_str().unwrap()).unwrap();
+        let w_cache = cache_samples[0].weight;
+
+        assert!(
+            (w_json - w_cache).abs() < 1e-6,
+            "weights should match: {} vs {}",
+            w_json,
+            w_cache
+        );
+    }
+
+    #[test]
+    fn unknown_flags_warning_and_continue() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("unknown_flags.cache");
+        let mut f = File::create(&path).unwrap();
+        // mask に 0 を渡して「全bit未知扱い」にする
+        let off = write_v1_header(&mut f, 0x48414C46, 1, 1024, 48, 0, 0, 0);
+        f.seek(SeekFrom::Start(off)).unwrap();
+        // n_features=0, label=0.0, gap=0, depth=0, seldepth=0, flags = 0x80 (未知bit)
+        f.write_all(&0u32.to_le_bytes()).unwrap();
+        f.write_all(&0.0f32.to_le_bytes()).unwrap();
+        f.write_all(&0u16.to_le_bytes()).unwrap();
+        f.write_all(&[0u8, 0u8, 0x80u8]).unwrap();
+        f.flush().unwrap();
+
+        let samples = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+        assert_eq!(samples.len(), 1);
+    }
+
+    #[test]
+    fn clamp_gap_and_depth_saturation() {
+        // JSONL with large gap and max depth/seldepth (u8 saturate)
+        let td = tempdir().unwrap();
+        let json_path = td.path().join("w2.jsonl");
+        let mut jf = File::create(&json_path).unwrap();
+        writeln!(
+            jf,
+            r#"{{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":255,"seldepth":255,"bound1":"Exact","bound2":"Exact","best2_gap_cp":70000}}"#
+        )
+        .unwrap();
+        jf.flush().unwrap();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+        let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        assert!(!json_samples.is_empty());
+        assert!(json_samples[0].weight <= 1.0);
+    }
+
+    // 再現性（seed指定）— test_training_reproducibility_with_seed
+    #[test]
+    fn test_training_reproducibility_with_seed() {
+        use rand::SeedableRng;
+
+        // JSONLを用意（2局面）
+        let td = tempdir().unwrap();
+        let json_path = td.path().join("repro.jsonl");
+        let mut jf = File::create(&json_path).unwrap();
+        writeln!(
+            jf,
+            r#"{{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":100,"depth":10,"seldepth":12,"bound1":"Exact","bound2":"Exact","best2_gap_cp":25}}"#
+        )
+        .unwrap();
+        writeln!(
+            jf,
+            r#"{{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1","eval":200,"depth":10,"seldepth":12,"bound1":"Exact","bound2":"Exact","best2_gap_cp":30}}"#
+        )
+        .unwrap();
+        jf.flush().unwrap();
+
+        // 設定（shuffle=false、optimizer=sgd、l2=0、accumulator_dim小さめ）
+        let cfg = Config {
+            epochs: 2,
+            batch_size: 4,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+
+        // サンプルを読み込み（2局面→2サンプル/局面 = 計4サンプル）
+        let mut samples1 = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        let mut samples2 = samples1.clone();
+        assert_eq!(samples1.len(), samples2.len());
+        assert_eq!(samples1.len(), 4);
+
+        // 同じseedで2つのネットワークを初期化
+        let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
+        let mut net1 = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng1);
+        let mut net2 = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng2);
+
+        // 同じ条件・同じデータで学習
+        let out_dir = td.path();
+        let mut dummy_rng1 = rand::rngs::StdRng::seed_from_u64(123);
+        let mut dummy_rng2 = rand::rngs::StdRng::seed_from_u64(123);
+        train_model(&mut net1, &mut samples1, &None, &cfg, out_dir, None, &mut dummy_rng1).unwrap();
+        train_model(&mut net2, &mut samples2, &None, &cfg, out_dir, None, &mut dummy_rng2).unwrap();
+
+        // 重みの一致を確認（厳密一致 or 十分小さい誤差）
+        assert_eq!(net1.w0.len(), net2.w0.len());
+        assert_eq!(net1.b0.len(), net2.b0.len());
+        assert_eq!(net1.w2.len(), net2.w2.len());
+        let eps = 1e-7;
+        for (a, b) in net1.w0.iter().zip(net2.w0.iter()) {
+            assert!((a - b).abs() <= eps, "w0 diff: {} vs {}", a, b);
+        }
+        for (a, b) in net1.b0.iter().zip(net2.b0.iter()) {
+            assert!((a - b).abs() <= eps, "b0 diff: {} vs {}", a, b);
+        }
+        for (a, b) in net1.w2.iter().zip(net2.w2.iter()) {
+            assert!((a - b).abs() <= eps, "w2 diff: {} vs {}", a, b);
+        }
+        assert!((net1.b2 - net2.b2).abs() <= eps, "b2 diff: {} vs {}", net1.b2, net2.b2);
+    }
+
+    // 巨大な n_features を持つ壊れキャッシュが上限制約でエラーになること
+    #[test]
+    fn n_features_exceeds_limit_errors() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("too_many_features.cache");
+        let mut f = File::create(&path).unwrap();
+        // 1サンプル・非圧縮・flags_mask=0
+        let off = write_v1_header(&mut f, 0x48414C46, 1, 1024, 48, 0, 0, 0);
+        f.seek(SeekFrom::Start(off)).unwrap();
+        // 上限 (SHOGI_BOARD_SIZE*FE_END) + 1 を書く
+        let max_allowed = (SHOGI_BOARD_SIZE * FE_END) as u32;
+        let n_features = max_allowed + 1;
+        f.write_all(&n_features.to_le_bytes()).unwrap();
+        // 以降のボディは不要（n_features検証で即エラー）
+        f.flush().unwrap();
+
+        let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("exceeds"), "unexpected err msg: {}", msg);
+    }
+
+    // n_features=0 のサンプルのみで 1 epoch 学習し、NaN が発生しないことのスモーク
+    #[test]
+    fn train_one_batch_with_zero_feature_sample_smoke() {
+        use rand::SeedableRng;
+
+        // 単一サンプル（特徴なし、重み1.0、ラベル0.0）
+        let mut samples = vec![Sample {
+            features: Vec::new(),
+            label: 0.0,
+            weight: 1.0,
+        }];
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+
+        let td = tempfile::tempdir().unwrap();
+        let out_dir = td.path();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+        train_model(&mut net, &mut samples, &None, &cfg, out_dir, None, &mut rng).unwrap();
+
+        // NaN が混入していないこと
+        assert!(net.w0.iter().all(|v| v.is_finite()));
+        assert!(net.b0.iter().all(|v| v.is_finite()));
+        assert!(net.w2.iter().all(|v| v.is_finite()));
+        assert!(net.b2.is_finite());
+    }
 }
