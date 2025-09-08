@@ -128,6 +128,10 @@ struct ManifestAmbiguousSummary {
     count: usize,
     denom: usize,
     rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reran: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    with_entropy: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -163,6 +167,8 @@ struct Manifest {
     generated_at: String,
     git_commit: Option<String>,
     engine: String,
+    #[serde(default)]
+    manifest_scope: Option<String>,
     // Manifest v2 provenance (required)
     #[serde(default)]
     teacher_engine: TeacherEngineInfo,
@@ -251,8 +257,9 @@ struct GenShared {
     lines_ge2: Arc<AtomicUsize>,
     both_exact: Arc<AtomicUsize>,
     ambiguous_k3: Arc<AtomicUsize>,
-    top1_exact: Arc<AtomicUsize>,
     depth_hist: Arc<Mutex<Vec<usize>>>,
+    k3_reran: Arc<AtomicUsize>,
+    k3_entropy: Arc<AtomicUsize>,
 }
 
 struct ProcEnv<'a> {
@@ -787,49 +794,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // existing_lines will be computed later (only for non-split/non-compress mode)
     let mut existing_lines: usize = 0;
 
-    println!("NNUE Training Data Generator");
-    println!("============================");
-    let effective_depth = opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
-    println!("Search depth: {effective_depth}");
-    if let Some(ref s) = preset_log {
-        println!("Preset: {s}");
-    }
-    println!("Batch size: {batch_size}");
-    println!("Engine: {:?}", opts.engine);
-    if let Some(ref w) = opts.nnue_weights {
-        println!("NNUE weights: {w}");
-    }
-    println!("Label: {:?}", opts.label);
-    if matches!(opts.label, LabelKind::Wdl | LabelKind::Hybrid) {
-        println!("WDL scale: {:.3}", opts.wdl_scale);
-        if matches!(opts.label, LabelKind::Hybrid) {
-            println!("Hybrid cutoff ply: {}", opts.hybrid_ply_cutoff);
+    // Route human-readable logs to STDERR when structured JSON goes to STDOUT
+    let human_to_stderr = matches!(opts.structured_log.as_deref(), Some("-"));
+    macro_rules! human_log {
+        ($($arg:tt)*) => {
+            if human_to_stderr { eprintln!($($arg)*); } else { println!($($arg)*); }
         }
     }
-    println!("Entropy scale: {:.3}", opts.entropy_scale);
-    println!("Hash size (MB): {}", opts.hash_mb);
-    println!("MultiPV: {}", opts.multipv);
-    println!("Teacher profile: {:?}", opts.teacher_profile);
-    println!("Reuse TT: {}", opts.reuse_tt);
-    println!(
+
+    human_log!("NNUE Training Data Generator");
+    human_log!("============================");
+    let effective_depth = opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
+    human_log!("Search depth: {effective_depth}");
+    if let Some(ref s) = preset_log {
+        human_log!("Preset: {s}");
+    }
+    human_log!("Batch size: {batch_size}");
+    human_log!("Engine: {:?}", opts.engine);
+    if let Some(ref w) = opts.nnue_weights {
+        human_log!("NNUE weights: {w}");
+    }
+    human_log!("Label: {:?}", opts.label);
+    if matches!(opts.label, LabelKind::Wdl | LabelKind::Hybrid) {
+        human_log!("WDL scale: {:.3}", opts.wdl_scale);
+        if matches!(opts.label, LabelKind::Hybrid) {
+            human_log!("Hybrid cutoff ply: {}", opts.hybrid_ply_cutoff);
+        }
+    }
+    human_log!("Entropy scale: {:.3}", opts.entropy_scale);
+    human_log!("Hash size (MB): {}", opts.hash_mb);
+    human_log!("MultiPV: {}", opts.multipv);
+    human_log!("Teacher profile: {:?}", opts.teacher_profile);
+    human_log!("Reuse TT: {}", opts.reuse_tt);
+    human_log!(
         "Ambiguity: gap2_th={}cp, require_exact={}, mate_mode={:?}",
-        opts.amb_gap2_threshold, opts.amb_require_exact, opts.entropy_mate_mode
+        opts.amb_gap2_threshold,
+        opts.amb_require_exact,
+        opts.entropy_mate_mode
     );
     if let Some(n) = opts.nodes {
         let cap_actual = std::cmp::max(n / 4, 10_000);
-        println!("Nodes (limit): {} (K=3 cap: max(n/4, 10000) = {})", n, cap_actual);
+        human_log!("Nodes (limit): {} (K=3 cap: max(n/4, 10000) = {})", n, cap_actual);
     }
     if let Some(j) = opts.jobs {
-        println!("Jobs (outer parallelism): {}", j);
+        human_log!("Jobs (outer parallelism): {}", j);
     }
-    println!("CPU cores: {:?}", std::thread::available_parallelism());
-    println!("Skipped positions will be saved to: {}", skipped_path.display());
-    println!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
-    println!("Note: TT memory usage scales with jobs: ~ hash_mb × jobs per process");
+    human_log!("CPU cores: {:?}", std::thread::available_parallelism());
+    human_log!("Skipped positions will be saved to: {}", skipped_path.display());
+    human_log!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
+    human_log!("Note: TT memory usage scales with jobs: ~ hash_mb × jobs per process");
     if let Some(n) = opts.split_every {
-        println!("Split every: {} lines", n);
+        human_log!("Split every: {} lines", n);
     }
-    println!(
+    human_log!(
         "Compression: {}",
         match opts.compress {
             CompressionKind::None => "none",
@@ -838,7 +855,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
     if let Some(ref p) = opts.structured_log {
-        println!("Structured log: {}", p);
+        human_log!("Structured log: {}", p);
     }
 
     // Early feature guard for zstd compression for better UX
@@ -859,9 +876,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => 800,
     });
     if opts.nodes.is_none() {
-        println!("Time limit per position: {time_limit_ms}ms");
+        human_log!("Time limit per position: {time_limit_ms}ms");
     } else {
-        println!("Nodes-based budget active; time limit ignored for search.");
+        human_log!("Nodes-based budget active; time limit ignored for search.");
     }
 
     // Decide if we use split/compressed output
@@ -873,26 +890,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if output_path.exists() {
             let count = fast_count_lines(&output_path)?;
             if count > 0 {
-                println!("Found existing output file with {count} lines");
+                human_log!("Found existing output file with {count} lines");
                 if resume_from > 0 && resume_from != count {
-                    println!(
+                    human_log!(
                         "Warning: resume_from ({resume_from}) differs from existing lines ({count})"
                     );
-                    println!("Using the larger value: {}", resume_from.max(count));
+                    human_log!("Using the larger value: {}", resume_from.max(count));
                 }
             }
             existing_lines = count;
         } else if resume_from > 0 {
-            println!(
+            human_log!(
                 "Warning: Output file does not exist, but resume_from is set to {resume_from}"
             );
-            println!("Starting from position {resume_from} anyway");
+            human_log!("Starting from position {resume_from} anyway");
         }
     }
 
     // Now that existing_lines is known (for non-parted mode), print resume info
     if resume_from > 0 || existing_lines > 0 {
-        println!("Resuming from position: {}", resume_from.max(existing_lines));
+        human_log!("Resuming from position: {}", resume_from.max(existing_lines));
     }
 
     // Open files - append mode if resuming (only when not using split/compress)
@@ -1199,6 +1216,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     file: None,
                 })
             } else {
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let f = OpenOptions::new().create(true).append(true).open(path)?;
                 let bw = BufWriter::with_capacity(1 << 20, f);
                 Ok(Self {
@@ -1255,7 +1275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let total_positions = sfen_positions.len();
-    println!("\nFound {total_positions} positions in input file");
+    human_log!("\nFound {total_positions} positions in input file");
 
     // Optional: calibrate nodes from NPS if requested and nodes not explicitly set
     let mut manifest_existing: Option<Manifest> = None;
@@ -1302,20 +1322,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(ref calib) = man.calibration {
                             if let Some(tn) = calib.target_nodes {
                                 opts.nodes = Some(tn);
-                                println!(
+                                human_log!(
                                     "Reusing calibration from manifest: target_nodes={} (samples={:?}, min_depth={:?})",
                                     tn, calib.samples, calib.min_depth_used
                                 );
                             }
                         }
                     } else {
-                        println!("Existing calibration found but incompatible with current settings; recalibrating.");
+                        human_log!("Existing calibration found but incompatible with current settings; recalibrating.");
                     }
                 }
             }
 
             if opts.nodes.is_none() {
-                println!("Starting nodes auto-calibration: target {} ms", target_ms);
+                human_log!("Starting nodes auto-calibration: target {} ms", target_ms);
                 let sample_n = opts.calibrate_sample.min(total_positions).max(10);
                 // Prepare a reusable engine for calibration
                 let mut engine = Engine::new(opts.engine);
@@ -1336,7 +1356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
                     }
                     if i % 25 == 0 {
-                        println!("  calibrating {}/{}", i + 1, sample_n);
+                        human_log!("  calibrating {}/{}", i + 1, sample_n);
                     }
                     // Build position
                     let mut pos = match engine_core::usi::parse_sfen(sfen) {
@@ -1364,9 +1384,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let target_nodes = (nps * (target_ms as f64) / 1000.0) as u64;
                     let target_nodes = target_nodes.max(10_000);
                     opts.nodes = Some(target_nodes);
-                    println!(
+                    human_log!(
                         "Auto-calibration done: NPS≈{:.0}, nodes target={} ({} ms)",
-                        nps, target_nodes, target_ms
+                        nps,
+                        target_nodes,
+                        target_ms
                     );
                     calibration_to_write = Some(ManifestCalibration {
                         nps: Some(nps),
@@ -1376,7 +1398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         timestamp: Some(chrono::Utc::now().to_rfc3339()),
                     });
                 } else {
-                    println!("Auto-calibration failed (zero ms or nodes). Using time budget.");
+                    human_log!("Auto-calibration failed (zero ms or nodes). Using time budget.");
                 }
             }
         }
@@ -1393,9 +1415,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(&progress_path)?;
         let progress: usize = content.trim().parse().unwrap_or(skip_count);
         if progress > skip_count {
-            println!("Progress file shows {progress} positions attempted (including skipped)");
-            println!("Output file has {skip_count} successful results");
-            println!("Difference of {} positions were skipped/failed", progress - skip_count);
+            human_log!("Progress file shows {progress} positions attempted (including skipped)");
+            human_log!("Output file has {skip_count} successful results");
+            human_log!("Difference of {} positions were skipped/failed", progress - skip_count);
         }
         progress
     } else {
@@ -1405,14 +1427,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Skip based on the maximum of skip_count and actual_progress to avoid double-skip
     let positions_to_skip = skip_count.max(actual_progress);
     let sfen_positions = if positions_to_skip > 0 {
-        println!("Skipping first {positions_to_skip} positions (already attempted)");
+        human_log!("Skipping first {positions_to_skip} positions (already attempted)");
         sfen_positions.into_iter().skip(positions_to_skip).collect()
     } else {
         sfen_positions
     };
 
     let remaining_positions = sfen_positions.len();
-    println!("Processing {remaining_positions} remaining positions");
+    human_log!("Processing {remaining_positions} remaining positions");
 
     // Statistics - include already processed count
     let processed_count = Arc::new(AtomicUsize::new(skip_count));
@@ -1433,8 +1455,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lines_ge2: Arc::new(AtomicUsize::new(0)),
         both_exact: Arc::new(AtomicUsize::new(0)),
         ambiguous_k3: Arc::new(AtomicUsize::new(0)),
-        top1_exact: Arc::new(AtomicUsize::new(0)),
         depth_hist: Arc::new(Mutex::new(Vec::new())),
+        k3_reran: Arc::new(AtomicUsize::new(0)),
+        k3_entropy: Arc::new(AtomicUsize::new(0)),
     };
 
     let env = ProcEnv {
@@ -1456,7 +1479,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let batch_start = std::time::Instant::now();
 
-            println!(
+            human_log!(
                 "\nBatch {}/{}: Processing {} positions...",
                 batch_idx + 1,
                 remaining_positions.div_ceil(batch_size),
@@ -1517,13 +1540,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_time = batch_start.elapsed();
             let positions_per_sec = chunk.len() as f64 / batch_time.as_secs_f64();
 
-            println!(
+            human_log!(
                 "Batch complete: {} results in {:.1}s ({:.0} pos/sec)",
                 successful_results.len(),
                 batch_time.as_secs_f32(),
                 positions_per_sec
             );
-            println!(
+            human_log!(
                 "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
                 (new_processed as f64 / total_positions as f64) * 100.0
             );
@@ -1532,6 +1555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ref lg) = structured_logger {
                 let rec = serde_json::json!({
                     "kind": "batch",
+                    "version": 1,
                     "batch_index": batch_idx,
                     "size": chunk.len(),
                     "success": successful_results.len(),
@@ -1568,30 +1592,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let e_empty_pv = errors_empty_pv.load(Ordering::Relaxed);
     let newly_processed = total_processed - skip_count;
 
-    println!("\n{}", "=".repeat(60));
-    println!("NNUE Training Data Generation Complete!");
-    println!("Total positions in file: {total_positions}");
-    println!("Previously processed: {skip_count}");
-    println!("Newly processed: {newly_processed}");
-    println!("Total processed: {total_processed}");
-    println!("Errors (hard): {total_errors}");
-    println!("  - parse: {e_parse}");
-    println!("  - nonexact_top1: {e_nonexact}");
-    println!("  - empty_or_missing_pv: {e_empty_pv}");
-    println!("Skipped (timeout_overruns): {total_skipped}");
+    human_log!("\n{}", "=".repeat(60));
+    human_log!("NNUE Training Data Generation Complete!");
+    human_log!("Total positions in file: {total_positions}");
+    human_log!("Previously processed: {skip_count}");
+    human_log!("Newly processed: {newly_processed}");
+    human_log!("Total processed: {total_processed}");
+    human_log!("Errors (hard): {total_errors}");
+    human_log!("  - parse: {e_parse}");
+    human_log!("  - nonexact_top1: {e_nonexact}");
+    human_log!("  - empty_or_missing_pv: {e_empty_pv}");
+    human_log!("Skipped (timeout_overruns): {total_skipped}");
 
     if newly_processed > 0 {
         let success_rate = (newly_processed as f64
             / (newly_processed + total_errors + total_skipped) as f64)
             * 100.0;
-        println!("Success rate (this run): {success_rate:.1}%");
+        human_log!("Success rate (this run): {success_rate:.1}%");
     }
 
     if total_skipped > 0 {
-        println!("\nSkipped positions saved to: {}", skipped_path.display());
-        println!("Progress tracked in: {}", progress_path.display());
-        println!("You can reprocess skipped positions with:");
-        println!(
+        human_log!("\nSkipped positions saved to: {}", skipped_path.display());
+        human_log!("Progress tracked in: {}", progress_path.display());
+        human_log!("You can reprocess skipped positions with:");
+        human_log!(
             "  cargo run --release --bin generate_nnue_training_data -- {} output_retry.txt {} {}",
             skipped_path.display(),
             search_depth + 1,
@@ -1675,38 +1699,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lines_ge2 = shared.lines_ge2.load(Ordering::Relaxed);
     let both_exact_cnt = shared.both_exact.load(Ordering::Relaxed);
     let ambiguous_cnt = shared.ambiguous_k3.load(Ordering::Relaxed);
+    let k3_reran_cnt = shared.k3_reran.load(Ordering::Relaxed);
+    let k3_entropy_cnt = shared.k3_entropy.load(Ordering::Relaxed);
     let depth_hist_vec = shared.depth_hist.lock().unwrap().clone();
     let (dmin, dmax, dp50, dp90) = summarize_depth_hist(&depth_hist_vec);
+    // Run-scoped deltas
+    let attempted_run = attempted_total.saturating_sub(positions_to_skip);
+    let success_run = success_total.saturating_sub(skip_count);
+    let timeout_rate = if attempted_run > 0 {
+        (total_skipped as f64 / attempted_run as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let top1_exact_rate = if attempted_run > 0 {
+        (success_run as f64 / attempted_run as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let both_exact_rate = if lines_ge2 > 0 {
+        (both_exact_cnt as f64 / lines_ge2 as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let summary_obj = ManifestSummary {
         elapsed_sec,
         throughput: ManifestThroughputSummary {
             attempted_sps: if elapsed_sec > 0.0 {
-                attempted_total as f64 / elapsed_sec
+                attempted_run as f64 / elapsed_sec
             } else {
                 0.0
             },
             success_sps: if elapsed_sec > 0.0 {
-                success_total as f64 / elapsed_sec
+                success_run as f64 / elapsed_sec
             } else {
                 0.0
             },
         },
         rates: ManifestRatesSummary {
-            timeout: if attempted_total > 0 {
-                total_skipped as f64 / attempted_total as f64
-            } else {
-                0.0
-            },
-            top1_exact: if attempted_total > 0 {
-                success_total as f64 / attempted_total as f64
-            } else {
-                0.0
-            },
-            both_exact: if lines_ge2 > 0 {
-                both_exact_cnt as f64 / lines_ge2 as f64
-            } else {
-                0.0
-            },
+            timeout: timeout_rate,
+            top1_exact: top1_exact_rate,
+            both_exact: both_exact_rate,
         },
         ambiguous: ManifestAmbiguousSummary {
             threshold_cp: opts.amb_gap2_threshold,
@@ -1714,10 +1746,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             count: ambiguous_cnt,
             denom: lines_ge2,
             rate: if lines_ge2 > 0 {
-                ambiguous_cnt as f64 / lines_ge2 as f64
+                (ambiguous_cnt as f64 / lines_ge2 as f64).clamp(0.0, 1.0)
             } else {
                 0.0
             },
+            reran: Some(k3_reran_cnt),
+            with_entropy: Some(k3_entropy_cnt),
         },
         depth: ManifestDepthSummary {
             histogram: depth_hist_vec.clone(),
@@ -1727,8 +1761,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p90: dp90,
         },
         counts: ManifestCountsSummary {
-            attempted: attempted_total,
-            success: success_total,
+            attempted: attempted_run,
+            success: success_run,
             skipped_timeout: total_skipped,
             errors: ManifestErrorsSummary {
                 parse: e_parse,
@@ -1794,6 +1828,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 generated_at: chrono::Utc::now().to_rfc3339(),
                 git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
                 engine: engine_name.to_string(),
+                manifest_scope: Some("part".to_string()),
                 teacher_engine,
                 generation_command,
                 seed,
@@ -1908,6 +1943,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             generated_at: chrono::Utc::now().to_rfc3339(),
             git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
             engine: engine_name.to_string(),
+            manifest_scope: Some("aggregate".to_string()),
             teacher_engine,
             generation_command,
             seed,
@@ -1982,7 +2018,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     e
                 );
             } else {
-                println!("Manifest written: {}", manifest_path.display());
+                human_log!("Manifest written: {}", manifest_path.display());
             }
         }
     } else {
@@ -2037,6 +2073,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             generated_at: chrono::Utc::now().to_rfc3339(),
             git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
             engine: engine_name.to_string(),
+            manifest_scope: Some("aggregate".to_string()),
             teacher_engine,
             generation_command,
             seed,
@@ -2119,14 +2156,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     e
                 );
             } else {
-                println!("Manifest written: {}", manifest_path.display());
+                human_log!("Manifest written: {}", manifest_path.display());
             }
         }
     }
 
     // Structured final record (optional)
     if let Some(ref lg) = structured_logger {
-        let rec = serde_json::json!({ "kind": "final", "summary": &summary_obj });
+        let rec = serde_json::json!({ "kind": "final", "version": 1, "summary": &summary_obj });
         lg.write_json(&rec);
     }
 
@@ -2175,6 +2212,10 @@ fn process_position_with_engine(
     let mut pos_clone = position.clone();
     let result = eng.search(&mut pos_clone, limits);
     let elapsed_stats_ms = result.stats.elapsed.as_millis() as u64;
+    let k2_time_ms = elapsed_stats_ms;
+    let k2_nodes = result.stats.nodes;
+    let mut k3_time_ms_opt: Option<u64> = None;
+    let mut k3_nodes_opt: Option<u64> = None;
     // Track which search stats we will report (K=2 by default; may switch to K=3)
     let mut result_used_time_ms = elapsed_stats_ms;
     let mut result_used_depth = result.stats.depth;
@@ -2277,15 +2318,11 @@ fn process_position_with_engine(
     let mut lines_used_opt: Option<Vec<engine_core::search::types::RootLine>> = None;
     if let Some(ref lines0) = result.lines {
         if lines0.len() >= 2 {
-            env.shared.lines_ge2.fetch_add(1, Ordering::Relaxed);
             let l0 = &lines0[0];
             let l1 = &lines0[1];
             let gap = (l0.score_cp - l1.score_cp).abs();
             best2_gap_cp_meta =
                 format!(" best2_gap_cp:{} bound0:{:?} bound1:{:?}", gap, l0.bound, l1.bound);
-            if matches!(l0.bound, Bound::Exact) && matches!(l1.bound, Bound::Exact) {
-                env.shared.both_exact.fetch_add(1, Ordering::Relaxed);
-            }
             if is_ambiguous_for_k3(
                 l0.bound,
                 l1.bound,
@@ -2316,19 +2353,23 @@ fn process_position_with_engine(
                         } else {
                             // Keep within remaining budget conservatively: at most 1/4 of time_limit
                             let rem = env.time_limit_ms.saturating_sub(elapsed_stats_ms);
-                            let cap = rem.min(env.time_limit_ms / 4);
+                            let cap = rem.min(env.time_limit_ms / 4).max(20);
                             builder2 = builder2.fixed_time_ms(cap);
                         }
                         let limits2 = builder2.build();
+                        // Count actual K=3 re-search executions
+                        env.shared.k3_reran.fetch_add(1, Ordering::Relaxed);
                         let res2 = eng.search(&mut pos2, limits2);
                         if let Some(ref lines2) = res2.lines {
                             lines_k = lines2.iter().take(3).cloned().collect();
                             have_three = lines_k.len() >= 3;
                             if have_three {
                                 // Adopt K=3 stats/lines (compute entropy once after this block)
+                                k3_time_ms_opt = Some(res2.stats.elapsed.as_millis() as u64);
                                 result_used_time_ms = res2.stats.elapsed.as_millis() as u64;
                                 result_used_depth = res2.stats.depth;
                                 result_used_seldepth = res2.stats.seldepth;
+                                k3_nodes_opt = Some(res2.stats.nodes);
                                 result_used_nodes = res2.stats.nodes;
                                 result_used_qnodes = res2.stats.qnodes;
                                 result_used_tt_hits = res2.stats.tt_hits;
@@ -2350,8 +2391,26 @@ fn process_position_with_engine(
                         env.opts.entropy_scale,
                         env.opts.entropy_mate_mode,
                     );
+                    if entropy_k3_opt.is_some() {
+                        env.shared.k3_entropy.fetch_add(1, Ordering::Relaxed);
+                    }
                     // no extra clone
                     lines_used_opt = Some(lines_k);
+                }
+            }
+            // Update both_exact/lines_ge2 using adopted lines (K=3 if present)
+            let lines_for_stats: &[engine_core::search::types::RootLine] =
+                if let Some(ref v) = lines_used_opt {
+                    v.as_slice()
+                } else {
+                    lines0.as_slice()
+                };
+            if lines_for_stats.len() >= 2 {
+                env.shared.lines_ge2.fetch_add(1, Ordering::Relaxed);
+                if matches!(lines_for_stats[0].bound, Bound::Exact)
+                    && matches!(lines_for_stats[1].bound, Bound::Exact)
+                {
+                    env.shared.both_exact.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -2401,7 +2460,6 @@ fn process_position_with_engine(
         };
 
     // Success path counters
-    env.shared.top1_exact.fetch_add(1, Ordering::Relaxed);
     {
         let mut hist = env.shared.depth_hist.lock().unwrap();
         let d = result_used_depth as usize;
@@ -2496,6 +2554,12 @@ fn process_position_with_engine(
                 "nodes": result_used_nodes,
                 "nodes_q": result_used_qnodes,
                 "time_ms": result_used_time_ms,
+                "time_ms_k2": k2_time_ms,
+                "time_ms_k3": k3_time_ms_opt,
+                "search_time_ms_total": k2_time_ms + k3_time_ms_opt.unwrap_or(0),
+                "nodes_k2": k2_nodes,
+                "nodes_k3": k3_nodes_opt,
+                "nodes_total": k2_nodes + k3_nodes_opt.unwrap_or(0),
                 "aspiration_retries": result_used_re_searches,
                 "pv_changed": result_used_pv_changed,
                 "best2_gap_cp": gap2,
