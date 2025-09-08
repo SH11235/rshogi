@@ -1274,6 +1274,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0
     };
+    // When reading from stdin ("-"), we tee the stream into a temporary file during pass-1
+    // so that pass-2 can re-read the same data. This keeps memory bounded while preserving
+    // the two-pass behavior (counting + processing).
+    let is_stdin = input_path.to_string_lossy() == "-";
+    let mut tee_tmp_path: Option<PathBuf> = None;
+    let mut tee_writer: Option<BufWriter<File>> = None;
+    if is_stdin {
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "generate_nnue_training_data.stdin.{}.tmp",
+            std::process::id()
+        ));
+        if let Ok(f) = File::create(&tmp) {
+            tee_writer = Some(BufWriter::with_capacity(1 << 20, f));
+            tee_tmp_path = Some(tmp);
+        } else {
+            eprintln!("Warning: failed to create temporary tee file for stdin; proceeding without tee");
+        }
+    }
     {
         let mut reader = open_reader(&input_path)?;
         let mut line = String::new();
@@ -1283,6 +1302,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if n == 0 {
                 break;
             }
+            if let Some(w) = tee_writer.as_mut() {
+                // Write original line (includes newline from read_line)
+                let _ = w.write_all(line.as_bytes());
+            }
             if let Some(s) = extract_sfen(line.trim()) {
                 total_positions += 1;
                 if need_calib_samples && calib_samples.len() < sample_cap {
@@ -1291,7 +1314,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    if let Some(mut w) = tee_writer.take() {
+        let _ = w.flush();
+    }
     human_log!("\nFound {total_positions} positions in input file");
+
+    // Effective input path for pass-2 (use tee temp for stdin, else original path)
+    let effective_input_path: PathBuf = tee_tmp_path
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| input_path.clone());
 
     // Optional: calibrate nodes from NPS if requested and nodes not explicitly set
     let mut manifest_existing: Option<Manifest> = None;
@@ -1485,7 +1517,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process in batches (optionally inside a local rayon thread pool) from a streaming reader
     let mut run_batches = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut reader = open_reader(&input_path)?;
+        let mut reader = open_reader(&effective_input_path)?;
         let mut line = String::new();
         let mut seen_valid: usize = 0; // valid SFENs seen so far
         let mut batch: Vec<(usize, String)> = Vec::with_capacity(batch_size.min(1024));
@@ -2281,7 +2313,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rec = serde_json::json!({ "kind": "final", "version": 1, "summary": &summary_obj });
         lg.write_json(&rec);
     }
-
+    // Clean up tee temporary file for stdin (if any)
+    if let Some(p) = tee_tmp_path.take() {
+        let _ = std::fs::remove_file(p);
+    }
     Ok(())
 }
 
