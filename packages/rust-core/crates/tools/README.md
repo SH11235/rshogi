@@ -54,6 +54,35 @@ cargo run --release -p tools --bin train_nnue -- \
 # 量子化モデルの保存
 cargo run --release -p tools --bin train_nnue -- \
   -i runs/out_pass1.cache -e 1 --quantized -o runs/my_nnue_q
+
+# スループット表示と非同期プリフェッチ（キャッシュ入力時）
+cargo run --release -p tools --bin train_nnue -- \
+  -i runs/out_pass1.cache -e 1 -b 16384 --prefetch-batches 4 --throughput-interval 2.0
+  # => [throughput] sps(=samples/sec), bps(=batches/sec), avg_batch を定期表示
+  #    prefetch-batches=0 を指定すると同期モード（mode=sync）で動作
+
+## ストリーミング学習モード（大規模/圧縮キャッシュ向け）
+
+学習前に全量をメモリ化せず、キャッシュをバックグラウンドで逐次読み込みます。
+シャッフルは無効化（現状）。ローダ待ち比率（loader_ratio）と sps の改善を比較できます。
+
+```bash
+cargo run --release -p tools --bin train_nnue -- \
+  -i runs/out_pass1.cache -e 1 -b 16384 \
+  --stream-cache --prefetch-batches 4 --throughput-interval 2.0
+# ログ: [throughput] mode=stream ... loader_ratio=...%
+```
+
+オプション補足:
+- `--prefetch-batches N`: stream-cache / cache 入力時のプリフェッチ深さ。
+- `--prefetch-bytes BYTES`: プリフェッチの概算メモリ上限（バイト）。0 または未指定で無制限。
+- `--estimated-features-per-sample N`: サンプル1件あたりの推定活性特徴数（既定 64）。
+  - 概算メモリは `~32 + 4*N` バイト/サンプルとして見積もられ、`--prefetch-bytes` の丸めに使用されます。
+  - 実データで活性数が多い場合は N を増やすと安全です。
+
+ログの意味:
+- `[throughput] mode=stream ... loader_ratio=...%` は、非同期ローダに対する受信待機（I/O/解凍待ち等）が占める割合です。
+- in‑memory 経路は `mode=inmem loader=async|sync` として出力され、`loader_ratio` は概ね 0% になります。
 ```
 
 4) 品質解析（ゲート/要約/複数入力の比較）

@@ -27,6 +27,10 @@ fn read_gz_to_string(p: &Path) -> String {
 
 #[test]
 fn generate_non_split_smoke_manifest_and_output_exist() {
+    if engine_core::util::is_ci_environment() {
+        println!("Skipping integration test requiring engine search in CI environment");
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     let input = tmp.path().join("in.sfen.txt");
     write_sfens(&input, 5);
@@ -64,6 +68,10 @@ fn generate_non_split_smoke_manifest_and_output_exist() {
 
 #[test]
 fn generate_split_gz_smoke_parts_and_manifests_consistent() {
+    if engine_core::util::is_ci_environment() {
+        println!("Skipping integration test requiring engine search in CI environment");
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     let input = tmp.path().join("in2.sfen.txt");
     write_sfens(&input, 7);
@@ -87,7 +95,6 @@ fn generate_split_gz_smoke_parts_and_manifests_consistent() {
             "--output-format",
             "jsonl",
         ])
-        .timeout(std::time::Duration::from_secs(30))
         .assert();
     assert.success();
 

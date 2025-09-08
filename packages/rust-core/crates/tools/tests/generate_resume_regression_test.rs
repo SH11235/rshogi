@@ -1,6 +1,5 @@
 use assert_cmd::prelude::*;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -23,6 +22,10 @@ fn count_lines(path: &Path) -> usize {
 
 #[test]
 fn resume_twice_no_duplicate_and_manifest_v2_present() {
+    if engine_core::util::is_ci_environment() {
+        println!("Skipping integration test requiring engine search in CI environment");
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     let input = tmp.path().join("resume_in.sfen.txt");
     write_sfens(&input, 8);

@@ -198,6 +198,25 @@ Machine learning tools for NNUE evaluation function:
 - **train_nnue**: Full NNUE trainer with HalfKP features and row-sparse updates
   - Performance metrics: loader_ratio and examples/sec monitoring
   - Cache support for faster data loading
+
+#### 手動ベンチ（GitHub Actions）: NNUE Stream Loader Bench
+- 目的: stream-cache ローダとプリフェッチの効果検証（sps / loader_ratio を比較）。
+- 実行: GitHub Actions → 「NNUE Stream Loader Bench (manual)」→ Run workflow。
+- 仕様: 小規模データを合成し、prefetch=0（同期）/8（非同期）で 1 epoch 実行。ジョブサマリに sps と loader_ratio を出力。
+- 備考: デフォルトで gzip を使用（zstd 機能は不要）。しきい値による自動失敗は未設定（必要なら追加）。
+ - 入力は JSONL / Cache を自動判定（Cache は NNFC マジックヘッダで検出）
+
+例: ストリーミング学習（事前ロードなし）
+```bash
+cargo run -p tools --bin train_nnue -- \
+  -i runs/data.cache.gz -e 1 -b 16384 \
+  --stream-cache --prefetch-batches 8 --throughput-interval 2.0
+# ログ: [throughput] mode=stream ... sps=... loader_ratio=...%
+```
+
+補足:
+- `loader_ratio` は、ストリーミング時の「ローダ待ち（I/O/解凍/受信待機）」が占める比率です。
+- 事前メモリロード（in‑memory）では `mode=inmem` で出力され、`loader_ratio` は概ね 0% になります。
 - **build_feature_cache**: Pre-extract HalfKP features to binary cache format
   - Eliminates SFEN parsing and feature extraction overhead
   - Variable-length record format with metadata preservation
