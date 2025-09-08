@@ -1331,6 +1331,7 @@ dependencies = [
  "rand",
  "rand_xoshiro",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

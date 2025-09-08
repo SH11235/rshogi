@@ -41,7 +41,7 @@ cargo run --release -p tools --bin build_feature_cache --features zstd -- \
   - v1 フォーマット（既定）では 2 サンプル/局面（先手視点・後手視点）に分割し、ラベルは黒基準で整合化します。
   - `--dedup-features` で特徴の重複を除去（デフォルトOFF）。統計に dedup の有無を表示。
   - 圧縮はヘッダ非圧縮＋ペイロード部のみ圧縮（gzip/zstd）。トレーナはヘッダの `payload_encoding` を自動判別して読込。
-  - 圧縮時は `chunk_size` 件ごとにメンバー/フレームを区切る（マルチメンバー gzip / 連結 zstd）。メモリピークの安定化に有効。
+  - 圧縮時は `chunk_size` 件（= サンプル単位。1局面=先手/後手の2サンプル）ごとにメンバー/フレームを区切る（マルチメンバー gzip / 連結 zstd）。メモリピークの安定化に有効。
   - 入力 JSONL は `.jsonl`/`.jsonl.gz`/`.jsonl.zst`（zstdは feature 有効時）を自動判別。
 
 3) NNUE 学習（キャッシュ入力推奨）
