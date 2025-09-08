@@ -3,7 +3,17 @@ name: tools-ci
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'packages/rust-core/crates/tools/**'
+      - 'packages/rust-core/crates/engine-core/**'
+      - 'packages/rust-core/Cargo.*'
+      - '.github/workflows/tools-ci.yml'
   pull_request:
+    paths:
+      - 'packages/rust-core/crates/tools/**'
+      - 'packages/rust-core/crates/engine-core/**'
+      - 'packages/rust-core/Cargo.*'
+      - '.github/workflows/tools-ci.yml'
   workflow_dispatch:
     inputs:
       train:

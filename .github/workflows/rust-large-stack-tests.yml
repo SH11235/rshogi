@@ -3,11 +3,15 @@ name: Rust Large Stack Tests
 on:
   push:
     paths:
-      - 'packages/rust-core/**'
+      - 'packages/rust-core/crates/engine-core/**'
+      - 'packages/rust-core/crates/engine-usi/**'
+      - 'packages/rust-core/Cargo.*'
       - '.github/workflows/rust-large-stack-tests.yml'
   pull_request:
     paths:
-      - 'packages/rust-core/**'
+      - 'packages/rust-core/crates/engine-core/**'
+      - 'packages/rust-core/crates/engine-usi/**'
+      - 'packages/rust-core/Cargo.*'
       - '.github/workflows/rust-large-stack-tests.yml'
   workflow_dispatch:
     inputs:

@@ -3,8 +3,30 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'packages/core/**'
+      - 'packages/web/**'
+      - 'packages/server/**'
+      - 'packages/desktop/**'
+      - 'packages/discord-bot/**'
+      - 'package*.json'
+      - 'turbo.json'
+      - 'tsconfig.json'
+      - 'biome.json'
+      - '.github/workflows/ci.yml'
   push:
     branches: [main]
+    paths:
+      - 'packages/core/**'
+      - 'packages/web/**'
+      - 'packages/server/**'
+      - 'packages/desktop/**'
+      - 'packages/discord-bot/**'
+      - 'package*.json'
+      - 'turbo.json'
+      - 'tsconfig.json'
+      - 'biome.json'
+      - '.github/workflows/ci.yml'
 
 jobs:
   quality-check:
@@ -17,6 +39,24 @@ jobs:
         with:
           # PR時の変更検出のため
           fetch-depth: 2
+
+      - name: Detect changed paths
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            node_code:
+              - 'packages/core/**'
+              - 'packages/web/**'
+              - 'packages/server/**'
+              - 'packages/desktop/**'
+              - 'packages/discord-bot/**'
+              - 'package*.json'
+              - 'turbo.json'
+              - 'tsconfig.json'
+              - 'biome.json'
+              - '!**/*.md'
+              - '!**/*.mdx'
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -84,11 +124,11 @@ jobs:
         run: npm run lint
 
       - name: Test (Affected)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.node_code == 'true'
         run: npm run test:unit -- --filter='[HEAD^1]'
 
       - name: Test (All)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.changes.outputs.node_code == 'true'
         run: npm run test:unit
 
       - name: Format Check
