@@ -176,6 +176,58 @@ cargo build -p tools --features plots --release
 - AUC は補助指標（既定ゲート OFF）。二値化しきい値は 0.5。
  - `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です。一般的な確率ビン（0..1）の ECE とは異なります。
 
+### 使い方（NNUE trainer）
+
+```bash
+# PNG も出す場合は features=plots でビルド
+cargo build -p tools --features plots --release
+
+# JSONL 入力（小規模サンプル）
+./target/release/train_nnue \
+  --input runs/train.jsonl --validation runs/valid.jsonl \
+  --epochs 2 --batch-size 8192 --metrics --plots --seed 1 \
+  --gate-val-loss-non-increase --gate-mode fail \
+  --calibration-bins 40 \
+  --out runs/nnue_dashboard
+
+# キャッシュ入力（推奨）
+./target/release/train_nnue \
+  --input runs/train.cache --validation runs/valid.cache \
+  --epochs 2 --batch-size 16384 --metrics --seed 1 \
+  --out runs/nnue_cache
+
+# ストリーミング（大規模キャッシュ向け）
+./target/release/train_nnue \
+  --input runs/train.cache \
+  --epochs 1 --batch-size 16384 \
+  --stream-cache --prefetch-batches 4 --throughput-interval 2.0 \
+  --out runs/nnue_stream
+```
+
+主なオプション（train_nnue）:
+- `--metrics`: 各エポックの CSV 出力を有効化
+- `--plots`: 校正 PNG を出力（`tools` を `--features plots` でビルド時のみ有効）
+- `--calibration-bins N`: 校正ビン数（既定 40）
+- `--gate-val-loss-non-increase`: 最終エポックが最良の `val_loss` でなければ FAIL/WARN
+- `--gate-min-auc <f64>`: WDL 時の最小 AUC 閾値（既定無効）
+- `--gate-mode {warn|fail}`: ゲートの動作
+- `--stream-cache`: キャッシュを逐次読み込み（学習前の全量読み込みを行わない）
+- `--prefetch-batches N`, `--prefetch-bytes BYTES`, `--estimated-features-per-sample N`: プリフェッチ制御
+- `--save-every N`: N バッチ毎にチェックポイントを保存（`checkpoint_batch_*.fp32.bin`）
+
+出力物（`runs/nnue_*` 配下）:
+- `metrics.csv`（列）: `epoch, train_loss, val_loss, val_auc, val_ece, time_sec, train_weight_sum, val_weight_sum, is_best`
+- `phase_metrics.csv`（列）: `epoch, phase, count, weighted_count, logloss, brier, accuracy, mae, mse`（WDL+JSONL 検証のみ）
+- `calibration_epoch_k.csv` / `calibration_epoch_k.png`（WDL+JSONL 検証のみ）
+- `nn.fp32.bin`: 最終エポックの FP32 モデル
+- `nn_best.fp32.bin`, `nn_best.meta.json`: 最良 `val_loss` のモデルとメタ情報（`best_epoch`, `best_val_loss`, 可能なら `best_val_auc`, `best_val_ece`）
+- `nn.i8.bin`: 量子化（int8）版（`--quantized` 指定時）
+
+注意:
+- 校正/ECE/phase 別メトリクスは **WDL + JSONL 検証** のときにのみ有効です（キャッシュ検証では cp/sfen が持てないためスキップ）。
+- AUC は補助指標（既定ゲート OFF）。二値化しきい値は 0.5。
+- `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です。一般的な確率ビン（0..1）の ECE とは異なります。
+
 ### CI アーティファクト（雛形）
 
 `.github/workflows/train_dashboard.yml` を同梱。小さな JSONL を用意して 2 エポック実行、`runs/...` を artifact 化し、

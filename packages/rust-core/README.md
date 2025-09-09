@@ -198,6 +198,10 @@ Machine learning tools for NNUE evaluation function:
 - **train_nnue**: Full NNUE trainer with HalfKP features and row-sparse updates
   - Performance metrics: loader_ratio and examples/sec monitoring
   - Cache support for faster data loading
+  - Minimal training dashboard: per-epoch metrics, phase metrics, calibration (CP-binned ECE)
+
+See tools README for usage, options, and outputs:
+- crates/tools/README.md (Minimal Training Dashboard: baseline and NNUE)
 
 #### 手動ベンチ（GitHub Actions）: NNUE Stream Loader Bench
 - 目的: stream-cache ローダとプリフェッチの効果検証（sps / loader_ratio を比較）。
