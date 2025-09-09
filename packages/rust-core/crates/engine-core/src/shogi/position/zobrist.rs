@@ -193,22 +193,22 @@ impl ZobristHashing for Position {
             hash ^= ZOBRIST.piece_square_hash(captured_piece, to);
 
             // Update hand hash (piece goes to hand)
-            // IMPORTANT: Promoted pieces revert to their base type when captured
-            // e.g., ProRook → Rook, ProPawn → Pawn
+            // NOTE: hand_index() returns the "hand (base) slot" even for promoted types.
+            // Promoted piece is treated as its base type in hand (e.g., ProRook → Rook).
+            // If this behavior changes in the future, explicitly normalize here.
             let color_idx = moving.color as usize;
-            // Since promoted pieces cannot exist in hand, we use the base piece type
-            let captured_base_type = captured_piece.piece_type;
+            let captured_hand_type = captured_piece.piece_type; // base type slot for hand_index()
             let piece_idx =
-                captured_base_type.hand_index().expect("King is never captured to hand");
+                captured_hand_type.hand_index().expect("King is never captured to hand");
             let old_count = self.hands[color_idx][piece_idx];
             let new_count = old_count + 1;
 
             // Remove old hand hash
             if old_count > 0 {
-                hash ^= ZOBRIST.hand_hash(moving.color, captured_base_type, old_count);
+                hash ^= ZOBRIST.hand_hash(moving.color, captured_hand_type, old_count);
             }
             // Add new hand hash
-            hash ^= ZOBRIST.hand_hash(moving.color, captured_base_type, new_count);
+            hash ^= ZOBRIST.hand_hash(moving.color, captured_hand_type, new_count);
         }
 
         // Add moving piece to destination
