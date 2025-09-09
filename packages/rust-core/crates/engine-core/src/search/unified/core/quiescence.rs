@@ -104,6 +104,26 @@ where
     // Check if in check first - this determines our search strategy
     let in_check = pos.is_in_check();
 
+    // Path-dependent repetition handling in quiescence as well
+    if pos.is_repetition() {
+        // Use stack-cached static eval if available to avoid double evaluation
+        let static_eval = if crate::search::types::SearchStack::is_valid_ply(ply) {
+            let slot = &mut searcher.search_stack[ply as usize].static_eval;
+            if let Some(v) = *slot {
+                v
+            } else {
+                let v = searcher.evaluator.evaluate(pos);
+                *slot = Some(v);
+                v
+            }
+        } else {
+            searcher.evaluator.evaluate(pos)
+        };
+
+        let score = super::repetition_penalty(static_eval).clamp(alpha, beta);
+        return score;
+    }
+
     // QNodes budget check (after in_check determination)
     if let Some(limit) = qlimit {
         // Check if we've exceeded the limit using previous value
@@ -147,8 +167,10 @@ where
     }
 
     // Debug logging gate (read once)
-    static QS_DEBUG: Lazy<bool> =
-        Lazy::new(|| std::env::var("SHOGI_DEBUG_QS").as_deref() == Ok("1"));
+    static QS_DEBUG: Lazy<bool> = Lazy::new(|| {
+        // Enable with SHOGI_DEBUG_QS=1
+        std::env::var("SHOGI_DEBUG_QS").map(|v| v == "1").unwrap_or(false)
+    });
 
     // Primary limit: relative qsearch depth
     // This ensures consistent qsearch behavior regardless of main search depth
@@ -443,6 +465,68 @@ where
         }
     }
 
+    // === Add: non-drop, non-capture checking moves (limited) ===
+    if stand_pat + CHECK_DROP_MARGIN >= alpha {
+        use smallvec::SmallVec;
+
+        let mut check_noncaptures: SmallVec<[Move; 16]> = all_moves
+            .iter()
+            .copied()
+            .filter(|&mv| !mv.is_drop())
+            .filter(|&mv| pos.piece_at(mv.to()).is_none()) // non-capture only
+            .filter(|&mv| {
+                // Cheap prefilter then accurate check
+                crate::search::unified::pruning::likely_could_give_check(pos, mv)
+                    && pos.gives_check(mv)
+            })
+            .collect();
+
+        // Order by proximity/alignment similar to drops
+        check_noncaptures.sort_by_key(|&mv| -score_nocap_check_for_ordering(pos, mv));
+
+        const MAX_QS_NONCAP_CHECKS: usize = 4;
+        if check_noncaptures.len() > MAX_QS_NONCAP_CHECKS {
+            check_noncaptures.truncate(MAX_QS_NONCAP_CHECKS);
+        }
+
+        for &mv in check_noncaptures.iter() {
+            if searcher.context.should_stop() {
+                return alpha;
+            }
+
+            // Budget enforcement
+            if let Some(limit) = qlimit {
+                let exceeded = if let Some(ref counter) = qnodes_counter {
+                    counter.load(Ordering::Acquire) >= limit
+                } else {
+                    searcher.stats.qnodes >= limit
+                };
+                if exceeded {
+                    return alpha;
+                }
+            }
+
+            if !pos.is_pseudo_legal(mv) {
+                continue;
+            }
+
+            let undo = pos.do_move(mv);
+            let score =
+                -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
+            pos.undo_move(mv, undo);
+
+            if searcher.context.should_stop() {
+                return alpha;
+            }
+            if score >= beta {
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+        }
+    }
+
     // === Add: checking drops (limited) ===
     // First, skip generation if stand pat is too far below alpha
     if stand_pat + CHECK_DROP_MARGIN >= alpha {
@@ -537,6 +621,53 @@ where
     alpha
 }
 
+#[cfg(test)]
+mod tests_repetition_qs {
+    use super::quiescence_search;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::unified::UnifiedSearcher,
+        shogi::{board::Piece, board::PieceType, board::Square, Color, Position},
+    };
+
+    #[test]
+    fn test_quiescence_returns_penalty_on_repetition() {
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // Advantage: extra rook for side to move
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+        pos.side_to_move = Color::Black;
+
+        // Sync hash and history for repetition detection
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let h = pos.zobrist_hash;
+        pos.history = vec![h, h, h, h];
+
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+
+        let alpha = -10000;
+        let beta = 10000;
+        let score = quiescence_search(&mut searcher, &mut pos, alpha, beta, 0, 0);
+
+        assert!(
+            score < 0,
+            "QS repetition should return a negative penalty when ahead, got {score}"
+        );
+    }
+}
+
 /// Score checking drops for move ordering in quiescence search
 /// Prioritizes drops closer to the king and more valuable pieces
 #[inline]
@@ -562,6 +693,32 @@ fn score_check_drop_for_ordering(pos: &Position, mv: crate::shogi::Move) -> i32 
         PieceType::Bishop => 11,
         PieceType::Rook => 12,
         PieceType::King => 0,
+    };
+    prox * 2 + atk_hint
+}
+
+/// Score non-capture checking moves for ordering in quiescence search
+#[inline]
+fn score_nocap_check_for_ordering(pos: &Position, mv: crate::shogi::Move) -> i32 {
+    use crate::shogi::PieceType;
+    let them = pos.side_to_move.opposite();
+    let ksq = match pos.board.king_square(them) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let to = mv.to();
+    let dx = (ksq.file() as i32 - to.file() as i32).abs();
+    let dy = (ksq.rank() as i32 - to.rank() as i32).abs();
+    let prox = (10 - (dx + dy)).max(0);
+    let atk_hint = match mv.piece_type() {
+        Some(PieceType::Rook) => (dx == 0 || dy == 0) as i32 * 6 + 6,
+        Some(PieceType::Bishop) => (dx == dy) as i32 * 6 + 5,
+        Some(PieceType::Lance) => (dx == 0) as i32 * 4 + 3,
+        Some(PieceType::Silver) => 3,
+        Some(PieceType::Gold) => 3,
+        Some(PieceType::Knight) => 3,
+        Some(PieceType::Pawn) => 2,
+        _ => 1,
     };
     prox * 2 + atk_hint
 }

@@ -31,7 +31,7 @@ use crate::{
 use std::sync::atomic::Ordering;
 
 #[inline]
-fn repetition_penalty(static_eval: i32) -> i32 {
+pub(super) fn repetition_penalty(static_eval: i32) -> i32 {
     // Penalize only the side that is ahead to discourage waiting-move loops.
     // Example shape: at least -16cp, up to -128cp; otherwise 0 for draw acceptance.
     if static_eval >= 50 {
