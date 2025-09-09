@@ -234,6 +234,76 @@ cargo build -p tools --features plots --release
 `--gate-val-loss-non-increase --gate-mode fail` で回帰を赤化できます。
 
 
+### ローカルでのクイック検証（サンプル生成→CSV/PNG確認）
+
+最小サンプルの JSONL を作って、baseline/nnue のダッシュボード出力を手元で確認できます。
+
+1) サンプル JSONL 作成
+```bash
+mkdir -p sample_data
+cat > sample_data/train.jsonl << 'EOF'
+{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":50}
+{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1","eval":150,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":30}
+EOF
+cp sample_data/train.jsonl sample_data/val.jsonl
+```
+
+2) CSV だけ確認する場合（PNG不要）
+```bash
+cargo build -p tools --release
+
+# Baseline
+./target/release/train_wdl_baseline \
+  --input sample_data/train.jsonl \
+  --validation sample_data/val.jsonl \
+  --epochs 2 --batch-size 64 \
+  --metrics --calibration-bins 10 \
+  --gate-val-loss-non-increase --gate-mode warn --seed 1 \
+  --out runs/wdl_local
+
+# NNUE
+./target/release/train_nnue \
+  --input sample_data/train.jsonl \
+  --validation sample_data/val.jsonl \
+  --epochs 2 --batch-size 128 \
+  --metrics --calibration-bins 10 \
+  --gate-val-loss-non-increase --gate-mode warn --seed 1 \
+  --out runs/nnue_local
+
+# 確認（例）
+head -n 5 runs/wdl_local/metrics.csv
+head -n 5 runs/nnue_local/metrics.csv
+head -n 10 runs/nnue_local/calibration_epoch_1.csv
+head -n 10 runs/nnue_local/phase_metrics.csv
+```
+
+3) PNG も出力する場合（Fontconfig が必要）
+- Linux: `sudo apt-get install -y libfontconfig1-dev`
+- macOS: `brew install fontconfig`
+- Windows: WSL 推奨（もしくは CSV のみ利用）
+
+```bash
+cargo build -p tools --features plots --release
+
+# --plots を付けて実行
+./target/release/train_nnue \
+  --input sample_data/train.jsonl \
+  --validation sample_data/val.jsonl \
+  --epochs 2 --batch-size 128 \
+  --metrics --calibration-bins 10 --plots \
+  --gate-val-loss-non-increase --gate-mode warn --seed 1 \
+  --out runs/nnue_png
+
+# 画像を開く
+# macOS: open runs/nnue_png/calibration_epoch_1.png
+# Linux: xdg-open runs/nnue_png/calibration_epoch_1.png
+```
+
+補足:
+- 校正/ECE/phase 別メトリクスは **WDL + JSONL 検証** のときにのみ有効です。
+- `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です（確率ビンECEではありません）。
+
+
 ## バイナリ一覧（主要）
 
 - データ生成/学習/解析
