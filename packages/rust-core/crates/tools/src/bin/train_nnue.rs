@@ -43,6 +43,7 @@ use tools::nnfc_v1::{
 };
 
 use clap::{arg, Command};
+use engine_core::game_phase::{detect_game_phase, GamePhase, Profile};
 use engine_core::{
     evaluation::nnue::features::{extract_features, FE_END},
     shogi::SHOGI_BOARD_SIZE,
@@ -52,6 +53,9 @@ use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tools::nnfc_v1::flags as fc_flags;
+use tools::stats::{
+    binary_metrics, calibration_bins, ece_from_bins, regression_metrics, roc_auc_weighted,
+};
 
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
@@ -116,6 +120,9 @@ struct Sample {
     features: Vec<u32>, // Active feature indices for both perspectives
     label: f32,
     weight: f32,
+    // Dashboard-only (JSONL validation path). None for cache-loaded samples.
+    cp: Option<i32>,
+    phase: Option<GamePhase>,
 }
 
 // CacheHeader schema is parsed ad-hoc (v1 only). No struct kept to avoid drift.
@@ -595,6 +602,8 @@ impl StreamCacheLoader {
                     features,
                     label,
                     weight,
+                    cp: None,
+                    phase: None,
                 });
                 loaded += 1;
 
@@ -738,6 +747,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .default_value("64")
                 .value_parser(clap::value_parser!(usize))
         )
+        .arg(arg!(--metrics "Emit per-epoch metrics CSV").action(clap::ArgAction::SetTrue))
+        .arg(
+            arg!(--"calibration-bins" <N> "Bins for cp calibration (JSONL validation)")
+                .value_parser(clap::value_parser!(usize))
+                .default_value("40"),
+        )
+        .arg(
+            arg!(--"plots" "Emit PNG plots (requires features=plots)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--"gate-val-loss-non-increase" "Fail if best val_loss not at last epoch")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--"gate-min-auc" <N> "Minimum AUC to pass (wdl only)")
+                .value_parser(clap::value_parser!(f64)),
+        )
+        .arg(
+            arg!(--"gate-mode" <MODE> "Gate behavior")
+                .value_parser(["warn", "fail"]) 
+                .default_value("warn"),
+        )
         .arg(arg!(--quantized "Save quantized (int8) version of the model"))
         .arg(arg!(--seed <SEED> "Random seed for reproducibility"))
         .arg(arg!(-o --out <DIR> "Output directory"))
@@ -778,6 +810,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let input_path = app.get_one::<String>("input").unwrap();
     let validation_path = app.get_one::<String>("validation");
+    let emit_metrics = app.get_flag("metrics");
+    let calib_bins_n = *app.get_one::<usize>("calibration-bins").unwrap_or(&40usize);
+    let do_plots = app.get_flag("plots");
+    let gate_last_epoch_best = app.get_flag("gate-val-loss-non-increase");
+    let gate_min_auc = app.get_one::<f64>("gate-min-auc").copied();
+    let gate_mode_fail = app.get_one::<String>("gate-mode").map(|s| s == "fail").unwrap_or(false);
     let save_every: Option<usize> =
         app.get_one::<String>("save-every").map(|s| s.parse()).transpose()?;
 
@@ -837,6 +875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load validation data if provided
+    let mut val_is_jsonl = false;
     let validation_samples = if let Some(val_path) = validation_path {
         println!("\nLoading validation data...");
         let start_val = Instant::now();
@@ -846,6 +885,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Loading validation from cache file...");
             load_samples_from_cache(val_path)?
         } else {
+            val_is_jsonl = true;
             load_samples(val_path, &config)?
         };
 
@@ -878,38 +918,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Train the model
     println!("\nTraining...");
     create_dir_all(&out_dir)?;
+    if emit_metrics {
+        let mut w = csv::Writer::from_path(out_dir.join("metrics.csv"))?;
+        w.write_record([
+            "epoch",
+            "train_loss",
+            "val_loss",
+            "val_auc",
+            "val_ece",
+            "time_sec",
+            "train_weight_sum",
+            "val_weight_sum",
+            "is_best",
+        ])?;
+        w.flush()?;
+        let mut wp = csv::Writer::from_path(out_dir.join("phase_metrics.csv"))?;
+        wp.write_record([
+            "epoch",
+            "phase",
+            "count",
+            "weighted_count",
+            "logloss",
+            "brier",
+            "accuracy",
+            "mae",
+            "mse",
+        ])?;
+        wp.flush()?;
+    }
 
-    // Training mode dispatch
-    if is_cache && config.stream_cache {
-        train_model_stream_cache(
-            &mut network,
-            input_path,
-            &validation_samples,
-            &config,
-            &out_dir,
+    // Dashboard options
+    let dash = DashboardOpts {
+        emit: emit_metrics,
+        calib_bins_n,
+        do_plots,
+        val_is_jsonl,
+    };
+
+    // Track best/last for gates and best saving
+    let mut best_network: Option<Network> = None;
+    let mut best_val_loss: f32 = f32::INFINITY;
+    let mut last_val_loss: Option<f32> = None;
+    let mut best_epoch: Option<usize> = None;
+
+    // Training mode dispatch (scope to release borrows when done)
+    {
+        let mut ctx = TrainContext {
+            out_dir: &out_dir,
             save_every,
-            &mut rng,
-        )?;
-    } else if is_cache {
-        train_model_with_loader(
-            &mut network,
-            train_samples,
-            &validation_samples,
-            &config,
-            &out_dir,
-            save_every,
-            &mut rng,
-        )?;
-    } else {
-        train_model(
-            &mut network,
-            &mut train_samples,
-            &validation_samples,
-            &config,
-            &out_dir,
-            save_every,
-            &mut rng,
-        )?;
+            dash,
+            trackers: TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+        };
+        if is_cache && config.stream_cache {
+            train_model_stream_cache(
+                &mut network,
+                input_path,
+                &validation_samples,
+                &config,
+                &mut rng,
+                &mut ctx,
+            )?;
+        } else if is_cache {
+            train_model_with_loader(
+                &mut network,
+                train_samples,
+                &validation_samples,
+                &config,
+                &mut rng,
+                &mut ctx,
+            )?;
+        } else {
+            train_model(
+                &mut network,
+                &mut train_samples,
+                &validation_samples,
+                &config,
+                &mut rng,
+                &mut ctx,
+            )?;
+        }
     }
 
     // Save final model
@@ -923,6 +1015,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save config
     let mut config_file = File::create(out_dir.join("config.json"))?;
     writeln!(config_file, "{}", serde_json::to_string_pretty(&config)?)?;
+
+    // Save best network and meta when validation present
+    if let Some(val_samples) = &validation_samples {
+        if let Some(best_net) = &best_network {
+            save_network(best_net, &out_dir.join("nn_best.fp32.bin"))?;
+            #[derive(serde::Serialize)]
+            struct BestMeta {
+                best_epoch: usize,
+                best_val_loss: f32,
+                best_val_auc: Option<f64>,
+                best_val_ece: Option<f64>,
+            }
+            let (best_val_auc, best_val_ece) =
+                compute_val_auc_and_ece(best_net, val_samples, &config, &dash);
+            let meta = BestMeta {
+                best_epoch: best_epoch.unwrap_or(0),
+                best_val_loss,
+                best_val_auc,
+                best_val_ece,
+            };
+            let mut mf = File::create(out_dir.join("nn_best.meta.json"))?;
+            writeln!(mf, "{}", serde_json::to_string_pretty(&meta)?)?;
+            println!(
+                "Saved best validation network to {}",
+                out_dir.join("nn_best.fp32.bin").display()
+            );
+        }
+    }
+
+    // Gating
+    if gate_last_epoch_best {
+        match (last_val_loss, best_val_loss.is_finite(), validation_samples.is_some()) {
+            (Some(last), true, true) => {
+                let pass = last <= best_val_loss + 1e-6;
+                println!(
+                    "GATE val_loss_last_is_best: {} (last={:.6}, best={:.6})",
+                    if pass { "PASS" } else { "FAIL" },
+                    last,
+                    best_val_loss
+                );
+                if !pass && gate_mode_fail {
+                    std::process::exit(1);
+                }
+            }
+            _ => println!("GATE val_loss_last_is_best: SKIP (no validation)"),
+        }
+    }
+    if let (Some(th), Some(val_samples)) = (gate_min_auc, validation_samples.as_ref()) {
+        if config.label_type == "wdl" {
+            let auc = compute_val_auc(&network, val_samples, &config);
+            match auc {
+                Some(v) => {
+                    let pass = v >= th;
+                    println!(
+                        "GATE min_auc {:.4} >= {:.4}: {}",
+                        v,
+                        th,
+                        if pass { "PASS" } else { "FAIL" }
+                    );
+                    if !pass && gate_mode_fail {
+                        std::process::exit(1);
+                    }
+                }
+                None => println!("GATE min_auc: SKIP (insufficient positive/negative)"),
+            }
+        } else {
+            println!("GATE min_auc: SKIP (label_type!=wdl)");
+        }
+    }
 
     println!("\nModel saved to: {}", out_dir.display());
 
@@ -1016,6 +1177,8 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
                 features,
                 label,
                 weight,
+                cp: Some(cp_black),
+                phase: Some(detect_game_phase(&position, position.ply as u32, Profile::Search)),
             });
         }
 
@@ -1032,6 +1195,8 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
                 features,
                 label,
                 weight,
+                cp: Some(cp_white),
+                phase: Some(detect_game_phase(&position, position.ply as u32, Profile::Search)),
             });
         }
     }
@@ -1200,6 +1365,8 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
             features,
             label,
             weight,
+            cp: None,
+            phase: None,
         });
     }
 
@@ -1213,14 +1380,44 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     Ok(samples)
 }
 
+#[derive(Clone, Copy)]
+struct DashboardOpts {
+    emit: bool,
+    calib_bins_n: usize,
+    do_plots: bool,
+    val_is_jsonl: bool,
+}
+
+impl DashboardValKind for DashboardOpts {
+    fn is_jsonl(&self) -> bool {
+        self.val_is_jsonl
+    }
+    fn calib_bins(&self) -> usize {
+        self.calib_bins_n
+    }
+}
+
+struct TrainTrackers<'a> {
+    best_network: &'a mut Option<Network>,
+    best_val_loss: &'a mut f32,
+    last_val_loss: &'a mut Option<f32>,
+    best_epoch: &'a mut Option<usize>,
+}
+
+struct TrainContext<'a> {
+    out_dir: &'a Path,
+    save_every: Option<usize>,
+    dash: DashboardOpts,
+    trackers: TrainTrackers<'a>,
+}
+
 fn train_model(
     network: &mut Network,
     train_samples: &mut [Sample],
     validation_samples: &Option<Vec<Sample>>,
     config: &Config,
-    out_dir: &Path,
-    save_every: Option<usize>,
     rng: &mut StdRng,
+    ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n_samples = train_samples.len();
     let n_batches = n_samples.div_ceil(config.batch_size);
@@ -1247,6 +1444,7 @@ fn train_model(
         let mut last_report = Instant::now();
         let mut samples_since = 0usize;
         let mut batches_since = 0usize;
+        let mut zero_weight_batches = 0usize;
         for batch_idx in 0..n_batches {
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
@@ -1262,6 +1460,9 @@ fn train_model(
             total_batches += 1;
             samples_since += batch.len();
             batches_since += 1;
+            if batch_weight == 0.0 {
+                zero_weight_batches += 1;
+            }
 
             // Periodic throughput report
             if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
@@ -1285,10 +1486,10 @@ fn train_model(
             }
 
             // Save checkpoint if requested
-            if let Some(interval) = save_every {
+            if let Some(interval) = ctx.save_every {
                 if total_batches % interval == 0 {
                     let checkpoint_path =
-                        out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
+                        ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
                     save_network(network, &checkpoint_path)?;
                     println!("Saved checkpoint: {}", checkpoint_path.display());
                 }
@@ -1301,21 +1502,248 @@ fn train_model(
             0.0
         };
 
-        // Validation
-        let val_loss = if let Some(val_samples) = validation_samples {
-            compute_validation_loss(network, val_samples, config)
-        } else {
-            0.0
-        };
+        // Validation/metrics
+        let mut val_loss = None;
+        let mut val_auc: Option<f64> = None;
+        let mut val_ece: Option<f64> = None;
+        let mut val_wsum: Option<f64> = None;
+        if let Some(val_samples) = validation_samples {
+            let vl = compute_validation_loss(network, val_samples, config);
+            val_loss = Some(vl);
+            val_auc = compute_val_auc(network, val_samples, config);
+            if ctx.dash.val_is_jsonl && config.label_type == "wdl" {
+                // Build bins and write CSV/PNG
+                let mut cps = Vec::with_capacity(val_samples.len());
+                let mut probs = Vec::with_capacity(val_samples.len());
+                let mut labels = Vec::with_capacity(val_samples.len());
+                let mut wts = Vec::with_capacity(val_samples.len());
+                let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                for s in val_samples.iter() {
+                    if let Some(cp) = s.cp {
+                        let out = network.forward_with_buffers(
+                            &s.features,
+                            &mut acc_buffer,
+                            &mut activated_buffer,
+                        );
+                        let p = 1.0 / (1.0 + (-out).exp());
+                        cps.push(cp);
+                        probs.push(p);
+                        labels.push(s.label);
+                        wts.push(s.weight);
+                    }
+                }
+                if !cps.is_empty() {
+                    let bins = calibration_bins(
+                        &cps,
+                        &probs,
+                        &labels,
+                        &wts,
+                        config.cp_clip,
+                        ctx.dash.calib_bins_n,
+                    );
+                    val_ece = ece_from_bins(&bins);
+                    if ctx.dash.emit {
+                        // Write calibration CSV
+                        let mut w = csv::Writer::from_path(
+                            ctx.out_dir.join(format!("calibration_epoch_{}.csv", epoch + 1)),
+                        )?;
+                        w.write_record([
+                            "bin_left",
+                            "bin_right",
+                            "bin_center",
+                            "count",
+                            "weighted_count",
+                            "mean_pred",
+                            "mean_label",
+                        ])?;
+                        for b in &bins {
+                            w.write_record([
+                                b.left.to_string(),
+                                b.right.to_string(),
+                                format!("{:.1}", b.center),
+                                b.count.to_string(),
+                                format!("{:.3}", b.weighted_count),
+                                format!("{:.6}", b.mean_pred),
+                                format!("{:.6}", b.mean_label),
+                            ])?;
+                        }
+                        w.flush()?;
+                        if ctx.dash.do_plots {
+                            let points: Vec<(i32, i32, f32, f64, f64)> = bins
+                                .iter()
+                                .map(|b| (b.left, b.right, b.center, b.mean_pred, b.mean_label))
+                                .collect();
+                            if let Err(e) = tools::plot::plot_calibration_png(
+                                ctx.out_dir.join(format!("calibration_epoch_{}.png", epoch + 1)),
+                                &points,
+                            ) {
+                                eprintln!("plot_calibration_png failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            // Phase metrics (JSONL only)
+            if ctx.dash.val_is_jsonl && ctx.dash.emit {
+                // buckets per phase
+                let mut probs_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                let mut cp_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                #[inline]
+                fn idx_of(phase: GamePhase) -> usize {
+                    match phase {
+                        GamePhase::Opening => 0,
+                        GamePhase::MiddleGame => 1,
+                        GamePhase::EndGame => 2,
+                    }
+                }
+                let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                match config.label_type.as_str() {
+                    "wdl" => {
+                        for s in val_samples.iter() {
+                            if let Some(ph) = s.phase {
+                                let out = network.forward_with_buffers(
+                                    &s.features,
+                                    &mut acc_buffer,
+                                    &mut activated_buffer,
+                                );
+                                let p = 1.0 / (1.0 + (-out).exp());
+                                let b = &mut probs_buckets[idx_of(ph)];
+                                b.0.push(p);
+                                b.1.push(s.label);
+                                b.2.push(s.weight);
+                            }
+                        }
+                    }
+                    "cp" => {
+                        for s in val_samples.iter() {
+                            if let Some(ph) = s.phase {
+                                let out = network.forward_with_buffers(
+                                    &s.features,
+                                    &mut acc_buffer,
+                                    &mut activated_buffer,
+                                );
+                                let b = &mut cp_buckets[idx_of(ph)];
+                                b.0.push(out);
+                                b.1.push(s.label);
+                                b.2.push(s.weight);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                let mut wpm = csv::WriterBuilder::new().has_headers(false).from_writer(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(ctx.out_dir.join("phase_metrics.csv"))?,
+                );
+                let phases = [
+                    GamePhase::Opening,
+                    GamePhase::MiddleGame,
+                    GamePhase::EndGame,
+                ];
+                for (i, ph) in phases.iter().enumerate() {
+                    match config.label_type.as_str() {
+                        "wdl" => {
+                            let (ref probs, ref labels, ref wts) = probs_buckets[i];
+                            if !probs.is_empty() {
+                                let cnt = probs.len();
+                                let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                if let Some(m) = binary_metrics(probs, labels, wts) {
+                                    wpm.write_record([
+                                        (epoch + 1).to_string(),
+                                        format!("{:?}", ph),
+                                        cnt.to_string(),
+                                        format!("{:.3}", wsum),
+                                        format!("{:.6}", m.logloss),
+                                        format!("{:.6}", m.brier),
+                                        format!("{:.6}", m.accuracy),
+                                        String::new(),
+                                        String::new(),
+                                    ])?;
+                                }
+                            }
+                        }
+                        "cp" => {
+                            let (ref preds, ref labels, ref wts) = cp_buckets[i];
+                            if !preds.is_empty() {
+                                let cnt = preds.len();
+                                let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                if let Some(r) = regression_metrics(preds, labels, wts) {
+                                    wpm.write_record([
+                                        (epoch + 1).to_string(),
+                                        format!("{:?}", ph),
+                                        cnt.to_string(),
+                                        format!("{:.3}", wsum),
+                                        String::new(),
+                                        String::new(),
+                                        String::new(),
+                                        format!("{:.6}", r.mae),
+                                        format!("{:.6}", r.mse),
+                                    ])?;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                wpm.flush()?;
+            }
+            val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
+        }
 
         let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
         let epoch_sps = (n_samples as f32) / epoch_secs;
+        if zero_weight_batches > 0 {
+            eprintln!(
+                "[debug] epoch {} had {} zero-weight batches",
+                epoch + 1,
+                zero_weight_batches
+            );
+        }
+        // Update best trackers
+        if let Some(vl) = val_loss {
+            if vl < *ctx.trackers.best_val_loss {
+                *ctx.trackers.best_val_loss = vl;
+                *ctx.trackers.best_network = Some(network.clone());
+                *ctx.trackers.best_epoch = Some(epoch + 1);
+            }
+            *ctx.trackers.last_val_loss = Some(vl);
+        }
+        // Emit metrics.csv
+        if ctx.dash.emit {
+            let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(ctx.out_dir.join("metrics.csv"))?,
+            );
+            w.write_record([
+                (epoch + 1).to_string(),
+                format!("{:.6}", avg_loss),
+                val_loss.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                format!("{:.3}", epoch_secs),
+                format!("{:.3}", total_weight),
+                val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                if Some(epoch + 1) == *ctx.trackers.best_epoch {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            ])?;
+            w.flush()?;
+        }
+        // Console log summary
         println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={:.4} time={:.2}s sps={:.0}",
+            "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
             epoch + 1,
             config.epochs,
             avg_loss,
-            val_loss,
+            val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
             epoch_secs,
             epoch_sps
         );
@@ -1329,10 +1757,10 @@ fn train_model_stream_cache(
     cache_path: &str,
     validation_samples: &Option<Vec<Sample>>,
     config: &Config,
-    out_dir: &Path,
-    save_every: Option<usize>,
     _rng: &mut StdRng,
+    ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Use ctx fields directly in this function to avoid borrow confusion
     // If prefetch=0, run synchronous streaming in the training thread (no background worker)
     if config.prefetch_batches == 0 {
         let mut adam_state = if config.optimizer == "adam" {
@@ -1435,6 +1863,8 @@ fn train_model_stream_cache(
                         features,
                         label,
                         weight,
+                        cp: None,
+                        phase: None,
                     });
                     loaded += 1;
                 }
@@ -1595,10 +2025,10 @@ fn train_model_stream_cache(
                 wait_ns_since = 0;
             }
 
-            if let Some(interval) = save_every {
+            if let Some(interval) = ctx.save_every {
                 if total_batches % interval == 0 {
                     let checkpoint_path =
-                        out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
+                        ctx.out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
                     save_network(network, &checkpoint_path)?;
                     println!("Saved checkpoint: {}", checkpoint_path.display());
                 }
@@ -1610,11 +2040,194 @@ fn train_model_stream_cache(
         } else {
             0.0
         };
-        let val_loss = if let Some(val_samples) = validation_samples {
-            compute_validation_loss(network, val_samples, config)
-        } else {
-            0.0
-        };
+        let mut val_loss = None;
+        let mut val_auc: Option<f64> = None;
+        let mut val_ece: Option<f64> = None;
+        let mut val_wsum: Option<f64> = None;
+        if let Some(val_samples) = validation_samples {
+            let vl = compute_validation_loss(network, val_samples, config);
+            val_loss = Some(vl);
+            val_auc = compute_val_auc(network, val_samples, config);
+            if ctx.dash.val_is_jsonl && config.label_type == "wdl" {
+                // Calibration CSV/PNG
+                let mut cps = Vec::new();
+                let mut probs = Vec::new();
+                let mut labels = Vec::new();
+                let mut wts = Vec::new();
+                let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                for s in val_samples.iter() {
+                    if let Some(cp) = s.cp {
+                        let out = network.forward_with_buffers(
+                            &s.features,
+                            &mut acc_buffer,
+                            &mut activated_buffer,
+                        );
+                        let p = 1.0 / (1.0 + (-out).exp());
+                        cps.push(cp);
+                        probs.push(p);
+                        labels.push(s.label);
+                        wts.push(s.weight);
+                    }
+                }
+                if !cps.is_empty() {
+                    let bins = calibration_bins(
+                        &cps,
+                        &probs,
+                        &labels,
+                        &wts,
+                        config.cp_clip,
+                        ctx.dash.calib_bins_n,
+                    );
+                    val_ece = ece_from_bins(&bins);
+                    if ctx.dash.emit {
+                        let mut w = csv::Writer::from_path(
+                            ctx.out_dir.join(format!("calibration_epoch_{}.csv", epoch + 1)),
+                        )?;
+                        w.write_record([
+                            "bin_left",
+                            "bin_right",
+                            "bin_center",
+                            "count",
+                            "weighted_count",
+                            "mean_pred",
+                            "mean_label",
+                        ])?;
+                        for b in &bins {
+                            w.write_record([
+                                b.left.to_string(),
+                                b.right.to_string(),
+                                format!("{:.1}", b.center),
+                                b.count.to_string(),
+                                format!("{:.3}", b.weighted_count),
+                                format!("{:.6}", b.mean_pred),
+                                format!("{:.6}", b.mean_label),
+                            ])?;
+                        }
+                        w.flush()?;
+                        if ctx.dash.do_plots {
+                            let points: Vec<(i32, i32, f32, f64, f64)> = bins
+                                .iter()
+                                .map(|b| (b.left, b.right, b.center, b.mean_pred, b.mean_label))
+                                .collect();
+                            if let Err(e) = tools::plot::plot_calibration_png(
+                                ctx.out_dir.join(format!("calibration_epoch_{}.png", epoch + 1)),
+                                &points,
+                            ) {
+                                eprintln!("plot_calibration_png failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            // Phase metrics (JSONL only)
+            if ctx.dash.val_is_jsonl && ctx.dash.emit {
+                let mut probs_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                let mut cp_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                #[inline]
+                fn idx_of(phase: GamePhase) -> usize {
+                    match phase {
+                        GamePhase::Opening => 0,
+                        GamePhase::MiddleGame => 1,
+                        GamePhase::EndGame => 2,
+                    }
+                }
+                let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                match config.label_type.as_str() {
+                    "wdl" => {
+                        for s in val_samples.iter() {
+                            if let Some(ph) = s.phase {
+                                let out = network.forward_with_buffers(
+                                    &s.features,
+                                    &mut acc_buffer,
+                                    &mut activated_buffer,
+                                );
+                                let p = 1.0 / (1.0 + (-out).exp());
+                                let b = &mut probs_buckets[idx_of(ph)];
+                                b.0.push(p);
+                                b.1.push(s.label);
+                                b.2.push(s.weight);
+                            }
+                        }
+                    }
+                    "cp" => {
+                        for s in val_samples.iter() {
+                            if let Some(ph) = s.phase {
+                                let out = network.forward_with_buffers(
+                                    &s.features,
+                                    &mut acc_buffer,
+                                    &mut activated_buffer,
+                                );
+                                let b = &mut cp_buckets[idx_of(ph)];
+                                b.0.push(out);
+                                b.1.push(s.label);
+                                b.2.push(s.weight);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                let mut wpm = csv::WriterBuilder::new().has_headers(false).from_writer(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(ctx.out_dir.join("phase_metrics.csv"))?,
+                );
+                let phases = [
+                    GamePhase::Opening,
+                    GamePhase::MiddleGame,
+                    GamePhase::EndGame,
+                ];
+                for (i, ph) in phases.iter().enumerate() {
+                    match config.label_type.as_str() {
+                        "wdl" => {
+                            let (ref probs, ref labels, ref wts) = probs_buckets[i];
+                            if !probs.is_empty() {
+                                let cnt = probs.len();
+                                let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                if let Some(m) = binary_metrics(probs, labels, wts) {
+                                    wpm.write_record([
+                                        (epoch + 1).to_string(),
+                                        format!("{:?}", ph),
+                                        cnt.to_string(),
+                                        format!("{:.3}", wsum),
+                                        format!("{:.6}", m.logloss),
+                                        format!("{:.6}", m.brier),
+                                        format!("{:.6}", m.accuracy),
+                                        String::new(),
+                                        String::new(),
+                                    ])?;
+                                }
+                            }
+                        }
+                        "cp" => {
+                            let (ref preds, ref labels, ref wts) = cp_buckets[i];
+                            if !preds.is_empty() {
+                                let cnt = preds.len();
+                                let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                if let Some(r) = regression_metrics(preds, labels, wts) {
+                                    wpm.write_record([
+                                        (epoch + 1).to_string(),
+                                        format!("{:?}", ph),
+                                        cnt.to_string(),
+                                        format!("{:.3}", wsum),
+                                        String::new(),
+                                        String::new(),
+                                        String::new(),
+                                        format!("{:.6}", r.mae),
+                                        format!("{:.6}", r.mse),
+                                    ])?;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                wpm.flush()?;
+            }
+            val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
+        }
         let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
         let wait_secs_epoch = (wait_ns_epoch as f64) / 1e9f64;
         let loader_ratio_epoch = if epoch_secs > 0.0 {
@@ -1623,16 +2236,43 @@ fn train_model_stream_cache(
             0.0
         };
         let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
+        if let Some(vl) = val_loss {
+            if vl < *ctx.trackers.best_val_loss {
+                *ctx.trackers.best_val_loss = vl;
+                *ctx.trackers.best_network = Some(network.clone());
+                *ctx.trackers.best_epoch = Some(epoch + 1);
+            }
+            *ctx.trackers.last_val_loss = Some(vl);
+        }
+        if ctx.dash.emit {
+            let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(ctx.out_dir.join("metrics.csv"))?,
+            );
+            w.write_record([
+                (epoch + 1).to_string(),
+                format!("{:.6}", avg_loss),
+                val_loss.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                format!("{:.3}", epoch_secs),
+                format!("{:.3}", total_weight),
+                val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                if Some(epoch + 1) == *ctx.trackers.best_epoch {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            ])?;
+            w.flush()?;
+        }
         println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-            epoch + 1,
-            config.epochs,
-            avg_loss,
-            val_loss,
-            batch_count,
-            epoch_secs,
-            epoch_sps,
-            loader_ratio_epoch
+            "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+            epoch + 1, config.epochs, avg_loss,
+            val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+            batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
         );
 
         loader.finish();
@@ -1645,10 +2285,17 @@ fn train_model_with_loader(
     train_samples: Vec<Sample>,
     validation_samples: &Option<Vec<Sample>>,
     config: &Config,
-    out_dir: &Path,
-    save_every: Option<usize>,
     rng: &mut StdRng,
+    ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Local aliases to minimize code churn (avoid double references)
+    let out_dir = ctx.out_dir;
+    let dash = &ctx.dash;
+    let save_every = ctx.save_every;
+    let best_network: &mut Option<Network> = ctx.trackers.best_network;
+    let best_val_loss: &mut f32 = ctx.trackers.best_val_loss;
+    let last_val_loss: &mut Option<f32> = ctx.trackers.last_val_loss;
+    let best_epoch: &mut Option<usize> = ctx.trackers.best_epoch;
     let train_samples_arc = Arc::new(train_samples);
     let mut adam_state = if config.optimizer == "adam" {
         Some(AdamState::new(network))
@@ -1754,13 +2401,193 @@ fn train_model_with_loader(
             } else {
                 0.0
             };
-
-            // Validation
-            let val_loss = if let Some(val_samples) = validation_samples {
-                compute_validation_loss(network, val_samples, config)
-            } else {
-                0.0
-            };
+            let mut val_loss = None;
+            let mut val_auc: Option<f64> = None;
+            let mut val_ece: Option<f64> = None;
+            let mut val_wsum: Option<f64> = None;
+            if let Some(val_samples) = validation_samples {
+                let vl = compute_validation_loss(network, val_samples, config);
+                val_loss = Some(vl);
+                val_auc = compute_val_auc(network, val_samples, config);
+                if dash.val_is_jsonl && config.label_type == "wdl" {
+                    let mut cps = Vec::new();
+                    let mut probs = Vec::new();
+                    let mut labels = Vec::new();
+                    let mut wts = Vec::new();
+                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                    for s in val_samples.iter() {
+                        if let Some(cp) = s.cp {
+                            let out = network.forward_with_buffers(
+                                &s.features,
+                                &mut acc_buffer,
+                                &mut activated_buffer,
+                            );
+                            let p = 1.0 / (1.0 + (-out).exp());
+                            cps.push(cp);
+                            probs.push(p);
+                            labels.push(s.label);
+                            wts.push(s.weight);
+                        }
+                    }
+                    if !cps.is_empty() {
+                        let bins = calibration_bins(
+                            &cps,
+                            &probs,
+                            &labels,
+                            &wts,
+                            config.cp_clip,
+                            dash.calib_bins_n,
+                        );
+                        val_ece = ece_from_bins(&bins);
+                        if dash.emit {
+                            let mut w = csv::Writer::from_path(
+                                out_dir.join(format!("calibration_epoch_{}.csv", epoch + 1)),
+                            )?;
+                            w.write_record([
+                                "bin_left",
+                                "bin_right",
+                                "bin_center",
+                                "count",
+                                "weighted_count",
+                                "mean_pred",
+                                "mean_label",
+                            ])?;
+                            for b in &bins {
+                                w.write_record([
+                                    b.left.to_string(),
+                                    b.right.to_string(),
+                                    format!("{:.1}", b.center),
+                                    b.count.to_string(),
+                                    format!("{:.3}", b.weighted_count),
+                                    format!("{:.6}", b.mean_pred),
+                                    format!("{:.6}", b.mean_label),
+                                ])?;
+                            }
+                            w.flush()?;
+                            if dash.do_plots {
+                                let points: Vec<(i32, i32, f32, f64, f64)> = bins
+                                    .iter()
+                                    .map(|b| (b.left, b.right, b.center, b.mean_pred, b.mean_label))
+                                    .collect();
+                                if let Err(e) = tools::plot::plot_calibration_png(
+                                    out_dir.join(format!("calibration_epoch_{}.png", epoch + 1)),
+                                    &points,
+                                ) {
+                                    eprintln!("plot_calibration_png failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Phase metrics
+                if ctx.dash.val_is_jsonl && ctx.dash.emit {
+                    let mut probs_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                    let mut cp_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                    #[inline]
+                    fn idx_of(phase: GamePhase) -> usize {
+                        match phase {
+                            GamePhase::Opening => 0,
+                            GamePhase::MiddleGame => 1,
+                            GamePhase::EndGame => 2,
+                        }
+                    }
+                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                    match config.label_type.as_str() {
+                        "wdl" => {
+                            for s in val_samples.iter() {
+                                if let Some(ph) = s.phase {
+                                    let out = network.forward_with_buffers(
+                                        &s.features,
+                                        &mut acc_buffer,
+                                        &mut activated_buffer,
+                                    );
+                                    let p = 1.0 / (1.0 + (-out).exp());
+                                    let b = &mut probs_buckets[idx_of(ph)];
+                                    b.0.push(p);
+                                    b.1.push(s.label);
+                                    b.2.push(s.weight);
+                                }
+                            }
+                        }
+                        "cp" => {
+                            for s in val_samples.iter() {
+                                if let Some(ph) = s.phase {
+                                    let out = network.forward_with_buffers(
+                                        &s.features,
+                                        &mut acc_buffer,
+                                        &mut activated_buffer,
+                                    );
+                                    let b = &mut cp_buckets[idx_of(ph)];
+                                    b.0.push(out);
+                                    b.1.push(s.label);
+                                    b.2.push(s.weight);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    let mut wpm = csv::WriterBuilder::new().has_headers(false).from_writer(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(ctx.out_dir.join("phase_metrics.csv"))?,
+                    );
+                    let phases = [
+                        GamePhase::Opening,
+                        GamePhase::MiddleGame,
+                        GamePhase::EndGame,
+                    ];
+                    for (i, ph) in phases.iter().enumerate() {
+                        match config.label_type.as_str() {
+                            "wdl" => {
+                                let (ref probs, ref labels, ref wts) = probs_buckets[i];
+                                if !probs.is_empty() {
+                                    let cnt = probs.len();
+                                    let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                    if let Some(m) = binary_metrics(probs, labels, wts) {
+                                        wpm.write_record([
+                                            (epoch + 1).to_string(),
+                                            format!("{:?}", ph),
+                                            cnt.to_string(),
+                                            format!("{:.3}", wsum),
+                                            format!("{:.6}", m.logloss),
+                                            format!("{:.6}", m.brier),
+                                            format!("{:.6}", m.accuracy),
+                                            String::new(),
+                                            String::new(),
+                                        ])?;
+                                    }
+                                }
+                            }
+                            "cp" => {
+                                let (ref preds, ref labels, ref wts) = cp_buckets[i];
+                                if !preds.is_empty() {
+                                    let cnt = preds.len();
+                                    let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                    if let Some(r) = regression_metrics(preds, labels, wts) {
+                                        wpm.write_record([
+                                            (epoch + 1).to_string(),
+                                            format!("{:?}", ph),
+                                            cnt.to_string(),
+                                            format!("{:.3}", wsum),
+                                            String::new(),
+                                            String::new(),
+                                            String::new(),
+                                            format!("{:.6}", r.mae),
+                                            format!("{:.6}", r.mse),
+                                        ])?;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    wpm.flush()?;
+                }
+                val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
+            }
 
             let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
             let loader_ratio_epoch = if epoch_secs > 0.0 {
@@ -1770,16 +2597,41 @@ fn train_model_with_loader(
                 0.0
             };
             let epoch_sps = (train_samples_arc.len() as f32) / epoch_secs;
+            if let Some(vl) = val_loss {
+                if vl < *best_val_loss {
+                    *best_val_loss = vl;
+                    *best_network = Some(network.clone());
+                    *best_epoch = Some(epoch + 1);
+                }
+                *last_val_loss = Some(vl);
+            }
+            if dash.emit {
+                let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(out_dir.join("metrics.csv"))?,
+                );
+                w.write_record([
+                    (epoch + 1).to_string(),
+                    format!("{:.6}", avg_loss),
+                    val_loss.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    format!("{:.3}", epoch_secs),
+                    format!("{:.3}", total_weight),
+                    val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                    if Some(epoch + 1) == *best_epoch {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    },
+                ])?;
+                w.flush()?;
+            }
             println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-                epoch + 1,
-                config.epochs,
-                avg_loss,
-                val_loss,
-                batch_count,
-                epoch_secs,
-                epoch_sps,
-                loader_ratio_epoch
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
             );
         }
         // Ensure worker fully finished at end
@@ -1866,25 +2718,231 @@ fn train_model_with_loader(
             } else {
                 0.0
             };
-
-            // Validation
-            let val_loss = if let Some(val_samples) = validation_samples {
-                compute_validation_loss(network, val_samples, config)
-            } else {
-                0.0
-            };
+            let mut val_loss = None;
+            let mut val_auc: Option<f64> = None;
+            let mut val_ece: Option<f64> = None;
+            let mut val_wsum: Option<f64> = None;
+            if let Some(val_samples) = validation_samples {
+                let vl = compute_validation_loss(network, val_samples, config);
+                val_loss = Some(vl);
+                val_auc = compute_val_auc(network, val_samples, config);
+                if dash.val_is_jsonl && config.label_type == "wdl" {
+                    let mut cps = Vec::new();
+                    let mut probs = Vec::new();
+                    let mut labels = Vec::new();
+                    let mut wts = Vec::new();
+                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                    for s in val_samples.iter() {
+                        if let Some(cp) = s.cp {
+                            let out = network.forward_with_buffers(
+                                &s.features,
+                                &mut acc_buffer,
+                                &mut activated_buffer,
+                            );
+                            let p = 1.0 / (1.0 + (-out).exp());
+                            cps.push(cp);
+                            probs.push(p);
+                            labels.push(s.label);
+                            wts.push(s.weight);
+                        }
+                    }
+                    if !cps.is_empty() {
+                        let bins = calibration_bins(
+                            &cps,
+                            &probs,
+                            &labels,
+                            &wts,
+                            config.cp_clip,
+                            dash.calib_bins_n,
+                        );
+                        val_ece = ece_from_bins(&bins);
+                        if dash.emit {
+                            let mut w = csv::Writer::from_path(
+                                out_dir.join(format!("calibration_epoch_{}.csv", epoch + 1)),
+                            )?;
+                            w.write_record([
+                                "bin_left",
+                                "bin_right",
+                                "bin_center",
+                                "count",
+                                "weighted_count",
+                                "mean_pred",
+                                "mean_label",
+                            ])?;
+                            for b in &bins {
+                                w.write_record([
+                                    b.left.to_string(),
+                                    b.right.to_string(),
+                                    format!("{:.1}", b.center),
+                                    b.count.to_string(),
+                                    format!("{:.3}", b.weighted_count),
+                                    format!("{:.6}", b.mean_pred),
+                                    format!("{:.6}", b.mean_label),
+                                ])?;
+                            }
+                            w.flush()?;
+                            if dash.do_plots {
+                                let points: Vec<(i32, i32, f32, f64, f64)> = bins
+                                    .iter()
+                                    .map(|b| (b.left, b.right, b.center, b.mean_pred, b.mean_label))
+                                    .collect();
+                                if let Err(e) = tools::plot::plot_calibration_png(
+                                    out_dir.join(format!("calibration_epoch_{}.png", epoch + 1)),
+                                    &points,
+                                ) {
+                                    eprintln!("plot_calibration_png failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Phase metrics
+                if dash.val_is_jsonl && dash.emit {
+                    let mut probs_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                    let mut cp_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+                    #[inline]
+                    fn idx_of(phase: GamePhase) -> usize {
+                        match phase {
+                            GamePhase::Opening => 0,
+                            GamePhase::MiddleGame => 1,
+                            GamePhase::EndGame => 2,
+                        }
+                    }
+                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
+                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                    match config.label_type.as_str() {
+                        "wdl" => {
+                            for s in val_samples.iter() {
+                                if let Some(ph) = s.phase {
+                                    let out = network.forward_with_buffers(
+                                        &s.features,
+                                        &mut acc_buffer,
+                                        &mut activated_buffer,
+                                    );
+                                    let p = 1.0 / (1.0 + (-out).exp());
+                                    let b = &mut probs_buckets[idx_of(ph)];
+                                    b.0.push(p);
+                                    b.1.push(s.label);
+                                    b.2.push(s.weight);
+                                }
+                            }
+                        }
+                        "cp" => {
+                            for s in val_samples.iter() {
+                                if let Some(ph) = s.phase {
+                                    let out = network.forward_with_buffers(
+                                        &s.features,
+                                        &mut acc_buffer,
+                                        &mut activated_buffer,
+                                    );
+                                    let b = &mut cp_buckets[idx_of(ph)];
+                                    b.0.push(out);
+                                    b.1.push(s.label);
+                                    b.2.push(s.weight);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    let mut wpm = csv::WriterBuilder::new().has_headers(false).from_writer(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(out_dir.join("phase_metrics.csv"))?,
+                    );
+                    let phases = [
+                        GamePhase::Opening,
+                        GamePhase::MiddleGame,
+                        GamePhase::EndGame,
+                    ];
+                    for (i, ph) in phases.iter().enumerate() {
+                        match config.label_type.as_str() {
+                            "wdl" => {
+                                let (ref probs, ref labels, ref wts) = probs_buckets[i];
+                                if !probs.is_empty() {
+                                    let cnt = probs.len();
+                                    let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                    if let Some(m) = binary_metrics(probs, labels, wts) {
+                                        wpm.write_record([
+                                            (epoch + 1).to_string(),
+                                            format!("{:?}", ph),
+                                            cnt.to_string(),
+                                            format!("{:.3}", wsum),
+                                            format!("{:.6}", m.logloss),
+                                            format!("{:.6}", m.brier),
+                                            format!("{:.6}", m.accuracy),
+                                            String::new(),
+                                            String::new(),
+                                        ])?;
+                                    }
+                                }
+                            }
+                            "cp" => {
+                                let (ref preds, ref labels, ref wts) = cp_buckets[i];
+                                if !preds.is_empty() {
+                                    let cnt = preds.len();
+                                    let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                                    if let Some(r) = regression_metrics(preds, labels, wts) {
+                                        wpm.write_record([
+                                            (epoch + 1).to_string(),
+                                            format!("{:?}", ph),
+                                            cnt.to_string(),
+                                            format!("{:.3}", wsum),
+                                            String::new(),
+                                            String::new(),
+                                            String::new(),
+                                            format!("{:.6}", r.mae),
+                                            format!("{:.6}", r.mse),
+                                        ])?;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    wpm.flush()?;
+                }
+                val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
+            }
 
             let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
             let epoch_sps = (train_samples_arc.len() as f32) / epoch_secs;
+            if let Some(vl) = val_loss {
+                if vl < *best_val_loss {
+                    *best_val_loss = vl;
+                    *best_network = Some(network.clone());
+                    *best_epoch = Some(epoch + 1);
+                }
+                *last_val_loss = Some(vl);
+            }
+            if dash.emit {
+                let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(out_dir.join("metrics.csv"))?,
+                );
+                w.write_record([
+                    (epoch + 1).to_string(),
+                    format!("{:.6}", avg_loss),
+                    val_loss.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    format!("{:.3}", epoch_secs),
+                    format!("{:.3}", total_weight),
+                    val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                    if Some(epoch + 1) == *best_epoch {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    },
+                ])?;
+                w.flush()?;
+            }
             println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
-                epoch + 1,
-                config.epochs,
-                avg_loss,
-                val_loss,
-                batch_count,
-                epoch_secs,
-                epoch_sps
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
+                epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps
             );
         }
     }
@@ -2073,6 +3131,68 @@ fn compute_validation_loss(network: &Network, samples: &[Sample], config: &Confi
     total_loss / total_weight
 }
 
+fn compute_val_auc(network: &Network, samples: &[Sample], config: &Config) -> Option<f64> {
+    if config.label_type != "wdl" || samples.is_empty() {
+        return None;
+    }
+    let mut probs: Vec<f32> = Vec::with_capacity(samples.len());
+    let mut labels: Vec<f32> = Vec::with_capacity(samples.len());
+    let mut weights: Vec<f32> = Vec::with_capacity(samples.len());
+
+    let mut acc_buffer = vec![0.0f32; network.acc_dim];
+    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+    for s in samples {
+        let out = network.forward_with_buffers(&s.features, &mut acc_buffer, &mut activated_buffer);
+        let p = 1.0 / (1.0 + (-out).exp());
+        probs.push(p);
+        labels.push(s.label);
+        weights.push(s.weight);
+    }
+    roc_auc_weighted(&probs, &labels, &weights)
+}
+
+fn compute_val_auc_and_ece(
+    network: &Network,
+    samples: &[Sample],
+    config: &Config,
+    dash_val: &impl DashboardValKind,
+) -> (Option<f64>, Option<f64>) {
+    let auc = compute_val_auc(network, samples, config);
+    if config.label_type != "wdl" || !dash_val.is_jsonl() {
+        return (auc, None);
+    }
+    // Build cp-binned calibration and compute ECE
+    let mut cps: Vec<i32> = Vec::new();
+    let mut probs: Vec<f32> = Vec::new();
+    let mut labels: Vec<f32> = Vec::new();
+    let mut wts: Vec<f32> = Vec::new();
+    let mut acc_buffer = vec![0.0f32; network.acc_dim];
+    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+    for s in samples {
+        if let Some(cp) = s.cp {
+            let out =
+                network.forward_with_buffers(&s.features, &mut acc_buffer, &mut activated_buffer);
+            let p = 1.0 / (1.0 + (-out).exp());
+            cps.push(cp);
+            probs.push(p);
+            labels.push(s.label);
+            wts.push(s.weight);
+        }
+    }
+    if cps.is_empty() {
+        return (auc, None);
+    }
+    let bins = calibration_bins(&cps, &probs, &labels, &wts, config.cp_clip, dash_val.calib_bins());
+    let ece = ece_from_bins(&bins);
+    (auc, ece)
+}
+
+// Small trait to pass validation kind info into helpers without threading many flags.
+trait DashboardValKind {
+    fn is_jsonl(&self) -> bool;
+    fn calib_bins(&self) -> usize;
+}
+
 // Quantization parameters for int8 conversion
 #[derive(Debug)]
 struct QuantizationParams {
@@ -2208,8 +3328,8 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
     use tempfile::tempdir;
 
-    fn write_v1_header(
-        f: &mut File,
+    #[derive(Clone, Copy)]
+    struct HeaderV1 {
         feature_set_id: u32,
         num_samples: u64,
         chunk_size: u32,
@@ -2217,33 +3337,35 @@ mod tests {
         endianness: u8,
         payload_encoding: u8,
         sample_flags_mask: u32,
-    ) -> u64 {
+    }
+
+    fn write_v1_header(f: &mut File, h: HeaderV1) -> u64 {
         // Magic
         f.write_all(b"NNFC").unwrap();
         // version
         f.write_all(&1u32.to_le_bytes()).unwrap();
         // feature_set_id
-        f.write_all(&feature_set_id.to_le_bytes()).unwrap();
+        f.write_all(&h.feature_set_id.to_le_bytes()).unwrap();
         // num_samples
-        f.write_all(&num_samples.to_le_bytes()).unwrap();
+        f.write_all(&h.num_samples.to_le_bytes()).unwrap();
         // chunk_size
-        f.write_all(&chunk_size.to_le_bytes()).unwrap();
+        f.write_all(&h.chunk_size.to_le_bytes()).unwrap();
         // header_size
-        f.write_all(&header_size.to_le_bytes()).unwrap();
+        f.write_all(&h.header_size.to_le_bytes()).unwrap();
         // endianness
-        f.write_all(&[endianness]).unwrap();
+        f.write_all(&[h.endianness]).unwrap();
         // payload_encoding
-        f.write_all(&[payload_encoding]).unwrap();
+        f.write_all(&[h.payload_encoding]).unwrap();
         // reserved16
         f.write_all(&[0u8; 2]).unwrap();
         // payload_offset = after magic (4 bytes) + header_size
-        let payload_offset = 4u64 + header_size as u64;
+        let payload_offset = 4u64 + h.header_size as u64;
         f.write_all(&payload_offset.to_le_bytes()).unwrap();
         // sample_flags_mask
-        f.write_all(&sample_flags_mask.to_le_bytes()).unwrap();
+        f.write_all(&h.sample_flags_mask.to_le_bytes()).unwrap();
         // pad header tail to header_size
         let written = 40usize; // fields after magic
-        let pad = (header_size as usize).saturating_sub(written);
+        let pad = (h.header_size as usize).saturating_sub(written);
         if pad > 0 {
             f.write_all(&vec![0u8; pad]).unwrap();
         }
@@ -2283,8 +3405,16 @@ mod tests {
             let path = td.path().join("endianness.cache");
             let mut f = File::create(&path).unwrap();
             let _off = write_v1_header(
-                &mut f, 0x48414C46, 0, 1024, 48, 1, // BE
-                0, 0,
+                &mut f,
+                HeaderV1 {
+                    feature_set_id: 0x48414C46,
+                    num_samples: 0,
+                    chunk_size: 1024,
+                    header_size: 48,
+                    endianness: 1, // BE
+                    payload_encoding: 0,
+                    sample_flags_mask: 0,
+                },
             );
             f.flush().unwrap();
             let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
@@ -2296,7 +3426,18 @@ mod tests {
             let td = tempdir().unwrap();
             let path = td.path().join("encoding.cache");
             let mut f = File::create(&path).unwrap();
-            let _off = write_v1_header(&mut f, 0x48414C46, 0, 1024, 48, 0, 3, 0);
+            let _off = write_v1_header(
+                &mut f,
+                HeaderV1 {
+                    feature_set_id: 0x48414C46,
+                    num_samples: 0,
+                    chunk_size: 1024,
+                    header_size: 48,
+                    endianness: 0,
+                    payload_encoding: 3,
+                    sample_flags_mask: 0,
+                },
+            );
             f.flush().unwrap();
             let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
             assert!(format!("{}", err).contains("Unknown payload encoding"));
@@ -2307,7 +3448,18 @@ mod tests {
             let td = tempdir().unwrap();
             let path = td.path().join("featureset.cache");
             let mut f = File::create(&path).unwrap();
-            let _off = write_v1_header(&mut f, 0x00000000, 0, 1024, 48, 0, 0, 0);
+            let _off = write_v1_header(
+                &mut f,
+                HeaderV1 {
+                    feature_set_id: 0x00000000,
+                    num_samples: 0,
+                    chunk_size: 1024,
+                    header_size: 48,
+                    endianness: 0,
+                    payload_encoding: 0,
+                    sample_flags_mask: 0,
+                },
+            );
             f.flush().unwrap();
             let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
             assert!(format!("{}", err).contains("Unsupported feature_set_id"));
@@ -2318,7 +3470,18 @@ mod tests {
             let td = tempdir().unwrap();
             let path = td.path().join(format!("bad_hs_{bad_size}.cache"));
             let mut f = File::create(&path).unwrap();
-            let _off = write_v1_header(&mut f, 0x48414C46, 0, 1024, bad_size, 0, 0, 0);
+            let _off = write_v1_header(
+                &mut f,
+                HeaderV1 {
+                    feature_set_id: 0x48414C46,
+                    num_samples: 0,
+                    chunk_size: 1024,
+                    header_size: bad_size,
+                    endianness: 0,
+                    payload_encoding: 0,
+                    sample_flags_mask: 0,
+                },
+            );
             f.flush().unwrap();
             let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
             assert!(format!("{}", err).contains("header_size"));
@@ -2364,7 +3527,18 @@ mod tests {
             let td = tempdir().unwrap();
             let path = td.path().join("ok_zero.cache");
             let mut f = File::create(&path).unwrap();
-            let _off = write_v1_header(&mut f, 0x48414C46, 0, 1024, 64, 0, 0, 0);
+            let _off = write_v1_header(
+                &mut f,
+                HeaderV1 {
+                    feature_set_id: 0x48414C46,
+                    num_samples: 0,
+                    chunk_size: 1024,
+                    header_size: 64,
+                    endianness: 0,
+                    payload_encoding: 0,
+                    sample_flags_mask: 0,
+                },
+            );
             f.flush().unwrap();
             let v = load_samples_from_cache(path.to_str().unwrap()).unwrap();
             assert!(v.is_empty());
@@ -2412,7 +3586,18 @@ mod tests {
         let cache_path = td.path().join("w.cache");
         {
             let mut f = File::create(&cache_path).unwrap();
-            let payload_offset = write_v1_header(&mut f, 0x48414C46, 1, 1024, 48, 0, 0, 1u8 as u32);
+            let payload_offset = write_v1_header(
+                &mut f,
+                HeaderV1 {
+                    feature_set_id: 0x48414C46,
+                    num_samples: 1,
+                    chunk_size: 1024,
+                    header_size: 48,
+                    endianness: 0,
+                    payload_encoding: 0,
+                    sample_flags_mask: 1u8 as u32,
+                },
+            );
             // seek to payload_offset
             f.seek(SeekFrom::Start(payload_offset)).unwrap();
             // n_features = 0
@@ -2447,7 +3632,18 @@ mod tests {
         let path = td.path().join("unknown_flags.cache");
         let mut f = File::create(&path).unwrap();
         // mask に 0 を渡して「全bit未知扱い」にする
-        let off = write_v1_header(&mut f, 0x48414C46, 1, 1024, 48, 0, 0, 0);
+        let off = write_v1_header(
+            &mut f,
+            HeaderV1 {
+                feature_set_id: 0x48414C46,
+                num_samples: 1,
+                chunk_size: 1024,
+                header_size: 48,
+                endianness: 0,
+                payload_encoding: 0,
+                sample_flags_mask: 0,
+            },
+        );
         f.seek(SeekFrom::Start(off)).unwrap();
         // n_features=0, label=0.0, gap=0, depth=0, seldepth=0, flags = 0x80 (未知bit)
         f.write_all(&0u32.to_le_bytes()).unwrap();
@@ -2557,8 +3753,50 @@ mod tests {
         let out_dir = td.path();
         let mut dummy_rng1 = rand::rngs::StdRng::seed_from_u64(123);
         let mut dummy_rng2 = rand::rngs::StdRng::seed_from_u64(123);
-        train_model(&mut net1, &mut samples1, &None, &cfg, out_dir, None, &mut dummy_rng1).unwrap();
-        train_model(&mut net2, &mut samples2, &None, &cfg, out_dir, None, &mut dummy_rng2).unwrap();
+        let dash = super::DashboardOpts {
+            emit: false,
+            calib_bins_n: 40,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut bn1 = None;
+        let mut bvl1 = f32::INFINITY;
+        let mut ll1 = None;
+        let mut be1 = None;
+        let mut ctx1 = super::TrainContext {
+            out_dir,
+            save_every: None,
+            dash,
+            trackers: super::TrainTrackers {
+                best_network: &mut bn1,
+                best_val_loss: &mut bvl1,
+                last_val_loss: &mut ll1,
+                best_epoch: &mut be1,
+            },
+        };
+        train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
+        let dash2 = super::DashboardOpts {
+            emit: false,
+            calib_bins_n: 40,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut bn2 = None;
+        let mut bvl2 = f32::INFINITY;
+        let mut ll2 = None;
+        let mut be2 = None;
+        let mut ctx2 = super::TrainContext {
+            out_dir,
+            save_every: None,
+            dash: dash2,
+            trackers: super::TrainTrackers {
+                best_network: &mut bn2,
+                best_val_loss: &mut bvl2,
+                last_val_loss: &mut ll2,
+                best_epoch: &mut be2,
+            },
+        };
+        train_model(&mut net2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
 
         // 重みの一致を確認（厳密一致 or 十分小さい誤差）
         assert_eq!(net1.w0.len(), net2.w0.len());
@@ -2584,7 +3822,18 @@ mod tests {
         let path = td.path().join("too_many_features.cache");
         let mut f = File::create(&path).unwrap();
         // 1サンプル・非圧縮・flags_mask=0
-        let off = write_v1_header(&mut f, 0x48414C46, 1, 1024, 48, 0, 0, 0);
+        let off = write_v1_header(
+            &mut f,
+            HeaderV1 {
+                feature_set_id: 0x48414C46,
+                num_samples: 1,
+                chunk_size: 1024,
+                header_size: 48,
+                endianness: 0,
+                payload_encoding: 0,
+                sample_flags_mask: 0,
+            },
+        );
         f.seek(SeekFrom::Start(off)).unwrap();
         // 上限 (SHOGI_BOARD_SIZE*FE_END) + 1 を書く
         let max_allowed = (SHOGI_BOARD_SIZE * FE_END) as u32;
@@ -2607,7 +3856,18 @@ mod tests {
         let path = td.path().join("tiny.cache");
         let mut f = File::create(&path).unwrap();
         // header: feature_set_id=HALF, num_samples=3, chunk_size=1024, header_size=48, LE, raw payload, flags_mask=0
-        let payload_off = write_v1_header(&mut f, 0x48414C46, 3, 1024, 48, 0, 0, 0);
+        let payload_off = write_v1_header(
+            &mut f,
+            HeaderV1 {
+                feature_set_id: 0x48414C46,
+                num_samples: 3,
+                chunk_size: 1024,
+                header_size: 48,
+                endianness: 0,
+                payload_encoding: 0,
+                sample_flags_mask: 0,
+            },
+        );
         f.seek(SeekFrom::Start(payload_off)).unwrap();
         for _ in 0..3u32 {
             // n_features=0
@@ -2664,17 +3924,58 @@ mod tests {
         let mut dummy_rng = rand::rngs::StdRng::seed_from_u64(123);
 
         // in-mem 学習
-        train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, out_dir, None, &mut dummy_rng)
+        let dash_inmem = super::DashboardOpts {
+            emit: false,
+            calib_bins_n: 40,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network: Option<Network> = None;
+        let mut best_val_loss = f32::INFINITY;
+        let mut last_val_loss: Option<f32> = None;
+        let mut best_epoch: Option<usize> = None;
+        let mut ctx_in = super::TrainContext {
+            out_dir,
+            save_every: None,
+            dash: dash_inmem,
+            trackers: super::TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+        };
+        train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
             .unwrap();
         // stream-sync 学習
+        let dash_stream = super::DashboardOpts {
+            emit: false,
+            calib_bins_n: 40,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network2: Option<Network> = None;
+        let mut best_val_loss2 = f32::INFINITY;
+        let mut last_val_loss2: Option<f32> = None;
+        let mut best_epoch2: Option<usize> = None;
+        let mut ctx_st = super::TrainContext {
+            out_dir,
+            save_every: None,
+            dash: dash_stream,
+            trackers: super::TrainTrackers {
+                best_network: &mut best_network2,
+                best_val_loss: &mut best_val_loss2,
+                last_val_loss: &mut last_val_loss2,
+                best_epoch: &mut best_epoch2,
+            },
+        };
         train_model_stream_cache(
             &mut net_stream,
             path.to_str().unwrap(),
             &None,
             &cfg_stream,
-            out_dir,
-            None,
             &mut dummy_rng,
+            &mut ctx_st,
         )
         .unwrap();
 
@@ -2708,7 +4009,18 @@ mod tests {
 
         // 1サンプル、raw（非圧縮）でヘッダを書き、payload に n_features = MAX+1 を書く
         let mut f = File::create(&path).unwrap();
-        let payload_off = write_v1_header(&mut f, FEATURE_SET_ID_HALF, 1, 1024, 48, 0, 0, 0);
+        let payload_off = write_v1_header(
+            &mut f,
+            HeaderV1 {
+                feature_set_id: FEATURE_SET_ID_HALF,
+                num_samples: 1,
+                chunk_size: 1024,
+                header_size: 48,
+                endianness: 0,
+                payload_encoding: 0,
+                sample_flags_mask: 0,
+            },
+        );
         f.seek(SeekFrom::Start(payload_off)).unwrap();
         let max_allowed = (SHOGI_BOARD_SIZE * FE_END) as u32;
         let n_features = max_allowed + 1;
@@ -2739,14 +4051,34 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
         let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
         let out_dir = td.path();
+        let dash = super::DashboardOpts {
+            emit: false,
+            calib_bins_n: 40,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network: Option<Network> = None;
+        let mut best_val_loss = f32::INFINITY;
+        let mut last_val_loss: Option<f32> = None;
+        let mut best_epoch: Option<usize> = None;
+        let mut ctx = super::TrainContext {
+            out_dir,
+            save_every: None,
+            dash,
+            trackers: super::TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+        };
         let err = train_model_stream_cache(
             &mut net,
             path.to_str().unwrap(),
             &None,
             &cfg,
-            out_dir,
-            None,
             &mut rng,
+            &mut ctx,
         )
         .unwrap_err();
         let msg = format!("{}", err);
@@ -2762,6 +4094,8 @@ mod tests {
             features: Vec::new(),
             label: 0.0,
             weight: 1.0,
+            cp: None,
+            phase: None,
         }];
 
         let cfg = Config {
@@ -2790,7 +4124,28 @@ mod tests {
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
         let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
-        train_model(&mut net, &mut samples, &None, &cfg, out_dir, None, &mut rng).unwrap();
+        let dash = super::DashboardOpts {
+            emit: false,
+            calib_bins_n: 40,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network: Option<Network> = None;
+        let mut best_val_loss = f32::INFINITY;
+        let mut last_val_loss: Option<f32> = None;
+        let mut best_epoch: Option<usize> = None;
+        let mut ctx = super::TrainContext {
+            out_dir,
+            save_every: None,
+            dash,
+            trackers: super::TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+        };
+        train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
 
         // NaN が混入していないこと
         assert!(net.w0.iter().all(|v| v.is_finite()));

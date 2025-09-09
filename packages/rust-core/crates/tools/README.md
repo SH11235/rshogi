@@ -135,6 +135,53 @@ cargo run --release -p tools --bin merge_annotation_results -- \
   runs/p1.jsonl runs/p2.jsonl - --dedup-by-sfen --manifest-out runs/merge_manifest.json
 ```
 
+## 学習ダッシュボード（最小）
+
+軽量ベースライン（線形モデル）で、各エポックのメトリクスを CSV/PNG に出力し、CI でアーティファクト化できます。
+
+### 使い方（baseline trainer）
+
+```bash
+# PNG も出す場合は features=plots でビルド
+cargo build -p tools --features plots --release
+
+# 最小ダッシュボード出力
+./target/release/train_wdl_baseline \
+  --input runs/train.jsonl --validation runs/valid.jsonl \
+  --epochs 3 --batch-size 4096 --metrics --plots --seed 1 \
+  --gate-val-loss-non-increase --gate-mode fail \
+  --out runs/wdl_baseline
+```
+
+主なオプション:
+- `--metrics`: 各エポックの CSV 出力を有効化
+- `--plots`: 校正 PNG を出力（`tools` を `--features plots` でビルド時のみ有効）
+- `--calibration-bins N`: 校正ビン数（既定 40）
+- `--seed <u64>`: シャッフルの再現性シード（未指定時は非決定）
+- `--gate-val-loss-non-increase`: 最終エポックが最良の `val_loss` でなければ FAIL/WARN
+- `--gate-min-auc <f64>`: WDL 時の最小 AUC 閾値（既定無効）
+- `--gate-mode {warn|fail}`: ゲートの動作
+
+出力物（`runs/wdl_baseline_*` 配下）:
+- `metrics.csv`（列）: `epoch, train_loss, val_loss, val_auc, val_ece, time_sec, train_weight_sum, val_weight_sum, is_best`
+- `phase_metrics.csv`（列）: `epoch, phase, count, weighted_count, logloss, brier, accuracy, mae, mse`
+  - WDL 時: `logloss, brier, accuracy` を出力、CP 時: `mae, mse` を出力、他は空欄
+- `calibration_epoch_k.csv`: cp 等幅ビンごとの `mean_pred, mean_label(soft)`（±`--cp-clip` を等分）
+- `calibration_epoch_k.png`: `mean_pred` と `mean_label(soft)` の 2 系列（X 軸は CP）
+- `weights.json`: 最終エポックの重み
+- `weights_best.json`: 最良 `val_loss` の重み（検証がある場合）
+
+注意:
+- 校正/ECE/phase 別メトリクスは **WDL + JSONL 検証** のときにのみ有効です（キャッシュ検証では cp/sfen が持てないためスキップ）。
+- AUC は補助指標（既定ゲート OFF）。二値化しきい値は 0.5。
+ - `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です。一般的な確率ビン（0..1）の ECE とは異なります。
+
+### CI アーティファクト（雛形）
+
+`.github/workflows/train_dashboard.yml` を同梱。小さな JSONL を用意して 2 エポック実行、`runs/...` を artifact 化し、
+`--gate-val-loss-non-increase --gate-mode fail` で回帰を赤化できます。
+
+
 ## バイナリ一覧（主要）
 
 - データ生成/学習/解析

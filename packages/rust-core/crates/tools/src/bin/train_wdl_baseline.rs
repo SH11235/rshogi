@@ -15,8 +15,9 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
-use tools::stats::{calibration_bins, ece_from_bins, roc_auc_weighted};
-// use thread-local RNG via rand::rng() for non-deterministic shuffle
+use tools::stats::{
+    binary_metrics, calibration_bins, ece_from_bins, regression_metrics, roc_auc_weighted,
+};
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
@@ -157,6 +158,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            arg!(--"gate-min-auc" <N> "Minimum AUC to pass (wdl only)")
+                .value_parser(clap::value_parser!(f64)),
+        )
+        .arg(
             arg!(--"gate-mode" <MODE> "Gate behavior")
                 .value_parser(["warn", "fail"])
                 .default_value("warn"),
@@ -185,6 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let do_plots = app.get_flag("plots");
     let seed_opt = app.get_one::<u64>("seed").copied();
     let gate_last_epoch_best = app.get_flag("gate-val-loss-non-increase");
+    let gate_min_auc = app.get_one::<f64>("gate-min-auc").copied();
     let gate_mode_fail = app.get_one::<String>("gate-mode").map(|s| s == "fail").unwrap_or(false);
 
     // Sanity checks for numeric args
@@ -266,8 +272,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "time_sec",
             "train_weight_sum",
             "val_weight_sum",
+            "is_best",
         ])?;
         w.flush()?;
+        // Phase metrics header
+        let mut wp = csv::Writer::from_path(out_dir.join("phase_metrics.csv"))?;
+        wp.write_record([
+            "epoch",
+            "phase",
+            "count",
+            "weighted_count",
+            "logloss",
+            "brier",
+            "accuracy",
+            "mae",
+            "mse",
+        ])?;
+        wp.flush()?;
     }
 
     let dash = DashboardOpts {
@@ -294,6 +315,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (_, false) => {
                 println!("GATE val_loss_last_is_best: SKIP (no validation)");
             }
+        }
+    }
+
+    // AUC threshold gate (wdl only)
+    if let (Some(th), Some(val_samples)) = (gate_min_auc, validation_samples.as_ref()) {
+        if config.label_type == "wdl" {
+            // Compute a final AUC on validation with final weights
+            let mut probs: Vec<f32> = Vec::with_capacity(val_samples.len());
+            let mut labels: Vec<f32> = Vec::with_capacity(val_samples.len());
+            let mut wts: Vec<f32> = Vec::with_capacity(val_samples.len());
+            for s in val_samples.iter() {
+                let logit: f32 = weights.iter().zip(s.features.iter()).map(|(w, f)| w * f).sum();
+                let p = 1.0 / (1.0 + (-logit).exp());
+                probs.push(p);
+                labels.push(s.label);
+                wts.push(s.weight);
+            }
+            let auc = roc_auc_weighted(&probs, &labels, &wts);
+            match auc {
+                Some(v) => {
+                    let pass = v >= th;
+                    println!(
+                        "GATE min_auc {:.4} >= {:.4}: {}",
+                        v,
+                        th,
+                        if pass { "PASS" } else { "FAIL" }
+                    );
+                    if !pass && gate_mode_fail {
+                        std::process::exit(1);
+                    }
+                }
+                None => {
+                    println!("GATE min_auc: SKIP (insufficient positive/negative)");
+                }
+            }
+        } else {
+            println!("GATE min_auc: SKIP (label_type!=wdl)");
         }
     }
 
@@ -529,6 +587,7 @@ fn train_model(
         }
 
         // Training
+        let mut zero_weight_batches = 0usize;
         for batch_idx in 0..n_batches {
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
@@ -544,6 +603,9 @@ fn train_model(
 
             total_loss += (loss_avg as f64) * (batch_wsum as f64);
             total_wsum += batch_wsum as f64;
+            if batch_wsum == 0.0 {
+                zero_weight_batches += 1;
+            }
         }
 
         let avg_loss = if total_wsum > 0.0 {
@@ -562,10 +624,12 @@ fn train_model(
                 (None, None, None)
             };
 
+        let mut is_epoch_best = false;
         if let Some(vl) = val_loss_opt {
             if vl < best_val_loss {
                 best_val_loss = vl;
                 best_weights = Some(weights.to_vec());
+                is_epoch_best = true;
             }
             last_val_loss = Some(vl);
         }
@@ -658,6 +722,111 @@ fn train_model(
             }
         }
 
+        // Phase metrics (validation-based)
+        if let Some(val_samples) = validation_samples {
+            // Use fixed index buckets instead of maps to avoid extra trait bounds
+            #[inline]
+            fn idx_of(phase: GamePhase) -> usize {
+                match phase {
+                    GamePhase::Opening => 0,
+                    GamePhase::MiddleGame => 1,
+                    GamePhase::EndGame => 2,
+                }
+            }
+            let mut probs_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+            let mut cp_buckets: [(Vec<f32>, Vec<f32>, Vec<f32>); 3] = Default::default();
+            match config.label_type.as_str() {
+                "wdl" => {
+                    for s in val_samples.iter() {
+                        let logit: f32 =
+                            weights.iter().zip(s.features.iter()).map(|(w, f)| w * f).sum();
+                        let p = 1.0 / (1.0 + (-logit).exp());
+                        let b = &mut probs_buckets[idx_of(s.phase)];
+                        b.0.push(p);
+                        b.1.push(s.label);
+                        b.2.push(s.weight);
+                    }
+                }
+                "cp" => {
+                    for s in val_samples.iter() {
+                        let pred: f32 =
+                            weights.iter().zip(s.features.iter()).map(|(w, f)| w * f).sum();
+                        let b = &mut cp_buckets[idx_of(s.phase)];
+                        b.0.push(pred);
+                        b.1.push(s.label);
+                        b.2.push(s.weight);
+                    }
+                }
+                _ => {}
+            }
+            let mut wpm = csv::WriterBuilder::new().has_headers(false).from_writer(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dash.out_dir.join("phase_metrics.csv"))?,
+            );
+            let phases = [
+                GamePhase::Opening,
+                GamePhase::MiddleGame,
+                GamePhase::EndGame,
+            ];
+            for (i, ph) in phases.iter().enumerate() {
+                match config.label_type.as_str() {
+                    "wdl" => {
+                        let (ref probs, ref labels, ref wts) = probs_buckets[i];
+                        if !probs.is_empty() {
+                            let cnt = probs.len();
+                            let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                            if let Some(m) = binary_metrics(probs, labels, wts) {
+                                wpm.write_record([
+                                    (epoch + 1).to_string(),
+                                    format!("{:?}", ph),
+                                    cnt.to_string(),
+                                    format!("{:.3}", wsum),
+                                    format!("{:.6}", m.logloss),
+                                    format!("{:.6}", m.brier),
+                                    format!("{:.6}", m.accuracy),
+                                    String::new(),
+                                    String::new(),
+                                ])?;
+                            }
+                        }
+                    }
+                    "cp" => {
+                        let (ref preds, ref labels, ref wts) = cp_buckets[i];
+                        if !preds.is_empty() {
+                            let cnt = preds.len();
+                            let wsum: f64 = wts.iter().map(|&x| x as f64).sum();
+                            if let Some(r) = regression_metrics(preds, labels, wts) {
+                                wpm.write_record([
+                                    (epoch + 1).to_string(),
+                                    format!("{:?}", ph),
+                                    cnt.to_string(),
+                                    format!("{:.3}", wsum),
+                                    String::new(),
+                                    String::new(),
+                                    String::new(),
+                                    format!("{:.6}", r.mae),
+                                    format!("{:.6}", r.mse),
+                                ])?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            wpm.flush()?;
+        }
+
+        // Optional debug about zero-weight batches
+        if zero_weight_batches > 0 {
+            eprintln!(
+                "[debug] epoch {} had {} zero-weight batches",
+                epoch + 1,
+                zero_weight_batches
+            );
+        }
+
         // Write metrics row (after computing optional ECE)
         if dash.emit_metrics {
             let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
@@ -675,6 +844,11 @@ fn train_model(
                 format!("{:.3}", epoch_start.elapsed().as_secs_f32()),
                 format!("{:.3}", total_wsum),
                 val_wsum_opt.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                if is_epoch_best {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
             ])?;
             w.flush()?;
         }
@@ -684,6 +858,10 @@ fn train_model(
     if let Some(wb) = best_weights {
         let mut f = File::create(dash.out_dir.join("weights_best.json"))?;
         writeln!(f, "{}", serde_json::to_string_pretty(&wb)?)?;
+        println!(
+            "Saved best validation weights to {}",
+            dash.out_dir.join("weights_best.json").display()
+        );
     }
 
     // Gate condition: last epoch should be best within small epsilon margin
