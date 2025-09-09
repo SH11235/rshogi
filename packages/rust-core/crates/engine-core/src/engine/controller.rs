@@ -214,29 +214,29 @@ impl Engine {
         if self.use_parallel {
             return self.shared_tt.hashfull();
         }
-        let tt_opt: Option<std::sync::Arc<crate::search::tt::TranspositionTable>> =
-            match self.engine_type {
-                EngineType::Material => self
-                    .material_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::Nnue => self
-                    .nnue_basic_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::Enhanced => self
-                    .material_enhanced_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::EnhancedNnue => self
-                    .nnue_enhanced_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            };
+        // Use the re-exported TranspositionTable type consistently
+        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = match self.engine_type {
+            EngineType::Material => self
+                .material_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Nnue => self
+                .nnue_basic_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Enhanced => self
+                .material_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::EnhancedNnue => self
+                .nnue_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+        };
         tt_opt.map(|tt| tt.hashfull()).unwrap_or_else(|| self.shared_tt.hashfull())
     }
 
@@ -696,10 +696,12 @@ impl Engine {
             match self.engine_type {
                 EngineType::Material => {
                     if let Ok(mut guard) = self.material_searcher.lock() {
-                        *guard = Some(MaterialSearcher::new_with_tt_size(
+                        let mut s = MaterialSearcher::new_with_tt_size(
                             *self.material_evaluator,
                             self.tt_size_mb,
-                        ));
+                        );
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
                 EngineType::Nnue => {
@@ -707,16 +709,20 @@ impl Engine {
                         evaluator: self.nnue_evaluator.clone(),
                     };
                     if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
-                        *guard =
-                            Some(NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb));
+                        let mut s =
+                            NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
                 EngineType::Enhanced => {
                     if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
-                        *guard = Some(MaterialEnhancedSearcher::new_with_tt_size(
+                        let mut s = MaterialEnhancedSearcher::new_with_tt_size(
                             *self.material_evaluator,
                             self.tt_size_mb,
-                        ));
+                        );
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
                 EngineType::EnhancedNnue => {
@@ -724,10 +730,10 @@ impl Engine {
                         evaluator: self.nnue_evaluator.clone(),
                     };
                     if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
-                        *guard = Some(NnueEnhancedSearcher::new_with_tt_size(
-                            nnue_proxy,
-                            self.tt_size_mb,
-                        ));
+                        let mut s =
+                            NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
             }
