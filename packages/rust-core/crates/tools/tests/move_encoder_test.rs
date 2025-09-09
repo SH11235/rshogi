@@ -142,9 +142,8 @@ mod move_encoder_tests {
         for encoding in invalid_encodings {
             let result = MoveEncoder::decode_move(encoding);
             // Should either succeed with a valid move or fail gracefully
-            if result.is_ok() {
+            if let Ok(decoded) = result {
                 // If it succeeds, re-encoding should give the same result
-                let decoded = result.unwrap();
                 let re_encoded = MoveEncoder::encode_move(&decoded);
                 assert!(re_encoded.is_ok());
             }

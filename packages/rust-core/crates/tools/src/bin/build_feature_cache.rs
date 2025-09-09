@@ -609,8 +609,9 @@ fn read_linux_rss_kb() -> Option<(u64, u64)> {
 mod tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom, Write};
+    use std::path::Path;
 
-    fn write_minimal_jsonl(dir: &PathBuf) -> PathBuf {
+    fn write_minimal_jsonl(dir: &Path) -> PathBuf {
         let jsonl_path = dir.join("input.jsonl");
         let mut f = File::create(&jsonl_path).unwrap();
         // stm = Black, cp=+100
@@ -628,7 +629,7 @@ mod tests {
         jsonl_path
     }
 
-    fn parse_cache_labels(path: &PathBuf) -> (u64, Vec<(usize, f32)>) {
+    fn parse_cache_labels(path: &Path) -> (u64, Vec<(usize, f32)>) {
         let mut f = File::open(path).unwrap();
         let mut magic = [0u8; 4];
         f.read_exact(&mut magic).unwrap();
@@ -725,7 +726,7 @@ mod tests {
             payload_encoding: PayloadEncodingKind::None,
             compress_level: None,
             dedup_features: false,
-            io_buf_bytes: 1 * 1024 * 1024,
+            io_buf_bytes: 1024 * 1024,
             metrics_interval: 10_000,
             report_rss: false,
         };
@@ -767,7 +768,7 @@ mod tests {
             payload_encoding: PayloadEncodingKind::Gzip,
             compress_level: Some(6),
             dedup_features: false,
-            io_buf_bytes: 1 * 1024 * 1024,
+            io_buf_bytes: 1024 * 1024,
             metrics_interval: 10_000,
             report_rss: false,
         };
@@ -804,7 +805,7 @@ mod tests {
             payload_encoding: PayloadEncodingKind::None,
             compress_level: None,
             dedup_features: false,
-            io_buf_bytes: 1 * 1024 * 1024,
+            io_buf_bytes: 1024 * 1024,
             metrics_interval: 10_000,
             report_rss: false,
         };
@@ -839,7 +840,7 @@ mod tests {
                 payload_encoding: PayloadEncodingKind::Gzip,
                 compress_level: Some(lvl),
                 dedup_features: false,
-                io_buf_bytes: 1 * 1024 * 1024,
+                io_buf_bytes: 1024 * 1024,
                 metrics_interval: 10_000,
                 report_rss: false,
             };
@@ -870,7 +871,7 @@ mod tests {
             payload_encoding: PayloadEncodingKind::Gzip,
             compress_level: Some(6),
             dedup_features: false,
-            io_buf_bytes: 1 * 1024 * 1024,
+            io_buf_bytes: 1024 * 1024,
             metrics_interval: 10_000,
             report_rss: false,
         };
@@ -901,7 +902,7 @@ mod tests {
                 payload_encoding: PayloadEncodingKind::Zstd,
                 compress_level: Some(lvl),
                 dedup_features: false,
-                io_buf_bytes: 1 * 1024 * 1024,
+                io_buf_bytes: 1024 * 1024,
                 metrics_interval: 10_000,
                 report_rss: false,
             };
@@ -934,7 +935,7 @@ mod tests {
             payload_encoding: PayloadEncodingKind::None,
             compress_level: None,
             dedup_features: false,
-            io_buf_bytes: 1 * 1024 * 1024,
+            io_buf_bytes: 1024 * 1024,
             metrics_interval: 10_000,
             report_rss: false,
         };
