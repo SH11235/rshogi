@@ -26,9 +26,11 @@ sha2 = "0.10"
 hex = "0.4"
 smallvec = { workspace = true }
 csv = "1.3"
+plotters = { version = "0.3", optional = true }
 
 [features]
 zstd = ["dep:zstd"]
+plots = ["dep:plotters"]
 
 [dev-dependencies]
 tempfile = "3.10"
