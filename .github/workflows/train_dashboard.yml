@@ -1,0 +1,103 @@
+name: train-dashboard
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'packages/rust-core/**'
+      - '!packages/rust-core/docs/**'
+      - '!packages/rust-core/runs/**'
+      - '!packages/rust-core/converted_openings/**'
+      - '!packages/rust-core/memo/**'
+      - '!packages/rust-core/target/**'
+      - '!**/*.md'
+      - '!**/*.mdx'
+      - '.github/workflows/train_dashboard.yml'
+  pull_request:
+    paths:
+      - 'packages/rust-core/**'
+      - '!packages/rust-core/docs/**'
+      - '!packages/rust-core/runs/**'
+      - '!packages/rust-core/converted_openings/**'
+      - '!packages/rust-core/memo/**'
+      - '!packages/rust-core/target/**'
+      - '!**/*.md'
+      - '!**/*.mdx'
+      - '.github/workflows/train_dashboard.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+
+defaults:
+  run:
+    working-directory: packages/rust-core
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+
+      - name: Build tools (with plots)
+        run: |
+          set -euo pipefail
+          cargo build -p tools --features plots --release
+
+      - name: Prepare tiny JSONL data
+        run: |
+          set -euo pipefail
+          mkdir -p sample_data
+          cat > sample_data/train.jsonl << 'EOF'
+          {"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":50}
+          {"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1","eval":150,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":30}
+          EOF
+          cp sample_data/train.jsonl sample_data/val.jsonl
+
+      - name: Run baseline trainer
+        run: |
+          set -euo pipefail
+          ./target/release/train_wdl_baseline \
+            --input sample_data/train.jsonl \
+            --validation sample_data/val.jsonl \
+            --epochs 2 --batch-size 64 \
+            --metrics --calibration-bins 10 --plots \
+            --gate-val-loss-non-increase --gate-mode fail --seed 1 \
+            --out runs/wdl_ci
+
+      - name: Run NNUE trainer
+        run: |
+          set -euo pipefail
+          ./target/release/train_nnue \
+            --input sample_data/train.jsonl \
+            --validation sample_data/val.jsonl \
+            --epochs 2 --batch-size 128 \
+            --metrics --calibration-bins 10 --plots \
+            --gate-val-loss-non-increase --gate-mode fail --seed 1 \
+            --out runs/nnue_ci
+
+      - name: Upload baseline dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: wdl_dashboard
+          path: packages/rust-core/runs/wdl_ci/**
+
+      - name: Upload NNUE dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue_dashboard
+          path: packages/rust-core/runs/nnue_ci/**
