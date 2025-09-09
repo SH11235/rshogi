@@ -539,7 +539,11 @@ where
             .copied()
             .filter(|&mv| !mv.is_drop() && mv.is_promote())
             .filter(|&mv| pos.piece_at(mv.to()).is_none()) // non-capture only
-            .filter(|&mv| pos.gives_check(mv))
+            .filter(|&mv| {
+                // Cheap prefilter to avoid expensive gives_check calls
+                crate::search::unified::pruning::likely_could_give_check(pos, mv)
+                    && pos.gives_check(mv)
+            })
             .collect();
 
         promo_check_noncaptures.sort_by_key(|&mv| -score_nocap_check_for_ordering(pos, mv));
