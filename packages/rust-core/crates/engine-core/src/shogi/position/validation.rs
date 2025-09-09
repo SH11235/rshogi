@@ -392,11 +392,9 @@ impl Position {
         false
     }
 
-    /// Check if position is draw (simplified check)
+    /// Check if position is draw (currently delegated to repetition)
     pub fn is_draw(&self) -> bool {
-        // Simple repetition detection would go here
-        // For now, return false
-        false
+        self.is_repetition()
     }
 
     /// Check if a move gives check to the opponent
