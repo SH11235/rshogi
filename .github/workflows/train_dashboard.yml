@@ -43,7 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y mold clang
+          sudo apt-get install -y mold clang libfontconfig1-dev
           mold --version || true
           clang --version || true
 

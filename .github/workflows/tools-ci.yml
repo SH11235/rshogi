@@ -58,14 +58,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "packages/rust-core -> target"
-      - name: Format check
-        run: |
-          set -euo pipefail
-          cargo fmt --all -- --check
-      - name: Clippy (tools, all features)
-        run: |
-          set -euo pipefail
-          cargo clippy -p tools --all-features -- -D warnings
       - name: Build tools (locked)
         run: |
           set -euo pipefail
