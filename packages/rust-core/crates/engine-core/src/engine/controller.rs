@@ -208,6 +208,38 @@ impl Engine {
         }
     }
 
+    /// Get current hashfull estimate of the transposition table (permille: 0-1000)
+    /// - Uses shared TT in parallel mode; otherwise queries the active searcher's TT when available
+    pub fn tt_hashfull_permille(&self) -> u16 {
+        if self.use_parallel {
+            return self.shared_tt.hashfull();
+        }
+        let tt_opt: Option<std::sync::Arc<crate::search::tt::TranspositionTable>> =
+            match self.engine_type {
+                EngineType::Material => self
+                    .material_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::Nnue => self
+                    .nnue_basic_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::Enhanced => self
+                    .material_enhanced_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::EnhancedNnue => self
+                    .nnue_enhanced_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            };
+        tt_opt.map(|tt| tt.hashfull()).unwrap_or_else(|| self.shared_tt.hashfull())
+    }
+
     /// Detect game phase based on position
     fn detect_game_phase(&self, position: &Position) -> GamePhase {
         // Use the new game_phase module with Search profile

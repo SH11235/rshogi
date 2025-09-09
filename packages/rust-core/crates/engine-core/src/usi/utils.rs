@@ -334,6 +334,14 @@ mod tests {
     }
 
     #[test]
+    fn test_append_usi_score_mate_zero_normalization() {
+        let mut s = String::from("info");
+        append_usi_score_and_bound(&mut s, ScoreView::Mate(0), NodeType::Exact);
+        assert!(s.contains(" score mate 0"));
+        assert!(!s.contains(" score mate -0"));
+    }
+
+    #[test]
     fn test_mate_detection_helpers() {
         let win2 = mate_score(2, true);
         assert!(is_mate_score(win2));
