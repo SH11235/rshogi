@@ -558,6 +558,20 @@ pub fn calibration_bins(
     bins
 }
 
+/// Compute Expected Calibration Error (ECE) from calibration bins.
+/// Uses weighted L1 distance between mean_pred and mean_label.
+pub fn ece_from_bins(bins: &[CalibBin]) -> Option<f64> {
+    let wsum: f64 = bins.iter().map(|b| b.weighted_count).sum();
+    if wsum <= 0.0 {
+        return None;
+    }
+    let mut acc = 0.0f64;
+    for b in bins {
+        acc += b.weighted_count * (b.mean_pred - b.mean_label).abs();
+    }
+    Some(acc / wsum)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
