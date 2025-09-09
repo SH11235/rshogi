@@ -1646,7 +1646,7 @@ mod tests {
     #[test]
     fn test_tt_hashfull_permille_fallback_shared_tt() {
         let engine_type = EngineType::Material;
-        let mut engine = Engine::new(engine_type);
+        let engine = Engine::new(engine_type);
         // Simulate uninitialized searcher of current engine type
         if let Ok(mut guard) = engine.material_searcher.lock() {
             *guard = None;

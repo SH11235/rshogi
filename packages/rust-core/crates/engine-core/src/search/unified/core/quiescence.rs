@@ -466,63 +466,139 @@ where
     }
 
     // === Add: non-drop, non-capture checking moves (limited) ===
-    if stand_pat + CHECK_DROP_MARGIN >= alpha {
+    // Only enable with pruning profile to avoid blowing up basic search
+    if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN >= alpha {
         use smallvec::SmallVec;
-
-        let mut check_noncaptures: SmallVec<[Move; 16]> = all_moves
-            .iter()
-            .copied()
-            .filter(|&mv| !mv.is_drop())
-            .filter(|&mv| pos.piece_at(mv.to()).is_none()) // non-capture only
-            .filter(|&mv| {
-                // Cheap prefilter then accurate check
-                crate::search::unified::pruning::likely_could_give_check(pos, mv)
-                    && pos.gives_check(mv)
-            })
-            .collect();
-
-        // Order by proximity/alignment similar to drops
-        check_noncaptures.sort_by_key(|&mv| -score_nocap_check_for_ordering(pos, mv));
-
         const MAX_QS_NONCAP_CHECKS: usize = 4;
-        if check_noncaptures.len() > MAX_QS_NONCAP_CHECKS {
-            check_noncaptures.truncate(MAX_QS_NONCAP_CHECKS);
-        }
+        const QS_NONCAP_QPLY_CAP: u8 = 4; // Only allow shallow chains of checks in qsearch
 
-        for &mv in check_noncaptures.iter() {
-            if searcher.context.should_stop() {
-                return alpha;
+        if qply < QS_NONCAP_QPLY_CAP {
+            let mut check_noncaptures: SmallVec<[Move; 16]> = all_moves
+                .iter()
+                .copied()
+                .filter(|&mv| !mv.is_drop())
+                .filter(|&mv| pos.piece_at(mv.to()).is_none()) // non-capture only
+                .filter(|&mv| {
+                    // Cheap prefilter then accurate check
+                    crate::search::unified::pruning::likely_could_give_check(pos, mv)
+                        && pos.gives_check(mv)
+                })
+                .collect();
+
+            // Order by proximity/alignment similar to drops
+            check_noncaptures.sort_by_key(|&mv| -score_nocap_check_for_ordering(pos, mv));
+
+            if check_noncaptures.len() > MAX_QS_NONCAP_CHECKS {
+                check_noncaptures.truncate(MAX_QS_NONCAP_CHECKS);
             }
 
-            // Budget enforcement
-            if let Some(limit) = qlimit {
-                let exceeded = if let Some(ref counter) = qnodes_counter {
-                    counter.load(Ordering::Acquire) >= limit
-                } else {
-                    searcher.stats.qnodes >= limit
-                };
-                if exceeded {
+            for &mv in check_noncaptures.iter() {
+                if searcher.context.should_stop() {
                     return alpha;
                 }
+
+                // Budget enforcement
+                if let Some(limit) = qlimit {
+                    let exceeded = if let Some(ref counter) = qnodes_counter {
+                        counter.load(Ordering::Acquire) >= limit
+                    } else {
+                        searcher.stats.qnodes >= limit
+                    };
+                    if exceeded {
+                        return alpha;
+                    }
+                }
+
+                if !pos.is_pseudo_legal(mv) {
+                    continue;
+                }
+
+                let undo = pos.do_move(mv);
+                let score = -quiescence_search(
+                    searcher,
+                    pos,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    qply.saturating_add(1),
+                );
+                pos.undo_move(mv, undo);
+
+                if searcher.context.should_stop() {
+                    return alpha;
+                }
+                if score >= beta {
+                    return beta;
+                }
+                if score > alpha {
+                    alpha = score;
+                }
+            }
+        }
+    }
+
+    // === Add: non-capture promotion moves that give check (limited) ===
+    if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN >= alpha {
+        use smallvec::SmallVec;
+        const MAX_QS_PROMO_CHECKS: usize = 4;
+        const QS_PROMO_QPLY_CAP: u8 = 4;
+
+        if qply < QS_PROMO_QPLY_CAP {
+            let mut promo_check_noncaptures: SmallVec<[Move; 16]> = all_moves
+                .iter()
+                .copied()
+                .filter(|&mv| !mv.is_drop() && mv.is_promote())
+                .filter(|&mv| pos.piece_at(mv.to()).is_none()) // non-capture only
+                .filter(|&mv| pos.gives_check(mv))
+                .collect();
+
+            promo_check_noncaptures.sort_by_key(|&mv| -score_nocap_check_for_ordering(pos, mv));
+
+            if promo_check_noncaptures.len() > MAX_QS_PROMO_CHECKS {
+                promo_check_noncaptures.truncate(MAX_QS_PROMO_CHECKS);
             }
 
-            if !pos.is_pseudo_legal(mv) {
-                continue;
-            }
+            for &mv in promo_check_noncaptures.iter() {
+                if searcher.context.should_stop() {
+                    return alpha;
+                }
 
-            let undo = pos.do_move(mv);
-            let score =
-                -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
-            pos.undo_move(mv, undo);
+                // Budget enforcement
+                if let Some(limit) = qlimit {
+                    let exceeded = if let Some(ref counter) = qnodes_counter {
+                        counter.load(Ordering::Acquire) >= limit
+                    } else {
+                        searcher.stats.qnodes >= limit
+                    };
+                    if exceeded {
+                        return alpha;
+                    }
+                }
 
-            if searcher.context.should_stop() {
-                return alpha;
-            }
-            if score >= beta {
-                return beta;
-            }
-            if score > alpha {
-                alpha = score;
+                if !pos.is_pseudo_legal(mv) {
+                    continue;
+                }
+
+                let undo = pos.do_move(mv);
+                let score = -quiescence_search(
+                    searcher,
+                    pos,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    qply.saturating_add(1),
+                );
+                pos.undo_move(mv, undo);
+
+                if searcher.context.should_stop() {
+                    return alpha;
+                }
+                if score >= beta {
+                    return beta;
+                }
+                if score > alpha {
+                    alpha = score;
+                }
             }
         }
     }
