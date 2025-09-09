@@ -15,6 +15,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   bench:
     runs-on: ubuntu-latest
@@ -27,9 +31,17 @@ jobs:
           mold --version || true
           clang --version || true
       - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "packages/rust-core -> target"
+          workspaces: |
+            packages/rust-core -> target
+            base/packages/rust-core -> target
+          key: tools-zstd
+          cache-on-failure: true
       - name: Build tools (with zstd)
         working-directory: packages/rust-core
         run: |
@@ -93,3 +105,6 @@ jobs:
             /tmp/out_base.cache
             /tmp/base.json
           if-no-files-found: ignore
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

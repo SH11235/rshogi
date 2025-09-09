@@ -38,6 +38,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tools:
     runs-on: ubuntu-latest
@@ -55,9 +59,14 @@ jobs:
           clang --version || true
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
       - name: Build tools (locked)
         run: |
           set -euo pipefail
@@ -78,6 +87,9 @@ jobs:
             --valid ./crates/tools/tests/data/cross/valid.jsonl \
             --test  ./crates/tools/tests/data/cross/test.jsonl \
             --report leak_report.csv
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
       - name: Upload cross-dedup report
         if: always()
         uses: actions/upload-artifact@v4
@@ -103,9 +115,15 @@ jobs:
           clang --version || true
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "packages/rust-core -> target"
+          key: tools-zstd
+          cache-on-failure: true
       - name: Build tools with zstd support (locked)
         run: |
           set -euo pipefail
@@ -141,3 +159,6 @@ jobs:
         with:
           name: cross-dedup-report-real
           path: packages/rust-core/leak_report_real.csv
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

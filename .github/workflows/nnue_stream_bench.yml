@@ -22,6 +22,10 @@ name: NNUE Stream Loader Bench (manual)
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   bench:
     runs-on: ubuntu-latest
@@ -35,10 +39,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
 
       - name: Build tools (release)
         run: |
@@ -91,5 +102,8 @@ jobs:
             echo "### NNUE stream-cache bench" >> $GITHUB_STEP_SUMMARY; \
             echo "- prefetch=0: sps=$P0, loader_ratio=${L0}%" >> $GITHUB_STEP_SUMMARY; \
             echo "- prefetch=8: sps=$P8, loader_ratio=${L8}%" >> $GITHUB_STEP_SUMMARY; \
-            echo "- improvement: ${IMP}%" >> $GITHUB_STEP_SUMMARY; \
+          echo "- improvement: ${IMP}%" >> $GITHUB_STEP_SUMMARY; \
           fi
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

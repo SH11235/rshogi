@@ -24,6 +24,10 @@ env:
   CARGO_TERM_COLOR: always
   DEFAULT_STACK_SIZE: 8388608
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     working-directory: packages/rust-core
@@ -50,11 +54,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
           key: ${{ matrix.os }}-rust-${{ matrix.rust }}-large-stack
+          cache-on-failure: true
       
       - name: Set stack size
         id: stack
@@ -119,6 +128,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Ignored tests that were run:" >> $GITHUB_STEP_SUMMARY
           cargo test -- --list --ignored 2>/dev/null | grep "test::" | sed 's/test::/- /' | sed 's/:.*$//' >> $GITHUB_STEP_SUMMARY || echo "Unable to list ignored tests" >> $GITHUB_STEP_SUMMARY
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   benchmark-stack-requirements:
     name: Benchmark Stack Requirements
@@ -129,9 +141,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
       
       - name: Test different stack sizes
         run: |
@@ -147,6 +164,9 @@ jobs:
             fi
             echo ""
           done
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   release-mode-comparison:
     name: Debug vs Release Mode
@@ -156,9 +176,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
       
       - name: Compare debug and release modes
         run: |
@@ -179,3 +204,6 @@ jobs:
           else
             echo "✗ Debug mode with 8MB stack failed"
           fi
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
