@@ -11,8 +11,12 @@ use std::time::{Instant, SystemTime};
 use clap::{arg, Command};
 use engine_core::game_phase::{detect_game_phase, GamePhase, Profile};
 use engine_core::Position;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
-use tools::stats::{calibration_bins, roc_auc_weighted};
+use tools::stats::{calibration_bins, ece_from_bins, roc_auc_weighted};
+// use thread-local RNG via rand::rng() for non-deterministic shuffle
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
@@ -117,10 +121,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .default_value("1200"),
         )
         .arg(
-            arg!(--"weight-gap-ref" <N> "Reference gap for weight calculation").default_value("50"),
+            arg!(--"weight-gap-ref" <N> "Reference gap for weight calculation")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("50"),
         )
-        .arg(arg!(--"weight-exact" <N> "Weight for exact bounds").default_value("1.0"))
-        .arg(arg!(--"weight-non-exact" <N> "Weight for non-exact bounds").default_value("0.7"))
+        .arg(
+            arg!(--"weight-exact" <N> "Weight for exact bounds")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
+        .arg(
+            arg!(--"weight-non-exact" <N> "Weight for non-exact bounds")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.7"),
+        )
         .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves"))
         .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used"))
         .arg(arg!(-o --out <DIR> "Output directory"))
@@ -133,6 +147,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             arg!(--"plots" "Emit PNG plots (requires features=plots)")
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--"seed" <N> "Shuffle seed for reproducibility")
+                .value_parser(clap::value_parser!(u64)),
         )
         .arg(
             arg!(--"gate-val-loss-non-increase" "Fail if best val_loss not at last epoch")
@@ -153,9 +171,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         label_type: app.get_one::<String>("label").unwrap().to_string(),
         scale: *app.get_one::<f32>("scale").unwrap(),
         cp_clip: *app.get_one::<i32>("cp-clip").unwrap(),
-        weight_gap_ref: app.get_one::<String>("weight-gap-ref").unwrap().parse()?,
-        weight_exact: app.get_one::<String>("weight-exact").unwrap().parse()?,
-        weight_non_exact: app.get_one::<String>("weight-non-exact").unwrap().parse()?,
+        weight_gap_ref: *app.get_one::<f32>("weight-gap-ref").unwrap(),
+        weight_exact: *app.get_one::<f32>("weight-exact").unwrap(),
+        weight_non_exact: *app.get_one::<f32>("weight-non-exact").unwrap(),
         exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
         exclude_fallback: app.get_flag("exclude-fallback"),
     };
@@ -165,6 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let emit_metrics = app.get_flag("metrics");
     let calib_bins_n = *app.get_one::<usize>("calibration-bins").unwrap_or(&40usize);
     let do_plots = app.get_flag("plots");
+    let seed_opt = app.get_one::<u64>("seed").copied();
     let gate_last_epoch_best = app.get_flag("gate-val-loss-non-increase");
     let gate_mode_fail = app.get_one::<String>("gate-mode").map(|s| s == "fail").unwrap_or(false);
 
@@ -238,7 +257,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Prepare metrics.csv if requested
     if emit_metrics {
         let mut w = csv::Writer::from_path(out_dir.join("metrics.csv"))?;
-        w.write_record(["epoch", "train_loss", "val_loss", "val_auc", "time_sec"])?;
+        w.write_record([
+            "epoch",
+            "train_loss",
+            "val_loss",
+            "val_auc",
+            "val_ece",
+            "time_sec",
+            "train_weight_sum",
+            "val_weight_sum",
+        ])?;
         w.flush()?;
     }
 
@@ -250,7 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let best_is_last =
-        train_model(&mut weights, &train_samples, &validation_samples, &config, &dash)?;
+        train_model(&mut weights, &train_samples, &validation_samples, &config, &dash, seed_opt)?;
 
     if gate_last_epoch_best {
         match (best_is_last, validation_samples.is_some()) {
@@ -477,24 +505,37 @@ fn train_model(
     validation_samples: &Option<Vec<Sample>>,
     config: &Config,
     dash: &DashboardOpts,
+    seed_opt: Option<u64>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let n_samples = train_samples.len();
     let n_batches = n_samples.div_ceil(config.batch_size);
     let mut best_val_loss = f32::INFINITY;
     let mut last_val_loss: Option<f32> = None;
+    let mut best_weights: Option<Vec<f32>> = None;
 
     for epoch in 0..config.epochs {
         let epoch_start = Instant::now();
         let mut total_loss = 0.0f64;
         let mut total_wsum = 0.0f64;
+        // Shuffle order per epoch for SGD stability
+        let mut order: Vec<usize> = (0..n_samples).collect();
+        if let Some(seed) = seed_opt {
+            let mut rng =
+                StdRng::seed_from_u64(seed ^ (epoch as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            order.as_mut_slice().shuffle(&mut rng);
+        } else {
+            let mut rng = rand::rng();
+            order.as_mut_slice().shuffle(&mut rng);
+        }
 
         // Training
         for batch_idx in 0..n_batches {
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
-            let batch = &train_samples[start..end];
+            let batch_indices = &order[start..end];
 
-            let (loss_avg, batch_wsum, grad) = compute_batch_gradient(weights, batch, config);
+            let (loss_avg, batch_wsum, grad) =
+                compute_batch_gradient_over_indices(weights, train_samples, batch_indices, config);
 
             // Update weights
             for i in 0..weights.len() {
@@ -512,16 +553,19 @@ fn train_model(
         };
 
         // Validation
-        let (val_loss_opt, val_auc_opt) = if let Some(val_samples) = validation_samples {
-            let (vl_opt, auc_opt) = compute_validation_metrics(weights, val_samples, config);
-            (vl_opt, auc_opt)
-        } else {
-            (None, None)
-        };
+        let (val_loss_opt, val_auc_opt, val_wsum_opt) =
+            if let Some(val_samples) = validation_samples {
+                let (vl_opt, auc_opt, wsum_opt) =
+                    compute_validation_metrics(weights, val_samples, config);
+                (vl_opt, auc_opt, wsum_opt)
+            } else {
+                (None, None, None)
+            };
 
         if let Some(vl) = val_loss_opt {
             if vl < best_val_loss {
                 best_val_loss = vl;
+                best_weights = Some(weights.to_vec());
             }
             last_val_loss = Some(vl);
         }
@@ -547,24 +591,8 @@ fn train_model(
             );
         }
 
-        if dash.emit_metrics {
-            let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(dash.out_dir.join("metrics.csv"))?,
-            );
-            w.write_record([
-                (epoch + 1).to_string(),
-                format!("{:.6}", avg_loss),
-                val_loss_opt.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
-                val_auc_opt.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
-                format!("{:.3}", epoch_start.elapsed().as_secs_f32()),
-            ])?;
-            w.flush()?;
-        }
-
         // Calibration CSV/PNG for WDL when validation present
+        let mut val_ece_opt: Option<f64> = None;
         if let (Some(val_samples), Some(_)) = (validation_samples, val_loss_opt) {
             if config.label_type == "wdl" {
                 let mut cps = Vec::with_capacity(val_samples.len());
@@ -588,6 +616,7 @@ fn train_model(
                     config.cp_clip,
                     dash.calib_bins_n,
                 );
+                val_ece_opt = ece_from_bins(&bins);
                 // Write CSV
                 let mut w = csv::Writer::from_path(
                     dash.out_dir.join(format!("calibration_epoch_{}.csv", epoch + 1)),
@@ -619,13 +648,42 @@ fn train_model(
                         .iter()
                         .map(|b| (b.left, b.right, b.center, b.mean_pred, b.mean_label))
                         .collect();
-                    let _ = tools::plot::plot_calibration_png(
+                    if let Err(e) = tools::plot::plot_calibration_png(
                         dash.out_dir.join(format!("calibration_epoch_{}.png", epoch + 1)),
                         &points,
-                    );
+                    ) {
+                        eprintln!("plot_calibration_png failed: {}", e);
+                    }
                 }
             }
         }
+
+        // Write metrics row (after computing optional ECE)
+        if dash.emit_metrics {
+            let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dash.out_dir.join("metrics.csv"))?,
+            );
+            w.write_record([
+                (epoch + 1).to_string(),
+                format!("{:.6}", avg_loss),
+                val_loss_opt.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_auc_opt.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_ece_opt.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                format!("{:.3}", epoch_start.elapsed().as_secs_f32()),
+                format!("{:.3}", total_wsum),
+                val_wsum_opt.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+            ])?;
+            w.flush()?;
+        }
+    }
+
+    // Save best weights if available
+    if let Some(wb) = best_weights {
+        let mut f = File::create(dash.out_dir.join("weights_best.json"))?;
+        writeln!(f, "{}", serde_json::to_string_pretty(&wb)?)?;
     }
 
     // Gate condition: last epoch should be best within small epsilon margin
@@ -637,20 +695,19 @@ fn train_model(
     Ok(pass)
 }
 
-fn compute_batch_gradient(
+fn compute_batch_gradient_over_indices(
     weights: &[f32],
-    batch: &[Sample],
+    samples: &[Sample],
+    indices: &[usize],
     config: &Config,
 ) -> (f32, f32, Vec<f32>) {
-    let mut total_loss = 0.0;
+    let mut total_loss = 0.0f32;
     let mut gradient = vec![0.0f32; weights.len()];
-    let mut total_weight = 0.0;
+    let mut total_weight = 0.0f32;
 
-    for sample in batch {
-        // Forward pass
+    for &idx in indices {
+        let sample = &samples[idx];
         let logit: f32 = weights.iter().zip(sample.features.iter()).map(|(w, f)| w * f).sum();
-
-        // Compute loss and gradient based on label type
         let (loss, grad_factor) = match config.label_type.as_str() {
             "wdl" => bce_with_logits(logit, sample.label),
             "cp" => {
@@ -660,31 +717,35 @@ fn compute_batch_gradient(
             }
             _ => unreachable!(),
         };
-
         total_loss += loss * sample.weight;
         total_weight += sample.weight;
-
-        // Accumulate gradient
-        for (grad, feat) in gradient.iter_mut().zip(sample.features.iter()) {
-            *grad += grad_factor * feat * sample.weight;
+        for (g, feat) in gradient.iter_mut().zip(sample.features.iter()) {
+            *g += grad_factor * feat * sample.weight;
         }
     }
-
-    // Average gradient and add L2 regularization
     for (i, grad) in gradient.iter_mut().enumerate() {
-        *grad = *grad / total_weight + config.l2_reg * weights[i];
+        let wd = if i == 0 { 0.0 } else { config.l2_reg };
+        *grad = if total_weight > 0.0 {
+            *grad / total_weight + wd * weights[i]
+        } else {
+            wd * weights[i]
+        };
     }
-
-    (total_loss / total_weight, total_weight, gradient)
+    let loss_avg = if total_weight > 0.0 {
+        total_loss / total_weight
+    } else {
+        0.0
+    };
+    (loss_avg, total_weight, gradient)
 }
 
 fn compute_validation_metrics(
     weights: &[f32],
     samples: &[Sample],
     config: &Config,
-) -> (Option<f32>, Option<f64>) {
+) -> (Option<f32>, Option<f64>, Option<f64>) {
     if samples.is_empty() {
-        return (None, None);
+        return (None, None, None);
     }
     let mut total_loss = 0.0f64;
     let mut total_weight = 0.0f64;
@@ -726,5 +787,13 @@ fn compute_validation_metrics(
     } else {
         None
     };
-    (val_loss, val_auc)
+    (
+        val_loss,
+        val_auc,
+        if total_weight > 0.0 {
+            Some(total_weight)
+        } else {
+            None
+        },
+    )
 }
