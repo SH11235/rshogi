@@ -276,7 +276,12 @@ impl BatchLoader {
             indices.shuffle(rng);
         }
 
-        BatchLoader { indices, batch_size, position: 0, epoch: 0 }
+        BatchLoader {
+            indices,
+            batch_size,
+            position: 0,
+            epoch: 0,
+        }
     }
 
     fn next_batch(&mut self) -> Option<Vec<usize>> {
