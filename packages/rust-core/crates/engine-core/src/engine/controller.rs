@@ -1608,10 +1608,7 @@ mod tests {
 
         // Inspect the underlying searcher directly to verify MultiPV persistence
         {
-            let guard = engine
-                .material_searcher
-                .lock()
-                .expect("lock material searcher");
+            let guard = engine.material_searcher.lock().expect("lock material searcher");
             let s = guard.as_ref().expect("material searcher should exist");
             assert_eq!(s.multi_pv(), 3);
         }
@@ -1626,10 +1623,7 @@ mod tests {
 
         // Inspect the recreated searcher
         {
-            let guard = engine
-                .material_searcher
-                .lock()
-                .expect("lock material searcher");
+            let guard = engine.material_searcher.lock().expect("lock material searcher");
             let s = guard.as_ref().expect("material searcher should exist");
             assert_eq!(s.multi_pv(), 4);
         }
@@ -1643,10 +1637,7 @@ mod tests {
 
         // Inspect the enhanced searcher
         {
-            let guard = engine
-                .material_enhanced_searcher
-                .lock()
-                .expect("lock enhanced searcher");
+            let guard = engine.material_enhanced_searcher.lock().expect("lock enhanced searcher");
             let s = guard.as_ref().expect("enhanced searcher should exist");
             assert_eq!(s.multi_pv(), 2);
         }
