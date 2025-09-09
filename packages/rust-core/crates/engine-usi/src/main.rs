@@ -163,7 +163,8 @@ impl EngineState {
             eng.set_engine_type(self.opts.engine_type);
             eng.set_threads(self.opts.threads);
             eng.set_hash_size(self.opts.hash_mb);
-            eng.set_multipv(self.opts.multipv);
+            // Persist MultiPV so it survives ClearHash/TT resize
+            eng.set_multipv_persistent(self.opts.multipv);
             // NNUE weights
             if matches!(self.opts.engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
                 if let Some(ref path) = self.opts.eval_file {
@@ -378,7 +379,13 @@ fn finalize_and_send(
         .map(|m| move_to_usi(&m))
         .unwrap_or_else(|| "resign".to_string());
     let ponder_mv = if state.opts.ponder {
-        final_best.pv.get(1).map(move_to_usi)
+        // Prefer PV second move; fallback to TT-derived ponder for better UX
+        final_best.pv.get(1).map(move_to_usi).or_else(|| {
+            final_best.best_move.and_then(|bm| {
+                let eng = state.engine.lock().unwrap();
+                eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
+            })
+        })
     } else {
         None
     };
@@ -395,8 +402,9 @@ fn send_id_and_options(opts: &UsiOptions) {
     usi_println("id author RustShogi Team");
 
     // Options we support in this thin USI
+    // Align max with engine clamp to avoid confusion
     usi_println(&format!(
-        "option name USI_Hash type spin default {} min 1 max 32768",
+        "option name USI_Hash type spin default {} min 1 max 1024",
         opts.hash_mb
     ));
     usi_println(&format!("option name Threads type spin default {} min 1 max 256", opts.threads));
@@ -907,6 +915,10 @@ fn main() -> Result<()> {
                             if let Some(v) = value {
                                 if let Ok(k) = v.parse::<u8>() {
                                     state.opts.multipv = k.clamp(1, 20);
+                                    // Persist immediately so it survives ClearHash/TT resize
+                                    if let Ok(mut eng) = state.engine.lock() {
+                                        eng.set_multipv_persistent(state.opts.multipv);
+                                    }
                                 }
                             }
                         }
@@ -937,6 +949,8 @@ fn main() -> Result<()> {
                         }
                         "ClearHash" => {
                             if let Ok(mut eng) = state.engine.lock() {
+                                // Re-apply persistent MultiPV before clearing/recreating
+                                eng.set_multipv_persistent(state.opts.multipv);
                                 eng.clear_hash();
                             }
                         }
@@ -1222,12 +1236,8 @@ fn main() -> Result<()> {
                                     state.stop_flag = None;
                                     state.ponder_hit_flag = None;
 
-                                    // Ponder中のstopはbestmoveを出さない
-                                    if state.current_is_ponder {
-                                        state.current_is_ponder = false;
-                                        finalized = true;
-                                        continue;
-                                    }
+                                    // Note: Even if the current search is pondering, emit bestmove on explicit stop
+                                    // for compatibility with GUIs that expect a bestmove response after stop.
                                     // Finalize centrally using choose_final_bestmove
                                     let stale = state
                                         .current_root_hash
@@ -1252,6 +1262,9 @@ fn main() -> Result<()> {
                                         Some(&result),
                                         stale,
                                     );
+                                    // Reset ponder state after explicit stop
+                                    state.current_is_ponder = false;
+                                    state.current_root_hash = None;
                                     finalized = true;
                                 }
                                 Err(mpsc::RecvTimeoutError::Timeout) => { /* continue */ }
@@ -1278,16 +1291,15 @@ fn main() -> Result<()> {
                             state.stop_flag = None;
                             state.ponder_hit_flag = None;
 
-                            if !state.current_is_ponder {
-                                let stale = state
-                                    .current_root_hash
-                                    .map(|h| h != state.position.zobrist_hash())
-                                    .unwrap_or(false);
-                                finalize_and_send(&mut state, "stop_timeout_finalize", None, stale);
-                            } else {
-                                state.current_is_ponder = false;
-                                state.current_root_hash = None;
-                            }
+                            // Emit bestmove even if this was a ponder search, to avoid GUI timeouts after stop.
+                            let stale = state
+                                .current_root_hash
+                                .map(|h| h != state.position.zobrist_hash())
+                                .unwrap_or(false);
+                            finalize_and_send(&mut state, "stop_timeout_finalize", None, stale);
+                            // Reset ponder state after explicit stop
+                            state.current_is_ponder = false;
+                            state.current_root_hash = None;
                         }
                     }
                 }
