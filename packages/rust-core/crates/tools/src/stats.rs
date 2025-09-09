@@ -546,7 +546,8 @@ pub fn calibration_bins(
         bins[idx].count += 1;
         bins[idx].weighted_count += w;
         bins[idx].mean_pred += w * (probs[i] as f64);
-        bins[idx].mean_label += w * if labels[i] >= 0.5 { 1.0 } else { 0.0 };
+        // Use soft mean (average of provided labels) for calibration target
+        bins[idx].mean_label += w * (labels[i] as f64);
     }
     for b in &mut bins {
         if b.weighted_count > 0.0 {

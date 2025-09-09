@@ -242,15 +242,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         w.flush()?;
     }
 
-    let dash = DashboardOpts { out_dir: &out_dir, emit_metrics, calib_bins_n, do_plots };
+    let dash = DashboardOpts {
+        out_dir: &out_dir,
+        emit_metrics,
+        calib_bins_n,
+        do_plots,
+    };
 
-    let best_is_last = train_model(
-        &mut weights,
-        &train_samples,
-        &validation_samples,
-        &config,
-        &dash,
-    )?;
+    let best_is_last =
+        train_model(&mut weights, &train_samples, &validation_samples, &config, &dash)?;
 
     if gate_last_epoch_best {
         match (best_is_last, validation_samples.is_some()) {
@@ -481,7 +481,7 @@ fn train_model(
     let n_samples = train_samples.len();
     let n_batches = n_samples.div_ceil(config.batch_size);
     let mut best_val_loss = f32::INFINITY;
-    let mut best_epoch = 0usize;
+    let mut last_val_loss: Option<f32> = None;
 
     for epoch in 0..config.epochs {
         let epoch_start = Instant::now();
@@ -522,18 +522,30 @@ fn train_model(
         if let Some(vl) = val_loss_opt {
             if vl < best_val_loss {
                 best_val_loss = vl;
-                best_epoch = epoch + 1;
             }
+            last_val_loss = Some(vl);
         }
 
-        println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s",
-            epoch + 1,
-            config.epochs,
-            avg_loss,
-            val_loss_opt.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-            epoch_start.elapsed().as_secs_f32()
-        );
+        if let Some(auc) = val_auc_opt {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} val_auc={:.4} time={:.2}s",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss_opt.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                auc,
+                epoch_start.elapsed().as_secs_f32()
+            );
+        } else {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss_opt.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                epoch_start.elapsed().as_secs_f32()
+            );
+        }
 
         if dash.emit_metrics {
             let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
@@ -558,7 +570,7 @@ fn train_model(
                 let mut cps = Vec::with_capacity(val_samples.len());
                 let mut probs = Vec::with_capacity(val_samples.len());
                 let mut labels = Vec::with_capacity(val_samples.len());
-                let mut weights = Vec::with_capacity(val_samples.len());
+                let mut sample_w = Vec::with_capacity(val_samples.len());
                 for s in val_samples.iter() {
                     let logit: f32 =
                         weights.iter().zip(s.features.iter()).map(|(w, f)| w * f).sum();
@@ -566,21 +578,20 @@ fn train_model(
                     cps.push(s.cp);
                     probs.push(p);
                     labels.push(s.label);
-                    weights.push(s.weight);
+                    sample_w.push(s.weight);
                 }
                 let bins = calibration_bins(
                     &cps,
                     &probs,
                     &labels,
-                    &weights,
+                    &sample_w,
                     config.cp_clip,
                     dash.calib_bins_n,
                 );
                 // Write CSV
-                let mut w = csv::Writer::from_path(dash.out_dir.join(format!(
-                    "calibration_epoch_{}.csv",
-                    epoch + 1
-                )))?;
+                let mut w = csv::Writer::from_path(
+                    dash.out_dir.join(format!("calibration_epoch_{}.csv", epoch + 1)),
+                )?;
                 w.write_record([
                     "bin_left",
                     "bin_right",
@@ -617,7 +628,13 @@ fn train_model(
         }
     }
 
-    Ok(best_epoch == config.epochs)
+    // Gate condition: last epoch should be best within small epsilon margin
+    let eps = 1e-6_f32;
+    let pass = match (last_val_loss, best_val_loss.is_finite()) {
+        (Some(last), true) => last <= best_val_loss + eps,
+        _ => true, // no validation -> skip gate
+    };
+    Ok(pass)
 }
 
 fn compute_batch_gradient(
