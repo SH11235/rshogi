@@ -30,6 +30,73 @@ use crate::{
 };
 use std::sync::atomic::Ordering;
 
+#[inline]
+fn repetition_penalty(static_eval: i32) -> i32 {
+    // Penalize only the side that is ahead to discourage waiting-move loops.
+    // Example shape: at least -16cp, up to -128cp; otherwise 0 for draw acceptance.
+    if static_eval >= 50 {
+        -(16 + static_eval / 16).min(128)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests_repetition_penalty {
+    use super::repetition_penalty;
+
+    #[test]
+    fn test_repetition_penalty_shape() {
+        assert_eq!(repetition_penalty(0), 0);
+        assert_eq!(repetition_penalty(49), 0);
+        assert!(repetition_penalty(50) <= -16);
+        // Large advantage saturates at -128cp
+        assert!(repetition_penalty(16 * 128) <= -128);
+        assert!(repetition_penalty(16 * 128) >= -1024); // sanity bound (not too extreme)
+    }
+}
+
+#[cfg(test)]
+mod tests_repetition_alpha_beta {
+    use super::alpha_beta;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::unified::UnifiedSearcher,
+        shogi::{board::Piece, board::PieceType, board::Square, Color, Position},
+    };
+
+    #[test]
+    fn test_alpha_beta_returns_penalty_on_repetition() {
+        // Minimal position with kings and an extra rook for side to move
+        let mut pos = Position::empty();
+        let bk = Piece::new(PieceType::King, Color::Black);
+        let wk = Piece::new(PieceType::King, Color::White);
+        // Place kings
+        pos.board.put_piece(Square::from_usi_chars('5', 'i').unwrap(), bk);
+        pos.board.put_piece(Square::from_usi_chars('5', 'a').unwrap(), wk);
+        // Advantage for Black: add a rook
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+        pos.side_to_move = Color::Black;
+
+        // Compute hash and set repetition history: 3 previous occurrences
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let h = pos.hash;
+        // Four entries to pass the early length guard and ensure >=3 matches
+        pos.history = vec![h, h, h, h];
+
+        // Build a searcher and call alpha-beta
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+        let score = alpha_beta(&mut searcher, &mut pos, 2, -10000, 10000, 0);
+
+        // Since Black is ahead, repetition should return a negative penalty
+        assert!(score < 0, "Repetition should be penalized when ahead, got {score}");
+    }
+}
+
 /// Alpha-beta search with pruning
 pub(super) fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
@@ -127,9 +194,24 @@ where
         }
     }
 
-    // Check for draw
-    if pos.is_draw() {
-        return 0;
+    // Path-dependent repetition handling BEFORE TT probing
+    if pos.is_repetition() {
+        // Use stack-cached static eval if available to avoid double evaluation
+        let static_eval = if crate::search::types::SearchStack::is_valid_ply(ply) {
+            let slot = &mut searcher.search_stack[ply as usize].static_eval;
+            if let Some(v) = *slot {
+                v
+            } else {
+                let v = searcher.evaluator.evaluate(pos);
+                *slot = Some(v);
+                v
+            }
+        } else {
+            searcher.evaluator.evaluate(pos)
+        };
+
+        let score = repetition_penalty(static_eval).clamp(alpha, beta);
+        return score;
     }
 
     // Probe transposition table
