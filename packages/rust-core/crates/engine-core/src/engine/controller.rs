@@ -1601,6 +1601,90 @@ mod tests {
     }
 
     #[test]
+    fn test_multipv_persistence_clear_hash() {
+        let mut engine = Engine::new(EngineType::Material);
+        engine.set_multipv_persistent(3);
+        engine.clear_hash();
+
+        let mut pos = Position::startpos();
+        let limits = SearchLimits::builder().depth(1).fixed_time_ms(10).build();
+        let result = engine.search(&mut pos, limits);
+
+        let lines = result.lines.expect("lines should be available for MultiPV");
+        assert_eq!(lines.len() as u8, 3, "MultiPV should persist across clear_hash");
+    }
+
+    #[test]
+    fn test_multipv_persistence_tt_resize() {
+        let mut engine = Engine::new(EngineType::Material);
+        engine.set_multipv_persistent(4);
+        engine.set_hash_size(32); // pending until next search
+
+        let mut pos = Position::startpos();
+        let limits = SearchLimits::builder().depth(1).fixed_time_ms(10).build();
+        let result = engine.search(&mut pos, limits);
+
+        let lines = result.lines.expect("lines should be available for MultiPV");
+        assert_eq!(lines.len() as u8, 4, "MultiPV should persist across TT resize");
+    }
+
+    #[test]
+    fn test_multipv_persistence_engine_type_switch() {
+        let mut engine = Engine::new(EngineType::Material);
+        engine.set_multipv_persistent(2);
+        engine.set_engine_type(EngineType::Enhanced);
+
+        let mut pos = Position::startpos();
+        let limits = SearchLimits::builder().depth(1).fixed_time_ms(10).build();
+        let result = engine.search(&mut pos, limits);
+
+        let lines = result.lines.expect("lines should be available for MultiPV");
+        assert_eq!(lines.len() as u8, 2, "MultiPV should persist across engine type switch");
+    }
+
+    #[test]
+    fn test_tt_hashfull_permille_fallback_shared_tt() {
+        let engine_type = EngineType::Material;
+        let mut engine = Engine::new(engine_type);
+        // Simulate uninitialized searcher of current engine type
+        if let Ok(mut guard) = engine.material_searcher.lock() {
+            *guard = None;
+        }
+        // Should not panic and should return a value from shared TT
+        let hf = engine.tt_hashfull_permille();
+        assert!(hf <= 1000);
+    }
+
+    #[test]
+    fn test_get_ponder_from_tt_returns_move() {
+        use crate::movegen::MoveGenerator;
+        let mut engine = Engine::new(EngineType::Material);
+        let mut pos = Position::startpos();
+
+        // Pick a legal root move
+        let gen = MoveGenerator::new();
+        let moves = gen.generate_all(&pos).expect("generate moves");
+        let root_mv = moves.as_slice()[0];
+        assert!(pos.is_legal_move(root_mv));
+
+        // Search the child position to populate TT with an Exact entry
+        let mut child = pos.clone();
+        let _ = child.do_move(root_mv);
+        let limits = SearchLimits::builder().depth(1).fixed_time_ms(5).build();
+        let _ = engine.search(&mut child, limits);
+
+        // Now query ponder from TT for the child
+        let ponder = engine.get_ponder_from_tt(&pos, root_mv);
+        assert!(ponder.is_some(), "Expected ponder from TT for child position");
+        if let Some(pmv) = ponder {
+            // Ponder must be legal in the child position
+            let mut child2 = pos.clone();
+            let _ = child2.do_move(root_mv);
+            assert!(child2.is_legal_move(pmv));
+        }
+    }
+
+    #[test]
     fn test_game_phase_edge_cases() {
         let engine = Engine::new(EngineType::Material);
 
