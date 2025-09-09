@@ -180,42 +180,6 @@ impl Network {
         }
     }
 
-    #[allow(dead_code)]
-    fn forward(&self, features: &[u32]) -> (f32, Vec<f32>) {
-        // Accumulator = b0 + sum(W0[features])
-        let mut acc = self.b0.clone();
-
-        for &feat_idx in features {
-            let feat_idx = feat_idx as usize;
-            #[cfg(debug_assertions)]
-            debug_assert!(
-                feat_idx < self.input_dim,
-                "feat_idx={} out of range {}",
-                feat_idx,
-                self.input_dim
-            );
-
-            let offset = feat_idx * self.acc_dim;
-            for (i, acc_val) in acc.iter_mut().enumerate() {
-                *acc_val += self.w0[offset + i];
-            }
-        }
-
-        // Apply clipped ReLU
-        let mut activated = vec![0.0f32; self.acc_dim];
-        for (i, &acc_val) in acc.iter().enumerate() {
-            activated[i] = acc_val.max(0.0).min(self.relu_clip);
-        }
-
-        // Output layer
-        let mut output = self.b2;
-        for (w, act) in self.w2.iter().zip(activated.iter()) {
-            output += w * act;
-        }
-
-        (output, activated)
-    }
-
     // Forward pass with pre-allocated buffers to avoid allocations
     fn forward_with_buffers(
         &self,
@@ -298,7 +262,6 @@ fn forward_into(network: &Network, features: &[u32], acc: &mut [f32], act: &mut 
 }
 
 struct BatchLoader {
-    samples: Arc<Vec<Sample>>,
     indices: Vec<usize>,
     batch_size: usize,
     position: usize,
@@ -306,21 +269,14 @@ struct BatchLoader {
 }
 
 impl BatchLoader {
-    fn new(samples: Arc<Vec<Sample>>, batch_size: usize, shuffle: bool, rng: &mut StdRng) -> Self {
-        let n_samples = samples.len();
-        let mut indices: Vec<usize> = (0..n_samples).collect();
+    fn new(num_samples: usize, batch_size: usize, shuffle: bool, rng: &mut StdRng) -> Self {
+        let mut indices: Vec<usize> = (0..num_samples).collect();
 
         if shuffle {
             indices.shuffle(rng);
         }
 
-        BatchLoader {
-            samples,
-            indices,
-            batch_size,
-            position: 0,
-            epoch: 0,
-        }
+        BatchLoader { indices, batch_size, position: 0, epoch: 0 }
     }
 
     fn next_batch(&mut self) -> Option<Vec<usize>> {
@@ -342,11 +298,6 @@ impl BatchLoader {
         if shuffle {
             self.indices.shuffle(rng);
         }
-    }
-
-    #[allow(dead_code)]
-    fn get_samples(&self, indices: &[usize]) -> Vec<Sample> {
-        indices.iter().map(|&idx| self.samples[idx].clone()).collect()
     }
 }
 
@@ -836,14 +787,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
 
     // Decide input mode
+    // Robustly detect NNFC cache (raw/gzip/zstd) by attempting to parse the header.
+    // This avoids misclassifying compressed caches as JSONL.
     fn is_cache_file(path: &str) -> bool {
-        if let Ok(mut f) = File::open(path) {
-            let mut magic = [0u8; 4];
-            if f.read_exact(&mut magic).is_ok() {
-                return &magic == b"NNFC";
-            }
+        match open_cache_payload_reader_shared(path) {
+            Ok((_r, header)) => header.feature_set_id == FEATURE_SET_ID_HALF,
+            Err(_) => false,
         }
-        false
     }
 
     let is_cache = is_cache_file(input_path);
@@ -900,8 +850,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Initialize RNG with seed if provided
-    let mut rng: StdRng = if let Some(seed_str) = app.get_one::<String>("seed") {
-        let seed: u64 = seed_str.parse().expect("Invalid seed value (expected u64)");
+    let seed_u64_opt: Option<u64> =
+        app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
+    let mut rng: StdRng = if let Some(seed) = seed_u64_opt {
         println!("Using random seed (u64): {}", seed);
         StdRng::seed_from_u64(seed)
     } else {
@@ -1026,6 +977,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 best_val_loss: f32,
                 best_val_auc: Option<f64>,
                 best_val_ece: Option<f64>,
+                // Repro metadata for reproducibility
+                seed: Option<u64>,
+                optimizer: String,
+                lr: f32,
+                l2: f32,
+                acc_dim: usize,
+                relu_clip: i32,
+                label_type: String,
+                scale: f32,
+                cp_clip: i32,
             }
             let (best_val_auc, best_val_ece) =
                 compute_val_auc_and_ece(best_net, val_samples, &config, &dash);
@@ -1034,6 +995,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 best_val_loss,
                 best_val_auc,
                 best_val_ece,
+                seed: seed_u64_opt,
+                optimizer: config.optimizer.clone(),
+                lr: config.learning_rate,
+                l2: config.l2_reg,
+                acc_dim: config.accumulator_dim,
+                relu_clip: config.relu_clip,
+                label_type: config.label_type.clone(),
+                scale: config.scale,
+                cp_clip: config.cp_clip,
             };
             let mut mf = File::create(out_dir.join("nn_best.meta.json"))?;
             writeln!(mf, "{}", serde_json::to_string_pretty(&meta)?)?;
@@ -2639,7 +2609,7 @@ fn train_model_with_loader(
     } else {
         // Original synchronous loader path (still with throughput reporting)
         let mut batch_loader =
-            BatchLoader::new(train_samples_arc.clone(), config.batch_size, config.shuffle, rng);
+            BatchLoader::new(train_samples_arc.len(), config.batch_size, config.shuffle, rng);
 
         for epoch in 0..config.epochs {
             let epoch_start = Instant::now();
@@ -3058,6 +3028,10 @@ fn train_batch_by_indices(
     }
 
     // Update output layer (weighted average + L2 reg)
+    // Note: L2 is applied online (per-feature) for w0 in the sparse inner loop,
+    // while w2 applies L2 to the batch-averaged gradient. This asymmetry is
+    // intentional for performance (row-sparse updates on w0), and is documented
+    // to aid reproducibility when comparing training dynamics.
     let sum_w = total_weight.max(1e-8);
     let inv_sum_w = 1.0 / sum_w;
 
@@ -3144,11 +3118,22 @@ fn compute_val_auc(network: &Network, samples: &[Sample], config: &Config) -> Op
     for s in samples {
         let out = network.forward_with_buffers(&s.features, &mut acc_buffer, &mut activated_buffer);
         let p = 1.0 / (1.0 + (-out).exp());
-        probs.push(p);
-        labels.push(s.label);
-        weights.push(s.weight);
+        // Treat strict positives/negatives only; skip exact boundary (label==0.5)
+        if s.label > 0.5 {
+            probs.push(p);
+            labels.push(1.0);
+            weights.push(s.weight);
+        } else if s.label < 0.5 {
+            probs.push(p);
+            labels.push(0.0);
+            weights.push(s.weight);
+        }
     }
-    roc_auc_weighted(&probs, &labels, &weights)
+    if probs.is_empty() {
+        None
+    } else {
+        roc_auc_weighted(&probs, &labels, &weights)
+    }
 }
 
 fn compute_val_auc_and_ece(
@@ -3654,6 +3639,64 @@ mod tests {
 
         let samples = load_samples_from_cache(path.to_str().unwrap()).unwrap();
         assert_eq!(samples.len(), 1);
+    }
+
+    #[test]
+    fn auc_boundary_labels_skipped() {
+        // Network with zero weights outputs 0.0 logits -> p=0.5
+        let mut rng = rand::rngs::StdRng::seed_from_u64(123);
+        let mut net = Network::new(8, 127, &mut rng);
+        // Zero out all weights/biases to make output exactly 0
+        for w in net.w0.iter_mut() {
+            *w = 0.0;
+        }
+        for b in net.b0.iter_mut() {
+            *b = 0.0;
+        }
+        for w in net.w2.iter_mut() {
+            *w = 0.0;
+        }
+        net.b2 = 0.0;
+
+        // Samples all with label==0.5 (boundary) should be skipped and yield None AUC
+        let samples = vec![
+            Sample {
+                features: vec![],
+                label: 0.5,
+                weight: 1.0,
+                cp: None,
+                phase: None,
+            },
+            Sample {
+                features: vec![],
+                label: 0.5,
+                weight: 1.0,
+                cp: None,
+                phase: None,
+            },
+        ];
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "wdl".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+        let auc = super::compute_val_auc(&net, &samples, &cfg);
+        assert!(auc.is_none(), "AUC should be None when all labels are 0.5 boundary");
     }
 
     #[test]

@@ -332,6 +332,24 @@ cargo build -p tools --features plots --release
   - `quick_perf_test`: TT/探索の簡易パフォーマンステスト
   - `metrics_analyzer`: エンジンログ（`kind=bestmove_*`）の集計
 
+### 量子化フォーマット（VERSION 3 概要）
+
+`train_nnue --quantized` で保存される `nn.i8.bin` は以下の構造です。
+
+- テキストヘッダ（行単位）
+  - `NNUE` / `VERSION 3` / `FEATURES HALFKP` / `ACC_DIM <N>` / `RELU_CLIP <M>` / `FORMAT QUANTIZED_I8` / `END_HEADER`
+- バイナリ本体（リトルエンディアン）
+  1) `w0` の量子化パラメータ: `scale: f32` → `zero_point: i32`
+  2) `w0` 本体: `i8` の配列（`input_dim * acc_dim` 要素）
+  3) `b0` の量子化パラメータ: `scale: f32` → `zero_point: i32`
+  4) `b0` 本体: `i8` の配列（`acc_dim` 要素）
+  5) `w2` の量子化パラメータ: `scale: f32` → `zero_point: i32`
+  6) `w2` 本体: `i8` の配列（`acc_dim` 要素）
+  7) `b2` は `f32` のまま1要素
+
+復元は `real ≈ (q - zero_point) * scale`（各重み配列で個別の `scale/zero_point` を使用）。
+将来の互換性のため、フォーマット変更時は `VERSION` 行を更新します。
+
 ## 追加ドキュメント
 
 - 教師データ生成ガイド: `docs/nnue-training-data-generation.md`
