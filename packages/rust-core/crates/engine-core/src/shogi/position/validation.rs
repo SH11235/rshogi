@@ -380,7 +380,8 @@ impl Position {
         let current_hash = self.zobrist_hash;
         let mut count = 0;
 
-        for &h in self.history.iter() {
+        // Scan from newest to oldest for faster early exit on typical cycles
+        for &h in self.history.iter().rev() {
             if h == current_hash {
                 count += 1;
                 if count >= 3 {

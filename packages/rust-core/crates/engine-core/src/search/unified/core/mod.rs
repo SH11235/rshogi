@@ -30,6 +30,11 @@ use crate::{
 };
 use std::sync::atomic::Ordering;
 
+/// Compute repetition penalty based on static evaluation from the side-to-move perspective.
+///
+/// - If side to move is ahead (static_eval >= 50cp), return a negative penalty to discourage
+///   waiting-move loops (at least -16cp, saturating at -128cp).
+/// - If side to move is not ahead, return 0 (draw acceptance for the worse/level side).
 #[inline]
 pub(super) fn repetition_penalty(static_eval: i32) -> i32 {
     // Penalize only the side that is ahead to discourage waiting-move loops.
@@ -84,7 +89,7 @@ mod tests_repetition_alpha_beta {
         // Compute hash and set repetition history: 3 previous occurrences
         pos.hash = pos.compute_hash();
         pos.zobrist_hash = pos.hash;
-        let h = pos.hash;
+        let h = pos.zobrist_hash;
         // Four entries to pass the early length guard and ensure >=3 matches
         pos.history = vec![h, h, h, h];
 
@@ -94,6 +99,39 @@ mod tests_repetition_alpha_beta {
 
         // Since Black is ahead, repetition should return a negative penalty
         assert!(score < 0, "Repetition should be penalized when ahead, got {score}");
+    }
+
+    #[test]
+    fn test_alpha_beta_repetition_when_behind_returns_zero() {
+        // Side to move is behind: give opponent an extra rook
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // Opponent (White) has rook
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'b').unwrap(),
+            Piece::new(PieceType::Rook, Color::White),
+        );
+        pos.side_to_move = Color::Black; // Black is behind
+
+        // Hash & repetition history
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let h = pos.zobrist_hash;
+        pos.history = vec![h, h, h, h];
+
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+        let score = alpha_beta(&mut searcher, &mut pos, 2, -10000, 10000, 0);
+
+        // Behind -> draw acceptance => 0 (within clamp)
+        assert_eq!(score, 0, "Repetition when behind should return 0, got {score}");
     }
 }
 

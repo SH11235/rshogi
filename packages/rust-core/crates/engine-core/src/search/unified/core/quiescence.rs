@@ -19,10 +19,17 @@ use std::sync::atomic::Ordering;
 // Import victim_score from move_ordering module
 use super::move_ordering::victim_score;
 
-// Conservative initial values for checking drops in quiescence search
+// Conservative initial values for checking moves in quiescence search
+// Drops
 const MAX_QS_CHECK_DROPS: usize = 4; // Maximum number of checking drops to search in QS
 const CHECK_DROP_MARGIN: i32 = 80; // Small margin to prune clearly losing drops
 const CHECK_DROP_NEAR_KING_DIST: u8 = 2; // Manhattan distance limit for drops near king
+                                         // Non-capture checks
+const MAX_QS_NONCAP_CHECKS: usize = 4; // Maximum number of non-capture checking moves
+const QS_NONCAP_QPLY_CAP: u8 = 4; // Limit relative depth for non-capture checks in QS
+                                  // Non-capture promotion checks
+const MAX_QS_PROMO_CHECKS: usize = 4; // Maximum number of non-capture promotions that give check
+const QS_PROMO_QPLY_CAP: u8 = 4; // Limit relative depth for promotion checks in QS
 
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
 ///
@@ -467,12 +474,8 @@ where
 
     // === Add: non-drop, non-capture checking moves (limited) ===
     // Only enable with pruning profile to avoid blowing up basic search
-    if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN >= alpha {
-        use smallvec::SmallVec;
-        const MAX_QS_NONCAP_CHECKS: usize = 4;
-        const QS_NONCAP_QPLY_CAP: u8 = 4; // Only allow shallow chains of checks in qsearch
-
-        if qply < QS_NONCAP_QPLY_CAP {
+    if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN >= alpha
+        && qply < QS_NONCAP_QPLY_CAP {
             let mut check_noncaptures: SmallVec<[Move; 16]> = all_moves
                 .iter()
                 .copied()
@@ -535,15 +538,10 @@ where
                 }
             }
         }
-    }
 
     // === Add: non-capture promotion moves that give check (limited) ===
-    if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN >= alpha {
-        use smallvec::SmallVec;
-        const MAX_QS_PROMO_CHECKS: usize = 4;
-        const QS_PROMO_QPLY_CAP: u8 = 4;
-
-        if qply < QS_PROMO_QPLY_CAP {
+    if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN >= alpha
+        && qply < QS_PROMO_QPLY_CAP {
             let mut promo_check_noncaptures: SmallVec<[Move; 16]> = all_moves
                 .iter()
                 .copied()
@@ -601,7 +599,6 @@ where
                 }
             }
         }
-    }
 
     // === Add: checking drops (limited) ===
     // First, skip generation if stand pat is too far below alpha
@@ -741,6 +738,39 @@ mod tests_repetition_qs {
             score < 0,
             "QS repetition should return a negative penalty when ahead, got {score}"
         );
+    }
+
+    #[test]
+    fn test_quiescence_repetition_when_behind_returns_zero() {
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // Opponent advantage: white rook
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'b').unwrap(),
+            Piece::new(PieceType::Rook, Color::White),
+        );
+        pos.side_to_move = Color::Black; // Black is behind
+
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let h = pos.zobrist_hash;
+        pos.history = vec![h, h, h, h];
+
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+
+        let alpha = -10000;
+        let beta = 10000;
+        let score = quiescence_search(&mut searcher, &mut pos, alpha, beta, 0, 0);
+
+        assert_eq!(score, 0, "QS repetition when behind should return 0, got {score}");
     }
 }
 
