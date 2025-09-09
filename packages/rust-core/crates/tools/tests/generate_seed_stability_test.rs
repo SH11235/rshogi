@@ -18,7 +18,7 @@ fn stable_seed_from_args(args: &[&str]) -> u64 {
     let mut hasher = Sha256::new();
     for a in args.iter() {
         hasher.update(a.as_bytes());
-        hasher.update(&[0]);
+        hasher.update([0]);
     }
     let d = hasher.finalize();
     u64::from_le_bytes(d[0..8].try_into().unwrap())

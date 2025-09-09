@@ -518,11 +518,13 @@ pub fn calibration_bins(
 ) -> Vec<CalibBin> {
     let n = cps.len().min(probs.len()).min(labels.len()).min(weights.len());
     let nb = nbins.max(1);
+    // Use float width but compute bin boundaries with floor to avoid rounding drift
     let width = (2 * clip).max(1) as f32 / nb as f32;
     let mut bins: Vec<CalibBin> = (0..nb)
         .map(|b| {
-            let l = (-clip as f32 + b as f32 * width).round() as i32;
-            let r = (-clip as f32 + (b as f32 + 1.0) * width).round() as i32;
+            // Boundaries computed via floor to keep widths stable near edges
+            let l = -clip + ((b as f32) * width).floor() as i32;
+            let r = -clip + (((b as f32) + 1.0) * width).floor() as i32;
             let c = (l + r) as f32 / 2.0;
             CalibBin {
                 left: l,
@@ -560,6 +562,12 @@ pub fn calibration_bins(
 
 /// Compute Expected Calibration Error (ECE) from calibration bins.
 /// Uses weighted L1 distance between mean_pred and mean_label.
+/// Expected Calibration Error (ECE) computed over CP-binned calibration bins.
+///
+/// Note: This is not the general probability-binned ECE across [0,1].
+/// Here we aggregate by equal-width CP bins (±clip), and take the
+/// weighted L1 distance between `mean_pred` and `mean_label(soft)` in each bin.
+/// This is useful to detect bias in cp→wdl conversion calibration.
 pub fn ece_from_bins(bins: &[CalibBin]) -> Option<f64> {
     let wsum: f64 = bins.iter().map(|b| b.weighted_count).sum();
     if wsum <= 0.0 {
@@ -596,5 +604,41 @@ mod tests {
         let s = o.stats().unwrap();
         assert!(s.p50 >= s.min && s.p50 <= s.max);
         assert!(s.p99 >= s.p95);
+    }
+
+    #[test]
+    fn ece_from_bins_zero_when_perfect_match() {
+        let bins = vec![
+            CalibBin {
+                left: -100,
+                right: 0,
+                center: -50.0,
+                count: 10,
+                weighted_count: 10.0,
+                mean_pred: 0.25,
+                mean_label: 0.25,
+            },
+            CalibBin {
+                left: 0,
+                right: 100,
+                center: 50.0,
+                count: 10,
+                weighted_count: 10.0,
+                mean_pred: 0.75,
+                mean_label: 0.75,
+            },
+        ];
+        let ece = ece_from_bins(&bins).unwrap();
+        assert!(ece.abs() < 1e-12, "ece should be 0, got {}", ece);
+    }
+
+    #[test]
+    fn roc_auc_weighted_tie_group_is_half() {
+        // Same scores for positive and negative; contribution should be 0.5
+        let scores = [0.5f32, 0.5f32];
+        let labels = [1.0f32, 0.0f32];
+        let w = [1.0f32, 1.0f32];
+        let auc = roc_auc_weighted(&scores, &labels, &w).unwrap();
+        assert!((auc - 0.5).abs() < 1e-12, "auc should be 0.5, got {}", auc);
     }
 }
