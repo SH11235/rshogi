@@ -520,6 +520,9 @@ where
                 -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
             pos.undo_move(mv, undo);
 
+            // Stats: count searched non-capture checks
+            crate::search::SearchStats::bump(&mut searcher.stats.qs_noncapture_checks, 1);
+
             if searcher.context.should_stop() {
                 return alpha;
             }
@@ -577,6 +580,9 @@ where
             let score =
                 -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
             pos.undo_move(mv, undo);
+
+            // Stats: count searched non-capture promotions that give check
+            crate::search::SearchStats::bump(&mut searcher.stats.qs_promo_checks, 1);
 
             if searcher.context.should_stop() {
                 return alpha;
