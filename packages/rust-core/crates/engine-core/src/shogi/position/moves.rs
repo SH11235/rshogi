@@ -17,8 +17,8 @@ impl Position {
     /// when added to hand (as per shogi rules). The promoted flag is stored in
     /// UndoInfo for proper restoration during unmake_move.
     pub fn do_move(&mut self, mv: Move) -> UndoInfo {
-        // Save current hash to history
-        self.history.push(self.hash);
+        // Save current position key to history (zobrist)
+        self.history.push(self.zobrist_hash);
 
         // Initialize undo info
         let mut undo_info = UndoInfo {
@@ -142,7 +142,7 @@ impl Position {
 
     /// Undo a move on the position
     pub fn undo_move(&mut self, mv: Move, undo_info: UndoInfo) {
-        // Remove last hash from history
+        // Remove last key from history
         self.history.pop();
 
         // Restore hash value
@@ -202,8 +202,8 @@ impl Position {
     /// Used in null move pruning for search optimization
     /// Returns undo information to restore the position state
     pub fn do_null_move(&mut self) -> UndoInfo {
-        // Save current hash to history
-        self.history.push(self.hash);
+        // Save current position key to history (zobrist)
+        self.history.push(self.zobrist_hash);
 
         // Create undo info
         let undo_info = UndoInfo {
@@ -228,7 +228,7 @@ impl Position {
 
     /// Undo null move - restores position state after null move
     pub fn undo_null_move(&mut self, undo_info: UndoInfo) {
-        // Remove last hash from history
+        // Remove last key from history
         self.history.pop();
 
         // Restore hash value

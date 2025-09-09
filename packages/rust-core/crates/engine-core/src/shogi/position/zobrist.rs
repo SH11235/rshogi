@@ -193,22 +193,22 @@ impl ZobristHashing for Position {
             hash ^= ZOBRIST.piece_square_hash(captured_piece, to);
 
             // Update hand hash (piece goes to hand)
-            // IMPORTANT: Promoted pieces revert to their base type when captured
-            // e.g., ProRook → Rook, ProPawn → Pawn
+            // NOTE: hand_index() returns the "hand (base) slot" even for promoted types.
+            // Promoted piece is treated as its base type in hand (e.g., ProRook → Rook).
+            // If this behavior changes in the future, explicitly normalize here.
             let color_idx = moving.color as usize;
-            // Since promoted pieces cannot exist in hand, we use the base piece type
-            let captured_base_type = captured_piece.piece_type;
+            let captured_hand_type = captured_piece.piece_type; // base type slot for hand_index()
             let piece_idx =
-                captured_base_type.hand_index().expect("King is never captured to hand");
+                captured_hand_type.hand_index().expect("King is never captured to hand");
             let old_count = self.hands[color_idx][piece_idx];
             let new_count = old_count + 1;
 
             // Remove old hand hash
             if old_count > 0 {
-                hash ^= ZOBRIST.hand_hash(moving.color, captured_base_type, old_count);
+                hash ^= ZOBRIST.hand_hash(moving.color, captured_hand_type, old_count);
             }
             // Add new hand hash
-            hash ^= ZOBRIST.hand_hash(moving.color, captured_base_type, new_count);
+            hash ^= ZOBRIST.hand_hash(moving.color, captured_hand_type, new_count);
         }
 
         // Add moving piece to destination
@@ -227,11 +227,7 @@ impl ZobristHashing for Position {
         to: Square,
         color: Color,
     ) -> u64 {
-        // Add piece to board
-        let piece = Piece::new(piece_type, color);
-        hash ^= ZOBRIST.piece_square_hash(piece, to);
-
-        // Update hand hash
+        // Validate hand count BEFORE touching hash to keep hash consistent on early return
         let color_idx = color as usize;
         let piece_idx = piece_type.hand_index().expect("King cannot be dropped");
         let old_count = self.hands[color_idx][piece_idx];
@@ -239,9 +235,15 @@ impl ZobristHashing for Position {
         debug_assert!(old_count > 0, "Dropping {:?} for {:?} but hand is empty", piece_type, color);
         if old_count == 0 {
             log::warn!("Dropping {:?} for {:?} but hand is empty", piece_type, color);
-            // リリースでも安全側に無変更で返す
+            // リリースでも安全側に無変更で返す（ハッシュにまだ触れていない）
             return hash;
         }
+
+        // Add piece to board
+        let piece = Piece::new(piece_type, color);
+        hash ^= ZOBRIST.piece_square_hash(piece, to);
+
+        // Update hand hash
         let new_count = old_count - 1;
 
         // Remove old hand hash
@@ -296,6 +298,7 @@ impl Position {
 
 #[cfg(test)]
 mod tests {
+    use crate::shogi::board::MAX_PIECE_INDEX;
     use crate::usi::parse_usi_square;
 
     use super::*;
@@ -321,7 +324,7 @@ mod tests {
 
         // Test piece-square values
         for color in 0..2 {
-            for piece in 0..14 {
+            for piece in 0..MAX_PIECE_INDEX {
                 for sq in 0..crate::shogi::SHOGI_BOARD_SIZE {
                     let hash = table.piece_square[color][piece][sq];
                     assert!(values.insert(hash), "Duplicate hash found");
@@ -837,5 +840,34 @@ mod tests {
             hash2_from_scratch, hash2_incremental,
             "Hash mismatch when capturing promoted rook"
         );
+    }
+
+    #[test]
+    fn test_update_hash_drop_guard_keeps_hash_unchanged() {
+        // In debug builds, this path triggers a debug_assert! to catch engine bugs.
+        // Skip the assertion-triggering scenario in debug to avoid expected panic.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        // When dropping from empty hand, update_hash_drop must NOT modify hash
+        let mut pos = Position::empty();
+
+        // Place kings only (minimal legal-ish board)
+        let black_king = Piece::new(PieceType::King, Color::Black);
+        let white_king = Piece::new(PieceType::King, Color::White);
+        pos.board.put_piece(parse_usi_square("5i").unwrap(), black_king);
+        pos.board.put_piece(parse_usi_square("5a").unwrap(), white_king);
+
+        // Compute initial hash
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let initial = pos.zobrist_hash;
+
+        // Black has no pawns in hand; attempt to compute hash for a drop
+        // The function must return unchanged hash when hand is empty
+        let sq = parse_usi_square("5e").unwrap();
+        let new_hash = pos.update_hash_drop(initial, PieceType::Pawn, sq, Color::Black);
+
+        assert_eq!(new_hash, initial, "Hash must remain unchanged on invalid drop");
     }
 }

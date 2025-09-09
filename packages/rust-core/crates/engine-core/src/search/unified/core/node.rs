@@ -72,6 +72,24 @@ where
         searcher.search_stack[ply as usize].clear_for_new_node();
     }
 
+    // In-check entry extension: extend depth by +1 at node entry (capped)
+    // Apply before any pruning/razoring decisions so they see the extended depth
+    let mut depth = depth; // shadow parameter for local mutation
+    if in_check
+        && depth >= 3
+        && crate::search::types::SearchStack::is_valid_ply(ply)
+        && searcher.search_stack[ply as usize].consecutive_checks < 2
+    {
+        depth = depth.saturating_add(1);
+
+        // Suppress piling-up of per-move check extensions within this node
+        let entry = &mut searcher.search_stack[ply as usize];
+        entry.consecutive_checks = entry.consecutive_checks.saturating_add(1);
+
+        // Attribute this to check_extensions for diagnostics
+        crate::search::SearchStats::bump(&mut searcher.stats.check_extensions, 1);
+    }
+
     // Static evaluation for pruning decisions
     let static_eval = if USE_PRUNING && !in_check {
         if crate::search::types::SearchStack::is_valid_ply(ply) {
@@ -377,7 +395,7 @@ where
             if gives_check && allow_check_ext {
                 extension = 1; // Check extension
                 crate::search::SearchStats::bump(&mut searcher.stats.check_extensions, 1);
-            } else if is_king_move {
+            } else if is_king_move && moves_searched < 4 {
                 extension = 1; // Existing king extension
                 crate::search::SearchStats::bump(&mut searcher.stats.king_extensions, 1);
             }
