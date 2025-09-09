@@ -138,8 +138,12 @@ impl Board {
         #[cfg(debug_assertions)]
         {
             if king_sq.is_none() {
-                warn!("No king found for {color:?}");
-                warn!("Board state: all_bb has {} pieces", self.all_bb.count_ones());
+                // Avoid noisy warnings for intentionally empty boards (e.g., NNUE zero init)
+                let piece_count = self.all_bb.count_ones();
+                if piece_count > 0 {
+                    warn!("No king found for {color:?}");
+                    warn!("Board state: all_bb has {} pieces", piece_count);
+                }
             }
             // Verify there's only one king
             if !bb.is_empty() {

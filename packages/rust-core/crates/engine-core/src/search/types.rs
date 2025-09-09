@@ -48,6 +48,10 @@ pub struct SearchStats {
     pub king_extensions: Option<u64>,
     /// Number of checking drops searched in quiescence search
     pub qs_check_drops: Option<u64>,
+    /// Number of non-capture checking moves searched in qsearch
+    pub qs_noncapture_checks: Option<u64>,
+    /// Number of non-capture promotion checks searched in qsearch
+    pub qs_promo_checks: Option<u64>,
     /// Number of PV owner mismatches detected
     pub pv_owner_mismatches: Option<u64>,
     /// Number of PV owner mismatch checks performed

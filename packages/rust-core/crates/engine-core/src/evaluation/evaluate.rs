@@ -9,6 +9,15 @@ use crate::{
 };
 
 /// Trait for position evaluation
+///
+/// Contract:
+/// - Returns a score in centipawns from the side-to-move perspective.
+/// - Positive values favor the side to move; negative values favor the opponent.
+/// - Flipping `side_to_move` on the same board position should approximately flip the sign
+///   (exact symmetry is not guaranteed if the evaluator incorporates tempo or king safety asymmetries).
+///
+/// Implementations should keep this polarity contract to ensure search components
+/// (e.g., repetition penalties, pruning rules) behave consistently.
 pub trait Evaluator {
     /// Evaluate position from side to move perspective
     fn evaluate(&self, pos: &Position) -> i32;

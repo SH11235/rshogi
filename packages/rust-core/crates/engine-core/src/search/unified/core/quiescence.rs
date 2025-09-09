@@ -7,10 +7,18 @@ use crate::{
     movegen::MoveGenerator,
     search::{
         common::mate_score,
-        constants::{MAX_PLY, SEARCH_INF},
-        unified::UnifiedSearcher,
+        constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
+        unified::{
+            core::log_rate_limiter::QUIESCE_DEPTH_LIMITER,
+            pruning::{delta_pruning_margin, likely_could_give_check, should_skip_see_pruning},
+            UnifiedSearcher,
+        },
+        SearchStack, SearchStats, MAX_QPLY, QUIESCE_CHECK_EVAL_PENALTY,
     },
-    shogi::{Move, Position},
+    search_debug,
+    shogi::{Move, MoveList, Position},
+    usi::{move_to_usi, position_to_sfen},
+    PieceType,
 };
 use once_cell::sync::Lazy;
 use smallvec::SmallVec;
@@ -19,10 +27,19 @@ use std::sync::atomic::Ordering;
 // Import victim_score from move_ordering module
 use super::move_ordering::victim_score;
 
-// Conservative initial values for checking drops in quiescence search
+// Conservative initial values for checking moves in quiescence search
+// Drops
 const MAX_QS_CHECK_DROPS: usize = 4; // Maximum number of checking drops to search in QS
-const CHECK_DROP_MARGIN: i32 = 80; // Small margin to prune clearly losing drops
+const QS_CHECK_ENABLE_MARGIN: i32 = 80; // Small margin to prune clearly losing drops
 const CHECK_DROP_NEAR_KING_DIST: u8 = 2; // Manhattan distance limit for drops near king
+                                         // Non-capture checks
+const MAX_QS_NONCAP_CHECKS: usize = 4; // Maximum number of non-capture checking moves
+const QS_NONCAP_QPLY_CAP: u8 = 4; // Limit relative depth for non-capture checks in QS
+                                  // Non-capture promotion checks
+const MAX_QS_PROMO_CHECKS: usize = 4; // Maximum number of non-capture promotions that give check
+const QS_PROMO_QPLY_CAP: u8 = 4; // Limit relative depth for promotion checks in QS
+                                 // Total budget across all check-like categories to prevent spikes
+const MAX_QS_TOTAL_CHECKS: usize = 6;
 
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
 ///
@@ -104,6 +121,26 @@ where
     // Check if in check first - this determines our search strategy
     let in_check = pos.is_in_check();
 
+    // Path-dependent repetition handling in quiescence as well
+    if pos.is_repetition() {
+        // Use stack-cached static eval if available to avoid double evaluation
+        let static_eval = if SearchStack::is_valid_ply(ply) {
+            let slot = &mut searcher.search_stack[ply as usize].static_eval;
+            if let Some(v) = *slot {
+                v
+            } else {
+                let v = searcher.evaluator.evaluate(pos);
+                *slot = Some(v);
+                v
+            }
+        } else {
+            searcher.evaluator.evaluate(pos)
+        };
+
+        let score = super::repetition_penalty(static_eval).clamp(alpha, beta);
+        return score;
+    }
+
     // QNodes budget check (after in_check determination)
     if let Some(limit) = qlimit {
         // Check if we've exceeded the limit using previous value
@@ -147,14 +184,16 @@ where
     }
 
     // Debug logging gate (read once)
-    static QS_DEBUG: Lazy<bool> =
-        Lazy::new(|| std::env::var("SHOGI_DEBUG_QS").as_deref() == Ok("1"));
+    static QS_DEBUG: Lazy<bool> = Lazy::new(|| {
+        // Enable with SHOGI_DEBUG_QS=1
+        std::env::var("SHOGI_DEBUG_QS").map(|v| v == "1").unwrap_or(false)
+    });
 
     // Primary limit: relative qsearch depth
     // This ensures consistent qsearch behavior regardless of main search depth
     // Note: In check positions, we skip this limit to ensure proper check evasion
     if !in_check {
-        let qply_limit = crate::search::constants::MAX_QPLY;
+        let qply_limit = MAX_QPLY;
 
         if qply >= qply_limit {
             // Debug-only logging (opt-in via SHOGI_DEBUG_QS=1) with rate limiting
@@ -197,22 +236,16 @@ where
 
     // Tertiary safeguard: absolute quiescence depth (relaxed to 96)
     // This prevents explosion in complex positions with many captures
-    if ply >= crate::search::constants::MAX_QUIESCE_DEPTH {
+    if ply >= MAX_QUIESCE_DEPTH {
         // Debug-only logging (opt-in) with rate limiting
-        if *QS_DEBUG
-            && log::log_enabled!(log::Level::Debug)
-            && super::log_rate_limiter::QUIESCE_DEPTH_LIMITER.should_log()
-        {
+        if *QS_DEBUG && log::log_enabled!(log::Level::Debug) && QUIESCE_DEPTH_LIMITER.should_log() {
             log::debug!("Hit absolute quiescence depth limit at ply {ply}");
         }
         // Hard stop at reasonable depth
         // Return evaluation-based value instead of fixed constants to avoid discontinuity
         return if in_check {
             // In check positions, return a value based on evaluation but slightly pessimistic
-            alpha.max(
-                searcher.evaluator.evaluate(pos)
-                    - crate::search::constants::QUIESCE_CHECK_EVAL_PENALTY,
-            )
+            alpha.max(searcher.evaluator.evaluate(pos) - QUIESCE_CHECK_EVAL_PENALTY)
         } else {
             // Not in check, return current evaluation
             searcher.evaluator.evaluate(pos)
@@ -311,7 +344,7 @@ where
 
     // Delta pruning margin
     let delta_margin = if USE_PRUNING {
-        crate::search::unified::pruning::delta_pruning_margin()
+        delta_pruning_margin()
     } else {
         0
     };
@@ -328,7 +361,7 @@ where
 
     // Filter to captures only - check board state directly instead of relying on metadata
     let us = pos.side_to_move;
-    let mut moves = crate::shogi::MoveList::new();
+    let mut moves = MoveList::new();
     for &mv in all_moves.iter() {
         if mv.is_drop() {
             continue; // Drops don't capture
@@ -347,7 +380,7 @@ where
         // This reduces the number of moves to sort, improving performance
         moves.as_mut_vec().retain(|mv| {
             // Check if this move should skip SEE pruning (drops, checks, etc.)
-            if crate::search::unified::pruning::should_skip_see_pruning(pos, *mv) {
+            if should_skip_see_pruning(pos, *mv) {
                 return true;
             }
 
@@ -410,9 +443,9 @@ where
 
         // Validate move before executing (important for safety)
         if !pos.is_pseudo_legal(mv) {
-            crate::search_debug!("WARNING: Skipping illegal move in quiescence search");
-            crate::search_debug!("Move: {}", crate::usi::move_to_usi(&mv));
-            crate::search_debug!("Position: {}", crate::usi::position_to_sfen(pos));
+            search_debug!("WARNING: Skipping illegal move in quiescence search");
+            search_debug!("Move: {}", move_to_usi(&mv));
+            search_debug!("Position: {}", position_to_sfen(pos));
             continue;
         }
 
@@ -443,9 +476,153 @@ where
         }
     }
 
+    // Global checks budget across categories (noncap, promo, drops)
+    let mut checks_budget: usize = MAX_QS_TOTAL_CHECKS;
+
+    // === Add: non-drop, non-capture checking moves (limited) ===
+    // Only enable with pruning profile to avoid blowing up basic search
+    if USE_PRUNING
+        && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha
+        && qply < QS_NONCAP_QPLY_CAP
+        && checks_budget > 0
+    {
+        let mut check_noncaptures: SmallVec<[Move; 16]> = all_moves
+            .iter()
+            .copied()
+            .filter(|&mv| !mv.is_drop())
+            .filter(|&mv| pos.piece_at(mv.to()).is_none()) // non-capture only
+            .filter(|&mv| {
+                // Cheap prefilter then accurate check
+                likely_could_give_check(pos, mv) && pos.gives_check(mv)
+            })
+            .collect();
+
+        // Order by proximity/alignment similar to drops
+        check_noncaptures.sort_by_key(|&mv| -score_nocap_check_for_ordering(pos, mv));
+
+        let per_cap = MAX_QS_NONCAP_CHECKS.min(checks_budget);
+        if check_noncaptures.len() > per_cap {
+            check_noncaptures.truncate(per_cap);
+        }
+
+        for &mv in check_noncaptures.iter() {
+            if searcher.context.should_stop() {
+                return alpha;
+            }
+
+            // Budget enforcement
+            if let Some(limit) = qlimit {
+                let exceeded = if let Some(ref counter) = qnodes_counter {
+                    counter.load(Ordering::Acquire) >= limit
+                } else {
+                    searcher.stats.qnodes >= limit
+                };
+                if exceeded {
+                    return alpha;
+                }
+            }
+
+            if !pos.is_pseudo_legal(mv) {
+                continue;
+            }
+
+            let undo = pos.do_move(mv);
+            let score =
+                -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
+            pos.undo_move(mv, undo);
+
+            // Stats: count searched non-capture checks
+            SearchStats::bump(&mut searcher.stats.qs_noncapture_checks, 1);
+
+            if searcher.context.should_stop() {
+                return alpha;
+            }
+            if score >= beta {
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+            // Spend total budget
+            checks_budget = checks_budget.saturating_sub(1);
+            if checks_budget == 0 {
+                break;
+            }
+        }
+    }
+
+    // === Add: non-capture promotion moves that give check (limited) ===
+    if USE_PRUNING
+        && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha
+        && qply < QS_PROMO_QPLY_CAP
+        && checks_budget > 0
+    {
+        let mut promo_check_noncaptures: SmallVec<[Move; 16]> = all_moves
+            .iter()
+            .copied()
+            .filter(|&mv| !mv.is_drop() && mv.is_promote())
+            .filter(|&mv| pos.piece_at(mv.to()).is_none()) // non-capture only
+            .filter(|&mv| {
+                // Cheap prefilter to avoid expensive gives_check calls
+                likely_could_give_check(pos, mv) && pos.gives_check(mv)
+            })
+            .collect();
+
+        promo_check_noncaptures.sort_by_key(|&mv| -score_nocap_check_for_ordering(pos, mv));
+
+        let per_cap = MAX_QS_PROMO_CHECKS.min(checks_budget);
+        if promo_check_noncaptures.len() > per_cap {
+            promo_check_noncaptures.truncate(per_cap);
+        }
+
+        for &mv in promo_check_noncaptures.iter() {
+            if searcher.context.should_stop() {
+                return alpha;
+            }
+
+            // Budget enforcement
+            if let Some(limit) = qlimit {
+                let exceeded = if let Some(ref counter) = qnodes_counter {
+                    counter.load(Ordering::Acquire) >= limit
+                } else {
+                    searcher.stats.qnodes >= limit
+                };
+                if exceeded {
+                    return alpha;
+                }
+            }
+
+            if !pos.is_pseudo_legal(mv) {
+                continue;
+            }
+
+            let undo = pos.do_move(mv);
+            let score =
+                -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
+            pos.undo_move(mv, undo);
+
+            // Stats: count searched non-capture promotions that give check
+            SearchStats::bump(&mut searcher.stats.qs_promo_checks, 1);
+
+            if searcher.context.should_stop() {
+                return alpha;
+            }
+            if score >= beta {
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+            checks_budget = checks_budget.saturating_sub(1);
+            if checks_budget == 0 {
+                break;
+            }
+        }
+    }
+
     // === Add: checking drops (limited) ===
     // First, skip generation if stand pat is too far below alpha
-    if stand_pat + CHECK_DROP_MARGIN >= alpha {
+    if stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha && checks_budget > 0 {
         // all_moves already generated above (generate_all). Extract checking drops.
         let them = pos.side_to_move.opposite();
         let ksq_opt = pos.board.king_square(them);
@@ -459,7 +636,6 @@ where
                 // Proximity and alignment filter to reduce gives_check calls
                 // Exception: sliders (Rook, Bishop, Lance) have special alignment checks
                 .filter(|&mv| {
-                    use crate::shogi::PieceType;
                     let to = mv.to();
                     let dx = ksq.file().abs_diff(to.file());
                     let dy = ksq.rank().abs_diff(to.rank());
@@ -479,9 +655,10 @@ where
             // Ordering: proximity and piece hints
             check_drops.sort_by_key(|&mv| -score_check_drop_for_ordering(pos, mv));
 
-            // Limit number of drops
-            if check_drops.len() > MAX_QS_CHECK_DROPS {
-                check_drops.truncate(MAX_QS_CHECK_DROPS);
+            // Limit number of drops by both category cap and total budget
+            let per_cap = MAX_QS_CHECK_DROPS.min(checks_budget);
+            if check_drops.len() > per_cap {
+                check_drops.truncate(per_cap);
             }
 
             // Search checking drops
@@ -490,8 +667,6 @@ where
                     return alpha;
                 }
 
-                // Increment qs_check_drops counter
-                crate::search::SearchStats::bump(&mut searcher.stats.qs_check_drops, 1);
                 // Budget (qnodes) strict enforcement
                 if let Some(limit) = qlimit {
                     let exceeded = if let Some(ref counter) = qnodes_counter {
@@ -520,6 +695,8 @@ where
                     qply.saturating_add(1),
                 );
                 pos.undo_move(mv, undo);
+                // Count only after we actually searched it
+                SearchStats::bump(&mut searcher.stats.qs_check_drops, 1);
 
                 if searcher.context.should_stop() {
                     return alpha;
@@ -529,6 +706,10 @@ where
                 }
                 if score > alpha {
                     alpha = score;
+                }
+                checks_budget = checks_budget.saturating_sub(1);
+                if checks_budget == 0 {
+                    break;
                 }
             }
         }
@@ -540,7 +721,7 @@ where
 /// Score checking drops for move ordering in quiescence search
 /// Prioritizes drops closer to the king and more valuable pieces
 #[inline]
-fn score_check_drop_for_ordering(pos: &Position, mv: crate::shogi::Move) -> i32 {
+fn score_check_drop_for_ordering(pos: &Position, mv: Move) -> i32 {
     use crate::shogi::PieceType;
     let them = pos.side_to_move.opposite();
     let ksq = match pos.board.king_square(them) {
@@ -564,4 +745,109 @@ fn score_check_drop_for_ordering(pos: &Position, mv: crate::shogi::Move) -> i32 
         PieceType::King => 0,
     };
     prox * 2 + atk_hint
+}
+
+/// Score non-capture checking moves for ordering in quiescence search
+#[inline]
+fn score_nocap_check_for_ordering(pos: &Position, mv: Move) -> i32 {
+    let them = pos.side_to_move.opposite();
+    let ksq = match pos.board.king_square(them) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let to = mv.to();
+    let dx = (ksq.file() as i32 - to.file() as i32).abs();
+    let dy = (ksq.rank() as i32 - to.rank() as i32).abs();
+    let prox = (10 - (dx + dy)).max(0);
+    let atk_hint = match mv.piece_type() {
+        Some(PieceType::Rook) => (dx == 0 || dy == 0) as i32 * 6 + 6,
+        Some(PieceType::Bishop) => (dx == dy) as i32 * 6 + 5,
+        Some(PieceType::Lance) => (dx == 0) as i32 * 4 + 3,
+        Some(PieceType::Silver) => 3,
+        Some(PieceType::Gold) => 3,
+        Some(PieceType::Knight) => 3,
+        Some(PieceType::Pawn) => 2,
+        _ => 1,
+    };
+    prox * 2 + atk_hint
+}
+
+#[cfg(test)]
+mod tests_repetition_qs {
+    use super::quiescence_search;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::unified::UnifiedSearcher,
+        shogi::{board::Piece, board::PieceType, board::Square, Color, Position},
+    };
+
+    #[test]
+    fn test_quiescence_returns_penalty_on_repetition() {
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // Advantage: extra rook for side to move
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+        pos.side_to_move = Color::Black;
+
+        // Sync hash and history for repetition detection
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let h = pos.zobrist_hash;
+        pos.history = vec![h, h, h, h];
+
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+
+        let alpha = -10000;
+        let beta = 10000;
+        let score = quiescence_search(&mut searcher, &mut pos, alpha, beta, 0, 0);
+
+        assert!(
+            score < 0,
+            "QS repetition should return a negative penalty when ahead, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_quiescence_repetition_when_behind_returns_zero() {
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // Opponent advantage: white rook
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'b').unwrap(),
+            Piece::new(PieceType::Rook, Color::White),
+        );
+        pos.side_to_move = Color::Black; // Black is behind
+
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let h = pos.zobrist_hash;
+        pos.history = vec![h, h, h, h];
+
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+
+        let alpha = -10000;
+        let beta = 10000;
+        let score = quiescence_search(&mut searcher, &mut pos, alpha, beta, 0, 0);
+
+        assert_eq!(score, 0, "QS repetition when behind should return 0, got {score}");
+    }
 }

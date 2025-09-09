@@ -369,22 +369,23 @@ impl Position {
         self.is_check(self.side_to_move)
     }
 
-    /// Check for repetition
+    /// Check for repetition based on Zobrist hash history
     pub fn is_repetition(&self) -> bool {
+        // We require that the same position (by Zobrist key) occurred 3 times in history,
+        // making the current one effectively the 4th occurrence (four-fold repetition).
         if self.history.len() < 4 {
             return false;
         }
 
-        let current_hash = self.hash;
+        let current_hash = self.zobrist_hash;
         let mut count = 0;
 
-        // Four-fold repetition
-        for &hash in self.history.iter() {
-            if hash == current_hash {
+        // Scan from newest to oldest for faster early exit on typical cycles
+        for &h in self.history.iter().rev() {
+            if h == current_hash {
                 count += 1;
                 if count >= 3 {
-                    // Current position + 3 in history = 4 total
-                    return true;
+                    return true; // Current + 3 in history = 4 total occurrences
                 }
             }
         }
@@ -392,11 +393,9 @@ impl Position {
         false
     }
 
-    /// Check if position is draw (simplified check)
+    /// Check if position is draw (currently delegated to repetition)
     pub fn is_draw(&self) -> bool {
-        // Simple repetition detection would go here
-        // For now, return false
-        false
+        self.is_repetition()
     }
 
     /// Check if a move gives check to the opponent
