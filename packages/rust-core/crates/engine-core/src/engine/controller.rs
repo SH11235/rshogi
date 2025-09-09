@@ -208,6 +208,39 @@ impl Engine {
         }
     }
 
+    /// Get current hashfull estimate of the transposition table (permille: 0-1000)
+    /// - Uses shared TT in parallel mode; otherwise queries the active searcher's TT when available
+    /// - Falls back to shared TT when the active searcher is not yet initialized
+    pub fn tt_hashfull_permille(&self) -> u16 {
+        if self.use_parallel {
+            return self.shared_tt.hashfull();
+        }
+        // Use the re-exported TranspositionTable type consistently
+        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = match self.engine_type {
+            EngineType::Material => self
+                .material_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Nnue => self
+                .nnue_basic_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Enhanced => self
+                .material_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::EnhancedNnue => self
+                .nnue_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+        };
+        tt_opt.map(|tt| tt.hashfull()).unwrap_or_else(|| self.shared_tt.hashfull())
+    }
+
     /// Detect game phase based on position
     fn detect_game_phase(&self, position: &Position) -> GamePhase {
         // Use the new game_phase module with Search profile
@@ -447,7 +480,8 @@ impl Engine {
     ) -> Option<crate::shogi::Move> {
         // Apply best move to reach child position
         let mut child = pos.clone();
-        let _undo = child.do_move(best_move);
+        // We don't need the undo handle here
+        let _ = child.do_move(best_move);
         let child_hash = child.zobrist_hash;
 
         // Choose TT source
@@ -664,10 +698,12 @@ impl Engine {
             match self.engine_type {
                 EngineType::Material => {
                     if let Ok(mut guard) = self.material_searcher.lock() {
-                        *guard = Some(MaterialSearcher::new_with_tt_size(
+                        let mut s = MaterialSearcher::new_with_tt_size(
                             *self.material_evaluator,
                             self.tt_size_mb,
-                        ));
+                        );
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
                 EngineType::Nnue => {
@@ -675,16 +711,20 @@ impl Engine {
                         evaluator: self.nnue_evaluator.clone(),
                     };
                     if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
-                        *guard =
-                            Some(NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb));
+                        let mut s =
+                            NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
                 EngineType::Enhanced => {
                     if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
-                        *guard = Some(MaterialEnhancedSearcher::new_with_tt_size(
+                        let mut s = MaterialEnhancedSearcher::new_with_tt_size(
                             *self.material_evaluator,
                             self.tt_size_mb,
-                        ));
+                        );
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
                 EngineType::EnhancedNnue => {
@@ -692,10 +732,10 @@ impl Engine {
                         evaluator: self.nnue_evaluator.clone(),
                     };
                     if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
-                        *guard = Some(NnueEnhancedSearcher::new_with_tt_size(
-                            nnue_proxy,
-                            self.tt_size_mb,
-                        ));
+                        let mut s =
+                            NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                        s.set_multi_pv(self.desired_multi_pv);
+                        *guard = Some(s);
                     }
                 }
             }
@@ -843,6 +883,8 @@ impl Engine {
                 }
             }
         }
+        // Ensure new or existing searchers reflect the desired MultiPV setting
+        self.set_multipv(self.desired_multi_pv);
     }
 
     /// Clear the transposition table
@@ -1557,6 +1599,64 @@ mod tests {
         engine.apply_pending_tt_size();
         assert_eq!(engine.get_hash_size(), 32);
     }
+
+    #[test]
+    fn test_multipv_persistence_clear_hash() {
+        let mut engine = Engine::new(EngineType::Material);
+        engine.set_multipv_persistent(3);
+        engine.clear_hash();
+
+        // Inspect the underlying searcher directly to verify MultiPV persistence
+        {
+            let guard = engine.material_searcher.lock().expect("lock material searcher");
+            let s = guard.as_ref().expect("material searcher should exist");
+            assert_eq!(s.multi_pv(), 3);
+        }
+    }
+
+    #[test]
+    fn test_multipv_persistence_tt_resize() {
+        let mut engine = Engine::new(EngineType::Material);
+        engine.set_multipv_persistent(4);
+        engine.set_hash_size(32); // pending until next apply
+        engine.apply_pending_tt_size();
+
+        // Inspect the recreated searcher
+        {
+            let guard = engine.material_searcher.lock().expect("lock material searcher");
+            let s = guard.as_ref().expect("material searcher should exist");
+            assert_eq!(s.multi_pv(), 4);
+        }
+    }
+
+    #[test]
+    fn test_multipv_persistence_engine_type_switch() {
+        let mut engine = Engine::new(EngineType::Material);
+        engine.set_multipv_persistent(2);
+        engine.set_engine_type(EngineType::Enhanced);
+
+        // Inspect the enhanced searcher
+        {
+            let guard = engine.material_enhanced_searcher.lock().expect("lock enhanced searcher");
+            let s = guard.as_ref().expect("enhanced searcher should exist");
+            assert_eq!(s.multi_pv(), 2);
+        }
+    }
+
+    #[test]
+    fn test_tt_hashfull_permille_fallback_shared_tt() {
+        let engine_type = EngineType::Material;
+        let mut engine = Engine::new(engine_type);
+        // Simulate uninitialized searcher of current engine type
+        if let Ok(mut guard) = engine.material_searcher.lock() {
+            *guard = None;
+        }
+        // Should not panic and should return a value from shared TT
+        let hf = engine.tt_hashfull_permille();
+        assert!(hf <= 1000);
+    }
+
+    // Note: A higher-level USI-side test would verify bestmove ponder emission.
 
     #[test]
     fn test_game_phase_edge_cases() {

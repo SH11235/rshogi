@@ -3,15 +3,15 @@ use engine_core::engine::controller::{Engine, EngineType, FinalBestSource};
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
 use engine_core::shogi::{Color, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
-use engine_core::usi::{move_to_usi, parse_sfen, parse_usi_move};
+use engine_core::usi::{
+    append_usi_score_and_bound, create_position, move_to_usi, score_view_from_internal,
+};
 use log::info;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-// ============ Minimal USI Orchestrator (YaneuraOu-style) ============
 
 #[derive(Clone, Debug)]
 struct UsiOptions {
@@ -163,7 +163,8 @@ impl EngineState {
             eng.set_engine_type(self.opts.engine_type);
             eng.set_threads(self.opts.threads);
             eng.set_hash_size(self.opts.hash_mb);
-            eng.set_multipv(self.opts.multipv);
+            // Persist MultiPV so it survives ClearHash/TT resize
+            eng.set_multipv_persistent(self.opts.multipv);
             // NNUE weights
             if matches!(self.opts.engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
                 if let Some(ref path) = self.opts.eval_file {
@@ -262,18 +263,25 @@ fn source_to_str(src: FinalBestSource) -> &'static str {
     }
 }
 
+// score formatting is provided by engine_core::usi::append_usi_score_and_bound / ScoreView
+
 /// Centralized finalize + bestmove emission
 /// - label: "finalize" | "stop_finalize" | "stop_timeout_finalize"
 /// - result: Some(&SearchResult) when available to build committed PV and log soft/hard
-/// - stale: whether root hash mismatched
-/// - mate_flag: force resign when true (normal finalizeのみで使用)
+/// - stale: whether root hash mismatched (when true: emits "bestmove resign" and returns early)
 fn finalize_and_send(
     state: &mut EngineState,
     label: &str,
     result: Option<&engine_core::search::SearchResult>,
     stale: bool,
-    mate_flag: bool,
 ) {
+    // If stale, do not try to select a move from the new position; emit resign and return.
+    if stale {
+        info_string(format!("{label}_stale resign=1"));
+        usi_println("bestmove resign");
+        state.current_root_hash = None;
+        return;
+    }
     // Build committed when applicable
     let committed = if let Some(res) = result {
         if !stale {
@@ -293,13 +301,7 @@ fn finalize_and_send(
         None
     };
 
-    let final_best = if mate_flag {
-        engine_core::engine::controller::FinalBest {
-            best_move: None,
-            pv: Vec::new(),
-            source: engine_core::engine::controller::FinalBestSource::Resign,
-        }
-    } else {
+    let final_best = {
         let eng = state.engine.lock().unwrap();
         eng.choose_final_bestmove(&state.position, committed.as_ref())
     };
@@ -329,23 +331,34 @@ fn finalize_and_send(
         if !stale {
             if let Some(ref lines) = res.lines {
                 if !lines.is_empty() {
+                    // Obtain hashfull once (permille) and compute aggregate nps
+                    let hf_permille = {
+                        let eng = state.engine.lock().unwrap();
+                        eng.tt_hashfull_permille()
+                    };
+                    let nps_agg: u128 = if res.stats.elapsed.as_millis() > 0 {
+                        (res.stats.nodes as u128).saturating_mul(1000)
+                            / res.stats.elapsed.as_millis()
+                    } else {
+                        0
+                    };
                     for (i, ln) in lines.iter().enumerate() {
-                        // info multipv N depth D time T nodes N score cp X [lowerbound|upperbound] pv ...
+                        // info multipv N depth D time T nodes N score (cp|mate) X [lowerbound|upperbound] pv ...
                         let mut s = String::from("info");
                         s.push_str(&format!(" multipv {}", i + 1));
                         s.push_str(&format!(" depth {}", res.stats.depth));
+                        if let Some(sd) = res.stats.seldepth {
+                            s.push_str(&format!(" seldepth {}", sd));
+                        }
                         s.push_str(&format!(" time {}", res.stats.elapsed.as_millis()));
                         s.push_str(&format!(" nodes {}", res.stats.nodes));
-                        s.push_str(&format!(" score cp {}", ln.score_cp));
-                        match ln.bound {
-                            engine_core::search::types::NodeType::UpperBound => {
-                                s.push_str(" upperbound")
-                            }
-                            engine_core::search::types::NodeType::LowerBound => {
-                                s.push_str(" lowerbound")
-                            }
-                            _ => {}
-                        }
+                        s.push_str(&format!(" nps {}", nps_agg));
+                        s.push_str(&format!(" hashfull {}", hf_permille));
+
+                        // Prefer mate output when available; otherwise cp
+                        let view = score_view_from_internal(ln.score_internal);
+                        append_usi_score_and_bound(&mut s, view, ln.bound);
+
                         if !ln.pv.is_empty() {
                             s.push_str(" pv");
                             for m in ln.pv.iter() {
@@ -361,16 +374,18 @@ fn finalize_and_send(
     }
 
     // Emit bestmove (+ ponder)
-    let final_usi = if mate_flag {
-        "resign".to_string()
-    } else {
-        final_best
-            .best_move
-            .map(|m| move_to_usi(&m))
-            .unwrap_or_else(|| "resign".to_string())
-    };
+    let final_usi = final_best
+        .best_move
+        .map(|m| move_to_usi(&m))
+        .unwrap_or_else(|| "resign".to_string());
     let ponder_mv = if state.opts.ponder {
-        final_best.pv.get(1).map(move_to_usi)
+        // Prefer PV second move; fallback to TT-derived ponder for better UX
+        final_best.pv.get(1).map(move_to_usi).or_else(|| {
+            final_best.best_move.and_then(|bm| {
+                let eng = state.engine.lock().unwrap();
+                eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
+            })
+        })
     } else {
         None
     };
@@ -387,8 +402,9 @@ fn send_id_and_options(opts: &UsiOptions) {
     usi_println("id author RustShogi Team");
 
     // Options we support in this thin USI
+    // Align max with engine clamp to avoid confusion
     usi_println(&format!(
-        "option name USI_Hash type spin default {} min 1 max 32768",
+        "option name USI_Hash type spin default {} min 1 max 1024",
         opts.hash_mb
     ));
     usi_println(&format!("option name Threads type spin default {} min 1 max 256", opts.threads));
@@ -413,7 +429,6 @@ fn send_id_and_options(opts: &UsiOptions) {
 fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     // Format: position [startpos | sfen <sfen...>] [moves m1 m2 ...]
     let mut tokens = cmd.split_whitespace().skip(1).peekable();
-    let mut pos = Position::startpos();
     let mut have_pos = false;
     // Reset record of current position components
     state.pos_from_startpos = false;
@@ -424,7 +439,6 @@ fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
         match tok {
             "startpos" => {
                 let _ = tokens.next();
-                pos = Position::startpos();
                 have_pos = true;
                 state.pos_from_startpos = true;
                 state.pos_sfen = None;
@@ -438,26 +452,22 @@ fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
                         break;
                     }
                     sfen_parts.push(tokens.next().unwrap().to_string());
-                    if sfen_parts.len() >= 6 {
-                        break;
-                    }
                 }
                 let sfen = sfen_parts.join(" ");
-                pos = parse_sfen(&sfen).map_err(|e| anyhow!("Invalid SFEN: {}", e))?;
+                if sfen.trim().is_empty() {
+                    info_string("invalid_sfen_empty");
+                    return Err(anyhow!("Empty SFEN in position command"));
+                }
+                // Defer parsing to core; just store SFEN parts here
                 have_pos = true;
                 state.pos_from_startpos = false;
                 state.pos_sfen = Some(sfen);
             }
             "moves" => {
                 let _ = tokens.next();
-                // Apply moves
+                // Collect moves only; legality will be validated by core
                 for mstr in tokens.by_ref() {
                     state.pos_moves.push(mstr.to_string());
-                    let mv = parse_usi_move(mstr).map_err(|_| anyhow!("Invalid move: {}", mstr))?;
-                    if !pos.is_legal_move(mv) {
-                        return Err(anyhow!("Illegal move in sequence: {}", mstr));
-                    }
-                    pos.do_move(mv);
                 }
             }
             _ => {
@@ -467,9 +477,13 @@ fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     }
 
     if !have_pos {
-        pos = Position::startpos();
+        state.pos_from_startpos = true;
+        state.pos_sfen = None;
     }
 
+    // Build via core helper (validates legality and promotions)
+    let pos =
+        create_position(state.pos_from_startpos, state.pos_sfen.as_deref(), &state.pos_moves)?;
     state.position = pos;
     Ok(())
 }
@@ -626,20 +640,21 @@ fn run_search_thread(
             line.push_str(&format!(" depth {}", depth));
             line.push_str(&format!(" time {}", elapsed.as_millis()));
             line.push_str(&format!(" nodes {}", nodes));
-            // score: cp
-            line.push_str(&format!(" score cp {}", score));
+            // Add nps (nodes per second) with minimal overhead
+            let ems = elapsed.as_millis();
+            if ems > 0 {
+                let nps = (nodes as u128).saturating_mul(1000) / ems;
+                line.push_str(&format!(" nps {}", nps));
+            }
+            // score: normalize to mate or cp with proper bound tag placement
+            let view = score_view_from_internal(score);
+            append_usi_score_and_bound(&mut line, view, node_type);
             if !pv.is_empty() {
                 line.push_str(" pv");
                 for m in pv.iter() {
                     line.push(' ');
                     line.push_str(&move_to_usi(m));
                 }
-            }
-            // node_type only for bound info
-            match node_type {
-                engine_core::search::types::NodeType::UpperBound => line.push_str(" upperbound"),
-                engine_core::search::types::NodeType::LowerBound => line.push_str(" lowerbound"),
-                _ => {}
             }
             usi_println(&line);
         });
@@ -775,21 +790,11 @@ fn main() -> Result<()> {
                         } else if was_ponder {
                             // Ponder完了結果は送出しない（USI仕様）。GUIのponderhit/stopに従う。
                         } else {
-                            // Normal finalize and emit bestmove（Mateは投了優先、合法性ガード）
+                            // Normal finalize (centralized)
                             // まずステール結果のガード（rootハッシュ比較）
                             let stale = state
                                 .current_root_hash
                                 .map(|h| h != state.position.zobrist_hash())
-                                .unwrap_or(false);
-                            let mate_flag = result
-                                .stop_info
-                                .as_ref()
-                                .map(|si| {
-                                    matches!(
-                                        si.reason,
-                                        engine_core::search::types::TerminationReason::Mate
-                                    )
-                                })
                                 .unwrap_or(false);
 
                             // Diagnostics: finalize snapshot
@@ -817,57 +822,7 @@ fn main() -> Result<()> {
                                 hard_ms
                             ));
 
-                            let (final_usi, final_pv) = if mate_flag {
-                                ("resign".to_string(), Vec::new())
-                            } else {
-                                // Centralized finalize using engine-core helper
-                                let committed = if !stale {
-                                    Some(engine_core::search::CommittedIteration {
-                                        depth: result.stats.depth,
-                                        seldepth: result.stats.seldepth,
-                                        score: result.score,
-                                        pv: result.stats.pv.clone(),
-                                        node_type: result.node_type,
-                                        nodes: result.stats.nodes,
-                                        elapsed: result.stats.elapsed,
-                                    })
-                                } else {
-                                    None
-                                };
-                                let final_best = {
-                                    let eng = state.engine.lock().unwrap();
-                                    eng.choose_final_bestmove(&state.position, committed.as_ref())
-                                };
-                                info_string(format!(
-                                    "finalize_select source={} move={} stale={}",
-                                    source_to_str(final_best.source),
-                                    final_best
-                                        .best_move
-                                        .map(|m| move_to_usi(&m))
-                                        .unwrap_or_else(|| "resign".to_string()),
-                                    if stale { 1 } else { 0 }
-                                ));
-                                (
-                                    final_best
-                                        .best_move
-                                        .map(|m| move_to_usi(&m))
-                                        .unwrap_or_else(|| "resign".to_string()),
-                                    final_best.pv,
-                                )
-                            };
-
-                            let ponder_mv = if state.opts.ponder {
-                                // Use selected PV for ponder when available
-                                final_pv.get(1).map(move_to_usi)
-                            } else {
-                                None
-                            };
-                            if let Some(p) = ponder_mv {
-                                usi_println(&format!("bestmove {} ponder {}", final_usi, p));
-                            } else {
-                                usi_println(&format!("bestmove {}", final_usi));
-                            }
-                            state.current_root_hash = None;
+                            finalize_and_send(&mut state, "finalize", Some(&result), stale);
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
@@ -960,6 +915,10 @@ fn main() -> Result<()> {
                             if let Some(v) = value {
                                 if let Ok(k) = v.parse::<u8>() {
                                     state.opts.multipv = k.clamp(1, 20);
+                                    // Persist immediately so it survives ClearHash/TT resize
+                                    if let Ok(mut eng) = state.engine.lock() {
+                                        eng.set_multipv_persistent(state.opts.multipv);
+                                    }
                                 }
                             }
                         }
@@ -990,6 +949,8 @@ fn main() -> Result<()> {
                         }
                         "ClearHash" => {
                             if let Ok(mut eng) = state.engine.lock() {
+                                // Re-apply persistent MultiPV before clearing/recreating
+                                eng.set_multipv_persistent(state.opts.multipv);
                                 eng.clear_hash();
                             }
                         }
@@ -1151,11 +1112,16 @@ fn main() -> Result<()> {
                     None
                 };
 
-                let gp = if cmd == "go" {
+                let mut gp = if cmd == "go" {
                     GoParams::default()
                 } else {
                     parse_go(cmd)
                 };
+                // Guard: if USI_Ponder is disabled, force gp.ponder=false to avoid silent ponder state
+                if gp.ponder && !state.opts.ponder {
+                    info_string("ponder_disabled_guard=1");
+                    gp.ponder = false;
+                }
                 // Save last go params
                 state.last_go_params = Some(gp.clone());
                 // Stochastic Ponder: if go ponder && enabled → search from 1手前
@@ -1220,6 +1186,7 @@ fn main() -> Result<()> {
                 state.worker = Some(handle);
                 state.result_rx = Some(rx);
                 state.current_is_stochastic_ponder = current_is_stochastic_ponder;
+                state.current_is_ponder = gp.ponder;
                 state.current_root_hash = Some(search_position.zobrist_hash());
                 // Diagnostics: mark search start and show hashes
                 info_string(format!(
@@ -1269,6 +1236,8 @@ fn main() -> Result<()> {
                                     state.stop_flag = None;
                                     state.ponder_hit_flag = None;
 
+                                    // Note: Even if the current search is pondering, emit bestmove on explicit stop
+                                    // for compatibility with GUIs that expect a bestmove response after stop.
                                     // Finalize centrally using choose_final_bestmove
                                     let stale = state
                                         .current_root_hash
@@ -1292,8 +1261,10 @@ fn main() -> Result<()> {
                                         "stop_finalize",
                                         Some(&result),
                                         stale,
-                                        false,
                                     );
+                                    // Reset ponder state after explicit stop
+                                    state.current_is_ponder = false;
+                                    state.current_root_hash = None;
                                     finalized = true;
                                 }
                                 Err(mpsc::RecvTimeoutError::Timeout) => { /* continue */ }
@@ -1320,17 +1291,15 @@ fn main() -> Result<()> {
                             state.stop_flag = None;
                             state.ponder_hit_flag = None;
 
+                            // Emit bestmove even if this was a ponder search, to avoid GUI timeouts after stop.
                             let stale = state
                                 .current_root_hash
                                 .map(|h| h != state.position.zobrist_hash())
                                 .unwrap_or(false);
-                            finalize_and_send(
-                                &mut state,
-                                "stop_timeout_finalize",
-                                None,
-                                stale,
-                                false,
-                            );
+                            finalize_and_send(&mut state, "stop_timeout_finalize", None, stale);
+                            // Reset ponder state after explicit stop
+                            state.current_is_ponder = false;
+                            state.current_root_hash = None;
                         }
                     }
                 }
@@ -1384,5 +1353,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-
-// emergency_fallback_move: 廃止（stop経路は中央Finalizeへ一元化）
