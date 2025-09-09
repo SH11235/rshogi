@@ -298,6 +298,7 @@ impl Position {
 
 #[cfg(test)]
 mod tests {
+    use crate::shogi::board::MAX_PIECE_INDEX;
     use crate::usi::parse_usi_square;
 
     use super::*;
@@ -323,7 +324,7 @@ mod tests {
 
         // Test piece-square values
         for color in 0..2 {
-            for piece in 0..14 {
+            for piece in 0..MAX_PIECE_INDEX {
                 for sq in 0..crate::shogi::SHOGI_BOARD_SIZE {
                     let hash = table.piece_square[color][piece][sq];
                     assert!(values.insert(hash), "Duplicate hash found");
