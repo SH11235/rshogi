@@ -57,6 +57,41 @@ use tools::stats::{
     binary_metrics, calibration_bins, ece_from_bins, regression_metrics, roc_auc_weighted,
 };
 
+// Training configuration constants
+const DEFAULT_ACC_DIM: &str = "256";
+const DEFAULT_RELU_CLIP: &str = "127";
+const MAX_PREFETCH_BATCHES: usize = 1024;
+
+// Weight scaling constants
+const GAP_WEIGHT_DIVISOR: f32 = 50.0;
+const SELECTIVE_DEPTH_WEIGHT: f32 = 0.8;
+const NON_EXACT_BOUND_WEIGHT: f32 = 0.7;
+const SELECTIVE_DEPTH_MARGIN: i32 = 6;
+
+// Numeric conversion constants
+const PERCENTAGE_DIVISOR: f32 = 100.0;
+const CP_TO_FLOAT_DIVISOR: f32 = 100.0;
+const CP_CLAMP_LIMIT: f32 = 20.0;
+const NANOSECONDS_PER_SECOND: f64 = 1e9;
+const BYTES_PER_MB: usize = 1024 * 1024;
+const KB_TO_MB_DIVISOR: f32 = 1024.0;
+
+// Buffer sizes
+const LINE_BUFFER_CAPACITY: usize = 64 * 1024;
+
+// Adam optimizer constants
+const ADAM_BETA1: f32 = 0.9;
+const ADAM_BETA2: f32 = 0.999;
+const ADAM_EPSILON: f32 = 1e-8;
+
+// Safety constants
+const MIN_ELAPSED_TIME: f64 = 1e-6;
+
+// Quantization constants
+const QUANTIZATION_MIN: f32 = -128.0;
+const QUANTIZATION_MAX: f32 = 127.0;
+const QUANTIZATION_METADATA_SIZE: usize = 3 * 8 + 4;
+
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
     sfen: String,
@@ -544,14 +579,18 @@ impl StreamCacheLoader {
 
                 // weight policy
                 let mut weight = 1.0f32;
-                weight *= (gap as f32 / 50.0).min(1.0);
+                weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
                 let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
-                weight *= if both_exact { 1.0 } else { 0.7 };
+                weight *= if both_exact {
+                    1.0
+                } else {
+                    NON_EXACT_BOUND_WEIGHT
+                };
                 if (flags & fc_flags::MATE_BOUNDARY) != 0 {
                     weight *= 0.5;
                 }
-                if seldepth < depth.saturating_add(6) {
-                    weight *= 0.8;
+                if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
+                    weight *= SELECTIVE_DEPTH_WEIGHT;
                 }
 
                 batch.push(Sample {
@@ -644,9 +683,9 @@ impl AdamState {
             v_w2: vec![0.0; network.w2.len()],
             m_b2: 0.0,
             v_b2: 0.0,
-            beta1: 0.9,
-            beta2: 0.999,
-            epsilon: 1e-8,
+            beta1: ADAM_BETA1,
+            beta2: ADAM_BETA2,
+            epsilon: ADAM_EPSILON,
             t: 0,
         }
     }
@@ -677,8 +716,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(clap::value_parser!(i32).range(0..))
                 .default_value("1200"),
         )
-        .arg(arg!(--"acc-dim" <N> "Accumulator dimension").default_value("256"))
-        .arg(arg!(--"relu-clip" <N> "ReLU clipping value").default_value("127"))
+        .arg(arg!(--"acc-dim" <N> "Accumulator dimension").default_value(DEFAULT_ACC_DIM))
+        .arg(arg!(--"relu-clip" <N> "ReLU clipping value").default_value(DEFAULT_RELU_CLIP))
         .arg(arg!(--shuffle "Shuffle training data"))
         .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves (JSONL input)"))
         .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used (JSONL input)"))
@@ -760,8 +799,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.throughput_interval_sec <= 0.0 {
         return Err("Invalid --throughput-interval: must be > 0".into());
     }
-    if config.prefetch_batches > 1024 {
-        return Err("Invalid --prefetch-batches: must be <= 1024".into());
+    if config.prefetch_batches > MAX_PREFETCH_BATCHES {
+        return Err(format!("Invalid --prefetch-batches: must be <= {MAX_PREFETCH_BATCHES}").into());
     }
 
     let input_path = app.get_one::<String>("input").unwrap();
@@ -1067,14 +1106,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn open_jsonl_reader(path: &str) -> Result<Box<dyn BufRead>, Box<dyn std::error::Error>> {
     const BUF_MB: usize = 4;
-    tools::io_detect::open_maybe_compressed_reader(path, BUF_MB * 1024 * 1024)
+    tools::io_detect::open_maybe_compressed_reader(path, BUF_MB * BYTES_PER_MB)
 }
 
 fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let mut reader = open_jsonl_reader(path)?;
     let mut samples = Vec::new();
     let mut skipped = 0;
-    let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut line_buf: Vec<u8> = Vec::with_capacity(LINE_BUFFER_CAPACITY);
 
     loop {
         line_buf.clear();
@@ -1145,7 +1184,9 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
             let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
             let label = match config.label_type.as_str() {
                 "wdl" => cp_to_wdl(cp_black, config.scale),
-                "cp" => (cp_black.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
+                "cp" => {
+                    (cp_black.clamp(-config.cp_clip, config.cp_clip) as f32) / CP_TO_FLOAT_DIVISOR
+                }
                 _ => continue,
             };
             samples.push(Sample {
@@ -1163,7 +1204,9 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
             let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
             let label = match config.label_type.as_str() {
                 "wdl" => cp_to_wdl(cp_white, config.scale),
-                "cp" => (cp_white.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
+                "cp" => {
+                    (cp_white.clamp(-config.cp_clip, config.cp_clip) as f32) / CP_TO_FLOAT_DIVISOR
+                }
                 _ => continue,
             };
             samples.push(Sample {
@@ -1184,7 +1227,7 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
 }
 
 fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
-    let x = (cp as f32 / scale).clamp(-20.0, 20.0);
+    let x = (cp as f32 / scale).clamp(-CP_CLAMP_LIMIT, CP_CLAMP_LIMIT);
     1.0 / (1.0 + (-x).exp())
 }
 
@@ -1201,12 +1244,16 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
 
     // Gap-based weight
     if let Some(gap) = pos_data.best2_gap_cp {
-        weight *= (gap as f32 / 50.0).min(1.0);
+        weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
     }
 
     // Bound-based weight
     let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
-    weight *= if both_exact { 1.0 } else { 0.7 };
+    weight *= if both_exact {
+        1.0
+    } else {
+        NON_EXACT_BOUND_WEIGHT
+    };
 
     // Mate boundary weight
     if pos_data.mate_boundary.unwrap_or(false) {
@@ -1215,8 +1262,8 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
 
     // Depth-based weight
     if let (Some(depth), Some(seldepth)) = (pos_data.depth, pos_data.seldepth) {
-        if seldepth < depth.saturating_add(6) {
-            weight *= 0.8;
+        if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
+            weight *= SELECTIVE_DEPTH_WEIGHT;
         }
     }
 
@@ -1320,11 +1367,15 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         let mut weight = 1.0;
 
         // Gap-based weight
-        weight *= (gap as f32 / 50.0).min(1.0);
+        weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
 
         // Exact bound weight
         let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
-        weight *= if both_exact { 1.0 } else { 0.7 };
+        weight *= if both_exact {
+            1.0
+        } else {
+            NON_EXACT_BOUND_WEIGHT
+        };
 
         // Mate boundary weight
         if (flags & fc_flags::MATE_BOUNDARY) != 0 {
@@ -1332,8 +1383,8 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         }
 
         // Depth-based weight
-        if seldepth < depth.saturating_add(6) {
-            weight *= 0.8;
+        if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
+            weight *= SELECTIVE_DEPTH_WEIGHT;
         }
 
         samples.push(Sample {
@@ -1443,7 +1494,7 @@ fn train_model(
             if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                 && batches_since > 0
             {
-                let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                let secs = last_report.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
                 let sps = samples_since as f32 / secs;
                 let bps = batches_since as f32 / secs;
                 let avg_bs = samples_since as f32 / batches_since as f32;
@@ -1669,7 +1720,7 @@ fn train_model(
             val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
         }
 
-        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
         let epoch_sps = (n_samples as f32) / epoch_secs;
         if zero_weight_batches > 0 {
             eprintln!(
@@ -1824,14 +1875,18 @@ fn train_model_stream_cache(
                     let flags = flags[0];
                     let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
                     let mut weight = 1.0f32;
-                    weight *= (gap as f32 / 50.0).min(1.0);
+                    weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
                     let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
-                    weight *= if both_exact { 1.0 } else { 0.7 };
+                    weight *= if both_exact {
+                        1.0
+                    } else {
+                        NON_EXACT_BOUND_WEIGHT
+                    };
                     if (flags & fc_flags::MATE_BOUNDARY) != 0 {
                         weight *= 0.5;
                     }
-                    if seldepth < depth.saturating_add(6) {
-                        weight *= 0.8;
+                    if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
+                        weight *= SELECTIVE_DEPTH_WEIGHT;
                     }
 
                     batch.push(Sample {
@@ -1867,12 +1922,14 @@ fn train_model_stream_cache(
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
                 {
-                    let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                    let secs = last_report.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
                     let sps = samples_since as f32 / secs;
                     let bps = batches_since as f32 / secs;
                     let avg_bs = samples_since as f32 / batches_since as f32;
-                    let loader_ratio =
-                        ((read_ns_since as f64) / (secs as f64 * 1e9)).clamp(0.0, 1.0) * 100.0;
+                    let loader_ratio = ((read_ns_since as f64)
+                        / (secs as f64 * NANOSECONDS_PER_SECOND))
+                        .clamp(0.0, 1.0)
+                        * PERCENTAGE_DIVISOR as f64;
                     println!(
                         "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
                         epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
@@ -1894,9 +1951,11 @@ fn train_model_stream_cache(
             } else {
                 0.0
             };
-            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
-            let loader_ratio_epoch =
-                ((read_ns_epoch as f64) / (epoch_secs as f64 * 1e9)).clamp(0.0, 1.0) * 100.0;
+            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
+            let loader_ratio_epoch = ((read_ns_epoch as f64)
+                / (epoch_secs as f64 * NANOSECONDS_PER_SECOND))
+                .clamp(0.0, 1.0)
+                * PERCENTAGE_DIVISOR as f64;
             let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
             println!(
                 "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
@@ -1975,13 +2034,13 @@ fn train_model_stream_cache(
             if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                 && batches_since > 0
             {
-                let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                let secs = last_report.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
                 let sps = samples_since as f32 / secs;
                 let bps = batches_since as f32 / secs;
                 let avg_bs = samples_since as f32 / batches_since as f32;
-                let wait_secs = (wait_ns_since as f64) / 1e9f64;
+                let wait_secs = (wait_ns_since as f64) / NANOSECONDS_PER_SECOND;
                 let loader_ratio = if secs > 0.0 {
-                    (wait_secs / secs as f64) * 100.0
+                    (wait_secs / secs as f64) * PERCENTAGE_DIVISOR as f64
                 } else {
                     0.0
                 };
@@ -2203,10 +2262,10 @@ fn train_model_stream_cache(
             }
             val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
         }
-        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
-        let wait_secs_epoch = (wait_ns_epoch as f64) / 1e9f64;
+        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
+        let wait_secs_epoch = (wait_ns_epoch as f64) / NANOSECONDS_PER_SECOND;
         let loader_ratio_epoch = if epoch_secs > 0.0 {
-            ((wait_secs_epoch / epoch_secs as f64) * 100.0) as f32
+            ((wait_secs_epoch / epoch_secs as f64) * PERCENTAGE_DIVISOR as f64) as f32
         } else {
             0.0
         };
@@ -2334,14 +2393,14 @@ fn train_model_with_loader(
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
                 {
-                    let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                    let secs = last_report.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
                     let sps = samples_since as f32 / secs;
                     let bps = batches_since as f32 / secs;
                     let avg_bs = samples_since as f32 / batches_since as f32;
                     // compute_ns_since is not directly tracked; approximate as (secs - wait) * 1e9
-                    let wait_secs = (wait_ns_since as f64) / 1e9f64;
+                    let wait_secs = (wait_ns_since as f64) / NANOSECONDS_PER_SECOND;
                     let loader_ratio = if secs > 0.0 {
-                        (wait_secs / secs as f64) * 100.0
+                        (wait_secs / secs as f64) * PERCENTAGE_DIVISOR as f64
                     } else {
                         0.0
                     };
@@ -2564,10 +2623,10 @@ fn train_model_with_loader(
                 val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
             }
 
-            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
             let loader_ratio_epoch = if epoch_secs > 0.0 {
-                let wait_secs = (wait_ns_epoch as f64) / 1e9f64;
-                ((wait_secs / epoch_secs as f64) * 100.0) as f32
+                let wait_secs = (wait_ns_epoch as f64) / NANOSECONDS_PER_SECOND;
+                ((wait_secs / epoch_secs as f64) * PERCENTAGE_DIVISOR as f64) as f32
             } else {
                 0.0
             };
@@ -2660,7 +2719,7 @@ fn train_model_with_loader(
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
                 {
-                    let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                    let secs = last_report.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
                     let sps = samples_since as f32 / secs;
                     let bps = batches_since as f32 / secs;
                     let avg_bs = samples_since as f32 / batches_since as f32;
@@ -2881,7 +2940,7 @@ fn train_model_with_loader(
                 val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
             }
 
-            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
             let epoch_sps = (train_samples_arc.len() as f32) / epoch_secs;
             if let Some(vl) = val_loss {
                 if vl < *best_val_loss {
@@ -3198,7 +3257,8 @@ impl QuantizationParams {
         // Scale to map [min, max] to [-128, 127]
         let range = (max_val - min_val).max(1e-8);
         let scale = range / 255.0;
-        let zero_point = (-min_val / scale - 128.0).round().clamp(-128.0, 127.0) as i32;
+        let zero_point =
+            (-min_val / scale - 128.0).round().clamp(QUANTIZATION_MIN, QUANTIZATION_MAX) as i32;
 
         Self { scale, zero_point }
     }
@@ -3210,7 +3270,7 @@ fn quantize_weights(weights: &[f32], params: &QuantizationParams) -> Vec<i8> {
         .iter()
         .map(|&w| {
             let quantized = (w / params.scale + params.zero_point as f32).round();
-            quantized.clamp(-128.0, 127.0) as i8
+            quantized.clamp(QUANTIZATION_MIN, QUANTIZATION_MAX) as i8
         })
         .collect()
 }
@@ -3260,12 +3320,13 @@ fn save_network_quantized(
 
     // Calculate size reduction
     let original_size = (network.w0.len() + network.b0.len() + network.w2.len() + 1) * 4;
-    let quantized_size = (network.w0.len() + network.b0.len() + network.w2.len()) + 3 * 8 + 4;
+    let quantized_size =
+        (network.w0.len() + network.b0.len() + network.w2.len()) + QUANTIZATION_METADATA_SIZE;
     println!(
         "Quantized model saved. Size: {:.1} MB -> {:.1} MB ({:.1}% reduction)",
-        original_size as f32 / 1024.0 / 1024.0,
-        quantized_size as f32 / 1024.0 / 1024.0,
-        (1.0 - quantized_size as f32 / original_size as f32) * 100.0
+        original_size as f32 / KB_TO_MB_DIVISOR / KB_TO_MB_DIVISOR,
+        quantized_size as f32 / KB_TO_MB_DIVISOR / KB_TO_MB_DIVISOR,
+        (1.0 - quantized_size as f32 / original_size as f32) * PERCENTAGE_DIVISOR
     );
 
     Ok(())
@@ -3317,6 +3378,10 @@ mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
     use tempfile::tempdir;
+
+    const DEFAULT_RELU_CLIP_NUM: i32 = 127;
+    const DEFAULT_CALIBRATION_BINS: usize = 40;
+    const DEFAULT_CHUNK_SIZE: u32 = 1024;
 
     #[derive(Clone, Copy)]
     struct HeaderV1 {
@@ -3399,7 +3464,7 @@ mod tests {
                 HeaderV1 {
                     feature_set_id: 0x48414C46,
                     num_samples: 0,
-                    chunk_size: 1024,
+                    chunk_size: DEFAULT_CHUNK_SIZE,
                     header_size: 48,
                     endianness: 1, // BE
                     payload_encoding: 0,
@@ -3421,7 +3486,7 @@ mod tests {
                 HeaderV1 {
                     feature_set_id: 0x48414C46,
                     num_samples: 0,
-                    chunk_size: 1024,
+                    chunk_size: DEFAULT_CHUNK_SIZE,
                     header_size: 48,
                     endianness: 0,
                     payload_encoding: 3,
@@ -3443,7 +3508,7 @@ mod tests {
                 HeaderV1 {
                     feature_set_id: 0x00000000,
                     num_samples: 0,
-                    chunk_size: 1024,
+                    chunk_size: DEFAULT_CHUNK_SIZE,
                     header_size: 48,
                     endianness: 0,
                     payload_encoding: 0,
@@ -3465,7 +3530,7 @@ mod tests {
                 HeaderV1 {
                     feature_set_id: 0x48414C46,
                     num_samples: 0,
-                    chunk_size: 1024,
+                    chunk_size: DEFAULT_CHUNK_SIZE,
                     header_size: bad_size,
                     endianness: 0,
                     payload_encoding: 0,
@@ -3522,7 +3587,7 @@ mod tests {
                 HeaderV1 {
                     feature_set_id: 0x48414C46,
                     num_samples: 0,
-                    chunk_size: 1024,
+                    chunk_size: DEFAULT_CHUNK_SIZE,
                     header_size: 64,
                     endianness: 0,
                     payload_encoding: 0,
@@ -3558,7 +3623,7 @@ mod tests {
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 8,
-            relu_clip: 127,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
             shuffle: false,
             prefetch_batches: 0,
             throughput_interval_sec: 10_000.0,
@@ -3581,7 +3646,7 @@ mod tests {
                 HeaderV1 {
                     feature_set_id: 0x48414C46,
                     num_samples: 1,
-                    chunk_size: 1024,
+                    chunk_size: DEFAULT_CHUNK_SIZE,
                     header_size: 48,
                     endianness: 0,
                     payload_encoding: 0,
@@ -3627,7 +3692,7 @@ mod tests {
             HeaderV1 {
                 feature_set_id: 0x48414C46,
                 num_samples: 1,
-                chunk_size: 1024,
+                chunk_size: DEFAULT_CHUNK_SIZE,
                 header_size: 48,
                 endianness: 0,
                 payload_encoding: 0,
@@ -3650,7 +3715,7 @@ mod tests {
     fn auc_boundary_labels_skipped() {
         // Network with zero weights outputs 0.0 logits -> p=0.5
         let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-        let mut net = Network::new(8, 127, &mut rng);
+        let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
         // Zero out all weights/biases to make output exactly 0
         for w in net.w0.iter_mut() {
             *w = 0.0;
@@ -3690,7 +3755,7 @@ mod tests {
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 8,
-            relu_clip: 127,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
             shuffle: false,
             prefetch_batches: 0,
             throughput_interval_sec: 10.0,
@@ -3727,7 +3792,7 @@ mod tests {
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 8,
-            relu_clip: 127,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
             shuffle: false,
             prefetch_batches: 0,
             throughput_interval_sec: 10_000.0,
@@ -3774,7 +3839,7 @@ mod tests {
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 8,
-            relu_clip: 127,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
             shuffle: false,
             prefetch_batches: 0,
             throughput_interval_sec: 10_000.0,
@@ -3803,7 +3868,7 @@ mod tests {
         let mut dummy_rng2 = rand::rngs::StdRng::seed_from_u64(123);
         let dash = super::DashboardOpts {
             emit: false,
-            calib_bins_n: 40,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
             do_plots: false,
             val_is_jsonl: false,
         };
@@ -3825,7 +3890,7 @@ mod tests {
         train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
         let dash2 = super::DashboardOpts {
             emit: false,
-            calib_bins_n: 40,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
             do_plots: false,
             val_is_jsonl: false,
         };
@@ -3875,7 +3940,7 @@ mod tests {
             HeaderV1 {
                 feature_set_id: 0x48414C46,
                 num_samples: 1,
-                chunk_size: 1024,
+                chunk_size: DEFAULT_CHUNK_SIZE,
                 header_size: 48,
                 endianness: 0,
                 payload_encoding: 0,
@@ -3909,7 +3974,7 @@ mod tests {
             HeaderV1 {
                 feature_set_id: 0x48414C46,
                 num_samples: 3,
-                chunk_size: 1024,
+                chunk_size: DEFAULT_CHUNK_SIZE,
                 header_size: 48,
                 endianness: 0,
                 payload_encoding: 0,
@@ -3943,7 +4008,7 @@ mod tests {
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 8,
-            relu_clip: 127,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
             shuffle: false,
             prefetch_batches: 0,
             throughput_interval_sec: 10_000.0,
@@ -3974,7 +4039,7 @@ mod tests {
         // in-mem 学習
         let dash_inmem = super::DashboardOpts {
             emit: false,
-            calib_bins_n: 40,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
             do_plots: false,
             val_is_jsonl: false,
         };
@@ -3998,7 +4063,7 @@ mod tests {
         // stream-sync 学習
         let dash_stream = super::DashboardOpts {
             emit: false,
-            calib_bins_n: 40,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
             do_plots: false,
             val_is_jsonl: false,
         };
@@ -4062,7 +4127,7 @@ mod tests {
             HeaderV1 {
                 feature_set_id: FEATURE_SET_ID_HALF,
                 num_samples: 1,
-                chunk_size: 1024,
+                chunk_size: DEFAULT_CHUNK_SIZE,
                 header_size: 48,
                 endianness: 0,
                 payload_encoding: 0,
@@ -4085,7 +4150,7 @@ mod tests {
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 8,
-            relu_clip: 127,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
             shuffle: false,
             prefetch_batches: 2, // async 経路
             throughput_interval_sec: 10_000.0,
@@ -4101,7 +4166,7 @@ mod tests {
         let out_dir = td.path();
         let dash = super::DashboardOpts {
             emit: false,
-            calib_bins_n: 40,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
             do_plots: false,
             val_is_jsonl: false,
         };
@@ -4156,7 +4221,7 @@ mod tests {
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 8,
-            relu_clip: 127,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
             shuffle: false,
             prefetch_batches: 0,
             throughput_interval_sec: 10_000.0,
@@ -4174,7 +4239,7 @@ mod tests {
         let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
         let dash = super::DashboardOpts {
             emit: false,
-            calib_bins_n: 40,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
             do_plots: false,
             val_is_jsonl: false,
         };
