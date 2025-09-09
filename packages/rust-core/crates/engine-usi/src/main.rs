@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use engine_core::engine::controller::{Engine, EngineType, FinalBestSource};
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
 use engine_core::shogi::{Color, Position};
@@ -267,14 +267,20 @@ fn source_to_str(src: FinalBestSource) -> &'static str {
 /// Centralized finalize + bestmove emission
 /// - label: "finalize" | "stop_finalize" | "stop_timeout_finalize"
 /// - result: Some(&SearchResult) when available to build committed PV and log soft/hard
-/// - stale: whether root hash mismatched
-/// - mate_flag: force resign when true (normal finalizeのみで使用)
+/// - stale: whether root hash mismatched (when true: emits "bestmove resign" and returns early)
 fn finalize_and_send(
     state: &mut EngineState,
     label: &str,
     result: Option<&engine_core::search::SearchResult>,
     stale: bool,
 ) {
+    // If stale, do not try to select a move from the new position; emit resign and return.
+    if stale {
+        info_string(format!("{label}_stale resign=1"));
+        usi_println("bestmove resign");
+        state.current_root_hash = None;
+        return;
+    }
     // Build committed when applicable
     let committed = if let Some(res) = result {
         if !stale {
@@ -324,6 +330,17 @@ fn finalize_and_send(
         if !stale {
             if let Some(ref lines) = res.lines {
                 if !lines.is_empty() {
+                    // Obtain hashfull once (permille) and compute aggregate nps
+                    let hf_permille = {
+                        let eng = state.engine.lock().unwrap();
+                        eng.tt_hashfull_permille()
+                    };
+                    let nps_agg: u128 = if res.stats.elapsed.as_millis() > 0 {
+                        (res.stats.nodes as u128).saturating_mul(1000)
+                            / res.stats.elapsed.as_millis()
+                    } else {
+                        0
+                    };
                     for (i, ln) in lines.iter().enumerate() {
                         // info multipv N depth D time T nodes N score (cp|mate) X [lowerbound|upperbound] pv ...
                         let mut s = String::from("info");
@@ -334,6 +351,8 @@ fn finalize_and_send(
                         }
                         s.push_str(&format!(" time {}", res.stats.elapsed.as_millis()));
                         s.push_str(&format!(" nodes {}", res.stats.nodes));
+                        s.push_str(&format!(" nps {}", nps_agg));
+                        s.push_str(&format!(" hashfull {}", hf_permille));
 
                         // Prefer mate output when available; otherwise cp
                         let view = score_view_from_internal(ln.score_internal);
@@ -354,16 +373,11 @@ fn finalize_and_send(
     }
 
     // Emit bestmove (+ ponder)
-    // Stale guard: when stale, always emit resign to avoid mixing results for different positions
-    let final_usi = if stale {
-        "resign".to_string()
-    } else {
-        final_best
-            .best_move
-            .map(|m| move_to_usi(&m))
-            .unwrap_or_else(|| "resign".to_string())
-    };
-    let ponder_mv = if !stale && state.opts.ponder {
+    let final_usi = final_best
+        .best_move
+        .map(|m| move_to_usi(&m))
+        .unwrap_or_else(|| "resign".to_string());
+    let ponder_mv = if state.opts.ponder {
         final_best.pv.get(1).map(move_to_usi)
     } else {
         None
@@ -432,6 +446,10 @@ fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
                     sfen_parts.push(tokens.next().unwrap().to_string());
                 }
                 let sfen = sfen_parts.join(" ");
+                if sfen.trim().is_empty() {
+                    info_string("invalid_sfen_empty");
+                    return Err(anyhow!("Empty SFEN in position command"));
+                }
                 // Defer parsing to core; just store SFEN parts here
                 have_pos = true;
                 state.pos_from_startpos = false;
@@ -614,6 +632,12 @@ fn run_search_thread(
             line.push_str(&format!(" depth {}", depth));
             line.push_str(&format!(" time {}", elapsed.as_millis()));
             line.push_str(&format!(" nodes {}", nodes));
+            // Add nps (nodes per second) with minimal overhead
+            let ems = elapsed.as_millis();
+            if ems > 0 {
+                let nps = (nodes as u128).saturating_mul(1000) / ems;
+                line.push_str(&format!(" nps {}", nps));
+            }
             // score: normalize to mate or cp with proper bound tag placement
             let view = score_view_from_internal(score);
             append_usi_score_and_bound(&mut line, view, node_type);
@@ -1081,6 +1105,7 @@ fn main() -> Result<()> {
                 };
                 // Guard: if USI_Ponder is disabled, force gp.ponder=false to avoid silent ponder state
                 if gp.ponder && !state.opts.ponder {
+                    info_string("ponder_disabled_guard=1");
                     gp.ponder = false;
                 }
                 // Save last go params
@@ -1261,6 +1286,7 @@ fn main() -> Result<()> {
                                 finalize_and_send(&mut state, "stop_timeout_finalize", None, stale);
                             } else {
                                 state.current_is_ponder = false;
+                                state.current_root_hash = None;
                             }
                         }
                     }
