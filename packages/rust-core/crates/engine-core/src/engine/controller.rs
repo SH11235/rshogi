@@ -210,6 +210,7 @@ impl Engine {
 
     /// Get current hashfull estimate of the transposition table (permille: 0-1000)
     /// - Uses shared TT in parallel mode; otherwise queries the active searcher's TT when available
+    /// - Falls back to shared TT when the active searcher is not yet initialized
     pub fn tt_hashfull_permille(&self) -> u16 {
         if self.use_parallel {
             return self.shared_tt.hashfull();
@@ -479,7 +480,8 @@ impl Engine {
     ) -> Option<crate::shogi::Move> {
         // Apply best move to reach child position
         let mut child = pos.clone();
-        let _undo = child.do_move(best_move);
+        // We don't need the undo handle here
+        let _ = child.do_move(best_move);
         let child_hash = child.zobrist_hash;
 
         // Choose TT source
@@ -881,6 +883,8 @@ impl Engine {
                 }
             }
         }
+        // Ensure new or existing searchers reflect the desired MultiPV setting
+        self.set_multipv(self.desired_multi_pv);
     }
 
     /// Clear the transposition table
