@@ -44,16 +44,17 @@ jobs:
           override: true
           target: wasm32-unknown-unknown
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v3
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Cache Rust (workspace)
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            packages/rust-core/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh

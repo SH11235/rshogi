@@ -34,31 +34,17 @@ pub fn compute_stats_exact(values: &[i64]) -> Option<StatsI64> {
     }
     let mean = sum as f64 / count as f64;
     let mut v = values.to_vec();
-    let n = v.len();
-    // nearest-rank-ish index (consistent with existing quantile_sorted)
-    let idx = |q: f64| -> usize { (((n - 1) as f64 * q).round() as usize).min(n - 1) };
-    let i50 = idx(0.5);
-    let i90 = idx(0.9);
-    let i95 = idx(0.95);
-    let i99 = idx(0.99);
-    // Sort indices descending and deduplicate while preserving need
-    let mut idxs = vec![i99, i95, i90, i50];
-    idxs.sort_unstable_by(|a, b| b.cmp(a));
-    idxs.dedup();
-    // Use select_nth_unstable for each index from largest to smallest
-    for &i in &idxs {
-        let (_less, _nth, _greater) = v.select_nth_unstable(i);
-        // no-op; positions are now correct up to i
-    }
+    v.sort_unstable();
+    let idx = |q: f64| -> usize { (((count - 1) as f64 * q).round() as usize).min(count - 1) };
     Some(StatsI64 {
         count,
         min: min_v,
         max: max_v,
         mean,
-        p50: v[i50],
-        p90: v[i90],
-        p95: v[i95],
-        p99: v[i99],
+        p50: v[idx(0.5)],
+        p90: v[idx(0.9)],
+        p95: v[idx(0.95)],
+        p99: v[idx(0.99)],
     })
 }
 
@@ -386,6 +372,214 @@ impl OnlineTDigest {
     }
 }
 
+// ------------------------
+// Additional metrics utils
+// ------------------------
+
+/// Weighted ROC-AUC for binary labels (labels >= 0.5 treated as positive).
+/// Returns None if there are no positive or no negative examples.
+pub fn roc_auc_weighted(scores: &[f32], labels: &[f32], weights: &[f32]) -> Option<f64> {
+    use std::cmp::Ordering;
+    let n = scores.len();
+    if n == 0 || labels.len() != n || weights.len() != n {
+        return None;
+    }
+    let mut items: Vec<(f32, f32, f32)> =
+        (0..n).map(|i| (scores[i], labels[i], weights[i])).collect();
+    items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+
+    let mut wpos = 0.0f64;
+    let mut wneg = 0.0f64;
+    for &(_, y, w) in &items {
+        if y >= 0.5 {
+            wpos += w as f64;
+        } else {
+            wneg += w as f64;
+        }
+    }
+    if wpos == 0.0 || wneg == 0.0 {
+        return None;
+    }
+
+    let mut auc_num = 0.0f64;
+    let mut neg_cum = 0.0f64;
+    let mut i = 0;
+    while i < n {
+        let s = items[i].0;
+        let mut j = i;
+        let mut pos_sum = 0.0f64;
+        let mut neg_sum = 0.0f64;
+        while j < n && items[j].0 == s {
+            if items[j].1 >= 0.5 {
+                pos_sum += items[j].2 as f64;
+            } else {
+                neg_sum += items[j].2 as f64;
+            }
+            j += 1;
+        }
+        auc_num += pos_sum * neg_cum + 0.5 * pos_sum * neg_sum;
+        neg_cum += neg_sum;
+        i = j;
+    }
+    Some(auc_num / (wpos * wneg))
+}
+
+/// Binary classification metrics for WDL probability predictions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BinaryMetrics {
+    pub logloss: f64,
+    pub brier: f64,
+    pub accuracy: f64,
+}
+
+pub fn binary_metrics(probs: &[f32], labels: &[f32], weights: &[f32]) -> Option<BinaryMetrics> {
+    let n = probs.len();
+    if n == 0 || labels.len() != n || weights.len() != n {
+        return None;
+    }
+    let mut wsum = 0.0f64;
+    let mut logloss = 0.0f64;
+    let mut brier = 0.0f64;
+    let mut correct = 0.0f64;
+    for i in 0..n {
+        let p = probs[i].clamp(1e-7, 1.0 - 1e-7) as f64;
+        let y = if labels[i] >= 0.5 { 1.0 } else { 0.0 };
+        let w = weights[i] as f64;
+        logloss += -w * (y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+        brier += w * (p - y) * (p - y);
+        correct += w * if (p >= 0.5) as i32 as f64 == y {
+            1.0
+        } else {
+            0.0
+        };
+        wsum += w;
+    }
+    if wsum == 0.0 {
+        return None;
+    }
+    Some(BinaryMetrics {
+        logloss: logloss / wsum,
+        brier: brier / wsum,
+        accuracy: correct / wsum,
+    })
+}
+
+/// Regression metrics (CP prediction) with weights.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegMetrics {
+    pub mse: f64,
+    pub mae: f64,
+}
+
+pub fn regression_metrics(pred: &[f32], label: &[f32], weights: &[f32]) -> Option<RegMetrics> {
+    let n = pred.len();
+    if n == 0 || label.len() != n || weights.len() != n {
+        return None;
+    }
+    let mut wsum = 0.0f64;
+    let mut mse = 0.0f64;
+    let mut mae = 0.0f64;
+    for i in 0..n {
+        let e = (pred[i] - label[i]) as f64;
+        let w = weights[i] as f64;
+        mse += w * e * e;
+        mae += w * e.abs();
+        wsum += w;
+    }
+    if wsum == 0.0 {
+        return None;
+    }
+    Some(RegMetrics {
+        mse: mse / wsum,
+        mae: mae / wsum,
+    })
+}
+
+/// Calibration bin summary for cp↔wdl calibration plotting.
+#[derive(Clone, Debug)]
+pub struct CalibBin {
+    pub left: i32,
+    pub right: i32,
+    pub center: f32,
+    pub count: usize,
+    pub weighted_count: f64,
+    pub mean_pred: f64,
+    pub mean_label: f64,
+}
+
+/// Build equal-width calibration bins across [-clip, clip].
+pub fn calibration_bins(
+    cps: &[i32],
+    probs: &[f32],
+    labels: &[f32],
+    weights: &[f32],
+    clip: i32,
+    nbins: usize,
+) -> Vec<CalibBin> {
+    let n = cps.len().min(probs.len()).min(labels.len()).min(weights.len());
+    let nb = nbins.max(1);
+    // Use float width but compute bin boundaries with floor to avoid rounding drift
+    let width = (2 * clip).max(1) as f32 / nb as f32;
+    let mut bins: Vec<CalibBin> = (0..nb)
+        .map(|b| {
+            // Boundaries computed via floor to keep widths stable near edges
+            let l = -clip + ((b as f32) * width).floor() as i32;
+            let r = -clip + (((b as f32) + 1.0) * width).floor() as i32;
+            let c = (l + r) as f32 / 2.0;
+            CalibBin {
+                left: l,
+                right: r,
+                center: c,
+                count: 0,
+                weighted_count: 0.0,
+                mean_pred: 0.0,
+                mean_label: 0.0,
+            }
+        })
+        .collect();
+    if n == 0 {
+        return bins;
+    }
+    for i in 0..n {
+        let cp = cps[i].clamp(-clip, clip);
+        let idx = (((cp + clip) as f32) / width).floor() as usize;
+        let idx = idx.min(nb - 1);
+        let w = weights[i] as f64;
+        bins[idx].count += 1;
+        bins[idx].weighted_count += w;
+        bins[idx].mean_pred += w * (probs[i] as f64);
+        // Use soft mean (average of provided labels) for calibration target
+        bins[idx].mean_label += w * (labels[i] as f64);
+    }
+    for b in &mut bins {
+        if b.weighted_count > 0.0 {
+            b.mean_pred /= b.weighted_count;
+            b.mean_label /= b.weighted_count;
+        }
+    }
+    bins
+}
+
+/// Compute Expected Calibration Error (ECE) from calibration bins.
+/// Uses weighted L1 distance between mean_pred and mean_label.
+/// Expected Calibration Error (ECE) computed over CP-binned calibration bins.
+///
+/// Note: This is not the general probability-binned ECE across [0,1].
+/// Here we aggregate by equal-width CP bins (±clip), and take the
+/// weighted L1 distance between `mean_pred` and `mean_label(soft)` in each bin.
+/// This is useful to detect bias in cp→wdl conversion calibration.
+pub fn ece_from_bins(bins: &[CalibBin]) -> Option<f64> {
+    let wsum: f64 = bins.iter().map(|b| b.weighted_count).sum();
+    if wsum <= 0.0 {
+        return None;
+    }
+    let mut acc = 0.0f64;
+    for b in bins {
+        acc += b.weighted_count * (b.mean_pred - b.mean_label).abs();
+    }
+    Some(acc / wsum)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +604,41 @@ mod tests {
         let s = o.stats().unwrap();
         assert!(s.p50 >= s.min && s.p50 <= s.max);
         assert!(s.p99 >= s.p95);
+    }
+
+    #[test]
+    fn ece_from_bins_zero_when_perfect_match() {
+        let bins = vec![
+            CalibBin {
+                left: -100,
+                right: 0,
+                center: -50.0,
+                count: 10,
+                weighted_count: 10.0,
+                mean_pred: 0.25,
+                mean_label: 0.25,
+            },
+            CalibBin {
+                left: 0,
+                right: 100,
+                center: 50.0,
+                count: 10,
+                weighted_count: 10.0,
+                mean_pred: 0.75,
+                mean_label: 0.75,
+            },
+        ];
+        let ece = ece_from_bins(&bins).unwrap();
+        assert!(ece.abs() < 1e-12, "ece should be 0, got {}", ece);
+    }
+
+    #[test]
+    fn roc_auc_weighted_tie_group_is_half() {
+        // Same scores for positive and negative; contribution should be 0.5
+        let scores = [0.5f32, 0.5f32];
+        let labels = [1.0f32, 0.0f32];
+        let w = [1.0f32, 1.0f32];
+        let auc = roc_auc_weighted(&scores, &labels, &w).unwrap();
+        assert!((auc - 0.5).abs() < 1e-12, "auc should be 0.5, got {}", auc);
     }
 }

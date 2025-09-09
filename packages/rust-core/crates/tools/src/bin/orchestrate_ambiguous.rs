@@ -495,7 +495,7 @@ mod tests {
             "output_sha256": sha,
         });
         std::fs::write(&man, serde_json::to_string(&manifest).unwrap()).unwrap();
-        let (by_src, total) = compute_pass1_totals(&[pass1.clone()]).unwrap();
+        let (by_src, total) = compute_pass1_totals(std::slice::from_ref(&pass1)).unwrap();
         assert_eq!(by_src, vec![5]);
         assert_eq!(total, 5);
     }
@@ -512,7 +512,7 @@ mod tests {
         enc.write_all(b"b\n").unwrap();
         enc.write_all(b"c\n").unwrap();
         enc.finish().unwrap();
-        let (by_src, total) = compute_pass1_totals(&[pass1.clone()]).unwrap();
+        let (by_src, total) = compute_pass1_totals(std::slice::from_ref(&pass1)).unwrap();
         assert_eq!(by_src, vec![3]);
         assert_eq!(total, 3);
     }
@@ -523,7 +523,7 @@ mod tests {
         let pass1 = dir.path().join("p1.jsonl");
         // two lines, second without trailing newline
         std::fs::write(&pass1, b"x\ny").unwrap();
-        let (by_src, total) = compute_pass1_totals(&[pass1.clone()]).unwrap();
+        let (by_src, total) = compute_pass1_totals(std::slice::from_ref(&pass1)).unwrap();
         assert_eq!(by_src, vec![2]);
         assert_eq!(total, 2);
     }

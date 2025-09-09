@@ -1,0 +1,115 @@
+name: train-dashboard
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'packages/rust-core/**'
+      - '!packages/rust-core/docs/**'
+      - '!packages/rust-core/runs/**'
+      - '!packages/rust-core/converted_openings/**'
+      - '!packages/rust-core/memo/**'
+      - '!packages/rust-core/target/**'
+      - '!**/*.md'
+      - '!**/*.mdx'
+      - '.github/workflows/train_dashboard.yml'
+  pull_request:
+    paths:
+      - 'packages/rust-core/**'
+      - '!packages/rust-core/docs/**'
+      - '!packages/rust-core/runs/**'
+      - '!packages/rust-core/converted_openings/**'
+      - '!packages/rust-core/memo/**'
+      - '!packages/rust-core/target/**'
+      - '!**/*.md'
+      - '!**/*.mdx'
+      - '.github/workflows/train_dashboard.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+
+defaults:
+  run:
+    working-directory: packages/rust-core
+
+jobs:
+  train:
+    name: Train (${{ matrix.trainer }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        trainer: [baseline, nnue]
+        include:
+          - trainer: baseline
+            bin: train_wdl_baseline
+            out: runs/wdl_ci
+            args: --epochs 2 --batch-size 64 --metrics --calibration-bins 10 --plots --gate-val-loss-non-increase --gate-mode fail --seed 1
+          - trainer: nnue
+            bin: train_nnue
+            out: runs/nnue_ci
+            args: --epochs 2 --batch-size 128 --metrics --calibration-bins 10 --plots --gate-val-loss-non-increase --gate-mode fail --seed 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mold clang libfontconfig1-dev
+          mold --version || true
+          clang --version || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+          key: train-tools-plots
+          cache-on-failure: true
+
+      - name: Build tools (with plots)
+        run: |
+          set -euo pipefail
+          cargo build -p tools --features plots --release --locked
+
+      - name: Prepare tiny JSONL data
+        run: |
+          set -euo pipefail
+          mkdir -p sample_data
+          cat > sample_data/train.jsonl << 'EOF'
+          {"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":50}
+          {"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1","eval":150,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":30}
+          EOF
+          cp sample_data/train.jsonl sample_data/val.jsonl
+
+      - name: Run ${{ matrix.trainer }} trainer
+        run: |
+          set -euo pipefail
+          ./target/release/${{ matrix.bin }} \
+            --input sample_data/train.jsonl \
+            --validation sample_data/val.jsonl \
+            ${{ matrix.args }} \
+            --out ${{ matrix.out }}
+
+      - name: Upload dashboard (${{ matrix.trainer }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.trainer }}_dashboard
+          path: packages/rust-core/${{ matrix.out }}/**
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

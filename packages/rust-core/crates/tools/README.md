@@ -135,6 +135,175 @@ cargo run --release -p tools --bin merge_annotation_results -- \
   runs/p1.jsonl runs/p2.jsonl - --dedup-by-sfen --manifest-out runs/merge_manifest.json
 ```
 
+## 学習ダッシュボード（最小）
+
+軽量ベースライン（線形モデル）で、各エポックのメトリクスを CSV/PNG に出力し、CI でアーティファクト化できます。
+
+### 使い方（baseline trainer）
+
+```bash
+# PNG も出す場合は features=plots でビルド
+cargo build -p tools --features plots --release
+
+# 最小ダッシュボード出力
+./target/release/train_wdl_baseline \
+  --input runs/train.jsonl --validation runs/valid.jsonl \
+  --epochs 3 --batch-size 4096 --metrics --plots --seed 1 \
+  --gate-val-loss-non-increase --gate-mode fail \
+  --out runs/wdl_baseline
+```
+
+主なオプション:
+- `--metrics`: 各エポックの CSV 出力を有効化
+- `--plots`: 校正 PNG を出力（`tools` を `--features plots` でビルド時のみ有効）
+- `--calibration-bins N`: 校正ビン数（既定 40）
+- `--seed <u64>`: シャッフルの再現性シード（未指定時は非決定）
+- `--gate-val-loss-non-increase`: 最終エポックが最良の `val_loss` でなければ FAIL/WARN
+- `--gate-min-auc <f64>`: WDL 時の最小 AUC 閾値（既定無効）
+- `--gate-mode {warn|fail}`: ゲートの動作
+
+出力物（`runs/wdl_baseline_*` 配下）:
+- `metrics.csv`（列）: `epoch, train_loss, val_loss, val_auc, val_ece, time_sec, train_weight_sum, val_weight_sum, is_best`
+- `phase_metrics.csv`（列）: `epoch, phase, count, weighted_count, logloss, brier, accuracy, mae, mse`
+  - WDL 時: `logloss, brier, accuracy` を出力、CP 時: `mae, mse` を出力、他は空欄
+- `calibration_epoch_k.csv`: cp 等幅ビンごとの `mean_pred, mean_label(soft)`（±`--cp-clip` を等分）
+- `calibration_epoch_k.png`: `mean_pred` と `mean_label(soft)` の 2 系列（X 軸は CP）
+- `weights.json`: 最終エポックの重み
+- `weights_best.json`: 最良 `val_loss` の重み（検証がある場合）
+
+注意:
+- 校正/ECE/phase 別メトリクスは **WDL + JSONL 検証** のときにのみ有効です（キャッシュ検証では cp/sfen が持てないためスキップ）。
+- AUC は補助指標（既定ゲート OFF）。二値化しきい値は 0.5。
+ - `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です。一般的な確率ビン（0..1）の ECE とは異なります。
+
+### 使い方（NNUE trainer）
+
+```bash
+# PNG も出す場合は features=plots でビルド
+cargo build -p tools --features plots --release
+
+# JSONL 入力（小規模サンプル）
+./target/release/train_nnue \
+  --input runs/train.jsonl --validation runs/valid.jsonl \
+  --epochs 2 --batch-size 8192 --metrics --plots --seed 1 \
+  --gate-val-loss-non-increase --gate-mode fail \
+  --calibration-bins 40 \
+  --out runs/nnue_dashboard
+
+# キャッシュ入力（推奨）
+./target/release/train_nnue \
+  --input runs/train.cache --validation runs/valid.cache \
+  --epochs 2 --batch-size 16384 --metrics --seed 1 \
+  --out runs/nnue_cache
+
+# ストリーミング（大規模キャッシュ向け）
+./target/release/train_nnue \
+  --input runs/train.cache \
+  --epochs 1 --batch-size 16384 \
+  --stream-cache --prefetch-batches 4 --throughput-interval 2.0 \
+  --out runs/nnue_stream
+```
+
+主なオプション（train_nnue）:
+- `--metrics`: 各エポックの CSV 出力を有効化
+- `--plots`: 校正 PNG を出力（`tools` を `--features plots` でビルド時のみ有効）
+- `--calibration-bins N`: 校正ビン数（既定 40）
+- `--gate-val-loss-non-increase`: 最終エポックが最良の `val_loss` でなければ FAIL/WARN
+- `--gate-min-auc <f64>`: WDL 時の最小 AUC 閾値（既定無効）
+- `--gate-mode {warn|fail}`: ゲートの動作
+- `--stream-cache`: キャッシュを逐次読み込み（学習前の全量読み込みを行わない）
+- `--prefetch-batches N`, `--prefetch-bytes BYTES`, `--estimated-features-per-sample N`: プリフェッチ制御
+- `--save-every N`: N バッチ毎にチェックポイントを保存（`checkpoint_batch_*.fp32.bin`）
+
+出力物（`runs/nnue_*` 配下）:
+- `metrics.csv`（列）: `epoch, train_loss, val_loss, val_auc, val_ece, time_sec, train_weight_sum, val_weight_sum, is_best`
+- `phase_metrics.csv`（列）: `epoch, phase, count, weighted_count, logloss, brier, accuracy, mae, mse`（WDL+JSONL 検証のみ）
+- `calibration_epoch_k.csv` / `calibration_epoch_k.png`（WDL+JSONL 検証のみ）
+- `nn.fp32.bin`: 最終エポックの FP32 モデル
+- `nn_best.fp32.bin`, `nn_best.meta.json`: 最良 `val_loss` のモデルとメタ情報（`best_epoch`, `best_val_loss`, 可能なら `best_val_auc`, `best_val_ece`）
+- `nn.i8.bin`: 量子化（int8）版（`--quantized` 指定時）
+
+注意:
+- 校正/ECE/phase 別メトリクスは **WDL + JSONL 検証** のときにのみ有効です（キャッシュ検証では cp/sfen が持てないためスキップ）。
+- AUC は補助指標（既定ゲート OFF）。二値化しきい値は 0.5。
+- `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です。一般的な確率ビン（0..1）の ECE とは異なります。
+
+### CI アーティファクト（雛形）
+
+`.github/workflows/train_dashboard.yml` を同梱。小さな JSONL を用意して 2 エポック実行、`runs/...` を artifact 化し、
+`--gate-val-loss-non-increase --gate-mode fail` で回帰を赤化できます。
+
+
+### ローカルでのクイック検証（サンプル生成→CSV/PNG確認）
+
+最小サンプルの JSONL を作って、baseline/nnue のダッシュボード出力を手元で確認できます。
+
+1) サンプル JSONL 作成
+```bash
+mkdir -p sample_data
+cat > sample_data/train.jsonl << 'EOF'
+{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":50}
+{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1","eval":150,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":30}
+EOF
+cp sample_data/train.jsonl sample_data/val.jsonl
+```
+
+2) CSV だけ確認する場合（PNG不要）
+```bash
+cargo build -p tools --release
+
+# Baseline
+./target/release/train_wdl_baseline \
+  --input sample_data/train.jsonl \
+  --validation sample_data/val.jsonl \
+  --epochs 2 --batch-size 64 \
+  --metrics --calibration-bins 10 \
+  --gate-val-loss-non-increase --gate-mode warn --seed 1 \
+  --out runs/wdl_local
+
+# NNUE
+./target/release/train_nnue \
+  --input sample_data/train.jsonl \
+  --validation sample_data/val.jsonl \
+  --epochs 2 --batch-size 128 \
+  --metrics --calibration-bins 10 \
+  --gate-val-loss-non-increase --gate-mode warn --seed 1 \
+  --out runs/nnue_local
+
+# 確認（例）
+head -n 5 runs/wdl_local/metrics.csv
+head -n 5 runs/nnue_local/metrics.csv
+head -n 10 runs/nnue_local/calibration_epoch_1.csv
+head -n 10 runs/nnue_local/phase_metrics.csv
+```
+
+3) PNG も出力する場合（Fontconfig が必要）
+- Linux: `sudo apt-get install -y libfontconfig1-dev`
+- macOS: `brew install fontconfig`
+- Windows: WSL 推奨（もしくは CSV のみ利用）
+
+```bash
+cargo build -p tools --features plots --release
+
+# --plots を付けて実行
+./target/release/train_nnue \
+  --input sample_data/train.jsonl \
+  --validation sample_data/val.jsonl \
+  --epochs 2 --batch-size 128 \
+  --metrics --calibration-bins 10 --plots \
+  --gate-val-loss-non-increase --gate-mode warn --seed 1 \
+  --out runs/nnue_png
+
+# 画像を開く
+# macOS: open runs/nnue_png/calibration_epoch_1.png
+# Linux: xdg-open runs/nnue_png/calibration_epoch_1.png
+```
+
+補足:
+- 校正/ECE/phase 別メトリクスは **WDL + JSONL 検証** のときにのみ有効です。
+- `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です（確率ビンECEではありません）。
+
+
 ## バイナリ一覧（主要）
 
 - データ生成/学習/解析
@@ -162,6 +331,24 @@ cargo run --release -p tools --bin merge_annotation_results -- \
   - `simd_benchmark` / `simd_check`: SIMD の効果測定/機能確認
   - `quick_perf_test`: TT/探索の簡易パフォーマンステスト
   - `metrics_analyzer`: エンジンログ（`kind=bestmove_*`）の集計
+
+### 量子化フォーマット（VERSION 3 概要）
+
+`train_nnue --quantized` で保存される `nn.i8.bin` は以下の構造です。
+
+- テキストヘッダ（行単位）
+  - `NNUE` / `VERSION 3` / `FEATURES HALFKP` / `ACC_DIM <N>` / `RELU_CLIP <M>` / `FORMAT QUANTIZED_I8` / `END_HEADER`
+- バイナリ本体（リトルエンディアン）
+  1) `w0` の量子化パラメータ: `scale: f32` → `zero_point: i32`
+  2) `w0` 本体: `i8` の配列（`input_dim * acc_dim` 要素）
+  3) `b0` の量子化パラメータ: `scale: f32` → `zero_point: i32`
+  4) `b0` 本体: `i8` の配列（`acc_dim` 要素）
+  5) `w2` の量子化パラメータ: `scale: f32` → `zero_point: i32`
+  6) `w2` 本体: `i8` の配列（`acc_dim` 要素）
+  7) `b2` は `f32` のまま1要素
+
+復元は `real ≈ (q - zero_point) * scale`（各重み配列で個別の `scale/zero_point` を使用）。
+将来の互換性のため、フォーマット変更時は `VERSION` 行を更新します。
 
 ## 追加ドキュメント
 
