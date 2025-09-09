@@ -14,6 +14,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     working-directory: packages/rust-core
@@ -70,11 +74,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
       - name: Run Clippy
         run: cargo clippy -- -D warnings
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   test:
     name: Test
@@ -91,11 +103,19 @@ jobs:
           mold --version || true
           clang --version || true
       - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
       - name: Run tests
         run: cargo test --release -- --test-threads=2
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   test-large-stack:
     name: Test (Large Stack) - Release Mode
@@ -114,10 +134,15 @@ jobs:
           mold --version || true
           clang --version || true
       - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
           key: rust-cache-large-stack
+          cache-on-failure: true
       - name: Run ignored tests in release mode
         run: |
           echo "Running large stack tests in release mode..."
@@ -128,6 +153,9 @@ jobs:
         run: |
           echo "## Large Stack Test Summary"
           echo "Total ignored tests: $(grep -r "#\[ignore\]" --include="*.rs" . | grep -B1 "fn test_" | wc -l)"
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   test-features:
     name: Test with Features
@@ -147,10 +175,15 @@ jobs:
           mold --version || true
           clang --version || true
       - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
           key: rust-cache-feature-${{ matrix.feature }}
+          cache-on-failure: true
       - name: Run tests with feature ${{ matrix.feature }}
         run: |
           echo "Running tests with feature: ${{ matrix.feature }}"
@@ -162,6 +195,9 @@ jobs:
             echo "::error::No tests were run with feature ${{ matrix.feature }}"
             exit 1
           fi
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   security:
     name: Security Audit
