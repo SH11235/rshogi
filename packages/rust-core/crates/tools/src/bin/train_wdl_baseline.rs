@@ -86,7 +86,6 @@ struct Sample {
     label: f32,
     weight: f32,
     cp: i32,
-    #[allow(dead_code)]
     phase: GamePhase,
 }
 
