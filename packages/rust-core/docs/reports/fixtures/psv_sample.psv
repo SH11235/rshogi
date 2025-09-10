@@ -1,0 +1,11 @@
+# Sample PSV (10 lines)
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b - 1
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PP1PPPP/1B3R3/LNSGKGSNL b Pp 17
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL w - 2
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PP1PPPP/1B3R3/LNSGKGSNL w Pp 18
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PP1PPPP/1B3R3/LNSGKGSNL b - 19
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PP1PPPP/1B3R3/LNSGKGSNL w - 20
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b - 1
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL w - 2
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b - 3
+sfen lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL w - 4

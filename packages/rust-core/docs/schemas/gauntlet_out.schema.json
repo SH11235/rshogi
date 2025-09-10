@@ -1,0 +1,54 @@
+{
+  "$id": "gauntlet_out.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["env", "params", "summary", "series"],
+  "properties": {
+    "env": {
+      "type": "object",
+      "properties": {
+        "cpu": {"type": "string"},
+        "rustc": {"type": "string"},
+        "commit": {"type": "string"},
+        "toolchain": {"type": "string"}
+      },
+      "required": ["cpu", "rustc"]
+    },
+    "params": {
+      "type": "object",
+      "properties": {
+        "time": {"type": "string"},
+        "games": {"type": "integer", "minimum": 1},
+        "threads": {"type": "integer", "minimum": 1},
+        "hash_mb": {"type": "integer", "minimum": 1},
+        "book": {"type": "string"},
+        "multipv": {"type": "integer", "minimum": 1}
+      },
+      "required": ["time", "games", "threads", "hash_mb", "multipv"]
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "winrate": {"type": "number", "minimum": 0, "maximum": 1},
+        "draw": {"type": "number", "minimum": 0, "maximum": 1},
+        "nps_delta_pct": {"type": "number"},
+        "pv_spread_p90_cp": {"type": "number"},
+        "gate": {"enum": ["pass", "reject", "provisional"]},
+        "reject_reason": {"type": "string"},
+        "wins": {"type": "integer", "minimum": 0},
+        "losses": {"type": "integer", "minimum": 0},
+        "draws": {"type": "integer", "minimum": 0},
+        "games": {"type": "integer", "minimum": 0}
+      },
+      "required": ["winrate", "draw", "nps_delta_pct", "pv_spread_p90_cp", "gate"]
+    },
+    "training_config": {
+      "type": "object",
+      "description": "Optional: weighting and lr config baked into report"
+    },
+    "series": {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  }
+}

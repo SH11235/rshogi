@@ -8,6 +8,26 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**エンジンタイプ選択ガイド**](engine-types-guide.md) - 4種類のエンジンタイプの選択指針
 - [**デバッグポジションツール**](debug-position-tool.md) - 特定局面の調査・デバッグツール
 
+### 📜 Charter & Plans
+- [**00_charter**](00_charter.md) - 測定条件・昇格Gate・データ/ログの横断契約
+- [**10_pipeline（運用改善）**](10_pipeline.md) - P2/P3 の残タスク計画（ガントレット/Gate 連携）
+- [**20_engine（棋力向上）**](20_engine.md) - B/C 以降の残タスク（Phase 1: Classic NNUE）
+
+### 📑 Specs & Schemas
+- Specs: [011 LRスケジュール](specs/011_lr_schedule.md) / [012 重み付け](specs/012_weighting.md) / [013 ガントレット](specs/013_gauntlet.md) / [017 生成ストリーミング](specs/017_generate_streaming.md)
+- Schemas: [structured_v1](schemas/structured_v1.schema.json) / [gauntlet_out](schemas/gauntlet_out.schema.json) / [manifest_v2](schemas/manifest_v2.schema.json)
+
+### 🧪 Fixtures（CI/手元検証用）
+- JSONL（structured_v1 サンプル）: `docs/reports/fixtures/jsonl_sample.jsonl`
+- PSV（10行サンプル）: `docs/reports/fixtures/psv_sample.psv`
+- 開幕ブック（代表/アンチ）:
+  - `docs/reports/fixtures/opening/representative.epd`
+  - `docs/reports/fixtures/opening/anti.epd`
+
+使用例（抜粋）:
+- Gauntlet（代表ブック版）: `--book docs/reports/fixtures/opening/representative.epd`
+- Streaming smoke: `cat docs/reports/fixtures/psv_sample.psv | <generate_cmd> ...`
+
 ### 🏗️ Architecture & Design
 - [**統一探索フレームワーク設計**](unified-searcher-design.md) - const genericsを活用した探索エンジン設計
 - [**ABDADA実装**](abdada-implementation.md) - 並列探索の重複作業削減技術

@@ -60,3 +60,6 @@ If Clippy reports warnings:
 - Keep functions focused and small
 - Use descriptive variable names
 - Prefer iterators over manual loops where appropriate
+
+## Language Preference
+Please respond in Japanese (日本語) when interacting with this codebase.
