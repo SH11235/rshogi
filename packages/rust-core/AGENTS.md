@@ -58,3 +58,6 @@
 ### Agent Compliance
 - Changes made by agents follow this policy by default. We avoid wide, unrelated refactors; legacy `mod.rs` is migrated opportunistically only when touching that area or by request.
 - If project conventions conflict or an exception is needed (e.g., generated code, FFI/WASM bindings), document the rationale in PRs and align with this policy where feasible.
+
+## Language Preference
+Please respond in Japanese (日本語) when interacting with this codebase.

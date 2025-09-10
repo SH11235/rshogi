@@ -1,0 +1,27 @@
+{
+  "$id": "structured_v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["ts", "phase", "global_step", "epoch"],
+  "properties": {
+    "ts": {"type": "string", "format": "date-time"},
+    "phase": {"enum": ["train", "val", "gauntlet"]},
+    "global_step": {"type": "integer", "minimum": 0},
+    "epoch": {"type": "integer", "minimum": 0},
+    "lr": {"type": "number", "minimum": 0},
+    "train_loss": {"type": "number"},
+    "val_loss": {"type": "number"},
+    "val_auc": {"type": "number", "minimum": 0, "maximum": 1},
+    "examples_sec": {"type": "number", "minimum": 0},
+    "loader_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+    "exact_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "ambiguous_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "timeout_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "depth_hist": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "wall_time": {"type": "number", "minimum": 0},
+    "training_config": {"type": "object"}
+  }
+}

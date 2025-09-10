@@ -1,0 +1,49 @@
+{
+  "$id": "manifest_v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "teacher",
+    "seed",
+    "output_sha256",
+    "output_bytes",
+    "summary",
+    "license_scope"
+  ],
+  "properties": {
+    "teacher": {
+      "type": "object",
+      "required": ["name", "version", "commit", "usi_opts"],
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "commit": {"type": "string"},
+        "usi_opts": {"type": "object"}
+      }
+    },
+    "seed": {
+      "type": "object",
+      "required": ["model_init", "data_shuffle"],
+      "properties": {
+        "model_init": {"type": "integer", "minimum": 0},
+        "data_shuffle": {"type": "integer", "minimum": 0}
+      }
+    },
+    "output_sha256": {"type": "string"},
+    "output_bytes": {"type": "integer", "minimum": 0},
+    "summary": {
+      "type": "object",
+      "required": ["positions", "exact_rate", "ambiguous_rate", "aggregated"],
+      "properties": {
+        "positions": {"type": "integer", "minimum": 0},
+        "exact_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "ambiguous_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "aggregated": {
+          "type": "object",
+          "properties": {"multipv": {"type": "integer", "minimum": 1}}
+        }
+      }
+    },
+    "license_scope": {"enum": ["internal", "research", "release"]}
+  }
+}
