@@ -84,7 +84,7 @@ pub fn load_config_file<P: AsRef<std::path::Path>>(
     }
 }
 
-const CANONICAL_ORDER: [WeightingKind; 4] = [
+pub(crate) const CANONICAL_ORDER: [WeightingKind; 4] = [
     WeightingKind::Exact,
     WeightingKind::Gap,
     WeightingKind::Phase,
