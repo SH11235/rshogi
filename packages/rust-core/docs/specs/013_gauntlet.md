@@ -17,17 +17,23 @@ cargo run -p tools --bin gauntlet -- \
   --json runs/gauntlet/out.json --report runs/gauntlet/report.md
 ```
 
+備考:
+- `--json -` または `--report -` を指定すると、対応する出力を STDOUT に書き出します。
+  - その場合、構造化ログ（structured_v1）は STDERR に出力されます（混在防止）。
+```
+
 ## 出力スキーマ
 - JSON 出力は `docs/schemas/gauntlet_out.schema.json` に準拠
 - 含むべき情報
   - `env`: CPU, rustc, commit, toolchain
   - `params`: time, games, threads, hash_mb, book, multipv
   - `summary`: winrate, draw, nps_delta_pct, pv_spread_p90_cp, gate
+    - `winrate` は互換のため名称を保持しつつ、実体は Score rate（W=1, D=0.5, L=0）
   - `series`: 各対局の結果（先後/手数/勝敗/消費ノード/NPS）
 
 ## Gate 判定
-- 勝率: Wilson区間95%の下限 > 50% を準合格
-- 最終合格: 勝率 +5%pt 以上 かつ NPS ±3% 以内
+- スコア率: Wilson区間95%の下限 > 50% を準合格
+- 最終合格: スコア率 +5%pt（=55%）以上 かつ NPS ±3% 以内
 - 代表/アンチの2系統ブック
   - 昇格判定は代表系で実施
   - 退避評価はアンチ系でも確認（オーバーフィット抑止）
@@ -47,3 +53,7 @@ cargo run -p tools --bin gauntlet -- \
     --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
     --json runs/gauntlet/out.json --report runs/gauntlet/report.md
   ```
+
+## 実装メモ（計測の厳密化）
+- NPS: サンプルごとに TT をクリアしてから固定時間探索し、`f64` で累積平均化（丸め誤差抑制）
+- PV スプレッド: MultiPV=3 の root を用い、mate スコアを含むサンプルは除外
