@@ -622,7 +622,7 @@ impl StreamCacheLoader {
 
                 // weight policy
                 let mut weight = 1.0f32;
-                let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+                let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
                 weight *= base_gap;
                 let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                 weight *= if both_exact {
@@ -1205,10 +1205,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Training mode dispatch (scope to release borrows when done)
     {
-        // Compose training_config for JSONL: include whether phase weighting was applied
+        // Compose training_config for JSONL: include whether phase weighting was actually applied
         let mut training_cfg_json = serde_json::to_value(&weighting_cfg).ok();
         if let Some(obj) = training_cfg_json.as_mut().and_then(|v| v.as_object_mut()) {
-            obj.insert("phase_applied".into(), serde_json::json!(!is_cache));
+            let phase_applied =
+                !is_cache && weighting_cfg.active.contains(&wcfg::WeightingKind::Phase);
+            obj.insert("phase_applied".into(), serde_json::json!(phase_applied));
         }
 
         let mut ctx = TrainContext {
@@ -1569,7 +1571,7 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
 
     // Gap-based weight (avoid zero weight at gap=0)
     if let Some(gap) = pos_data.best2_gap_cp {
-        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
         weight *= base_gap;
     }
 
@@ -1694,7 +1696,7 @@ fn load_samples_from_cache(
 
         // Calculate weight using same baseline policy as JSONL loading
         let mut weight = 1.0f32;
-        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
         weight *= base_gap;
         let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
         weight *= if both_exact {
@@ -1807,8 +1809,8 @@ fn train_model(
         let mut samples_since = 0usize;
         let mut batches_since = 0usize;
         let mut zero_weight_batches = 0usize;
-        // 直近のバッチloss（throughput構造化ログ用）。計算しなかった場合は前回値を保持
-        let mut last_loss_for_log: f32 = 0.0;
+        // 直近のバッチloss（throughput構造化ログ用）。最初は未定義。
+        let mut last_loss_for_log: Option<f32> = None;
         for batch_idx in 0..n_batches {
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
@@ -1870,7 +1872,7 @@ fn train_model(
                 );
                 total_loss += loss * batch_weight;
                 total_weight += batch_weight;
-                last_loss_for_log = loss;
+                last_loss_for_log = Some(loss);
             }
             last_lr_base = lr_base;
 
@@ -1910,17 +1912,21 @@ fn train_model(
                     );
                 }
                 if let Some(ref lg) = ctx.structured {
-                    let rec = serde_json::json!({
+                    let mut rec = serde_json::json!({
                         "ts": chrono::Utc::now().to_rfc3339(),
                         "phase": "train",
                         "global_step": ctx.global_step as i64,
                         "epoch": (epoch + 1) as i64,
                         "lr": lr_base as f64,
-                        "train_loss": last_loss_for_log as f64,
                         "examples_sec": sps as f64,
                         "loader_ratio": 0.0f64,
                         "wall_time": secs as f64,
                     });
+                    if let Some(ls) = last_loss_for_log {
+                        rec.as_object_mut()
+                            .unwrap()
+                            .insert("train_loss".into(), serde_json::json!(ls as f64));
+                    }
                     lg.write_json(&rec);
                 }
                 last_report = Instant::now();
@@ -2144,11 +2150,20 @@ fn train_model(
         let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
         let epoch_sps = (n_samples as f32) / epoch_secs;
         if zero_weight_batches > 0 {
-            eprintln!(
-                "[debug] epoch {} had {} zero-weight batches",
-                epoch + 1,
-                zero_weight_batches
-            );
+            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+            if human_to_stderr {
+                eprintln!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            } else {
+                println!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            }
         }
         // Update best trackers
         if let Some(vl) = val_loss {
@@ -2292,7 +2307,7 @@ fn train_model_stream_cache(
 
             let mut loaded: u64 = 0;
             let mut last_lr_base = config.learning_rate;
-            let mut last_loss_for_log: f32 = 0.0;
+            let mut last_loss_for_log: Option<f32> = None;
             while loaded < num_samples {
                 // Read up to batch_size samples synchronously
                 let mut batch = Vec::with_capacity(config.batch_size);
@@ -2356,7 +2371,7 @@ fn train_model_stream_cache(
                     let flags = flags[0];
                     let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
                     let mut weight = 1.0f32;
-                    let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+                    let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
                     weight *= base_gap;
                     let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                     weight *= if both_exact {
@@ -2455,7 +2470,7 @@ fn train_model_stream_cache(
                     );
                     total_loss += loss * batch_weight;
                     total_weight += batch_weight;
-                    last_loss_for_log = loss;
+                    last_loss_for_log = Some(loss);
                 }
                 last_lr_base = lr_base;
 
@@ -2489,17 +2504,21 @@ fn train_model_stream_cache(
                         );
                     }
                     if let Some(ref lg) = ctx.structured {
-                        let rec = serde_json::json!({
+                        let mut rec = serde_json::json!({
                             "ts": chrono::Utc::now().to_rfc3339(),
                             "phase": "train",
                             "global_step": ctx.global_step as i64,
                             "epoch": (epoch + 1) as i64,
                             "lr": lr_base as f64,
-                            "train_loss": last_loss_for_log as f64,
                             "examples_sec": sps as f64,
                             "loader_ratio": loader_ratio/100.0,
                             "wall_time": secs as f64,
                         });
+                        if let Some(ls) = last_loss_for_log {
+                            rec.as_object_mut()
+                                .unwrap()
+                                .insert("train_loss".into(), serde_json::json!(ls as f64));
+                        }
                         lg.write_json(&rec);
                     }
                     last_report = Instant::now();
@@ -2687,7 +2706,7 @@ fn train_model_stream_cache(
         let mut batches_since = 0usize;
         let mut wait_ns_since: u128 = 0;
         let mut wait_ns_epoch: u128 = 0;
-        let mut last_loss_for_log: f32 = 0.0;
+        let mut last_loss_for_log: Option<f32> = None;
 
         let mut last_lr_base = config.learning_rate;
         loop {
@@ -2753,7 +2772,7 @@ fn train_model_stream_cache(
                 );
                 total_loss += loss * batch_weight;
                 total_weight += batch_weight;
-                last_loss_for_log = loss;
+                last_loss_for_log = Some(loss);
             }
             last_lr_base = lr_base;
 
@@ -2801,17 +2820,21 @@ fn train_model_stream_cache(
                     );
                 }
                 if let Some(ref lg) = ctx.structured {
-                    let rec = serde_json::json!({
+                    let mut rec = serde_json::json!({
                         "ts": chrono::Utc::now().to_rfc3339(),
                         "phase": "train",
                         "global_step": ctx.global_step as i64,
                         "epoch": (epoch + 1) as i64,
                         "lr": lr_base as f64,
-                        "train_loss": last_loss_for_log as f64,
                         "examples_sec": sps as f64,
                         "loader_ratio": (loader_ratio )/100.0,
                         "wall_time": secs as f64,
                     });
+                    if let Some(ls) = last_loss_for_log {
+                        rec.as_object_mut()
+                            .unwrap()
+                            .insert("train_loss".into(), serde_json::json!(ls as f64));
+                    }
                     lg.write_json(&rec);
                 }
                 last_report = Instant::now();
@@ -3067,12 +3090,31 @@ fn train_model_stream_cache(
             ])?;
             w.flush()?;
         }
-        println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-            epoch + 1, config.epochs, avg_loss,
-            val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-            batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-        );
+        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+            eprintln!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                batch_count,
+                epoch_secs,
+                epoch_sps,
+                loader_ratio_epoch
+            );
+        } else {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                batch_count,
+                epoch_secs,
+                epoch_sps,
+                loader_ratio_epoch
+            );
+        }
         if let Some(ref lg) = ctx.structured {
             let mut rec_train = serde_json::json!({
                 "ts": chrono::Utc::now().to_rfc3339(),
@@ -3173,7 +3215,7 @@ fn train_model_with_loader(
             let mut wait_ns_since: u128 = 0;
             let mut wait_ns_epoch: u128 = 0;
             let mut last_lr_base = config.learning_rate;
-            let mut last_loss_for_log: f32 = 0.0;
+            let mut last_loss_for_log: Option<f32> = None;
 
             loop {
                 let (maybe_indices, wait_dur) = async_loader.next_batch_with_wait();
@@ -3234,7 +3276,7 @@ fn train_model_with_loader(
                     );
                     total_loss += loss * batch_weight;
                     total_weight += batch_weight;
-                    last_loss_for_log = loss;
+                    last_loss_for_log = Some(loss);
                 }
 
                 let batch_len = indices.len();
@@ -3289,17 +3331,21 @@ fn train_model_with_loader(
                         );
                     }
                     if let Some(ref lg) = ctx.structured {
-                        let rec = serde_json::json!({
+                        let mut rec = serde_json::json!({
                             "ts": chrono::Utc::now().to_rfc3339(),
                             "phase": "train",
                             "global_step": ctx.global_step as i64,
                             "epoch": (epoch + 1) as i64,
                             "lr": lr_base as f64,
-                            "train_loss": last_loss_for_log as f64,
                             "examples_sec": sps as f64,
                             "loader_ratio": (loader_ratio )/100.0,
                             "wall_time": secs as f64,
                         });
+                        if let Some(ls) = last_loss_for_log {
+                            rec.as_object_mut()
+                                .unwrap()
+                                .insert("train_loss".into(), serde_json::json!(ls as f64));
+                        }
                         lg.write_json(&rec);
                     }
                     last_report = Instant::now();
@@ -3630,7 +3676,7 @@ fn train_model_with_loader(
             let mut samples_since = 0usize;
             let mut batches_since = 0usize;
             let mut last_lr_base = config.learning_rate;
-            let mut last_loss_for_log: f32 = 0.0;
+            let mut last_loss_for_log: Option<f32> = None;
 
             while let Some(indices) = {
                 let t0 = Instant::now();
@@ -3699,7 +3745,7 @@ fn train_model_with_loader(
                     );
                     total_loss += loss * batch_weight;
                     total_weight += batch_weight;
-                    last_loss_for_log = loss;
+                    last_loss_for_log = Some(loss);
                 }
 
                 let batch_len = indices.len();
@@ -3737,17 +3783,21 @@ fn train_model_with_loader(
                         );
                     }
                     if let Some(ref lg) = ctx.structured {
-                        let rec = serde_json::json!({
+                        let mut rec = serde_json::json!({
                             "ts": chrono::Utc::now().to_rfc3339(),
                             "phase": "train",
                             "global_step": ctx.global_step as i64,
                             "epoch": (epoch + 1) as i64,
                             "lr": lr_base as f64,
-                            "train_loss": last_loss_for_log as f64,
                             "examples_sec": sps as f64,
                             "loader_ratio": 0.0f64,
                             "wall_time": secs as f64,
                         });
+                        if let Some(ls) = last_loss_for_log {
+                            rec.as_object_mut()
+                                .unwrap()
+                                .insert("train_loss".into(), serde_json::json!(ls as f64));
+                        }
                         lg.write_json(&rec);
                     }
                     last_report = Instant::now();
@@ -4971,7 +5021,9 @@ mod tests {
             lr_decay_steps: None,
             lr_plateau_patience: None,
         };
-        let samples = load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
+        let samples =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
         assert_eq!(samples.len(), 2); // both perspectives
         assert!(samples[0].weight > 0.0, "weight should be >0 when gap=0");
         assert!(samples[1].weight > 0.0, "weight should be >0 when gap=0");
