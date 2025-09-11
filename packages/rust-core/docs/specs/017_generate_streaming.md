@@ -18,6 +18,11 @@
 - ルール: CLI 明示は常に最優先で上書き
 - 後方互換: manifest 不在時は既定/CLI を使用
 
+受理する manifest 形状（後方互換）
+- 優先1: `aggregated.multipv`（例: `{ "aggregated": { "multipv": 3 } }`）
+- 優先2: top-level `multipv`（集約 manifest; 例: `{ "multipv": 3, "manifest_scope": "aggregate" }`）
+- どちらも無い/manifest 不在: 既定値 `2` を使用（CLI 数値は常に最優先）
+
 ## 後方互換シナリオ
 - 既存 manifest v2 と互換（スキーマ: `docs/schemas/manifest_v2.schema.json`）
 - CI に小回帰テスト追加（小/中/大入力、error-handling）
