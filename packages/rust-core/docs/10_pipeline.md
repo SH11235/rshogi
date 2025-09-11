@@ -30,6 +30,9 @@
 - ログ:
   - JSONL に `global_step, epoch, lr, train_loss, val_loss, val_auc, wall_time`
   - `examples_sec, loader_ratio` を合わせて出力
+- 備考:
+  - Plateauは任意。検証が存在し、`--lr-plateau-patience > 0` のときのみ有効。係数はスケジュールにオーバーレイ（`multiplier *= 0.5`）して次エポックに一律適用。
+  - Plateau発火時は人間可読ログに1行通知（structured_v1の`lr`はplateau反映済）。
 - DoD:
   - 既存 run（constant）と再現性が一致
   - Cosine/Step で val 曲線に改善が目視可能（ダッシュボード生成に必要十分なログ）
