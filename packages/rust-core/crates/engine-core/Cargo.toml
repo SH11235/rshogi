@@ -48,19 +48,11 @@ name = "tt_prefetch_bench"
 harness = false
 
 [[bench]]
-name = "tt_simd_bench"
-harness = false
-
-[[bench]]
 name = "tt_bucket_bench"
 harness = false
 
 [[bench]]
 name = "tt_dynamic_bench"
-harness = false
-
-[[bench]]
-name = "tt_8entry_comparison"
 harness = false
 
 [[bench]]
@@ -81,10 +73,6 @@ harness = false
 
 [[bench]]
 name = "time_management_bench"
-harness = false
-
-[[bench]]
-name = "movelist_bench"
 harness = false
 
 [[bench]]
