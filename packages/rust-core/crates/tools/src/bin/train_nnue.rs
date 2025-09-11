@@ -2153,22 +2153,6 @@ fn train_model(
 
         let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
         let epoch_sps = (n_samples as f32) / epoch_secs;
-        if zero_weight_batches > 0 {
-            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-            if human_to_stderr {
-                eprintln!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            } else {
-                println!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            }
-        }
         // Update best trackers
         if let Some(vl) = val_loss {
             if vl < *ctx.trackers.best_val_loss {
@@ -2270,38 +2254,7 @@ fn train_model(
                 epoch_sps
             );
         }
-        if zero_weight_batches > 0 {
-            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-            if human_to_stderr {
-                eprintln!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            } else {
-                println!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            }
-        }
-        if zero_weight_batches > 0 {
-            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-            if human_to_stderr {
-                eprintln!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            } else {
-                println!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            }
-        }
+        print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
     }
 
     Ok(())
@@ -2616,23 +2569,7 @@ fn train_model_stream_cache(
                     epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
                 );
             }
-            if zero_weight_batches > 0 {
-                let human_to_stderr =
-                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-                if human_to_stderr {
-                    eprintln!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                } else {
-                    println!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                }
-            }
+            // zero-weight debug: print once per epoch after summary (handled below)
             if let Some(ref lg) = ctx.structured {
                 let mut rec_train = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
@@ -2710,6 +2647,9 @@ fn train_model_stream_cache(
                 ])?;
                 w.flush()?;
             }
+
+            // print once per epoch
+            print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
         }
 
         return Ok(());
@@ -3733,23 +3673,6 @@ fn train_model_with_loader(
                 }
                 lg.write_json(&rec_val);
             }
-            if zero_weight_batches > 0 {
-                let human_to_stderr =
-                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-                if human_to_stderr {
-                    eprintln!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                } else {
-                    println!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                }
-            }
             if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                 eprintln!(
                     "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
@@ -3761,23 +3684,7 @@ fn train_model_with_loader(
                     epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
                 );
             }
-            if zero_weight_batches > 0 {
-                let human_to_stderr =
-                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-                if human_to_stderr {
-                    eprintln!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                } else {
-                    println!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                }
-            }
+            print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
         }
         // Ensure worker fully finished at end
         async_loader.finish();
@@ -4234,23 +4141,7 @@ fn train_model_with_loader(
                 epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps
                 );
             }
-            if zero_weight_batches > 0 {
-                let human_to_stderr =
-                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-                if human_to_stderr {
-                    eprintln!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                } else {
-                    println!(
-                        "[debug] epoch {} had {} zero-weight batches",
-                        epoch + 1,
-                        zero_weight_batches
-                    );
-                }
-            }
+            print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
         }
     }
 
@@ -4521,6 +4412,20 @@ fn compute_val_auc_and_ece(
 trait DashboardValKind {
     fn is_jsonl(&self) -> bool;
     fn calib_bins(&self) -> usize;
+}
+
+/// Debug helper: print zero-weight batch count once per epoch
+#[inline]
+fn print_zero_weight_debug(epoch: usize, count: usize, structured: &Option<StructuredLogger>) {
+    if count == 0 {
+        return;
+    }
+    let human_to_stderr = structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+    if human_to_stderr {
+        eprintln!("[debug] epoch {} had {} zero-weight batches", epoch + 1, count);
+    } else {
+        println!("[debug] epoch {} had {} zero-weight batches", epoch + 1, count);
+    }
 }
 
 // Quantization parameters for int8 conversion
