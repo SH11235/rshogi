@@ -2315,6 +2315,8 @@ fn train_model_stream_cache(
                 batches_since += 1;
                 samples_since += batch.len();
 
+                // Define completed-batch semantics: increment before logging
+                ctx.global_step += 1;
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
                 {
@@ -2356,7 +2358,7 @@ fn train_model_stream_cache(
                     batches_since = 0;
                     read_ns_since = 0;
                 }
-                ctx.global_step += 1;
+                // already incremented above to represent completed batches
             }
 
             let avg_loss = if total_weight > 0.0 {
@@ -2365,10 +2367,18 @@ fn train_model_stream_cache(
                 0.0
             };
             let has_val = validation_samples.is_some();
-            let val_loss = if let Some(val_samples) = validation_samples {
-                compute_validation_loss(network, val_samples, config)
+            let (val_loss, val_auc, val_ece, val_wsum): (
+                f32,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+            ) = if let Some(val_samples) = validation_samples {
+                let vl = compute_validation_loss(network, val_samples, config);
+                let (auc, ece) = compute_val_auc_and_ece(network, val_samples, config, &ctx.dash);
+                let wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
+                (vl, auc, ece, wsum)
             } else {
-                0.0
+                (0.0, None, None, None)
             };
             let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
             let loader_ratio_epoch = ((read_ns_epoch as f64)
@@ -2376,6 +2386,15 @@ fn train_model_stream_cache(
                 .clamp(0.0, 1.0)
                 * PERCENTAGE_DIVISOR as f64;
             let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
+            // Update best trackers (only when validation is present)
+            if has_val {
+                if val_loss < *ctx.trackers.best_val_loss {
+                    *ctx.trackers.best_val_loss = val_loss;
+                    *ctx.trackers.best_network = Some(network.clone());
+                    *ctx.trackers.best_epoch = Some(epoch + 1);
+                }
+                *ctx.trackers.last_val_loss = Some(val_loss);
+            }
             if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                 eprintln!(
                     "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
@@ -2413,7 +2432,50 @@ fn train_model_stream_cache(
                         .unwrap()
                         .insert("val_loss".to_string(), serde_json::json!(val_loss as f64));
                 }
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
+                }
                 lg.write_json(&rec_val);
+            }
+
+            // Emit metrics.csv (sync stream-cache path)
+            if ctx.dash.emit {
+                let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(ctx.out_dir.join("metrics.csv"))?,
+                );
+                let val_loss_str = if has_val {
+                    format!("{:.6}", val_loss)
+                } else {
+                    String::new()
+                };
+                w.write_record([
+                    (epoch + 1).to_string(),
+                    format!("{:.6}", avg_loss),
+                    val_loss_str,
+                    val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    format!("{:.3}", epoch_secs),
+                    format!("{:.3}", total_weight),
+                    val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                    if Some(epoch + 1) == *ctx.trackers.best_epoch {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    },
+                ])?;
+                w.flush()?;
             }
         }
 
@@ -2932,7 +2994,7 @@ fn train_model_with_loader(
             let mut batches_since = 0usize;
             let mut wait_ns_since: u128 = 0;
             let mut wait_ns_epoch: u128 = 0;
-            let mut _last_lr_base = config.learning_rate;
+            let mut last_lr_base = config.learning_rate;
 
             loop {
                 let (maybe_indices, wait_dur) = async_loader.next_batch_with_wait();
@@ -2999,11 +3061,14 @@ fn train_model_with_loader(
                 batches_since += 1;
                 wait_ns_since += wait_dur.as_nanos();
                 wait_ns_epoch += wait_dur.as_nanos();
+                last_lr_base = lr_base;
                 // Approximate compute time as time taken by train_batch (dominant)
                 // Note: train_batch_by_indices already executed; we estimate by subtracting wait from interval wall time on print, but here we track per-batch compute as 0.
                 // Instead, measure explicitly around forward+backward: do a local timing.
                 // For minimal invasiveness, we cannot re-run compute; so we estimate compute time using throughput interval wall time at print.
 
+                // Define completed-batch semantics: increment before logging
+                ctx.global_step += 1;
                 // Periodic throughput report
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
@@ -3069,7 +3134,6 @@ fn train_model_with_loader(
                         println!("Saved checkpoint: {}", checkpoint_path.display());
                     }
                 }
-                ctx.global_step += 1;
             }
 
             let avg_loss = if total_weight > 0.0 {
@@ -3305,6 +3369,47 @@ fn train_model_with_loader(
                 ])?;
                 w.flush()?;
             }
+            // Structured per-epoch logs (train/val)
+            if let Some(ref lg) = ctx.structured {
+                let rec_train = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "train",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "lr": last_lr_base as f64,
+                    "train_loss": avg_loss as f64,
+                    "examples_sec": epoch_sps as f64,
+                    "loader_ratio": (loader_ratio_epoch as f64)/100.0,
+                    "wall_time": epoch_secs as f64,
+                });
+                lg.write_json(&rec_train);
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(vl) = val_loss {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+                }
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
+                }
+                lg.write_json(&rec_val);
+            }
             if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                 eprintln!(
                     "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
@@ -3335,7 +3440,7 @@ fn train_model_with_loader(
             let mut last_report = Instant::now();
             let mut samples_since = 0usize;
             let mut batches_since = 0usize;
-            let _last_lr_base = config.learning_rate;
+            let mut last_lr_base = config.learning_rate;
 
             while let Some(indices) = {
                 let t0 = Instant::now();
@@ -3408,6 +3513,7 @@ fn train_model_with_loader(
                 total_batches += 1;
                 samples_since += batch_len;
                 batches_since += 1;
+                last_lr_base = lr_base;
 
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
@@ -3467,8 +3573,7 @@ fn train_model_with_loader(
                         }
                     }
                 }
-                // advance global step per batch
-                ctx.global_step += 1;
+                // already incremented above
                 // record last lr used (unused in sync loader path)
             }
 
@@ -3699,6 +3804,47 @@ fn train_model_with_loader(
                 ])?;
                 w.flush()?;
             }
+            // Structured per-epoch logs (train/val) for sync in-mem loader
+            if let Some(ref lg) = ctx.structured {
+                let rec_train = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "train",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "lr": last_lr_base as f64,
+                    "train_loss": avg_loss as f64,
+                    "examples_sec": epoch_sps as f64,
+                    "loader_ratio": 0.0f64,
+                    "wall_time": epoch_secs as f64,
+                });
+                lg.write_json(&rec_train);
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(vl) = val_loss {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+                }
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
+                }
+                lg.write_json(&rec_val);
+            }
             if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                 eprintln!(
                 "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
@@ -3899,7 +4045,11 @@ fn compute_validation_loss(network: &Network, samples: &[Sample], config: &Confi
         total_weight += sample.weight;
     }
 
-    total_loss / total_weight
+    if total_weight > 0.0 {
+        total_loss / total_weight
+    } else {
+        0.0
+    }
 }
 
 fn compute_val_auc(network: &Network, samples: &[Sample], config: &Config) -> Option<f64> {
