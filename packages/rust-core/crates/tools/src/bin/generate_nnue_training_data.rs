@@ -323,6 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --entropy-mate-mode <exclude|saturate> (mate handling in entropy; default: saturate)");
         eprintln!("  --no-recalib (reuse manifest calibration if available)");
         eprintln!("  --force-recalib (force re-calibration even if manifest exists)");
+        eprintln!("  (Input) You can pass '-' to read SFEN from STDIN");
         eprintln!("\nRecommended settings for initial NNUE data:");
         eprintln!("  - Depth 2: Fast collection, basic evaluation");
         eprintln!("  - Depth 3: Balanced speed/quality");
@@ -335,6 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut f = File::open(path)?;
         let mut buf = [0u8; 1 << 20]; // 1 MiB
         let mut cnt: usize = 0;
+        let mut last_byte: Option<u8> = None;
         loop {
             let n = f.read(&mut buf)?;
             if n == 0 {
@@ -345,6 +347,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cnt += 1;
                 }
             }
+            last_byte = Some(buf[n - 1]);
+        }
+        // Count the final line if file doesn't end with a newline
+        if last_byte.is_some() && last_byte != Some(b'\n') {
+            cnt += 1;
         }
         Ok(cnt)
     }
@@ -1113,7 +1120,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         fn make_part_paths(&self, idx: usize) -> (std::path::PathBuf, std::path::PathBuf) {
-            let part_name = format!("{}.part-{:04}.{}", self.base_stem, idx, self.base_ext);
+            let part_name = if self.base_ext.is_empty() {
+                format!("{}.part-{:04}", self.base_stem, idx)
+            } else {
+                format!("{}.part-{:04}.{}", self.base_stem, idx, self.base_ext)
+            };
             let mut file_name = part_name.clone();
             match self.compress {
                 CompressionKind::None => {}
@@ -2632,9 +2643,9 @@ fn process_position_with_engine(
     };
 
     // Metadata for quality tracking
-    // Apply timeout mark if either K=2 or K=3 (if run) exceeded the time budget
-    let timed_out_any = timed_out
-        || (is_time_mode && used_k3_research && (result_used_time_ms > env.time_limit_ms));
+    // Apply timeout mark based on total (K=2 + optional K=3) time against the budget
+    let search_time_total_ms = k2_time_ms + k3_time_ms_opt.unwrap_or(0);
+    let timed_out_any = is_time_mode && (search_time_total_ms > env.time_limit_ms);
     let mut meta = if timed_out_any {
         format!(" # timeout_d{}", result_used_depth)
     } else {
@@ -2758,6 +2769,8 @@ fn process_position_with_engine(
                 "time_ms_k2": k2_time_ms,
                 "time_ms_k3": k3_time_ms_opt,
                 "search_time_ms_total": k2_time_ms + k3_time_ms_opt.unwrap_or(0),
+                "timeout_total": is_time_mode && (k2_time_ms + k3_time_ms_opt.unwrap_or(0) > env.time_limit_ms),
+                "budget_mode": if env.opts.nodes.is_some() { "nodes" } else { "time" },
                 "nodes_k2": k2_nodes,
                 "nodes_k3": k3_nodes_opt,
                 "nodes_total": k2_nodes + k3_nodes_opt.unwrap_or(0),
@@ -2866,6 +2879,7 @@ mod tests {
     use super::*;
     use engine_core::search::types::{Bound, RootLine};
     use smallvec::smallvec;
+    use std::io::Write as _;
 
     fn mk_line(cp: i32) -> RootLine {
         RootLine {
@@ -2924,4 +2938,6 @@ mod tests {
         // gap too large
         assert!(!is_ambiguous_for_k3(Bound::Exact, Bound::Exact, 100, 0, 25, true));
     }
+
+    // fast_count_lines は generate 内部関数のため単体テストは省略（回帰は上位の再開テストで担保）
 }
