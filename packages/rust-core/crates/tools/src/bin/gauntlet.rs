@@ -20,7 +20,9 @@ use std::process::Command;
     name = "gauntlet",
     about = "One-command gauntlet runner",
     version,
-    infer_subcommands = true
+    infer_subcommands = true,
+    subcommand_negates_reqs = true,
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -71,6 +73,21 @@ struct RunArgs {
     /// Hidden: use deterministic stub engine for tests
     #[arg(long, hide = true, action = ArgAction::SetTrue)]
     stub: bool,
+}
+
+fn validate_args(a: &RunArgs) -> Result<()> {
+    if a.multipv != 1 {
+        return Err(anyhow!(
+            "--multipv must be 1 for games (PV spread is measured with MultiPV=3 internally)"
+        ));
+    }
+    if a.games % 2 != 0 {
+        return Err(anyhow!("--games must be even for fair pairing"));
+    }
+    if a.threads != 1 {
+        eprintln!("WARN: Spec 013 requires --threads=1 (got {}).", a.threads);
+    }
+    Ok(())
 }
 
 // ---------------- Types ----------------
@@ -247,7 +264,7 @@ fn write_markdown(report_path: &Path, out: &GauntletOut) -> Result<()> {
     let mut md = String::new();
     md.push_str("# Gauntlet Report\n\n");
     md.push_str(&format!(
-        "- Winrate: {:.1}% (W:{} L:{} D:{})\n",
+        "- Score rate: {:.1}% (W:{} L:{} D:{})\n",
         out.summary.winrate * 100.0,
         out.summary.wins.unwrap_or(0),
         out.summary.losses.unwrap_or(0),
@@ -399,16 +416,9 @@ impl StubRunner {
 // ---------------- Core run ----------------
 
 fn run_real(args: &RunArgs) -> Result<GauntletOut> {
+    validate_args(args)?;
     let time = parse_time_spec(&args.time)?;
     let book = load_book_positions(Path::new(&args.book))?;
-    if args.multipv != 1 {
-        return Err(anyhow!(
-            "--multipv must be 1 for games (PV spread is measured with MultiPV=3 internally)"
-        ));
-    }
-    if args.threads != 1 {
-        eprintln!("WARN: Spec 013 requires --threads=1 (got {}).", args.threads);
-    }
     let mut base = PlayerEngine::new(
         &args.base,
         args.threads,
@@ -615,7 +625,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         // Reject with reason
         let mut rs = Vec::new();
         if winrate < 0.55 {
-            rs.push(format!("winrate {:.1}% < 55%", winrate * 100.0));
+            rs.push(format!("score rate {:.1}% < 55%", winrate * 100.0));
         }
         if nps_delta_pct.abs() > 3.0 {
             rs.push(format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
@@ -653,6 +663,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
 }
 
 fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
+    validate_args(args)?;
     let _time = parse_time_spec(&args.time)?;
     let book = load_book_positions(Path::new(&args.book))?;
     let mut stub = StubRunner::new();
@@ -667,9 +678,6 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
     let mut wins = 0usize;
     let mut losses = 0usize;
     let mut draws = 0usize;
-    if args.games % 2 != 0 {
-        return Err(anyhow!("--games must be even for fair pairing"));
-    }
     let schedule = schedule_pairs(book.len(), args.games);
     for (g, (open_idx, cand_black)) in schedule.into_iter().enumerate() {
         let sfen = &book[open_idx];
@@ -714,7 +722,7 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
     } else if !matches!(gate, GateDecision::Provisional) {
         let mut rs = Vec::new();
         if winrate < 0.55 {
-            rs.push(format!("winrate {:.1}% < 55%", winrate * 100.0));
+            rs.push(format!("score rate {:.1}% < 55%", winrate * 100.0));
         }
         if nps_delta_pct.abs() > 3.0 {
             rs.push(format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
@@ -772,7 +780,6 @@ fn emit_structured_jsonl(games: usize) {
 }
 
 fn schedule_pairs(book_len: usize, games: usize) -> Vec<(usize, bool)> {
-    assert!(games % 2 == 0, "games must be even for fair pairing");
     (0..(games / 2))
         .flat_map(|i| {
             let open_idx = i % book_len;
