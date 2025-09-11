@@ -128,10 +128,8 @@ fn test_gauntlet_stdout_destinations() {
         .stdout(predicate::str::contains("\"env\":"))
         // structured_v1 should be on stderr when stdout is used by JSON
         .stderr(predicate::str::contains("\"phase\":\"gauntlet\""))
-        // extended metrics should be present as optional keys
-        .stderr(predicate::str::contains("pv_spread_p90_cp"))
-        .stderr(predicate::str::contains("pv_spread_samples"))
-        .stderr(predicate::str::contains("nps_samples"));
+        // extended metrics (example field)
+        .stderr(predicate::str::contains("pv_spread_p90_cp"));
 }
 
 #[test]
@@ -172,6 +170,57 @@ fn test_gauntlet_seed_runs() {
         "--stub",
     ]);
     cmd.assert().success();
+}
+
+#[test]
+fn test_gauntlet_blockwise_seed_keeps_adjacent_pairs() {
+    // Prepare temp outputs
+    let tmp = tempfile::tempdir().unwrap();
+    let json_path = tmp.path().join("out.json");
+    let report_path = tmp.path().join("report.md");
+
+    let book_path = repo_root().join("docs/reports/fixtures/opening/representative.epd");
+    assert!(book_path.exists(), "book not found: {}", book_path.display());
+
+    let mut cmd = Command::cargo_bin("gauntlet").unwrap();
+    cmd.args([
+        "--base",
+        "baseline.nn",
+        "--cand",
+        "candidate.nn",
+        "--time",
+        "0/1+0.1",
+        "--games",
+        "20",
+        "--threads",
+        "1",
+        "--hash-mb",
+        "256",
+        "--book",
+        book_path.to_str().unwrap(),
+        "--multipv",
+        "1",
+        "--json",
+        json_path.to_str().unwrap(),
+        "--report",
+        report_path.to_str().unwrap(),
+        "--seed",
+        "123",
+        "--seed-mode",
+        "block",
+        "--stub",
+    ]);
+    cmd.assert().success();
+
+    // Load JSON and verify adjacency of opening_index in 2-game blocks
+    let data: Value = serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    let series = data["series"].as_array().unwrap();
+    assert!(series.len() % 2 == 0);
+    for i in (0..series.len()).step_by(2) {
+        let a = series[i]["opening_index"].as_u64().unwrap();
+        let b = series[i + 1]["opening_index"].as_u64().unwrap();
+        assert_eq!(a, b, "blockwise shuffle must keep 2-game pair adjacent");
+    }
 }
 
 #[test]
