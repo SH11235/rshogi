@@ -5,7 +5,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
-    search::{parallel::ParallelSearcher, SearchLimitsBuilder, ShardedTranspositionTable},
+    search::{parallel::ParallelSearcher, SearchLimitsBuilder, TranspositionTable},
     shogi::Position,
     time_management::TimeControl,
 };
@@ -70,7 +70,7 @@ fn bench_depth_search(c: &mut Criterion) {
                 |b, &threads| {
                     b.iter(|| {
                         // Fresh TT for each iteration to ensure consistency
-                        let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
+                        let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 
@@ -110,7 +110,7 @@ fn bench_nps_throughput(c: &mut Criterion) {
                     let mut _total_nodes = 0u64;
 
                     for _ in 0..iters {
-                        let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
+                        let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 
@@ -159,7 +159,7 @@ fn bench_stop_latency(c: &mut Criterion) {
                     let mut total_overshoot = Duration::ZERO;
 
                     for _ in 0..iters {
-                        let tt = Arc::new(ShardedTranspositionTable::new(64)); // Smaller TT for latency test
+                        let tt = Arc::new(TranspositionTable::new(64)); // Smaller TT for latency test
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 
@@ -200,14 +200,14 @@ fn bench_speedup_efficiency(c: &mut Criterion) {
     let position = Position::startpos();
 
     // First, get baseline with 1 thread
-    let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
+    let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
     let mut baseline_searcher = ParallelSearcher::new(evaluator.clone(), tt, 1);
     let mut pos_clone = position.clone();
 
-    let limits = SearchLimitsBuilder::default().depth(config.depth).build();
+    let baseline_limits = SearchLimitsBuilder::default().depth(config.depth).build();
 
     let baseline_start = std::time::Instant::now();
-    let baseline_result = baseline_searcher.search(&mut pos_clone, limits.clone());
+    let baseline_result = baseline_searcher.search(&mut pos_clone, baseline_limits);
     let baseline_time = baseline_start.elapsed();
     let baseline_nps = (baseline_result.stats.nodes as f64) / baseline_time.as_secs_f64();
 
@@ -224,12 +224,13 @@ fn bench_speedup_efficiency(c: &mut Criterion) {
             &thread_count,
             |b, &threads| {
                 b.iter(|| {
-                    let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
+                    let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
                     let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                     let mut pos_clone = position.clone();
 
                     let start = std::time::Instant::now();
-                    let result = searcher.search(&mut pos_clone, limits.clone());
+                    let iter_limits = SearchLimitsBuilder::default().depth(config.depth).build();
+                    let result = searcher.search(&mut pos_clone, iter_limits);
                     let elapsed = start.elapsed();
 
                     let nps = (result.stats.nodes as f64) / elapsed.as_secs_f64();
@@ -262,20 +263,21 @@ fn bench_pv_consistency(c: &mut Criterion) {
                 &thread_count,
                 |b, &threads| {
                     // Get reference PV with single thread
-                    let tt = Arc::new(ShardedTranspositionTable::new(128));
+                    let tt = Arc::new(TranspositionTable::new(128));
                     let mut ref_searcher = ParallelSearcher::new(evaluator.clone(), tt, 1);
                     let mut ref_pos = position.clone();
 
                     let limits = SearchLimitsBuilder::default().depth(6).build();
-                    let ref_result = ref_searcher.search(&mut ref_pos, limits.clone());
+                    let ref_result = ref_searcher.search(&mut ref_pos, limits);
                     let ref_move = ref_result.best_move;
 
                     b.iter(|| {
-                        let tt = Arc::new(ShardedTranspositionTable::new(128));
+                        let tt = Arc::new(TranspositionTable::new(128));
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 
-                        let result = searcher.search(&mut pos_clone, limits.clone());
+                        let limits = SearchLimitsBuilder::default().depth(6).build();
+                        let result = searcher.search(&mut pos_clone, limits);
 
                         // Return whether PV matches
                         result.best_move == ref_move
