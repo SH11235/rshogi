@@ -20,14 +20,24 @@
 - 出力先: JSONL（1 行 1 レコード）
 - 必須キー:
   - 共通: `ts`, `phase`, `global_step`, `epoch`, `wall_time`
-  - 学習: `lr`, `train_loss`, `examples_sec`, `loader_ratio`
+  - 学習: `lr`, `examples_sec`, `loader_ratio`
   - 検証: `val_loss`, `val_auc`
+  
+  備考: `train_loss` は任意。直近のミニバッチで損失が未計算（例: 全サンプルが weight=0 のバッチを通過した直後など）のスループット行では省略される場合があります。スキーマ（`docs/schemas/structured_v1.schema.json`）とも整合します。
 - スキーマ: `docs/schemas/structured_v1.schema.json`
 
 例（1 行）
 ```json
-{"ts":"2025-09-10T12:34:56Z","phase":"train","global_step":1200,"epoch":3,"lr":0.00083,"train_loss":0.642,"examples_sec":9350.4,"loader_ratio":0.91,"wall_time":123.4}
+ {"ts":"2025-09-10T12:34:56Z","phase":"train","global_step":1200,"epoch":3,"lr":0.00083,"train_loss":0.642,"examples_sec":9350.4,"loader_ratio":0.91,"wall_time":123.4}
 ```
+
+## ステップ意味論（global_step と LR 減衰）
+
+- 定義: `global_step` は「完了済みバッチ数」。学習ループにおいて各バッチ処理の完了直後に必ず +1 されます。
+- ゼロ重み: バッチ内サンプルの重み合計が 0 の場合でも、`global_step` は前進します（計算のスキップは行いますが、ステップは進む）。
+- 一貫性: 上記は in‑memory／stream‑cache、sync／async の全経路で共通です。
+- スケジュール: `--lr-decay-steps` を指定した場合、減衰の進行は `global_step` に基づきます。`--lr-decay-epochs` はエポック数に基づきます。Warmup も同様に `global_step`/エポックのいずれかで適用されます（実装依存の分岐に従う）。
+- 互換性: 現仕様では「有効更新バッチ数」（非ゼロ重みバッチのみをカウント）による減衰は行いません。将来的にオプトインのオプションを追加する場合は別途明記します。
 
 ## テスト行列
 - スケジュール: `{constant, step, cosine}`

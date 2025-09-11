@@ -35,6 +35,10 @@
   - Cosine/Step で val 曲線に改善が目視可能（ダッシュボード生成に必要十分なログ）
   - ログスキーマは `00_charter.md` の“ログ契約”に準拠
  - 参考: `docs/schemas/structured_v1.schema.json`
+ - 実装状況（tools/train_nnue）:
+   - CLIに上記フラグを追加し、バッチ更新毎にスケジュール適用
+   - 構造化ログ（`--structured-log <PATH|->`）を、ステップ間隔とエポック末に出力
+   - 既定は `constant` で、旧挙動と数値一致（決定論テストで担保）
 
 ### #13 最小ガントレット自動化（P2）
 - 機能:
@@ -65,15 +69,17 @@
  - 参考: `docs/specs/017_generate_streaming.md`
 
 ### #12 サンプル重み運用（P2）
-- 機能:
-  - `--weighting {exact,gap,phase,mate}` と係数指定（例: `--w-exact 1.5 --w-gap 1.2 --w-phase-endgame 1.3 --w-mate-ring 2.0`）
-  - YAML/JSON 設定ファイルからも読み込み可能に
+- 機能（tools/train_nnue）:
+  - `--weighting {exact|gap|phase|mate}`（複数指定可）
+  - 係数（既定=1.0）: `--w-exact`, `--w-gap`, `--w-phase-endgame`, `--w-mate-ring`
+  - 設定ファイル（YAML/JSON）: `--config <path>`（優先度: CLI > config > 既定）
+  - 適用順序: exact → gap → phase → mate（逐次乗算）
 - Gate/レポート:
-  - 学習設定の係数を Gate レポートに出力（逸脱は CI で検知）
+  - 構造化JSONL（structured v1）の `training_config` にスキームと係数（および `preset`）を出力
+  - Gauntlet出力も `training_config` を許容（スキーマ参照）
 - DoD:
   - 係数変更で val AUC またはガントレット勝率に有意差（±方向含む）が確認可能
-  - 既存 run（係数=1.0）と比較して再現性が崩れない
- - Gate レポートに係数を焼き込む（追跡可能性）
+  - 既存 run（係数=1.0）と比較して再現性が崩れない（決定論ユニットテストで担保）
 
 ---
 
