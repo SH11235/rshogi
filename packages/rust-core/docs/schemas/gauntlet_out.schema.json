@@ -29,7 +29,7 @@
     "summary": {
       "type": "object",
       "properties": {
-        "winrate": {"type": "number", "minimum": 0, "maximum": 1},
+        "winrate": {"type": "number", "minimum": 0, "maximum": 1, "description": "Score rate over all games (W=1, D=0.5, L=0). Kept as 'winrate' for backward compatibility."},
         "draw": {"type": "number", "minimum": 0, "maximum": 1},
         "nps_delta_pct": {"type": "number"},
         "pv_spread_p90_cp": {"type": "number"},

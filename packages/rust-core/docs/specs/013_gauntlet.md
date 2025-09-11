@@ -9,13 +9,59 @@
 - MultiPV: `1`（PVスプレッド観測は別途 MultiPV=3 で測定）
 
 ## CLI（例）
+
+デバッグ（cargo run）:
 ```
-cargo run -p tools --bin gauntlet -- \
-  --base runs/baseline/nn.bin --cand runs/candidate/nn.bin \
+RAYON_NUM_THREADS=1 cargo run -p tools --bin gauntlet -- \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
   --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
-  --book assets/opening/fixed-100.epd --multipv 1 \
-  --json runs/gauntlet/out.json --report runs/gauntlet/report.md
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  > runs/gauntlet/structured.jsonl
 ```
+
+リリースバイナリ（高速）:
+```
+cargo build -p tools --release
+RAYON_NUM_THREADS=1 target/release/gauntlet \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+  --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  > runs/gauntlet/structured.jsonl
+```
+
+再現性（任意）:
+```
+… --seed 123                 # フラット（各局）シャッフル（既定）
+… --seed 123 --seed-mode block  # 2局ブロックの隣接を維持してシャッフル
+```
+
+スタブ実行（パイプライン確認用・NNUE読込なし）:
+```
+# Debug（高速・少局で流れだけ確認）
+RAYON_NUM_THREADS=1 cargo run -p tools --bin gauntlet -- \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+  --time "0/1+0.1" --games 20 --threads 1 --hash-mb 256 \
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  --stub > runs/gauntlet/structured.jsonl
+
+# Release バイナリでのスタブ実行
+cargo build -p tools --release
+RAYON_NUM_THREADS=1 target/release/gauntlet \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+  --time "0/1+0.1" --games 20 --threads 1 --hash-mb 256 \
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  --stub > runs/gauntlet/structured.jsonl
+```
+
+備考:
+- `--json -` または `--report -` を指定すると、対応する出力を STDOUT に書き出します。
+  - その場合、構造化ログ（structured_v1）は STDERR に出力されます（混在防止）。
+- `--seed <N>` を指定すると、開幕順（ペアリング済みの2局セット）を N で決定的にシャッフルします（既定は非シャッフル）。
+  - `--seed-mode {flat|block}` でシャッフルの粒度を選べます。`flat` は各局単位で全体をシャッフル、`block` は先後2局を隣接ブロックのままブロック単位でシャッフルします（既定: flat）。
 
 ## 出力スキーマ
 - JSON 出力は `docs/schemas/gauntlet_out.schema.json` に準拠
@@ -23,11 +69,14 @@ cargo run -p tools --bin gauntlet -- \
   - `env`: CPU, rustc, commit, toolchain
   - `params`: time, games, threads, hash_mb, book, multipv
   - `summary`: winrate, draw, nps_delta_pct, pv_spread_p90_cp, gate
+    - `winrate` は互換のため名称を保持しつつ、実体は Score rate（W=1, D=0.5, L=0）
   - `series`: 各対局の結果（先後/手数/勝敗/消費ノード/NPS）
+  - 透明性向上のため、Summary に `nps_samples` と `pv_spread_samples` を任意で含みます（後方互換）
+  - 再現性のため、Params に `seed`（指定時のみ）と `seed_mode`（指定時のみ）を任意で含みます（後方互換）
 
 ## Gate 判定
-- 勝率: Wilson区間95%の下限 > 50% を準合格
-- 最終合格: 勝率 +5%pt 以上 かつ NPS ±3% 以内
+- 準合格（provisional）: 決着局（W/L）の勝率について、Wilson 区間95%の下限が 50% を超える場合
+- 最終合格（pass）: スコア率（W=1, D=0.5, L=0）が 55%以上 かつ NPS ±3% 以内
 - 代表/アンチの2系統ブック
   - 昇格判定は代表系で実施
   - 退避評価はアンチ系でも確認（オーバーフィット抑止）
@@ -39,11 +88,10 @@ cargo run -p tools --bin gauntlet -- \
 ## Fixtures
 - 代表ブック: `docs/reports/fixtures/opening/representative.epd`
 - アンチブック: `docs/reports/fixtures/opening/anti.epd`
-- 使用例（代表ブック）:
-  ```sh
-  cargo run -p tools --bin gauntlet -- \
-    --base runs/baseline/nn.bin --cand runs/candidate/nn.bin \
-    --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
-    --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
-    --json runs/gauntlet/out.json --report runs/gauntlet/report.md
-  ```
+-- 使用例（代表ブック）: 上記 CLI（例）を参照
+
+## 実装メモ（計測の厳密化）
+- NPS: サンプルごとに TT をクリアしてから固定時間探索し、`f64` で累積平均化（丸め誤差抑制）
+- PV スプレッド: MultiPV=3 の root を用い、mate スコアを含むサンプルは除外（閾値: `|cp| ≥ 30000`）
+- 環境情報（env）はクロスプラットフォームな手段で収集（Linux: /proc/cpuinfo, macOS: sysctl, Windows: PowerShell CIM）。取得不可時は "unknown" とする。
+- p90 は Nearest‑Rank（`rank = ceil(p · n)`）で算出します。
