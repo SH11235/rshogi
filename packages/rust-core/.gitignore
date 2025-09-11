@@ -39,7 +39,7 @@ complete-result.json
 memo/
 
 # Ignore tool-generated manifests under run outputs
-runs/**/manifest.json
+runs/*
 
 # Avoid re-introducing accidentally generated manifest in tools crate root
 crates/tools/manifest.json
