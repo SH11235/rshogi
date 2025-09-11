@@ -10,6 +10,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -260,7 +261,7 @@ fn gather_env_info() -> EnvInfo {
     }
 }
 
-fn write_markdown(report_path: &Path, out: &GauntletOut) -> Result<()> {
+fn build_markdown(out: &GauntletOut) -> String {
     let mut md = String::new();
     md.push_str("# Gauntlet Report\n\n");
     md.push_str(&format!(
@@ -287,6 +288,11 @@ fn write_markdown(report_path: &Path, out: &GauntletOut) -> Result<()> {
         out.params.multipv,
         out.params.book
     ));
+    md
+}
+
+fn write_markdown(report_path: &Path, out: &GauntletOut) -> Result<()> {
+    let md = build_markdown(out);
     fs::create_dir_all(report_path.parent().unwrap_or_else(|| Path::new(".")))?;
     fs::write(report_path, md)?;
     Ok(())
@@ -378,6 +384,11 @@ impl PlayerEngine {
             None
         }
     }
+
+    fn clear_tt(&mut self) {
+        // Clear TT/heuristics to avoid cross-sample warming effects for fair NPS measurement
+        self.eng.clear_hash();
+    }
 }
 
 // ---------------- Stub runner (deterministic) ----------------
@@ -438,12 +449,16 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
 
     // NPS measurement (fixed positions, fixed time per position)
     let nps_sample_ms = time.inc_ms.max(100);
-    let mut nps_base_sum = 0u128;
-    let mut nps_cand_sum = 0u128;
-    for (i, s) in book.iter().take(100.min(book.len())).enumerate() {
+    let mut nps_base_sum = 0.0f64;
+    let mut nps_cand_sum = 0.0f64;
+    let n_samples = 100.min(book.len());
+    for (i, s) in book.iter().take(n_samples).enumerate() {
         // Use independent positions and alternate measurement order
         let mut pos_b = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
         let mut pos_c = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
+        // Clear TT before each measurement to avoid TT warming bias
+        base.clear_tt();
+        cand.clear_tt();
         let (nodes_b, el_b, nodes_c, el_c) = if i % 2 == 0 {
             let (_b, nodes_b, el_b) = base.search_best(
                 &mut pos_b,
@@ -473,13 +488,21 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             );
             (nodes_b, el_b, nodes_c, el_c)
         };
-        let nps_b = (nodes_b as u128) * 1000 / (el_b as u128).max(1);
-        let nps_c = (nodes_c as u128) * 1000 / (el_c as u128).max(1);
+        let nps_b = (nodes_b as f64) * 1000.0 / (el_b as f64).max(1.0);
+        let nps_c = (nodes_c as f64) * 1000.0 / (el_c as f64).max(1.0);
         nps_base_sum += nps_b;
         nps_cand_sum += nps_c;
     }
-    let nps_b_avg: f64 = (nps_base_sum / (100.min(book.len()) as u128)) as f64;
-    let nps_c_avg: f64 = (nps_cand_sum / (100.min(book.len()) as u128)) as f64;
+    let nps_b_avg: f64 = if n_samples > 0 {
+        nps_base_sum / (n_samples as f64)
+    } else {
+        0.0
+    };
+    let nps_c_avg: f64 = if n_samples > 0 {
+        nps_cand_sum / (n_samples as f64)
+    } else {
+        0.0
+    };
     let nps_delta_pct: f64 = if nps_b_avg > 0.0 {
         (nps_c_avg - nps_b_avg) / nps_b_avg * 100.0
     } else {
@@ -488,9 +511,15 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
 
     // PV spread p90 (candidate; MultiPV=3)
     let mut spreads: Vec<f64> = Vec::new();
+    fn is_mate_cp(cp: i32) -> bool {
+        cp.abs() >= 30_000
+    }
     for s in book.iter().take(100.min(book.len())) {
         let mut pos = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
         if let Some(cps) = cand.eval_multipv3_root_cp(&mut pos, nps_sample_ms) {
+            if cps.iter().any(|&cp| is_mate_cp(cp)) {
+                continue; // Skip mate-valued samples for stable spread
+            }
             let min = cps.iter().min().copied().unwrap_or(0);
             let max = cps.iter().max().copied().unwrap_or(0);
             spreads.push((max - min) as f64);
@@ -755,8 +784,8 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
     })
 }
 
-fn emit_structured_jsonl(games: usize) {
-    // Minimal structured_v1 line to stdout (phase=gauntlet)
+fn emit_structured_jsonl_to<W: Write>(mut w: W, games: usize, summary: &SummaryOut) {
+    // structured_v1 minimal line, extended with optional gauntlet metrics
     #[derive(Serialize)]
     struct Line<'a> {
         ts: &'a str,
@@ -764,6 +793,16 @@ fn emit_structured_jsonl(games: usize) {
         global_step: usize,
         epoch: u32,
         wall_time: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gate: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        score_rate: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        draw: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nps_delta_pct: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pv_spread_p90_cp: Option<f64>,
     }
     let ts_str = Utc::now().to_rfc3339();
     let line = Line {
@@ -772,9 +811,18 @@ fn emit_structured_jsonl(games: usize) {
         global_step: games,
         epoch: 0,
         wall_time: 0.0,
+        gate: Some(match summary.gate {
+            GateDecision::Pass => "pass",
+            GateDecision::Reject => "reject",
+            GateDecision::Provisional => "provisional",
+        }),
+        score_rate: Some(summary.winrate),
+        draw: Some(summary.draw),
+        nps_delta_pct: Some(summary.nps_delta_pct),
+        pv_spread_p90_cp: Some(summary.pv_spread_p90_cp),
     };
     if let Ok(s) = serde_json::to_string(&line) {
-        println!("{}", s);
+        let _ = writeln!(w, "{}", s);
     }
 }
 
@@ -800,17 +848,32 @@ fn main() -> Result<()> {
         run_real(&args)?
     };
 
-    // Ensure parent dirs
-    let json_path = PathBuf::from(&args.json);
-    if let Some(parent) = json_path.parent() {
-        fs::create_dir_all(parent)?;
+    let json_to_stdout = args.json == "-";
+    let report_to_stdout = args.report == "-";
+
+    // JSON output
+    if json_to_stdout {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        let json_path = PathBuf::from(&args.json);
+        if let Some(parent) = json_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&json_path, serde_json::to_string_pretty(&out)?)?;
     }
-    // Write JSON
-    let json = serde_json::to_string_pretty(&out)?;
-    fs::write(&json_path, json)?;
-    // Write markdown report
-    write_markdown(Path::new(&args.report), &out)?;
-    // Emit minimal JSONL for structured_v1 (stdout)
-    emit_structured_jsonl(out.params.games);
+
+    // Markdown output
+    if report_to_stdout {
+        print!("{}", build_markdown(&out));
+    } else {
+        write_markdown(Path::new(&args.report), &out)?;
+    }
+
+    // structured_v1 line: default stdout, but if either main outputs are stdout, use stderr
+    if json_to_stdout || report_to_stdout {
+        emit_structured_jsonl_to(std::io::stderr(), out.params.games, &out.summary);
+    } else {
+        emit_structured_jsonl_to(std::io::stdout(), out.params.games, &out.summary);
+    }
     Ok(())
 }
