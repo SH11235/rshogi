@@ -14,6 +14,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tools::common::io::open_reader;
 
+fn derive_skipped_path(out: &std::path::Path) -> std::path::PathBuf {
+    let stem = out.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext.is_empty() {
+        out.with_file_name(format!("{stem}_skipped"))
+    } else {
+        out.with_file_name(format!("{stem}_skipped.{ext}"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LabelKind {
     Cp,
@@ -323,6 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --entropy-mate-mode <exclude|saturate> (mate handling in entropy; default: saturate)");
         eprintln!("  --no-recalib (reuse manifest calibration if available)");
         eprintln!("  --force-recalib (force re-calibration even if manifest exists)");
+        eprintln!("  (Input) You can pass '-' to read SFEN from STDIN");
         eprintln!("\nRecommended settings for initial NNUE data:");
         eprintln!("  - Depth 2: Fast collection, basic evaluation");
         eprintln!("  - Depth 3: Balanced speed/quality");
@@ -335,6 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut f = File::open(path)?;
         let mut buf = [0u8; 1 << 20]; // 1 MiB
         let mut cnt: usize = 0;
+        let mut last_byte: Option<u8> = None;
         loop {
             let n = f.read(&mut buf)?;
             if n == 0 {
@@ -345,6 +357,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cnt += 1;
                 }
             }
+            last_byte = Some(buf[n - 1]);
+        }
+        // Count the final line if file doesn't end with a newline
+        if last_byte.is_some() && last_byte != Some(b'\n') {
+            cnt += 1;
         }
         Ok(cnt)
     }
@@ -782,11 +799,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create skipped positions output file path
-    let skipped_path = {
-        let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
-        let ext = output_path.extension().unwrap_or_default().to_string_lossy();
-        output_path.with_file_name(format!("{stem}_skipped.{ext}"))
-    };
+    let skipped_path = derive_skipped_path(&output_path);
 
     // Validate depth
     if !(1..=10).contains(&search_depth) {
@@ -1113,7 +1126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         fn make_part_paths(&self, idx: usize) -> (std::path::PathBuf, std::path::PathBuf) {
-            let part_name = format!("{}.part-{:04}.{}", self.base_stem, idx, self.base_ext);
+            let part_name = if self.base_ext.is_empty() {
+                format!("{}.part-{:04}", self.base_stem, idx)
+            } else {
+                format!("{}.part-{:04}.{}", self.base_stem, idx, self.base_ext)
+            };
             let mut file_name = part_name.clone();
             match self.compress {
                 CompressionKind::None => {}
@@ -1127,7 +1144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fn open_next(&mut self) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
             self.current_part += 1;
             self.lines_in_part = 0;
-            let (out_path, _prog_path) = self.make_part_paths(self.current_part);
+            let (out_path, prog_path) = self.make_part_paths(self.current_part);
             let file = File::create(&out_path)?;
             let buf = BufWriter::with_capacity(1 << 20, file);
             let w: Box<dyn PartWrite> = match self.compress {
@@ -1152,7 +1169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             self.writer = Some(w);
-            Ok(self.make_part_paths(self.current_part))
+            Ok((out_path, prog_path))
         }
         fn write_lines(&mut self, lines: &[String]) -> std::io::Result<()> {
             for line in lines {
@@ -2632,9 +2649,9 @@ fn process_position_with_engine(
     };
 
     // Metadata for quality tracking
-    // Apply timeout mark if either K=2 or K=3 (if run) exceeded the time budget
-    let timed_out_any = timed_out
-        || (is_time_mode && used_k3_research && (result_used_time_ms > env.time_limit_ms));
+    // Apply timeout mark based on total (K=2 + optional K=3) time against the budget
+    let search_time_total_ms = k2_time_ms + k3_time_ms_opt.unwrap_or(0);
+    let timed_out_any = is_time_mode && (search_time_total_ms > env.time_limit_ms);
     let mut meta = if timed_out_any {
         format!(" # timeout_d{}", result_used_depth)
     } else {
@@ -2758,6 +2775,8 @@ fn process_position_with_engine(
                 "time_ms_k2": k2_time_ms,
                 "time_ms_k3": k3_time_ms_opt,
                 "search_time_ms_total": k2_time_ms + k3_time_ms_opt.unwrap_or(0),
+                "timeout_total": is_time_mode && (k2_time_ms + k3_time_ms_opt.unwrap_or(0) > env.time_limit_ms),
+                "budget_mode": if env.opts.nodes.is_some() { "nodes" } else { "time" },
                 "nodes_k2": k2_nodes,
                 "nodes_k3": k3_nodes_opt,
                 "nodes_total": k2_nodes + k3_nodes_opt.unwrap_or(0),
@@ -2866,6 +2885,7 @@ mod tests {
     use super::*;
     use engine_core::search::types::{Bound, RootLine};
     use smallvec::smallvec;
+    use std::path::Path;
 
     fn mk_line(cp: i32) -> RootLine {
         RootLine {
@@ -2923,5 +2943,29 @@ mod tests {
         assert!(is_ambiguous_for_k3(Bound::UpperBound, Bound::Exact, 5, 0, 25, false));
         // gap too large
         assert!(!is_ambiguous_for_k3(Bound::Exact, Bound::Exact, 100, 0, 25, true));
+    }
+
+    #[test]
+    fn test_derive_skipped_path_no_ext() {
+        let p = Path::new("out");
+        assert_eq!(derive_skipped_path(p), Path::new("out_skipped"));
+    }
+
+    #[test]
+    fn test_derive_skipped_path_jsonl() {
+        let p = Path::new("out.jsonl");
+        assert_eq!(derive_skipped_path(p), Path::new("out_skipped.jsonl"));
+    }
+
+    #[test]
+    fn test_derive_skipped_path_dotfile() {
+        let p = Path::new(".bashrc");
+        assert_eq!(derive_skipped_path(p), Path::new(".bashrc_skipped"));
+    }
+
+    #[test]
+    fn test_derive_skipped_path_multi_ext() {
+        let p = Path::new("a.b.c");
+        assert_eq!(derive_skipped_path(p), Path::new("a.b_skipped.c"));
     }
 }
