@@ -869,7 +869,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .conflicts_with("lr-decay-epochs"),
         )
         .arg(
-            arg!(--"lr-plateau-patience" <N> "Plateau patience in epochs (optional, step)")
+            arg!(--"lr-plateau-patience" <N> "Plateau patience in epochs (overlay; requires --validation)")
                 .value_parser(clap::value_parser!(u32)),
         )
         .arg(
@@ -1846,6 +1846,57 @@ impl LrPlateauState {
     }
 }
 
+#[inline]
+fn lr_base_for(
+    epoch: usize,
+    global_step: u64,
+    cfg: &Config,
+    plateau: Option<&LrPlateauState>,
+) -> f32 {
+    let mut lr_factor = 1.0f32;
+    if cfg.lr_warmup_epochs > 0 {
+        let e = epoch as u32;
+        if e < cfg.lr_warmup_epochs {
+            lr_factor = ((e + 1) as f32) / (cfg.lr_warmup_epochs as f32);
+        }
+    }
+    match cfg.lr_schedule.as_str() {
+        "constant" => {}
+        "step" => {
+            let step_gamma: f32 = 0.5;
+            if let Some(de) = cfg.lr_decay_epochs {
+                if de > 0 {
+                    let k = ((epoch as u32) / de) as i32;
+                    lr_factor *= step_gamma.powi(k);
+                }
+            }
+            if let Some(ds) = cfg.lr_decay_steps {
+                if ds > 0 {
+                    let k = (global_step / ds) as i32;
+                    lr_factor *= step_gamma.powi(k);
+                }
+            }
+        }
+        "cosine" => {
+            let mut p = 0.0f32;
+            if let Some(de) = cfg.lr_decay_epochs {
+                if de > 0 {
+                    p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
+                }
+            }
+            if let Some(ds) = cfg.lr_decay_steps {
+                if ds > 0 {
+                    p = ((global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
+                }
+            }
+            lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
+        }
+        _ => {}
+    }
+    let pl = plateau.map(|p| p.factor()).unwrap_or(1.0);
+    (cfg.learning_rate * lr_factor * pl).max(0.0)
+}
+
 fn train_model(
     network: &mut Network,
     train_samples: &mut [Sample],
@@ -1891,49 +1942,8 @@ fn train_model(
             let batch = &train_samples[start..end];
 
             let batch_indices: Vec<usize> = (0..batch.len()).collect();
-            // LR scheduling per spec #11 (epoch-based warmup, optional step/cosine decay)
-            let mut lr_factor = 1.0f32;
-            if config.lr_warmup_epochs > 0 {
-                let e = epoch as u32;
-                if e < config.lr_warmup_epochs {
-                    lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
-                }
-            }
-            match config.lr_schedule.as_str() {
-                "constant" => {}
-                "step" => {
-                    let step_gamma: f32 = 0.5;
-                    if let Some(de) = config.lr_decay_epochs {
-                        if de > 0 {
-                            let k = ((epoch as u32) / de) as i32;
-                            lr_factor *= step_gamma.powi(k);
-                        }
-                    }
-                    if let Some(ds) = config.lr_decay_steps {
-                        if ds > 0 {
-                            let k = (ctx.global_step / ds) as i32;
-                            lr_factor *= step_gamma.powi(k);
-                        }
-                    }
-                }
-                "cosine" => {
-                    let mut p = 0.0f32;
-                    if let Some(de) = config.lr_decay_epochs {
-                        if de > 0 {
-                            p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
-                        }
-                    }
-                    if let Some(ds) = config.lr_decay_steps {
-                        if ds > 0 {
-                            p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
-                        }
-                    }
-                    lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
-                }
-                _ => {}
-            }
-            let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
-            let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
+            // LR scheduling per spec #11
+            let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
             // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
             if batch_weight > 0.0 {
@@ -2511,48 +2521,7 @@ fn train_model_stream_cache(
                 let _ = last_loss_for_log;
                 let indices: Vec<usize> = (0..batch.len()).collect();
                 // LR scheduling
-                let mut lr_factor = 1.0f32;
-                if config.lr_warmup_epochs > 0 {
-                    let e = epoch as u32;
-                    if e < config.lr_warmup_epochs {
-                        lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
-                    }
-                }
-                match config.lr_schedule.as_str() {
-                    "constant" => {}
-                    "step" => {
-                        let step_gamma: f32 = 0.5;
-                        if let Some(de) = config.lr_decay_epochs {
-                            if de > 0 {
-                                let k = ((epoch as u32) / de) as i32;
-                                lr_factor *= step_gamma.powi(k);
-                            }
-                        }
-                        if let Some(ds) = config.lr_decay_steps {
-                            if ds > 0 {
-                                let k = (ctx.global_step / ds) as i32;
-                                lr_factor *= step_gamma.powi(k);
-                            }
-                        }
-                    }
-                    "cosine" => {
-                        let mut p = 0.0f32;
-                        if let Some(de) = config.lr_decay_epochs {
-                            if de > 0 {
-                                p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
-                            }
-                        }
-                        if let Some(ds) = config.lr_decay_steps {
-                            if ds > 0 {
-                                p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
-                            }
-                        }
-                        lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
-                    }
-                    _ => {}
-                }
-                let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
-                let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
+                let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
                 // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
                 if batch_weight > 0.0 {
@@ -2854,48 +2823,7 @@ fn train_model_stream_cache(
             };
             let indices: Vec<usize> = (0..batch.len()).collect();
             // LR scheduling
-            let mut lr_factor = 1.0f32;
-            if config.lr_warmup_epochs > 0 {
-                let e = epoch as u32;
-                if e < config.lr_warmup_epochs {
-                    lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
-                }
-            }
-            match config.lr_schedule.as_str() {
-                "constant" => {}
-                "step" => {
-                    let step_gamma: f32 = 0.5;
-                    if let Some(de) = config.lr_decay_epochs {
-                        if de > 0 {
-                            let k = ((epoch as u32) / de) as i32;
-                            lr_factor *= step_gamma.powi(k);
-                        }
-                    }
-                    if let Some(ds) = config.lr_decay_steps {
-                        if ds > 0 {
-                            let k = (ctx.global_step / ds) as i32;
-                            lr_factor *= step_gamma.powi(k);
-                        }
-                    }
-                }
-                "cosine" => {
-                    let mut p = 0.0f32;
-                    if let Some(de) = config.lr_decay_epochs {
-                        if de > 0 {
-                            p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
-                        }
-                    }
-                    if let Some(ds) = config.lr_decay_steps {
-                        if ds > 0 {
-                            p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
-                        }
-                    }
-                    lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
-                }
-                _ => {}
-            }
-            let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
-            let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
+            let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
             // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
             if batch_weight > 0.0 {
@@ -3302,22 +3230,7 @@ fn train_model_stream_cache(
             lg.write_json(&rec_val);
         }
 
-        if zero_weight_batches > 0 {
-            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
-            if human_to_stderr {
-                eprintln!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            } else {
-                println!(
-                    "[debug] epoch {} had {} zero-weight batches",
-                    epoch + 1,
-                    zero_weight_batches
-                );
-            }
-        }
+        print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
 
         loader.finish();
     }
@@ -3381,48 +3294,7 @@ fn train_model_with_loader(
                 let _ = last_loss_for_log;
                 let Some(indices) = maybe_indices else { break };
                 // LR scheduling
-                let mut lr_factor = 1.0f32;
-                if config.lr_warmup_epochs > 0 {
-                    let e = epoch as u32;
-                    if e < config.lr_warmup_epochs {
-                        lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
-                    }
-                }
-                match config.lr_schedule.as_str() {
-                    "constant" => {}
-                    "step" => {
-                        let step_gamma: f32 = 0.5;
-                        if let Some(de) = config.lr_decay_epochs {
-                            if de > 0 {
-                                let k = ((epoch as u32) / de) as i32;
-                                lr_factor *= step_gamma.powi(k);
-                            }
-                        }
-                        if let Some(ds) = config.lr_decay_steps {
-                            if ds > 0 {
-                                let k = (ctx.global_step / ds) as i32;
-                                lr_factor *= step_gamma.powi(k);
-                            }
-                        }
-                    }
-                    "cosine" => {
-                        let mut p = 0.0f32;
-                        if let Some(de) = config.lr_decay_epochs {
-                            if de > 0 {
-                                p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
-                            }
-                        }
-                        if let Some(ds) = config.lr_decay_steps {
-                            if ds > 0 {
-                                p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
-                            }
-                        }
-                        lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
-                    }
-                    _ => {}
-                }
-                let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
-                let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
+                let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
                 // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
@@ -3858,48 +3730,7 @@ fn train_model_with_loader(
                 // consume last_loss_for_log to avoid unused-assignment lint across iterations
                 let _ = last_loss_for_log;
                 // LR scheduling
-                let mut lr_factor = 1.0f32;
-                if config.lr_warmup_epochs > 0 {
-                    let e = epoch as u32;
-                    if e < config.lr_warmup_epochs {
-                        lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
-                    }
-                }
-                match config.lr_schedule.as_str() {
-                    "constant" => {}
-                    "step" => {
-                        let step_gamma: f32 = 0.5;
-                        if let Some(de) = config.lr_decay_epochs {
-                            if de > 0 {
-                                let k = ((epoch as u32) / de) as i32;
-                                lr_factor *= step_gamma.powi(k);
-                            }
-                        }
-                        if let Some(ds) = config.lr_decay_steps {
-                            if ds > 0 {
-                                let k = (ctx.global_step / ds) as i32;
-                                lr_factor *= step_gamma.powi(k);
-                            }
-                        }
-                    }
-                    "cosine" => {
-                        let mut p = 0.0f32;
-                        if let Some(de) = config.lr_decay_epochs {
-                            if de > 0 {
-                                p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
-                            }
-                        }
-                        if let Some(ds) = config.lr_decay_steps {
-                            if ds > 0 {
-                                p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
-                            }
-                        }
-                        lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
-                    }
-                    _ => {}
-                }
-                let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
-                let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
+                let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
                 // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
