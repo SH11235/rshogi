@@ -127,7 +127,51 @@ fn test_gauntlet_stdout_destinations() {
         // JSON should go to stdout
         .stdout(predicate::str::contains("\"env\":"))
         // structured_v1 should be on stderr when stdout is used by JSON
-        .stderr(predicate::str::contains("\"phase\":\"gauntlet\""));
+        .stderr(predicate::str::contains("\"phase\":\"gauntlet\""))
+        // extended metrics should be present as optional keys
+        .stderr(predicate::str::contains("pv_spread_p90_cp"))
+        .stderr(predicate::str::contains("pv_spread_samples"))
+        .stderr(predicate::str::contains("nps_samples"));
+}
+
+#[test]
+fn test_gauntlet_seed_runs() {
+    // Prepare temp outputs
+    let tmp = tempfile::tempdir().unwrap();
+    let json_path = tmp.path().join("out.json");
+    let report_path = tmp.path().join("report.md");
+
+    let book_path = repo_root().join("docs/reports/fixtures/opening/representative.epd");
+    assert!(book_path.exists(), "book not found: {}", book_path.display());
+
+    // Run with seed: should accept and succeed
+    let mut cmd = Command::cargo_bin("gauntlet").unwrap();
+    cmd.args([
+        "--base",
+        "baseline.nn",
+        "--cand",
+        "candidate.nn",
+        "--time",
+        "0/1+0.1",
+        "--games",
+        "20",
+        "--threads",
+        "1",
+        "--hash-mb",
+        "256",
+        "--book",
+        book_path.to_str().unwrap(),
+        "--multipv",
+        "1",
+        "--json",
+        json_path.to_str().unwrap(),
+        "--report",
+        report_path.to_str().unwrap(),
+        "--seed",
+        "123",
+        "--stub",
+    ]);
+    cmd.assert().success();
 }
 
 #[test]
