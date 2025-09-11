@@ -37,6 +37,26 @@ RAYON_NUM_THREADS=1 target/release/gauntlet \
 … --seed 123 --seed-mode block  # 2局ブロックの隣接を維持してシャッフル
 ```
 
+スタブ実行（パイプライン確認用・NNUE読込なし）:
+```
+# Debug（高速・少局で流れだけ確認）
+RAYON_NUM_THREADS=1 cargo run -p tools --bin gauntlet -- \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+  --time "0/1+0.1" --games 20 --threads 1 --hash-mb 256 \
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  --stub > runs/gauntlet/structured.jsonl
+
+# Release バイナリでのスタブ実行
+cargo build -p tools --release
+RAYON_NUM_THREADS=1 target/release/gauntlet \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+  --time "0/1+0.1" --games 20 --threads 1 --hash-mb 256 \
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  --stub > runs/gauntlet/structured.jsonl
+```
+
 備考:
 - `--json -` または `--report -` を指定すると、対応する出力を STDOUT に書き出します。
   - その場合、構造化ログ（structured_v1）は STDERR に出力されます（混在防止）。

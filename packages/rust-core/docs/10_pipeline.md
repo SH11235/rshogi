@@ -74,6 +74,22 @@
   # 再現性（任意）
   # --seed 123                # フラット（各局）シャッフル
   # --seed 123 --seed-mode block  # 2局ブロック隣接を維持
+
+  # スタブ実行（パイプライン確認・NNUE不要）
+  # Debug（少局で流れのみ確認）
+  RAYON_NUM_THREADS=1 cargo run -p tools --bin gauntlet -- \
+    --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+    --time "0/1+0.1" --games 20 --threads 1 --hash-mb 256 \
+    --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+    --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+    --stub > runs/gauntlet/structured.jsonl
+  # Release バイナリのスタブ
+  RAYON_NUM_THREADS=1 target/release/gauntlet \
+    --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+    --time "0/1+0.1" --games 20 --threads 1 --hash-mb 256 \
+    --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+    --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+    --stub > runs/gauntlet/structured.jsonl
   ```
 
 ### #17 生成のストリーミング化 + `--expected-multipv auto`（昇格, P2）
