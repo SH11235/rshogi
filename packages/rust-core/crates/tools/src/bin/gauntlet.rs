@@ -124,6 +124,8 @@ struct ParamsOut {
     hash_mb: usize,
     book: String,
     multipv: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -364,6 +366,13 @@ fn wilson_lower_bound(wins: usize, losses: usize) -> f64 {
     let center = phat + z * z / (2.0 * n as f64);
     let adj = z * ((phat * (1.0 - phat) + z * z / (4.0 * n as f64)) / n as f64).sqrt();
     (center - adj) / denom
+}
+
+fn push_reason(cur: Option<String>, add: &str) -> Option<String> {
+    Some(match cur {
+        Some(r) if !r.is_empty() => format!("{r}, {add}"),
+        _ => add.to_string(),
+    })
 }
 
 // ---------------- Engine runner (real) ----------------
@@ -722,10 +731,9 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         if matches!(gate, GateDecision::Pass) {
             gate = GateDecision::Reject;
         }
-        reason = Some(match reason {
-            Some(r) if !r.is_empty() => format!("{}, {}", r, sample_reasons.join(", ")),
-            _ => sample_reasons.join(", "),
-        });
+        for r in sample_reasons {
+            reason = push_reason(reason, &r);
+        }
     }
 
     let out = GauntletOut {
@@ -737,6 +745,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             hash_mb: args.hash_mb,
             book: args.book.clone(),
             multipv: args.multipv,
+            seed: args.seed,
         },
         summary: SummaryOut {
             winrate,
@@ -835,6 +844,7 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             hash_mb: args.hash_mb,
             book: args.book.clone(),
             multipv: args.multipv,
+            seed: args.seed,
         },
         summary: SummaryOut {
             winrate,

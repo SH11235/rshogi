@@ -31,6 +31,7 @@ cargo run -p tools --bin gauntlet -- \
     - `winrate` は互換のため名称を保持しつつ、実体は Score rate（W=1, D=0.5, L=0）
   - `series`: 各対局の結果（先後/手数/勝敗/消費ノード/NPS）
   - 透明性向上のため、Summary に `nps_samples` と `pv_spread_samples` を任意で含みます（後方互換）
+  - 再現性のため、Params に `seed`（指定時のみ）を任意で含みます（後方互換）
 
 ## Gate 判定
 - 準合格（provisional）: 決着局（W/L）の勝率について、Wilson 区間95%の下限が 50% を超える場合
@@ -59,3 +60,4 @@ cargo run -p tools --bin gauntlet -- \
 - NPS: サンプルごとに TT をクリアしてから固定時間探索し、`f64` で累積平均化（丸め誤差抑制）
 - PV スプレッド: MultiPV=3 の root を用い、mate スコアを含むサンプルは除外（閾値: `|cp| ≥ 30000`）
 - 環境情報（env）はクロスプラットフォームな手段で収集（Linux: /proc/cpuinfo, macOS: sysctl, Windows: PowerShell CIM）。取得不可時は "unknown" とする。
+- p90 は Nearest‑Rank（`rank = ceil(p · n)`）で算出します。
