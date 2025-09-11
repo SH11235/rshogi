@@ -14,6 +14,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tools::common::io::open_reader;
 
+fn derive_skipped_path(out: &std::path::Path) -> std::path::PathBuf {
+    let stem = out.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext.is_empty() {
+        out.with_file_name(format!("{stem}_skipped"))
+    } else {
+        out.with_file_name(format!("{stem}_skipped.{ext}"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LabelKind {
     Cp,
@@ -789,15 +799,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create skipped positions output file path
-    let skipped_path = {
-        let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
-        let ext = output_path.extension().unwrap_or_default().to_string_lossy();
-        if ext.is_empty() {
-            output_path.with_file_name(format!("{stem}_skipped"))
-        } else {
-            output_path.with_file_name(format!("{stem}_skipped.{ext}"))
-        }
-    };
+    let skipped_path = derive_skipped_path(&output_path);
 
     // Validate depth
     if !(1..=10).contains(&search_depth) {
@@ -2883,7 +2885,7 @@ mod tests {
     use super::*;
     use engine_core::search::types::{Bound, RootLine};
     use smallvec::smallvec;
-    use std::io::Write as _;
+    use std::path::Path;
 
     fn mk_line(cp: i32) -> RootLine {
         RootLine {
@@ -2943,5 +2945,27 @@ mod tests {
         assert!(!is_ambiguous_for_k3(Bound::Exact, Bound::Exact, 100, 0, 25, true));
     }
 
-    // fast_count_lines は generate 内部関数のため単体テストは省略（回帰は上位の再開テストで担保）
+    #[test]
+    fn test_derive_skipped_path_no_ext() {
+        let p = Path::new("out");
+        assert_eq!(derive_skipped_path(p), Path::new("out_skipped"));
+    }
+
+    #[test]
+    fn test_derive_skipped_path_jsonl() {
+        let p = Path::new("out.jsonl");
+        assert_eq!(derive_skipped_path(p), Path::new("out_skipped.jsonl"));
+    }
+
+    #[test]
+    fn test_derive_skipped_path_dotfile() {
+        let p = Path::new(".bashrc");
+        assert_eq!(derive_skipped_path(p), Path::new(".bashrc_skipped"));
+    }
+
+    #[test]
+    fn test_derive_skipped_path_multi_ext() {
+        let p = Path::new("a.b.c");
+        assert_eq!(derive_skipped_path(p), Path::new("a.b_skipped.c"));
+    }
 }

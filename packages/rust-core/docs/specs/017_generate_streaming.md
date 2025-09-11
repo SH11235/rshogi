@@ -25,6 +25,33 @@
 - top-level `multipv`（集約 manifest; 例: `{ "multipv": 3, "manifest_scope": "aggregate" }`）
 どちらも無い/manifest 不在時は上記の決定ロジックに従い既定値 `2` を使用（CLI 数値は常に最優先）
 
+### JSONL サンプル（最小）
+生成 JSONL は後方互換を保ちつつ、以下のキーを含みます（例）：
+
+```json
+{
+  "sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+  "lines": [
+    { "multipv": 1, "move": "7g7f", "score_cp": 23, "bound": "Exact", "depth": 3 }
+  ],
+  "depth": 3,
+  "seldepth": 5,
+  "nodes": 123456,
+  "nodes_q": 3456,
+  "time_ms": 180,
+  "time_ms_k2": 150,
+  "time_ms_k3": 30,
+  "search_time_ms_total": 180,
+  "timeout_total": false,
+  "budget_mode": "time",
+  "label": "cp",
+  "eval": 23,
+  "ambiguous": true,
+  "softmax_entropy_k3": 0.42,
+  "meta": "# d3 label:cp"
+}
+```
+
 ## 後方互換シナリオ
 - 既存 manifest v2 と互換（スキーマ: `docs/schemas/manifest_v2.schema.json`）
 - CI に小回帰テスト追加（小/中/大入力、error-handling）
