@@ -1812,6 +1812,8 @@ fn train_model(
         // 直近のバッチloss（throughput構造化ログ用）。最初は未定義。
         let mut last_loss_for_log: Option<f32> = None;
         for batch_idx in 0..n_batches {
+            // consume last_loss_for_log to avoid unused-assignment lint across iterations
+            let _ = last_loss_for_log;
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
             let batch = &train_samples[start..end];
@@ -1873,6 +1875,8 @@ fn train_model(
                 total_loss += loss * batch_weight;
                 total_weight += batch_weight;
                 last_loss_for_log = Some(loss);
+            } else {
+                last_loss_for_log = None;
             }
             last_lr_base = lr_base;
 
@@ -2266,6 +2270,38 @@ fn train_model(
                 epoch_sps
             );
         }
+        if zero_weight_batches > 0 {
+            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+            if human_to_stderr {
+                eprintln!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            } else {
+                println!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            }
+        }
+        if zero_weight_batches > 0 {
+            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+            if human_to_stderr {
+                eprintln!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            } else {
+                println!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            }
+        }
     }
 
     Ok(())
@@ -2308,6 +2344,7 @@ fn train_model_stream_cache(
             let mut loaded: u64 = 0;
             let mut last_lr_base = config.learning_rate;
             let mut last_loss_for_log: Option<f32> = None;
+            let mut zero_weight_batches: usize = 0;
             while loaded < num_samples {
                 // Read up to batch_size samples synchronously
                 let mut batch = Vec::with_capacity(config.batch_size);
@@ -2414,6 +2451,8 @@ fn train_model_stream_cache(
                     break;
                 }
 
+                // consume last_loss_for_log to avoid unused-assignment lint across iterations
+                let _ = last_loss_for_log;
                 let indices: Vec<usize> = (0..batch.len()).collect();
                 // LR scheduling
                 let mut lr_factor = 1.0f32;
@@ -2471,6 +2510,9 @@ fn train_model_stream_cache(
                     total_loss += loss * batch_weight;
                     total_weight += batch_weight;
                     last_loss_for_log = Some(loss);
+                } else {
+                    zero_weight_batches += 1;
+                    last_loss_for_log = None;
                 }
                 last_lr_base = lr_base;
 
@@ -2573,6 +2615,23 @@ fn train_model_stream_cache(
                     "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
                     epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
                 );
+            }
+            if zero_weight_batches > 0 {
+                let human_to_stderr =
+                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+                if human_to_stderr {
+                    eprintln!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                } else {
+                    println!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                }
             }
             if let Some(ref lg) = ctx.structured {
                 let mut rec_train = serde_json::json!({
@@ -2707,10 +2766,13 @@ fn train_model_stream_cache(
         let mut wait_ns_since: u128 = 0;
         let mut wait_ns_epoch: u128 = 0;
         let mut last_loss_for_log: Option<f32> = None;
+        let mut zero_weight_batches: usize = 0;
 
         let mut last_lr_base = config.learning_rate;
         loop {
             let (maybe_batch, wait_dur) = loader.next_batch_with_wait();
+            // consume last_loss_for_log to avoid unused-assignment lint across iterations
+            let _ = last_loss_for_log;
             let Some(batch_res) = maybe_batch else { break };
             let batch = match batch_res {
                 Ok(b) => b,
@@ -2773,6 +2835,9 @@ fn train_model_stream_cache(
                 total_loss += loss * batch_weight;
                 total_weight += batch_weight;
                 last_loss_for_log = Some(loss);
+            } else {
+                zero_weight_batches += 1;
+                last_loss_for_log = None;
             }
             last_lr_base = lr_base;
 
@@ -3162,6 +3227,23 @@ fn train_model_stream_cache(
             lg.write_json(&rec_val);
         }
 
+        if zero_weight_batches > 0 {
+            let human_to_stderr = ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+            if human_to_stderr {
+                eprintln!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            } else {
+                println!(
+                    "[debug] epoch {} had {} zero-weight batches",
+                    epoch + 1,
+                    zero_weight_batches
+                );
+            }
+        }
+
         loader.finish();
     }
 
@@ -3216,9 +3298,12 @@ fn train_model_with_loader(
             let mut wait_ns_epoch: u128 = 0;
             let mut last_lr_base = config.learning_rate;
             let mut last_loss_for_log: Option<f32> = None;
+            let mut zero_weight_batches: usize = 0;
 
             loop {
                 let (maybe_indices, wait_dur) = async_loader.next_batch_with_wait();
+                // consume last_loss_for_log to avoid unused-assignment lint across iterations
+                let _ = last_loss_for_log;
                 let Some(indices) = maybe_indices else { break };
                 // LR scheduling
                 let mut lr_factor = 1.0f32;
@@ -3277,6 +3362,9 @@ fn train_model_with_loader(
                     total_loss += loss * batch_weight;
                     total_weight += batch_weight;
                     last_loss_for_log = Some(loss);
+                } else {
+                    zero_weight_batches += 1;
+                    last_loss_for_log = None;
                 }
 
                 let batch_len = indices.len();
@@ -3645,6 +3733,23 @@ fn train_model_with_loader(
                 }
                 lg.write_json(&rec_val);
             }
+            if zero_weight_batches > 0 {
+                let human_to_stderr =
+                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+                if human_to_stderr {
+                    eprintln!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                } else {
+                    println!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                }
+            }
             if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                 eprintln!(
                     "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
@@ -3655,6 +3760,23 @@ fn train_model_with_loader(
                     "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
                     epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
                 );
+            }
+            if zero_weight_batches > 0 {
+                let human_to_stderr =
+                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+                if human_to_stderr {
+                    eprintln!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                } else {
+                    println!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                }
             }
         }
         // Ensure worker fully finished at end
@@ -3677,6 +3799,7 @@ fn train_model_with_loader(
             let mut batches_since = 0usize;
             let mut last_lr_base = config.learning_rate;
             let mut last_loss_for_log: Option<f32> = None;
+            let mut zero_weight_batches: usize = 0;
 
             while let Some(indices) = {
                 let t0 = Instant::now();
@@ -3689,6 +3812,8 @@ fn train_model_with_loader(
                 }
                 next
             } {
+                // consume last_loss_for_log to avoid unused-assignment lint across iterations
+                let _ = last_loss_for_log;
                 // LR scheduling
                 let mut lr_factor = 1.0f32;
                 if config.lr_warmup_epochs > 0 {
@@ -3746,6 +3871,9 @@ fn train_model_with_loader(
                     total_loss += loss * batch_weight;
                     total_weight += batch_weight;
                     last_loss_for_log = Some(loss);
+                } else {
+                    zero_weight_batches += 1;
+                    last_loss_for_log = None;
                 }
 
                 let batch_len = indices.len();
@@ -3765,22 +3893,22 @@ fn train_model_with_loader(
                     let avg_bs = samples_since as f32 / batches_since as f32;
                     if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                         eprintln!(
-                        "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
-                        epoch + 1,
-                        batch_count,
-                        sps,
-                        bps,
-                        avg_bs
-                        );
+                    "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs
+                );
                     } else {
                         println!(
-                        "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
-                        epoch + 1,
-                        batch_count,
-                        sps,
-                        bps,
-                        avg_bs
-                        );
+                    "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs
+                );
                     }
                     if let Some(ref lg) = ctx.structured {
                         let mut rec = serde_json::json!({
@@ -4105,6 +4233,23 @@ fn train_model_with_loader(
                 "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
                 epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps
                 );
+            }
+            if zero_weight_batches > 0 {
+                let human_to_stderr =
+                    ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+                if human_to_stderr {
+                    eprintln!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                } else {
+                    println!(
+                        "[debug] epoch {} had {} zero-weight batches",
+                        epoch + 1,
+                        zero_weight_batches
+                    );
+                }
             }
         }
     }
