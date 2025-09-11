@@ -42,7 +42,7 @@ use tools::nnfc_v1::{
     open_payload_reader as open_cache_payload_reader_shared, FEATURE_SET_ID_HALF,
 };
 
-use clap::{arg, Command};
+use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::game_phase::{detect_game_phase, GamePhase, Profile};
 use engine_core::{
     evaluation::nnue::features::{extract_features, FE_END},
@@ -52,6 +52,7 @@ use engine_core::{
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use tools::common::weighting as wcfg;
 use tools::nnfc_v1::flags as fc_flags;
 use tools::stats::{
     binary_metrics, calibration_bins, ece_from_bins, regression_metrics, roc_auc_weighted,
@@ -737,6 +738,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .about("Train NNUE model from JSONL data")
         .arg(arg!(-i --input <FILE> "Input JSONL file").required(true))
         .arg(arg!(-v --validation <FILE> "Validation JSONL file"))
+        // Weighting (Spec #12)
+        .arg(
+            Arg::new("config")
+                .long("config")
+                .help("YAML/JSON config file for weighting and presets")
+                .value_hint(ValueHint::FilePath),
+        )
+        .arg(
+            Arg::new("weighting")
+                .long("weighting")
+                .help("Enable weighting scheme(s): exact|gap|phase|mate (repeatable)")
+                .action(ArgAction::Append)
+                .value_parser(["exact", "gap", "phase", "mate"]) ,
+        )
+        .arg(
+            Arg::new("w-exact")
+                .long("w-exact")
+                .help("Coefficient for exact samples")
+                .value_parser(value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("w-gap")
+                .long("w-gap")
+                .help("Coefficient for small-gap samples")
+                .value_parser(value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("w-phase-endgame")
+                .long("w-phase-endgame")
+                .help("Coefficient for endgame phase")
+                .value_parser(value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("w-mate-ring")
+                .long("w-mate-ring")
+                .help("Coefficient for mate-ring samples")
+                .value_parser(value_parser!(f32)),
+        )
         .arg(arg!(-e --epochs <N> "Number of epochs").default_value("2"))
         .arg(arg!(-b --"batch-size" <N> "Batch size").default_value("8192"))
         .arg(arg!(--lr <RATE> "Learning rate").default_value("0.001"))
@@ -850,6 +889,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     let human_to_stderr = structured_logger.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+
+    // Build weighting config (Spec #12)
+    let cfg_file = app.get_one::<String>("config").and_then(|p| match wcfg::load_config_file(p) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            if human_to_stderr {
+                eprintln!("Warning: failed to load config '{}': {}", p, e);
+            } else {
+                println!("Warning: failed to load config '{}': {}", p, e);
+            }
+            None
+        }
+    });
+    let cli_active = app.get_many::<String>("weighting").map(|vals| {
+        vals.map(|s| match s.as_str() {
+            "exact" => wcfg::WeightingKind::Exact,
+            "gap" => wcfg::WeightingKind::Gap,
+            "phase" => wcfg::WeightingKind::Phase,
+            "mate" => wcfg::WeightingKind::Mate,
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>()
+    });
+    let weighting_cfg = wcfg::merge_config(
+        cfg_file,
+        cli_active,
+        app.get_one::<f32>("w-exact").copied(),
+        app.get_one::<f32>("w-gap").copied(),
+        app.get_one::<f32>("w-phase-endgame").copied(),
+        app.get_one::<f32>("w-mate-ring").copied(),
+    );
+
+    fn build_training_config_obj(w: &wcfg::WeightingConfig) -> serde_json::Value {
+        let mut obj = serde_json::json!({
+            "weighting": w.active.iter().map(|k| match k {
+                wcfg::WeightingKind::Exact => "exact",
+                wcfg::WeightingKind::Gap => "gap",
+                wcfg::WeightingKind::Phase => "phase",
+                wcfg::WeightingKind::Mate => "mate",
+            }).collect::<Vec<_>>()
+        });
+        let m = obj.as_object_mut().unwrap();
+        m.insert("w_exact".into(), serde_json::json!(w.coeffs.w_exact));
+        m.insert("w_gap".into(), serde_json::json!(w.coeffs.w_gap));
+        m.insert("w_phase_opening".into(), serde_json::json!(w.coeffs.w_phase_opening));
+        m.insert("w_phase_middlegame".into(), serde_json::json!(w.coeffs.w_phase_middlegame));
+        m.insert("w_phase_endgame".into(), serde_json::json!(w.coeffs.w_phase_endgame));
+        m.insert("w_mate_ring".into(), serde_json::json!(w.coeffs.w_mate_ring));
+        if let Some(p) = w.preset.as_ref() {
+            m.insert("preset".into(), serde_json::json!(p));
+        }
+        obj
+    }
 
     let config = Config {
         epochs: app.get_one::<String>("epochs").unwrap().parse()?,
@@ -985,9 +1077,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Loading from cache file...");
             }
-            load_samples_from_cache(input_path)?
+            load_samples_from_cache(input_path, &weighting_cfg)?
         } else {
-            load_samples(input_path, &config)?
+            load_samples(input_path, &config, &weighting_cfg)?
         };
         if human_to_stderr {
             eprintln!(
@@ -1030,10 +1122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Loading validation from cache file...");
             }
-            load_samples_from_cache(val_path)?
+            load_samples_from_cache(val_path, &weighting_cfg)?
         } else {
             val_is_jsonl = true;
-            load_samples(val_path, &config)?
+            load_samples(val_path, &config, &weighting_cfg)?
         };
 
         if human_to_stderr {
@@ -1145,6 +1237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             structured: structured_logger,
             global_step: 0,
+            training_config_json: Some(build_training_config_obj(&weighting_cfg)),
         };
         if is_cache && config.stream_cache {
             train_model_stream_cache(
@@ -1154,6 +1247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config,
                 &mut rng,
                 &mut ctx,
+                &weighting_cfg,
             )?;
         } else if is_cache {
             train_model_with_loader(
@@ -1329,7 +1423,19 @@ fn open_jsonl_reader(path: &str) -> Result<Box<dyn BufRead>, Box<dyn std::error:
     tools::io_detect::open_maybe_compressed_reader(path, BUF_MB * BYTES_PER_MB)
 }
 
-fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+fn to_phase_kind(ph: GamePhase) -> wcfg::PhaseKind {
+    match ph {
+        GamePhase::Opening => wcfg::PhaseKind::Opening,
+        GamePhase::MiddleGame => wcfg::PhaseKind::Middlegame,
+        GamePhase::EndGame => wcfg::PhaseKind::Endgame,
+    }
+}
+
+fn load_samples(
+    path: &str,
+    config: &Config,
+    weighting: &wcfg::WeightingConfig,
+) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let mut reader = open_jsonl_reader(path)?;
     let mut samples = Vec::new();
     let mut skipped = 0;
@@ -1395,8 +1501,21 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
         let cp_black = if stm == Color::Black { cp } else { -cp };
         let cp_white = -cp_black;
 
-        // Calculate sample weight once (shared)
-        let weight = calculate_weight(&pos_data, config);
+        // Phase (once)
+        let phase = detect_game_phase(&position, position.ply as u32, Profile::Search);
+
+        // Calculate sample weight once (shared): baseline then apply Spec#12 coefficients
+        let base_weight = calculate_weight(&pos_data, config);
+        let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
+        let mate_ring = pos_data.mate_boundary.unwrap_or(false);
+        let weight = wcfg::apply_weighting(
+            base_weight,
+            weighting,
+            Some(both_exact),
+            pos_data.best2_gap_cp,
+            Some(to_phase_kind(phase)),
+            Some(mate_ring),
+        );
 
         // Black perspective sample
         {
@@ -1414,7 +1533,7 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
                 label,
                 weight,
                 cp: Some(cp_black),
-                phase: Some(detect_game_phase(&position, position.ply as u32, Profile::Search)),
+                phase: Some(phase),
             });
         }
 
@@ -1434,7 +1553,7 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
                 label,
                 weight,
                 cp: Some(cp_white),
-                phase: Some(detect_game_phase(&position, position.ply as u32, Profile::Search)),
+                phase: Some(phase),
             });
         }
     }
@@ -1507,7 +1626,10 @@ fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::er
     Ok((r, header.num_samples, header.flags_mask))
 }
 
-fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+fn load_samples_from_cache(
+    path: &str,
+    weighting: &wcfg::WeightingConfig,
+) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let (mut r, num_samples, flags_mask) = open_cache_payload_reader(path)?;
 
     eprintln!("Loading cache: {num_samples} samples");
@@ -1583,29 +1705,31 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
             unknown_flag_bits_accum |= unknown;
         }
 
-        // Calculate weight using same policy as JSONL loading
-        let mut weight = 1.0;
-
-        // Gap-based weight
+        // Calculate weight using same baseline policy as JSONL loading
+        let mut weight = 1.0f32;
         weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
-
-        // Exact bound weight
         let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
         weight *= if both_exact {
             1.0
         } else {
             NON_EXACT_BOUND_WEIGHT
         };
-
-        // Mate boundary weight
-        if (flags & fc_flags::MATE_BOUNDARY) != 0 {
+        let mate_ring = (flags & fc_flags::MATE_BOUNDARY) != 0;
+        if mate_ring {
             weight *= 0.5;
         }
-
-        // Depth-based weight
         if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
             weight *= SELECTIVE_DEPTH_WEIGHT;
         }
+        // Apply Spec#12 coefficients (phase unknown in cache → not applied)
+        weight = wcfg::apply_weighting(
+            weight,
+            weighting,
+            Some(both_exact),
+            Some(gap as i32),
+            None,
+            Some(mate_ring),
+        );
 
         samples.push(Sample {
             features,
@@ -1657,6 +1781,7 @@ struct TrainContext<'a> {
     trackers: TrainTrackers<'a>,
     structured: Option<StructuredLogger>,
     global_step: u64,
+    training_config_json: Option<serde_json::Value>,
 }
 
 fn train_model(
@@ -2067,7 +2192,7 @@ fn train_model(
         }
         // Structured per-epoch logs (train/val)
         if let Some(ref lg) = ctx.structured {
-            let rec_train = serde_json::json!({
+            let mut rec_train = serde_json::json!({
                 "ts": chrono::Utc::now().to_rfc3339(),
                 "phase": "train",
                 "global_step": ctx.global_step as i64,
@@ -2078,6 +2203,10 @@ fn train_model(
                 "loader_ratio": 0.0f64,
                 "wall_time": epoch_secs as f64,
             });
+            // Bake training_config (Spec#12)
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
             lg.write_json(&rec_train);
             if let Some(vl) = val_loss {
                 let mut rec_val = serde_json::json!({
@@ -2088,11 +2217,20 @@ fn train_model(
                     "val_loss": vl as f64,
                     "wall_time": epoch_secs as f64,
                 });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
                 if let Some(a) = val_auc {
                     rec_val
                         .as_object_mut()
                         .unwrap()
                         .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
                 }
                 lg.write_json(&rec_val);
             }
@@ -2131,6 +2269,7 @@ fn train_model_stream_cache(
     config: &Config,
     _rng: &mut StdRng,
     ctx: &mut TrainContext,
+    weighting: &wcfg::WeightingConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use ctx fields directly in this function to avoid borrow confusion
     // If prefetch=0, run synchronous streaming in the training thread (no background worker)
@@ -2229,12 +2368,22 @@ fn train_model_stream_cache(
                     } else {
                         NON_EXACT_BOUND_WEIGHT
                     };
-                    if (flags & fc_flags::MATE_BOUNDARY) != 0 {
+                    let mate_ring = (flags & fc_flags::MATE_BOUNDARY) != 0;
+                    if mate_ring {
                         weight *= 0.5;
                     }
                     if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
                         weight *= SELECTIVE_DEPTH_WEIGHT;
                     }
+                    // Apply Spec#12 coefficients (phase unknown in cache → not applied)
+                    weight = wcfg::apply_weighting(
+                        weight,
+                        weighting,
+                        Some(both_exact),
+                        Some(gap as i32),
+                        None,
+                        Some(mate_ring),
+                    );
 
                     batch.push(Sample {
                         features,
@@ -2407,7 +2556,7 @@ fn train_model_stream_cache(
                 );
             }
             if let Some(ref lg) = ctx.structured {
-                let rec_train = serde_json::json!({
+                let mut rec_train = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
                     "phase": "train",
                     "global_step": ctx.global_step as i64,
@@ -2418,6 +2567,9 @@ fn train_model_stream_cache(
                     "loader_ratio": (loader_ratio_epoch/100.0) ,
                     "wall_time": epoch_secs as f64,
                 });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
                 lg.write_json(&rec_train);
                 let mut rec_val = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
@@ -2426,6 +2578,9 @@ fn train_model_stream_cache(
                     "epoch": (epoch + 1) as i64,
                     "wall_time": epoch_secs as f64,
                 });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
                 if has_val {
                     rec_val
                         .as_object_mut()
@@ -2599,6 +2754,7 @@ fn train_model_stream_cache(
             wait_ns_since += wait_dur.as_nanos();
             wait_ns_epoch += wait_dur.as_nanos();
 
+            ctx.global_step += 1;
             if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                 && batches_since > 0
             {
@@ -2652,7 +2808,6 @@ fn train_model_stream_cache(
                 batches_since = 0;
                 wait_ns_since = 0;
             }
-            ctx.global_step += 1;
 
             if let Some(interval) = ctx.save_every {
                 if total_batches % interval == 0 {
@@ -2908,7 +3063,7 @@ fn train_model_stream_cache(
             batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
         );
         if let Some(ref lg) = ctx.structured {
-            let rec_train = serde_json::json!({
+            let mut rec_train = serde_json::json!({
                 "ts": chrono::Utc::now().to_rfc3339(),
                 "phase": "train",
                 "global_step": ctx.global_step as i64,
@@ -2919,6 +3074,9 @@ fn train_model_stream_cache(
                 "loader_ratio": (loader_ratio_epoch as f64)/100.0,
                 "wall_time": epoch_secs as f64,
             });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
             lg.write_json(&rec_train);
             let mut rec_val = serde_json::json!({
                 "ts": chrono::Utc::now().to_rfc3339(),
@@ -2927,6 +3085,9 @@ fn train_model_stream_cache(
                 "epoch": (epoch + 1) as i64,
                 "wall_time": epoch_secs as f64,
             });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
             if let Some(vl) = val_loss {
                 rec_val
                     .as_object_mut()
@@ -2938,6 +3099,12 @@ fn train_model_stream_cache(
                     .as_object_mut()
                     .unwrap()
                     .insert("val_auc".to_string(), serde_json::json!(a));
+            }
+            if let Some(e) = val_ece {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_ece".to_string(), serde_json::json!(e));
             }
             lg.write_json(&rec_val);
         }
@@ -3515,6 +3682,7 @@ fn train_model_with_loader(
                 batches_since += 1;
                 last_lr_base = lr_base;
 
+                ctx.global_step += 1;
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
                 {
@@ -3573,7 +3741,6 @@ fn train_model_with_loader(
                         }
                     }
                 }
-                // already incremented above
                 // record last lr used (unused in sync loader path)
             }
 
@@ -3806,7 +3973,7 @@ fn train_model_with_loader(
             }
             // Structured per-epoch logs (train/val) for sync in-mem loader
             if let Some(ref lg) = ctx.structured {
-                let rec_train = serde_json::json!({
+                let mut rec_train = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
                     "phase": "train",
                     "global_step": ctx.global_step as i64,
@@ -3817,6 +3984,9 @@ fn train_model_with_loader(
                     "loader_ratio": 0.0f64,
                     "wall_time": epoch_secs as f64,
                 });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
                 lg.write_json(&rec_train);
                 let mut rec_val = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
@@ -3825,6 +3995,9 @@ fn train_model_with_loader(
                     "epoch": (epoch + 1) as i64,
                     "wall_time": epoch_secs as f64,
                 });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
                 if let Some(vl) = val_loss {
                     rec_val
                         .as_object_mut()
@@ -4319,7 +4492,9 @@ mod tests {
             let mut f = File::create(&path).unwrap();
             f.write_all(b"BAD!").unwrap();
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("bad magic"));
         }
 
@@ -4333,7 +4508,9 @@ mod tests {
                                                        // Fill rest with zeros to avoid EOF early
             f.write_all(&[0u8; 64]).unwrap();
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("v1 required"));
         }
 
@@ -4355,7 +4532,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("Unsupported endianness"));
         }
 
@@ -4377,7 +4556,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("Unknown payload encoding"));
         }
 
@@ -4399,7 +4580,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("Unsupported feature_set_id"));
         }
 
@@ -4421,7 +4604,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("header_size"));
         }
 
@@ -4456,7 +4641,8 @@ mod tests {
             f.write_all(&0u32.to_le_bytes()).unwrap();
             f.flush().unwrap();
 
-            let res = load_samples_from_cache(path.to_str().unwrap());
+            let res =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default());
             assert!(res.is_err(), "broken payload_offset should error");
         }
 
@@ -4478,7 +4664,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let v = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+            let v =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap();
             assert!(v.is_empty());
         }
     }
@@ -4521,7 +4709,9 @@ mod tests {
             lr_decay_steps: None,
             lr_plateau_patience: None,
         };
-        let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        let json_samples =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
         // Two-sample orientation -> take first weight
         let w_json = json_samples[0].weight;
 
@@ -4558,7 +4748,11 @@ mod tests {
             f.flush().unwrap();
         }
 
-        let cache_samples = load_samples_from_cache(cache_path.to_str().unwrap()).unwrap();
+        let cache_samples = load_samples_from_cache(
+            cache_path.to_str().unwrap(),
+            &wcfg::WeightingConfig::default(),
+        )
+        .unwrap();
         let w_cache = cache_samples[0].weight;
 
         assert!(
@@ -4595,7 +4789,9 @@ mod tests {
         f.write_all(&[0u8, 0u8, 0x80u8]).unwrap();
         f.flush().unwrap();
 
-        let samples = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+        let samples =
+            load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                .unwrap();
         assert_eq!(samples.len(), 1);
     }
 
@@ -4700,7 +4896,9 @@ mod tests {
             lr_decay_steps: None,
             lr_plateau_patience: None,
         };
-        let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        let json_samples =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
         assert!(!json_samples.is_empty());
         assert!(json_samples[0].weight <= 1.0);
     }
@@ -4754,7 +4952,9 @@ mod tests {
         };
 
         // サンプルを読み込み（2局面→2サンプル/局面 = 計4サンプル）
-        let mut samples1 = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        let mut samples1 =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
         let mut samples2 = samples1.clone();
         assert_eq!(samples1.len(), samples2.len());
         assert_eq!(samples1.len(), 4);
@@ -4791,6 +4991,7 @@ mod tests {
             },
             structured: None,
             global_step: 0,
+            training_config_json: None,
         };
         train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
         let dash2 = super::DashboardOpts {
@@ -4815,6 +5016,7 @@ mod tests {
             },
             structured: None,
             global_step: 0,
+            training_config_json: None,
         };
         train_model(&mut net2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
 
@@ -4862,7 +5064,9 @@ mod tests {
         // 以降のボディは不要（n_features検証で即エラー）
         f.flush().unwrap();
 
-        let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+        let err =
+            load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                .unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("exceeds"), "unexpected err msg: {}", msg);
     }
@@ -4936,7 +5140,9 @@ mod tests {
         };
 
         // サンプルを読み込み（in-mem）
-        let mut samples = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+        let mut samples =
+            load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                .unwrap();
 
         // 同じseedで2つのネットを初期化
         let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
@@ -4971,6 +5177,7 @@ mod tests {
             },
             structured: None,
             global_step: 0,
+            training_config_json: None,
         };
         train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
             .unwrap();
@@ -4997,6 +5204,7 @@ mod tests {
             },
             structured: None,
             global_step: 0,
+            training_config_json: None,
         };
         train_model_stream_cache(
             &mut net_stream,
@@ -5005,6 +5213,7 @@ mod tests {
             &cfg_stream,
             &mut dummy_rng,
             &mut ctx_st,
+            &wcfg::WeightingConfig::default(),
         )
         .unwrap();
 
@@ -5107,6 +5316,7 @@ mod tests {
             },
             structured: None,
             global_step: 0,
+            training_config_json: None,
         };
         let err = train_model_stream_cache(
             &mut net,
@@ -5115,6 +5325,7 @@ mod tests {
             &cfg,
             &mut rng,
             &mut ctx,
+            &wcfg::WeightingConfig::default(),
         )
         .unwrap_err();
         let msg = format!("{}", err);
@@ -5187,6 +5398,7 @@ mod tests {
             },
             structured: None,
             global_step: 0,
+            training_config_json: None,
         };
         train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
 
