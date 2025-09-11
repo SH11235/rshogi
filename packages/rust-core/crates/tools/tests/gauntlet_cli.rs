@@ -71,7 +71,7 @@ fn test_gauntlet_stub_json_schema_and_gate() {
             }
         }
     }
-    let compiled = JSONSchema::options().with_draft(Draft::Draft7).compile(&schema).unwrap();
+    let compiled = JSONSchema::options().with_draft(Draft::Draft202012).compile(&schema).unwrap();
     if let Err(errors) = compiled.validate(&data) {
         for e in errors {
             eprintln!("schema error: {}", e);
@@ -128,4 +128,40 @@ fn test_gauntlet_stdout_destinations() {
         .stdout(predicate::str::contains("\"env\":"))
         // structured_v1 should be on stderr when stdout is used by JSON
         .stderr(predicate::str::contains("\"phase\":\"gauntlet\""));
+}
+
+#[test]
+fn test_gauntlet_stdout_mutual_exclusion() {
+    // Book path (representative sample)
+    let book_path = repo_root().join("docs/reports/fixtures/opening/representative.epd");
+    assert!(book_path.exists(), "book not found: {}", book_path.display());
+
+    // Both JSON and report to stdout should fail validation
+    let mut cmd = Command::cargo_bin("gauntlet").unwrap();
+    cmd.args([
+        "--base",
+        "baseline.nn",
+        "--cand",
+        "candidate.nn",
+        "--time",
+        "0/1+0.1",
+        "--games",
+        "20",
+        "--threads",
+        "1",
+        "--hash-mb",
+        "256",
+        "--book",
+        book_path.to_str().unwrap(),
+        "--multipv",
+        "1",
+        "--json",
+        "-",
+        "--report",
+        "-",
+        "--stub",
+    ]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Use at most one of '--json -' or '--report -'"));
 }
