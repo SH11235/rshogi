@@ -21,6 +21,7 @@ cargo run -p tools --bin gauntlet -- \
 - `--json -` または `--report -` を指定すると、対応する出力を STDOUT に書き出します。
   - その場合、構造化ログ（structured_v1）は STDERR に出力されます（混在防止）。
 - `--seed <N>` を指定すると、開幕順（ペアリング済みの2局セット）を N で決定的にシャッフルします（既定は非シャッフル）。
+  - `--seed-mode {flat|block}` でシャッフルの粒度を選べます。`flat` は各局単位で全体をシャッフル、`block` は先後2局を隣接ブロックのままブロック単位でシャッフルします（既定: flat）。
 
 ## 出力スキーマ
 - JSON 出力は `docs/schemas/gauntlet_out.schema.json` に準拠
@@ -31,7 +32,7 @@ cargo run -p tools --bin gauntlet -- \
     - `winrate` は互換のため名称を保持しつつ、実体は Score rate（W=1, D=0.5, L=0）
   - `series`: 各対局の結果（先後/手数/勝敗/消費ノード/NPS）
   - 透明性向上のため、Summary に `nps_samples` と `pv_spread_samples` を任意で含みます（後方互換）
-  - 再現性のため、Params に `seed`（指定時のみ）を任意で含みます（後方互換）
+  - 再現性のため、Params に `seed`（指定時のみ）と `seed_mode`（指定時のみ）を任意で含みます（後方互換）
 
 ## Gate 判定
 - 準合格（provisional）: 決着局（W/L）の勝率について、Wilson 区間95%の下限が 50% を超える場合

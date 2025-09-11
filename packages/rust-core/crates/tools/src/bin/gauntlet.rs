@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::search::limits::SearchLimitsBuilder;
 use engine_core::time_management::TimeControl;
@@ -78,6 +78,15 @@ struct RunArgs {
     /// Optional seed for deterministic shuffling of game schedule (default: no shuffle)
     #[arg(long, value_name = "N")]
     seed: Option<u64>,
+    /// Seed shuffle mode (only used when --seed is set): flat (per-game) or block (keep 2-game pair adjacency)
+    #[arg(long = "seed-mode", value_enum, default_value_t = SeedMode::Flat)]
+    seed_mode: SeedMode,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum SeedMode {
+    Flat,
+    Block,
 }
 
 fn validate_args(a: &RunArgs) -> Result<()> {
@@ -96,6 +105,9 @@ fn validate_args(a: &RunArgs) -> Result<()> {
         return Err(anyhow!(
             "Use at most one of '--json -' or '--report -' (both write to STDOUT)"
         ));
+    }
+    if a.seed.is_none() && a.seed_mode != SeedMode::Flat {
+        eprintln!("WARN: --seed-mode is ignored without --seed (got {:?})", a.seed_mode);
     }
     Ok(())
 }
@@ -126,6 +138,8 @@ struct ParamsOut {
     multipv: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -324,15 +338,28 @@ fn build_markdown(out: &GauntletOut) -> String {
     if let Some(reason) = &out.summary.reject_reason {
         md.push_str(&format!("- Reason: {}\n", reason));
     }
+    if let Some(nps_n) = out.summary.nps_samples {
+        md.push_str(&format!(
+            "- Samples: NPS={} PV spread={}\n",
+            nps_n,
+            out.summary.pv_spread_samples.unwrap_or(0)
+        ));
+    }
     md.push_str("\n## Params\n");
+    let seed_info = match (out.params.seed, out.params.seed_mode.as_deref()) {
+        (Some(s), Some(m)) => format!(" seed={} seed_mode={}", s, m),
+        (Some(s), _) => format!(" seed={}", s),
+        _ => String::new(),
+    };
     md.push_str(&format!(
-        "- time={} games={} threads={} hash_mb={} multipv={} book='{}'\n",
+        "- time={} games={} threads={} hash_mb={} multipv={} book='{}'{}\n",
         out.params.time,
         out.params.games,
         out.params.threads,
         out.params.hash_mb,
         out.params.multipv,
-        out.params.book
+        out.params.book,
+        seed_info
     ));
     md
 }
@@ -579,11 +606,11 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             spreads.push((max - min) as f64);
         }
     }
-    let pv_spread_p90 = percentile_nearest_rank(spreads.clone(), 0.90);
     let pv_samples = spreads.len();
+    let pv_spread_p90 = percentile_nearest_rank(spreads, 0.90);
 
     // Games
-    let schedule = schedule_pairs_shuffled(book.len(), args.games, args.seed);
+    let schedule = schedule_pairs_with_mode(book.len(), args.games, args.seed, args.seed_mode);
     let mut series: Vec<SeriesItem> = Vec::with_capacity(args.games);
     let mut wins = 0usize;
     let mut losses = 0usize;
@@ -710,14 +737,12 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         gate = GateDecision::Pass;
     } else if !matches!(gate, GateDecision::Provisional) {
         // Reject with reason
-        let mut rs = Vec::new();
         if winrate < 0.55 {
-            rs.push(format!("score rate {:.1}% < 55%", winrate * 100.0));
+            reason = push_reason(reason, &format!("score rate {:.1}% < 55%", winrate * 100.0));
         }
         if nps_delta_pct.abs() > 3.0 {
-            rs.push(format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
+            reason = push_reason(reason, &format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
         }
-        reason = Some(rs.join(", "));
     }
     // Ensure we don't pass when samples are missing for fairness
     let mut sample_reasons: Vec<String> = Vec::new();
@@ -746,6 +771,10 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             book: args.book.clone(),
             multipv: args.multipv,
             seed: args.seed,
+            seed_mode: args.seed.map(|_| match args.seed_mode {
+                SeedMode::Flat => "flat".to_string(),
+                SeedMode::Block => "block".to_string(),
+            }),
         },
         summary: SummaryOut {
             winrate,
@@ -784,7 +813,7 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
     let mut wins = 0usize;
     let mut losses = 0usize;
     let mut draws = 0usize;
-    let schedule = schedule_pairs_shuffled(book.len(), args.games, args.seed);
+    let schedule = schedule_pairs_with_mode(book.len(), args.games, args.seed, args.seed_mode);
     for (g, (open_idx, cand_black)) in schedule.into_iter().enumerate() {
         let sfen = &book[open_idx];
         let (res, plies, nb, nc, nps_b, nps_c) = stub.play_game(g);
@@ -826,14 +855,12 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
     if winrate >= 0.55 && nps_delta_pct.abs() <= 3.0 {
         gate = GateDecision::Pass;
     } else if !matches!(gate, GateDecision::Provisional) {
-        let mut rs = Vec::new();
         if winrate < 0.55 {
-            rs.push(format!("score rate {:.1}% < 55%", winrate * 100.0));
+            reason = push_reason(reason, &format!("score rate {:.1}% < 55%", winrate * 100.0));
         }
         if nps_delta_pct.abs() > 3.0 {
-            rs.push(format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
+            reason = push_reason(reason, &format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
         }
-        reason = Some(rs.join(", "));
     }
     Ok(GauntletOut {
         env: gather_env_info(),
@@ -845,6 +872,10 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             book: args.book.clone(),
             multipv: args.multipv,
             seed: args.seed,
+            seed_mode: args.seed.map(|_| match args.seed_mode {
+                SeedMode::Flat => "flat".to_string(),
+                SeedMode::Block => "block".to_string(),
+            }),
         },
         summary: SummaryOut {
             winrate,
@@ -857,8 +888,8 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             losses: Some(losses),
             draws: Some(draws),
             games: Some(args.games),
-            nps_samples: Some(100.min(book.len())),
-            pv_spread_samples: Some(100.min(book.len())),
+            nps_samples: None,
+            pv_spread_samples: None,
         },
         training_config: None,
         series,
@@ -938,6 +969,40 @@ fn schedule_pairs_shuffled(book_len: usize, games: usize, seed: Option<u64>) -> 
         v.as_mut_slice().shuffle(&mut rng);
     }
     v
+}
+
+fn schedule_pairs_blockwise_shuffled(
+    book_len: usize,
+    games: usize,
+    seed: Option<u64>,
+) -> Vec<(usize, bool)> {
+    let blocks_len = games / 2;
+    let mut blocks: Vec<[(usize, bool); 2]> = (0..blocks_len)
+        .map(|i| {
+            let open_idx = i % book_len;
+            [(open_idx, true), (open_idx, false)]
+        })
+        .collect();
+    if let Some(s) = seed {
+        let mut rng = StdRng::seed_from_u64(s);
+        blocks.as_mut_slice().shuffle(&mut rng);
+    }
+    blocks.into_iter().flatten().collect()
+}
+
+fn schedule_pairs_with_mode(
+    book_len: usize,
+    games: usize,
+    seed: Option<u64>,
+    mode: SeedMode,
+) -> Vec<(usize, bool)> {
+    if seed.is_none() {
+        return schedule_pairs(book_len, games);
+    }
+    match mode {
+        SeedMode::Flat => schedule_pairs_shuffled(book_len, games, seed),
+        SeedMode::Block => schedule_pairs_blockwise_shuffled(book_len, games, seed),
+    }
 }
 
 fn main() -> Result<()> {
