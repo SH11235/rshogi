@@ -65,6 +65,7 @@ const MAX_PREFETCH_BATCHES: usize = 1024;
 
 // Weight scaling constants
 const GAP_WEIGHT_DIVISOR: f32 = 50.0;
+const BASELINE_MIN_EPS: f32 = 1e-3;
 const SELECTIVE_DEPTH_WEIGHT: f32 = 0.8;
 const NON_EXACT_BOUND_WEIGHT: f32 = 0.7;
 const SELECTIVE_DEPTH_MARGIN: i32 = 6;
@@ -621,7 +622,8 @@ impl StreamCacheLoader {
 
                 // weight policy
                 let mut weight = 1.0f32;
-                weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
+                let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+                weight *= base_gap;
                 let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                 weight *= if both_exact {
                     1.0
@@ -1203,6 +1205,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Training mode dispatch (scope to release borrows when done)
     {
+        // Compose training_config for JSONL: include whether phase weighting was applied
+        let mut training_cfg_json = serde_json::to_value(&weighting_cfg).ok();
+        if let Some(obj) = training_cfg_json.as_mut().and_then(|v| v.as_object_mut()) {
+            obj.insert("phase_applied".into(), serde_json::json!(!is_cache));
+        }
+
         let mut ctx = TrainContext {
             out_dir: &out_dir,
             save_every,
@@ -1215,7 +1223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             structured: structured_logger,
             global_step: 0,
-            training_config_json: serde_json::to_value(&weighting_cfg).ok(),
+            training_config_json: training_cfg_json,
         };
         if is_cache && config.stream_cache {
             train_model_stream_cache(
@@ -1559,9 +1567,10 @@ fn is_exact_opt(s: &Option<String>) -> bool {
 fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
     let mut weight = 1.0;
 
-    // Gap-based weight
+    // Gap-based weight (avoid zero weight at gap=0)
     if let Some(gap) = pos_data.best2_gap_cp {
-        weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
+        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+        weight *= base_gap;
     }
 
     // Bound-based weight
@@ -1685,7 +1694,8 @@ fn load_samples_from_cache(
 
         // Calculate weight using same baseline policy as JSONL loading
         let mut weight = 1.0f32;
-        weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
+        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+        weight *= base_gap;
         let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
         weight *= if both_exact {
             1.0
@@ -2346,7 +2356,8 @@ fn train_model_stream_cache(
                     let flags = flags[0];
                     let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
                     let mut weight = 1.0f32;
-                    weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
+                    let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0).max(BASELINE_MIN_EPS);
+                    weight *= base_gap;
                     let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                     weight *= if both_exact {
                         1.0
@@ -4920,6 +4931,50 @@ mod tests {
                 .unwrap();
         assert!(!json_samples.is_empty());
         assert!(json_samples[0].weight <= 1.0);
+    }
+
+    #[test]
+    fn gap_zero_not_zero_weight() {
+        // JSONL with gap=0 should not produce zero sample weight due to BASELINE_MIN_EPS
+        let td = tempdir().unwrap();
+        let json_path = td.path().join("w_gap0.jsonl");
+        let mut jf = File::create(&json_path).unwrap();
+        writeln!(
+            jf,
+            r#"{{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"best2_gap_cp":0}}"#
+        )
+        .unwrap();
+        jf.flush().unwrap();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
+            shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10_000.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
+        };
+        let samples = load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
+        assert_eq!(samples.len(), 2); // both perspectives
+        assert!(samples[0].weight > 0.0, "weight should be >0 when gap=0");
+        assert!(samples[1].weight > 0.0, "weight should be >0 when gap=0");
     }
 
     // 再現性（seed指定）— test_training_reproducibility_with_seed
