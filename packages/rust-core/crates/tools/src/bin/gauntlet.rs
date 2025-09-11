@@ -88,6 +88,11 @@ fn validate_args(a: &RunArgs) -> Result<()> {
     if a.threads != 1 {
         eprintln!("WARN: Spec 013 requires --threads=1 (got {}).", a.threads);
     }
+    if a.json == "-" && a.report == "-" {
+        return Err(anyhow!(
+            "Use at most one of '--json -' or '--report -' (both write to STDOUT)"
+        ));
+    }
     Ok(())
 }
 
@@ -515,6 +520,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         cp.abs() >= 30_000
     }
     for s in book.iter().take(100.min(book.len())) {
+        cand.clear_tt();
         let mut pos = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
         if let Some(cps) = cand.eval_multipv3_root_cp(&mut pos, nps_sample_ms) {
             if cps.iter().any(|&cp| is_mate_cp(cp)) {

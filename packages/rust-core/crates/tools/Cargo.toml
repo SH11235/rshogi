@@ -38,4 +38,4 @@ plots = ["dep:plotters"]
 tempfile = "3.10"
 assert_cmd = "2.0"
 predicates = "3.1"
-jsonschema = "0.17"
+jsonschema = { version = "0.17", features = ["draft202012"] }
