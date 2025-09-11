@@ -1,0 +1,6 @@
+weighting: [exact, gap, phase, mate]
+w_exact: 1.2
+w_gap: 1.1
+w_phase_endgame: 1.3
+w_mate_ring: 2.0
+preset: endgame_heavy

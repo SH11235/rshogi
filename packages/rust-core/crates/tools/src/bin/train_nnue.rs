@@ -42,7 +42,7 @@ use tools::nnfc_v1::{
     open_payload_reader as open_cache_payload_reader_shared, FEATURE_SET_ID_HALF,
 };
 
-use clap::{arg, Command};
+use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::game_phase::{detect_game_phase, GamePhase, Profile};
 use engine_core::{
     evaluation::nnue::features::{extract_features, FE_END},
@@ -52,6 +52,7 @@ use engine_core::{
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use tools::common::weighting as wcfg;
 use tools::nnfc_v1::flags as fc_flags;
 use tools::stats::{
     binary_metrics, calibration_bins, ece_from_bins, regression_metrics, roc_auc_weighted,
@@ -64,6 +65,7 @@ const MAX_PREFETCH_BATCHES: usize = 1024;
 
 // Weight scaling constants
 const GAP_WEIGHT_DIVISOR: f32 = 50.0;
+const BASELINE_MIN_EPS: f32 = 1e-3;
 const SELECTIVE_DEPTH_WEIGHT: f32 = 0.8;
 const NON_EXACT_BOUND_WEIGHT: f32 = 0.7;
 const SELECTIVE_DEPTH_MARGIN: i32 = 6;
@@ -148,6 +150,12 @@ struct Config {
     // Data filters (align with build_feature_cache)
     exclude_no_legal_move: bool,
     exclude_fallback: bool,
+    // LR scheduler (Spec #11)
+    lr_schedule: String,          // constant|step|cosine
+    lr_warmup_epochs: u32,        // >=0
+    lr_decay_epochs: Option<u32>, // mutually exclusive with steps
+    lr_decay_steps: Option<u64>,  // mutually exclusive with epochs
+    lr_plateau_patience: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +169,41 @@ struct Sample {
 }
 
 // CacheHeader schema is parsed ad-hoc (v1 only). No struct kept to avoid drift.
+
+// Structured JSONL logger (shared by training paths)
+struct StructuredLogger {
+    to_stdout: bool,
+    file: Option<std::sync::Mutex<std::io::BufWriter<File>>>,
+}
+impl StructuredLogger {
+    fn new(path: &str) -> std::io::Result<Self> {
+        if path == "-" {
+            Ok(Self {
+                to_stdout: true,
+                file: None,
+            })
+        } else {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let bw = std::io::BufWriter::with_capacity(1 << 20, f);
+            Ok(Self {
+                to_stdout: false,
+                file: Some(std::sync::Mutex::new(bw)),
+            })
+        }
+    }
+    fn write_json(&self, v: &serde_json::Value) {
+        if self.to_stdout {
+            println!("{}", v);
+        } else if let Some(ref file) = self.file {
+            if let Ok(mut w) = file.lock() {
+                let _ = writeln!(w, "{}", v);
+            }
+        }
+    }
+}
 
 /// NNUE Network structure with single-channel accumulator
 ///
@@ -579,7 +622,8 @@ impl StreamCacheLoader {
 
                 // weight policy
                 let mut weight = 1.0f32;
-                weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
+                let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
+                weight *= base_gap;
                 let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                 weight *= if both_exact {
                     1.0
@@ -696,6 +740,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .about("Train NNUE model from JSONL data")
         .arg(arg!(-i --input <FILE> "Input JSONL file").required(true))
         .arg(arg!(-v --validation <FILE> "Validation JSONL file"))
+        // Weighting (Spec #12)
+        .arg(
+            Arg::new("config")
+                .long("config")
+                .help("YAML/JSON config file for weighting and presets")
+                .value_hint(ValueHint::FilePath),
+        )
+        .arg(
+            Arg::new("weighting")
+                .long("weighting")
+                .help("Enable weighting scheme(s): exact|gap|phase|mate (repeatable)")
+                .action(ArgAction::Append)
+                .value_parser(["exact", "gap", "phase", "mate"]) ,
+        )
+        .arg(
+            Arg::new("w-exact")
+                .long("w-exact")
+                .help("Coefficient for exact samples")
+                .value_parser(value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("w-gap")
+                .long("w-gap")
+                .help("Coefficient for small-gap samples")
+                .value_parser(value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("w-phase-endgame")
+                .long("w-phase-endgame")
+                .help("Coefficient for endgame phase")
+                .value_parser(value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("w-mate-ring")
+                .long("w-mate-ring")
+                .help("Coefficient for mate-ring samples")
+                .value_parser(value_parser!(f32)),
+        )
         .arg(arg!(-e --epochs <N> "Number of epochs").default_value("2"))
         .arg(arg!(-b --"batch-size" <N> "Batch size").default_value("8192"))
         .arg(arg!(--lr <RATE> "Learning rate").default_value("0.001"))
@@ -765,10 +847,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(["warn", "fail"]) 
                 .default_value("warn"),
         )
+        // LR scheduler (Spec #11)
+        .arg(
+            arg!(--"lr-schedule" <KIND> "LR scheduler: constant|step|cosine")
+                .value_parser(["constant", "step", "cosine"]) 
+                .default_value("constant"),
+        )
+        .arg(
+            arg!(--"lr-warmup-epochs" <N> "Warmup epochs for LR")
+                .value_parser(clap::value_parser!(u32))
+                .default_value("0"),
+        )
+        .arg(
+            arg!(--"lr-decay-epochs" <N> "Decay interval in epochs (step/cosine)")
+                .value_parser(clap::value_parser!(u32))
+                .conflicts_with("lr-decay-steps"),
+        )
+        .arg(
+            arg!(--"lr-decay-steps" <N> "Decay interval in steps (step/cosine)")
+                .value_parser(clap::value_parser!(u64))
+                .conflicts_with("lr-decay-epochs"),
+        )
+        .arg(
+            arg!(--"lr-plateau-patience" <N> "Plateau patience in epochs (overlay; requires --validation)")
+                .value_parser(clap::value_parser!(u32)),
+        )
+        .arg(
+            arg!(--"structured-log" <PATH> "Structured JSONL log path ('-' for STDOUT)")
+        )
         .arg(arg!(--quantized "Save quantized (int8) version of the model"))
         .arg(arg!(--seed <SEED> "Random seed for reproducibility"))
         .arg(arg!(-o --out <DIR> "Output directory"))
         .get_matches();
+
+    // Prepare structured logger early for stdout/stderr routing decisions
+    let structured_logger: Option<StructuredLogger> = app
+        .get_one::<String>("structured-log")
+        .and_then(|p| match StructuredLogger::new(p) {
+            Ok(lg) => Some(lg),
+            Err(e) => {
+                eprintln!("Warning: failed to open structured log '{}': {}", p, e);
+                None
+            }
+        });
+    let human_to_stderr = structured_logger.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+
+    // Build weighting config (Spec #12)
+    let cfg_file = app.get_one::<String>("config").and_then(|p| match wcfg::load_config_file(p) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            if human_to_stderr {
+                eprintln!("Warning: failed to load config '{}': {}", p, e);
+            } else {
+                println!("Warning: failed to load config '{}': {}", p, e);
+            }
+            None
+        }
+    });
+    let cli_active = app.get_many::<String>("weighting").map(|vals| {
+        vals.map(|s| match s.as_str() {
+            "exact" => wcfg::WeightingKind::Exact,
+            "gap" => wcfg::WeightingKind::Gap,
+            "phase" => wcfg::WeightingKind::Phase,
+            "mate" => wcfg::WeightingKind::Mate,
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>()
+    });
+    let weighting_cfg = wcfg::merge_config(
+        cfg_file,
+        cli_active,
+        app.get_one::<f32>("w-exact").copied(),
+        app.get_one::<f32>("w-gap").copied(),
+        app.get_one::<f32>("w-phase-endgame").copied(),
+        app.get_one::<f32>("w-mate-ring").copied(),
+    );
 
     let config = Config {
         epochs: app.get_one::<String>("epochs").unwrap().parse()?,
@@ -791,6 +944,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap(),
         exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
         exclude_fallback: app.get_flag("exclude-fallback"),
+        lr_schedule: app
+            .get_one::<String>("lr-schedule")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "constant".to_string()),
+        lr_warmup_epochs: *app.get_one::<u32>("lr-warmup-epochs").unwrap_or(&0u32),
+        lr_decay_epochs: app.get_one::<u32>("lr-decay-epochs").copied(),
+        lr_decay_steps: app.get_one::<u64>("lr-decay-steps").copied(),
+        lr_plateau_patience: app.get_one::<u32>("lr-plateau-patience").copied(),
     };
 
     if config.scale <= 0.0 {
@@ -801,6 +962,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if config.prefetch_batches > MAX_PREFETCH_BATCHES {
         return Err(format!("Invalid --prefetch-batches: must be <= {MAX_PREFETCH_BATCHES}").into());
+    }
+    if let Some(0) = config.lr_decay_epochs {
+        eprintln!("Error: --lr-decay-epochs must be > 0");
+        std::process::exit(2);
+    }
+    if let Some(0) = config.lr_decay_steps {
+        eprintln!("Error: --lr-decay-steps must be > 0");
+        std::process::exit(2);
     }
 
     let input_path = app.get_one::<String>("input").unwrap();
@@ -820,15 +989,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("runs/nnue_{}", timestamp)));
 
-    println!("Configuration:");
-    println!("  Input: {}", input_path);
-    if let Some(val_path) = validation_path {
-        println!("  Validation: {}", val_path);
+    if human_to_stderr {
+        eprintln!("Configuration:");
+    } else {
+        println!("Configuration:");
     }
-    println!("  Output: {}", out_dir.display());
-    println!("  Settings: {:?}", config);
-    println!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
-    println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+    if human_to_stderr {
+        eprintln!("  Input: {}", input_path);
+    } else {
+        println!("  Input: {}", input_path);
+    }
+    if let Some(val_path) = validation_path {
+        if human_to_stderr {
+            eprintln!("  Validation: {}", val_path);
+        } else {
+            println!("  Validation: {}", val_path);
+        }
+    }
+    if human_to_stderr {
+        eprintln!("  Output: {}", out_dir.display());
+    } else {
+        println!("  Output: {}", out_dir.display());
+    }
+    if human_to_stderr {
+        eprintln!("  Settings: {:?}", config);
+    } else {
+        println!("  Settings: {:?}", config);
+    }
+    if human_to_stderr {
+        eprintln!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
+    } else {
+        println!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
+    }
+    if human_to_stderr {
+        eprintln!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+    } else {
+        println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+    }
 
     // Decide input mode
     // Robustly detect NNFC cache (raw/gzip/zstd) by attempting to parse the header.
@@ -849,20 +1046,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut train_samples: Vec<Sample> = Vec::new();
     if !(is_cache && config.stream_cache) {
         let start_time = Instant::now();
-        println!("\nLoading training data...");
-        train_samples = if is_cache {
-            println!("Loading from cache file...");
-            load_samples_from_cache(input_path)?
+        if human_to_stderr {
+            eprintln!("\nLoading training data...");
         } else {
-            load_samples(input_path, &config)?
+            println!("\nLoading training data...");
+        }
+        train_samples = if is_cache {
+            if human_to_stderr {
+                eprintln!("Loading from cache file...");
+            } else {
+                println!("Loading from cache file...");
+            }
+            load_samples_from_cache(input_path, &weighting_cfg)?
+        } else {
+            load_samples(input_path, &config, &weighting_cfg)?
         };
-        println!(
-            "Loaded {} samples in {:.2}s",
-            train_samples.len(),
-            start_time.elapsed().as_secs_f32()
-        );
+        if human_to_stderr {
+            eprintln!(
+                "Loaded {} samples in {:.2}s",
+                train_samples.len(),
+                start_time.elapsed().as_secs_f32()
+            );
+        } else {
+            println!(
+                "Loaded {} samples in {:.2}s",
+                train_samples.len(),
+                start_time.elapsed().as_secs_f32()
+            );
+        }
     } else {
-        println!("\nStreaming training data from cache (no preloading)...");
+        if human_to_stderr {
+            eprintln!("\nStreaming training data from cache (no preloading)...");
+        } else {
+            println!("\nStreaming training data from cache (no preloading)...");
+        }
         if config.shuffle {
             eprintln!("Note: shuffle is disabled in --stream-cache mode.");
         }
@@ -871,23 +1088,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load validation data if provided
     let mut val_is_jsonl = false;
     let validation_samples = if let Some(val_path) = validation_path {
-        println!("\nLoading validation data...");
+        if human_to_stderr {
+            eprintln!("\nLoading validation data...");
+        } else {
+            println!("\nLoading validation data...");
+        }
         let start_val = Instant::now();
 
         let is_val_cache = is_cache_file(val_path);
         let samples = if is_val_cache {
-            println!("Loading validation from cache file...");
-            load_samples_from_cache(val_path)?
+            if human_to_stderr {
+                eprintln!("Loading validation from cache file...");
+            } else {
+                println!("Loading validation from cache file...");
+            }
+            load_samples_from_cache(val_path, &weighting_cfg)?
         } else {
             val_is_jsonl = true;
-            load_samples(val_path, &config)?
+            load_samples(val_path, &config, &weighting_cfg)?
         };
 
-        println!(
-            "Loaded {} validation samples in {:.2}s",
-            samples.len(),
-            start_val.elapsed().as_secs_f32()
-        );
+        if human_to_stderr {
+            eprintln!(
+                "Loaded {} validation samples in {:.2}s",
+                samples.len(),
+                start_val.elapsed().as_secs_f32()
+            );
+        } else {
+            println!(
+                "Loaded {} validation samples in {:.2}s",
+                samples.len(),
+                start_val.elapsed().as_secs_f32()
+            );
+        }
         Some(samples)
     } else {
         None
@@ -897,13 +1130,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed_u64_opt: Option<u64> =
         app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
     let mut rng: StdRng = if let Some(seed) = seed_u64_opt {
-        println!("Using random seed (u64): {}", seed);
+        if human_to_stderr {
+            eprintln!("Using random seed (u64): {}", seed);
+        } else {
+            println!("Using random seed (u64): {}", seed);
+        }
         StdRng::seed_from_u64(seed)
     } else {
         let seed_bytes: [u8; 32] = rand::rng().random();
         let seed_hex = seed_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
         let u64_proj = u64::from_le_bytes(seed_bytes[0..8].try_into().unwrap());
-        println!("Generated random seed (32B hex): {} | (u64 proj): {}", seed_hex, u64_proj);
+        if human_to_stderr {
+            eprintln!("Generated random seed (32B hex): {} | (u64 proj): {}", seed_hex, u64_proj);
+        } else {
+            println!("Generated random seed (32B hex): {} | (u64 proj): {}", seed_hex, u64_proj);
+        }
         StdRng::from_seed(seed_bytes)
     };
 
@@ -911,7 +1152,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut network = Network::new(config.accumulator_dim, config.relu_clip, &mut rng);
 
     // Train the model
-    println!("\nTraining...");
+    if human_to_stderr {
+        eprintln!("\nTraining...");
+    } else {
+        println!("\nTraining...");
+    }
     create_dir_all(&out_dir)?;
     if emit_metrics {
         let mut w = csv::Writer::from_path(out_dir.join("metrics.csv"))?;
@@ -950,6 +1195,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         val_is_jsonl,
     };
 
+    // structured_logger is already created above
+
     // Track best/last for gates and best saving
     let mut best_network: Option<Network> = None;
     let mut best_val_loss: f32 = f32::INFINITY;
@@ -958,6 +1205,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Training mode dispatch (scope to release borrows when done)
     {
+        // Compose training_config for JSONL: include whether phase weighting was actually applied
+        let mut training_cfg_json = serde_json::to_value(&weighting_cfg).ok();
+        if let Some(obj) = training_cfg_json.as_mut().and_then(|v| v.as_object_mut()) {
+            let phase_applied =
+                !is_cache && weighting_cfg.active.contains(&wcfg::WeightingKind::Phase);
+            obj.insert("phase_applied".into(), serde_json::json!(phase_applied));
+        }
+
+        // Initialize plateau state if configured and validation is present
+        let mut plateau_state = None;
+        if let Some(pat) = config.lr_plateau_patience {
+            if pat > 0 {
+                if validation_samples.is_some() {
+                    plateau_state = Some(LrPlateauState::new(pat));
+                } else {
+                    // Warn once if plateau requested but no validation
+                    if human_to_stderr {
+                        eprintln!(
+                            "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
+                        );
+                    } else {
+                        println!(
+                            "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
+                        );
+                    }
+                }
+            }
+        }
+
         let mut ctx = TrainContext {
             out_dir: &out_dir,
             save_every,
@@ -968,6 +1244,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: structured_logger,
+            global_step: 0,
+            training_config_json: training_cfg_json,
+            plateau: plateau_state,
         };
         if is_cache && config.stream_cache {
             train_model_stream_cache(
@@ -977,6 +1257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config,
                 &mut rng,
                 &mut ctx,
+                &weighting_cfg,
             )?;
         } else if is_cache {
             train_model_with_loader(
@@ -1051,10 +1332,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let mut mf = File::create(out_dir.join("nn_best.meta.json"))?;
             writeln!(mf, "{}", serde_json::to_string_pretty(&meta)?)?;
-            println!(
-                "Saved best validation network to {}",
-                out_dir.join("nn_best.fp32.bin").display()
-            );
+            if human_to_stderr {
+                eprintln!(
+                    "Saved best validation network to {}",
+                    out_dir.join("nn_best.fp32.bin").display()
+                );
+            } else {
+                println!(
+                    "Saved best validation network to {}",
+                    out_dir.join("nn_best.fp32.bin").display()
+                );
+            }
         }
     }
 
@@ -1063,17 +1351,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match (last_val_loss, best_val_loss.is_finite(), validation_samples.is_some()) {
             (Some(last), true, true) => {
                 let pass = last <= best_val_loss + 1e-6;
-                println!(
-                    "GATE val_loss_last_is_best: {} (last={:.6}, best={:.6})",
-                    if pass { "PASS" } else { "FAIL" },
-                    last,
-                    best_val_loss
-                );
+                if human_to_stderr {
+                    eprintln!(
+                        "GATE val_loss_last_is_best: {} (last={:.6}, best={:.6})",
+                        if pass { "PASS" } else { "FAIL" },
+                        last,
+                        best_val_loss
+                    );
+                } else {
+                    println!(
+                        "GATE val_loss_last_is_best: {} (last={:.6}, best={:.6})",
+                        if pass { "PASS" } else { "FAIL" },
+                        last,
+                        best_val_loss
+                    );
+                }
                 if !pass && gate_mode_fail {
                     std::process::exit(1);
                 }
             }
-            _ => println!("GATE val_loss_last_is_best: SKIP (no validation)"),
+            _ => {
+                if human_to_stderr {
+                    eprintln!("GATE val_loss_last_is_best: SKIP (no validation)")
+                } else {
+                    println!("GATE val_loss_last_is_best: SKIP (no validation)")
+                }
+            }
         }
     }
     if let (Some(th), Some(val_samples)) = (gate_min_auc, validation_samples.as_ref()) {
@@ -1082,24 +1385,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match auc {
                 Some(v) => {
                     let pass = v >= th;
-                    println!(
-                        "GATE min_auc {:.4} >= {:.4}: {}",
-                        v,
-                        th,
-                        if pass { "PASS" } else { "FAIL" }
-                    );
+                    if human_to_stderr {
+                        eprintln!(
+                            "GATE min_auc {:.4} >= {:.4}: {}",
+                            v,
+                            th,
+                            if pass { "PASS" } else { "FAIL" }
+                        );
+                    } else {
+                        println!(
+                            "GATE min_auc {:.4} >= {:.4}: {}",
+                            v,
+                            th,
+                            if pass { "PASS" } else { "FAIL" }
+                        );
+                    }
                     if !pass && gate_mode_fail {
                         std::process::exit(1);
                     }
                 }
-                None => println!("GATE min_auc: SKIP (insufficient positive/negative)"),
+                None => {
+                    if human_to_stderr {
+                        eprintln!("GATE min_auc: SKIP (insufficient positive/negative)")
+                    } else {
+                        println!("GATE min_auc: SKIP (insufficient positive/negative)")
+                    }
+                }
             }
+        } else if human_to_stderr {
+            eprintln!("GATE min_auc: SKIP (label_type!=wdl)");
         } else {
             println!("GATE min_auc: SKIP (label_type!=wdl)");
         }
     }
 
-    println!("\nModel saved to: {}", out_dir.display());
+    if human_to_stderr {
+        eprintln!("\nModel saved to: {}", out_dir.display());
+    } else {
+        println!("\nModel saved to: {}", out_dir.display());
+    }
 
     Ok(())
 }
@@ -1109,7 +1433,19 @@ fn open_jsonl_reader(path: &str) -> Result<Box<dyn BufRead>, Box<dyn std::error:
     tools::io_detect::open_maybe_compressed_reader(path, BUF_MB * BYTES_PER_MB)
 }
 
-fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+fn to_phase_kind(ph: GamePhase) -> wcfg::PhaseKind {
+    match ph {
+        GamePhase::Opening => wcfg::PhaseKind::Opening,
+        GamePhase::MiddleGame => wcfg::PhaseKind::Middlegame,
+        GamePhase::EndGame => wcfg::PhaseKind::Endgame,
+    }
+}
+
+fn load_samples(
+    path: &str,
+    config: &Config,
+    weighting: &wcfg::WeightingConfig,
+) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let mut reader = open_jsonl_reader(path)?;
     let mut samples = Vec::new();
     let mut skipped = 0;
@@ -1175,8 +1511,21 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
         let cp_black = if stm == Color::Black { cp } else { -cp };
         let cp_white = -cp_black;
 
-        // Calculate sample weight once (shared)
-        let weight = calculate_weight(&pos_data, config);
+        // Phase (once)
+        let phase = detect_game_phase(&position, position.ply as u32, Profile::Search);
+
+        // Calculate sample weight once (shared): baseline then apply Spec#12 coefficients
+        let base_weight = calculate_weight(&pos_data, config);
+        let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
+        let mate_ring = pos_data.mate_boundary.unwrap_or(false);
+        let weight = wcfg::apply_weighting(
+            base_weight,
+            weighting,
+            Some(both_exact),
+            pos_data.best2_gap_cp,
+            Some(to_phase_kind(phase)),
+            Some(mate_ring),
+        );
 
         // Black perspective sample
         {
@@ -1194,7 +1543,7 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
                 label,
                 weight,
                 cp: Some(cp_black),
-                phase: Some(detect_game_phase(&position, position.ply as u32, Profile::Search)),
+                phase: Some(phase),
             });
         }
 
@@ -1214,7 +1563,7 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
                 label,
                 weight,
                 cp: Some(cp_white),
-                phase: Some(detect_game_phase(&position, position.ply as u32, Profile::Search)),
+                phase: Some(phase),
             });
         }
     }
@@ -1242,9 +1591,10 @@ fn is_exact_opt(s: &Option<String>) -> bool {
 fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
     let mut weight = 1.0;
 
-    // Gap-based weight
+    // Gap-based weight (avoid zero weight at gap=0)
     if let Some(gap) = pos_data.best2_gap_cp {
-        weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
+        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
+        weight *= base_gap;
     }
 
     // Bound-based weight
@@ -1287,10 +1637,13 @@ fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::er
     Ok((r, header.num_samples, header.flags_mask))
 }
 
-fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+fn load_samples_from_cache(
+    path: &str,
+    weighting: &wcfg::WeightingConfig,
+) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let (mut r, num_samples, flags_mask) = open_cache_payload_reader(path)?;
 
-    println!("Loading cache: {num_samples} samples");
+    eprintln!("Loading cache: {num_samples} samples");
 
     let mut samples = Vec::with_capacity(num_samples as usize);
     let mut unknown_flag_samples: u64 = 0;
@@ -1298,7 +1651,7 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
 
     for i in 0..num_samples {
         if i % 100000 == 0 && i > 0 {
-            println!("  Loaded {i}/{num_samples} samples...");
+            eprintln!("  Loaded {i}/{num_samples} samples...");
         }
 
         // Read number of features
@@ -1363,29 +1716,32 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
             unknown_flag_bits_accum |= unknown;
         }
 
-        // Calculate weight using same policy as JSONL loading
-        let mut weight = 1.0;
-
-        // Gap-based weight
-        weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
-
-        // Exact bound weight
+        // Calculate weight using same baseline policy as JSONL loading
+        let mut weight = 1.0f32;
+        let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
+        weight *= base_gap;
         let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
         weight *= if both_exact {
             1.0
         } else {
             NON_EXACT_BOUND_WEIGHT
         };
-
-        // Mate boundary weight
-        if (flags & fc_flags::MATE_BOUNDARY) != 0 {
+        let mate_ring = (flags & fc_flags::MATE_BOUNDARY) != 0;
+        if mate_ring {
             weight *= 0.5;
         }
-
-        // Depth-based weight
         if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
             weight *= SELECTIVE_DEPTH_WEIGHT;
         }
+        // Apply Spec#12 coefficients (phase unknown in cache → not applied)
+        weight = wcfg::apply_weighting(
+            weight,
+            weighting,
+            Some(both_exact),
+            Some(gap as i32),
+            None,
+            Some(mate_ring),
+        );
 
         samples.push(Sample {
             features,
@@ -1435,6 +1791,110 @@ struct TrainContext<'a> {
     save_every: Option<usize>,
     dash: DashboardOpts,
     trackers: TrainTrackers<'a>,
+    structured: Option<StructuredLogger>,
+    global_step: u64,
+    training_config_json: Option<serde_json::Value>,
+    plateau: Option<LrPlateauState>,
+}
+
+// LR Plateau state (Spec #11 overlay)
+struct LrPlateauState {
+    best: f32,
+    wait: u32,
+    patience: u32,
+    min_delta: f32,
+    gamma: f32,
+    multiplier: f32,
+}
+
+impl LrPlateauState {
+    fn new(patience: u32) -> Self {
+        Self {
+            best: f32::INFINITY,
+            wait: 0,
+            patience,
+            min_delta: 1e-6,
+            gamma: 0.5,
+            multiplier: 1.0,
+        }
+    }
+
+    #[inline]
+    fn factor(&self) -> f32 {
+        self.multiplier
+    }
+
+    // Returns Some(new_multiplier) if decay triggered
+    fn update(&mut self, val_loss: f32) -> Option<f32> {
+        if !val_loss.is_finite() {
+            return None;
+        }
+        if val_loss + self.min_delta < self.best {
+            self.best = val_loss;
+            self.wait = 0;
+            None
+        } else {
+            self.wait = self.wait.saturating_add(1);
+            if self.patience > 0 && self.wait >= self.patience {
+                self.wait = 0;
+                self.multiplier *= self.gamma;
+                Some(self.multiplier)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[inline]
+fn lr_base_for(
+    epoch: usize,
+    global_step: u64,
+    cfg: &Config,
+    plateau: Option<&LrPlateauState>,
+) -> f32 {
+    let mut lr_factor = 1.0f32;
+    if cfg.lr_warmup_epochs > 0 {
+        let e = epoch as u32;
+        if e < cfg.lr_warmup_epochs {
+            lr_factor = ((e + 1) as f32) / (cfg.lr_warmup_epochs as f32);
+        }
+    }
+    match cfg.lr_schedule.as_str() {
+        "constant" => {}
+        "step" => {
+            let step_gamma: f32 = 0.5;
+            if let Some(de) = cfg.lr_decay_epochs {
+                if de > 0 {
+                    let k = ((epoch as u32) / de) as i32;
+                    lr_factor *= step_gamma.powi(k);
+                }
+            }
+            if let Some(ds) = cfg.lr_decay_steps {
+                if ds > 0 {
+                    let k = (global_step / ds) as i32;
+                    lr_factor *= step_gamma.powi(k);
+                }
+            }
+        }
+        "cosine" => {
+            let mut p = 0.0f32;
+            if let Some(de) = cfg.lr_decay_epochs {
+                if de > 0 {
+                    p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
+                }
+            }
+            if let Some(ds) = cfg.lr_decay_steps {
+                if ds > 0 {
+                    p = ((global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
+                }
+            }
+            lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
+        }
+        _ => {}
+    }
+    let pl = plateau.map(|p| p.factor()).unwrap_or(1.0);
+    (cfg.learning_rate * lr_factor * pl).max(0.0)
 }
 
 fn train_model(
@@ -1457,6 +1917,7 @@ fn train_model(
 
     for epoch in 0..config.epochs {
         let epoch_start = Instant::now();
+        let mut last_lr_base = config.learning_rate;
 
         // Shuffle training data
         if config.shuffle {
@@ -1471,19 +1932,39 @@ fn train_model(
         let mut samples_since = 0usize;
         let mut batches_since = 0usize;
         let mut zero_weight_batches = 0usize;
+        // 直近のバッチloss（throughput構造化ログ用）。最初は未定義。
+        let mut last_loss_for_log: Option<f32> = None;
         for batch_idx in 0..n_batches {
+            // consume last_loss_for_log to avoid unused-assignment lint across iterations
+            let _ = last_loss_for_log;
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
             let batch = &train_samples[start..end];
 
             let batch_indices: Vec<usize> = (0..batch.len()).collect();
-            let loss =
-                train_batch_by_indices(network, batch, &batch_indices, config, &mut adam_state);
+            // LR scheduling per spec #11
+            let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
+            // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
-            total_loss += loss * batch_weight;
-            total_weight += batch_weight;
+            if batch_weight > 0.0 {
+                let loss = train_batch_by_indices(
+                    network,
+                    batch,
+                    &batch_indices,
+                    config,
+                    &mut adam_state,
+                    lr_base,
+                );
+                total_loss += loss * batch_weight;
+                total_weight += batch_weight;
+                last_loss_for_log = Some(loss);
+            } else {
+                last_loss_for_log = None;
+            }
+            last_lr_base = lr_base;
 
             total_batches += 1;
+            ctx.global_step += 1;
             samples_since += batch.len();
             batches_since += 1;
             if batch_weight == 0.0 {
@@ -1498,14 +1979,43 @@ fn train_model(
                 let sps = samples_since as f32 / secs;
                 let bps = batches_since as f32 / secs;
                 let avg_bs = samples_since as f32 / batches_since as f32;
-                println!(
-                    "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
-                    epoch + 1,
-                    batch_idx + 1,
-                    sps,
-                    bps,
-                    avg_bs
-                );
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
+                        "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
+                        epoch + 1,
+                        batch_idx + 1,
+                        sps,
+                        bps,
+                        avg_bs
+                    );
+                } else {
+                    println!(
+                        "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
+                        epoch + 1,
+                        batch_idx + 1,
+                        sps,
+                        bps,
+                        avg_bs
+                    );
+                }
+                if let Some(ref lg) = ctx.structured {
+                    let mut rec = serde_json::json!({
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "phase": "train",
+                        "global_step": ctx.global_step as i64,
+                        "epoch": (epoch + 1) as i64,
+                        "lr": lr_base as f64,
+                        "examples_sec": sps as f64,
+                        "loader_ratio": 0.0f64,
+                        "wall_time": secs as f64,
+                    });
+                    if let Some(ls) = last_loss_for_log {
+                        rec.as_object_mut()
+                            .unwrap()
+                            .insert("train_loss".into(), serde_json::json!(ls as f64));
+                    }
+                    lg.write_json(&rec);
+                }
                 last_report = Instant::now();
                 samples_since = 0;
                 batches_since = 0;
@@ -1517,7 +2027,11 @@ fn train_model(
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
                     save_network(network, &checkpoint_path)?;
-                    println!("Saved checkpoint: {}", checkpoint_path.display());
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                    } else {
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
                 }
             }
         }
@@ -1722,13 +2236,6 @@ fn train_model(
 
         let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
         let epoch_sps = (n_samples as f32) / epoch_secs;
-        if zero_weight_batches > 0 {
-            eprintln!(
-                "[debug] epoch {} had {} zero-weight batches",
-                epoch + 1,
-                zero_weight_batches
-            );
-        }
         // Update best trackers
         if let Some(vl) = val_loss {
             if vl < *ctx.trackers.best_val_loss {
@@ -1737,6 +2244,36 @@ fn train_model(
                 *ctx.trackers.best_epoch = Some(epoch + 1);
             }
             *ctx.trackers.last_val_loss = Some(vl);
+            // Plateau update (epoch end)
+            if let Some(ref mut p) = ctx.plateau {
+                if !vl.is_finite() {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Warning: val_loss is not finite; skipping plateau update");
+                    } else {
+                        println!("Warning: val_loss is not finite; skipping plateau update");
+                    }
+                } else if let Some(new_mult) = p.update(vl) {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    } else {
+                        println!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    }
+                }
+            }
         }
         // Emit metrics.csv
         if ctx.dash.emit {
@@ -1763,16 +2300,74 @@ fn train_model(
             ])?;
             w.flush()?;
         }
+        // Structured per-epoch logs (train/val)
+        if let Some(ref lg) = ctx.structured {
+            let mut rec_train = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "train",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "lr": last_lr_base as f64,
+                "train_loss": avg_loss as f64,
+                "examples_sec": epoch_sps as f64,
+                "loader_ratio": 0.0f64,
+                "wall_time": epoch_secs as f64,
+            });
+            // Bake training_config (Spec#12)
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
+            lg.write_json(&rec_train);
+            if let Some(vl) = val_loss {
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "val_loss": vl as f64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
+                }
+                lg.write_json(&rec_val);
+            }
+        }
         // Console log summary
-        println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
-            epoch + 1,
-            config.epochs,
-            avg_loss,
-            val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-            epoch_secs,
-            epoch_sps
-        );
+        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+            eprintln!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                epoch_secs,
+                epoch_sps
+            );
+        } else {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                epoch_secs,
+                epoch_sps
+            );
+        }
+        print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
     }
 
     Ok(())
@@ -1785,6 +2380,7 @@ fn train_model_stream_cache(
     config: &Config,
     _rng: &mut StdRng,
     ctx: &mut TrainContext,
+    weighting: &wcfg::WeightingConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use ctx fields directly in this function to avoid borrow confusion
     // If prefetch=0, run synchronous streaming in the training thread (no background worker)
@@ -1812,6 +2408,9 @@ fn train_model_stream_cache(
             let mut read_ns_epoch: u128 = 0;
 
             let mut loaded: u64 = 0;
+            let mut last_lr_base = config.learning_rate;
+            let mut last_loss_for_log: Option<f32> = None;
+            let mut zero_weight_batches: usize = 0;
             while loaded < num_samples {
                 // Read up to batch_size samples synchronously
                 let mut batch = Vec::with_capacity(config.batch_size);
@@ -1875,19 +2474,30 @@ fn train_model_stream_cache(
                     let flags = flags[0];
                     let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
                     let mut weight = 1.0f32;
-                    weight *= (gap as f32 / GAP_WEIGHT_DIVISOR).min(1.0);
+                    let base_gap = (gap as f32 / GAP_WEIGHT_DIVISOR).clamp(BASELINE_MIN_EPS, 1.0);
+                    weight *= base_gap;
                     let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                     weight *= if both_exact {
                         1.0
                     } else {
                         NON_EXACT_BOUND_WEIGHT
                     };
-                    if (flags & fc_flags::MATE_BOUNDARY) != 0 {
+                    let mate_ring = (flags & fc_flags::MATE_BOUNDARY) != 0;
+                    if mate_ring {
                         weight *= 0.5;
                     }
                     if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
                         weight *= SELECTIVE_DEPTH_WEIGHT;
                     }
+                    // Apply Spec#12 coefficients (phase unknown in cache → not applied)
+                    weight = wcfg::apply_weighting(
+                        weight,
+                        weighting,
+                        Some(both_exact),
+                        Some(gap as i32),
+                        None,
+                        Some(mate_ring),
+                    );
 
                     batch.push(Sample {
                         features,
@@ -1907,18 +2517,38 @@ fn train_model_stream_cache(
                     break;
                 }
 
+                // consume last_loss_for_log to avoid unused-assignment lint across iterations
+                let _ = last_loss_for_log;
                 let indices: Vec<usize> = (0..batch.len()).collect();
-                let loss =
-                    train_batch_by_indices(network, &batch, &indices, config, &mut adam_state);
+                // LR scheduling
+                let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
+                // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
-                total_loss += loss * batch_weight;
-                total_weight += batch_weight;
+                if batch_weight > 0.0 {
+                    let loss = train_batch_by_indices(
+                        network,
+                        &batch,
+                        &indices,
+                        config,
+                        &mut adam_state,
+                        lr_base,
+                    );
+                    total_loss += loss * batch_weight;
+                    total_weight += batch_weight;
+                    last_loss_for_log = Some(loss);
+                } else {
+                    zero_weight_batches += 1;
+                    last_loss_for_log = None;
+                }
+                last_lr_base = lr_base;
 
                 total_samples_epoch += batch.len();
                 batch_count += 1;
                 batches_since += 1;
                 samples_since += batch.len();
 
+                // Define completed-batch semantics: increment before logging
+                ctx.global_step += 1;
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
                 {
@@ -1930,15 +2560,41 @@ fn train_model_stream_cache(
                         / (secs as f64 * NANOSECONDS_PER_SECOND))
                         .clamp(0.0, 1.0)
                         * PERCENTAGE_DIVISOR as f64;
-                    println!(
-                        "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
-                        epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
-                    );
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                            "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                            epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
+                        );
+                    } else {
+                        println!(
+                            "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                            epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
+                        );
+                    }
+                    if let Some(ref lg) = ctx.structured {
+                        let mut rec = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "phase": "train",
+                            "global_step": ctx.global_step as i64,
+                            "epoch": (epoch + 1) as i64,
+                            "lr": lr_base as f64,
+                            "examples_sec": sps as f64,
+                            "loader_ratio": loader_ratio/100.0,
+                            "wall_time": secs as f64,
+                        });
+                        if let Some(ls) = last_loss_for_log {
+                            rec.as_object_mut()
+                                .unwrap()
+                                .insert("train_loss".into(), serde_json::json!(ls as f64));
+                        }
+                        lg.write_json(&rec);
+                    }
                     last_report = Instant::now();
                     samples_since = 0;
                     batches_since = 0;
                     read_ns_since = 0;
                 }
+                // already incremented above to represent completed batches
             }
 
             let avg_loss = if total_weight > 0.0 {
@@ -1946,10 +2602,19 @@ fn train_model_stream_cache(
             } else {
                 0.0
             };
-            let val_loss = if let Some(val_samples) = validation_samples {
-                compute_validation_loss(network, val_samples, config)
+            let has_val = validation_samples.is_some();
+            let (val_loss, val_auc, val_ece, val_wsum): (
+                f32,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+            ) = if let Some(val_samples) = validation_samples {
+                let vl = compute_validation_loss(network, val_samples, config);
+                let (auc, ece) = compute_val_auc_and_ece(network, val_samples, config, &ctx.dash);
+                let wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
+                (vl, auc, ece, wsum)
             } else {
-                0.0
+                (0.0, None, None, None)
             };
             let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
             let loader_ratio_epoch = ((read_ns_epoch as f64)
@@ -1957,10 +2622,137 @@ fn train_model_stream_cache(
                 .clamp(0.0, 1.0)
                 * PERCENTAGE_DIVISOR as f64;
             let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
-            println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-                epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-            );
+            // Update best trackers (only when validation is present)
+            if has_val {
+                if val_loss < *ctx.trackers.best_val_loss {
+                    *ctx.trackers.best_val_loss = val_loss;
+                    *ctx.trackers.best_network = Some(network.clone());
+                    *ctx.trackers.best_epoch = Some(epoch + 1);
+                }
+                *ctx.trackers.last_val_loss = Some(val_loss);
+                // Plateau update (epoch end)
+                if let Some(ref mut p) = ctx.plateau {
+                    if !val_loss.is_finite() {
+                        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                            eprintln!("Warning: val_loss is not finite; skipping plateau update");
+                        } else {
+                            println!("Warning: val_loss is not finite; skipping plateau update");
+                        }
+                    } else if let Some(new_mult) = p.update(val_loss) {
+                        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                            eprintln!(
+                                "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                                epoch + 1,
+                                p.gamma,
+                                new_mult,
+                                p.best,
+                                val_loss
+                            );
+                        } else {
+                            println!(
+                                "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                                epoch + 1,
+                                p.gamma,
+                                new_mult,
+                                p.best,
+                                val_loss
+                            );
+                        }
+                    }
+                }
+            }
+            if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                eprintln!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            } else {
+                println!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            }
+            // zero-weight debug: print once per epoch after summary (handled below)
+            if let Some(ref lg) = ctx.structured {
+                let mut rec_train = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "train",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "lr": last_lr_base as f64,
+                    "train_loss": avg_loss as f64,
+                    "examples_sec": epoch_sps as f64,
+                    "loader_ratio": (loader_ratio_epoch/100.0) ,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
+                lg.write_json(&rec_train);
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
+                if has_val {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_loss".to_string(), serde_json::json!(val_loss as f64));
+                }
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
+                }
+                lg.write_json(&rec_val);
+            }
+
+            // Emit metrics.csv (sync stream-cache path)
+            if ctx.dash.emit {
+                let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(ctx.out_dir.join("metrics.csv"))?,
+                );
+                let val_loss_str = if has_val {
+                    format!("{:.6}", val_loss)
+                } else {
+                    String::new()
+                };
+                w.write_record([
+                    (epoch + 1).to_string(),
+                    format!("{:.6}", avg_loss),
+                    val_loss_str,
+                    val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                    format!("{:.3}", epoch_secs),
+                    format!("{:.3}", total_weight),
+                    val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                    if Some(epoch + 1) == *ctx.trackers.best_epoch {
+                        "1".into()
+                    } else {
+                        "0".into()
+                    },
+                ])?;
+                w.flush()?;
+            }
+
+            // print once per epoch
+            print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
         }
 
         return Ok(());
@@ -1977,10 +2769,17 @@ fn train_model_stream_cache(
         if est_batch_bytes > 0 {
             let max_batches = (bytes_cap / est_batch_bytes).max(1);
             if effective_prefetch > max_batches {
-                println!(
-                    "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
-                    effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
-                );
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
+                        "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                        effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
+                    );
+                } else {
+                    println!(
+                        "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                        effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
+                    );
+                }
                 effective_prefetch = max_batches;
             }
         }
@@ -2009,19 +2808,41 @@ fn train_model_stream_cache(
         let mut batches_since = 0usize;
         let mut wait_ns_since: u128 = 0;
         let mut wait_ns_epoch: u128 = 0;
+        let mut last_loss_for_log: Option<f32> = None;
+        let mut zero_weight_batches: usize = 0;
 
+        let mut last_lr_base = config.learning_rate;
         loop {
             let (maybe_batch, wait_dur) = loader.next_batch_with_wait();
+            // consume last_loss_for_log to avoid unused-assignment lint across iterations
+            let _ = last_loss_for_log;
             let Some(batch_res) = maybe_batch else { break };
             let batch = match batch_res {
                 Ok(b) => b,
                 Err(msg) => return Err(msg.into()),
             };
             let indices: Vec<usize> = (0..batch.len()).collect();
-            let loss = train_batch_by_indices(network, &batch, &indices, config, &mut adam_state);
+            // LR scheduling
+            let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
+            // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
-            total_loss += loss * batch_weight;
-            total_weight += batch_weight;
+            if batch_weight > 0.0 {
+                let loss = train_batch_by_indices(
+                    network,
+                    &batch,
+                    &indices,
+                    config,
+                    &mut adam_state,
+                    lr_base,
+                );
+                total_loss += loss * batch_weight;
+                total_weight += batch_weight;
+                last_loss_for_log = Some(loss);
+            } else {
+                zero_weight_batches += 1;
+                last_loss_for_log = None;
+            }
+            last_lr_base = lr_base;
 
             total_samples_epoch += batch.len();
             batch_count += 1;
@@ -2031,6 +2852,7 @@ fn train_model_stream_cache(
             wait_ns_since += wait_dur.as_nanos();
             wait_ns_epoch += wait_dur.as_nanos();
 
+            ctx.global_step += 1;
             if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                 && batches_since > 0
             {
@@ -2044,7 +2866,8 @@ fn train_model_stream_cache(
                 } else {
                     0.0
                 };
-                println!(
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
                     "[throughput] mode=stream epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
                     epoch + 1,
                     batch_count,
@@ -2052,7 +2875,36 @@ fn train_model_stream_cache(
                     bps,
                     avg_bs,
                     loader_ratio
-                );
+                    );
+                } else {
+                    println!(
+                    "[throughput] mode=stream epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs,
+                    loader_ratio
+                    );
+                }
+                if let Some(ref lg) = ctx.structured {
+                    let mut rec = serde_json::json!({
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "phase": "train",
+                        "global_step": ctx.global_step as i64,
+                        "epoch": (epoch + 1) as i64,
+                        "lr": lr_base as f64,
+                        "examples_sec": sps as f64,
+                        "loader_ratio": (loader_ratio )/100.0,
+                        "wall_time": secs as f64,
+                    });
+                    if let Some(ls) = last_loss_for_log {
+                        rec.as_object_mut()
+                            .unwrap()
+                            .insert("train_loss".into(), serde_json::json!(ls as f64));
+                    }
+                    lg.write_json(&rec);
+                }
                 last_report = Instant::now();
                 samples_since = 0;
                 batches_since = 0;
@@ -2064,7 +2916,11 @@ fn train_model_stream_cache(
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
                     save_network(network, &checkpoint_path)?;
-                    println!("Saved checkpoint: {}", checkpoint_path.display());
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                    } else {
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
                 }
             }
         }
@@ -2302,12 +3158,79 @@ fn train_model_stream_cache(
             ])?;
             w.flush()?;
         }
-        println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-            epoch + 1, config.epochs, avg_loss,
-            val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-            batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-        );
+        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+            eprintln!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                batch_count,
+                epoch_secs,
+                epoch_sps,
+                loader_ratio_epoch
+            );
+        } else {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                batch_count,
+                epoch_secs,
+                epoch_sps,
+                loader_ratio_epoch
+            );
+        }
+        if let Some(ref lg) = ctx.structured {
+            let mut rec_train = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "train",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "lr": last_lr_base as f64,
+                "train_loss": avg_loss as f64,
+                "examples_sec": epoch_sps as f64,
+                "loader_ratio": (loader_ratio_epoch as f64)/100.0,
+                "wall_time": epoch_secs as f64,
+            });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
+            lg.write_json(&rec_train);
+            let mut rec_val = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "val",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "wall_time": epoch_secs as f64,
+            });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
+            if let Some(vl) = val_loss {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+            }
+            if let Some(a) = val_auc {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_auc".to_string(), serde_json::json!(a));
+            }
+            if let Some(e) = val_ece {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_ece".to_string(), serde_json::json!(e));
+            }
+            lg.write_json(&rec_val);
+        }
+
+        print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
 
         loader.finish();
     }
@@ -2361,21 +3284,36 @@ fn train_model_with_loader(
             let mut batches_since = 0usize;
             let mut wait_ns_since: u128 = 0;
             let mut wait_ns_epoch: u128 = 0;
+            let mut last_lr_base = config.learning_rate;
+            let mut last_loss_for_log: Option<f32> = None;
+            let mut zero_weight_batches: usize = 0;
 
             loop {
                 let (maybe_indices, wait_dur) = async_loader.next_batch_with_wait();
+                // consume last_loss_for_log to avoid unused-assignment lint across iterations
+                let _ = last_loss_for_log;
                 let Some(indices) = maybe_indices else { break };
-                let loss = train_batch_by_indices(
-                    network,
-                    &train_samples_arc,
-                    &indices,
-                    config,
-                    &mut adam_state,
-                );
+                // LR scheduling
+                let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
+                // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
-                total_loss += loss * batch_weight;
-                total_weight += batch_weight;
+                if batch_weight > 0.0 {
+                    let loss = train_batch_by_indices(
+                        network,
+                        &train_samples_arc,
+                        &indices,
+                        config,
+                        &mut adam_state,
+                        lr_base,
+                    );
+                    total_loss += loss * batch_weight;
+                    total_weight += batch_weight;
+                    last_loss_for_log = Some(loss);
+                } else {
+                    zero_weight_batches += 1;
+                    last_loss_for_log = None;
+                }
 
                 let batch_len = indices.len();
                 batch_count += 1;
@@ -2384,11 +3322,14 @@ fn train_model_with_loader(
                 batches_since += 1;
                 wait_ns_since += wait_dur.as_nanos();
                 wait_ns_epoch += wait_dur.as_nanos();
+                last_lr_base = lr_base;
                 // Approximate compute time as time taken by train_batch (dominant)
                 // Note: train_batch_by_indices already executed; we estimate by subtracting wait from interval wall time on print, but here we track per-batch compute as 0.
                 // Instead, measure explicitly around forward+backward: do a local timing.
                 // For minimal invasiveness, we cannot re-run compute; so we estimate compute time using throughput interval wall time at print.
 
+                // Define completed-batch semantics: increment before logging
+                ctx.global_step += 1;
                 // Periodic throughput report
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
@@ -2404,15 +3345,45 @@ fn train_model_with_loader(
                     } else {
                         0.0
                     };
-                    println!(
-                    "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
-                    epoch + 1,
-                    batch_count,
-                    sps,
-                    bps,
-                    avg_bs,
-                    loader_ratio
-                );
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                        "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs,
+                        loader_ratio
+                        );
+                    } else {
+                        println!(
+                        "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs,
+                        loader_ratio
+                        );
+                    }
+                    if let Some(ref lg) = ctx.structured {
+                        let mut rec = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "phase": "train",
+                            "global_step": ctx.global_step as i64,
+                            "epoch": (epoch + 1) as i64,
+                            "lr": lr_base as f64,
+                            "examples_sec": sps as f64,
+                            "loader_ratio": (loader_ratio )/100.0,
+                            "wall_time": secs as f64,
+                        });
+                        if let Some(ls) = last_loss_for_log {
+                            rec.as_object_mut()
+                                .unwrap()
+                                .insert("train_loss".into(), serde_json::json!(ls as f64));
+                        }
+                        lg.write_json(&rec);
+                    }
                     last_report = Instant::now();
                     samples_since = 0;
                     batches_since = 0;
@@ -2663,10 +3634,65 @@ fn train_model_with_loader(
                 ])?;
                 w.flush()?;
             }
-            println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-                epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-            );
+            // Structured per-epoch logs (train/val)
+            if let Some(ref lg) = ctx.structured {
+                let mut rec_train = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "train",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "lr": last_lr_base as f64,
+                    "train_loss": avg_loss as f64,
+                    "examples_sec": epoch_sps as f64,
+                    "loader_ratio": (loader_ratio_epoch as f64)/100.0,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
+                lg.write_json(&rec_train);
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
+                if let Some(vl) = val_loss {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+                }
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
+                }
+                lg.write_json(&rec_val);
+            }
+            if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                eprintln!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            } else {
+                println!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            }
+            print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
         }
         // Ensure worker fully finished at end
         async_loader.finish();
@@ -2686,6 +3712,9 @@ fn train_model_with_loader(
             let mut last_report = Instant::now();
             let mut samples_since = 0usize;
             let mut batches_since = 0usize;
+            let mut last_lr_base = config.learning_rate;
+            let mut last_loss_for_log: Option<f32> = None;
+            let mut zero_weight_batches: usize = 0;
 
             while let Some(indices) = {
                 let t0 = Instant::now();
@@ -2698,24 +3727,38 @@ fn train_model_with_loader(
                 }
                 next
             } {
-                let loss = train_batch_by_indices(
-                    network,
-                    &train_samples_arc,
-                    &indices,
-                    config,
-                    &mut adam_state,
-                );
+                // consume last_loss_for_log to avoid unused-assignment lint across iterations
+                let _ = last_loss_for_log;
+                // LR scheduling
+                let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
+                // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
-                total_loss += loss * batch_weight;
-                total_weight += batch_weight;
+                if batch_weight > 0.0 {
+                    let loss = train_batch_by_indices(
+                        network,
+                        &train_samples_arc,
+                        &indices,
+                        config,
+                        &mut adam_state,
+                        lr_base,
+                    );
+                    total_loss += loss * batch_weight;
+                    total_weight += batch_weight;
+                    last_loss_for_log = Some(loss);
+                } else {
+                    zero_weight_batches += 1;
+                    last_loss_for_log = None;
+                }
 
                 let batch_len = indices.len();
                 batch_count += 1;
                 total_batches += 1;
                 samples_since += batch_len;
                 batches_since += 1;
+                last_lr_base = lr_base;
 
+                ctx.global_step += 1;
                 if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                     && batches_since > 0
                 {
@@ -2723,14 +3766,43 @@ fn train_model_with_loader(
                     let sps = samples_since as f32 / secs;
                     let bps = batches_since as f32 / secs;
                     let avg_bs = samples_since as f32 / batches_since as f32;
-                    println!(
-                        "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
-                        epoch + 1,
-                        batch_count,
-                        sps,
-                        bps,
-                        avg_bs
-                    );
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                    "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs
+                );
+                    } else {
+                        println!(
+                    "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs
+                );
+                    }
+                    if let Some(ref lg) = ctx.structured {
+                        let mut rec = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "phase": "train",
+                            "global_step": ctx.global_step as i64,
+                            "epoch": (epoch + 1) as i64,
+                            "lr": lr_base as f64,
+                            "examples_sec": sps as f64,
+                            "loader_ratio": 0.0f64,
+                            "wall_time": secs as f64,
+                        });
+                        if let Some(ls) = last_loss_for_log {
+                            rec.as_object_mut()
+                                .unwrap()
+                                .insert("train_loss".into(), serde_json::json!(ls as f64));
+                        }
+                        lg.write_json(&rec);
+                    }
                     last_report = Instant::now();
                     samples_since = 0;
                     batches_since = 0;
@@ -2742,9 +3814,14 @@ fn train_model_with_loader(
                         let checkpoint_path =
                             out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
                         save_network(network, &checkpoint_path)?;
-                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                            eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                        } else {
+                            println!("Saved checkpoint: {}", checkpoint_path.display());
+                        }
                     }
                 }
+                // record last lr used (unused in sync loader path)
             }
 
             let avg_loss = if total_weight > 0.0 {
@@ -2974,10 +4051,65 @@ fn train_model_with_loader(
                 ])?;
                 w.flush()?;
             }
-            println!(
+            // Structured per-epoch logs (train/val) for sync in-mem loader
+            if let Some(ref lg) = ctx.structured {
+                let mut rec_train = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "train",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "lr": last_lr_base as f64,
+                    "train_loss": avg_loss as f64,
+                    "examples_sec": epoch_sps as f64,
+                    "loader_ratio": 0.0f64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
+                lg.write_json(&rec_train);
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
+                if let Some(vl) = val_loss {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+                }
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                if let Some(e) = val_ece {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_ece".to_string(), serde_json::json!(e));
+                }
+                lg.write_json(&rec_val);
+            }
+            if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                eprintln!(
                 "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
                 epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps
-            );
+                );
+            } else {
+                println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
+                epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps
+                );
+            }
+            print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
         }
     }
 
@@ -2990,6 +4122,7 @@ fn train_batch_by_indices(
     indices: &[usize],
     config: &Config,
     adam_state: &mut Option<AdamState>,
+    lr_base: f32,
 ) -> f32 {
     let mut total_loss = 0.0;
     let mut total_weight = 0.0;
@@ -3006,13 +4139,16 @@ fn train_batch_by_indices(
     let lr_t = if let Some(adam) = adam_state.as_mut() {
         adam.t += 1;
         let t = adam.t as f32;
-        config.learning_rate * (1.0 - adam.beta2.powf(t)).sqrt() / (1.0 - adam.beta1.powf(t))
+        lr_base * (1.0 - adam.beta2.powf(t)).sqrt() / (1.0 - adam.beta1.powf(t))
     } else {
-        config.learning_rate
+        lr_base
     };
 
     for &idx in indices {
         let sample = &samples[idx];
+        if sample.weight == 0.0 {
+            continue; // skip updates entirely for zero-weight samples
+        }
         // Forward pass with reused buffers
         let output =
             forward_into(network, &sample.features, &mut acc_buffer, &mut activated_buffer);
@@ -3166,7 +4302,11 @@ fn compute_validation_loss(network: &Network, samples: &[Sample], config: &Confi
         total_weight += sample.weight;
     }
 
-    total_loss / total_weight
+    if total_weight > 0.0 {
+        total_loss / total_weight
+    } else {
+        0.0
+    }
 }
 
 fn compute_val_auc(network: &Network, samples: &[Sample], config: &Config) -> Option<f64> {
@@ -3240,6 +4380,20 @@ fn compute_val_auc_and_ece(
 trait DashboardValKind {
     fn is_jsonl(&self) -> bool;
     fn calib_bins(&self) -> usize;
+}
+
+/// Debug helper: print zero-weight batch count once per epoch
+#[inline]
+fn print_zero_weight_debug(epoch: usize, count: usize, structured: &Option<StructuredLogger>) {
+    if count == 0 {
+        return;
+    }
+    let human_to_stderr = structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
+    if human_to_stderr {
+        eprintln!("[debug] epoch {} had {} zero-weight batches", epoch + 1, count);
+    } else {
+        println!("[debug] epoch {} had {} zero-weight batches", epoch + 1, count);
+    }
 }
 
 // Quantization parameters for int8 conversion
@@ -3436,7 +4590,9 @@ mod tests {
             let mut f = File::create(&path).unwrap();
             f.write_all(b"BAD!").unwrap();
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("bad magic"));
         }
 
@@ -3450,7 +4606,9 @@ mod tests {
                                                        // Fill rest with zeros to avoid EOF early
             f.write_all(&[0u8; 64]).unwrap();
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("v1 required"));
         }
 
@@ -3472,7 +4630,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("Unsupported endianness"));
         }
 
@@ -3494,7 +4654,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("Unknown payload encoding"));
         }
 
@@ -3516,7 +4678,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("Unsupported feature_set_id"));
         }
 
@@ -3538,7 +4702,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+            let err =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap_err();
             assert!(format!("{}", err).contains("header_size"));
         }
 
@@ -3573,7 +4739,8 @@ mod tests {
             f.write_all(&0u32.to_le_bytes()).unwrap();
             f.flush().unwrap();
 
-            let res = load_samples_from_cache(path.to_str().unwrap());
+            let res =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default());
             assert!(res.is_err(), "broken payload_offset should error");
         }
 
@@ -3595,7 +4762,9 @@ mod tests {
                 },
             );
             f.flush().unwrap();
-            let v = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+            let v =
+                load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                    .unwrap();
             assert!(v.is_empty());
         }
     }
@@ -3632,8 +4801,15 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
-        let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        let json_samples =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
         // Two-sample orientation -> take first weight
         let w_json = json_samples[0].weight;
 
@@ -3670,7 +4846,11 @@ mod tests {
             f.flush().unwrap();
         }
 
-        let cache_samples = load_samples_from_cache(cache_path.to_str().unwrap()).unwrap();
+        let cache_samples = load_samples_from_cache(
+            cache_path.to_str().unwrap(),
+            &wcfg::WeightingConfig::default(),
+        )
+        .unwrap();
         let w_cache = cache_samples[0].weight;
 
         assert!(
@@ -3707,7 +4887,9 @@ mod tests {
         f.write_all(&[0u8, 0u8, 0x80u8]).unwrap();
         f.flush().unwrap();
 
-        let samples = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+        let samples =
+            load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                .unwrap();
         assert_eq!(samples.len(), 1);
     }
 
@@ -3764,6 +4946,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
         let auc = super::compute_val_auc(&net, &samples, &cfg);
         assert!(auc.is_none(), "AUC should be None when all labels are 0.5 boundary");
@@ -3801,10 +4988,63 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
-        let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        let json_samples =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
         assert!(!json_samples.is_empty());
         assert!(json_samples[0].weight <= 1.0);
+    }
+
+    #[test]
+    fn gap_zero_not_zero_weight() {
+        // JSONL with gap=0 should not produce zero sample weight due to BASELINE_MIN_EPS
+        let td = tempdir().unwrap();
+        let json_path = td.path().join("w_gap0.jsonl");
+        let mut jf = File::create(&json_path).unwrap();
+        writeln!(
+            jf,
+            r#"{{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"best2_gap_cp":0}}"#
+        )
+        .unwrap();
+        jf.flush().unwrap();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
+            shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10_000.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
+        };
+        let samples =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
+        assert_eq!(samples.len(), 2); // both perspectives
+        assert!(samples[0].weight > 0.0, "weight should be >0 when gap=0");
+        assert!(samples[1].weight > 0.0, "weight should be >0 when gap=0");
     }
 
     // 再現性（seed指定）— test_training_reproducibility_with_seed
@@ -3848,10 +5088,17 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
 
         // サンプルを読み込み（2局面→2サンプル/局面 = 計4サンプル）
-        let mut samples1 = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
+        let mut samples1 =
+            load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default())
+                .unwrap();
         let mut samples2 = samples1.clone();
         assert_eq!(samples1.len(), samples2.len());
         assert_eq!(samples1.len(), 4);
@@ -3886,6 +5133,10 @@ mod tests {
                 last_val_loss: &mut ll1,
                 best_epoch: &mut be1,
             },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
         let dash2 = super::DashboardOpts {
@@ -3908,6 +5159,10 @@ mod tests {
                 last_val_loss: &mut ll2,
                 best_epoch: &mut be2,
             },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
 
@@ -3955,7 +5210,9 @@ mod tests {
         // 以降のボディは不要（n_features検証で即エラー）
         f.flush().unwrap();
 
-        let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+        let err =
+            load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                .unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("exceeds"), "unexpected err msg: {}", msg);
     }
@@ -4017,6 +5274,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
         let cfg_stream = Config {
             stream_cache: true,
@@ -4024,7 +5286,9 @@ mod tests {
         };
 
         // サンプルを読み込み（in-mem）
-        let mut samples = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+        let mut samples =
+            load_samples_from_cache(path.to_str().unwrap(), &wcfg::WeightingConfig::default())
+                .unwrap();
 
         // 同じseedで2つのネットを初期化
         let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
@@ -4057,6 +5321,10 @@ mod tests {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
             .unwrap();
@@ -4081,6 +5349,10 @@ mod tests {
                 last_val_loss: &mut last_val_loss2,
                 best_epoch: &mut best_epoch2,
             },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+            plateau: None,
         };
         train_model_stream_cache(
             &mut net_stream,
@@ -4089,6 +5361,7 @@ mod tests {
             &cfg_stream,
             &mut dummy_rng,
             &mut ctx_st,
+            &wcfg::WeightingConfig::default(),
         )
         .unwrap();
 
@@ -4112,6 +5385,203 @@ mod tests {
             net_inmem.b2,
             net_stream.b2
         );
+    }
+
+    // in-mem loader async 経路（prefetch>0）の structured JSONL に training_config が入ること
+    #[test]
+    fn structured_training_config_present_in_inmem_async_loader() {
+        let td = tempdir().unwrap();
+        let out_dir = td.path();
+        let struct_path = out_dir.join("structured.jsonl");
+
+        // 最小のサンプル（特徴ゼロでも動作）
+        let train_samples: Vec<Sample> = (0..5)
+            .map(|_| Sample {
+                features: vec![],
+                label: 0.0,
+                weight: 1.0,
+                cp: None,
+                phase: None,
+            })
+            .collect();
+        let val_samples: Vec<Sample> = (0..3)
+            .map(|_| Sample {
+                features: vec![],
+                label: 0.0,
+                weight: 1.0,
+                cp: None,
+                phase: None,
+            })
+            .collect();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 2,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
+            shuffle: false,
+            prefetch_batches: 2,          // async 経路
+            throughput_interval_sec: 1e9, // throughput出力を抑止
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 32,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
+        };
+
+        let dash = DashboardOpts {
+            emit: false,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network: Option<Network> = None;
+        let mut best_val_loss = f32::INFINITY;
+        let mut last_val_loss: Option<f32> = None;
+        let mut best_epoch: Option<usize> = None;
+        let mut ctx = TrainContext {
+            out_dir,
+            save_every: None,
+            dash,
+            trackers: TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+            structured: Some(StructuredLogger::new(struct_path.to_str().unwrap()).unwrap()),
+            global_step: 0,
+            training_config_json: Some(serde_json::json!({"exp_id": "unit"})),
+            plateau: None,
+        };
+
+        train_model_with_loader(
+            &mut net,
+            train_samples,
+            &Some(val_samples),
+            &cfg,
+            &mut rand::rngs::StdRng::seed_from_u64(1234),
+            &mut ctx,
+        )
+        .unwrap();
+
+        // 構造化ログのバッファを明示的にフラッシュ
+        if let Some(ref lg) = ctx.structured {
+            if let Some(ref f) = lg.file {
+                use std::io::Write as _;
+                f.lock().unwrap().flush().unwrap();
+            }
+        }
+
+        // JSONLを読んで、phase=val のレコードに training_config があることを確認
+        let content = std::fs::read_to_string(struct_path).unwrap();
+        let mut found_val = false;
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v.get("phase").and_then(|x| x.as_str()) == Some("val") {
+                assert!(v.get("training_config").is_some());
+                found_val = true;
+                break;
+            }
+        }
+        assert!(found_val, "no val record with training_config found in structured JSONL");
+    }
+
+    // ゼロ重みサンプルのみのバッチでは更新が一切走らない（L2=0で検証）
+    #[test]
+    fn zero_weight_batches_do_not_update() {
+        let td = tempdir().unwrap();
+        let out_dir = td.path();
+        // 全て weight=0 のサンプル
+        let mut samples: Vec<Sample> = (0..4)
+            .map(|_| Sample {
+                features: vec![0], // 何かしらの特徴を入れても weight=0 で無視される
+                label: 0.0,
+                weight: 0.0,
+                cp: None,
+                phase: None,
+            })
+            .collect();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 2,
+            learning_rate: 0.01,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0, // L2も無効化
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
+            shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 1e9,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 32,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
+        };
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+        let before = net.clone();
+
+        let dash = DashboardOpts {
+            emit: false,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network: Option<Network> = None;
+        let mut best_val_loss = f32::INFINITY;
+        let mut last_val_loss: Option<f32> = None;
+        let mut best_epoch: Option<usize> = None;
+        let mut ctx = TrainContext {
+            out_dir,
+            save_every: None,
+            dash,
+            trackers: TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+            plateau: None,
+        };
+
+        train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
+
+        // 重みが全く変わっていないことを確認（ビット単位で比較して浮動小数比較Lintを回避）
+        assert!(before.w0.iter().zip(net.w0.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(before.b0.iter().zip(net.b0.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(before.w2.iter().zip(net.w2.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert_eq!(before.b2.to_bits(), net.b2.to_bits());
     }
 
     // 非同期ストリーム（prefetch>0）で破損キャッシュのエラーが上位に伝搬すること
@@ -4159,6 +5629,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
@@ -4184,6 +5659,10 @@ mod tests {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+            plateau: None,
         };
         let err = train_model_stream_cache(
             &mut net,
@@ -4192,6 +5671,7 @@ mod tests {
             &cfg,
             &mut rng,
             &mut ctx,
+            &wcfg::WeightingConfig::default(),
         )
         .unwrap_err();
         let msg = format!("{}", err);
@@ -4230,6 +5710,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
 
         let td = tempfile::tempdir().unwrap();
@@ -4257,6 +5742,10 @@ mod tests {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
 
@@ -4265,5 +5754,45 @@ mod tests {
         assert!(net.b0.iter().all(|v| v.is_finite()));
         assert!(net.w2.iter().all(|v| v.is_finite()));
         assert!(net.b2.is_finite());
+    }
+
+    // LrPlateauState の単体テスト
+    #[test]
+    fn lr_plateau_state_basic() {
+        let mut p = super::LrPlateauState::new(2);
+        assert!((p.factor() - 1.0).abs() < 1e-12);
+        // 初回: bestが更新、wait=0、発火しない
+        assert!(p.update(1.0).is_none());
+        assert_eq!(p.wait, 0);
+        assert!((p.best - 1.0).abs() < 1e-12);
+        // 同値（改善なし）: wait=1
+        assert!(p.update(1.0).is_none());
+        assert_eq!(p.wait, 1);
+        // さらに改善なし: patience到達で発火、*gamma(=0.5)
+        if let Some(mult) = p.update(1.0) {
+            assert!((mult - 0.5).abs() < 1e-6);
+        } else {
+            panic!("expected plateau trigger");
+        }
+        assert!((p.factor() - 0.5).abs() < 1e-6);
+        assert_eq!(p.wait, 0);
+        // 改善あり: best更新、wait=0据え置き
+        assert!(p.update(0.9).is_none());
+        assert!((p.best - 0.9).abs() < 1e-12);
+        assert_eq!(p.wait, 0);
+        // 非有限は無視
+        assert!(p.update(f32::NAN).is_none());
+        assert!(p.update(f32::INFINITY).is_none());
+        assert!((p.factor() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lr_plateau_state_min_delta() {
+        let mut p = super::LrPlateauState::new(1);
+        // set best
+        assert!(p.update(1.0).is_none());
+        // min_delta=1e-6 の閾下の変化は改善扱いしない
+        assert!(p.update(0.9999999).is_some()); // patience=1 到達で発火
+        assert!((p.factor() - 0.5).abs() < 1e-6);
     }
 }
