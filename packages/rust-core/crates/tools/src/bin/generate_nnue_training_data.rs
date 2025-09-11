@@ -792,7 +792,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skipped_path = {
         let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
         let ext = output_path.extension().unwrap_or_default().to_string_lossy();
-        output_path.with_file_name(format!("{stem}_skipped.{ext}"))
+        if ext.is_empty() {
+            output_path.with_file_name(format!("{stem}_skipped"))
+        } else {
+            output_path.with_file_name(format!("{stem}_skipped.{ext}"))
+        }
     };
 
     // Validate depth
@@ -1138,7 +1142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fn open_next(&mut self) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
             self.current_part += 1;
             self.lines_in_part = 0;
-            let (out_path, _prog_path) = self.make_part_paths(self.current_part);
+            let (out_path, prog_path) = self.make_part_paths(self.current_part);
             let file = File::create(&out_path)?;
             let buf = BufWriter::with_capacity(1 << 20, file);
             let w: Box<dyn PartWrite> = match self.compress {
@@ -1163,7 +1167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             self.writer = Some(w);
-            Ok(self.make_part_paths(self.current_part))
+            Ok((out_path, prog_path))
         }
         fn write_lines(&mut self, lines: &[String]) -> std::io::Result<()> {
             for line in lines {

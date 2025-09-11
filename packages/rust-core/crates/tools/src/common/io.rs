@@ -8,7 +8,9 @@ use zstd::Decoder as ZstdDecoder;
 pub fn open_reader<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn BufRead>> {
     let p = path.as_ref();
     if p.to_string_lossy() == "-" {
-        return Ok(Box::new(BufReader::with_capacity(128 * 1024, io::stdin())));
+        let stdin = io::stdin();
+        let handle = stdin.lock();
+        return Ok(Box::new(BufReader::with_capacity(128 * 1024, handle)));
     }
     let f = File::open(p)?;
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();

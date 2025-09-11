@@ -14,14 +14,16 @@
   - 入力行数 `{1, 1e5, 1e6}` で `VmHWM` が一定 ±X%（X は 10–20% 目安）
 
 ## expected-multipv auto
-- 参照優先度: `final.manifest(aggregated.multipv)` → `aggregate pass2` → CLI 明示
-- ルール: CLI 明示は常に最優先で上書き
-- 後方互換: manifest 不在時は既定/CLI を使用
+決定ロジック（優先度の高い順）
+1. CLI 明示（常に最優先で上書き）
+2. `final.manifest` の `aggregated.multipv`
+3. 集約 manifest（top-level `multipv`, 例: `manifest_scope=aggregate`）
+4. 既定値 = `2`
 
 受理する manifest 形状（後方互換）
-- 優先1: `aggregated.multipv`（例: `{ "aggregated": { "multipv": 3 } }`）
-- 優先2: top-level `multipv`（集約 manifest; 例: `{ "multipv": 3, "manifest_scope": "aggregate" }`）
-- どちらも無い/manifest 不在: 既定値 `2` を使用（CLI 数値は常に最優先）
+- `aggregated.multipv`（例: `{ "aggregated": { "multipv": 3 } }`）
+- top-level `multipv`（集約 manifest; 例: `{ "multipv": 3, "manifest_scope": "aggregate" }`）
+どちらも無い/manifest 不在時は上記の決定ロジックに従い既定値 `2` を使用（CLI 数値は常に最優先）
 
 ## 後方互換シナリオ
 - 既存 manifest v2 と互換（スキーマ: `docs/schemas/manifest_v2.schema.json`）
