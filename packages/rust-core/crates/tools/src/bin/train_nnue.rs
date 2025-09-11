@@ -5348,6 +5348,14 @@ mod tests {
         )
         .unwrap();
 
+        // 構造化ログのバッファを明示的にフラッシュ
+        if let Some(ref lg) = ctx.structured {
+            if let Some(ref f) = lg.file {
+                use std::io::Write as _;
+                f.lock().unwrap().flush().unwrap();
+            }
+        }
+
         // JSONLを読んで、phase=val のレコードに training_config があることを確認
         let content = std::fs::read_to_string(struct_path).unwrap();
         let mut found_val = false;
