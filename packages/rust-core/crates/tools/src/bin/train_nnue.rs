@@ -148,6 +148,12 @@ struct Config {
     // Data filters (align with build_feature_cache)
     exclude_no_legal_move: bool,
     exclude_fallback: bool,
+    // LR scheduler (Spec #11)
+    lr_schedule: String,          // constant|step|cosine
+    lr_warmup_epochs: u32,        // >=0
+    lr_decay_epochs: Option<u32>, // mutually exclusive with steps
+    lr_decay_steps: Option<u64>,  // mutually exclusive with epochs
+    lr_plateau_patience: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +167,41 @@ struct Sample {
 }
 
 // CacheHeader schema is parsed ad-hoc (v1 only). No struct kept to avoid drift.
+
+// Structured JSONL logger (shared by training paths)
+struct StructuredLogger {
+    to_stdout: bool,
+    file: Option<std::sync::Mutex<std::io::BufWriter<File>>>,
+}
+impl StructuredLogger {
+    fn new(path: &str) -> std::io::Result<Self> {
+        if path == "-" {
+            Ok(Self {
+                to_stdout: true,
+                file: None,
+            })
+        } else {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let bw = std::io::BufWriter::with_capacity(1 << 20, f);
+            Ok(Self {
+                to_stdout: false,
+                file: Some(std::sync::Mutex::new(bw)),
+            })
+        }
+    }
+    fn write_json(&self, v: &serde_json::Value) {
+        if self.to_stdout {
+            println!("{}", v);
+        } else if let Some(ref file) = self.file {
+            if let Ok(mut w) = file.lock() {
+                let _ = writeln!(w, "{}", v);
+            }
+        }
+    }
+}
 
 /// NNUE Network structure with single-channel accumulator
 ///
@@ -765,10 +806,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(["warn", "fail"]) 
                 .default_value("warn"),
         )
+        // LR scheduler (Spec #11)
+        .arg(
+            arg!(--"lr-schedule" <KIND> "LR scheduler: constant|step|cosine")
+                .value_parser(["constant", "step", "cosine"]) 
+                .default_value("constant"),
+        )
+        .arg(
+            arg!(--"lr-warmup-epochs" <N> "Warmup epochs for LR")
+                .value_parser(clap::value_parser!(u32))
+                .default_value("0"),
+        )
+        .arg(
+            arg!(--"lr-decay-epochs" <N> "Decay interval in epochs (step/cosine)")
+                .value_parser(clap::value_parser!(u32))
+                .conflicts_with("lr-decay-steps"),
+        )
+        .arg(
+            arg!(--"lr-decay-steps" <N> "Decay interval in steps (step/cosine)")
+                .value_parser(clap::value_parser!(u64))
+                .conflicts_with("lr-decay-epochs"),
+        )
+        .arg(
+            arg!(--"lr-plateau-patience" <N> "Plateau patience in epochs (optional, step)")
+                .value_parser(clap::value_parser!(u32)),
+        )
+        .arg(
+            arg!(--"structured-log" <PATH> "Structured JSONL log path ('-' for STDOUT)")
+        )
         .arg(arg!(--quantized "Save quantized (int8) version of the model"))
         .arg(arg!(--seed <SEED> "Random seed for reproducibility"))
         .arg(arg!(-o --out <DIR> "Output directory"))
         .get_matches();
+
+    // Prepare structured logger early for stdout/stderr routing decisions
+    let structured_logger: Option<StructuredLogger> = app
+        .get_one::<String>("structured-log")
+        .and_then(|p| match StructuredLogger::new(p) {
+            Ok(lg) => Some(lg),
+            Err(e) => {
+                eprintln!("Warning: failed to open structured log '{}': {}", p, e);
+                None
+            }
+        });
+    let human_to_stderr = structured_logger.as_ref().map(|lg| lg.to_stdout).unwrap_or(false);
 
     let config = Config {
         epochs: app.get_one::<String>("epochs").unwrap().parse()?,
@@ -791,6 +872,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap(),
         exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
         exclude_fallback: app.get_flag("exclude-fallback"),
+        lr_schedule: app
+            .get_one::<String>("lr-schedule")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "constant".to_string()),
+        lr_warmup_epochs: *app.get_one::<u32>("lr-warmup-epochs").unwrap_or(&0u32),
+        lr_decay_epochs: app.get_one::<u32>("lr-decay-epochs").copied(),
+        lr_decay_steps: app.get_one::<u64>("lr-decay-steps").copied(),
+        lr_plateau_patience: app.get_one::<u32>("lr-plateau-patience").copied(),
     };
 
     if config.scale <= 0.0 {
@@ -801,6 +890,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if config.prefetch_batches > MAX_PREFETCH_BATCHES {
         return Err(format!("Invalid --prefetch-batches: must be <= {MAX_PREFETCH_BATCHES}").into());
+    }
+    if let Some(0) = config.lr_decay_epochs {
+        eprintln!("Error: --lr-decay-epochs must be > 0");
+        std::process::exit(2);
+    }
+    if let Some(0) = config.lr_decay_steps {
+        eprintln!("Error: --lr-decay-steps must be > 0");
+        std::process::exit(2);
     }
 
     let input_path = app.get_one::<String>("input").unwrap();
@@ -820,15 +917,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("runs/nnue_{}", timestamp)));
 
-    println!("Configuration:");
-    println!("  Input: {}", input_path);
-    if let Some(val_path) = validation_path {
-        println!("  Validation: {}", val_path);
+    if human_to_stderr {
+        eprintln!("Configuration:");
+    } else {
+        println!("Configuration:");
     }
-    println!("  Output: {}", out_dir.display());
-    println!("  Settings: {:?}", config);
-    println!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
-    println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+    if human_to_stderr {
+        eprintln!("  Input: {}", input_path);
+    } else {
+        println!("  Input: {}", input_path);
+    }
+    if let Some(val_path) = validation_path {
+        if human_to_stderr {
+            eprintln!("  Validation: {}", val_path);
+        } else {
+            println!("  Validation: {}", val_path);
+        }
+    }
+    if human_to_stderr {
+        eprintln!("  Output: {}", out_dir.display());
+    } else {
+        println!("  Output: {}", out_dir.display());
+    }
+    if human_to_stderr {
+        eprintln!("  Settings: {:?}", config);
+    } else {
+        println!("  Settings: {:?}", config);
+    }
+    if human_to_stderr {
+        eprintln!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
+    } else {
+        println!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
+    }
+    if human_to_stderr {
+        eprintln!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+    } else {
+        println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+    }
 
     // Decide input mode
     // Robustly detect NNFC cache (raw/gzip/zstd) by attempting to parse the header.
@@ -849,20 +974,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut train_samples: Vec<Sample> = Vec::new();
     if !(is_cache && config.stream_cache) {
         let start_time = Instant::now();
-        println!("\nLoading training data...");
+        if human_to_stderr {
+            eprintln!("\nLoading training data...");
+        } else {
+            println!("\nLoading training data...");
+        }
         train_samples = if is_cache {
-            println!("Loading from cache file...");
+            if human_to_stderr {
+                eprintln!("Loading from cache file...");
+            } else {
+                println!("Loading from cache file...");
+            }
             load_samples_from_cache(input_path)?
         } else {
             load_samples(input_path, &config)?
         };
-        println!(
-            "Loaded {} samples in {:.2}s",
-            train_samples.len(),
-            start_time.elapsed().as_secs_f32()
-        );
+        if human_to_stderr {
+            eprintln!(
+                "Loaded {} samples in {:.2}s",
+                train_samples.len(),
+                start_time.elapsed().as_secs_f32()
+            );
+        } else {
+            println!(
+                "Loaded {} samples in {:.2}s",
+                train_samples.len(),
+                start_time.elapsed().as_secs_f32()
+            );
+        }
     } else {
-        println!("\nStreaming training data from cache (no preloading)...");
+        if human_to_stderr {
+            eprintln!("\nStreaming training data from cache (no preloading)...");
+        } else {
+            println!("\nStreaming training data from cache (no preloading)...");
+        }
         if config.shuffle {
             eprintln!("Note: shuffle is disabled in --stream-cache mode.");
         }
@@ -871,23 +1016,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load validation data if provided
     let mut val_is_jsonl = false;
     let validation_samples = if let Some(val_path) = validation_path {
-        println!("\nLoading validation data...");
+        if human_to_stderr {
+            eprintln!("\nLoading validation data...");
+        } else {
+            println!("\nLoading validation data...");
+        }
         let start_val = Instant::now();
 
         let is_val_cache = is_cache_file(val_path);
         let samples = if is_val_cache {
-            println!("Loading validation from cache file...");
+            if human_to_stderr {
+                eprintln!("Loading validation from cache file...");
+            } else {
+                println!("Loading validation from cache file...");
+            }
             load_samples_from_cache(val_path)?
         } else {
             val_is_jsonl = true;
             load_samples(val_path, &config)?
         };
 
-        println!(
-            "Loaded {} validation samples in {:.2}s",
-            samples.len(),
-            start_val.elapsed().as_secs_f32()
-        );
+        if human_to_stderr {
+            eprintln!(
+                "Loaded {} validation samples in {:.2}s",
+                samples.len(),
+                start_val.elapsed().as_secs_f32()
+            );
+        } else {
+            println!(
+                "Loaded {} validation samples in {:.2}s",
+                samples.len(),
+                start_val.elapsed().as_secs_f32()
+            );
+        }
         Some(samples)
     } else {
         None
@@ -897,13 +1058,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed_u64_opt: Option<u64> =
         app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
     let mut rng: StdRng = if let Some(seed) = seed_u64_opt {
-        println!("Using random seed (u64): {}", seed);
+        if human_to_stderr {
+            eprintln!("Using random seed (u64): {}", seed);
+        } else {
+            println!("Using random seed (u64): {}", seed);
+        }
         StdRng::seed_from_u64(seed)
     } else {
         let seed_bytes: [u8; 32] = rand::rng().random();
         let seed_hex = seed_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
         let u64_proj = u64::from_le_bytes(seed_bytes[0..8].try_into().unwrap());
-        println!("Generated random seed (32B hex): {} | (u64 proj): {}", seed_hex, u64_proj);
+        if human_to_stderr {
+            eprintln!("Generated random seed (32B hex): {} | (u64 proj): {}", seed_hex, u64_proj);
+        } else {
+            println!("Generated random seed (32B hex): {} | (u64 proj): {}", seed_hex, u64_proj);
+        }
         StdRng::from_seed(seed_bytes)
     };
 
@@ -911,7 +1080,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut network = Network::new(config.accumulator_dim, config.relu_clip, &mut rng);
 
     // Train the model
-    println!("\nTraining...");
+    if human_to_stderr {
+        eprintln!("\nTraining...");
+    } else {
+        println!("\nTraining...");
+    }
     create_dir_all(&out_dir)?;
     if emit_metrics {
         let mut w = csv::Writer::from_path(out_dir.join("metrics.csv"))?;
@@ -950,6 +1123,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         val_is_jsonl,
     };
 
+    // structured_logger is already created above
+
     // Track best/last for gates and best saving
     let mut best_network: Option<Network> = None;
     let mut best_val_loss: f32 = f32::INFINITY;
@@ -968,6 +1143,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: structured_logger,
+            global_step: 0,
         };
         if is_cache && config.stream_cache {
             train_model_stream_cache(
@@ -1051,10 +1228,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let mut mf = File::create(out_dir.join("nn_best.meta.json"))?;
             writeln!(mf, "{}", serde_json::to_string_pretty(&meta)?)?;
-            println!(
-                "Saved best validation network to {}",
-                out_dir.join("nn_best.fp32.bin").display()
-            );
+            if human_to_stderr {
+                eprintln!(
+                    "Saved best validation network to {}",
+                    out_dir.join("nn_best.fp32.bin").display()
+                );
+            } else {
+                println!(
+                    "Saved best validation network to {}",
+                    out_dir.join("nn_best.fp32.bin").display()
+                );
+            }
         }
     }
 
@@ -1063,17 +1247,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match (last_val_loss, best_val_loss.is_finite(), validation_samples.is_some()) {
             (Some(last), true, true) => {
                 let pass = last <= best_val_loss + 1e-6;
-                println!(
-                    "GATE val_loss_last_is_best: {} (last={:.6}, best={:.6})",
-                    if pass { "PASS" } else { "FAIL" },
-                    last,
-                    best_val_loss
-                );
+                if human_to_stderr {
+                    eprintln!(
+                        "GATE val_loss_last_is_best: {} (last={:.6}, best={:.6})",
+                        if pass { "PASS" } else { "FAIL" },
+                        last,
+                        best_val_loss
+                    );
+                } else {
+                    println!(
+                        "GATE val_loss_last_is_best: {} (last={:.6}, best={:.6})",
+                        if pass { "PASS" } else { "FAIL" },
+                        last,
+                        best_val_loss
+                    );
+                }
                 if !pass && gate_mode_fail {
                     std::process::exit(1);
                 }
             }
-            _ => println!("GATE val_loss_last_is_best: SKIP (no validation)"),
+            _ => {
+                if human_to_stderr {
+                    eprintln!("GATE val_loss_last_is_best: SKIP (no validation)")
+                } else {
+                    println!("GATE val_loss_last_is_best: SKIP (no validation)")
+                }
+            }
         }
     }
     if let (Some(th), Some(val_samples)) = (gate_min_auc, validation_samples.as_ref()) {
@@ -1082,24 +1281,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match auc {
                 Some(v) => {
                     let pass = v >= th;
-                    println!(
-                        "GATE min_auc {:.4} >= {:.4}: {}",
-                        v,
-                        th,
-                        if pass { "PASS" } else { "FAIL" }
-                    );
+                    if human_to_stderr {
+                        eprintln!(
+                            "GATE min_auc {:.4} >= {:.4}: {}",
+                            v,
+                            th,
+                            if pass { "PASS" } else { "FAIL" }
+                        );
+                    } else {
+                        println!(
+                            "GATE min_auc {:.4} >= {:.4}: {}",
+                            v,
+                            th,
+                            if pass { "PASS" } else { "FAIL" }
+                        );
+                    }
                     if !pass && gate_mode_fail {
                         std::process::exit(1);
                     }
                 }
-                None => println!("GATE min_auc: SKIP (insufficient positive/negative)"),
+                None => {
+                    if human_to_stderr {
+                        eprintln!("GATE min_auc: SKIP (insufficient positive/negative)")
+                    } else {
+                        println!("GATE min_auc: SKIP (insufficient positive/negative)")
+                    }
+                }
             }
+        } else if human_to_stderr {
+            eprintln!("GATE min_auc: SKIP (label_type!=wdl)");
         } else {
             println!("GATE min_auc: SKIP (label_type!=wdl)");
         }
     }
 
-    println!("\nModel saved to: {}", out_dir.display());
+    if human_to_stderr {
+        eprintln!("\nModel saved to: {}", out_dir.display());
+    } else {
+        println!("\nModel saved to: {}", out_dir.display());
+    }
 
     Ok(())
 }
@@ -1290,7 +1510,7 @@ fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::er
 fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let (mut r, num_samples, flags_mask) = open_cache_payload_reader(path)?;
 
-    println!("Loading cache: {num_samples} samples");
+    eprintln!("Loading cache: {num_samples} samples");
 
     let mut samples = Vec::with_capacity(num_samples as usize);
     let mut unknown_flag_samples: u64 = 0;
@@ -1298,7 +1518,7 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
 
     for i in 0..num_samples {
         if i % 100000 == 0 && i > 0 {
-            println!("  Loaded {i}/{num_samples} samples...");
+            eprintln!("  Loaded {i}/{num_samples} samples...");
         }
 
         // Read number of features
@@ -1435,6 +1655,8 @@ struct TrainContext<'a> {
     save_every: Option<usize>,
     dash: DashboardOpts,
     trackers: TrainTrackers<'a>,
+    structured: Option<StructuredLogger>,
+    global_step: u64,
 }
 
 fn train_model(
@@ -1457,6 +1679,7 @@ fn train_model(
 
     for epoch in 0..config.epochs {
         let epoch_start = Instant::now();
+        let mut last_lr_base = config.learning_rate;
 
         // Shuffle training data
         if config.shuffle {
@@ -1477,13 +1700,63 @@ fn train_model(
             let batch = &train_samples[start..end];
 
             let batch_indices: Vec<usize> = (0..batch.len()).collect();
-            let loss =
-                train_batch_by_indices(network, batch, &batch_indices, config, &mut adam_state);
+            // LR scheduling per spec #11 (epoch-based warmup, optional step/cosine decay)
+            let mut lr_factor = 1.0f32;
+            if config.lr_warmup_epochs > 0 {
+                let e = epoch as u32;
+                if e < config.lr_warmup_epochs {
+                    lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
+                }
+            }
+            match config.lr_schedule.as_str() {
+                "constant" => {}
+                "step" => {
+                    let step_gamma: f32 = 0.5;
+                    if let Some(de) = config.lr_decay_epochs {
+                        if de > 0 {
+                            let k = ((epoch as u32) / de) as i32;
+                            lr_factor *= step_gamma.powi(k);
+                        }
+                    }
+                    if let Some(ds) = config.lr_decay_steps {
+                        if ds > 0 {
+                            let k = (ctx.global_step / ds) as i32;
+                            lr_factor *= step_gamma.powi(k);
+                        }
+                    }
+                }
+                "cosine" => {
+                    let mut p = 0.0f32;
+                    if let Some(de) = config.lr_decay_epochs {
+                        if de > 0 {
+                            p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
+                        }
+                    }
+                    if let Some(ds) = config.lr_decay_steps {
+                        if ds > 0 {
+                            p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
+                        }
+                    }
+                    lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
+                }
+                _ => {}
+            }
+            let lr_base = (config.learning_rate * lr_factor).max(0.0);
+            let loss = train_batch_by_indices(
+                network,
+                batch,
+                &batch_indices,
+                config,
+                &mut adam_state,
+                lr_base,
+            );
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
             total_loss += loss * batch_weight;
             total_weight += batch_weight;
+            last_lr_base = lr_base;
 
             total_batches += 1;
+            ctx.global_step += 1;
             samples_since += batch.len();
             batches_since += 1;
             if batch_weight == 0.0 {
@@ -1498,14 +1771,39 @@ fn train_model(
                 let sps = samples_since as f32 / secs;
                 let bps = batches_since as f32 / secs;
                 let avg_bs = samples_since as f32 / batches_since as f32;
-                println!(
-                    "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
-                    epoch + 1,
-                    batch_idx + 1,
-                    sps,
-                    bps,
-                    avg_bs
-                );
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
+                        "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
+                        epoch + 1,
+                        batch_idx + 1,
+                        sps,
+                        bps,
+                        avg_bs
+                    );
+                } else {
+                    println!(
+                        "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
+                        epoch + 1,
+                        batch_idx + 1,
+                        sps,
+                        bps,
+                        avg_bs
+                    );
+                }
+                if let Some(ref lg) = ctx.structured {
+                    let rec = serde_json::json!({
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "phase": "train",
+                        "global_step": ctx.global_step as i64,
+                        "epoch": (epoch + 1) as i64,
+                        "lr": lr_base as f64,
+                        "train_loss": loss as f64,
+                        "examples_sec": sps as f64,
+                        "loader_ratio": 0.0f64,
+                        "wall_time": secs as f64,
+                    });
+                    lg.write_json(&rec);
+                }
                 last_report = Instant::now();
                 samples_since = 0;
                 batches_since = 0;
@@ -1517,7 +1815,11 @@ fn train_model(
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
                     save_network(network, &checkpoint_path)?;
-                    println!("Saved checkpoint: {}", checkpoint_path.display());
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                    } else {
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
                 }
             }
         }
@@ -1763,16 +2065,60 @@ fn train_model(
             ])?;
             w.flush()?;
         }
+        // Structured per-epoch logs (train/val)
+        if let Some(ref lg) = ctx.structured {
+            let rec_train = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "train",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "lr": last_lr_base as f64,
+                "train_loss": avg_loss as f64,
+                "examples_sec": epoch_sps as f64,
+                "loader_ratio": 0.0f64,
+                "wall_time": epoch_secs as f64,
+            });
+            lg.write_json(&rec_train);
+            if let Some(vl) = val_loss {
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "val_loss": vl as f64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if let Some(a) = val_auc {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_auc".to_string(), serde_json::json!(a));
+                }
+                lg.write_json(&rec_val);
+            }
+        }
         // Console log summary
-        println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
-            epoch + 1,
-            config.epochs,
-            avg_loss,
-            val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-            epoch_secs,
-            epoch_sps
-        );
+        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+            eprintln!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                epoch_secs,
+                epoch_sps
+            );
+        } else {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                epoch_secs,
+                epoch_sps
+            );
+        }
     }
 
     Ok(())
@@ -1812,6 +2158,7 @@ fn train_model_stream_cache(
             let mut read_ns_epoch: u128 = 0;
 
             let mut loaded: u64 = 0;
+            let mut last_lr_base = config.learning_rate;
             while loaded < num_samples {
                 // Read up to batch_size samples synchronously
                 let mut batch = Vec::with_capacity(config.batch_size);
@@ -1908,11 +2255,60 @@ fn train_model_stream_cache(
                 }
 
                 let indices: Vec<usize> = (0..batch.len()).collect();
-                let loss =
-                    train_batch_by_indices(network, &batch, &indices, config, &mut adam_state);
+                // LR scheduling
+                let mut lr_factor = 1.0f32;
+                if config.lr_warmup_epochs > 0 {
+                    let e = epoch as u32;
+                    if e < config.lr_warmup_epochs {
+                        lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
+                    }
+                }
+                match config.lr_schedule.as_str() {
+                    "constant" => {}
+                    "step" => {
+                        let step_gamma: f32 = 0.5;
+                        if let Some(de) = config.lr_decay_epochs {
+                            if de > 0 {
+                                let k = ((epoch as u32) / de) as i32;
+                                lr_factor *= step_gamma.powi(k);
+                            }
+                        }
+                        if let Some(ds) = config.lr_decay_steps {
+                            if ds > 0 {
+                                let k = (ctx.global_step / ds) as i32;
+                                lr_factor *= step_gamma.powi(k);
+                            }
+                        }
+                    }
+                    "cosine" => {
+                        let mut p = 0.0f32;
+                        if let Some(de) = config.lr_decay_epochs {
+                            if de > 0 {
+                                p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
+                            }
+                        }
+                        if let Some(ds) = config.lr_decay_steps {
+                            if ds > 0 {
+                                p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
+                            }
+                        }
+                        lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
+                    }
+                    _ => {}
+                }
+                let lr_base = (config.learning_rate * lr_factor).max(0.0);
+                let loss = train_batch_by_indices(
+                    network,
+                    &batch,
+                    &indices,
+                    config,
+                    &mut adam_state,
+                    lr_base,
+                );
                 let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
                 total_loss += loss * batch_weight;
                 total_weight += batch_weight;
+                last_lr_base = lr_base;
 
                 total_samples_epoch += batch.len();
                 batch_count += 1;
@@ -1930,15 +2326,37 @@ fn train_model_stream_cache(
                         / (secs as f64 * NANOSECONDS_PER_SECOND))
                         .clamp(0.0, 1.0)
                         * PERCENTAGE_DIVISOR as f64;
-                    println!(
-                        "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
-                        epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
-                    );
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                            "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                            epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
+                        );
+                    } else {
+                        println!(
+                            "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                            epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
+                        );
+                    }
+                    if let Some(ref lg) = ctx.structured {
+                        let rec = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "phase": "train",
+                            "global_step": ctx.global_step as i64,
+                            "epoch": (epoch + 1) as i64,
+                            "lr": lr_base as f64,
+                            "train_loss": loss as f64,
+                            "examples_sec": sps as f64,
+                            "loader_ratio": loader_ratio/100.0,
+                            "wall_time": secs as f64,
+                        });
+                        lg.write_json(&rec);
+                    }
                     last_report = Instant::now();
                     samples_since = 0;
                     batches_since = 0;
                     read_ns_since = 0;
                 }
+                ctx.global_step += 1;
             }
 
             let avg_loss = if total_weight > 0.0 {
@@ -1946,6 +2364,7 @@ fn train_model_stream_cache(
             } else {
                 0.0
             };
+            let has_val = validation_samples.is_some();
             let val_loss = if let Some(val_samples) = validation_samples {
                 compute_validation_loss(network, val_samples, config)
             } else {
@@ -1957,10 +2376,45 @@ fn train_model_stream_cache(
                 .clamp(0.0, 1.0)
                 * PERCENTAGE_DIVISOR as f64;
             let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
-            println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-                epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-            );
+            if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                eprintln!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            } else {
+                println!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            }
+            if let Some(ref lg) = ctx.structured {
+                let rec_train = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "train",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "lr": last_lr_base as f64,
+                    "train_loss": avg_loss as f64,
+                    "examples_sec": epoch_sps as f64,
+                    "loader_ratio": (loader_ratio_epoch/100.0) ,
+                    "wall_time": epoch_secs as f64,
+                });
+                lg.write_json(&rec_train);
+                let mut rec_val = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "val",
+                    "global_step": ctx.global_step as i64,
+                    "epoch": (epoch + 1) as i64,
+                    "wall_time": epoch_secs as f64,
+                });
+                if has_val {
+                    rec_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("val_loss".to_string(), serde_json::json!(val_loss as f64));
+                }
+                lg.write_json(&rec_val);
+            }
         }
 
         return Ok(());
@@ -1977,10 +2431,17 @@ fn train_model_stream_cache(
         if est_batch_bytes > 0 {
             let max_batches = (bytes_cap / est_batch_bytes).max(1);
             if effective_prefetch > max_batches {
-                println!(
-                    "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
-                    effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
-                );
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
+                        "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                        effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
+                    );
+                } else {
+                    println!(
+                        "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                        effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
+                    );
+                }
                 effective_prefetch = max_batches;
             }
         }
@@ -2010,6 +2471,7 @@ fn train_model_stream_cache(
         let mut wait_ns_since: u128 = 0;
         let mut wait_ns_epoch: u128 = 0;
 
+        let mut last_lr_base = config.learning_rate;
         loop {
             let (maybe_batch, wait_dur) = loader.next_batch_with_wait();
             let Some(batch_res) = maybe_batch else { break };
@@ -2018,10 +2480,54 @@ fn train_model_stream_cache(
                 Err(msg) => return Err(msg.into()),
             };
             let indices: Vec<usize> = (0..batch.len()).collect();
-            let loss = train_batch_by_indices(network, &batch, &indices, config, &mut adam_state);
+            // LR scheduling
+            let mut lr_factor = 1.0f32;
+            if config.lr_warmup_epochs > 0 {
+                let e = epoch as u32;
+                if e < config.lr_warmup_epochs {
+                    lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
+                }
+            }
+            match config.lr_schedule.as_str() {
+                "constant" => {}
+                "step" => {
+                    let step_gamma: f32 = 0.5;
+                    if let Some(de) = config.lr_decay_epochs {
+                        if de > 0 {
+                            let k = ((epoch as u32) / de) as i32;
+                            lr_factor *= step_gamma.powi(k);
+                        }
+                    }
+                    if let Some(ds) = config.lr_decay_steps {
+                        if ds > 0 {
+                            let k = (ctx.global_step / ds) as i32;
+                            lr_factor *= step_gamma.powi(k);
+                        }
+                    }
+                }
+                "cosine" => {
+                    let mut p = 0.0f32;
+                    if let Some(de) = config.lr_decay_epochs {
+                        if de > 0 {
+                            p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
+                        }
+                    }
+                    if let Some(ds) = config.lr_decay_steps {
+                        if ds > 0 {
+                            p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
+                        }
+                    }
+                    lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
+                }
+                _ => {}
+            }
+            let lr_base = (config.learning_rate * lr_factor).max(0.0);
+            let loss =
+                train_batch_by_indices(network, &batch, &indices, config, &mut adam_state, lr_base);
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
             total_loss += loss * batch_weight;
             total_weight += batch_weight;
+            last_lr_base = lr_base;
 
             total_samples_epoch += batch.len();
             batch_count += 1;
@@ -2044,7 +2550,8 @@ fn train_model_stream_cache(
                 } else {
                     0.0
                 };
-                println!(
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
                     "[throughput] mode=stream epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
                     epoch + 1,
                     batch_count,
@@ -2052,19 +2559,49 @@ fn train_model_stream_cache(
                     bps,
                     avg_bs,
                     loader_ratio
-                );
+                    );
+                } else {
+                    println!(
+                    "[throughput] mode=stream epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs,
+                    loader_ratio
+                    );
+                }
+                if let Some(ref lg) = ctx.structured {
+                    let rec = serde_json::json!({
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "phase": "train",
+                        "global_step": ctx.global_step as i64,
+                        "epoch": (epoch + 1) as i64,
+                        "lr": lr_base as f64,
+                        "train_loss": loss as f64,
+                        "examples_sec": sps as f64,
+                        "loader_ratio": (loader_ratio )/100.0,
+                        "wall_time": secs as f64,
+                    });
+                    lg.write_json(&rec);
+                }
                 last_report = Instant::now();
                 samples_since = 0;
                 batches_since = 0;
                 wait_ns_since = 0;
             }
+            ctx.global_step += 1;
 
             if let Some(interval) = ctx.save_every {
                 if total_batches % interval == 0 {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
                     save_network(network, &checkpoint_path)?;
-                    println!("Saved checkpoint: {}", checkpoint_path.display());
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                    } else {
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
                 }
             }
         }
@@ -2308,6 +2845,40 @@ fn train_model_stream_cache(
             val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
             batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
         );
+        if let Some(ref lg) = ctx.structured {
+            let rec_train = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "train",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "lr": last_lr_base as f64,
+                "train_loss": avg_loss as f64,
+                "examples_sec": epoch_sps as f64,
+                "loader_ratio": (loader_ratio_epoch as f64)/100.0,
+                "wall_time": epoch_secs as f64,
+            });
+            lg.write_json(&rec_train);
+            let mut rec_val = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "val",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "wall_time": epoch_secs as f64,
+            });
+            if let Some(vl) = val_loss {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+            }
+            if let Some(a) = val_auc {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_auc".to_string(), serde_json::json!(a));
+            }
+            lg.write_json(&rec_val);
+        }
 
         loader.finish();
     }
@@ -2361,16 +2932,60 @@ fn train_model_with_loader(
             let mut batches_since = 0usize;
             let mut wait_ns_since: u128 = 0;
             let mut wait_ns_epoch: u128 = 0;
+            let mut _last_lr_base = config.learning_rate;
 
             loop {
                 let (maybe_indices, wait_dur) = async_loader.next_batch_with_wait();
                 let Some(indices) = maybe_indices else { break };
+                // LR scheduling
+                let mut lr_factor = 1.0f32;
+                if config.lr_warmup_epochs > 0 {
+                    let e = epoch as u32;
+                    if e < config.lr_warmup_epochs {
+                        lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
+                    }
+                }
+                match config.lr_schedule.as_str() {
+                    "constant" => {}
+                    "step" => {
+                        let step_gamma: f32 = 0.5;
+                        if let Some(de) = config.lr_decay_epochs {
+                            if de > 0 {
+                                let k = ((epoch as u32) / de) as i32;
+                                lr_factor *= step_gamma.powi(k);
+                            }
+                        }
+                        if let Some(ds) = config.lr_decay_steps {
+                            if ds > 0 {
+                                let k = (ctx.global_step / ds) as i32;
+                                lr_factor *= step_gamma.powi(k);
+                            }
+                        }
+                    }
+                    "cosine" => {
+                        let mut p = 0.0f32;
+                        if let Some(de) = config.lr_decay_epochs {
+                            if de > 0 {
+                                p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
+                            }
+                        }
+                        if let Some(ds) = config.lr_decay_steps {
+                            if ds > 0 {
+                                p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
+                            }
+                        }
+                        lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
+                    }
+                    _ => {}
+                }
+                let lr_base = (config.learning_rate * lr_factor).max(0.0);
                 let loss = train_batch_by_indices(
                     network,
                     &train_samples_arc,
                     &indices,
                     config,
                     &mut adam_state,
+                    lr_base,
                 );
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
@@ -2404,15 +3019,41 @@ fn train_model_with_loader(
                     } else {
                         0.0
                     };
-                    println!(
-                    "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
-                    epoch + 1,
-                    batch_count,
-                    sps,
-                    bps,
-                    avg_bs,
-                    loader_ratio
-                );
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                        "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs,
+                        loader_ratio
+                        );
+                    } else {
+                        println!(
+                        "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs,
+                        loader_ratio
+                        );
+                    }
+                    if let Some(ref lg) = ctx.structured {
+                        let rec = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "phase": "train",
+                            "global_step": ctx.global_step as i64,
+                            "epoch": (epoch + 1) as i64,
+                            "lr": lr_base as f64,
+                            "train_loss": loss as f64,
+                            "examples_sec": sps as f64,
+                            "loader_ratio": (loader_ratio )/100.0,
+                            "wall_time": secs as f64,
+                        });
+                        lg.write_json(&rec);
+                    }
                     last_report = Instant::now();
                     samples_since = 0;
                     batches_since = 0;
@@ -2428,6 +3069,7 @@ fn train_model_with_loader(
                         println!("Saved checkpoint: {}", checkpoint_path.display());
                     }
                 }
+                ctx.global_step += 1;
             }
 
             let avg_loss = if total_weight > 0.0 {
@@ -2663,10 +3305,17 @@ fn train_model_with_loader(
                 ])?;
                 w.flush()?;
             }
-            println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-                epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-            );
+            if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                eprintln!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            } else {
+                println!(
+                    "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                    epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+                );
+            }
         }
         // Ensure worker fully finished at end
         async_loader.finish();
@@ -2686,6 +3335,7 @@ fn train_model_with_loader(
             let mut last_report = Instant::now();
             let mut samples_since = 0usize;
             let mut batches_since = 0usize;
+            let _last_lr_base = config.learning_rate;
 
             while let Some(indices) = {
                 let t0 = Instant::now();
@@ -2698,12 +3348,55 @@ fn train_model_with_loader(
                 }
                 next
             } {
+                // LR scheduling
+                let mut lr_factor = 1.0f32;
+                if config.lr_warmup_epochs > 0 {
+                    let e = epoch as u32;
+                    if e < config.lr_warmup_epochs {
+                        lr_factor = ((e + 1) as f32) / (config.lr_warmup_epochs as f32);
+                    }
+                }
+                match config.lr_schedule.as_str() {
+                    "constant" => {}
+                    "step" => {
+                        let step_gamma: f32 = 0.5;
+                        if let Some(de) = config.lr_decay_epochs {
+                            if de > 0 {
+                                let k = ((epoch as u32) / de) as i32;
+                                lr_factor *= step_gamma.powi(k);
+                            }
+                        }
+                        if let Some(ds) = config.lr_decay_steps {
+                            if ds > 0 {
+                                let k = (ctx.global_step / ds) as i32;
+                                lr_factor *= step_gamma.powi(k);
+                            }
+                        }
+                    }
+                    "cosine" => {
+                        let mut p = 0.0f32;
+                        if let Some(de) = config.lr_decay_epochs {
+                            if de > 0 {
+                                p = ((epoch as f32) / (de as f32)).clamp(0.0, 1.0);
+                            }
+                        }
+                        if let Some(ds) = config.lr_decay_steps {
+                            if ds > 0 {
+                                p = ((ctx.global_step as f32) / (ds as f32)).clamp(0.0, 1.0);
+                            }
+                        }
+                        lr_factor *= 0.5 * (1.0 + (std::f32::consts::PI * p).cos());
+                    }
+                    _ => {}
+                }
+                let lr_base = (config.learning_rate * lr_factor).max(0.0);
                 let loss = train_batch_by_indices(
                     network,
                     &train_samples_arc,
                     &indices,
                     config,
                     &mut adam_state,
+                    lr_base,
                 );
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
@@ -2723,14 +3416,39 @@ fn train_model_with_loader(
                     let sps = samples_since as f32 / secs;
                     let bps = batches_since as f32 / secs;
                     let avg_bs = samples_since as f32 / batches_since as f32;
-                    println!(
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
                         "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
                         epoch + 1,
                         batch_count,
                         sps,
                         bps,
                         avg_bs
-                    );
+                        );
+                    } else {
+                        println!(
+                        "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs
+                        );
+                    }
+                    if let Some(ref lg) = ctx.structured {
+                        let rec = serde_json::json!({
+                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "phase": "train",
+                            "global_step": ctx.global_step as i64,
+                            "epoch": (epoch + 1) as i64,
+                            "lr": lr_base as f64,
+                            "train_loss": loss as f64,
+                            "examples_sec": sps as f64,
+                            "loader_ratio": 0.0f64,
+                            "wall_time": secs as f64,
+                        });
+                        lg.write_json(&rec);
+                    }
                     last_report = Instant::now();
                     samples_since = 0;
                     batches_since = 0;
@@ -2742,9 +3460,16 @@ fn train_model_with_loader(
                         let checkpoint_path =
                             out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
                         save_network(network, &checkpoint_path)?;
-                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                            eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                        } else {
+                            println!("Saved checkpoint: {}", checkpoint_path.display());
+                        }
                     }
                 }
+                // advance global step per batch
+                ctx.global_step += 1;
+                // record last lr used (unused in sync loader path)
             }
 
             let avg_loss = if total_weight > 0.0 {
@@ -2974,10 +3699,17 @@ fn train_model_with_loader(
                 ])?;
                 w.flush()?;
             }
-            println!(
+            if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                eprintln!(
                 "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
                 epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps
-            );
+                );
+            } else {
+                println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
+                epoch + 1, config.epochs, avg_loss, val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()), batch_count, epoch_secs, epoch_sps
+                );
+            }
         }
     }
 
@@ -2990,6 +3722,7 @@ fn train_batch_by_indices(
     indices: &[usize],
     config: &Config,
     adam_state: &mut Option<AdamState>,
+    lr_base: f32,
 ) -> f32 {
     let mut total_loss = 0.0;
     let mut total_weight = 0.0;
@@ -3006,9 +3739,9 @@ fn train_batch_by_indices(
     let lr_t = if let Some(adam) = adam_state.as_mut() {
         adam.t += 1;
         let t = adam.t as f32;
-        config.learning_rate * (1.0 - adam.beta2.powf(t)).sqrt() / (1.0 - adam.beta1.powf(t))
+        lr_base * (1.0 - adam.beta2.powf(t)).sqrt() / (1.0 - adam.beta1.powf(t))
     } else {
-        config.learning_rate
+        lr_base
     };
 
     for &idx in indices {
@@ -3632,6 +4365,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
         let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
         // Two-sample orientation -> take first weight
@@ -3764,6 +4502,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
         let auc = super::compute_val_auc(&net, &samples, &cfg);
         assert!(auc.is_none(), "AUC should be None when all labels are 0.5 boundary");
@@ -3801,6 +4544,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
         let json_samples = load_samples(json_path.to_str().unwrap(), &cfg).unwrap();
         assert!(!json_samples.is_empty());
@@ -3848,6 +4596,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
 
         // サンプルを読み込み（2局面→2サンプル/局面 = 計4サンプル）
@@ -3886,6 +4639,8 @@ mod tests {
                 last_val_loss: &mut ll1,
                 best_epoch: &mut be1,
             },
+            structured: None,
+            global_step: 0,
         };
         train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
         let dash2 = super::DashboardOpts {
@@ -3908,6 +4663,8 @@ mod tests {
                 last_val_loss: &mut ll2,
                 best_epoch: &mut be2,
             },
+            structured: None,
+            global_step: 0,
         };
         train_model(&mut net2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
 
@@ -4017,6 +4774,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
         let cfg_stream = Config {
             stream_cache: true,
@@ -4057,6 +4819,8 @@ mod tests {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: None,
+            global_step: 0,
         };
         train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
             .unwrap();
@@ -4081,6 +4845,8 @@ mod tests {
                 last_val_loss: &mut last_val_loss2,
                 best_epoch: &mut best_epoch2,
             },
+            structured: None,
+            global_step: 0,
         };
         train_model_stream_cache(
             &mut net_stream,
@@ -4159,6 +4925,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(1);
@@ -4184,6 +4955,8 @@ mod tests {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: None,
+            global_step: 0,
         };
         let err = train_model_stream_cache(
             &mut net,
@@ -4230,6 +5003,11 @@ mod tests {
             estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
         };
 
         let td = tempfile::tempdir().unwrap();
@@ -4257,6 +5035,8 @@ mod tests {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
+            structured: None,
+            global_step: 0,
         };
         train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
 
