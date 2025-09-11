@@ -124,3 +124,30 @@ fn test_expected_mpv_cli_overrides_manifest() {
     let _ = std::fs::remove_file(&manifest);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_expected_mpv_auto_fallback_when_manifest_missing() {
+    // When manifest is absent and --expected-multipv=auto, analyzer should fall back to default (2).
+    let dir = tmp_dir("mpv_auto_fallback");
+    let data = dir.join("data.jsonl");
+    let rec = r#"{"sfen":"9/9/9/9/9/9/9/9/9 b - 1","lines":[]}"#;
+    write_text(&data, &(rec.to_string() + "\n"));
+
+    let out = Command::new(bin_path("analyze_teaching_quality"))
+        .arg(data.to_str().unwrap())
+        .arg("--summary")
+        .arg("--manifest-autoload-mode")
+        .arg("permissive") // no manifest available; permissive mode should allow fallback to default expected_mpv
+        .output()
+        .expect("run analyze_teaching_quality");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("expected_mpv=2"),
+        "stdout should show fallback expected_mpv=2, was: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_dir_all(&dir);
+}
