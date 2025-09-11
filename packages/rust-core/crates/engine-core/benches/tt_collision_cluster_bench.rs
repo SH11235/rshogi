@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use engine_core::search::tt::{BucketSize, NodeType, TranspositionTable};
+use engine_core::search::tt::{BucketSize, TranspositionTable};
+use engine_core::search::NodeType;
 use std::hint::black_box;
 use std::{env, time::Duration};
 

@@ -4,7 +4,8 @@
 //! before and after memory barrier optimization.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use engine_core::search::tt::{NodeType, TranspositionTable};
+use engine_core::search::tt::TranspositionTable;
+use engine_core::search::NodeType;
 use rand::{rng, Rng};
 use std::hint::black_box;
 
