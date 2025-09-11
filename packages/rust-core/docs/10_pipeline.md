@@ -54,11 +54,26 @@
   - 固定条件で誰が回しても同結果（`00_charter.md` 準拠）
 - コマンド例:
   ```sh
-  cargo run -p tools --bin gauntlet -- \
-    --base runs/baseline/nn.bin --cand runs/candidate/nn.bin \
+  # Debug 実行（stdout に structured_v1 1 行を出力）
+  RAYON_NUM_THREADS=1 cargo run -p tools --bin gauntlet -- \
+    --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
     --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
-    --book assets/opening/fixed-100.epd --multipv 1 \
-    --json runs/gauntlet/out.json --report runs/gauntlet/report.md
+    --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+    --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+    > runs/gauntlet/structured.jsonl
+
+  # Release 実行（高速）
+  cargo build -p tools --release
+  RAYON_NUM_THREADS=1 target/release/gauntlet \
+    --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+    --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
+    --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+    --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+    > runs/gauntlet/structured.jsonl
+
+  # 再現性（任意）
+  # --seed 123                # フラット（各局）シャッフル
+  # --seed 123 --seed-mode block  # 2局ブロック隣接を維持
   ```
 
 ### #17 生成のストリーミング化 + `--expected-multipv auto`（昇格, P2）

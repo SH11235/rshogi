@@ -9,12 +9,32 @@
 - MultiPV: `1`（PVスプレッド観測は別途 MultiPV=3 で測定）
 
 ## CLI（例）
+
+デバッグ（cargo run）:
 ```
-cargo run -p tools --bin gauntlet -- \
-  --base runs/baseline/nn.bin --cand runs/candidate/nn.bin \
+RAYON_NUM_THREADS=1 cargo run -p tools --bin gauntlet -- \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
   --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
-  --book assets/opening/fixed-100.epd --multipv 1 \
-  --json runs/gauntlet/out.json --report runs/gauntlet/report.md
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  > runs/gauntlet/structured.jsonl
+```
+
+リリースバイナリ（高速）:
+```
+cargo build -p tools --release
+RAYON_NUM_THREADS=1 target/release/gauntlet \
+  --base runs/nnue_local/baseline.nnue --cand runs/nnue_local/candidate.nnue \
+  --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
+  --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
+  --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
+  > runs/gauntlet/structured.jsonl
+```
+
+再現性（任意）:
+```
+… --seed 123                 # フラット（各局）シャッフル（既定）
+… --seed 123 --seed-mode block  # 2局ブロックの隣接を維持してシャッフル
 ```
 
 備考:
@@ -48,14 +68,7 @@ cargo run -p tools --bin gauntlet -- \
 ## Fixtures
 - 代表ブック: `docs/reports/fixtures/opening/representative.epd`
 - アンチブック: `docs/reports/fixtures/opening/anti.epd`
-- 使用例（代表ブック）:
-  ```sh
-  cargo run -p tools --bin gauntlet -- \
-    --base runs/baseline/nn.bin --cand runs/candidate/nn.bin \
-    --time "0/1+0.1" --games 200 --threads 1 --hash-mb 256 \
-    --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
-    --json runs/gauntlet/out.json --report runs/gauntlet/report.md
-  ```
+-- 使用例（代表ブック）: 上記 CLI（例）を参照
 
 ## 実装メモ（計測の厳密化）
 - NPS: サンプルごとに TT をクリアしてから固定時間探索し、`f64` で累積平均化（丸め誤差抑制）
