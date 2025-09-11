@@ -5,26 +5,28 @@ use std::path::Path;
 #[cfg(feature = "zstd")]
 use zstd::Decoder as ZstdDecoder;
 
+const READER_BUF_CAP: usize = 128 * 1024; // 128 KiB (spec: 64–256 KiB)
+
 pub fn open_reader<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn BufRead>> {
     let p = path.as_ref();
     if p.to_string_lossy() == "-" {
-        let stdin = io::stdin();
-        let handle = stdin.lock();
-        return Ok(Box::new(BufReader::with_capacity(128 * 1024, handle)));
+        // Note: avoid returning a locked handle with a non-'static lifetime here.
+        // A plain stdin wrapped in BufReader is sufficient and simpler for maintenance.
+        return Ok(Box::new(BufReader::with_capacity(READER_BUF_CAP, io::stdin())));
     }
     let f = File::open(p)?;
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
 
     if ext == "gz" {
         let dec = flate2::read::GzDecoder::new(f);
-        return Ok(Box::new(BufReader::with_capacity(128 * 1024, dec)));
+        return Ok(Box::new(BufReader::with_capacity(READER_BUF_CAP, dec)));
     }
     #[cfg(feature = "zstd")]
     if ext == "zst" {
         let dec = ZstdDecoder::new(f)?;
-        return Ok(Box::new(BufReader::with_capacity(128 * 1024, dec)));
+        return Ok(Box::new(BufReader::with_capacity(READER_BUF_CAP, dec)));
     }
-    Ok(Box::new(BufReader::with_capacity(128 * 1024, f)))
+    Ok(Box::new(BufReader::with_capacity(READER_BUF_CAP, f)))
 }
 
 #[cfg(feature = "zstd")]
