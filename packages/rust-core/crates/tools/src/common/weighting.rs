@@ -91,6 +91,9 @@ pub(crate) const CANONICAL_ORDER: [WeightingKind; 4] = [
     WeightingKind::Mate,
 ];
 
+/// 閾値（cp）。gap がこの値より小さいときにレバーの強調係数を乗算する（v1仕様）。
+pub const GAP_EMPHASIS_THRESHOLD_CP: i32 = 50;
+
 fn normalize_active(v: Vec<WeightingKind>) -> Vec<WeightingKind> {
     use std::collections::HashSet;
     let set: HashSet<_> = v.into_iter().collect();
@@ -209,9 +212,8 @@ pub fn apply_weighting(
             WeightingKind::Gap => {
                 if let Some(g) = gap_cp {
                     if g >= 0 {
-                        // 小さいほど↑
-                        // 閾値 50cp で簡易的に強調（ベースラインへの乗算のみ）
-                        if g < 50 {
+                        // 小さいほど↑ — 閾値で簡易強調（ベースラインへの乗算）
+                        if g < GAP_EMPHASIS_THRESHOLD_CP {
                             w *= cfg.coeffs.w_gap;
                         }
                     }
