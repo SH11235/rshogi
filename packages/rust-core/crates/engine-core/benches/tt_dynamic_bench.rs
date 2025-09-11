@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use engine_core::search::tt::{BucketSize, NodeType, TranspositionTable};
+use engine_core::search::tt::{BucketSize, TranspositionTable};
+use engine_core::search::NodeType;
 use std::hint::black_box;
 
 fn bench_bucket_sizes(c: &mut Criterion) {
