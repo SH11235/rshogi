@@ -16,10 +16,18 @@ use std::process::Command;
 // ---------------- CLI ----------------
 
 #[derive(Parser, Debug)]
-#[command(name = "gauntlet", about = "One-command gauntlet runner", version)]
+#[command(
+    name = "gauntlet",
+    about = "One-command gauntlet runner",
+    version,
+    infer_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+    // Allow subcommand-less usage by flattening run args
+    #[command(flatten)]
+    run_args: RunArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -97,6 +105,17 @@ enum GateDecision {
     Pass,
     Reject,
     Provisional,
+}
+
+impl std::fmt::Display for GateDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            GateDecision::Pass => "pass",
+            GateDecision::Reject => "reject",
+            GateDecision::Provisional => "provisional",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -237,7 +256,7 @@ fn write_markdown(report_path: &Path, out: &GauntletOut) -> Result<()> {
     md.push_str(&format!("- Draw rate: {:.1}%\n", out.summary.draw * 100.0));
     md.push_str(&format!("- NPS delta: {:+.2}%\n", out.summary.nps_delta_pct));
     md.push_str(&format!("- PV spread p90: {:.0} cp\n", out.summary.pv_spread_p90_cp));
-    md.push_str(&format!("- Gate: {:?}\n", out.summary.gate));
+    md.push_str(&format!("- Gate: {}\n", out.summary.gate));
     if let Some(reason) = &out.summary.reject_reason {
         md.push_str(&format!("- Reason: {}\n", reason));
     }
@@ -256,13 +275,14 @@ fn write_markdown(report_path: &Path, out: &GauntletOut) -> Result<()> {
     Ok(())
 }
 
-fn percentile_p90(mut v: Vec<f64>) -> f64 {
+fn percentile_nearest_rank(mut v: Vec<f64>, p: f64) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-    let idx = ((v.len() as f64) * 0.90).floor() as usize;
-    v[idx.min(v.len() - 1)]
+    let n = v.len();
+    let rank = (p * n as f64).ceil().max(1.0) as usize - 1;
+    v[rank.min(n - 1)]
 }
 
 fn wilson_lower_bound(wins: usize, losses: usize) -> f64 {
@@ -381,6 +401,14 @@ impl StubRunner {
 fn run_real(args: &RunArgs) -> Result<GauntletOut> {
     let time = parse_time_spec(&args.time)?;
     let book = load_book_positions(Path::new(&args.book))?;
+    if args.multipv != 1 {
+        return Err(anyhow!(
+            "--multipv must be 1 for games (PV spread is measured with MultiPV=3 internally)"
+        ));
+    }
+    if args.threads != 1 {
+        eprintln!("WARN: Spec 013 requires --threads=1 (got {}).", args.threads);
+    }
     let mut base = PlayerEngine::new(
         &args.base,
         args.threads,
@@ -400,20 +428,39 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
     let nps_sample_ms = time.inc_ms.max(100);
     let mut nps_base_sum = 0u128;
     let mut nps_cand_sum = 0u128;
-    for s in book.iter().take(100.min(book.len())) {
-        let mut pos = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
-        let (_b, nodes_b, el_b) = base.search_best(
-            &mut pos,
-            TimeControl::FixedTime {
-                ms_per_move: nps_sample_ms,
-            },
-        );
-        let (_c, nodes_c, el_c) = cand.search_best(
-            &mut pos,
-            TimeControl::FixedTime {
-                ms_per_move: nps_sample_ms,
-            },
-        );
+    for (i, s) in book.iter().take(100.min(book.len())).enumerate() {
+        // Use independent positions and alternate measurement order
+        let mut pos_b = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
+        let mut pos_c = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
+        let (nodes_b, el_b, nodes_c, el_c) = if i % 2 == 0 {
+            let (_b, nodes_b, el_b) = base.search_best(
+                &mut pos_b,
+                TimeControl::FixedTime {
+                    ms_per_move: nps_sample_ms,
+                },
+            );
+            let (_c, nodes_c, el_c) = cand.search_best(
+                &mut pos_c,
+                TimeControl::FixedTime {
+                    ms_per_move: nps_sample_ms,
+                },
+            );
+            (nodes_b, el_b, nodes_c, el_c)
+        } else {
+            let (_c, nodes_c, el_c) = cand.search_best(
+                &mut pos_c,
+                TimeControl::FixedTime {
+                    ms_per_move: nps_sample_ms,
+                },
+            );
+            let (_b, nodes_b, el_b) = base.search_best(
+                &mut pos_b,
+                TimeControl::FixedTime {
+                    ms_per_move: nps_sample_ms,
+                },
+            );
+            (nodes_b, el_b, nodes_c, el_c)
+        };
         let nps_b = (nodes_b as u128) * 1000 / (el_b as u128).max(1);
         let nps_c = (nodes_c as u128) * 1000 / (el_c as u128).max(1);
         nps_base_sum += nps_b;
@@ -437,19 +484,20 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             spreads.push((max - min) as f64);
         }
     }
-    let pv_spread_p90 = percentile_p90(spreads);
+    let pv_spread_p90 = percentile_nearest_rank(spreads, 0.90);
 
     // Games
+    if args.games % 2 != 0 {
+        return Err(anyhow!("--games must be even for fair pairing"));
+    }
+    let schedule = schedule_pairs(book.len(), args.games);
     let mut series: Vec<SeriesItem> = Vec::with_capacity(args.games);
     let mut wins = 0usize;
     let mut losses = 0usize;
     let mut draws = 0usize;
-    for g in 0..args.games {
-        let open_idx = g % book.len();
+    for (g, (open_idx, cand_black)) in schedule.into_iter().enumerate() {
         let sfen = &book[open_idx];
         let mut pos = Position::from_sfen(sfen).map_err(|e| anyhow!(e))?;
-        // Alternate colors for candidate
-        let cand_black = g % 2 == 0;
         // Use fixed-time per move equal to increment (~0.1s) as minimal policy
         let movetime = time.inc_ms.max(100);
         let max_plies = 256u32;
@@ -543,12 +591,12 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         }
     }
 
-    let decisive = wins + losses;
-    let winrate = if decisive > 0 {
-        wins as f64 / decisive as f64
+    let score_rate = if args.games > 0 {
+        (wins as f64 + 0.5 * draws as f64) / (args.games as f64)
     } else {
         0.5
     };
+    let winrate = score_rate; // Interpret as score rate (w=1,d=0.5,l=0)
     let draw = if args.games > 0 {
         draws as f64 / args.games as f64
     } else {
@@ -619,10 +667,12 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
     let mut wins = 0usize;
     let mut losses = 0usize;
     let mut draws = 0usize;
-    for g in 0..args.games {
-        let open_idx = g % book.len();
+    if args.games % 2 != 0 {
+        return Err(anyhow!("--games must be even for fair pairing"));
+    }
+    let schedule = schedule_pairs(book.len(), args.games);
+    for (g, (open_idx, cand_black)) in schedule.into_iter().enumerate() {
         let sfen = &book[open_idx];
-        let cand_black = g % 2 == 0;
         let (res, plies, nb, nc, nps_b, nps_c) = stub.play_game(g);
         match res.as_str() {
             "win" => wins += 1,
@@ -642,12 +692,12 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             nps_cand: nps_c,
         });
     }
-    let decisive = wins + losses;
-    let winrate = if decisive > 0 {
-        wins as f64 / decisive as f64
+    let score_rate = if args.games > 0 {
+        (wins as f64 + 0.5 * draws as f64) / (args.games as f64)
     } else {
         0.5
     };
+    let winrate = score_rate;
     let draw = if args.games > 0 {
         draws as f64 / args.games as f64
     } else {
@@ -721,29 +771,40 @@ fn emit_structured_jsonl(games: usize) {
     }
 }
 
+fn schedule_pairs(book_len: usize, games: usize) -> Vec<(usize, bool)> {
+    assert!(games % 2 == 0, "games must be even for fair pairing");
+    (0..(games / 2))
+        .flat_map(|i| {
+            let open_idx = i % book_len;
+            [(open_idx, true), (open_idx, false)]
+        })
+        .collect()
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
-        Commands::Run(args) => {
-            // Run
-            let out = if args.stub {
-                run_stub(&args)?
-            } else {
-                run_real(&args)?
-            };
-            // Ensure parent dirs
-            let json_path = PathBuf::from(&args.json);
-            if let Some(parent) = json_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            // Write JSON
-            let json = serde_json::to_string_pretty(&out)?;
-            fs::write(&json_path, json)?;
-            // Write markdown report
-            write_markdown(Path::new(&args.report), &out)?;
-            // Emit minimal JSONL for structured_v1 (stdout)
-            emit_structured_jsonl(out.params.games);
-        }
+    let args = match cli.command {
+        Some(Commands::Run(a)) => a,
+        None => cli.run_args,
+    };
+
+    let out = if args.stub {
+        run_stub(&args)?
+    } else {
+        run_real(&args)?
+    };
+
+    // Ensure parent dirs
+    let json_path = PathBuf::from(&args.json);
+    if let Some(parent) = json_path.parent() {
+        fs::create_dir_all(parent)?;
     }
+    // Write JSON
+    let json = serde_json::to_string_pretty(&out)?;
+    fs::write(&json_path, json)?;
+    // Write markdown report
+    write_markdown(Path::new(&args.report), &out)?;
+    // Emit minimal JSONL for structured_v1 (stdout)
+    emit_structured_jsonl(out.params.games);
     Ok(())
 }
