@@ -102,3 +102,21 @@ fn structured_schema_fixture_valid() {
         );
     }
 }
+
+#[test]
+fn cli_unknown_schedule_exits_2() {
+    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    let assert = cmd
+        .arg("-i")
+        .arg("nonexistent.jsonl")
+        .arg("-e")
+        .arg("1")
+        .arg("-b")
+        .arg("2")
+        .arg("--lr")
+        .arg("0.001")
+        .arg("--lr-schedule")
+        .arg("foo")
+        .assert();
+    assert.failure().code(predicate::eq(2));
+}

@@ -1213,6 +1213,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             obj.insert("phase_applied".into(), serde_json::json!(phase_applied));
         }
 
+        // Initialize plateau state if configured and validation is present
+        let mut plateau_state = None;
+        if let Some(pat) = config.lr_plateau_patience {
+            if pat > 0 {
+                if validation_samples.is_some() {
+                    plateau_state = Some(LrPlateauState::new(pat));
+                } else {
+                    // Warn once if plateau requested but no validation
+                    if human_to_stderr {
+                        eprintln!(
+                            "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
+                        );
+                    } else {
+                        println!(
+                            "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
+                        );
+                    }
+                }
+            }
+        }
+
         let mut ctx = TrainContext {
             out_dir: &out_dir,
             save_every,
@@ -1226,6 +1247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             structured: structured_logger,
             global_step: 0,
             training_config_json: training_cfg_json,
+            plateau: plateau_state,
         };
         if is_cache && config.stream_cache {
             train_model_stream_cache(
@@ -1772,6 +1794,56 @@ struct TrainContext<'a> {
     structured: Option<StructuredLogger>,
     global_step: u64,
     training_config_json: Option<serde_json::Value>,
+    plateau: Option<LrPlateauState>,
+}
+
+// LR Plateau state (Spec #11 overlay)
+struct LrPlateauState {
+    best: f32,
+    wait: u32,
+    patience: u32,
+    min_delta: f32,
+    gamma: f32,
+    multiplier: f32,
+}
+
+impl LrPlateauState {
+    fn new(patience: u32) -> Self {
+        Self {
+            best: f32::INFINITY,
+            wait: 0,
+            patience,
+            min_delta: 1e-6,
+            gamma: 0.5,
+            multiplier: 1.0,
+        }
+    }
+
+    #[inline]
+    fn factor(&self) -> f32 {
+        self.multiplier
+    }
+
+    // Returns Some(new_multiplier) if decay triggered
+    fn update(&mut self, val_loss: f32) -> Option<f32> {
+        if !val_loss.is_finite() {
+            return None;
+        }
+        if val_loss + self.min_delta < self.best {
+            self.best = val_loss;
+            self.wait = 0;
+            None
+        } else {
+            self.wait = self.wait.saturating_add(1);
+            if self.patience > 0 && self.wait >= self.patience {
+                self.wait = 0;
+                self.multiplier *= self.gamma;
+                Some(self.multiplier)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn train_model(
@@ -1860,7 +1932,8 @@ fn train_model(
                 }
                 _ => {}
             }
-            let lr_base = (config.learning_rate * lr_factor).max(0.0);
+            let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
+            let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
             // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
             if batch_weight > 0.0 {
@@ -2161,6 +2234,36 @@ fn train_model(
                 *ctx.trackers.best_epoch = Some(epoch + 1);
             }
             *ctx.trackers.last_val_loss = Some(vl);
+            // Plateau update (epoch end)
+            if let Some(ref mut p) = ctx.plateau {
+                if !vl.is_finite() {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Warning: val_loss is not finite; skipping plateau update");
+                    } else {
+                        println!("Warning: val_loss is not finite; skipping plateau update");
+                    }
+                } else if let Some(new_mult) = p.update(vl) {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    } else {
+                        println!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    }
+                }
+            }
         }
         // Emit metrics.csv
         if ctx.dash.emit {
@@ -2448,7 +2551,8 @@ fn train_model_stream_cache(
                     }
                     _ => {}
                 }
-                let lr_base = (config.learning_rate * lr_factor).max(0.0);
+                let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
+                let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
                 // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
                 if batch_weight > 0.0 {
@@ -2557,6 +2661,36 @@ fn train_model_stream_cache(
                     *ctx.trackers.best_epoch = Some(epoch + 1);
                 }
                 *ctx.trackers.last_val_loss = Some(val_loss);
+                // Plateau update (epoch end)
+                if let Some(ref mut p) = ctx.plateau {
+                    if !val_loss.is_finite() {
+                        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                            eprintln!("Warning: val_loss is not finite; skipping plateau update");
+                        } else {
+                            println!("Warning: val_loss is not finite; skipping plateau update");
+                        }
+                    } else if let Some(new_mult) = p.update(val_loss) {
+                        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                            eprintln!(
+                                "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                                epoch + 1,
+                                p.gamma,
+                                new_mult,
+                                p.best,
+                                val_loss
+                            );
+                        } else {
+                            println!(
+                                "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                                epoch + 1,
+                                p.gamma,
+                                new_mult,
+                                p.best,
+                                val_loss
+                            );
+                        }
+                    }
+                }
             }
             if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                 eprintln!(
@@ -2760,7 +2894,8 @@ fn train_model_stream_cache(
                 }
                 _ => {}
             }
-            let lr_base = (config.learning_rate * lr_factor).max(0.0);
+            let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
+            let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
             // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
             if batch_weight > 0.0 {
@@ -3286,7 +3421,8 @@ fn train_model_with_loader(
                     }
                     _ => {}
                 }
-                let lr_base = (config.learning_rate * lr_factor).max(0.0);
+                let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
+                let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
                 // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
@@ -3762,7 +3898,8 @@ fn train_model_with_loader(
                     }
                     _ => {}
                 }
-                let lr_base = (config.learning_rate * lr_factor).max(0.0);
+                let pl = ctx.plateau.as_ref().map(|p| p.factor()).unwrap_or(1.0);
+                let lr_base = (config.learning_rate * lr_factor * pl).max(0.0);
                 // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
@@ -5168,6 +5305,7 @@ mod tests {
             structured: None,
             global_step: 0,
             training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
         let dash2 = super::DashboardOpts {
@@ -5193,6 +5331,7 @@ mod tests {
             structured: None,
             global_step: 0,
             training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
 
@@ -5354,6 +5493,7 @@ mod tests {
             structured: None,
             global_step: 0,
             training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
             .unwrap();
@@ -5381,6 +5521,7 @@ mod tests {
             structured: None,
             global_step: 0,
             training_config_json: None,
+            plateau: None,
         };
         train_model_stream_cache(
             &mut net_stream,
@@ -5493,6 +5634,7 @@ mod tests {
             structured: Some(StructuredLogger::new(struct_path.to_str().unwrap()).unwrap()),
             global_step: 0,
             training_config_json: Some(serde_json::json!({"exp_id": "unit"})),
+            plateau: None,
         };
 
         train_model_with_loader(
@@ -5599,6 +5741,7 @@ mod tests {
             structured: None,
             global_step: 0,
             training_config_json: None,
+            plateau: None,
         };
 
         train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
@@ -5688,6 +5831,7 @@ mod tests {
             structured: None,
             global_step: 0,
             training_config_json: None,
+            plateau: None,
         };
         let err = train_model_stream_cache(
             &mut net,
@@ -5770,6 +5914,7 @@ mod tests {
             structured: None,
             global_step: 0,
             training_config_json: None,
+            plateau: None,
         };
         train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
 
@@ -5778,5 +5923,45 @@ mod tests {
         assert!(net.b0.iter().all(|v| v.is_finite()));
         assert!(net.w2.iter().all(|v| v.is_finite()));
         assert!(net.b2.is_finite());
+    }
+
+    // LrPlateauState の単体テスト
+    #[test]
+    fn lr_plateau_state_basic() {
+        let mut p = super::LrPlateauState::new(2);
+        assert!((p.factor() - 1.0).abs() < 1e-12);
+        // 初回: bestが更新、wait=0、発火しない
+        assert!(p.update(1.0).is_none());
+        assert_eq!(p.wait, 0);
+        assert!((p.best - 1.0).abs() < 1e-12);
+        // 同値（改善なし）: wait=1
+        assert!(p.update(1.0).is_none());
+        assert_eq!(p.wait, 1);
+        // さらに改善なし: patience到達で発火、*gamma(=0.5)
+        if let Some(mult) = p.update(1.0) {
+            assert!((mult - 0.5).abs() < 1e-6);
+        } else {
+            panic!("expected plateau trigger");
+        }
+        assert!((p.factor() - 0.5).abs() < 1e-6);
+        assert_eq!(p.wait, 0);
+        // 改善あり: best更新、wait=0据え置き
+        assert!(p.update(0.9).is_none());
+        assert!((p.best - 0.9).abs() < 1e-12);
+        assert_eq!(p.wait, 0);
+        // 非有限は無視
+        assert!(p.update(f32::NAN).is_none());
+        assert!(p.update(f32::INFINITY).is_none());
+        assert!((p.factor() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lr_plateau_state_min_delta() {
+        let mut p = super::LrPlateauState::new(1);
+        // set best
+        assert!(p.update(1.0).is_none());
+        // min_delta=1e-6 の閾下の変化は改善扱いしない
+        assert!(p.update(0.9999999).is_some()); // patience=1 到達で発火
+        assert!((p.factor() - 0.5).abs() < 1e-6);
     }
 }
