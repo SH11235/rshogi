@@ -6,6 +6,7 @@ use engine_core::search::limits::SearchLimitsBuilder;
 use engine_core::time_management::TimeControl;
 use engine_core::{search::types::RootLine, shogi::Position};
 use once_cell::sync::Lazy;
+use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -74,6 +75,9 @@ struct RunArgs {
     /// Hidden: use deterministic stub engine for tests
     #[arg(long, hide = true, action = ArgAction::SetTrue)]
     stub: bool,
+    /// Optional seed for deterministic shuffling of game schedule (default: no shuffle)
+    #[arg(long, value_name = "N")]
+    seed: Option<u64>,
 }
 
 fn validate_args(a: &RunArgs) -> Result<()> {
@@ -158,6 +162,10 @@ struct SummaryOut {
     draws: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     games: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nps_samples: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pv_spread_samples: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -187,6 +195,7 @@ struct GauntletOut {
 // ---------------- Impl ----------------
 
 static Z_95: Lazy<f64> = Lazy::new(|| 1.959963984540054); // 95% Wilson
+const MATE_CP_ABS_THRESHOLD: i32 = 30_000;
 
 fn parse_time_spec(s: &str) -> Result<TimeSpec> {
     // Accept forms like "0/1+0.1" or "1+0.1" (seconds)
@@ -241,18 +250,48 @@ fn gather_env_info() -> EnvInfo {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "rustc unknown".to_string());
-    let toolchain = rustc.clone();
-    let cpu = fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|c| {
-            c.lines()
-                .find(|l| {
-                    l.to_lowercase().starts_with("model name")
-                        || l.to_lowercase().starts_with("hardware")
-                })
-                .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
-        })
-        .unwrap_or_else(|| "cpu unknown".to_string());
+    let toolchain = Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| rustc.clone());
+    // Cross-platform CPU brand detection (best-effort)
+    let cpu = {
+        // Linux: /proc/cpuinfo
+        let linux = || {
+            fs::read_to_string("/proc/cpuinfo").ok().and_then(|c| {
+                c.lines()
+                    .find(|l| {
+                        l.to_lowercase().starts_with("model name")
+                            || l.to_lowercase().starts_with("hardware")
+                    })
+                    .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+            })
+        };
+        // macOS: sysctl
+        let mac = || {
+            Command::new("sysctl")
+                .args(["-n", "machdep.cpu.brand_string"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        // Windows: PowerShell CIM
+        let win = || {
+            Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance -ClassName Win32_Processor).Name",
+                ])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        linux().or_else(mac).or_else(win).unwrap_or_else(|| "cpu unknown".to_string())
+    };
     let commit = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -517,7 +556,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
     // PV spread p90 (candidate; MultiPV=3)
     let mut spreads: Vec<f64> = Vec::new();
     fn is_mate_cp(cp: i32) -> bool {
-        cp.abs() >= 30_000
+        cp.abs() >= MATE_CP_ABS_THRESHOLD
     }
     for s in book.iter().take(100.min(book.len())) {
         cand.clear_tt();
@@ -531,15 +570,19 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             spreads.push((max - min) as f64);
         }
     }
-    let pv_spread_p90 = percentile_nearest_rank(spreads, 0.90);
+    let pv_spread_p90 = percentile_nearest_rank(spreads.clone(), 0.90);
+    let pv_samples = spreads.len();
 
     // Games
-    let schedule = schedule_pairs(book.len(), args.games);
+    let schedule = schedule_pairs_shuffled(book.len(), args.games, args.seed);
     let mut series: Vec<SeriesItem> = Vec::with_capacity(args.games);
     let mut wins = 0usize;
     let mut losses = 0usize;
     let mut draws = 0usize;
     for (g, (open_idx, cand_black)) in schedule.into_iter().enumerate() {
+        // Clear TT at the beginning of each game to avoid cross-game warming effects
+        base.clear_tt();
+        cand.clear_tt();
         let sfen = &book[open_idx];
         let mut pos = Position::from_sfen(sfen).map_err(|e| anyhow!(e))?;
         // Use fixed-time per move equal to increment (~0.1s) as minimal policy
@@ -647,7 +690,8 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         0.0
     };
     let wl_lower = wilson_lower_bound(wins, losses);
-    // Gate: 最終合格: 勝率+5%pt かつ NPS±3%
+    // Gate: 準合格: 決着局の勝率の Wilson95%下限>50%
+    //      最終合格: スコア率+5%pt(=55%) かつ NPS±3%
     let mut gate = GateDecision::Reject;
     let mut reason: Option<String> = None;
     if wl_lower > 0.5 {
@@ -665,6 +709,23 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             rs.push(format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
         }
         reason = Some(rs.join(", "));
+    }
+    // Ensure we don't pass when samples are missing for fairness
+    let mut sample_reasons: Vec<String> = Vec::new();
+    if n_samples == 0 {
+        sample_reasons.push("no_nps_samples".to_string());
+    }
+    if pv_samples == 0 {
+        sample_reasons.push("no_pv_samples".to_string());
+    }
+    if !sample_reasons.is_empty() {
+        if matches!(gate, GateDecision::Pass) {
+            gate = GateDecision::Reject;
+        }
+        reason = Some(match reason {
+            Some(r) if !r.is_empty() => format!("{}, {}", r, sample_reasons.join(", ")),
+            _ => sample_reasons.join(", "),
+        });
     }
 
     let out = GauntletOut {
@@ -688,6 +749,8 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             losses: Some(losses),
             draws: Some(draws),
             games: Some(args.games),
+            nps_samples: Some(n_samples),
+            pv_spread_samples: Some(pv_samples),
         },
         training_config: None,
         series,
@@ -712,7 +775,7 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
     let mut wins = 0usize;
     let mut losses = 0usize;
     let mut draws = 0usize;
-    let schedule = schedule_pairs(book.len(), args.games);
+    let schedule = schedule_pairs_shuffled(book.len(), args.games, args.seed);
     for (g, (open_idx, cand_black)) in schedule.into_iter().enumerate() {
         let sfen = &book[open_idx];
         let (res, plies, nb, nc, nps_b, nps_c) = stub.play_game(g);
@@ -784,6 +847,8 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             losses: Some(losses),
             draws: Some(draws),
             games: Some(args.games),
+            nps_samples: Some(100.min(book.len())),
+            pv_spread_samples: Some(100.min(book.len())),
         },
         training_config: None,
         series,
@@ -809,6 +874,16 @@ fn emit_structured_jsonl_to<W: Write>(mut w: W, games: usize, summary: &SummaryO
         nps_delta_pct: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pv_spread_p90_cp: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wins: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        losses: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        draws: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nps_samples: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pv_spread_samples: Option<usize>,
     }
     let ts_str = Utc::now().to_rfc3339();
     let line = Line {
@@ -826,6 +901,11 @@ fn emit_structured_jsonl_to<W: Write>(mut w: W, games: usize, summary: &SummaryO
         draw: Some(summary.draw),
         nps_delta_pct: Some(summary.nps_delta_pct),
         pv_spread_p90_cp: Some(summary.pv_spread_p90_cp),
+        wins: summary.wins,
+        losses: summary.losses,
+        draws: summary.draws,
+        nps_samples: summary.nps_samples,
+        pv_spread_samples: summary.pv_spread_samples,
     };
     if let Ok(s) = serde_json::to_string(&line) {
         let _ = writeln!(w, "{}", s);
@@ -839,6 +919,15 @@ fn schedule_pairs(book_len: usize, games: usize) -> Vec<(usize, bool)> {
             [(open_idx, true), (open_idx, false)]
         })
         .collect()
+}
+
+fn schedule_pairs_shuffled(book_len: usize, games: usize, seed: Option<u64>) -> Vec<(usize, bool)> {
+    let mut v = schedule_pairs(book_len, games);
+    if let Some(s) = seed {
+        let mut rng = StdRng::seed_from_u64(s);
+        v.as_mut_slice().shuffle(&mut rng);
+    }
+    v
 }
 
 fn main() -> Result<()> {
@@ -870,16 +959,18 @@ fn main() -> Result<()> {
 
     // Markdown output
     if report_to_stdout {
-        print!("{}", build_markdown(&out));
+        println!("{}", build_markdown(&out));
     } else {
         write_markdown(Path::new(&args.report), &out)?;
     }
 
     // structured_v1 line: default stdout, but if either main outputs are stdout, use stderr
     if json_to_stdout || report_to_stdout {
-        emit_structured_jsonl_to(std::io::stderr(), out.params.games, &out.summary);
+        let mut err = std::io::stderr().lock();
+        emit_structured_jsonl_to(&mut err, out.params.games, &out.summary);
     } else {
-        emit_structured_jsonl_to(std::io::stdout(), out.params.games, &out.summary);
+        let mut outw = std::io::stdout().lock();
+        emit_structured_jsonl_to(&mut outw, out.params.games, &out.summary);
     }
     Ok(())
 }
