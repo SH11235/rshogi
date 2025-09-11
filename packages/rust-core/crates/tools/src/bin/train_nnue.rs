@@ -921,28 +921,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.get_one::<f32>("w-mate-ring").copied(),
     );
 
-    fn build_training_config_obj(w: &wcfg::WeightingConfig) -> serde_json::Value {
-        let mut obj = serde_json::json!({
-            "weighting": w.active.iter().map(|k| match k {
-                wcfg::WeightingKind::Exact => "exact",
-                wcfg::WeightingKind::Gap => "gap",
-                wcfg::WeightingKind::Phase => "phase",
-                wcfg::WeightingKind::Mate => "mate",
-            }).collect::<Vec<_>>()
-        });
-        let m = obj.as_object_mut().unwrap();
-        m.insert("w_exact".into(), serde_json::json!(w.coeffs.w_exact));
-        m.insert("w_gap".into(), serde_json::json!(w.coeffs.w_gap));
-        m.insert("w_phase_opening".into(), serde_json::json!(w.coeffs.w_phase_opening));
-        m.insert("w_phase_middlegame".into(), serde_json::json!(w.coeffs.w_phase_middlegame));
-        m.insert("w_phase_endgame".into(), serde_json::json!(w.coeffs.w_phase_endgame));
-        m.insert("w_mate_ring".into(), serde_json::json!(w.coeffs.w_mate_ring));
-        if let Some(p) = w.preset.as_ref() {
-            m.insert("preset".into(), serde_json::json!(p));
-        }
-        obj
-    }
-
     let config = Config {
         epochs: app.get_one::<String>("epochs").unwrap().parse()?,
         batch_size: app.get_one::<String>("batch-size").unwrap().parse()?,
@@ -1237,7 +1215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             structured: structured_logger,
             global_step: 0,
-            training_config_json: Some(build_training_config_obj(&weighting_cfg)),
+            training_config_json: serde_json::to_value(&weighting_cfg).ok(),
         };
         if is_cache && config.stream_cache {
             train_model_stream_cache(
@@ -1819,6 +1797,8 @@ fn train_model(
         let mut samples_since = 0usize;
         let mut batches_since = 0usize;
         let mut zero_weight_batches = 0usize;
+        // 直近のバッチloss（throughput構造化ログ用）。計算しなかった場合は前回値を保持
+        let mut last_loss_for_log: f32 = 0.0;
         for batch_idx in 0..n_batches {
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
@@ -1867,17 +1847,21 @@ fn train_model(
                 _ => {}
             }
             let lr_base = (config.learning_rate * lr_factor).max(0.0);
-            let loss = train_batch_by_indices(
-                network,
-                batch,
-                &batch_indices,
-                config,
-                &mut adam_state,
-                lr_base,
-            );
+            // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
-            total_loss += loss * batch_weight;
-            total_weight += batch_weight;
+            if batch_weight > 0.0 {
+                let loss = train_batch_by_indices(
+                    network,
+                    batch,
+                    &batch_indices,
+                    config,
+                    &mut adam_state,
+                    lr_base,
+                );
+                total_loss += loss * batch_weight;
+                total_weight += batch_weight;
+                last_loss_for_log = loss;
+            }
             last_lr_base = lr_base;
 
             total_batches += 1;
@@ -1922,7 +1906,7 @@ fn train_model(
                         "global_step": ctx.global_step as i64,
                         "epoch": (epoch + 1) as i64,
                         "lr": lr_base as f64,
-                        "train_loss": loss as f64,
+                        "train_loss": last_loss_for_log as f64,
                         "examples_sec": sps as f64,
                         "loader_ratio": 0.0f64,
                         "wall_time": secs as f64,
@@ -2298,6 +2282,7 @@ fn train_model_stream_cache(
 
             let mut loaded: u64 = 0;
             let mut last_lr_base = config.learning_rate;
+            let mut last_loss_for_log: f32 = 0.0;
             while loaded < num_samples {
                 // Read up to batch_size samples synchronously
                 let mut batch = Vec::with_capacity(config.batch_size);
@@ -2446,17 +2431,21 @@ fn train_model_stream_cache(
                     _ => {}
                 }
                 let lr_base = (config.learning_rate * lr_factor).max(0.0);
-                let loss = train_batch_by_indices(
-                    network,
-                    &batch,
-                    &indices,
-                    config,
-                    &mut adam_state,
-                    lr_base,
-                );
+                // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
-                total_loss += loss * batch_weight;
-                total_weight += batch_weight;
+                if batch_weight > 0.0 {
+                    let loss = train_batch_by_indices(
+                        network,
+                        &batch,
+                        &indices,
+                        config,
+                        &mut adam_state,
+                        lr_base,
+                    );
+                    total_loss += loss * batch_weight;
+                    total_weight += batch_weight;
+                    last_loss_for_log = loss;
+                }
                 last_lr_base = lr_base;
 
                 total_samples_epoch += batch.len();
@@ -2495,7 +2484,7 @@ fn train_model_stream_cache(
                             "global_step": ctx.global_step as i64,
                             "epoch": (epoch + 1) as i64,
                             "lr": lr_base as f64,
-                            "train_loss": loss as f64,
+                            "train_loss": last_loss_for_log as f64,
                             "examples_sec": sps as f64,
                             "loader_ratio": loader_ratio/100.0,
                             "wall_time": secs as f64,
@@ -2687,6 +2676,7 @@ fn train_model_stream_cache(
         let mut batches_since = 0usize;
         let mut wait_ns_since: u128 = 0;
         let mut wait_ns_epoch: u128 = 0;
+        let mut last_loss_for_log: f32 = 0.0;
 
         let mut last_lr_base = config.learning_rate;
         loop {
@@ -2739,11 +2729,21 @@ fn train_model_stream_cache(
                 _ => {}
             }
             let lr_base = (config.learning_rate * lr_factor).max(0.0);
-            let loss =
-                train_batch_by_indices(network, &batch, &indices, config, &mut adam_state, lr_base);
+            // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
             let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
-            total_loss += loss * batch_weight;
-            total_weight += batch_weight;
+            if batch_weight > 0.0 {
+                let loss = train_batch_by_indices(
+                    network,
+                    &batch,
+                    &indices,
+                    config,
+                    &mut adam_state,
+                    lr_base,
+                );
+                total_loss += loss * batch_weight;
+                total_weight += batch_weight;
+                last_loss_for_log = loss;
+            }
             last_lr_base = lr_base;
 
             total_samples_epoch += batch.len();
@@ -2796,7 +2796,7 @@ fn train_model_stream_cache(
                         "global_step": ctx.global_step as i64,
                         "epoch": (epoch + 1) as i64,
                         "lr": lr_base as f64,
-                        "train_loss": loss as f64,
+                        "train_loss": last_loss_for_log as f64,
                         "examples_sec": sps as f64,
                         "loader_ratio": (loader_ratio )/100.0,
                         "wall_time": secs as f64,
@@ -3162,6 +3162,7 @@ fn train_model_with_loader(
             let mut wait_ns_since: u128 = 0;
             let mut wait_ns_epoch: u128 = 0;
             let mut last_lr_base = config.learning_rate;
+            let mut last_loss_for_log: f32 = 0.0;
 
             loop {
                 let (maybe_indices, wait_dur) = async_loader.next_batch_with_wait();
@@ -3208,18 +3209,22 @@ fn train_model_with_loader(
                     _ => {}
                 }
                 let lr_base = (config.learning_rate * lr_factor).max(0.0);
-                let loss = train_batch_by_indices(
-                    network,
-                    &train_samples_arc,
-                    &indices,
-                    config,
-                    &mut adam_state,
-                    lr_base,
-                );
+                // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
-                total_loss += loss * batch_weight;
-                total_weight += batch_weight;
+                if batch_weight > 0.0 {
+                    let loss = train_batch_by_indices(
+                        network,
+                        &train_samples_arc,
+                        &indices,
+                        config,
+                        &mut adam_state,
+                        lr_base,
+                    );
+                    total_loss += loss * batch_weight;
+                    total_weight += batch_weight;
+                    last_loss_for_log = loss;
+                }
 
                 let batch_len = indices.len();
                 batch_count += 1;
@@ -3279,7 +3284,7 @@ fn train_model_with_loader(
                             "global_step": ctx.global_step as i64,
                             "epoch": (epoch + 1) as i64,
                             "lr": lr_base as f64,
-                            "train_loss": loss as f64,
+                            "train_loss": last_loss_for_log as f64,
                             "examples_sec": sps as f64,
                             "loader_ratio": (loader_ratio )/100.0,
                             "wall_time": secs as f64,
@@ -3538,7 +3543,7 @@ fn train_model_with_loader(
             }
             // Structured per-epoch logs (train/val)
             if let Some(ref lg) = ctx.structured {
-                let rec_train = serde_json::json!({
+                let mut rec_train = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
                     "phase": "train",
                     "global_step": ctx.global_step as i64,
@@ -3549,6 +3554,9 @@ fn train_model_with_loader(
                     "loader_ratio": (loader_ratio_epoch as f64)/100.0,
                     "wall_time": epoch_secs as f64,
                 });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
                 lg.write_json(&rec_train);
                 let mut rec_val = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
@@ -3557,6 +3565,9 @@ fn train_model_with_loader(
                     "epoch": (epoch + 1) as i64,
                     "wall_time": epoch_secs as f64,
                 });
+                if let Some(obj) = ctx.training_config_json.clone() {
+                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+                }
                 if let Some(vl) = val_loss {
                     rec_val
                         .as_object_mut()
@@ -3608,6 +3619,7 @@ fn train_model_with_loader(
             let mut samples_since = 0usize;
             let mut batches_since = 0usize;
             let mut last_lr_base = config.learning_rate;
+            let mut last_loss_for_log: f32 = 0.0;
 
             while let Some(indices) = {
                 let t0 = Instant::now();
@@ -3662,18 +3674,22 @@ fn train_model_with_loader(
                     _ => {}
                 }
                 let lr_base = (config.learning_rate * lr_factor).max(0.0);
-                let loss = train_batch_by_indices(
-                    network,
-                    &train_samples_arc,
-                    &indices,
-                    config,
-                    &mut adam_state,
-                    lr_base,
-                );
+                // 先にバッチ重みを集計し、ゼロなら計算自体をスキップ
                 let batch_weight: f32 =
                     indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
-                total_loss += loss * batch_weight;
-                total_weight += batch_weight;
+                if batch_weight > 0.0 {
+                    let loss = train_batch_by_indices(
+                        network,
+                        &train_samples_arc,
+                        &indices,
+                        config,
+                        &mut adam_state,
+                        lr_base,
+                    );
+                    total_loss += loss * batch_weight;
+                    total_weight += batch_weight;
+                    last_loss_for_log = loss;
+                }
 
                 let batch_len = indices.len();
                 batch_count += 1;
@@ -3716,7 +3732,7 @@ fn train_model_with_loader(
                             "global_step": ctx.global_step as i64,
                             "epoch": (epoch + 1) as i64,
                             "lr": lr_base as f64,
-                            "train_loss": loss as f64,
+                            "train_loss": last_loss_for_log as f64,
                             "examples_sec": sps as f64,
                             "loader_ratio": 0.0f64,
                             "wall_time": secs as f64,
@@ -4065,6 +4081,9 @@ fn train_batch_by_indices(
 
     for &idx in indices {
         let sample = &samples[idx];
+        if sample.weight == 0.0 {
+            continue; // skip updates entirely for zero-weight samples
+        }
         // Forward pass with reused buffers
         let output =
             forward_into(network, &sample.features, &mut acc_buffer, &mut activated_buffer);
@@ -5237,6 +5256,193 @@ mod tests {
             net_inmem.b2,
             net_stream.b2
         );
+    }
+
+    // in-mem loader async 経路（prefetch>0）の structured JSONL に training_config が入ること
+    #[test]
+    fn structured_training_config_present_in_inmem_async_loader() {
+        let td = tempdir().unwrap();
+        let out_dir = td.path();
+        let struct_path = out_dir.join("structured.jsonl");
+
+        // 最小のサンプル（特徴ゼロでも動作）
+        let train_samples: Vec<Sample> = (0..5)
+            .map(|_| Sample {
+                features: vec![],
+                label: 0.0,
+                weight: 1.0,
+                cp: None,
+                phase: None,
+            })
+            .collect();
+        let val_samples: Vec<Sample> = (0..3)
+            .map(|_| Sample {
+                features: vec![],
+                label: 0.0,
+                weight: 1.0,
+                cp: None,
+                phase: None,
+            })
+            .collect();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 2,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
+            shuffle: false,
+            prefetch_batches: 2,          // async 経路
+            throughput_interval_sec: 1e9, // throughput出力を抑止
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 32,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
+        };
+
+        let dash = DashboardOpts {
+            emit: false,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network: Option<Network> = None;
+        let mut best_val_loss = f32::INFINITY;
+        let mut last_val_loss: Option<f32> = None;
+        let mut best_epoch: Option<usize> = None;
+        let mut ctx = TrainContext {
+            out_dir,
+            save_every: None,
+            dash,
+            trackers: TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+            structured: Some(StructuredLogger::new(struct_path.to_str().unwrap()).unwrap()),
+            global_step: 0,
+            training_config_json: Some(serde_json::json!({"exp_id": "unit"})),
+        };
+
+        train_model_with_loader(
+            &mut net,
+            train_samples,
+            &Some(val_samples),
+            &cfg,
+            &mut rand::rngs::StdRng::seed_from_u64(1234),
+            &mut ctx,
+        )
+        .unwrap();
+
+        // JSONLを読んで、phase=val のレコードに training_config があることを確認
+        let content = std::fs::read_to_string(struct_path).unwrap();
+        let mut found_val = false;
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v.get("phase").and_then(|x| x.as_str()) == Some("val") {
+                assert!(v.get("training_config").is_some());
+                found_val = true;
+                break;
+            }
+        }
+        assert!(found_val, "no val record with training_config found in structured JSONL");
+    }
+
+    // ゼロ重みサンプルのみのバッチでは更新が一切走らない（L2=0で検証）
+    #[test]
+    fn zero_weight_batches_do_not_update() {
+        let td = tempdir().unwrap();
+        let out_dir = td.path();
+        // 全て weight=0 のサンプル
+        let mut samples: Vec<Sample> = (0..4)
+            .map(|_| Sample {
+                features: vec![0], // 何かしらの特徴を入れても weight=0 で無視される
+                label: 0.0,
+                weight: 0.0,
+                cp: None,
+                phase: None,
+            })
+            .collect();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 2,
+            learning_rate: 0.01,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0, // L2も無効化
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: DEFAULT_RELU_CLIP_NUM,
+            shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 1e9,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 32,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
+        };
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+        let before = net.clone();
+
+        let dash = DashboardOpts {
+            emit: false,
+            calib_bins_n: DEFAULT_CALIBRATION_BINS,
+            do_plots: false,
+            val_is_jsonl: false,
+        };
+        let mut best_network: Option<Network> = None;
+        let mut best_val_loss = f32::INFINITY;
+        let mut last_val_loss: Option<f32> = None;
+        let mut best_epoch: Option<usize> = None;
+        let mut ctx = TrainContext {
+            out_dir,
+            save_every: None,
+            dash,
+            trackers: TrainTrackers {
+                best_network: &mut best_network,
+                best_val_loss: &mut best_val_loss,
+                last_val_loss: &mut last_val_loss,
+                best_epoch: &mut best_epoch,
+            },
+            structured: None,
+            global_step: 0,
+            training_config_json: None,
+        };
+
+        train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
+
+        // 重みが全く変わっていないことを確認（ビット単位で比較して浮動小数比較Lintを回避）
+        assert!(before.w0.iter().zip(net.w0.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(before.b0.iter().zip(net.b0.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(before.w2.iter().zip(net.w2.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert_eq!(before.b2.to_bits(), net.b2.to_bits());
     }
 
     // 非同期ストリーム（prefetch>0）で破損キャッシュのエラーが上位に伝搬すること
