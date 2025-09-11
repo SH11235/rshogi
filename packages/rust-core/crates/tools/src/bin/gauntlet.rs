@@ -329,16 +329,18 @@ impl PlayerEngine {
         hash_mb: usize,
         engine_type: EngineType,
         multipv: u8,
-    ) -> Self {
+    ) -> Result<Self> {
         engine_core::init::init_all_tables_once();
         let mut eng = Engine::new(engine_type);
         eng.set_threads(threads);
         eng.set_hash_size(hash_mb);
         eng.set_multipv_persistent(multipv);
         if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
-            let _ = eng.load_nnue_weights(weights);
+            if let Err(e) = eng.load_nnue_weights(weights) {
+                return Err(anyhow!("failed to load NNUE weights '{}': {e}", weights));
+            }
         }
-        Self { eng }
+        Ok(Self { eng })
     }
 
     fn search_best(
@@ -425,14 +427,14 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         args.hash_mb,
         EngineType::EnhancedNnue,
         args.multipv,
-    );
+    )?;
     let mut cand = PlayerEngine::new(
         &args.cand,
         args.threads,
         args.hash_mb,
         EngineType::EnhancedNnue,
         args.multipv,
-    );
+    )?;
 
     // NPS measurement (fixed positions, fixed time per position)
     let nps_sample_ms = time.inc_ms.max(100);
@@ -497,9 +499,6 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
     let pv_spread_p90 = percentile_nearest_rank(spreads, 0.90);
 
     // Games
-    if args.games % 2 != 0 {
-        return Err(anyhow!("--games must be even for fair pairing"));
-    }
     let schedule = schedule_pairs(book.len(), args.games);
     let mut series: Vec<SeriesItem> = Vec::with_capacity(args.games);
     let mut wins = 0usize;
