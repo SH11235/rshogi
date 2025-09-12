@@ -453,7 +453,9 @@ where
             continue;
         }
 
-        // Make move
+        // Make move (pair evaluator hooks with move using guard)
+        let eval_arc = searcher.evaluator.clone();
+        let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
         let undo_info = pos.do_move(mv);
 
         // Skip prefetch in quiescence - adds overhead with minimal benefit
@@ -465,6 +467,7 @@ where
 
         // Undo move
         pos.undo_move(mv, undo_info);
+        eval_guard.undo();
 
         // Stop check after recursion
         if searcher.context.should_stop() {
@@ -530,10 +533,13 @@ where
                 continue;
             }
 
+            let eval_arc = searcher.evaluator.clone();
+            let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
             let undo = pos.do_move(mv);
             let score =
                 -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
             pos.undo_move(mv, undo);
+            eval_guard.undo();
 
             // Stats: count searched non-capture checks
             SearchStats::bump(&mut searcher.stats.qs_noncapture_checks, 1);
@@ -600,10 +606,13 @@ where
                 continue;
             }
 
+            let eval_arc = searcher.evaluator.clone();
+            let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
             let undo = pos.do_move(mv);
             let score =
                 -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
             pos.undo_move(mv, undo);
+            eval_guard.undo();
 
             // Stats: count searched non-capture promotions that give check
             SearchStats::bump(&mut searcher.stats.qs_promo_checks, 1);
@@ -689,6 +698,9 @@ where
                     continue;
                 }
 
+                let eval_arc = searcher.evaluator.clone();
+                let mut eval_guard =
+                    crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
                 let undo = pos.do_move(mv);
                 let score = -quiescence_search(
                     searcher,
@@ -699,6 +711,7 @@ where
                     qply.saturating_add(1),
                 );
                 pos.undo_move(mv, undo);
+                eval_guard.undo();
                 // Count only after we actually searched it
                 SearchStats::bump(&mut searcher.stats.qs_check_drops, 1);
 

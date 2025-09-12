@@ -9,7 +9,7 @@ use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::parallel::ParallelSearcher,
-    search::unified::UnifiedSearcher,
+    search::unified::{HookSuppressor, UnifiedSearcher},
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
 };
@@ -44,7 +44,7 @@ type NnueEnhancedSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, true>;
 
 /// Type alias for parallel searchers
 type MaterialParallelSearcher = ParallelSearcher<MaterialEvaluator>;
-type NnueParallelSearcher = ParallelSearcher<NNUEEvaluatorProxy>;
+type NnueParallelSearcher = ParallelSearcher<HookSuppressor<NNUEEvaluatorProxy>>;
 
 /// Engine type selection
 ///
@@ -582,8 +582,9 @@ impl Engine {
                     let nnue_proxy = NNUEEvaluatorProxy {
                         evaluator: self.nnue_evaluator.clone(),
                     };
+                    let hookless = HookSuppressor { inner: nnue_proxy };
                     *searcher_guard = Some(NnueParallelSearcher::new(
-                        Arc::new(nnue_proxy),
+                        Arc::new(hookless),
                         self.shared_tt.clone(),
                         self.num_threads, // Use max threads, not active threads
                     ));

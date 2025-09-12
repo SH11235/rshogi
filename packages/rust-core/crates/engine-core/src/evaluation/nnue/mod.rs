@@ -249,6 +249,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use crate::{shogi::Move, usi::parse_usi_square, Piece, PieceType};
