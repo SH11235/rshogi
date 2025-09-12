@@ -279,14 +279,14 @@ impl NNUEEvaluatorWrapper {
                 self.tracked_hash = Some(pos.zobrist_hash);
             }
             Backend::Single {
-                net: _net,
+                net,
                 #[cfg(feature = "nnue_single_diff")]
                 acc_stack,
             } => {
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     acc_stack.clear();
-                    acc_stack.push(single_state::SingleAcc::refresh(pos, _net));
+                    acc_stack.push(single_state::SingleAcc::refresh(pos, net));
                 }
                 self.tracked_hash = Some(pos.zobrist_hash);
             }
@@ -323,7 +323,11 @@ impl NNUEEvaluatorWrapper {
                         let next = single_state::SingleAcc::apply_update(&cur, pos, mv, net);
                         acc_stack.push(next);
                     } else {
-                        acc_stack.push(single_state::SingleAcc::refresh(pos, net));
+                        // 初回 do_move で acc_stack が空の場合でも、
+                        // 子局面の Acc を積む（親局面ではなく post で初期化）。
+                        let mut post = pos.clone();
+                        let _u = post.do_move(mv);
+                        acc_stack.push(single_state::SingleAcc::refresh(&post, net));
                     }
                 }
                 self.tracked_hash = None;
@@ -667,5 +671,54 @@ mod tests {
         let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
         pos.undo_move(mv, undo);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_two_step_update_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize; // small acc dim
+                        // 非トリビアル（w0!=0, b0<0）で ReLU 交差の可能性を持たせる
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.25; n_feat * d],
+            b0: Some(vec![-0.1; d]),
+            w2: vec![1.0; d],
+            b2: 0.5,
+        };
+
+        // 盤面セットアップ：玉と歩
+        let mut pos = Position::empty();
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("3g").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("7c").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+        pos.side_to_move = Color::Black;
+
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        // 1手目：3g->3f
+        let mv1 =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv1, &net);
+        let _u1 = pos.do_move(mv1);
+        // 2手目：7c->7d（白）
+        let mv2 =
+            Move::make_normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap());
+        let acc2 = super::single_state::SingleAcc::apply_update(&acc1, &pos, mv2, &net);
+        let _u2 = pos.do_move(mv2);
+
+        // フル再構築と一致
+        let eval_acc = net.evaluate_from_accumulator(acc2.acc_for(pos.side_to_move));
+        let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
     }
 }
