@@ -113,7 +113,9 @@ where
             );
         }
 
-        // Make move
+        // Make move (pair evaluator hooks with move using guard)
+        let eval_arc = searcher.evaluator.clone();
+        let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
         let undo_info = pos.do_move(mv);
 
         // Note: Node counting is done in alpha_beta() to avoid double counting
@@ -157,8 +159,9 @@ where
             }
         };
 
-        // Undo move
+        // Undo move (guarantee evaluator hook pairing)
         pos.undo_move(mv, undo_info);
+        eval_guard.undo();
 
         // Check stop flag immediately after alpha-beta search
         if searcher.context.should_stop() {

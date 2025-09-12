@@ -21,12 +21,47 @@ use crate::{
 pub trait Evaluator {
     /// Evaluate position from side to move perspective
     fn evaluate(&self, pos: &Position) -> i32;
+
+    /// Notify evaluator that search is starting at this position (root reset)
+    /// Default: no-op
+    fn on_set_position(&self, _pos: &Position) {}
+
+    /// Notify evaluator before making a real move (called with pre-move position)
+    /// Default: no-op
+    fn on_do_move(&self, _pre_pos: &Position, _mv: crate::shogi::Move) {}
+
+    /// Notify evaluator after undoing the last real move
+    /// Default: no-op
+    fn on_undo_move(&self) {}
+
+    /// Notify evaluator before doing a null move (side-to-move flip)
+    /// Default: no-op
+    fn on_do_null_move(&self, _pre_pos: &Position) {}
+
+    /// Notify evaluator after undoing the last null move
+    /// Default: no-op
+    fn on_undo_null_move(&self) {}
 }
 
 /// Implement Evaluator for Arc<T> where T: Evaluator
 impl<T: Evaluator + ?Sized> Evaluator for std::sync::Arc<T> {
     fn evaluate(&self, pos: &Position) -> i32 {
         (**self).evaluate(pos)
+    }
+    fn on_set_position(&self, pos: &Position) {
+        (**self).on_set_position(pos)
+    }
+    fn on_do_move(&self, pre_pos: &Position, mv: crate::shogi::Move) {
+        (**self).on_do_move(pre_pos, mv)
+    }
+    fn on_undo_move(&self) {
+        (**self).on_undo_move()
+    }
+    fn on_do_null_move(&self, pre_pos: &Position) {
+        (**self).on_do_null_move(pre_pos)
+    }
+    fn on_undo_null_move(&self) {
+        (**self).on_undo_null_move()
     }
 }
 

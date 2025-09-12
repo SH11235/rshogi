@@ -295,13 +295,16 @@ where
                 continue;
             }
 
-            // Make move
+            // Make move (pair evaluator hooks with move using guard)
+            let eval_arc = searcher.evaluator.clone();
+            let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
             let undo_info = pos.do_move(mv);
 
             // Check if still in check after the move
             let still_in_check = pos.is_in_check();
             if still_in_check {
                 pos.undo_move(mv, undo_info);
+                eval_guard.undo();
                 continue; // Not a valid evasion
             }
 
@@ -311,6 +314,7 @@ where
 
             // Undo move
             pos.undo_move(mv, undo_info);
+            eval_guard.undo();
 
             // Check stop flag
             if searcher.context.should_stop() {

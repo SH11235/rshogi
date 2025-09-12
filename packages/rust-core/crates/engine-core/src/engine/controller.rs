@@ -1142,6 +1142,56 @@ impl Evaluator for NNUEEvaluatorProxy {
             }
         }
     }
+
+    fn on_set_position(&self, pos: &Position) {
+        let mut guard = match self.evaluator.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                error!("Failed to acquire NNUE evaluator lock in on_set_position");
+                return;
+            }
+        };
+        if let Some(e) = guard.as_mut() {
+            // Safe: NNUEEvaluatorWrapper::set_position handles backend differences
+            e.set_position(pos);
+        }
+    }
+
+    fn on_do_move(&self, pre_pos: &Position, mv: crate::shogi::Move) {
+        let mut guard = match self.evaluator.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                error!("Failed to acquire NNUE evaluator lock in on_do_move");
+                return;
+            }
+        };
+        if let Some(wrapper) = guard.as_mut() {
+            // Ignore NNUE-specific errors in hook: treat as 0-eval fallback upstream
+            let _ = wrapper.do_move(pre_pos, mv);
+        }
+    }
+
+    fn on_undo_move(&self) {
+        let mut guard = match self.evaluator.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                error!("Failed to acquire NNUE evaluator lock in on_undo_move");
+                return;
+            }
+        };
+        if let Some(wrapper) = guard.as_mut() {
+            wrapper.undo_move();
+        }
+    }
+
+    fn on_do_null_move(&self, _pre_pos: &Position) {
+        // Classic/Single backends don't require accumulator changes for null move.
+        // Intentionally no-op to keep hook symmetry.
+    }
+
+    fn on_undo_null_move(&self) {
+        // Intentionally no-op
+    }
 }
 
 #[cfg(test)]
