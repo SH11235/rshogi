@@ -1,122 +1,109 @@
-//! NNUE performance benchmark
+use anyhow::{anyhow, Result};
+use clap::Parser;
+use engine_core::evaluation::nnue::single_state::SingleAcc;
+use engine_core::evaluation::nnue::weights::load_single_weights;
+use engine_core::movegen::MoveGenerator;
+use engine_core::shogi::{Move, Position};
+use std::time::{Duration, Instant};
 
-use std::time::Instant;
+#[derive(Parser, Debug)]
+#[command(about = "NNUE Single (diff vs refresh) micro-benchmark", version)]
+struct Args {
+    /// Path to SINGLE_CHANNEL weights (trainer export with END_HEADER)
+    #[arg(long, value_name = "FILE")]
+    single_weights: String,
 
-use engine_core::{
-    benchmark::{benchmark_evaluation, run_benchmark},
-    engine::controller::{Engine, EngineType},
-    search::SearchLimits,
-    Position,
-};
+    /// Seconds to run for each benchmark section
+    #[arg(long, default_value_t = 3)]
+    seconds: u64,
+}
 
-fn main() {
-    println!("=== NNUE Performance Benchmark ===\n");
+fn main() -> Result<()> {
+    env_logger::init();
+    let args = Args::parse();
 
-    // Run comprehensive evaluation benchmark
-    println!("1. Direct Evaluation Function Comparison");
-    println!("========================================");
-    let eval_comparison = benchmark_evaluation();
+    let net = load_single_weights(&args.single_weights)
+        .map_err(|e| anyhow!("failed to load SINGLE weights: {e}"))?;
 
-    println!("\nMaterial Evaluator:");
-    println!("  - Evaluations/sec: {}", eval_comparison.material.evals_per_sec);
-    println!("  - Avg time: {} ns", eval_comparison.material.avg_eval_time_ns);
-
-    println!("\nNNUE Evaluator:");
-    println!("  - Evaluations/sec: {}", eval_comparison.nnue.evals_per_sec);
-    println!("  - Avg time: {} ns", eval_comparison.nnue.avg_eval_time_ns);
-
-    println!("\nPerformance Comparison:");
-    println!(
-        "  - NNUE is {:.1}x slower than Material evaluator",
-        eval_comparison.nnue_slowdown_factor
-    );
-    println!(
-        "  - NNUE overhead: {:.1}%",
-        (eval_comparison.nnue_slowdown_factor - 1.0) * 100.0
-    );
-
-    // Test positions for search benchmark
-    println!("\n\n2. Search Performance Comparison");
-    println!("=================================");
-    let positions = vec![
-        Position::startpos(),
-        // Add more test positions here if needed
-    ];
-
-    // Compare Material vs NNUE evaluation in search
-    for (i, pos) in positions.iter().enumerate() {
-        println!("\nPosition {}:", i + 1);
-
-        // Material evaluator benchmark
-        let mut material_engine = Engine::new(EngineType::Material);
-        let material_result = benchmark_engine(&mut material_engine, pos.clone(), "Material");
-
-        // NNUE evaluator benchmark
-        let mut nnue_engine = Engine::new(EngineType::Nnue);
-        let nnue_result = benchmark_engine(&mut nnue_engine, pos.clone(), "NNUE");
-
-        // Compare results
-        println!("\nSearch Comparison:");
-        println!("  Material NPS: {:.0}", material_result.0);
-        println!("  NNUE NPS: {:.0}", nnue_result.0);
-        println!("  NPS ratio: {:.2}x", material_result.0 / nnue_result.0);
-        println!(
-            "  NNUE search overhead: {:.1}%",
-            (1.0 - nnue_result.0 / material_result.0) * 100.0
-        );
-
-        println!("\nEvaluation Quality:");
-        println!("  Material score: {}", material_result.1);
-        println!("  NNUE score: {}", nnue_result.1);
-        println!("  Score difference: {}", (nnue_result.1 - material_result.1).abs());
+    // Build start position and a small suite
+    let mut positions = Vec::new();
+    positions.push(Position::startpos());
+    // A light endgame position: just kings to keep movegen cheap
+    {
+        let mut p = Position::empty();
+        use engine_core::usi::parse_usi_square;
+        use engine_core::{Color, Piece, PieceType};
+        p.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        p.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        positions.push(p);
     }
 
-    // Run general benchmark
-    println!("\n\n3. General Performance Metrics");
-    println!("==============================");
-    let general_result = run_benchmark();
-    println!("Move Generation: {} moves/sec", general_result.movegen_speed);
-    println!("Search NPS (Material): {} nodes/sec", general_result.nps);
-}
-
-fn benchmark_engine(engine: &mut Engine, mut pos: Position, name: &str) -> (f64, i32) {
-    println!("\n  {name} Engine:");
-
-    let limits = SearchLimits::builder()
-        .depth(8)
-        .fixed_time_ms(5000) // Longer time for more accurate measurement
-        .build();
-
+    // Measure refresh throughput
+    let refresh_target = Duration::from_secs(args.seconds);
+    let mut refresh_iters: u64 = 0;
     let start = Instant::now();
-    let result = engine.search(&mut pos, limits);
-    let elapsed = start.elapsed();
+    while start.elapsed() < refresh_target {
+        for pos in &positions {
+            let acc = SingleAcc::refresh(pos, &net);
+            let _s = net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move));
+            refresh_iters += 1;
+            if start.elapsed() >= refresh_target {
+                break;
+            }
+        }
+    }
+    let refresh_eps = (refresh_iters as f64 / start.elapsed().as_secs_f64()) as u64;
 
-    let nps = result.stats.nodes as f64 / elapsed.as_secs_f64();
+    // Prepare a few legal moves per position
+    let mut suites: Vec<(Position, Vec<Move>)> = Vec::new();
+    for p in positions.clone() {
+        let gen = MoveGenerator::new();
+        let moves = gen
+            .generate_all(&p)
+            .unwrap_or_default()
+            .into_iter()
+            .take(32)
+            .collect::<Vec<_>>();
+        suites.push((p.clone(), moves));
+    }
 
-    println!("    Nodes: {}", result.stats.nodes);
-    println!("    Time: {elapsed:?}");
-    println!("    NPS: {nps:.0}");
-    println!("    Best move: {:?}", result.best_move);
-    println!("    Score: {}", result.score);
+    // Measure incremental throughput (apply_update + lightweight pos advance)
+    let inc_target = Duration::from_secs(args.seconds);
+    let start2 = Instant::now();
+    let mut inc_iters: u64 = 0;
+    'outer: loop {
+        for (p, moves) in suites.iter_mut() {
+            if moves.is_empty() {
+                continue;
+            }
+            let mut acc = SingleAcc::refresh(p, &net);
+            for &mv in moves.iter() {
+                let next = SingleAcc::apply_update(&acc, p, mv, &net);
+                let undo = p.do_move(mv);
+                let _s = net.evaluate_from_accumulator(next.acc_for(p.side_to_move));
+                p.undo_move(mv, undo);
+                acc = next;
+                inc_iters += 1;
+                if start2.elapsed() >= inc_target {
+                    break 'outer;
+                }
+            }
+        }
+        if start2.elapsed() >= inc_target {
+            break;
+        }
+    }
+    let inc_eps = (inc_iters as f64 / start2.elapsed().as_secs_f64()) as u64;
 
-    (nps, result.score)
-}
+    println!("=== NNUE Single Benchmark ===");
+    println!("Weights: {}", args.single_weights);
+    println!("Refresh-only: {} evals/sec", refresh_eps);
+    println!("Incremental: {} evals/sec", inc_eps);
+    if refresh_eps > 0 {
+        println!("Speedup: {:.2}x", inc_eps as f64 / refresh_eps as f64);
+    }
 
-#[test]
-#[ignore] // Requires large stack size due to NNUE initialization
-fn test_nnue_performance() {
-    use std::time::Duration;
-    // Simple performance regression test
-    let pos = Position::startpos();
-    let mut engine = Engine::new(EngineType::Nnue);
-
-    let limits = SearchLimits::builder().depth(4).fixed_time_ms(100).build();
-
-    let start = Instant::now();
-    let result = engine.search(&mut pos.clone(), limits);
-    let elapsed = start.elapsed();
-
-    // Should complete within reasonable time
-    assert!(elapsed < Duration::from_secs(1));
-    assert!(result.stats.nodes > 100);
+    Ok(())
 }

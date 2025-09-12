@@ -238,8 +238,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 // フォールバック: 一時 Accumulator を構築してフル評価
                 #[cfg(test)]
                 {
-                    CLASSIC_FALLBACK_HITS
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    CLASSIC_FALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 let mut tmp = accumulator::Accumulator::new();
                 tmp.refresh(pos, evaluator.feature_transformer());
@@ -312,7 +311,11 @@ impl NNUEEvaluatorWrapper {
                 self.tracked_hash = None;
                 Ok(())
             }
-            Backend::Single { net, #[cfg(feature = "nnue_single_diff")] acc_stack } => {
+            Backend::Single {
+                net,
+                #[cfg(feature = "nnue_single_diff")]
+                acc_stack,
+            } => {
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     let current = acc_stack.last().cloned();
@@ -340,7 +343,11 @@ impl NNUEEvaluatorWrapper {
                 }
                 self.tracked_hash = None;
             }
-            Backend::Single { #[cfg(feature = "nnue_single_diff")] acc_stack, .. } => {
+            Backend::Single {
+                #[cfg(feature = "nnue_single_diff")]
+                acc_stack,
+                ..
+            } => {
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     if acc_stack.len() > 1 {
@@ -471,12 +478,12 @@ mod tests {
         use crate::shogi::SHOGI_BOARD_SIZE;
         let n_feat = SHOGI_BOARD_SIZE * super::features::FE_END;
         let d = 4usize;
-        // trivial net: w0=0, b0=0.2, w2=1, b2=0
+        // net: w0=0.5, b0=0.2, w2=1, b2=0
         let net = super::single::SingleChannelNet {
             n_feat,
             acc_dim: d,
             scale: 600.0,
-            w0: vec![0.0; n_feat * d],
+            w0: vec![0.5; n_feat * d],
             b0: Some(vec![0.2; d]),
             w2: vec![1.0; d],
             b2: 0.0,
@@ -486,7 +493,8 @@ mod tests {
         let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
 
         // one legal pawn move 7g7f (3g3f in USI coords)
-        let mv = Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let mv =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
         let undo = pos.do_move(mv);
 
@@ -497,6 +505,167 @@ mod tests {
         let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
 
+        pos.undo_move(mv, undo);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_drop_update_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 4usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.5; n_feat * d],
+            b0: Some(vec![0.2; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::startpos();
+        // Give black a pawn in hand
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let mv = Move::make_drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
+        let undo = pos.do_move(mv);
+
+        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
+
+        pos.undo_move(mv, undo);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_capture_update_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 4usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.5; n_feat * d],
+            b0: Some(vec![0.2; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::empty();
+        // Place kings
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        // Place black pawn 3g, white pawn 3f (Black to move can capture)
+        pos.board
+            .put_piece(parse_usi_square("3g").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("3f").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+        pos.side_to_move = Color::Black;
+
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let mv =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
+        let undo = pos.do_move(mv);
+
+        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
+
+        pos.undo_move(mv, undo);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_promotion_update_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 4usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.5; n_feat * d],
+            b0: Some(vec![0.2; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::empty();
+        // Kings only
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        // Black pawn ready to promote: 3c -> 3b+
+        pos.board
+            .put_piece(parse_usi_square("3c").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+        pos.side_to_move = Color::Black;
+
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let mv = Move::normal_with_piece(
+            parse_usi_square("3c").unwrap(),
+            parse_usi_square("3b").unwrap(),
+            true,
+            PieceType::Pawn,
+            None,
+        );
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
+        let undo = pos.do_move(mv);
+
+        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
+
+        pos.undo_move(mv, undo);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_king_move_refresh_fallback_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 4usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.0; n_feat * d],
+            b0: Some(vec![0.2; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::empty();
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.side_to_move = Color::Black;
+
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let mv =
+            Move::make_normal(parse_usi_square("5i").unwrap(), parse_usi_square("5h").unwrap());
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
+
+        let undo = pos.do_move(mv);
+        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
         pos.undo_move(mv, undo);
     }
 }
