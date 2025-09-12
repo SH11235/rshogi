@@ -145,6 +145,22 @@ pub struct NNUEEvaluatorWrapper {
     tracked_hash: Option<u64>,
 }
 
+#[cfg(test)]
+static CLASSIC_FALLBACK_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+#[inline]
+pub fn fallback_hits() -> usize {
+    CLASSIC_FALLBACK_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+#[inline]
+pub fn reset_fallback_hits() {
+    CLASSIC_FALLBACK_HITS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl NNUEEvaluatorWrapper {
     /// Create new wrapper from weights file
     pub fn new(weights_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -220,6 +236,11 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 }
 
                 // フォールバック: 一時 Accumulator を構築してフル評価
+                #[cfg(test)]
+                {
+                    CLASSIC_FALLBACK_HITS
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 let mut tmp = accumulator::Accumulator::new();
                 tmp.refresh(pos, evaluator.feature_transformer());
                 evaluator.evaluate_with_accumulator(pos, &tmp)
@@ -227,13 +248,17 @@ impl Evaluator for NNUEEvaluatorWrapper {
             Backend::Single { net, .. } => {
                 #[cfg(feature = "nnue_single_diff")]
                 if let Backend::Single { acc_stack, .. } = &self.backend {
-                    if let (Some(acc), Some(h)) = (acc_stack.last(), self.tracked_hash) {
-                        if h == pos.zobrist_hash {
-                            return net.evaluate_from_accumulator(acc.as_slice());
+                    let use_acc = match self.tracked_hash {
+                        None => true,
+                        Some(h) => h == pos.zobrist_hash,
+                    };
+                    if use_acc {
+                        if let Some(acc) = acc_stack.last() {
+                            return net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move));
                         }
                     }
                 }
-                // フォールバック：同期が取れていない場合は常にフル評価
+                // フォールバック：同期が取れていない場合や acc 不在時はフル評価
                 net.evaluate(pos)
             }
         }
@@ -287,16 +312,24 @@ impl NNUEEvaluatorWrapper {
                 self.tracked_hash = None;
                 Ok(())
             }
-            Backend::Single { .. } => {
-                // まだ差分更新は未実装。評価時はフルにフォールバックさせる。
-                let _ = (pos, mv); // unused guard
+            Backend::Single { net, #[cfg(feature = "nnue_single_diff")] acc_stack } => {
+                #[cfg(feature = "nnue_single_diff")]
+                {
+                    let current = acc_stack.last().cloned();
+                    if let Some(cur) = current {
+                        let next = single_state::SingleAcc::apply_update(&cur, pos, mv, net);
+                        acc_stack.push(next);
+                    } else {
+                        acc_stack.push(single_state::SingleAcc::refresh(pos, net));
+                    }
+                }
                 self.tracked_hash = None;
                 Ok(())
             }
         }
     }
 
-    /// Hook: undo_move（増分戻し）。Single は未対応のため安全側にフォールバック。
+    /// Hook: undo_move（増分戻し）。
     pub fn undo_move(&mut self) {
         match &mut self.backend {
             Backend::Classic {
@@ -307,11 +340,7 @@ impl NNUEEvaluatorWrapper {
                 }
                 self.tracked_hash = None;
             }
-            Backend::Single {
-                #[cfg(feature = "nnue_single_diff")]
-                acc_stack,
-                ..
-            } => {
+            Backend::Single { #[cfg(feature = "nnue_single_diff")] acc_stack, .. } => {
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     if acc_stack.len() > 1 {
@@ -384,10 +413,15 @@ mod tests {
             Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
         let undo = pos.do_move(mv);
 
+        // reset counter before evaluation
+        super::reset_fallback_hits();
+
         // Evaluate should fallback to full rebuild (tracked_hash != pos)
         let s = wrapper.evaluate(&pos);
         // With zero weights, evaluation is zero
         assert_eq!(s, 0);
+        // And fallback path must be taken at least once
+        assert!(super::fallback_hits() > 0);
 
         // Clean up
         pos.undo_move(mv, undo);
@@ -408,7 +442,7 @@ mod tests {
             w0: vec![0.0; n_feat * d], // zero rows
             b0: Some(vec![0.1; d]),    // bias only
             w2: vec![1.0; d],          // sum all activations
-            b2: 0.0,
+            b2: 1.0,                   // 非ゼロ出力になるように調整
         };
 
         // Start position with both kings
@@ -418,14 +452,51 @@ mod tests {
         pos.side_to_move = Color::Black;
         let acc_b = super::single_state::SingleAcc::refresh(&pos, &net);
         let eval_full_b = net.evaluate(&pos);
-        let eval_acc_b = net.evaluate_from_accumulator(acc_b.as_slice());
+        let eval_acc_b = net.evaluate_from_accumulator(acc_b.acc_for(Color::Black));
         assert_eq!(eval_full_b, eval_acc_b);
+        assert_ne!(eval_full_b, 0);
 
         // White to move (flip path)
         pos.side_to_move = Color::White;
         let acc_w = super::single_state::SingleAcc::refresh(&pos, &net);
         let eval_full_w = net.evaluate(&pos);
-        let eval_acc_w = net.evaluate_from_accumulator(acc_w.as_slice());
+        let eval_acc_w = net.evaluate_from_accumulator(acc_w.acc_for(Color::White));
         assert_eq!(eval_full_w, eval_acc_w);
+        assert_ne!(eval_full_w, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_apply_update_matches_refresh_trivial() {
+        use crate::shogi::SHOGI_BOARD_SIZE;
+        let n_feat = SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 4usize;
+        // trivial net: w0=0, b0=0.2, w2=1, b2=0
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.0; n_feat * d],
+            b0: Some(vec![0.2; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::startpos();
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+
+        // one legal pawn move 7g7f (3g3f in USI coords)
+        let mv = Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
+        let undo = pos.do_move(mv);
+
+        // eval via acc (side-to-move has flipped)
+        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        // eval via full refresh
+        let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
+
+        pos.undo_move(mv, undo);
     }
 }
