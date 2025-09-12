@@ -80,6 +80,11 @@ impl<E: Evaluator> Evaluator for HookSuppressor<E> {
     fn evaluate(&self, pos: &Position) -> i32 {
         self.inner.evaluate(pos)
     }
+    #[inline]
+    fn on_set_position(&self, pos: &Position) {
+        // 並列探索でも初期同期だけは通す（差分更新フックは抑止）
+        self.inner.on_set_position(pos)
+    }
     // on_* はデフォルトno-op（未オーバーライド）
 }
 
@@ -231,8 +236,12 @@ where
 
         let start_time = Instant::now();
 
-        // Extract multipv from limits for use throughout the search
-        let effective_multipv = limits.multipv;
+        // Extract MultiPV: limits.multipv が未指定(=0)なら searcher の設定を使用
+        let effective_multipv = if self.context.limits().multipv > 0 {
+            self.context.limits().multipv
+        } else {
+            self.multi_pv
+        };
 
         // Create TimeManager if needed
         self.time_manager =

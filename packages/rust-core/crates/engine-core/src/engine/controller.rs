@@ -3,6 +3,7 @@
 //! Provides a simple interface for using different evaluators with the search engine
 
 use log::{debug, error, info, warn};
+use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -104,7 +105,7 @@ pub enum EngineType {
 pub struct Engine {
     engine_type: EngineType,
     material_evaluator: Arc<MaterialEvaluator>,
-    nnue_evaluator: Arc<Mutex<Option<NNUEEvaluatorWrapper>>>,
+    nnue_evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
     // Unified searchers for each engine type
     material_searcher: Arc<Mutex<Option<MaterialSearcher>>>,
     nnue_basic_searcher: Arc<Mutex<Option<NnueBasicSearcher>>>,
@@ -137,9 +138,9 @@ impl Engine {
 
         let nnue_evaluator = if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
             // Initialize with zero weights for NNUE engine
-            Arc::new(Mutex::new(Some(NNUEEvaluatorWrapper::zero())))
+            Arc::new(RwLock::new(Some(NNUEEvaluatorWrapper::zero())))
         } else {
-            Arc::new(Mutex::new(None))
+            Arc::new(RwLock::new(None))
         };
 
         // Initialize searchers based on engine type
@@ -764,10 +765,7 @@ impl Engine {
         let new_evaluator = NNUEEvaluatorWrapper::new(path)?;
 
         // Replace the evaluator
-        let mut nnue_guard = self
-            .nnue_evaluator
-            .lock()
-            .map_err(|_| "Failed to acquire NNUE evaluator lock")?;
+        let mut nnue_guard = self.nnue_evaluator.write();
         *nnue_guard = Some(new_evaluator);
 
         Ok(())
@@ -801,14 +799,10 @@ impl Engine {
             }
             EngineType::Nnue => {
                 // Initialize NNUE evaluator if needed
-                match self.nnue_evaluator.lock() {
-                    Ok(mut nnue_guard) => {
-                        if nnue_guard.is_none() {
-                            *nnue_guard = Some(NNUEEvaluatorWrapper::zero());
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to lock NNUE evaluator during engine type change: {}", e);
+                {
+                    let mut nnue_guard = self.nnue_evaluator.write();
+                    if nnue_guard.is_none() {
+                        *nnue_guard = Some(NNUEEvaluatorWrapper::zero());
                     }
                 }
 
@@ -851,14 +845,10 @@ impl Engine {
             }
             EngineType::EnhancedNnue => {
                 // Initialize NNUE evaluator if needed
-                match self.nnue_evaluator.lock() {
-                    Ok(mut nnue_guard) => {
-                        if nnue_guard.is_none() {
-                            *nnue_guard = Some(NNUEEvaluatorWrapper::zero());
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to lock NNUE evaluator during engine type change: {}", e);
+                {
+                    let mut nnue_guard = self.nnue_evaluator.write();
+                    if nnue_guard.is_none() {
+                        *nnue_guard = Some(NNUEEvaluatorWrapper::zero());
                     }
                 }
 
@@ -1122,64 +1112,36 @@ impl Engine {
 
 /// Proxy evaluator for thread-safe NNUE access
 struct NNUEEvaluatorProxy {
-    evaluator: Arc<Mutex<Option<NNUEEvaluatorWrapper>>>,
+    evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
 }
 
 impl Evaluator for NNUEEvaluatorProxy {
     fn evaluate(&self, pos: &Position) -> i32 {
-        let guard = match self.evaluator.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                error!("Failed to acquire NNUE evaluator lock");
-                return 0;
-            }
-        };
-
-        match guard.as_ref() {
-            Some(evaluator) => evaluator.evaluate(pos),
-            None => {
-                error!("NNUE evaluator not initialized");
-                0
-            }
+        let guard = self.evaluator.read();
+        if let Some(evaluator) = guard.as_ref() {
+            evaluator.evaluate(pos)
+        } else {
+            error!("NNUE evaluator not initialized");
+            0
         }
     }
 
     fn on_set_position(&self, pos: &Position) {
-        let mut guard = match self.evaluator.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                error!("Failed to acquire NNUE evaluator lock in on_set_position");
-                return;
-            }
-        };
+        let mut guard = self.evaluator.write();
         if let Some(e) = guard.as_mut() {
-            // Safe: NNUEEvaluatorWrapper::set_position handles backend differences
             e.set_position(pos);
         }
     }
 
     fn on_do_move(&self, pre_pos: &Position, mv: crate::shogi::Move) {
-        let mut guard = match self.evaluator.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                error!("Failed to acquire NNUE evaluator lock in on_do_move");
-                return;
-            }
-        };
+        let mut guard = self.evaluator.write();
         if let Some(wrapper) = guard.as_mut() {
-            // Ignore NNUE-specific errors in hook: treat as 0-eval fallback upstream
             let _ = wrapper.do_move(pre_pos, mv);
         }
     }
 
     fn on_undo_move(&self) {
-        let mut guard = match self.evaluator.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                error!("Failed to acquire NNUE evaluator lock in on_undo_move");
-                return;
-            }
-        };
+        let mut guard = self.evaluator.write();
         if let Some(wrapper) = guard.as_mut() {
             wrapper.undo_move();
         }
