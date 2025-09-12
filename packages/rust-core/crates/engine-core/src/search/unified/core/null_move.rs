@@ -66,6 +66,8 @@ where
 
     // Check if we have non-pawn material (simplified check)
     if has_non_pawn_material(pos) {
+        // Inform evaluator (null move has no board change, only side-to-move flip)
+        searcher.evaluator.on_do_null_move(pos);
         // Make null move using the Position's method
         let undo_info = pos.do_null_move();
 
@@ -82,6 +84,7 @@ where
 
         // Undo null move
         pos.undo_null_move(undo_info);
+        searcher.evaluator.on_undo_null_move();
 
         if score >= beta {
             // Null-verify: mandatory verification for Safe/Balanced teacher profiles

@@ -36,6 +36,36 @@ use std::{
     time::Instant,
 };
 
+/// Internal RAII-style guard to ensure evaluator hooks are paired in debug builds.
+/// It only guards evaluator hooks (not the board state). Call `undo()` when the move is undone.
+pub(crate) struct EvalMoveGuard<'a> {
+    eval: &'a dyn Evaluator,
+    undone: bool,
+}
+
+impl<'a> EvalMoveGuard<'a> {
+    pub fn new(eval: &'a dyn Evaluator, pre_pos: &Position, mv: Move) -> Self {
+        eval.on_do_move(pre_pos, mv);
+        Self {
+            eval,
+            undone: false,
+        }
+    }
+    pub fn undo(&mut self) {
+        if !self.undone {
+            self.eval.on_undo_move();
+            self.undone = true;
+        }
+    }
+}
+
+impl<'a> Drop for EvalMoveGuard<'a> {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.undone, "EvalMoveGuard dropped without calling undo()");
+    }
+}
+
 use self::aspiration::AspirationWindow;
 pub use self::tt_operations::TTOperations;
 
@@ -217,6 +247,9 @@ where
 
         // Initialize search context with limits
         self.context.set_limits(limits);
+
+        // Notify evaluator of the root position (for incremental evaluators)
+        self.evaluator.on_set_position(pos);
 
         // Iterative deepening
         let mut best_move = None;
