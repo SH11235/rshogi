@@ -72,6 +72,10 @@ struct RunArgs {
     /// Markdown report path
     #[arg(long, value_name = "FILE")]
     report: String,
+    /// Optional: time per sample (ms) for PV spread (MultiPV=3) measurement.
+    /// DefaultはNPS測定と同一（inc_ms, 最低100ms）。
+    #[arg(long = "pv-ms", value_name = "MS")]
+    pv_ms: Option<u64>,
     /// Hidden: use deterministic stub engine for tests
     #[arg(long, hide = true, action = ArgAction::SetTrue)]
     stub: bool,
@@ -136,6 +140,8 @@ struct ParamsOut {
     hash_mb: usize,
     book: String,
     multipv: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pv_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -351,15 +357,17 @@ fn build_markdown(out: &GauntletOut) -> String {
         (Some(s), _) => format!(" seed={}", s),
         _ => String::new(),
     };
+    let pv_info = out.params.pv_ms.map(|v| format!(" pv_ms={}", v)).unwrap_or_default();
     md.push_str(&format!(
-        "- time={} games={} threads={} hash_mb={} multipv={} book='{}'{}\n",
+        "- time={} games={} threads={} hash_mb={} multipv={} book='{}'{}{}\n",
         out.params.time,
         out.params.games,
         out.params.threads,
         out.params.hash_mb,
         out.params.multipv,
         out.params.book,
-        seed_info
+        seed_info,
+        pv_info
     ));
     md
 }
@@ -444,11 +452,13 @@ impl PlayerEngine {
     }
 
     fn eval_multipv3_root_cp(&mut self, pos: &mut Position, per_ms: u64) -> Option<[i32; 3]> {
+        // Ensure MultiPV=3 at the limits level so UnifiedSearcher produces lines
         self.eng.set_multipv_persistent(3);
         let limits = SearchLimitsBuilder::default()
             .time_control(TimeControl::FixedTime {
                 ms_per_move: per_ms,
             })
+            .multipv(3)
             .build();
         let res = self.eng.search(pos, limits);
         // restore MultiPV=1 for games
@@ -529,6 +539,8 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
 
     // NPS measurement (fixed positions, fixed time per position)
     let nps_sample_ms = time.inc_ms.max(100);
+    // PV 測定は最低100msにクランプ（仕様に合わせる）
+    let pv_sample_ms = args.pv_ms.unwrap_or(nps_sample_ms).max(100);
     let mut nps_base_sum = 0.0f64;
     let mut nps_cand_sum = 0.0f64;
     let n_samples = 100.min(book.len());
@@ -597,7 +609,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
     for s in book.iter().take(100.min(book.len())) {
         cand.clear_tt();
         let mut pos = Position::from_sfen(s).map_err(|e| anyhow!(e))?;
-        if let Some(cps) = cand.eval_multipv3_root_cp(&mut pos, nps_sample_ms) {
+        if let Some(cps) = cand.eval_multipv3_root_cp(&mut pos, pv_sample_ms) {
             if cps.iter().any(|&cp| is_mate_cp(cp)) {
                 continue; // Skip mate-valued samples for stable spread
             }
@@ -770,6 +782,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             hash_mb: args.hash_mb,
             book: args.book.clone(),
             multipv: args.multipv,
+            pv_ms: args.pv_ms,
             seed: args.seed,
             seed_mode: args.seed.map(|_| match args.seed_mode {
                 SeedMode::Flat => "flat".to_string(),
@@ -871,6 +884,7 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             hash_mb: args.hash_mb,
             book: args.book.clone(),
             multipv: args.multipv,
+            pv_ms: args.pv_ms,
             seed: args.seed,
             seed_mode: args.seed.map(|_| match args.seed_mode {
                 SeedMode::Flat => "flat".to_string(),
@@ -888,8 +902,8 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             losses: Some(losses),
             draws: Some(draws),
             games: Some(args.games),
-            nps_samples: None,
-            pv_spread_samples: None,
+            nps_samples: Some(100.min(book.len())),
+            pv_spread_samples: Some(100.min(book.len())),
         },
         training_config: None,
         series,

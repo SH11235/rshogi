@@ -51,3 +51,52 @@
 - Phase 1 完了時点で、推論/学習が HalfKP で統一され、差分更新が機能
 - ガントレット基準（スコア率 +5%pt（=55%） & NPS ±3%以内）を満たす候補が継続的に昇格
 - レポートは `docs/reports/` に蓄積、`00_charter.md` の契約（ログ/データ）に準拠
+
+---
+
+## Phase 1 実装ガイド（具体化）
+
+実装ルートは二択です（どちらかで DoD 達成）。
+
+### A. SINGLE_CHANNEL の差分更新（暫定・先行到達向け）
+目的: 現行の SINGLE_CHANNEL 推論で増分更新を実装し、NPS を大幅に改善。
+
+- 実装箇所
+  - `crates/engine-core/src/evaluation/nnue/single.rs`
+    - 状態: 累積ベクトル `acc[256]` を保持
+    - `set_position`: 現局面の active features を抽出しフル再構成
+    - `do_move/undo_move`: 前後状態の active features 差分で `w0` 行を加減算（ReLU→出力）
+  - `crates/engine-core/src/evaluation/nnue/mod.rs`
+    - `Backend::Single` 経路で上記を利用（`do_move/undo_move/set_position` を委譲）
+
+- テスト/検証
+  - 同一局面で「フル再計算」と「差分更新」出力が一致すること（許容誤差内）
+  - 固定100局面スイートで NPS 比較（目標: 既存 Single 比 +2〜5x、環境依存）
+  - ガントレットで Gate 条件を満たすこと（NPS ±3% 以内/勝率 +5pt）
+
+- ドキュメント/ログ
+  - `docs/reports/` に NPS 測定結果（スイート/条件/環境）を保存
+  - 差分更新実装の注意点（acc のゼロ初期化、ビットセット管理、mate/詰み近傍の安定化など）を追記
+
+### B. Classic NNUE へ統一（HalfKP 256×2→32→32→1, ClippedReLU）
+目的: 推論/学習のアーキテクチャを Classic に統一し、エコシステム互換を確保。
+
+- 学習器の拡張（`tools/train_nnue`）
+  - アーキ切替を追加（例: `--arch classic|single`）
+  - Classic でのエクスポートを `NNUEHeader v1 (HALFKP_256X2_32_32)` 互換にする
+  - 既存 SINGLE_CHANNEL との相互運用を維持（双方で推論/学習往復整合テスト）
+
+- 推論側
+  - `weights.rs::load_weights`（Classic）で読めることを前提に、ガントレット/USI 統合での動作確認
+
+- テスト/検証
+  - 学習器→エンジンで固定入力の往復整合テスト（数値一致）
+  - 差分更新が機能すること（探索内で `do_move/undo_move` が呼ばれ NPS 改善）
+  - ガントレット Gate を満たすこと
+
+- 移行方針
+  - まず A（差分更新）で NPS を確保 → 次に B（Classic）で統一、でも可
+
+### 参考
+- 運用手順は「[生成→学習→ログ→ガントレット（ハンズオン）](guides/pipeline_walkthrough.md)」を参照
+- Gate/測定条件は `docs/00_charter.md`、運用タスクは `docs/10_pipeline.md`
