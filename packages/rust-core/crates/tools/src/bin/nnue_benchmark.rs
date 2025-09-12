@@ -69,7 +69,7 @@ fn main() -> Result<()> {
         suites.push((p.clone(), moves));
     }
 
-    // Measure incremental throughput (apply_update + lightweight pos advance)
+    // Measure incremental throughput (apply_update only; keep pos/acc in sync by using a fixed base)
     let inc_target = Duration::from_secs(args.seconds);
     let start2 = Instant::now();
     let mut inc_iters: u64 = 0;
@@ -78,13 +78,10 @@ fn main() -> Result<()> {
             if moves.is_empty() {
                 continue;
             }
-            let mut acc = SingleAcc::refresh(p, &net);
+            let acc0 = SingleAcc::refresh(p, &net);
             for &mv in moves.iter() {
-                let next = SingleAcc::apply_update(&acc, p, mv, &net);
-                let undo = p.do_move(mv);
+                let next = SingleAcc::apply_update(&acc0, p, mv, &net);
                 let _s = net.evaluate_from_accumulator(next.acc_for(p.side_to_move));
-                p.undo_move(mv, undo);
-                acc = next;
                 inc_iters += 1;
                 if start2.elapsed() >= inc_target {
                     break 'outer;

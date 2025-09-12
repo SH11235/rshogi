@@ -193,6 +193,10 @@ impl SingleAcc {
                 }
 
                 let hand_type = captured.piece_type;
+                // NOTE: Piece は基底種(piece_type)と promoted フラグを分離保持する設計のため、
+                //       手駒化は常に基底種 hand_type で正しい（成駒を取っても基底種に戻る）。
+                debug_assert!(hand_type != PieceType::King);
+                debug_assert!(piece_type_to_hand_index(hand_type).is_ok());
                 let hand_idx = piece_type_to_hand_index(hand_type).expect("hand type");
                 let color = pre_pos.side_to_move;
                 let new_count = pre_pos.hands[color as usize][hand_idx] + 1;
@@ -213,6 +217,16 @@ impl SingleAcc {
                 }
             }
         }
+
+        // 同一 fid の重複を軽減（安全のための微最適化）
+        removed_b.sort_unstable();
+        removed_b.dedup();
+        removed_w.sort_unstable();
+        removed_w.dedup();
+        added_b.sort_unstable();
+        added_b.dedup();
+        added_w.sort_unstable();
+        added_w.dedup();
 
         // pre に適用
         for &fid in &removed_b {
