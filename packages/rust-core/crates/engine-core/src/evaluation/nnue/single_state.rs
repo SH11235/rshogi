@@ -228,6 +228,40 @@ impl SingleAcc {
         added_w.sort_unstable();
         added_w.dedup();
 
+        // 交差相殺（removed と added の共通要素を打ち消す）
+        fn cancel_cross(a: &mut SmallVec<[usize; 16]>, b: &mut SmallVec<[usize; 16]>) {
+            let mut i = 0usize;
+            let mut j = 0usize;
+            let mut a_only: SmallVec<[usize; 16]> = SmallVec::new();
+            let mut b_only: SmallVec<[usize; 16]> = SmallVec::new();
+            while i < a.len() && j < b.len() {
+                match a[i].cmp(&b[j]) {
+                    std::cmp::Ordering::Less => {
+                        a_only.push(a[i]);
+                        i += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        b_only.push(b[j]);
+                        j += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // 相殺: 両方スキップ
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            // 余りを追加
+            a_only.extend_from_slice(&a[i..]);
+            b_only.extend_from_slice(&b[j..]);
+            a.clear();
+            a.extend_from_slice(&a_only);
+            b.clear();
+            b.extend_from_slice(&b_only);
+        }
+        cancel_cross(&mut removed_b, &mut added_b);
+        cancel_cross(&mut removed_w, &mut added_w);
+
         // pre に適用
         for &fid in &removed_b {
             if fid >= net.n_feat {

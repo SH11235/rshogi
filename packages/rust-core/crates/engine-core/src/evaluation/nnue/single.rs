@@ -4,6 +4,7 @@ use crate::{evaluation::nnue::features::extract_features, Color, Position};
 /// - Returns raw centipawns from side-to-move perspective (cp, unclipped except final clamp).
 /// - Weights are stored in FP32 for simplicity and correctness.
 /// - Note: `scale` は学習時のメタ情報。推論では w2/b2 が cp スケールに整合している前提で未使用。
+#[derive(Clone)]
 pub struct SingleChannelNet {
     pub n_feat: usize,        // e.g., SHOGI_BOARD_SIZE * FE_END
     pub acc_dim: usize,       // 256

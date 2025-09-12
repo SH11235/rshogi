@@ -195,6 +195,19 @@ impl NNUEEvaluatorWrapper {
 
     // NOTE: set_position/do_move/undo_move は下部の実装へ集約
 
+    /// Test-only: construct a wrapper with a provided SINGLE net
+    #[cfg(test)]
+    pub fn new_with_single_net_for_test(net: single::SingleChannelNet) -> Self {
+        NNUEEvaluatorWrapper {
+            backend: Backend::Single {
+                net: std::sync::Arc::new(net),
+                #[cfg(feature = "nnue_single_diff")]
+                acc_stack: Vec::new(),
+            },
+            tracked_hash: None,
+        }
+    }
+
     /// Create zero-initialized evaluator (for testing)
     pub fn zero() -> Self {
         let evaluator = NNUEEvaluator::zero();
@@ -720,5 +733,280 @@ mod tests {
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
         let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_capture_promoted_to_hand_update_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize; // small acc dim
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.25; n_feat * d],
+            b0: Some(vec![0.05; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::empty();
+        // Kings
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        // Black rook at 3g
+        pos.board
+            .put_piece(parse_usi_square("3g").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+        // White promoted silver at 3f
+        let mut ps = Piece::new(PieceType::Silver, Color::White);
+        ps.promoted = true;
+        pos.board.put_piece(parse_usi_square("3f").unwrap(), ps);
+        pos.side_to_move = Color::Black;
+
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let mv =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
+        let undo = pos.do_move(mv);
+
+        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
+
+        pos.undo_move(mv, undo);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_wrapper_chain_matches_direct_eval() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.2; n_feat * d],
+            b0: Some(vec![0.05; d]),
+            w2: vec![1.0; d],
+            b2: 0.3,
+        };
+
+        let mut pos = Position::startpos();
+        let mut wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net.clone());
+        wrapper.set_position(&pos);
+
+        // Do two moves with wrapper and position
+        let m1 =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let _ = wrapper.do_move(&pos, m1);
+        let u1 = pos.do_move(m1);
+        let m2 =
+            Move::make_normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap());
+        let _ = wrapper.do_move(&pos, m2);
+        let u2 = pos.do_move(m2);
+
+        // Wrapper eval should match direct net.eval (フォールバック経路)
+        let s_wrap = wrapper.evaluate(&pos);
+        let s_dir = net.evaluate(&pos);
+        assert_eq!(s_wrap, s_dir);
+
+        // Undo two moves
+        wrapper.undo_move();
+        wrapper.undo_move();
+        pos.undo_move(m2, u2);
+        pos.undo_move(m1, u1);
+
+        // Still matches at original position
+        let s_wrap0 = wrapper.evaluate(&pos);
+        let s_dir0 = net.evaluate(&pos);
+        assert_eq!(s_wrap0, s_dir0);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_drop_two_times_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.1; n_feat * d],
+            b0: Some(vec![0.01; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::empty();
+        // Kings
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        // Give black two pawns in hand, white one pawn for the second ply
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 2;
+        pos.hands[Color::White as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+        pos.side_to_move = Color::Black;
+
+        // acc0
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        // 1st drop: 5e
+        let mv1 = Move::make_drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv1, &net);
+        let u1 = pos.do_move(mv1);
+        let eval_acc1 = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let full1 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full1 = net.evaluate_from_accumulator(full1.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc1, eval_full1);
+
+        // 2nd drop (now White to move): 3e (different file to avoid ni-fu rule)
+        let mv2 = Move::make_drop(PieceType::Pawn, parse_usi_square("3e").unwrap());
+        let acc2 = super::single_state::SingleAcc::apply_update(&acc1, &pos, mv2, &net);
+        let u2 = pos.do_move(mv2);
+        let eval_acc2 = net.evaluate_from_accumulator(acc2.acc_for(pos.side_to_move));
+        let full2 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full2 = net.evaluate_from_accumulator(full2.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc2, eval_full2);
+
+        // cleanup
+        pos.undo_move(mv2, u2);
+        pos.undo_move(mv1, u1);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_non_promotion_update_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.2; n_feat * d],
+            b0: Some(vec![0.05; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        let mut pos = Position::empty();
+        // Kings
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        // Black silver in promotion zone (3c -> 3b can be non-promotion)
+        pos.board.put_piece(
+            parse_usi_square("3c").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.side_to_move = Color::Black;
+
+        let acc0 = super::single_state::SingleAcc::refresh(&pos, &net);
+        let mv = Move::normal_with_piece(
+            parse_usi_square("3c").unwrap(),
+            parse_usi_square("3b").unwrap(),
+            false,
+            PieceType::Silver,
+            None,
+        );
+        let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
+        let u = pos.do_move(mv);
+        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let full = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+        assert_eq!(eval_acc, eval_full);
+        pos.undo_move(mv, u);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_wrapper_fallback_on_mismatch() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.2; n_feat * d],
+            b0: Some(vec![0.05; d]),
+            w2: vec![1.0; d],
+            b2: 0.3,
+        };
+
+        let mut pos = Position::startpos();
+        let mut wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net.clone());
+        wrapper.set_position(&pos);
+
+        // mutate pos externally without notifying wrapper
+        let mv =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let u = pos.do_move(mv);
+
+        // wrapper must fallback → equals direct net.evaluate(pos)
+        if let Backend::Single { net, .. } = &wrapper.backend {
+            let s_wrap = wrapper.evaluate(&pos);
+            let s_dir = net.evaluate(&pos);
+            assert_eq!(s_wrap, s_dir);
+        } else {
+            panic!("expected Single backend");
+        }
+
+        pos.undo_move(mv, u);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_random_chain_matches_refresh() {
+        use crate::movegen::MoveGenerator;
+        use rand::{RngCore, SeedableRng};
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.15; n_feat * d],
+            b0: Some(vec![-0.02; d]),
+            w2: vec![1.0; d],
+            b2: 0.1,
+        };
+
+        let mut pos = Position::startpos();
+        let mut acc = super::single_state::SingleAcc::refresh(&pos, &net);
+        let mut rng = rand_xoshiro::Xoshiro128Plus::seed_from_u64(0xC0FFEE);
+        let gen = MoveGenerator::new();
+
+        for _ply in 0..20 {
+            let moves = gen.generate_all(&pos).unwrap_or_default();
+            if moves.is_empty() {
+                break;
+            }
+            let idx = (rng.next_u32() as usize) % moves.len();
+            let mv = moves[idx];
+            let next = super::single_state::SingleAcc::apply_update(&acc, &pos, mv, &net);
+            let _u = pos.do_move(mv);
+
+            // Compare
+            let eval_acc = net.evaluate_from_accumulator(next.acc_for(pos.side_to_move));
+            let full = super::single_state::SingleAcc::refresh(&pos, &net);
+            let eval_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+            assert_eq!(eval_acc, eval_full);
+
+            acc = next;
+        }
     }
 }
