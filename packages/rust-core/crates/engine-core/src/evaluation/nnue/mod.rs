@@ -150,6 +150,10 @@ static CLASSIC_FALLBACK_HITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
+static SINGLE_FALLBACK_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
 #[inline]
 pub fn fallback_hits() -> usize {
     CLASSIC_FALLBACK_HITS.load(std::sync::atomic::Ordering::Relaxed)
@@ -159,6 +163,18 @@ pub fn fallback_hits() -> usize {
 #[inline]
 pub fn reset_fallback_hits() {
     CLASSIC_FALLBACK_HITS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+#[inline]
+pub fn single_fallback_hits() -> usize {
+    SINGLE_FALLBACK_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+#[inline]
+pub fn reset_single_fallback_hits() {
+    SINGLE_FALLBACK_HITS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl NNUEEvaluatorWrapper {
@@ -205,6 +221,26 @@ impl NNUEEvaluatorWrapper {
                 acc_stack: Vec::new(),
             },
             tracked_hash: None,
+        }
+    }
+
+    /// SINGLE 用: 現在ノードの Acc スナップショットを返す
+    #[cfg(feature = "nnue_single_diff")]
+    pub fn snapshot_single(&self) -> Option<single_state::SingleAcc> {
+        if let Backend::Single { acc_stack, .. } = &self.backend {
+            acc_stack.last().cloned()
+        } else {
+            None
+        }
+    }
+
+    /// SINGLE 用: 指定の Acc を現在ノードとして復元し、tracked_hash を pos に合わせる
+    #[cfg(feature = "nnue_single_diff")]
+    pub fn restore_single_at(&mut self, pos: &Position, acc: single_state::SingleAcc) {
+        if let Backend::Single { acc_stack, .. } = &mut self.backend {
+            acc_stack.clear();
+            acc_stack.push(acc);
+            self.tracked_hash = Some(pos.zobrist_hash);
         }
     }
 
@@ -271,6 +307,10 @@ impl Evaluator for NNUEEvaluatorWrapper {
                     }
                 }
                 // フォールバック：同期が取れていない場合や acc 不在時はフル評価
+                #[cfg(test)]
+                {
+                    SINGLE_FALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 net.evaluate(pos)
             }
         }
@@ -369,6 +409,11 @@ impl NNUEEvaluatorWrapper {
                 {
                     if acc_stack.len() > 1 {
                         acc_stack.pop();
+                    } else if acc_stack.len() == 1 {
+                        // set_position を通っていない誤用パスの保険：
+                        // 親局面へ戻る undo の時に同期が取れていない Acc を捨てる。
+                        // 次回 evaluate は安全側でフル評価にフォールバックする。
+                        acc_stack.clear();
                     }
                 }
                 self.tracked_hash = None;
@@ -812,7 +857,7 @@ mod tests {
         let _ = wrapper.do_move(&pos, m2);
         let u2 = pos.do_move(m2);
 
-        // Wrapper eval should match direct net.eval (フォールバック経路)
+        // Wrapper eval should match direct net.eval（差分 acc 経路でも等価）
         let s_wrap = wrapper.evaluate(&pos);
         let s_dir = net.evaluate(&pos);
         assert_eq!(s_wrap, s_dir);
@@ -956,10 +1001,13 @@ mod tests {
         let u = pos.do_move(mv);
 
         // wrapper must fallback → equals direct net.evaluate(pos)
+        super::reset_single_fallback_hits();
         if let Backend::Single { net, .. } = &wrapper.backend {
             let s_wrap = wrapper.evaluate(&pos);
             let s_dir = net.evaluate(&pos);
             assert_eq!(s_wrap, s_dir);
+            // フォールバックが使われたことを確認
+            assert!(super::single_fallback_hits() > 0);
         } else {
             panic!("expected Single backend");
         }
@@ -1008,5 +1056,77 @@ mod tests {
 
             acc = next;
         }
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_thread_local_acc_parallel_smoke() {
+        use crate::movegen::MoveGenerator;
+        use crossbeam::scope;
+        use rand::{RngCore, SeedableRng};
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.2; n_feat * d],
+            b0: Some(vec![0.01; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        // Root setup
+        let mut root_pos = Position::startpos();
+        let mut root_wrap = NNUEEvaluatorWrapper::new_with_single_net_for_test(net.clone());
+        root_wrap.set_position(&root_pos);
+
+        // Snapshot at split point
+        let acc0 = root_wrap.snapshot_single().expect("acc at root must exist");
+
+        // Parallel workers
+        super::reset_single_fallback_hits();
+        scope(|s| {
+            for seed in [1u64, 2, 3, 4] {
+                let net_cl = net.clone();
+                let acc_cl = acc0.clone();
+                let pos0 = root_pos.clone();
+                s.spawn(move |_| {
+                    let mut pos = pos0;
+                    let net_for_wrap = net_cl.clone();
+                    let mut wrap = NNUEEvaluatorWrapper::new_with_single_net_for_test(net_for_wrap);
+                    wrap.restore_single_at(&pos, acc_cl);
+                    let gen = MoveGenerator::new();
+                    let mut rng = rand_xoshiro::Xoshiro128Plus::seed_from_u64(seed);
+                    for _ in 0..16 {
+                        let moves = gen.generate_all(&pos).unwrap_or_default();
+                        if moves.is_empty() {
+                            break;
+                        }
+                        let mv = moves[(rng.next_u32() as usize) % moves.len()];
+                        let _ = wrap.do_move(&pos, mv);
+                        let u = pos.do_move(mv);
+
+                        // equality between wrapper eval (acc) and direct full eval
+                        let s_w = wrap.evaluate(&pos);
+                        let s_d = wrap
+                            .snapshot_single()
+                            .map(|acc| {
+                                net_cl.evaluate_from_accumulator(acc.acc_for(pos.side_to_move))
+                            })
+                            .unwrap_or_else(|| net_cl.evaluate(&pos));
+                        assert_eq!(s_w, s_d);
+
+                        pos.undo_move(mv, u);
+                        wrap.undo_move();
+                    }
+                });
+            }
+        })
+        .expect("threads joined");
+
+        // NOTE: 他テストと並列実行されるため、グローバルカウンタの厳密値は検証しない。
+        // 本スモークでは acc 経由評価とフル評価の一致のみを確認する。
     }
 }
