@@ -202,15 +202,27 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 evaluator,
                 accumulator_stack,
             } => {
-                let accumulator = match accumulator_stack.last() {
-                    Some(acc) => acc,
-                    None => {
+                // 単スレ探索（on_do/undo 経路）では tracked_hash=None とし、acc が常に同期済み
+                // 並列探索（HookSuppressor 経路）では tracked_hash=Some(root_hash) で root 以外は不一致→フル評価へフォールバック
+                let use_acc = match self.tracked_hash {
+                    None => true,
+                    Some(h) => h == pos.zobrist_hash,
+                };
+
+                if use_acc {
+                    if let Some(acc) = accumulator_stack.last() {
+                        return evaluator.evaluate_with_accumulator(pos, acc);
+                    } else {
                         #[cfg(debug_assertions)]
                         warn!("[NNUE] Empty accumulator stack");
-                        return 0;
+                        // fall through to full rebuild
                     }
-                };
-                evaluator.evaluate_with_accumulator(pos, accumulator)
+                }
+
+                // フォールバック: 一時 Accumulator を構築してフル評価
+                let mut tmp = accumulator::Accumulator::new();
+                tmp.refresh(pos, evaluator.feature_transformer());
+                evaluator.evaluate_with_accumulator(pos, &tmp)
             }
             Backend::Single { net, .. } => {
                 #[cfg(feature = "nnue_single_diff")]
@@ -243,14 +255,14 @@ impl NNUEEvaluatorWrapper {
                 self.tracked_hash = Some(pos.zobrist_hash);
             }
             Backend::Single {
-                net,
+                net: _net,
                 #[cfg(feature = "nnue_single_diff")]
                 acc_stack,
             } => {
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     acc_stack.clear();
-                    acc_stack.push(single_state::SingleAcc::refresh(pos, net));
+                    acc_stack.push(single_state::SingleAcc::refresh(pos, _net));
                 }
                 self.tracked_hash = Some(pos.zobrist_hash);
             }
@@ -358,6 +370,27 @@ mod tests {
         // Both should share the same Arc pointers
         assert!(Arc::ptr_eq(&evaluator1.feature_transformer, &evaluator2.feature_transformer));
         assert!(Arc::ptr_eq(&evaluator1.network, &evaluator2.network));
+    }
+
+    #[test]
+    fn test_classic_fallback_full_rebuild() {
+        // Classic backend (zero weights)
+        let mut wrapper = NNUEEvaluatorWrapper::zero();
+        let mut pos = Position::startpos();
+        wrapper.set_position(&pos);
+
+        // Move without notifying wrapper (simulate HookSuppressor path)
+        let mv =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let undo = pos.do_move(mv);
+
+        // Evaluate should fallback to full rebuild (tracked_hash != pos)
+        let s = wrapper.evaluate(&pos);
+        // With zero weights, evaluation is zero
+        assert_eq!(s, 0);
+
+        // Clean up
+        pos.undo_move(mv, undo);
     }
 
     #[test]

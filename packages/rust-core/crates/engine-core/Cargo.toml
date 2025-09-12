@@ -16,6 +16,8 @@ tt_metrics = []
 hashfull_filter = []
 # Feature to enable YBWC (Young Brothers Wait Concept) parallel search
 ybwc = []
+# Feature gate: SINGLE_CHANNEL の差分更新土台（acc リフレッシュと安全フォールバック）
+nnue_single_diff = []
 
 [dependencies]
 serde = { workspace = true }

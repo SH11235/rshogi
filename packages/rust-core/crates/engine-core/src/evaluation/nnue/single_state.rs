@@ -4,6 +4,7 @@ use crate::{Color, Position};
 /// SINGLE_CHANNEL 用の増分 Acc（土台）。
 /// - acc_dim はネットから取得（通常は 256）
 /// - 値は ReLU 後を保持する（evaluate_from_accumulator にそのまま渡せる）
+#[derive(Clone, Debug)]
 pub struct SingleAcc {
     acc: Vec<f32>,
 }
@@ -38,6 +39,9 @@ impl SingleAcc {
             let feats = super::features::extract_features(pos, ksq, stm);
             // 行ベクトルを加算
             for &fid in feats.as_slice() {
+                if fid >= net.n_feat {
+                    continue;
+                }
                 let base = fid * d;
                 let row = &net.w0[base..base + d];
                 for (a, w) in acc.iter_mut().zip(row.iter()) {
