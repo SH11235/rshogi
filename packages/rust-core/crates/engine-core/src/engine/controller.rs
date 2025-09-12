@@ -1121,7 +1121,7 @@ impl Evaluator for NNUEEvaluatorProxy {
         if let Some(evaluator) = guard.as_ref() {
             evaluator.evaluate(pos)
         } else {
-            error!("NNUE evaluator not initialized");
+            warn!("NNUE evaluator not initialized");
             0
         }
     }

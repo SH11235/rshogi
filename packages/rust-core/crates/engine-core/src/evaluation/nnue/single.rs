@@ -58,14 +58,30 @@ impl SingleChannelNet {
     /// Evaluate a position by extracting HalfKP active features for side-to-move
     pub fn evaluate(&self, pos: &Position) -> i32 {
         let stm = pos.side_to_move;
+        // HalfKP の語彙と整合させるため、白番視点では王座標を flip する
         let king_sq = match stm {
             Color::Black => pos.board.king_square(Color::Black),
-            Color::White => pos.board.king_square(Color::White),
+            Color::White => pos.board.king_square(Color::White).map(|sq| sq.flip()),
         };
         let Some(ksq) = king_sq else { return 0 };
 
         // Extract oriented features for stm perspective
         let feats = extract_features(pos, ksq, stm);
         self.infer_with_active_indices(feats.as_slice(), stm)
+    }
+
+    /// Accumulator からの推論（差分更新用）。ReLU 済みの acc を仮定。
+    #[inline]
+    pub fn evaluate_from_accumulator(&self, acc: &[f32]) -> i32 {
+        let d = self.acc_dim;
+        debug_assert_eq!(acc.len(), d);
+
+        // Output
+        let mut cp = self.b2;
+        for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
+            cp += (*w) * (*a);
+        }
+        let cp = cp.clamp(-32000.0, 32000.0);
+        cp as i32
     }
 }
