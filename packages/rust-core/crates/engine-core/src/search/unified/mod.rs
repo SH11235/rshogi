@@ -69,6 +69,20 @@ impl<'a> Drop for EvalMoveGuard<'a> {
 use self::aspiration::AspirationWindow;
 pub use self::tt_operations::TTOperations;
 
+/// hooksを無効化するEvaluatorラッパ（評価のみフォワード）
+/// 並列探索では増分フックを使わない運用のため、これを使用して安全性を担保する。
+pub struct HookSuppressor<E: Evaluator> {
+    pub inner: E,
+}
+
+impl<E: Evaluator> Evaluator for HookSuppressor<E> {
+    #[inline]
+    fn evaluate(&self, pos: &Position) -> i32 {
+        self.inner.evaluate(pos)
+    }
+    // on_* はデフォルトno-op（未オーバーライド）
+}
+
 /// Unified searcher with compile-time feature configuration
 ///
 /// # Type Parameters

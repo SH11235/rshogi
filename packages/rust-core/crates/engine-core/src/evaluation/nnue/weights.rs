@@ -373,6 +373,19 @@ pub fn load_single_weights(
         return Err("Invalid SINGLE_CHANNEL dims".into());
     }
 
+    #[cfg(debug_assertions)]
+    {
+        use super::features::FE_END;
+        use crate::shogi::SHOGI_BOARD_SIZE;
+        let expected = SHOGI_BOARD_SIZE * FE_END;
+        if input_dim != expected {
+            log::warn!(
+                "[NNUE] SINGLE_CHANNEL: input_dim({}) != expected({}) = SHOGI_BOARD_SIZE * FE_END — 語彙ずれの可能性",
+                input_dim, expected
+            );
+        }
+    }
+
     // Determine presence of b0 by remaining length (w0/b0/w2/b2). Fail fast on mismatch.
     let bytes_after_dims = data[bin_off + 8..].len();
     let bytes_w0 = input_dim
