@@ -237,8 +237,8 @@ where
         let start_time = Instant::now();
 
         // Extract MultiPV: limits.multipv が未指定(=0)なら searcher の設定を使用
-        let effective_multipv = if self.context.limits().multipv > 0 {
-            self.context.limits().multipv
+        let effective_multipv = if limits.multipv > 0 {
+            limits.multipv
         } else {
             self.multi_pv
         };

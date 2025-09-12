@@ -39,6 +39,8 @@ pub mod features;
 pub mod network;
 pub mod simd;
 pub mod single;
+#[cfg(feature = "nnue_single_diff")]
+pub mod single_state;
 pub mod weights;
 
 use crate::shogi::Move;
@@ -132,11 +134,15 @@ enum Backend {
     },
     Single {
         net: std::sync::Arc<single::SingleChannelNet>,
+        #[cfg(feature = "nnue_single_diff")]
+        acc_stack: Vec<single_state::SingleAcc>,
     },
 }
 
 pub struct NNUEEvaluatorWrapper {
     backend: Backend,
+    /// Position hash tracking for safe fallback in parallel / hookless paths
+    tracked_hash: Option<u64>,
 }
 
 impl NNUEEvaluatorWrapper {
@@ -155,63 +161,23 @@ impl NNUEEvaluatorWrapper {
                     evaluator,
                     accumulator_stack: vec![initial_acc],
                 },
+                tracked_hash: None,
             });
         }
         if let Ok(net) = load_single_weights(weights_path) {
             return Ok(NNUEEvaluatorWrapper {
                 backend: Backend::Single {
                     net: std::sync::Arc::new(net),
+                    #[cfg(feature = "nnue_single_diff")]
+                    acc_stack: Vec::new(),
                 },
+                tracked_hash: None,
             });
         }
         Err("Failed to load NNUE weights (unsupported format)".into())
     }
 
-    /// Update accumulator when making a move
-    pub fn do_move(&mut self, pos: &Position, mv: Move) -> NNUEResult<()> {
-        match &mut self.backend {
-            Backend::Classic {
-                evaluator,
-                accumulator_stack,
-            } => {
-                let current_acc =
-                    accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
-                let mut new_acc = current_acc.clone();
-                let update = accumulator::calculate_update(pos, mv)?;
-                new_acc.update(&update, Color::Black, &evaluator.feature_transformer);
-                new_acc.update(&update, Color::White, &evaluator.feature_transformer);
-                accumulator_stack.push(new_acc);
-                Ok(())
-            }
-            Backend::Single { .. } => Ok(()),
-        }
-    }
-
-    /// Undo last move
-    pub fn undo_move(&mut self) {
-        if let Backend::Classic {
-            accumulator_stack, ..
-        } = &mut self.backend
-        {
-            if accumulator_stack.len() > 1 {
-                accumulator_stack.pop();
-            }
-        }
-    }
-
-    /// Reset to position
-    pub fn set_position(&mut self, pos: &Position) {
-        if let Backend::Classic {
-            evaluator,
-            accumulator_stack,
-        } = &mut self.backend
-        {
-            accumulator_stack.clear();
-            let mut acc = Accumulator::new();
-            acc.refresh(pos, &evaluator.feature_transformer);
-            accumulator_stack.push(acc);
-        }
-    }
+    // NOTE: set_position/do_move/undo_move は下部の実装へ集約
 
     /// Create zero-initialized evaluator (for testing)
     pub fn zero() -> Self {
@@ -224,6 +190,7 @@ impl NNUEEvaluatorWrapper {
                 evaluator,
                 accumulator_stack: vec![initial_acc],
             },
+            tracked_hash: None,
         }
     }
 }
@@ -245,7 +212,102 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 };
                 evaluator.evaluate_with_accumulator(pos, accumulator)
             }
-            Backend::Single { net } => net.evaluate(pos),
+            Backend::Single { net, .. } => {
+                #[cfg(feature = "nnue_single_diff")]
+                if let Backend::Single { acc_stack, .. } = &self.backend {
+                    if let (Some(acc), Some(h)) = (acc_stack.last(), self.tracked_hash) {
+                        if h == pos.zobrist_hash {
+                            return net.evaluate_from_accumulator(acc.as_slice());
+                        }
+                    }
+                }
+                // フォールバック：同期が取れていない場合は常にフル評価
+                net.evaluate(pos)
+            }
+        }
+    }
+}
+
+impl NNUEEvaluatorWrapper {
+    /// Hook: set_position（ルート同期）。Single ではここで Acc を構築する。
+    pub fn set_position(&mut self, pos: &Position) {
+        match &mut self.backend {
+            Backend::Classic {
+                evaluator,
+                accumulator_stack,
+            } => {
+                accumulator_stack.clear();
+                let mut acc = Accumulator::new();
+                acc.refresh(pos, &evaluator.feature_transformer);
+                accumulator_stack.push(acc);
+                self.tracked_hash = Some(pos.zobrist_hash);
+            }
+            Backend::Single {
+                net,
+                #[cfg(feature = "nnue_single_diff")]
+                acc_stack,
+            } => {
+                #[cfg(feature = "nnue_single_diff")]
+                {
+                    acc_stack.clear();
+                    acc_stack.push(single_state::SingleAcc::refresh(pos, net));
+                }
+                self.tracked_hash = Some(pos.zobrist_hash);
+            }
+        }
+    }
+
+    /// Hook: do_move（増分）。Single は未対応のため安全側にフォールバック。
+    pub fn do_move(&mut self, pos: &Position, mv: Move) -> NNUEResult<()> {
+        match &mut self.backend {
+            Backend::Classic {
+                evaluator,
+                accumulator_stack,
+            } => {
+                let current_acc =
+                    accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
+                let mut new_acc = current_acc.clone();
+                let update = accumulator::calculate_update(pos, mv)?;
+                new_acc.update(&update, Color::Black, &evaluator.feature_transformer);
+                new_acc.update(&update, Color::White, &evaluator.feature_transformer);
+                accumulator_stack.push(new_acc);
+                // Classic は子局面に同期済みなので、ハッシュを無効化（安全側）。
+                self.tracked_hash = None;
+                Ok(())
+            }
+            Backend::Single { .. } => {
+                // まだ差分更新は未実装。評価時はフルにフォールバックさせる。
+                let _ = (pos, mv); // unused guard
+                self.tracked_hash = None;
+                Ok(())
+            }
+        }
+    }
+
+    /// Hook: undo_move（増分戻し）。Single は未対応のため安全側にフォールバック。
+    pub fn undo_move(&mut self) {
+        match &mut self.backend {
+            Backend::Classic {
+                accumulator_stack, ..
+            } => {
+                if accumulator_stack.len() > 1 {
+                    accumulator_stack.pop();
+                }
+                self.tracked_hash = None;
+            }
+            Backend::Single {
+                #[cfg(feature = "nnue_single_diff")]
+                acc_stack,
+                ..
+            } => {
+                #[cfg(feature = "nnue_single_diff")]
+                {
+                    if acc_stack.len() > 1 {
+                        acc_stack.pop();
+                    }
+                }
+                self.tracked_hash = None;
+            }
         }
     }
 }
@@ -296,5 +358,41 @@ mod tests {
         // Both should share the same Arc pointers
         assert!(Arc::ptr_eq(&evaluator1.feature_transformer, &evaluator2.feature_transformer));
         assert!(Arc::ptr_eq(&evaluator1.network, &evaluator2.network));
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_refresh_matches_direct_evaluate() {
+        use crate::shogi::SHOGI_BOARD_SIZE;
+        let n_feat = SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize; // small acc dim for test
+
+        // Construct a tiny SINGLE network
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.0; n_feat * d], // zero rows
+            b0: Some(vec![0.1; d]),    // bias only
+            w2: vec![1.0; d],          // sum all activations
+            b2: 0.0,
+        };
+
+        // Start position with both kings
+        let mut pos = Position::startpos();
+
+        // Black to move
+        pos.side_to_move = Color::Black;
+        let acc_b = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full_b = net.evaluate(&pos);
+        let eval_acc_b = net.evaluate_from_accumulator(acc_b.as_slice());
+        assert_eq!(eval_full_b, eval_acc_b);
+
+        // White to move (flip path)
+        pos.side_to_move = Color::White;
+        let acc_w = super::single_state::SingleAcc::refresh(&pos, &net);
+        let eval_full_w = net.evaluate(&pos);
+        let eval_acc_w = net.evaluate_from_accumulator(acc_w.as_slice());
+        assert_eq!(eval_full_w, eval_acc_w);
     }
 }
