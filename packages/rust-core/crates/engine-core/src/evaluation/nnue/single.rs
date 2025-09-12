@@ -24,7 +24,10 @@ impl SingleChannelNet {
 
         // Accumulate embedding rows
         for &fid in active {
-            debug_assert!(fid < self.n_feat);
+            // 安全側ガード：語彙外 fid は無視（releaseでもOOBを避ける）
+            if fid >= self.n_feat {
+                continue;
+            }
             let base = fid * d;
             let row = &self.w0[base..base + d];
             for (a, r) in acc[..d].iter_mut().zip(row.iter()) {
