@@ -94,12 +94,50 @@ fn main() -> Result<()> {
     }
     let inc_eps = (inc_iters as f64 / start2.elapsed().as_secs_f64()) as u64;
 
+    // Measure chained incremental throughput (apply_update + advance position)
+    let chain_target = Duration::from_secs(args.seconds);
+    let start3 = Instant::now();
+    let mut chain_iters: u64 = 0;
+    'outer_chain: loop {
+        for (p, _moves) in suites.iter() {
+            let mut p_chain = p.clone();
+            let mut acc = SingleAcc::refresh(&p_chain, &net);
+            let gen = MoveGenerator::new();
+            loop {
+                let moves = gen.generate_all(&p_chain).unwrap_or_default();
+                if moves.is_empty() {
+                    break;
+                }
+                // Take a few steps along the current frontier
+                for mv in moves.into_iter().take(8) {
+                    let next = SingleAcc::apply_update(&acc, &p_chain, mv, &net);
+                    let _u = p_chain.do_move(mv);
+                    let _s = net.evaluate_from_accumulator(next.acc_for(p_chain.side_to_move));
+                    acc = next;
+                    chain_iters += 1;
+                    if start3.elapsed() >= chain_target {
+                        break 'outer_chain;
+                    }
+                }
+            }
+            if start3.elapsed() >= chain_target {
+                break 'outer_chain;
+            }
+        }
+        if start3.elapsed() >= chain_target {
+            break;
+        }
+    }
+    let chain_eps = (chain_iters as f64 / start3.elapsed().as_secs_f64()) as u64;
+
     println!("=== NNUE Single Benchmark ===");
     println!("Weights: {}", args.single_weights);
     println!("Refresh-only: {} evals/sec", refresh_eps);
     println!("Incremental: {} evals/sec", inc_eps);
+    println!("Incremental-Chain: {} evals/sec", chain_eps);
     if refresh_eps > 0 {
-        println!("Speedup: {:.2}x", inc_eps as f64 / refresh_eps as f64);
+        println!("Speedup (ApplyOnce): {:.2}x", inc_eps as f64 / refresh_eps as f64);
+        println!("Speedup (Chain): {:.2}x", chain_eps as f64 / refresh_eps as f64);
     }
 
     Ok(())
