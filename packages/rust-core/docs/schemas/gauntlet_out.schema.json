@@ -22,7 +22,10 @@
         "threads": {"type": "integer", "minimum": 1},
         "hash_mb": {"type": "integer", "minimum": 1},
         "book": {"type": "string"},
-        "multipv": {"type": "integer", "minimum": 1}
+        "multipv": {"type": "integer", "minimum": 1},
+        "seed": {"type": ["integer", "null"]},
+        "seed_mode": {"type": ["string", "null"], "enum": ["flat", "block", null]},
+        "pv_ms": {"type": ["integer", "null"], "minimum": 1}
       },
       "required": ["time", "games", "threads", "hash_mb", "multipv"]
     },
@@ -38,7 +41,9 @@
         "wins": {"type": "integer", "minimum": 0},
         "losses": {"type": "integer", "minimum": 0},
         "draws": {"type": "integer", "minimum": 0},
-        "games": {"type": "integer", "minimum": 0}
+        "games": {"type": "integer", "minimum": 0},
+        "nps_samples": {"type": ["integer", "null"], "minimum": 0},
+        "pv_spread_samples": {"type": ["integer", "null"], "minimum": 0}
       },
       "required": ["winrate", "draw", "nps_delta_pct", "pv_spread_p90_cp", "gate"]
     },

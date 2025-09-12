@@ -134,6 +134,9 @@
 - すべての集計レポートは `docs/reports/` に保存する
 - Clap/圧縮直読/SIMD（#14–#16）は Later とし、需要と工数を見て順次対応
 
+### Hands-on（最短で一周）
+- 具体的な実行手順は「[生成→学習→ログ→ガントレット（ハンズオン）](guides/pipeline_walkthrough.md)」を参照。
+
 ### Fixtures（クイック検証用）
 - Gauntlet 用ブック: `docs/reports/fixtures/opening/representative.epd`（代表）, `.../anti.epd`（アンチ）
 - Streaming 入力: `docs/reports/fixtures/psv_sample.psv`
