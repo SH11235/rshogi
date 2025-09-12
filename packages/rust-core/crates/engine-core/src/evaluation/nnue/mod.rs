@@ -226,6 +226,7 @@ impl NNUEEvaluatorWrapper {
 
     /// SINGLE 用: 現在ノードの Acc スナップショットを返す
     #[cfg(feature = "nnue_single_diff")]
+    #[must_use]
     pub fn snapshot_single(&self) -> Option<single_state::SingleAcc> {
         if let Backend::Single { acc_stack, .. } = &self.backend {
             acc_stack.last().cloned()
@@ -371,6 +372,16 @@ impl NNUEEvaluatorWrapper {
             } => {
                 #[cfg(feature = "nnue_single_diff")]
                 {
+                    // Null move: Acc は変更しない（複製して積むだけ）
+                    if mv.is_null() {
+                        if let Some(cur) = acc_stack.last().cloned() {
+                            acc_stack.push(cur);
+                        } else {
+                            acc_stack.push(single_state::SingleAcc::refresh(pos, net));
+                        }
+                        self.tracked_hash = None;
+                        return Ok(());
+                    }
                     let current = acc_stack.last().cloned();
                     if let Some(cur) = current {
                         let next = single_state::SingleAcc::apply_update(&cur, pos, mv, net);
@@ -1004,7 +1015,12 @@ mod tests {
         super::reset_single_fallback_hits();
         if let Backend::Single { net, .. } = &wrapper.backend {
             let s_wrap = wrapper.evaluate(&pos);
+            let s_acc = wrapper
+                .snapshot_single()
+                .map(|acc| net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move)))
+                .unwrap_or_else(|| net.evaluate(&pos));
             let s_dir = net.evaluate(&pos);
+            assert_eq!(s_wrap, s_acc);
             assert_eq!(s_wrap, s_dir);
             // フォールバックが使われたことを確認
             assert!(super::single_fallback_hits() > 0);
@@ -1052,10 +1068,61 @@ mod tests {
             let eval_acc = net.evaluate_from_accumulator(next.acc_for(pos.side_to_move));
             let full = super::single_state::SingleAcc::refresh(&pos, &net);
             let eval_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+            let eval_direct = net.evaluate(&pos);
             assert_eq!(eval_acc, eval_full);
+            assert_eq!(eval_acc, eval_direct);
 
             acc = next;
         }
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_null_move_keeps_acc_and_matches_refresh() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 8usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.2; n_feat * d],
+            b0: Some(vec![0.01; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+        };
+
+        // Kings only position to keep it simple
+        let mut pos = Position::empty();
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        let mut wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net.clone());
+        wrapper.set_position(&pos);
+
+        // Do null move on both wrapper and position
+        let _ = wrapper.do_move(&pos, Move::null());
+        let undo_null = pos.do_null_move();
+
+        let s_wrap = wrapper.evaluate(&pos);
+        let s_acc = wrapper
+            .snapshot_single()
+            .map(|acc| net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move)))
+            .unwrap_or_else(|| net.evaluate(&pos));
+        let s_full = net.evaluate(&pos);
+        assert_eq!(s_wrap, s_acc);
+        assert_eq!(s_wrap, s_full);
+
+        // Undo null move
+        wrapper.undo_move();
+        pos.undo_null_move(undo_null);
+
+        let s_wrap0 = wrapper.evaluate(&pos);
+        let s_full0 = net.evaluate(&pos);
+        assert_eq!(s_wrap0, s_full0);
     }
 
     #[test]
@@ -1108,7 +1175,7 @@ mod tests {
                         let _ = wrap.do_move(&pos, mv);
                         let u = pos.do_move(mv);
 
-                        // equality between wrapper eval (acc) and direct full eval
+                        // equality between wrapper eval (acc), snapshot-acc eval and full eval
                         let s_w = wrap.evaluate(&pos);
                         let s_d = wrap
                             .snapshot_single()
@@ -1116,7 +1183,9 @@ mod tests {
                                 net_cl.evaluate_from_accumulator(acc.acc_for(pos.side_to_move))
                             })
                             .unwrap_or_else(|| net_cl.evaluate(&pos));
+                        let s_full = net_cl.evaluate(&pos);
                         assert_eq!(s_w, s_d);
+                        assert_eq!(s_w, s_full);
 
                         pos.undo_move(mv, u);
                         wrap.undo_move();
