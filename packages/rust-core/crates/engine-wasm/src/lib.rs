@@ -10,11 +10,8 @@ pub fn bench_add_row_scaled(len: usize, k: f32, reps: u32) -> f64 {
     // Prepare deterministic input
     let mut dst = vec![0.0f32; len];
     let mut row = vec![0.0f32; len];
-    // Use iterator enumeration (clippy: needless_range_loop)
+    // Use iterator enumeration (enumerate() は範囲外に到達しない)
     for (i, v) in row.iter_mut().enumerate() {
-        if i == len {
-            break;
-        } // defensive (though enumerate won't exceed)
         *v = ((i as f32 + 3.0) * 0.002).cos();
     }
 
