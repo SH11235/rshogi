@@ -794,9 +794,14 @@ impl Engine {
         let mut nnue_guard = self.nnue_evaluator.write();
         *nnue_guard = Some(new_evaluator);
 
-        // 並列サーチャは TLS を持つプロキシを内部に抱えるため、
-        // 重み切替時に再生成して TLS を作り直す（安全側）
+        // 重み切替時はプロキシ/TLS を抱える検索器を再生成（安全側）
         if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
             *guard = None;
         }
 
@@ -1155,24 +1160,32 @@ struct NNUEEvaluatorProxy {
 }
 
 impl NNUEEvaluatorProxy {
-    #[inline]
-    fn local(&self) -> Option<std::cell::RefMut<'_, NNUEEvaluatorWrapper>> {
-        self.locals.get().map(|c| c.borrow_mut())
-    }
+    // no direct local() helper (unused)
     #[inline]
     fn ensure_local(&self) -> Option<std::cell::RefMut<'_, NNUEEvaluatorWrapper>> {
-        if self.locals.get().is_none() {
-            let g = self.evaluator.read();
-            let base = g.as_ref()?;
-            let _ = self.locals.get_or(|| std::cell::RefCell::new(base.fork_stateless()));
+        if let Some(cell) = self.locals.get() {
+            return Some(cell.borrow_mut());
         }
-        self.local()
+        let g = self.evaluator.read();
+        let base = g.as_ref()?;
+        let cell = self.locals.get_or(|| std::cell::RefCell::new(base.fork_stateless()));
+        Some(cell.borrow_mut())
+    }
+    #[inline]
+    fn ensure_local_ro(&self) -> Option<std::cell::Ref<'_, NNUEEvaluatorWrapper>> {
+        if let Some(cell) = self.locals.get() {
+            return Some(cell.borrow());
+        }
+        let g = self.evaluator.read();
+        let base = g.as_ref()?;
+        let cell = self.locals.get_or(|| std::cell::RefCell::new(base.fork_stateless()));
+        Some(cell.borrow())
     }
 }
 
 impl Evaluator for NNUEEvaluatorProxy {
     fn evaluate(&self, pos: &Position) -> i32 {
-        if let Some(l) = self.ensure_local() {
+        if let Some(l) = self.ensure_local_ro() {
             return l.evaluate(pos);
         }
         warn!("NNUE evaluator not initialized");

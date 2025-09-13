@@ -54,9 +54,6 @@ use std::error::Error;
 use std::sync::Arc;
 use weights::{load_single_weights, load_weights};
 
-#[cfg(debug_assertions)]
-use log::warn;
-
 /// Scale factor for converting network output to centipawns
 ///
 /// The NNUE network outputs values in a higher resolution internal scale.
@@ -182,16 +179,13 @@ impl NNUEEvaluatorWrapper {
     pub fn fork_stateless(&self) -> Self {
         match &self.backend {
             Backend::Classic { evaluator, .. } => {
-                // 最小初期状態（空局面で refresh 済み Acc を1段）
-                let mut acc = Accumulator::new();
-                let empty = Position::empty();
-                acc.refresh(&empty, evaluator.feature_transformer());
                 Self {
                     backend: Backend::Classic {
                         evaluator: evaluator.clone(),
-                        accumulator_stack: vec![acc],
+                        accumulator_stack: Vec::new(),
                     },
-                    tracked_hash: None,
+                    // set_position 前の評価はフル再構築へ落とす
+                    tracked_hash: Some(u64::MAX),
                 }
             }
             Backend::Single { net, .. } => Self {
@@ -200,7 +194,8 @@ impl NNUEEvaluatorWrapper {
                     #[cfg(feature = "nnue_single_diff")]
                     acc_stack: Vec::new(),
                 },
-                tracked_hash: None,
+                // set_position 前の評価はフル経路
+                tracked_hash: Some(u64::MAX),
             },
         }
     }
@@ -274,7 +269,7 @@ impl NNUEEvaluatorWrapper {
                 acc_stack.push(acc);
             } else {
                 #[cfg(debug_assertions)]
-                warn!("[NNUE] restore_single_at: weights UID mismatch; refreshing acc");
+                log::warn!("[NNUE] restore_single_at: weights UID mismatch; refreshing acc");
                 acc_stack.clear();
                 acc_stack.push(single_state::SingleAcc::refresh(pos, net));
             }
@@ -305,20 +300,19 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 evaluator,
                 accumulator_stack,
             } => {
-                // 単スレ探索（on_do/undo 経路）では tracked_hash=None とし、acc が常に同期済み
-                // 並列探索（HookSuppressor 経路）では tracked_hash=Some(root_hash) で root 以外は不一致→フル評価へフォールバック
-                let use_acc = match self.tracked_hash {
-                    None => true,
-                    Some(h) => h == pos.zobrist_hash,
-                };
+                // 初期状態（set_position 前）はスタック空のため、常にフル再構築
+                if accumulator_stack.is_empty() {
+                    let mut tmp = accumulator::Accumulator::new();
+                    tmp.refresh(pos, evaluator.feature_transformer());
+                    return evaluator.evaluate_with_accumulator(pos, &tmp);
+                }
 
+                // 単スレ探索（on_do/undo 経路）では tracked_hash=None とし、acc が常に同期済み
+                // 並列探索では tracked_hash=Some(root_hash) で root 以外は不一致→フル評価へフォールバック
+                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
                 if use_acc {
                     if let Some(acc) = accumulator_stack.last() {
                         return evaluator.evaluate_with_accumulator(pos, acc);
-                    } else {
-                        #[cfg(debug_assertions)]
-                        warn!("[NNUE] Empty accumulator stack");
-                        // fall through to full rebuild
                     }
                 }
 
