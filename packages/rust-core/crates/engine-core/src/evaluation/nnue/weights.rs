@@ -439,6 +439,25 @@ pub fn load_single_weights(
     rdr.read_exact(&mut u4)?;
     let b2 = f32::from_le_bytes(u4);
 
+    // Cheap deterministic 64-bit hash as weights UID
+    fn hash_f32s(mut h: u64, xs: &[f32]) -> u64 {
+        for &v in xs {
+            let b = v.to_le_bytes();
+            let x = u32::from_le_bytes(b) as u64;
+            // group hex digits in equal-sized groups for clippy friendliness
+            h ^= x.wrapping_mul(0x0100_0000_01b3);
+            h = h.rotate_left(13).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+        }
+        h
+    }
+    let mut uid = 0x9E37_79B9_7F4A_7C15u64 ^ (input_dim as u64) ^ ((acc_dim as u64) << 32);
+    uid = hash_f32s(uid, &w0);
+    if let Some(ref bias0) = b0 {
+        uid = hash_f32s(uid, bias0);
+    }
+    uid = hash_f32s(uid, &w2);
+    uid ^= (b2.to_bits() as u64).wrapping_mul(0x9ddf_ea08eb382d69);
+
     Ok(super::single::SingleChannelNet {
         n_feat: input_dim,
         acc_dim,
@@ -447,5 +466,6 @@ pub fn load_single_weights(
         b0,
         w2,
         b2,
+        uid,
     })
 }

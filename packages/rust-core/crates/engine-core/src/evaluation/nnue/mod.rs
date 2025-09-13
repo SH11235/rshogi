@@ -178,6 +178,32 @@ pub fn reset_single_fallback_hits() {
 }
 
 impl NNUEEvaluatorWrapper {
+    /// 現在の重みを共有しつつ、状態（acc_stack/tracked_hash）のない新インスタンスを作る
+    pub fn fork_stateless(&self) -> Self {
+        match &self.backend {
+            Backend::Classic { evaluator, .. } => {
+                // 最小初期状態（空局面で refresh 済み Acc を1段）
+                let mut acc = Accumulator::new();
+                let empty = Position::empty();
+                acc.refresh(&empty, evaluator.feature_transformer());
+                Self {
+                    backend: Backend::Classic {
+                        evaluator: evaluator.clone(),
+                        accumulator_stack: vec![acc],
+                    },
+                    tracked_hash: None,
+                }
+            }
+            Backend::Single { net, .. } => Self {
+                backend: Backend::Single {
+                    net: net.clone(),
+                    #[cfg(feature = "nnue_single_diff")]
+                    acc_stack: Vec::new(),
+                },
+                tracked_hash: None,
+            },
+        }
+    }
     /// Create new wrapper from weights file
     pub fn new(weights_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         if let Ok((ft, net)) = load_weights(weights_path) {
@@ -242,8 +268,16 @@ impl NNUEEvaluatorWrapper {
             // 開発時の寸止め検証：異なる net 由来の Acc を誤って渡していないか
             debug_assert_eq!(acc.post_black.len(), net.acc_dim);
             debug_assert_eq!(acc.post_white.len(), net.acc_dim);
-            acc_stack.clear();
-            acc_stack.push(acc);
+            // 追加検査：重み UID の一致（不一致なら安全側で refresh）
+            if acc.weights_uid == net.uid {
+                acc_stack.clear();
+                acc_stack.push(acc);
+            } else {
+                #[cfg(debug_assertions)]
+                warn!("[NNUE] restore_single_at: weights UID mismatch; refreshing acc");
+                acc_stack.clear();
+                acc_stack.push(single_state::SingleAcc::refresh(pos, net));
+            }
             self.tracked_hash = Some(pos.zobrist_hash);
         }
     }
@@ -300,17 +334,13 @@ impl Evaluator for NNUEEvaluatorWrapper {
             Backend::Single { net, .. } => {
                 #[cfg(feature = "nnue_single_diff")]
                 if let Backend::Single { acc_stack, .. } = &self.backend {
-                    let use_acc = match self.tracked_hash {
-                        None => true,
-                        Some(h) => h == pos.zobrist_hash,
-                    };
+                    let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
                     if use_acc {
                         if let Some(acc) = acc_stack.last() {
                             return net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move));
                         }
                     }
                 }
-                // フォールバック：同期が取れていない場合や acc 不在時はフル評価
                 #[cfg(test)]
                 {
                     SINGLE_FALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -340,6 +370,8 @@ impl NNUEEvaluatorWrapper {
                 #[cfg(feature = "nnue_single_diff")]
                 acc_stack,
             } => {
+                #[cfg(not(feature = "nnue_single_diff"))]
+                let _ = net; // silence unused when feature disabled
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     acc_stack.clear();
@@ -373,6 +405,8 @@ impl NNUEEvaluatorWrapper {
                 #[cfg(feature = "nnue_single_diff")]
                 acc_stack,
             } => {
+                #[cfg(not(feature = "nnue_single_diff"))]
+                let _ = net; // silence unused when feature disabled
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     // Null move: Acc は変更しない（複製して積むだけ）
@@ -409,6 +443,12 @@ impl NNUEEvaluatorWrapper {
             Backend::Classic {
                 accumulator_stack, ..
             } => {
+                #[cfg(debug_assertions)]
+                {
+                    if accumulator_stack.is_empty() {
+                        debug_assert!(false, "undo_move called with empty accumulator_stack");
+                    }
+                }
                 if accumulator_stack.len() > 1 {
                     accumulator_stack.pop();
                 }
@@ -421,6 +461,12 @@ impl NNUEEvaluatorWrapper {
             } => {
                 #[cfg(feature = "nnue_single_diff")]
                 {
+                    #[cfg(debug_assertions)]
+                    {
+                        if acc_stack.is_empty() {
+                            debug_assert!(false, "undo_move called with empty acc_stack");
+                        }
+                    }
                     if acc_stack.len() > 1 {
                         acc_stack.pop();
                     }
@@ -521,6 +567,7 @@ mod tests {
             b0: Some(vec![0.1; d]),    // bias only
             w2: vec![1.0; d],          // sum all activations
             b2: 1.0,                   // 非ゼロ出力になるように調整
+            uid: 1,
         };
 
         // Start position with both kings
@@ -558,6 +605,7 @@ mod tests {
             b0: Some(vec![0.2; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 2,
         };
 
         let mut pos = Position::startpos();
@@ -594,6 +642,7 @@ mod tests {
             b0: Some(vec![0.2; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 3,
         };
 
         let mut pos = Position::startpos();
@@ -627,6 +676,7 @@ mod tests {
             b0: Some(vec![0.2; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 4,
         };
 
         let mut pos = Position::empty();
@@ -718,6 +768,7 @@ mod tests {
             b0: Some(vec![0.2; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 5,
         };
 
         let mut pos = Position::empty();
@@ -756,6 +807,7 @@ mod tests {
             b0: Some(vec![-0.1; d]),
             w2: vec![1.0; d],
             b2: 0.5,
+            uid: 6,
         };
 
         // 盤面セットアップ：玉と歩
@@ -804,6 +856,7 @@ mod tests {
             b0: Some(vec![0.05; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 7,
         };
 
         let mut pos = Position::empty();
@@ -850,6 +903,7 @@ mod tests {
             b0: Some(vec![0.05; d]),
             w2: vec![1.0; d],
             b2: 0.3,
+            uid: 8,
         };
 
         let mut pos = Position::startpos();
@@ -898,6 +952,7 @@ mod tests {
             b0: Some(vec![0.01; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 9,
         };
 
         let mut pos = Position::empty();
@@ -951,6 +1006,7 @@ mod tests {
             b0: Some(vec![0.05; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 10,
         };
 
         let mut pos = Position::empty();
@@ -1045,6 +1101,7 @@ mod tests {
             b0: Some(vec![-0.02; d]),
             w2: vec![1.0; d],
             b2: 0.1,
+            uid: 9,
         };
 
         let mut pos = Position::startpos();
@@ -1089,6 +1146,7 @@ mod tests {
             b0: Some(vec![0.01; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 10,
         };
 
         // Kings only position to keep it simple
@@ -1140,6 +1198,7 @@ mod tests {
             b0: Some(vec![0.01; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 11,
         };
 
         // Root setup
