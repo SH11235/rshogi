@@ -28,6 +28,10 @@ struct Args {
     /// Minimum baseline EPS for eval metrics to consider threshold
     #[arg(long, default_value_t = 50_000.0)]
     eval_baseline_min: f64,
+
+    /// Exit non-zero when warnings are present (for CI gating)
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    fail_on_warn: bool,
 }
 
 fn read_json(path: &str) -> Result<Value> {
@@ -67,61 +71,73 @@ fn main() -> Result<()> {
     // Metrics to compare (name, threshold, base_min)
     // Focus on apply/chain for both series; also include refresh for visibility (but same thresholds)
     #[derive(Clone, Copy)]
-    struct Target<'a> {
+    struct TargetEx<'a> {
         key: &'a str,
         thr: f64,
         base_min: f64,
+        warnable: bool,
     }
-    let targets_update = [
-        Target {
+    let targets = [
+        // Update-only (warnable)
+        TargetEx {
             key: "apply_update_eps",
             thr: args.update_threshold,
             base_min: args.update_baseline_min,
+            warnable: true,
         },
-        Target {
+        TargetEx {
             key: "chain_update_eps",
             thr: args.update_threshold,
             base_min: args.update_baseline_min,
+            warnable: true,
         },
-        Target {
+        TargetEx {
             key: "refresh_update_eps",
             thr: args.update_threshold,
             base_min: args.update_baseline_min,
+            warnable: false,
         },
-    ];
-    let targets_eval = [
-        Target {
+        // Eval-included (warnable)
+        TargetEx {
             key: "apply_eval_eps",
             thr: args.eval_threshold,
             base_min: args.eval_baseline_min,
+            warnable: true,
         },
-        Target {
+        TargetEx {
             key: "chain_eval_eps",
             thr: args.eval_threshold,
             base_min: args.eval_baseline_min,
+            warnable: true,
         },
-        Target {
+        TargetEx {
             key: "refresh_eval_eps",
             thr: args.eval_threshold,
             base_min: args.eval_baseline_min,
+            warnable: false,
         },
     ];
 
     let mut warns: Vec<WarnItem> = Vec::new();
     let mut deltas_out: Vec<Value> = Vec::new();
 
-    for t in targets_update.iter().chain(targets_eval.iter()) {
-        if let (Some(h), Some(b)) = (get_metric(&head, t.key), get_metric(&base, t.key)) {
-            if let Some(delta) = pct_delta(h, b) {
-                deltas_out.push(json!({ "metric": t.key, "base": b, "head": h, "delta_pct": (delta * 10.0).round()/10.0 }));
-                if b >= t.base_min && delta < t.thr {
-                    warns.push(WarnItem {
-                        metric: t.key.to_string(),
-                        base: b,
-                        head: h,
-                        delta,
-                    });
+    for t in targets.iter() {
+        match (get_metric(&head, t.key), get_metric(&base, t.key)) {
+            (Some(h), Some(b)) => {
+                if let Some(delta) = pct_delta(h, b) {
+                    deltas_out.push(json!({ "metric": t.key, "base": b, "head": h, "delta_pct": (delta * 10.0).round()/10.0 }));
+                    if t.warnable && b >= t.base_min && delta < t.thr {
+                        warns.push(WarnItem {
+                            metric: t.key.to_string(),
+                            base: b,
+                            head: h,
+                            delta,
+                        });
+                    }
                 }
+            }
+            _ => {
+                deltas_out.push(json!({ "metric": t.key, "status": "missing" }));
             }
         }
     }
@@ -166,19 +182,50 @@ fn main() -> Result<()> {
         })
         .collect();
 
+    // Environment & line compatibility checks
+    let mut notices: Vec<String> = Vec::new();
+    let get = |v: &Value, path: &[&str]| -> Option<Value> {
+        let mut cur = v;
+        for k in path {
+            cur = cur.get(*k)?;
+        }
+        Some(cur.clone())
+    };
+    if get(&head, &["env", "schema_version"]) != get(&base, &["env", "schema_version"]) {
+        notices.push("schema_version differs; comparison may be invalid".into());
+    }
+    for k in ["uid", "acc_dim", "n_feat"] {
+        if get(&head, &["env", "weights", k]) != get(&base, &["env", "weights", k]) {
+            notices.push(format!("weights.{k} differs; skip WARN (advisory only)"));
+        }
+    }
+    for k in ["mode", "line_len", "cases"] {
+        if get(&head, &["line", k]) != get(&base, &["line", k]) {
+            notices.push(format!("line.{k} differs; skip WARN (advisory only)"));
+        }
+    }
+    let suppress_warns = notices.iter().any(|s| s.contains("weights.") || s.contains("line."));
+    let warns_json_out = if suppress_warns {
+        Vec::new()
+    } else {
+        warns_json
+    };
+
     let result = json!({
         "head": head.get("env").cloned().unwrap_or(json!({})),
         "base": base.get("env").cloned().unwrap_or(json!({})),
         "compare": deltas_out,
-        "warns": warns_json,
+        "warns": warns_json_out,
+        "notices": notices,
     });
 
+    // JSON -> stdout
     println!("{}", serde_json::to_string_pretty(&result)?);
-
-    if !warns.is_empty() {
-        println!("\nWARN: nnue_benchmark regressions detected (worst first):");
+    // WARN lines -> stderr
+    if !warns.is_empty() && !suppress_warns {
+        eprintln!("\nWARN: nnue_benchmark regressions detected (worst first):");
         for w in &warns {
-            println!(
+            eprintln!(
                 "- {}: {delta:.1}% (head={h:.0}, base={b:.0})",
                 w.metric,
                 delta = w.delta,
@@ -186,6 +233,10 @@ fn main() -> Result<()> {
                 b = w.base
             );
         }
+    }
+
+    if !warns.is_empty() && !suppress_warns && args.fail_on_warn {
+        std::process::exit(2);
     }
 
     Ok(())

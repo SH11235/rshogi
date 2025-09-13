@@ -134,21 +134,21 @@ impl SearchContext {
         // 1秒毎に eval 経路テレメトリをデバッグログへ出力
         #[cfg(feature = "nnue_telemetry")]
         {
-            // グローバル・エポックで排他し、スナップショットの多重リセットを防ぐ
-            // 1秒あたり、いずれか1スレッドのみが snapshot_and_reset() を実行する。
+            // プロセス全体で1秒に1回だけスナップショットする（UNIXエポック秒基準）。
+            // 検索ごとに start_time が異なると新規検索の初期秒が永続的に抑止される問題を避けるため、
+            // 相対秒ではなくエポック秒を用いる。
             static LAST_LOG_SEC: std::sync::atomic::AtomicU64 =
                 std::sync::atomic::AtomicU64::new(0);
-            let now = Instant::now();
-            let sec = now.duration_since(self.start_time).as_secs();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let prev = LAST_LOG_SEC.load(Ordering::Relaxed);
-            // 同一秒では1回だけ成功する（複数スレッドからの呼び出しを抑止）
-            if sec > prev
+            if now > prev
                 && LAST_LOG_SEC
-                    .compare_exchange(prev, sec, Ordering::Relaxed, Ordering::Relaxed)
+                    .compare_exchange(prev, now, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
             {
-                // このスレッドが当該秒の担当ロガー
-                self.last_telemetry_log = Some(now);
                 let snap = crate::evaluation::nnue::telemetry::snapshot_and_reset();
                 let fb_total = snap.fb_hash_mismatch + snap.fb_acc_empty + snap.fb_feature_off;
                 let total = snap.acc + fb_total;

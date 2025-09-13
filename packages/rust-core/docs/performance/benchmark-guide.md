@@ -235,12 +235,15 @@ cargo run --release -p tools --bin nnue_benchmark -- \
 cargo run --release -p tools --bin compare_nnue_bench -- \
   docs/reports/head.json docs/reports/base.json \
   --update-threshold -15 --eval-threshold -10 \
-  --update-baseline-min 100000 --eval-baseline-min 50000
+  --update-baseline-min 100000 --eval-baseline-min 50000 \
+  --fail-on-warn
 ```
 
 出力:
-- JSON: 各指標の delta と warn を標準出力（人間可読の警告行も併記）
+- JSON: 各指標の delta と warn を標準出力（stdout）
+- WARN行: 人間可読の警告を標準エラー（stderr）に出力
 - 既定閾値: Update 系 -15%、Eval 系 -10%（ベースが十分に大きいときのみ判定）
+- --fail-on-warn: 警告があれば終了コード2で終了（CIゲート向け）
 
 #### 探索中テレメトリのログ（開発時）
 - feature `nnue_telemetry` 有効時、探索中に 1 秒ごと `kind=eval_path` を出力します。
