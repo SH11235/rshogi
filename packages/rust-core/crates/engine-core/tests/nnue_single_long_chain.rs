@@ -42,7 +42,7 @@ fn long_chain_150plies_triple_equality() {
     let gen = MoveGenerator::new();
     let mut rng = rand_xoshiro::Xoshiro128Plus::seed_from_u64(0xC0FFEE);
 
-    for ply in 0..150 {
+    for _ply in 0..150 {
         let moves = gen.generate_all(&pos).unwrap_or_default();
         if moves.is_empty() {
             break;
@@ -64,7 +64,7 @@ fn long_chain_150plies_triple_equality() {
         if !(eval_acc == eval_full && eval_acc == eval_dir) {
             eprintln!(
                 "ply={} mv={:?} acc={} full={} dir={}",
-                ply, mv, eval_acc, eval_full, eval_dir
+                _ply, mv, eval_acc, eval_full, eval_dir
             );
         }
         assert_eq!(eval_acc, eval_full);
@@ -73,7 +73,7 @@ fn long_chain_150plies_triple_equality() {
         // 進行
         acc = next;
         // 念のため、玉だけの簡単局面でも一度通す
-        if ply == 0 {
+        if _ply == 0 {
             let mut simple = Position::empty();
             use engine_core::usi::parse_usi_square;
             simple.board.put_piece(
@@ -97,8 +97,7 @@ fn long_chain_150plies_triple_equality() {
 }
 
 #[test]
-#[ignore]
-fn long_chain_200plies_triple_equality_ignored() {
+fn long_chain_200plies_triple_equality() {
     let d = 8usize;
     let net = make_small_net(d, 0xA2);
     let mut pos = Position::startpos();
@@ -106,7 +105,7 @@ fn long_chain_200plies_triple_equality_ignored() {
     let gen = MoveGenerator::new();
     let mut rng = rand_xoshiro::Xoshiro128Plus::seed_from_u64(0xBADC0DE);
 
-    for ply in 0..200 {
+    for _ply in 0..200 {
         let moves = gen.generate_all(&pos).unwrap_or_default();
         if moves.is_empty() {
             break;

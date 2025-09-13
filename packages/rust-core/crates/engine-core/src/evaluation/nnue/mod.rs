@@ -214,7 +214,8 @@ impl NNUEEvaluatorWrapper {
                     evaluator,
                     accumulator_stack: vec![initial_acc],
                 },
-                tracked_hash: None,
+                // set_position まで評価で Acc を使わない安全側にする
+                tracked_hash: Some(u64::MAX),
             });
         }
         if let Ok(net) = load_single_weights(weights_path) {
@@ -224,7 +225,8 @@ impl NNUEEvaluatorWrapper {
                     #[cfg(feature = "nnue_single_diff")]
                     acc_stack: Vec::new(),
                 },
-                tracked_hash: None,
+                // set_position まで評価で Acc を使わない安全側にする
+                tracked_hash: Some(u64::MAX),
             });
         }
         Err("Failed to load NNUE weights (unsupported format)".into())
@@ -288,7 +290,8 @@ impl NNUEEvaluatorWrapper {
                 evaluator,
                 accumulator_stack: vec![initial_acc],
             },
-            tracked_hash: None,
+            // set_position まで評価で Acc を使わない安全側にする
+            tracked_hash: Some(u64::MAX),
         }
     }
 }
@@ -300,7 +303,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 evaluator,
                 accumulator_stack,
             } => {
-                // 初期状態（set_position 前）はスタック空のため、常にフル再構築
+                // 初期状態（fork_stateless 直後などでスタック空）は常にフル再構築
                 if accumulator_stack.is_empty() {
                     let mut tmp = accumulator::Accumulator::new();
                     tmp.refresh(pos, evaluator.feature_transformer());
@@ -376,7 +379,9 @@ impl NNUEEvaluatorWrapper {
         }
     }
 
-    /// Hook: do_move（増分）。Single は未対応のため安全側にフォールバック。
+    /// Hook: do_move（増分）。
+    /// - feature=nnue_single_diff 有効時の Single は差分更新を行う
+    /// - それ以外は安全側にフォールバック
     pub fn do_move(&mut self, pos: &Position, mv: Move) -> NNUEResult<()> {
         match &mut self.backend {
             Backend::Classic {
@@ -1077,13 +1082,14 @@ mod tests {
         super::reset_single_fallback_hits();
         if let Backend::Single { net, .. } = &wrapper.backend {
             let s_wrap = wrapper.evaluate(&pos);
-            let s_acc = wrapper
-                .snapshot_single()
-                .map(|acc| net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move)))
-                .unwrap_or_else(|| net.evaluate(&pos));
             let s_dir = net.evaluate(&pos);
-            assert_eq!(s_wrap, s_acc);
+            // 子局面に同期した acc（refresh）経由の評価とも一致することを確認
+            let s_acc_refreshed = {
+                let full = super::single_state::SingleAcc::refresh(&pos, net);
+                net.evaluate_from_accumulator(full.acc_for(pos.side_to_move))
+            };
             assert_eq!(s_wrap, s_dir);
+            assert_eq!(s_wrap, s_acc_refreshed);
             // フォールバックが使われたことを確認
             assert!(super::single_fallback_hits() > 0);
         } else {
@@ -1210,7 +1216,7 @@ mod tests {
         };
 
         // Root setup
-        let mut root_pos = Position::startpos();
+        let root_pos = Position::startpos();
         let mut root_wrap = NNUEEvaluatorWrapper::new_with_single_net_for_test(net.clone());
         root_wrap.set_position(&root_pos);
 
