@@ -15,6 +15,7 @@ pub struct SingleAcc {
     pub(crate) pre_white: Vec<f32>,
     pub(crate) post_black: Vec<f32>,
     pub(crate) post_white: Vec<f32>,
+    pub(crate) weights_uid: u64,
 }
 
 impl SingleAcc {
@@ -90,6 +91,7 @@ impl SingleAcc {
             pre_white,
             post_black,
             post_white,
+            weights_uid: net.uid,
         }
     }
 
@@ -318,6 +320,8 @@ impl SingleAcc {
             }
         }
 
+        // Keep same net identity
+        next.weights_uid = pre.weights_uid;
         next
     }
 }

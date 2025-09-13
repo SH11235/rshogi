@@ -164,6 +164,7 @@ impl Engine {
         let nnue_basic_searcher = if engine_type == EngineType::Nnue {
             let nnue_proxy = NNUEEvaluatorProxy {
                 evaluator: nnue_evaluator.clone(),
+                locals: thread_local::ThreadLocal::new(),
             };
             Arc::new(Mutex::new(Some(NnueBasicSearcher::new_with_tt_size(
                 nnue_proxy,
@@ -185,6 +186,7 @@ impl Engine {
         let nnue_enhanced_searcher = if engine_type == EngineType::EnhancedNnue {
             let nnue_proxy = NNUEEvaluatorProxy {
                 evaluator: nnue_evaluator.clone(),
+                locals: thread_local::ThreadLocal::new(),
             };
             Arc::new(Mutex::new(Some(NnueEnhancedSearcher::new_with_tt_size(
                 nnue_proxy,
@@ -590,6 +592,7 @@ impl Engine {
                 if searcher_guard.is_none() {
                     let nnue_proxy = NNUEEvaluatorProxy {
                         evaluator: self.nnue_evaluator.clone(),
+                        locals: thread_local::ThreadLocal::new(),
                     };
                     #[cfg(feature = "nnue_single_diff")]
                     {
@@ -732,6 +735,7 @@ impl Engine {
                 EngineType::Nnue => {
                     let nnue_proxy = NNUEEvaluatorProxy {
                         evaluator: self.nnue_evaluator.clone(),
+                        locals: thread_local::ThreadLocal::new(),
                     };
                     if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
                         let mut s =
@@ -753,6 +757,7 @@ impl Engine {
                 EngineType::EnhancedNnue => {
                     let nnue_proxy = NNUEEvaluatorProxy {
                         evaluator: self.nnue_evaluator.clone(),
+                        locals: thread_local::ThreadLocal::new(),
                     };
                     if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
                         let mut s =
@@ -788,6 +793,12 @@ impl Engine {
         // Replace the evaluator
         let mut nnue_guard = self.nnue_evaluator.write();
         *nnue_guard = Some(new_evaluator);
+
+        // 並列サーチャは TLS を持つプロキシを内部に抱えるため、
+        // 重み切替時に再生成して TLS を作り直す（安全側）
+        if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
+            *guard = None;
+        }
 
         Ok(())
     }
@@ -833,6 +844,7 @@ impl Engine {
                         if searcher_guard.is_none() {
                             let nnue_proxy = NNUEEvaluatorProxy {
                                 evaluator: self.nnue_evaluator.clone(),
+                                locals: thread_local::ThreadLocal::new(),
                             };
                             *searcher_guard = Some(NnueBasicSearcher::new_with_tt_size(
                                 nnue_proxy,
@@ -879,6 +891,7 @@ impl Engine {
                         if searcher_guard.is_none() {
                             let nnue_proxy = NNUEEvaluatorProxy {
                                 evaluator: self.nnue_evaluator.clone(),
+                                locals: thread_local::ThreadLocal::new(),
                             };
                             *searcher_guard = Some(NnueEnhancedSearcher::new_with_tt_size(
                                 nnue_proxy,
@@ -946,6 +959,7 @@ impl Engine {
             EngineType::Nnue => {
                 let nnue_proxy = NNUEEvaluatorProxy {
                     evaluator: self.nnue_evaluator.clone(),
+                    locals: thread_local::ThreadLocal::new(),
                 };
                 if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
                     let mut s = NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
@@ -966,6 +980,7 @@ impl Engine {
             EngineType::EnhancedNnue => {
                 let nnue_proxy = NNUEEvaluatorProxy {
                     evaluator: self.nnue_evaluator.clone(),
+                    locals: thread_local::ThreadLocal::new(),
                 };
                 if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
                     let mut s = NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
@@ -1131,55 +1146,67 @@ impl Engine {
     }
 }
 
-/// Proxy evaluator for thread-safe NNUE access
+/// Proxy evaluator for thread-safe NNUE access（TLS でスレッド毎に独立状態）
 struct NNUEEvaluatorProxy {
+    // 重みの“源泉”：ロード/切替のためだけに使う
     evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
+    // スレッドローカルの Wrapper（差分 Acc スタックはここに保持）
+    locals: thread_local::ThreadLocal<std::cell::RefCell<NNUEEvaluatorWrapper>>,
+}
+
+impl NNUEEvaluatorProxy {
+    #[inline]
+    fn local(&self) -> Option<std::cell::RefMut<'_, NNUEEvaluatorWrapper>> {
+        self.locals.get().map(|c| c.borrow_mut())
+    }
+    #[inline]
+    fn ensure_local(&self) -> Option<std::cell::RefMut<'_, NNUEEvaluatorWrapper>> {
+        if self.locals.get().is_none() {
+            let g = self.evaluator.read();
+            let base = g.as_ref()?;
+            let _ = self.locals.get_or(|| std::cell::RefCell::new(base.fork_stateless()));
+        }
+        self.local()
+    }
 }
 
 impl Evaluator for NNUEEvaluatorProxy {
     fn evaluate(&self, pos: &Position) -> i32 {
-        let guard = self.evaluator.read();
-        if let Some(evaluator) = guard.as_ref() {
-            evaluator.evaluate(pos)
-        } else {
-            warn!("NNUE evaluator not initialized");
-            0
+        if let Some(l) = self.ensure_local() {
+            return l.evaluate(pos);
         }
+        warn!("NNUE evaluator not initialized");
+        0
     }
 
     fn on_set_position(&self, pos: &Position) {
-        let mut guard = self.evaluator.write();
-        if let Some(e) = guard.as_mut() {
-            e.set_position(pos);
+        if let Some(mut l) = self.ensure_local() {
+            l.set_position(pos);
         }
     }
 
     fn on_do_move(&self, pre_pos: &Position, mv: crate::shogi::Move) {
-        let mut guard = self.evaluator.write();
-        if let Some(wrapper) = guard.as_mut() {
-            let _ = wrapper.do_move(pre_pos, mv);
+        if let Some(mut l) = self.ensure_local() {
+            let _ = l.do_move(pre_pos, mv);
         }
     }
 
     fn on_undo_move(&self) {
-        let mut guard = self.evaluator.write();
-        if let Some(wrapper) = guard.as_mut() {
-            wrapper.undo_move();
+        if let Some(mut l) = self.ensure_local() {
+            l.undo_move();
         }
     }
 
-    fn on_do_null_move(&self, _pre_pos: &Position) {
+    fn on_do_null_move(&self, pre_pos: &Position) {
         // 差分Acc運用のため、null move でもスタック整合を保つ
-        let mut guard = self.evaluator.write();
-        if let Some(wrapper) = guard.as_mut() {
-            let _ = wrapper.do_move(_pre_pos, crate::shogi::Move::null());
+        if let Some(mut l) = self.ensure_local() {
+            let _ = l.do_move(pre_pos, crate::shogi::Move::null());
         }
     }
 
     fn on_undo_null_move(&self) {
-        let mut guard = self.evaluator.write();
-        if let Some(wrapper) = guard.as_mut() {
-            wrapper.undo_move();
+        if let Some(mut l) = self.ensure_local() {
+            l.undo_move();
         }
     }
 }

@@ -13,6 +13,7 @@ pub struct SingleChannelNet {
     pub b0: Option<Vec<f32>>, // [acc_dim]
     pub w2: Vec<f32>,         // [acc_dim]
     pub b2: f32,              // scalar
+    pub uid: u64,             // weights identity (runtime-unique)
 }
 
 impl SingleChannelNet {

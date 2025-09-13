@@ -36,6 +36,7 @@ crossbeam-utils = "0.8"
 crossbeam-deque = "0.8"
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true }
+thread_local = "1.1"
 
 [dev-dependencies]
 criterion = { version = "0.6", features = ["html_reports"] }

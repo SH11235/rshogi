@@ -154,6 +154,7 @@ fn test_parallel_nnue_diff_hooks_no_fallback() {
         b0: Some(vec![0.01; d]),
         w2: vec![1.0; d],
         b2: 0.0,
+        uid: 42,
     };
     let wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net);
     // Local proxy to forward hooks with interior mutability
