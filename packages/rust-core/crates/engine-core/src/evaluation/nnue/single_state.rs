@@ -6,15 +6,59 @@ use crate::{
 };
 use smallvec::SmallVec;
 
+#[inline]
+fn add_row_scaled(dst: &mut [f32], row: &[f32], k: f32) {
+    debug_assert_eq!(dst.len(), row.len());
+    for (d, r) in dst.iter_mut().zip(row.iter()) {
+        *d += k * *r;
+    }
+}
+
+#[inline]
+fn aggregate_counts(removed: &[usize], added: &[usize]) -> SmallVec<[(usize, i16); 32]> {
+    #[cfg(feature = "diff_agg_hash")]
+    {
+        use std::collections::HashMap;
+        let mut map: HashMap<usize, i16> = HashMap::with_capacity(removed.len() + added.len());
+        for &fid in removed {
+            *map.entry(fid).or_insert(0) -= 1;
+        }
+        for &fid in added {
+            *map.entry(fid).or_insert(0) += 1;
+        }
+        let mut out: SmallVec<[(usize, i16); 32]> = SmallVec::new();
+        out.extend(map.into_iter().filter(|&(_, c)| c != 0));
+        return out;
+    }
+    #[cfg(not(feature = "diff_agg_hash"))]
+    {
+        let mut agg: SmallVec<[(usize, i16); 32]> = SmallVec::new();
+        // linear map update
+        let mut update = |fid: usize, delta: i16| {
+            if let Some((_, c)) = agg.iter_mut().find(|(f, _)| *f == fid) {
+                *c += delta;
+            } else {
+                agg.push((fid, delta));
+            }
+        };
+        for &fid in removed {
+            update(fid, -1);
+        }
+        for &fid in added {
+            update(fid, 1);
+        }
+        agg.retain(|entry| entry.1 != 0);
+        agg
+    }
+}
+
 /// SINGLE_CHANNEL 用の増分 Acc（土台）。
 /// - acc_dim はネットから取得（通常は 256）
-/// - 値は pre/post の両方を保持（pre=前活性、post=ReLU(pre)）
+/// - pre のみ保持（前活性）。ReLU は評価直前に一度だけ適用する（ReLU遅延）。
 #[derive(Clone, Debug)]
 pub struct SingleAcc {
     pub(crate) pre_black: Vec<f32>,
     pub(crate) pre_white: Vec<f32>,
-    pub(crate) post_black: Vec<f32>,
-    pub(crate) post_white: Vec<f32>,
     pub(crate) weights_uid: u64,
 }
 
@@ -22,8 +66,8 @@ impl SingleAcc {
     #[inline]
     pub fn acc_for(&self, stm: Color) -> &[f32] {
         match stm {
-            Color::Black => &self.post_black,
-            Color::White => &self.post_white,
+            Color::Black => &self.pre_black,
+            Color::White => &self.pre_white,
         }
     }
 
@@ -73,24 +117,9 @@ impl SingleAcc {
             }
         }
 
-        let mut post_black = pre_black.clone();
-        let mut post_white = pre_white.clone();
-        for v in &mut post_black {
-            if *v < 0.0 {
-                *v = 0.0;
-            }
-        }
-        for v in &mut post_white {
-            if *v < 0.0 {
-                *v = 0.0;
-            }
-        }
-
         SingleAcc {
             pre_black,
             pre_white,
-            post_black,
-            post_white,
             weights_uid: net.uid,
         }
     }
@@ -224,104 +253,25 @@ impl SingleAcc {
             }
         }
 
-        // 同一 fid の重複を軽減（安全のための微最適化）
-        removed_b.sort_unstable();
-        removed_b.dedup();
-        removed_w.sort_unstable();
-        removed_w.dedup();
-        added_b.sort_unstable();
-        added_b.dedup();
-        added_w.sort_unstable();
-        added_w.dedup();
+        // 交差相殺の一般化（集計した増減を一括適用）
+        let diff_b = aggregate_counts(&removed_b, &added_b);
+        let diff_w = aggregate_counts(&removed_w, &added_w);
 
-        // 交差相殺（removed と added の共通要素を打ち消す）
-        fn cancel_cross(a: &mut SmallVec<[usize; 16]>, b: &mut SmallVec<[usize; 16]>) {
-            let mut i = 0usize;
-            let mut j = 0usize;
-            let mut a_only: SmallVec<[usize; 16]> = SmallVec::new();
-            let mut b_only: SmallVec<[usize; 16]> = SmallVec::new();
-            while i < a.len() && j < b.len() {
-                match a[i].cmp(&b[j]) {
-                    std::cmp::Ordering::Less => {
-                        a_only.push(a[i]);
-                        i += 1;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        b_only.push(b[j]);
-                        j += 1;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        // 相殺: 両方スキップ
-                        i += 1;
-                        j += 1;
-                    }
-                }
-            }
-            // 余りを追加
-            a_only.extend_from_slice(&a[i..]);
-            b_only.extend_from_slice(&b[j..]);
-            a.clear();
-            a.extend_from_slice(&a_only);
-            b.clear();
-            b.extend_from_slice(&b_only);
-        }
-        cancel_cross(&mut removed_b, &mut added_b);
-        cancel_cross(&mut removed_w, &mut added_w);
-
-        // pre に適用
-        for &fid in &removed_b {
-            if fid >= net.n_feat {
+        for &(fid, delta) in diff_b.iter() {
+            if fid >= net.n_feat || delta == 0 {
                 continue;
             }
             let base = fid * d;
             let row = &net.w0[base..base + d];
-            for (pb, r) in next.pre_black.iter_mut().zip(row.iter()) {
-                *pb -= *r;
-            }
+            add_row_scaled(&mut next.pre_black, row, delta as f32);
         }
-        for &fid in &removed_w {
-            if fid >= net.n_feat {
+        for &(fid, delta) in diff_w.iter() {
+            if fid >= net.n_feat || delta == 0 {
                 continue;
             }
             let base = fid * d;
             let row = &net.w0[base..base + d];
-            for (pw, r) in next.pre_white.iter_mut().zip(row.iter()) {
-                *pw -= *r;
-            }
-        }
-        for &fid in &added_b {
-            if fid >= net.n_feat {
-                continue;
-            }
-            let base = fid * d;
-            let row = &net.w0[base..base + d];
-            for (pb, r) in next.pre_black.iter_mut().zip(row.iter()) {
-                *pb += *r;
-            }
-        }
-        for &fid in &added_w {
-            if fid >= net.n_feat {
-                continue;
-            }
-            let base = fid * d;
-            let row = &net.w0[base..base + d];
-            for (pw, r) in next.pre_white.iter_mut().zip(row.iter()) {
-                *pw += *r;
-            }
-        }
-
-        // ReLU で post を更新
-        next.post_black.clone_from(&next.pre_black);
-        next.post_white.clone_from(&next.pre_white);
-        for v in &mut next.post_black {
-            if *v < 0.0 {
-                *v = 0.0;
-            }
-        }
-        for v in &mut next.post_white {
-            if *v < 0.0 {
-                *v = 0.0;
-            }
+            add_row_scaled(&mut next.pre_white, row, delta as f32);
         }
 
         // Keep same net identity

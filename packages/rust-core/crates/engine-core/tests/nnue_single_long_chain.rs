@@ -25,12 +25,10 @@ fn make_small_net(acc_dim: usize, uid: u64) -> SingleChannelNet {
     }
 }
 
-fn verify_relu_invariant(acc: &SingleAcc, d: usize) {
-    // 公開APIから検査できる範囲に限定
+fn verify_shape(acc: &SingleAcc, d: usize) {
+    // 公開APIから検査できる範囲に限定（ReLU は評価時に適用されるため非負は保証しない）
     assert_eq!(acc.acc_for(Color::Black).len(), d);
     assert_eq!(acc.acc_for(Color::White).len(), d);
-    assert!(acc.acc_for(Color::Black).iter().all(|&v| v >= 0.0));
-    assert!(acc.acc_for(Color::White).iter().all(|&v| v >= 0.0));
 }
 
 #[test]
@@ -53,13 +51,13 @@ fn long_chain_150plies_triple_equality() {
         let next = SingleAcc::apply_update(&acc, &pos, mv, &net);
         let u = pos.do_move(mv);
 
-        // 不変式
-        verify_relu_invariant(&next, d);
+        // 形状不変式
+        verify_shape(&next, d);
 
         // 三者一致
-        let eval_acc = net.evaluate_from_accumulator(next.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(next.acc_for(pos.side_to_move));
         let full = SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
         let eval_dir = net.evaluate(&pos);
         if !(eval_acc == eval_full && eval_acc == eval_dir) {
             eprintln!(
@@ -85,7 +83,7 @@ fn long_chain_150plies_triple_equality() {
                 Piece::new(PieceType::King, Color::White),
             );
             let acc_s = SingleAcc::refresh(&simple, &net);
-            let s_acc = net.evaluate_from_accumulator(acc_s.acc_for(simple.side_to_move));
+            let s_acc = net.evaluate_from_accumulator_pre(acc_s.acc_for(simple.side_to_move));
             let s_full = net.evaluate(&simple);
             assert_eq!(s_acc, s_full);
         }
@@ -116,10 +114,10 @@ fn long_chain_200plies_triple_equality() {
         let next = SingleAcc::apply_update(&acc, &pos, mv, &net);
         let _u = pos.do_move(mv);
 
-        verify_relu_invariant(&next, d);
-        let eval_acc = net.evaluate_from_accumulator(next.acc_for(pos.side_to_move));
+        verify_shape(&next, d);
+        let eval_acc = net.evaluate_from_accumulator_pre(next.acc_for(pos.side_to_move));
         let full = SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
         let eval_dir = net.evaluate(&pos);
         assert_eq!(eval_acc, eval_full);
         assert_eq!(eval_acc, eval_dir);

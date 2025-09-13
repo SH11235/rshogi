@@ -22,9 +22,9 @@ fn make_small_net(uid: u64) -> SingleChannelNet {
 }
 
 fn triple_eq(net: &SingleChannelNet, pos: &Position, acc: &SingleAcc) {
-    let s_acc = net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move));
+    let s_acc = net.evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move));
     let full = SingleAcc::refresh(pos, net);
-    let s_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+    let s_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
     let s_dir = net.evaluate(pos);
     assert_eq!(s_acc, s_full, "acc vs refresh mismatch: {} vs {}", s_acc, s_full);
     assert_eq!(s_acc, s_dir, "acc vs direct mismatch: {} vs {}", s_acc, s_dir);
@@ -179,7 +179,7 @@ fn category_drop_and_capture_cycle_min() {
 
 #[test]
 fn category_null_move_triple_equality_single_acc() {
-    // Null move（手番反転）でも acc は有効（両視点 post を保持）
+    // Null move（手番反転）でも acc は有効（両視点 pre を保持。ReLU は評価時に適用）
     let net = make_small_net(0xC1);
     let mut pos = Position::empty();
     pos.board
@@ -188,12 +188,12 @@ fn category_null_move_triple_equality_single_acc() {
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     let acc0 = SingleAcc::refresh(&pos, &net);
-    let s0 = net.evaluate_from_accumulator(acc0.acc_for(pos.side_to_move));
+    let s0 = net.evaluate_from_accumulator_pre(acc0.acc_for(pos.side_to_move));
     let s0f = net.evaluate(&pos);
     assert_eq!(s0, s0f);
 
     let undo = pos.do_null_move();
-    let s1 = net.evaluate_from_accumulator(acc0.acc_for(pos.side_to_move));
+    let s1 = net.evaluate_from_accumulator_pre(acc0.acc_for(pos.side_to_move));
     let s1f = net.evaluate(&pos);
     assert_eq!(s1, s1f);
     pos.undo_null_move(undo);

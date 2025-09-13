@@ -64,17 +64,14 @@ proptest! {
             let next = SingleAcc::apply_update(&acc, &pos, mv, &net);
             let _u = pos.do_move(mv);
 
-            // ReLU/acc_dim invariants
-            // 公開APIから検査できる範囲に限定
+            // 形状のみ（ReLUは評価時に適用されるため非負は保証しない）
             prop_assert_eq!(next.acc_for(Color::Black).len(), acc_dim);
             prop_assert_eq!(next.acc_for(Color::White).len(), acc_dim);
-            prop_assert!(next.acc_for(Color::Black).iter().all(|&v| v >= 0.0));
-            prop_assert!(next.acc_for(Color::White).iter().all(|&v| v >= 0.0));
 
             // Triple equality
-            let s_acc = net.evaluate_from_accumulator(next.acc_for(pos.side_to_move));
+            let s_acc = net.evaluate_from_accumulator_pre(next.acc_for(pos.side_to_move));
             let full = SingleAcc::refresh(&pos, &net);
-            let s_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+            let s_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
             let s_dir = net.evaluate(&pos);
             prop_assert_eq!(s_acc, s_full);
             prop_assert_eq!(s_acc, s_dir);
@@ -110,9 +107,9 @@ proptest! {
         let acc1 = SingleAcc::apply_update(&acc0, &pos, mv, &net);
 
         let u = pos.do_move(mv);
-        let s_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let s_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let full = SingleAcc::refresh(&pos, &net);
-        let s_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+        let s_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
         prop_assert_eq!(s_acc, s_full);
         pos.undo_move(mv, u);
     }

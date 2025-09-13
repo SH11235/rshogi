@@ -40,9 +40,9 @@ fn stress_2000plies_triple_equality() {
         let next = SingleAcc::apply_update(&acc, &pos, mv, &net);
         let _u = pos.do_move(mv);
 
-        let s_acc = net.evaluate_from_accumulator(next.acc_for(pos.side_to_move));
+        let s_acc = net.evaluate_from_accumulator_pre(next.acc_for(pos.side_to_move));
         let full = SingleAcc::refresh(&pos, &net);
-        let s_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+        let s_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
         let s_dir = net.evaluate(&pos);
         assert_eq!(s_acc, s_full);
         assert_eq!(s_acc, s_dir);
