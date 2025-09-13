@@ -134,7 +134,7 @@ jobs:
       - name: Format Check
         run: npm run format:check
 
-      # TODO: Re-enable when WASM build is ready
-      # - name: Type Check
-      #   if: github.event_name == 'push'
-      #   run: npm run typecheck
+        # TODO: Re-enable when WASM build is ready
+        # - name: Type Check
+        #   if: github.event_name == 'push'
+        #   run: npm run typecheck
