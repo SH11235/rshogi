@@ -39,7 +39,7 @@ fn category_promotion_and_capture_to_hand_base() {
     pos.board
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("3a").unwrap(), Piece::new(PieceType::King, Color::White));
     // Black silver ready to promote: 3c -> 3b+
     pos.board
         .put_piece(parse_usi_square("3c").unwrap(), Piece::new(PieceType::Silver, Color::Black));
@@ -90,7 +90,7 @@ fn category_consecutive_non_promotion() {
     pos.board
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("2a").unwrap(), Piece::new(PieceType::King, Color::White));
     // Place a white pawn far to avoid interactions
     pos.board
         .put_piece(parse_usi_square("7c").unwrap(), Piece::new(PieceType::Pawn, Color::White));
@@ -150,7 +150,7 @@ fn category_drop_and_capture_cycle_min() {
     // White gold placed to capture the drop
     pos.board
         .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::White));
-    // Black has two pawns in hand, to allow repeated drops later if needed
+    // Black has one pawn in hand (最小ケース)
     let hand_idx = engine_core::shogi::piece_type_to_hand_index(PieceType::Pawn).unwrap();
     pos.hands[Color::Black as usize][hand_idx] = 1;
     pos.side_to_move = Color::Black;
@@ -159,7 +159,7 @@ fn category_drop_and_capture_cycle_min() {
     triple_eq(&net, &pos, &acc);
 
     // Black: drop pawn at 5f
-    let d1 = Move::drop(PieceType::Pawn, parse_usi_square("5f").unwrap());
+    let d1 = Move::make_drop(PieceType::Pawn, parse_usi_square("5f").unwrap());
     acc = SingleAcc::apply_update(&acc, &pos, d1, &net);
     let _ud1 = pos.do_move(d1);
     triple_eq(&net, &pos, &acc);

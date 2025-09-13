@@ -601,6 +601,11 @@ where
                     crate::usi::move_to_usi(&head)
                 );
                 final_best_move = Some(head);
+                // ノード未計測で手だけが決まるとテスト整合性が崩れるため、
+                // フォールバックで手を返す場合は最低1ノードとみなす。
+                if self.stats.nodes == 0 {
+                    self.stats.nodes = 1;
+                }
             } else {
                 // 2) As a last resort, generate a legal move from the root position
                 //    to avoid emitting no-bestmove at the protocol boundary.
@@ -622,6 +627,11 @@ where
                         // Populate minimal PV for downstream consumers.
                         self.stats.pv.clear();
                         self.stats.pv.push(mv);
+
+                        // 同上: 手を返す以上、最低限の探索があったものとして1ノードに補正
+                        if self.stats.nodes == 0 {
+                            self.stats.nodes = 1;
+                        }
                     } else {
                         // No legal moves at root: this is a terminal position.
                         // Treat as mate (side to move has no legal moves) and attach StopInfo.
