@@ -7,6 +7,7 @@ use engine_core::shogi::{Move, Position};
 use engine_core::usi::{parse_sfen, parse_usi_move};
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256Plus;
+use regex::Regex;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
@@ -85,26 +86,39 @@ struct FixedCase {
 fn parse_line_file(path: &str) -> Result<Vec<FixedCase>> {
     let text = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
     let mut cases = Vec::new();
+    // 寛容なパース: 先頭/間の空白を包括。例: "sfen <SFEN>   moves    <m1>  <m2> ..."
+    // 非貪欲で SFEN を取得し、その後ろの moves 以降をまとめて取得。
+    let re = Regex::new(r"(?i)^\s*sfen\s+(.+?)\s+moves\s+(.+?)\s*$")
+        .map_err(|e| anyhow!("invalid regex: {e}"))?;
     for (idx, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some(rest) = line.strip_prefix("sfen ") else {
-            return Err(anyhow!("line {}: expected 'sfen <...> moves <...>'", idx + 1));
-        };
-        let mut parts = rest.split(" moves ");
-        let sfen_str =
-            parts.next().ok_or_else(|| anyhow!("line {}: missing sfen", idx + 1))?.trim();
-        let moves_part =
-            parts.next().ok_or_else(|| anyhow!("line {}: missing 'moves' part", idx + 1))?;
+        let caps = re
+            .captures(line)
+            .ok_or_else(|| anyhow!("line {}: expected 'sfen <...> moves <...>'", idx + 1))?;
+        let sfen_str = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        let moves_part = caps.get(2).map(|m| m.as_str().trim()).unwrap_or("");
         let mut root =
             parse_sfen(sfen_str).map_err(|e| anyhow!("line {}: invalid sfen: {e:?}", idx + 1))?;
         let mut pre_positions = Vec::new();
         let mut moves = Vec::new();
+        // 任意: デバッグ時のみ合法性チェック（ライン誤記の早期検知）
+        let gen = MoveGenerator::new();
         for token in moves_part.split_whitespace() {
             let mv = parse_usi_move(token)
                 .map_err(|e| anyhow!("line {}: invalid move '{}': {e:?}", idx + 1, token))?;
+            #[cfg(debug_assertions)]
+            {
+                let legal = gen.generate_all(&root).unwrap_or_default();
+                debug_assert!(
+                    legal.iter().any(|&m| m == mv),
+                    "line {}: illegal move '{}' for given position",
+                    idx + 1,
+                    token
+                );
+            }
             // legality check via do_move; capture pre_pos
             pre_positions.push(root.clone());
             let _u = root.do_move(mv);
@@ -136,12 +150,22 @@ fn parse_fixed_line_from_args(args: &Args) -> Result<Vec<FixedCase>> {
     if let Some(ref s) = args.moves {
         let mut pre_positions = Vec::new();
         let mut moves = Vec::new();
+        let gen = MoveGenerator::new();
         for tok in s.split(',') {
             let t = tok.trim();
             if t.is_empty() {
                 continue;
             }
             let mv = parse_usi_move(t).map_err(|e| anyhow!("invalid move '{}': {e:?}", t))?;
+            #[cfg(debug_assertions)]
+            {
+                let legal = gen.generate_all(&root).unwrap_or_default();
+                debug_assert!(
+                    legal.iter().any(|&m| m == mv),
+                    "illegal move '{}' for given position",
+                    t
+                );
+            }
             pre_positions.push(root.clone());
             let _u = root.do_move(mv);
             moves.push(mv);
@@ -155,7 +179,7 @@ fn parse_fixed_line_from_args(args: &Args) -> Result<Vec<FixedCase>> {
 
     if args.deterministic_line {
         let len = args.length.max(1);
-    let mut rng = Xoshiro256Plus::seed_from_u64(args.seed.unwrap_or(0x00C0_FFEE));
+        let mut rng = Xoshiro256Plus::seed_from_u64(args.seed.unwrap_or(0x00C0_FFEE));
         let mut pre_positions = Vec::with_capacity(len);
         let mut moves = Vec::with_capacity(len);
         let gen = MoveGenerator::new();
@@ -198,7 +222,8 @@ fn bench_refresh_update(
         iters += 1;
         i = i.wrapping_add(1);
     }
-    (iters as f64 / start.elapsed().as_secs_f64()) as u64
+    let dur = start.elapsed().as_secs_f64();
+    (iters as f64 / dur) as u64
 }
 
 fn bench_refresh_eval(
@@ -217,7 +242,8 @@ fn bench_refresh_eval(
         iters += 1;
         i = i.wrapping_add(1);
     }
-    (iters as f64 / start.elapsed().as_secs_f64()) as u64
+    let dur = start.elapsed().as_secs_f64();
+    (iters as f64 / dur) as u64
 }
 
 fn bench_apply_update_only(
@@ -252,7 +278,8 @@ fn bench_apply_update_only(
         }
         outer = outer.wrapping_add(1);
     }
-    (iters as f64 / start.elapsed().as_secs_f64()) as u64
+    let dur = start.elapsed().as_secs_f64();
+    (iters as f64 / dur) as u64
 }
 
 fn bench_apply_eval(
@@ -289,7 +316,8 @@ fn bench_apply_eval(
         }
         outer = outer.wrapping_add(1);
     }
-    (iters as f64 / start.elapsed().as_secs_f64()) as u64
+    let dur = start.elapsed().as_secs_f64();
+    (iters as f64 / dur) as u64
 }
 
 fn bench_chain_update_only(
@@ -318,7 +346,8 @@ fn bench_chain_update_only(
         }
         outer = outer.wrapping_add(1);
     }
-    (iters as f64 / start.elapsed().as_secs_f64()) as u64
+    let dur = start.elapsed().as_secs_f64();
+    (iters as f64 / dur) as u64
 }
 
 fn bench_chain_eval(
@@ -351,7 +380,8 @@ fn bench_chain_eval(
         }
         outer = outer.wrapping_add(1);
     }
-    (iters as f64 / start.elapsed().as_secs_f64()) as u64
+    let dur = start.elapsed().as_secs_f64();
+    (iters as f64 / dur) as u64
 }
 
 fn gather_env_json(

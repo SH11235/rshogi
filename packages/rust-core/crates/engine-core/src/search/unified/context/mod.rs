@@ -134,12 +134,20 @@ impl SearchContext {
         // 1秒毎に eval 経路テレメトリをデバッグログへ出力
         #[cfg(feature = "nnue_telemetry")]
         {
+            // グローバル・エポックで排他し、スナップショットの多重リセットを防ぐ
+            // 1秒あたり、いずれか1スレッドのみが snapshot_and_reset() を実行する。
+            static LAST_LOG_SEC: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let now = Instant::now();
-            let should_log = match self.last_telemetry_log {
-                None => true,
-                Some(t0) => now.duration_since(t0).as_secs() >= 1,
-            };
-            if should_log {
+            let sec = now.duration_since(self.start_time).as_secs();
+            let prev = LAST_LOG_SEC.load(Ordering::Relaxed);
+            // 同一秒では1回だけ成功する（複数スレッドからの呼び出しを抑止）
+            if sec > prev
+                && LAST_LOG_SEC
+                    .compare_exchange(prev, sec, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                // このスレッドが当該秒の担当ロガー
                 self.last_telemetry_log = Some(now);
                 let snap = crate::evaluation::nnue::telemetry::snapshot_and_reset();
                 let fb_total = snap.fb_hash_mismatch + snap.fb_acc_empty + snap.fb_feature_off;
@@ -149,17 +157,25 @@ impl SearchContext {
                 } else {
                     0.0
                 };
+                // 経路ログ（acc vs fallback 割合）
                 log::debug!(
-                    "kind=eval_path\tms={}\tacc={}\tfb={}\tfb_hash={}\tfb_empty={}\tfb_feat_off={}\trate={:.1}%\tapply_refresh_king={}\tapply_refresh_other={}",
+                    "kind=eval_path\tms={}\tacc={}\tfb={}\tfb_hash={}\tfb_empty={}\tfb_feat_off={}\trate={:.1}%",
                     self.elapsed().as_millis(),
                     snap.acc,
                     fb_total,
                     snap.fb_hash_mismatch,
                     snap.fb_acc_empty,
                     snap.fb_feature_off,
-                    acc_rate,
+                    acc_rate
+                );
+                // 差分適用のリフレッシュ頻度（原因別）
+                let apply_total = snap.apply_refresh_king + snap.apply_refresh_other;
+                log::debug!(
+                    "kind=apply_refresh\tms={}\tking={}\tother={}\ttotal={}",
+                    self.elapsed().as_millis(),
                     snap.apply_refresh_king,
-                    snap.apply_refresh_other
+                    snap.apply_refresh_other,
+                    apply_total
                 );
             }
         }
