@@ -47,9 +47,11 @@ fn add_row_scaled(dst: &mut [f32], row: &[f32], k: f32) {
         }
         return;
     }
-    // scalar
-    for (d, r) in dst.iter_mut().zip(row.iter()) {
-        *d += k * *r;
+    #[cfg(not(feature = "nnue_simd"))]
+    {
+        for (d, r) in dst.iter_mut().zip(row.iter()) {
+            *d += k * *r;
+        }
     }
 }
 
