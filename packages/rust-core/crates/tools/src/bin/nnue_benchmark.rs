@@ -13,6 +13,15 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+fn parse_u64_any(s: &str) -> std::result::Result<u64, String> {
+    let t = s.trim();
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|e| e.to_string())
+    } else {
+        t.parse::<u64>().map_err(|e| e.to_string())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     about = "NNUE SINGLE (diff vs refresh) micro-benchmark with fixed-line mode",
@@ -60,7 +69,7 @@ struct Args {
     deterministic_line: bool,
 
     /// RNG seed for deterministic line generation
-    #[arg(long)]
+    #[arg(long, value_parser = parse_u64_any, value_name = "SEED", help = "RNG seed (decimal or 0xHEX)")]
     seed: Option<u64>,
 
     /// Line length for deterministic generation
@@ -478,6 +487,25 @@ fn write_report_md(
     fs::create_dir_all(Path::new(path).parent().unwrap_or_else(|| Path::new(".")))?;
     fs::write(path, md)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_seed_parse {
+    use super::parse_u64_any;
+
+    #[test]
+    fn parse_decimal_ok() {
+        assert_eq!(parse_u64_any("12648430").unwrap(), 12_648_430u64);
+        assert_eq!(parse_u64_any("0").unwrap(), 0);
+        assert!(parse_u64_any("-1").is_err());
+    }
+
+    #[test]
+    fn parse_hex_ok() {
+        assert_eq!(parse_u64_any("0xC0FFEE").unwrap(), 0xC0FFEEu64);
+        assert_eq!(parse_u64_any("0XdeadBEEF").unwrap(), 0xDEADBEEFu64);
+        assert!(parse_u64_any("0x").is_err());
+    }
 }
 
 fn main() -> Result<()> {

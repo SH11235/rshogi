@@ -11,6 +11,10 @@ on:
       - 'packages/rust-core/**'
       - '.github/workflows/nnue-bench-regression.yml'
 
+permissions:
+  contents: read
+  actions: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -C link-arg=-fuse-ld=mold
@@ -68,13 +72,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p runs
           if [ ! -f "$WEIGHTS_PATH" ]; then
             echo "Attempting API download of $WEIGHTS_ASSET_NAME from tag $WEIGHTS_RELEASE_TAG"
             API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${WEIGHTS_RELEASE_TAG}"
             ASSET_URL=$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" "$API" \
-              | python3 -c "import sys,json; j=json.load(sys.stdin); a=j.get('assets') or []; print(next((x.get('url','') for x in a if x.get('name')=='${WEIGHTS_ASSET_NAME}'),''))")
+              | python3 - <<'PY'
+import sys, json
+try:
+    j=json.load(sys.stdin)
+    a=j.get('assets') or []
+    print(next((x.get('url','') for x in a if x.get('name')=='${WEIGHTS_ASSET_NAME}'), ''))
+except Exception:
+    print('')
+PY
+            )
             if [ -n "$ASSET_URL" ]; then
               curl -sSLf -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/octet-stream" -o "$WEIGHTS_PATH" "$ASSET_URL" \
                 || echo "::warning::Failed to download asset via API"
@@ -151,7 +164,7 @@ jobs:
               vals=[j.get("metrics",{}).get(k) for j in js]
               vals=[v for v in vals if isinstance(v,(int,float))]
               if vals:
-                  out["metrics"][k]=int(statistics.median(vals))
+                  out["metrics"][k]=int(round(statistics.median(vals)))
           # seconds: median of seconds
           secs=[j.get("metrics",{}).get("seconds") for j in js]
           secs=[s for s in secs if isinstance(s,(int,float))]
@@ -174,25 +187,45 @@ jobs:
       - name: Prepare baseline path
         if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
         run: |
-          set -e
+          set -euo pipefail
           if [ -f runs/base.json ]; then
             echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
-          elif [ -f runs/nnue-fixedline-baseline/base.json ]; then
-            cp runs/nnue-fixedline-baseline/base.json runs/base.json
-            echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
           else
-            echo "::warning::Baseline JSON not found in artifacts. Skipping comparison and gating."
-            echo "NO_BASELINE=1" >> $GITHUB_ENV
+            CANDIDATE="$(find runs -type f -name base.json | head -n1 || true)"
+            if [ -n "$CANDIDATE" ]; then
+              cp "$CANDIDATE" runs/base.json
+              echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
+            else
+              echo "::warning::Baseline JSON not found in artifacts. Skipping comparison and gating."
+              echo "NO_BASELINE=1" >> $GITHUB_ENV
+            fi
           fi
 
       - name: Compare and gate
         if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' && env.NO_BASELINE != '1'
         run: |
-          set -e
+          set -euo pipefail
           target/release/compare_nnue_bench runs/head.json "$BASE_JSON" \
             --update-threshold -15 --eval-threshold -10 \
             --update-baseline-min 100000 --eval-baseline-min 50000 \
-            --fail-on-warn
+            --fail-on-warn \
+            2> >(tee runs/compare.warn.log >&2) | tee runs/compare.json
+
+      - name: Upload compare result (PR)
+        if: (github.event_name == 'pull_request') && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue-compare-result
+          path: packages/rust-core/runs/compare.json
+          if-no-files-found: ignore
+
+      - name: Upload compare WARN log (PR)
+        if: (github.event_name == 'pull_request') && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue-compare-warn
+          path: packages/rust-core/runs/compare.warn.log
+          if-no-files-found: ignore
 
       - name: Upload head result (PR)
         if: (github.event_name == 'pull_request') && always()
@@ -265,7 +298,7 @@ jobs:
               vals=[j.get("metrics",{}).get(k) for j in js]
               vals=[v for v in vals if isinstance(v,(int,float))]
               if vals:
-                  out["metrics"][k]=int(statistics.median(vals))
+                  out["metrics"][k]=int(round(statistics.median(vals)))
           secs=[j.get("metrics",{}).get("seconds") for j in js]
           secs=[s for s in secs if isinstance(s,(int,float))]
           if secs:
