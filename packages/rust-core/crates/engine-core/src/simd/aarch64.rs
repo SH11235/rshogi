@@ -40,7 +40,10 @@ pub(super) unsafe fn add_row_scaled_f32_neon(dst: &mut [f32], row: &[f32], k: f3
         while i + 4 <= n {
             let d = vld1q_f32(dst.as_ptr().add(i));
             let r = vld1q_f32(row.as_ptr().add(i));
-            let v = vmlaq_f32(d, r, kk);
+            #[cfg(feature = "nnue_fast_fma")]
+            let v = vfmaq_f32(d, r, kk);
+            #[cfg(not(feature = "nnue_fast_fma"))]
+            let v = vaddq_f32(d, vmulq_f32(r, kk));
             vst1q_f32(dst.as_mut_ptr().add(i), v);
             i += 4;
         }

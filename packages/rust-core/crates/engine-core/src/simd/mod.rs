@@ -18,6 +18,32 @@ pub mod dispatch {
         }
     }
 
+    /// Check if AVX is available at runtime
+    #[inline]
+    pub fn has_avx() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("avx")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// Check if AVX-512F is available at runtime
+    #[inline]
+    pub fn has_avx512f() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("avx512f")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
     /// Check if SSE2 is available at runtime
     #[inline]
     pub fn has_sse2() -> bool {
@@ -49,17 +75,18 @@ pub mod dispatch {
     pub enum SimdLevel {
         Scalar,
         Sse2,
-        Sse41,
-        Avx2,
+        Avx,
+        Avx512f,
     }
 
     impl SimdLevel {
         /// Detect the best available SIMD level for current CPU
         pub fn detect() -> Self {
-            if has_avx2() {
-                SimdLevel::Avx2
-            } else if has_sse41() {
-                SimdLevel::Sse41
+            if has_avx512f() {
+                SimdLevel::Avx512f
+            } else if has_avx() {
+                // ランタイムでは AVX2/AVX をまとめて AVX として扱う
+                SimdLevel::Avx
             } else if has_sse2() {
                 SimdLevel::Sse2
             } else {
@@ -202,12 +229,12 @@ mod tests {
         log::debug!("Detected SIMD level: {level:?}");
 
         // Check that we detected a valid SIMD level
-        // The level should be one of: Scalar, Sse2, Sse41, or Avx2
+        // The level should be one of: Scalar, Sse2, Avx, or Avx512f
         match level {
             dispatch::SimdLevel::Scalar
             | dispatch::SimdLevel::Sse2
-            | dispatch::SimdLevel::Sse41
-            | dispatch::SimdLevel::Avx2 => {
+            | dispatch::SimdLevel::Avx
+            | dispatch::SimdLevel::Avx512f => {
                 // Valid SIMD level detected - test passes
             }
         }
@@ -286,18 +313,31 @@ mod tests {
                 add_row_scaled_f32(&mut dst_b, &row, k);
 
                 // FMA 経路では丸めが異なる可能性があるため、許容誤差を用意
-                let mut use_approx = false;
-                #[cfg(all(
-                    any(target_arch = "x86", target_arch = "x86_64"),
-                    feature = "nnue_fast_fma"
-                ))]
-                {
-                    if std::arch::is_x86_feature_detected!("avx")
-                        && std::arch::is_x86_feature_detected!("fma")
+                let use_approx = {
+                    #[cfg(all(
+                        any(target_arch = "x86", target_arch = "x86_64"),
+                        feature = "nnue_fast_fma"
+                    ))]
                     {
-                        use_approx = true;
+                        std::arch::is_x86_feature_detected!("avx512f")
+                            || (std::arch::is_x86_feature_detected!("avx")
+                                && std::arch::is_x86_feature_detected!("fma"))
                     }
-                }
+                    #[cfg(all(target_arch = "aarch64", feature = "nnue_fast_fma"))]
+                    {
+                        true
+                    }
+                    #[cfg(not(any(
+                        all(
+                            any(target_arch = "x86", target_arch = "x86_64"),
+                            feature = "nnue_fast_fma"
+                        ),
+                        all(target_arch = "aarch64", feature = "nnue_fast_fma"),
+                    )))]
+                    {
+                        false
+                    }
+                };
                 for i in 0..len {
                     if use_approx {
                         let a = dst_a[i];

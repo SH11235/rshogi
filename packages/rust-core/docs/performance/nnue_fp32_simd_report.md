@@ -105,6 +105,10 @@ bar
 - WASM（simd128）
   - 明確なメリットあり。特に k=±1.0 の add/sub 経路で効果が大きい。配布は SIMD/非SIMD の 2 バンドル戦略を推奨。
 
+### 補足: native と generic の見え方
+- `RUSTFLAGS="-C target-cpu=native"` では、Rust のスカラ実装が LLVM により自動ベクトル化（AVX2/AVX‑512）されるため、ランタイムディスパッチ経由の実装より速く見える場合があります。
+- 配布バイナリ前提の比較では、`-C target-feature=-avx,-avx2,-fma -C target-cpu=x86-64` のいわゆる generic 条件も合わせて評価してください（本レポート CSV 同梱）。
+
 ## 参考
 - ビルド/ブラウザ計測手順: `docs/wasm_simd_bench.md`
 

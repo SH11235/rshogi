@@ -158,6 +158,15 @@ pub(super) unsafe fn add_row_scaled_f32_avx512f(dst: &mut [f32], row: &[f32], k:
                 _mm512_storeu_ps(dst.as_mut_ptr().add(i), v);
                 i += 16;
             }
+            // tail: AVX-512 mask
+            let rem = n - i;
+            if rem > 0 {
+                let mask: u16 = ((1u32 << rem) - 1) as u16;
+                let d = _mm512_maskz_loadu_ps(mask, dst.as_ptr().add(i));
+                let r = _mm512_maskz_loadu_ps(mask, row.as_ptr().add(i));
+                let v = _mm512_add_ps(d, r);
+                _mm512_mask_storeu_ps(dst.as_mut_ptr().add(i), mask, v);
+            }
         } else {
             while i + 16 <= n {
                 let d = _mm512_loadu_ps(dst.as_ptr().add(i));
@@ -166,20 +175,39 @@ pub(super) unsafe fn add_row_scaled_f32_avx512f(dst: &mut [f32], row: &[f32], k:
                 _mm512_storeu_ps(dst.as_mut_ptr().add(i), v);
                 i += 16;
             }
+            // tail: AVX-512 mask
+            let rem = n - i;
+            if rem > 0 {
+                let mask: u16 = ((1u32 << rem) - 1) as u16;
+                let d = _mm512_maskz_loadu_ps(mask, dst.as_ptr().add(i));
+                let r = _mm512_maskz_loadu_ps(mask, row.as_ptr().add(i));
+                let v = _mm512_sub_ps(d, r);
+                _mm512_mask_storeu_ps(dst.as_mut_ptr().add(i), mask, v);
+            }
         }
     } else {
         let kk = _mm512_set1_ps(k);
         while i + 16 <= n {
             let d = _mm512_loadu_ps(dst.as_ptr().add(i));
             let r = _mm512_loadu_ps(row.as_ptr().add(i));
+            #[cfg(feature = "nnue_fast_fma")]
             let v = _mm512_fmadd_ps(r, kk, d);
+            #[cfg(not(feature = "nnue_fast_fma"))]
+            let v = _mm512_add_ps(d, _mm512_mul_ps(r, kk));
             _mm512_storeu_ps(dst.as_mut_ptr().add(i), v);
             i += 16;
         }
-    }
-
-    while i < n {
-        *dst.get_unchecked_mut(i) += k * *row.get_unchecked(i);
-        i += 1;
+        // tail: AVX-512 mask
+        let rem = n - i;
+        if rem > 0 {
+            let mask: u16 = ((1u32 << rem) - 1) as u16;
+            let d = _mm512_maskz_loadu_ps(mask, dst.as_ptr().add(i));
+            let r = _mm512_maskz_loadu_ps(mask, row.as_ptr().add(i));
+            #[cfg(feature = "nnue_fast_fma")]
+            let v = _mm512_fmadd_ps(r, kk, d);
+            #[cfg(not(feature = "nnue_fast_fma"))]
+            let v = _mm512_add_ps(d, _mm512_mul_ps(r, kk));
+            _mm512_mask_storeu_ps(dst.as_mut_ptr().add(i), mask, v);
+        }
     }
 }

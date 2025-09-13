@@ -32,20 +32,38 @@ run_engine_usi_once() {
   local rustflags="$2"
   local features="$3" # e.g. "--features fast-fma" or empty
   RUSTFLAGS="$rustflags" cargo build -p engine-usi --release -q $features
-  (
-    {
-      printf 'usi\n'
-      printf 'isready\n'
-      printf 'setoption name Threads value 1\n'
-      printf 'setoption name EngineType value EnhancedNnue\n'
-      printf 'setoption name EvalFile value runs/nnue_local/nn_best.fp32.bin\n'
-      printf 'isready\n'
-      printf 'position startpos\n'
-      printf 'go movetime 3000\n'
-      sleep 5
-      printf 'quit\n'
-    } | target/release/engine-usi
-  ) > "$out_file" 2>&1 || true
+
+  # Set up a FIFO to keep stdin open and allow sending 'quit' after bestmove
+  local fifo_in
+  fifo_in=$(mktemp -u)
+  mkfifo "$fifo_in"
+  # Start engine; redirect output to file
+  target/release/engine-usi <"$fifo_in" >"$out_file" 2>&1 &
+  local pid=$!
+  # Keep FIFO opened via FD 3
+  exec 3>"$fifo_in"
+  # Initial USI handshake and go command
+  printf 'usi\n' >&3
+  printf 'isready\n' >&3
+  printf 'setoption name Threads value 1\n' >&3
+  printf 'setoption name EngineType value EnhancedNnue\n' >&3
+  printf 'setoption name EvalFile value runs/nnue_local/nn_best.fp32.bin\n' >&3
+  printf 'isready\n' >&3
+  printf 'position startpos\n' >&3
+  printf 'go movetime 3000\n' >&3
+
+  # Wait up to ~20s for bestmove to appear, then send quit
+  for _ in $(seq 1 200); do
+    if grep -q '^bestmove ' "$out_file" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  printf 'quit\n' >&3
+  # Close FIFO writer and clean up
+  exec 3>&-
+  wait "$pid" || true
+  rm -f "$fifo_in"
 }
 
 avg_nps_from_runs() {
@@ -121,4 +139,3 @@ if $DO_MICRO; then
 fi
 
 echo "Done."
-

@@ -89,6 +89,11 @@ impl SingleAcc {
                     continue;
                 }
                 let base = fid * d;
+                debug_assert!(
+                    base <= net.w0.len().saturating_sub(d),
+                    "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
+                    net.w0.len()
+                );
                 let row = &net.w0[base..base + d];
                 add_row_scaled_f32(&mut pre_black, row, 1.0);
             }
@@ -102,6 +107,11 @@ impl SingleAcc {
                     continue;
                 }
                 let base = fid * d;
+                debug_assert!(
+                    base <= net.w0.len().saturating_sub(d),
+                    "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
+                    net.w0.len()
+                );
                 let row = &net.w0[base..base + d];
                 add_row_scaled_f32(&mut pre_white, row, 1.0);
             }
@@ -252,6 +262,11 @@ impl SingleAcc {
                 continue;
             }
             let base = fid * d;
+            debug_assert!(
+                base <= net.w0.len().saturating_sub(d),
+                "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
+                net.w0.len()
+            );
             let row = &net.w0[base..base + d];
             add_row_scaled_f32(&mut next.pre_black, row, delta as f32);
         }
@@ -260,6 +275,11 @@ impl SingleAcc {
                 continue;
             }
             let base = fid * d;
+            debug_assert!(
+                base <= net.w0.len().saturating_sub(d),
+                "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
+                net.w0.len()
+            );
             let row = &net.w0[base..base + d];
             add_row_scaled_f32(&mut next.pre_white, row, delta as f32);
         }
