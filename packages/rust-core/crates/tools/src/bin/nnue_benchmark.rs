@@ -415,11 +415,7 @@ fn gather_env_json(
     } else {
         "release"
     };
-    let target = format!(
-        "{}-{}",
-        std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default(),
-        std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
-    );
+    let target = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
     let rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
     let features = "engine-core:tt_metrics,hashfull_filter,nnue_single_diff,nnue_telemetry";
     json!({
@@ -525,15 +521,17 @@ fn main() -> Result<()> {
         // Fallback: simple suite (startpos + K vs K endgame)
         let mut cases = Vec::new();
         let root = Position::startpos();
-        // create a shallow deterministic line from startpos (first 32 legal)
+        // Build a shallow deterministic line by selecting the first legal move at each step
         let gen = MoveGenerator::new();
-        let legal = gen.generate_all(&root).unwrap_or_default();
-        let n = legal.len().min(32);
         let mut pre_positions = Vec::new();
         let mut cur = root.clone();
         let mut moves = Vec::new();
-        for i in 0..n {
-            let mv = legal[i];
+        for _ in 0..32 {
+            let legal = gen.generate_all(&cur).unwrap_or_default();
+            if legal.is_empty() {
+                break;
+            }
+            let mv = legal[0];
             pre_positions.push(cur.clone());
             let _u = cur.do_move(mv);
             moves.push(mv);

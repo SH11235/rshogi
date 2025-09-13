@@ -24,6 +24,9 @@ env:
   # Release tag and asset name for downloading reference weights
   WEIGHTS_RELEASE_TAG: weights-ref-v1
   WEIGHTS_ASSET_NAME: ref.nnue
+  # Defaults to silence static analyzers; overridden later via $GITHUB_ENV
+  NO_WEIGHTS: ''
+  NO_BASELINE: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -74,45 +77,78 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p runs
-          if [ ! -f "$WEIGHTS_PATH" ]; then
+          try_api() {
+            local url="$1"
+            curl -sSLf \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              -H "User-Agent: nnue-bench-regression-ci" \
+              -o "$WEIGHTS_PATH" "$url"
+          }
+          cleanup_if_empty() {
+            if [ -f "$WEIGHTS_PATH" ] && [ ! -s "$WEIGHTS_PATH" ]; then
+              echo "::warning::Downloaded '$WEIGHTS_PATH' is empty; removing"
+              rm -f "$WEIGHTS_PATH"
+            fi
+          }
+          if [ ! -s "$WEIGHTS_PATH" ]; then
             echo "Attempting API download of $WEIGHTS_ASSET_NAME from tag $WEIGHTS_RELEASE_TAG"
             API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${WEIGHTS_RELEASE_TAG}"
-            ASSET_URL=$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" "$API" \
+            ASSET_URL=$(curl -sSL -H "Authorization: token ${GH_TOKEN}" -H "User-Agent: nnue-bench-regression-ci" "$API" \
               | python3 - <<'PY'
-import sys, json, os
-try:
-    j = json.load(sys.stdin)
-    name = os.environ.get('WEIGHTS_ASSET_NAME','')
-    for x in (j.get('assets') or []):
-        if x.get('name') == name:
-            print(x.get('url',''))
-            break
-    else:
-        print('')
-except Exception:
-    print('')
-PY
+              import sys, json, os
+              try:
+                  j = json.load(sys.stdin)
+                  name = os.environ.get('WEIGHTS_ASSET_NAME','')
+                  for x in (j.get('assets') or []):
+                      if x.get('name') == name:
+                          print(x.get('url',''))
+                          break
+                  else:
+                      print('')
+              except Exception:
+                  print('')
+              PY
             )
             if [ -n "$ASSET_URL" ]; then
-              curl -sSLf -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/octet-stream" -o "$WEIGHTS_PATH" "$ASSET_URL" \
-                || echo "::warning::Failed to download asset via API"
+              try_api "$ASSET_URL" || echo "::warning::Failed to download asset via API"
+              cleanup_if_empty
             fi
           fi
-          if [ ! -f "$WEIGHTS_PATH" ]; then
+          if [ ! -s "$WEIGHTS_PATH" ]; then
             echo "Attempting direct download (public repos only)"
-            curl -sSLf -o "$WEIGHTS_PATH" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${WEIGHTS_RELEASE_TAG}/${WEIGHTS_ASSET_NAME}" \
+            curl -sSLf -H "User-Agent: nnue-bench-regression-ci" -o "$WEIGHTS_PATH" \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${WEIGHTS_RELEASE_TAG}/${WEIGHTS_ASSET_NAME}" \
               || echo "::warning::Failed to download release asset ${WEIGHTS_ASSET_NAME} from tag ${WEIGHTS_RELEASE_TAG}"
+            cleanup_if_empty
           fi
 
       - name: Ensure weights
         id: weights
         run: |
           mkdir -p runs
-          if [ ! -f "$WEIGHTS_PATH" ]; then
-            echo "::warning::Weights not found at '$WEIGHTS_PATH'. Skipping benchmark and gating."
+          if [ ! -s "$WEIGHTS_PATH" ]; then
+            echo "::warning::Weights not found (or empty) at '$WEIGHTS_PATH'. Skipping benchmark and gating."
             echo "NO_WEIGHTS=1" >> $GITHUB_ENV
           else
             echo "Found weights: $WEIGHTS_PATH"
+          fi
+
+      - name: Smoke load weights
+        if: env.NO_WEIGHTS != '1'
+        run: |
+          set -euo pipefail
+          if [ -x target/release/nnue_smoke ]; then
+            if ! target/release/nnue_smoke "$WEIGHTS_PATH"; then
+              echo "::warning::Weight load failed; skipping benchmark and gating"
+              echo "NO_WEIGHTS=1" >> $GITHUB_ENV
+            fi
+          else
+            echo "nnue_smoke not found; falling back to 1s nnue_benchmark smoke"
+            if ! target/release/nnue_benchmark --single-weights "$WEIGHTS_PATH" --fixed-line --startpos --seconds 1 --warmup-seconds 0 --json runs/_smoke.json; then
+              echo "::warning::Benchmark smoke failed; skipping benchmark and gating"
+              echo "NO_WEIGHTS=1" >> $GITHUB_ENV
+            fi
           fi
 
       # --- Pull Request path: run head bench, download baseline from main, compare & gate ---
@@ -197,9 +233,13 @@ PY
           if [ -f runs/base.json ]; then
             echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
           else
-            CANDIDATE="$(find runs -type f -name base.json | head -n1 || true)"
-            if [ -n "$CANDIDATE" ]; then
-              cp "$CANDIDATE" runs/base.json
+            CAND1="$(find runs -type f -name base.json | head -n1 || true)"
+            CAND2="$(find runs -type f -name .nnue_baseline.json | head -n1 || true)"
+            if [ -n "$CAND1" ]; then
+              cp "$CAND1" runs/base.json
+              echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
+            elif [ -n "$CAND2" ]; then
+              cp "$CAND2" runs/base.json
               echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
             else
               echo "::warning::Baseline JSON not found in artifacts. Skipping comparison and gating."
@@ -223,6 +263,7 @@ PY
         with:
           name: nnue-compare-result
           path: packages/rust-core/runs/compare.json
+          retention-days: 7
           if-no-files-found: ignore
 
       - name: Upload compare WARN log (PR)
@@ -231,6 +272,7 @@ PY
         with:
           name: nnue-compare-warn
           path: packages/rust-core/runs/compare.warn.log
+          retention-days: 7
           if-no-files-found: ignore
 
       - name: Write job summary (compare)
@@ -249,6 +291,18 @@ PY
             cat runs/compare.warn.log >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
+          # Worst regression quick view (if any)
+          python3 - <<'PY' || true
+          import json,os
+          p="runs/compare.json"
+          if os.path.exists(p):
+              j=json.load(open(p))
+              warns=j.get("warns") or []
+              if warns:
+                  worst=min(warns, key=lambda x: x.get("delta_pct", 0))
+                  print("\n### Worst regression\n")
+                  print(f"- {worst.get('metric')}: {worst.get('delta_pct')}%  (head={worst.get('head')}, base={worst.get('base')})\n")
+          PY
 
       - name: Upload head result (PR)
         if: always() && github.event_name == 'pull_request'
@@ -256,6 +310,7 @@ PY
         with:
           name: nnue-fixedline-head
           path: packages/rust-core/runs/head.json
+          retention-days: 7
           if-no-files-found: ignore
 
       - name: Upload head shards (PR)
@@ -267,6 +322,7 @@ PY
             packages/rust-core/runs/head_1.json
             packages/rust-core/runs/head_2.json
             packages/rust-core/runs/head_3.json
+          retention-days: 7
           if-no-files-found: ignore
 
       # --- Push to main path: generate and publish baseline artifact ---
@@ -330,12 +386,19 @@ PY
           json.dump(out,open("runs/base.json","w"),indent=2)
           PY
 
+      - name: Stage baseline for artifact
+        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        run: |
+          set -euo pipefail
+          cp runs/base.json .nnue_baseline.json
+
       - name: Upload baseline artifact (main)
         if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
         uses: actions/upload-artifact@v4
         with:
           name: nnue-fixedline-baseline
-          path: packages/rust-core/runs/base.json
+          path: .nnue_baseline.json
+          retention-days: 14
 
       - name: sccache stats
         if: always()
