@@ -2,58 +2,10 @@ use super::single::SingleChannelNet;
 use crate::{
     evaluation::nnue::features::{halfkp_index, BonaPiece},
     shogi::piece_type_to_hand_index,
+    simd::add_row_scaled_f32,
     Color, Piece, PieceType, Position,
 };
 use smallvec::SmallVec;
-
-#[inline]
-fn add_row_scaled(dst: &mut [f32], row: &[f32], k: f32) {
-    debug_assert_eq!(dst.len(), row.len());
-    #[cfg(feature = "nnue_simd")]
-    {
-        use core::simd::{Simd, SimdFloat};
-        // アーキ依存の自然なLANE幅
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        const LANES: usize = 8;
-        #[cfg(all(
-            not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
-        ))]
-        const LANES: usize = 4;
-        #[cfg(all(
-            not(target_arch = "aarch64"),
-            not(any(target_arch = "x86", target_arch = "x86_64"))
-        ))]
-        const LANES: usize = 4;
-
-        let n = dst.len();
-        let head = n - (n % LANES);
-        let ks = Simd::<f32, LANES>::splat(k);
-
-        let (d_head, d_tail) = dst.split_at_mut(head);
-        let (r_head, r_tail) = row.split_at(head);
-
-        for (dch, rch) in d_head.chunks_exact_mut(LANES).zip(r_head.chunks_exact(LANES)) {
-            let a = Simd::<f32, LANES>::from_slice(dch);
-            let b = Simd::<f32, LANES>::from_slice(rch);
-            #[cfg(feature = "nnue_fast_fma")]
-            let c = b.mul_add(ks, a);
-            #[cfg(not(feature = "nnue_fast_fma"))]
-            let c = a + b * ks;
-            dch.copy_from_slice(c.as_array());
-        }
-        for (d, r) in d_tail.iter_mut().zip(r_tail.iter()) {
-            *d += k * *r;
-        }
-        return;
-    }
-    #[cfg(not(feature = "nnue_simd"))]
-    {
-        for (d, r) in dst.iter_mut().zip(row.iter()) {
-            *d += k * *r;
-        }
-    }
-}
 
 #[inline]
 fn aggregate_counts(removed: &[usize], added: &[usize]) -> SmallVec<[(usize, i16); 32]> {
@@ -138,7 +90,7 @@ impl SingleAcc {
                 }
                 let base = fid * d;
                 let row = &net.w0[base..base + d];
-                add_row_scaled(&mut pre_black, row, 1.0);
+                add_row_scaled_f32(&mut pre_black, row, 1.0);
             }
         }
 
@@ -151,7 +103,7 @@ impl SingleAcc {
                 }
                 let base = fid * d;
                 let row = &net.w0[base..base + d];
-                add_row_scaled(&mut pre_white, row, 1.0);
+                add_row_scaled_f32(&mut pre_white, row, 1.0);
             }
         }
 
@@ -301,7 +253,7 @@ impl SingleAcc {
             }
             let base = fid * d;
             let row = &net.w0[base..base + d];
-            add_row_scaled(&mut next.pre_black, row, delta as f32);
+            add_row_scaled_f32(&mut next.pre_black, row, delta as f32);
         }
         for &(fid, delta) in diff_w.iter() {
             if fid >= net.n_feat {
@@ -309,7 +261,7 @@ impl SingleAcc {
             }
             let base = fid * d;
             let row = &net.w0[base..base + d];
-            add_row_scaled(&mut next.pre_white, row, delta as f32);
+            add_row_scaled_f32(&mut next.pre_white, row, delta as f32);
         }
 
         // Keep same net identity

@@ -1,0 +1,23 @@
+[package]
+name = "engine-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = { workspace = true }
+engine-core = { path = "../engine-core" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
