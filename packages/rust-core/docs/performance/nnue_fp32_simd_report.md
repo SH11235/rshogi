@@ -107,7 +107,6 @@ bar
 
 ## 参考
 - ビルド/ブラウザ計測手順: `docs/wasm_simd_bench.md`
-- 実装計画: `docs/nnue_single_simd_dispatch_plan.md`
 
 ## CI 収集スクリプト（提案）
 レポート生成を自動化するためのスクリプトを用意しています。

@@ -73,6 +73,63 @@ wasm-pack build crates/engine-wasm --release --target web --out-dir pkg-nosimd
 - JS↔Wasm の呼び出し回数が多いと性能が落ちます。ホットループは Wasm 内に閉じるように設計してください（本ベンチはその想定）。
 - Threads/Atomics を併用した並列化は COOP/COEP/SharedArrayBuffer 要件が必要です。SIMD と併用すると更に向上余地がありますが、配布条件が厳しくなります。
 
+## 設定の優位性（推奨構成と注意点）
+
+### SIMD128（`-C target-feature=+simd128`）
+- 優位性: f32 行加算に直撃。k=±1.0 の add/sub 専用経路を含め、レーン並列で有意に高速化。
+- 配布: ランタイム検出不可のため 2 バンドル（simd/nosimd）が安全。`wasm-feature-detect` などで切替。
+
+### fast-fma（`nnue_fast_fma`）
+- 優位性: Wasm には FMA 命令が無く効果なし（mul+add のみ）。ネイティブ用スイッチとして残す。
+
+### Threads + Atomics（並列化）
+- 優位性: マルチコア活用で更なる高速化（SIMD と併用可）。
+- 前提: COOP/COEP/SharedArrayBuffer が必要。`-C target-feature=+atomics,+bulk-memory,+mutable-globals` 等の設定が必要。
+
+### wasm-opt（Binaryen）
+- 優位性: 速度/サイズ双方に効く（例: `-O3` または `-Oz`）。
+- 注意: ツールチェーン依存で不安定な場合は一時無効化し、環境更新後に再有効化を検討。
+
+### LTO/コード生成
+- 推奨: `lto="fat"` + `codegen-units=1`（速度）、`panic=abort`（サイズ/オーバーヘッド削減）。
+- 注意: ビルド時間増。CI ではキャッシュ活用。
+
+### アロケータ/サイズ
+- `wee_alloc` はサイズ削減向き（速度はやや不利）。速度優先ならデフォルトで可。
+
+### API/境界設計
+- ホットループは Wasm 内に閉じる（JS↔Wasm 往復を減らす）。
+- 大きな配列は「一括」受け渡し。必要なら Wasm メモリを直接操作する設計も検討。
+
+### ターゲット（web / nodejs）
+- nodejs: ベンチや CI に最適。simd128 対応の Node を使用。
+- web: 本番配布。feature-detect で simd バンドルを選択。
+
+### getrandom（`wasm_js`）
+- wasm32 では `getrandom` の `wasm_js` バックエンドを使用し、ブラウザの `crypto.getRandomValues` を利用。
+
+## 推奨プリセット
+- 高速重視（最新ブラウザ/PWA）
+  - `+simd128`, `lto="fat"`, `codegen-units=1`, `panic=abort`, wasm-opt `-O3`
+  - 2 バンドル（simd/nosimd）配布、ホットループは Wasm 内に閉じる
+  - 可能なら Threads+Atomics も（配布要件に注意）
+- 互換性重視（古い端末あり）
+  - 非 simd 版（`-simd128`）, `lto="thin"`, wasm-opt `-Oz`
+  - feature-detect で simd 版に誘導可
+- Node/CI 用
+  - `--target nodejs`, `+simd128`, wasm-opt `-O3`
+  - `scripts/collect_nnue_fp32_simd_metrics.sh --wasm-node` で CSV 収集
+
+### バンドル選択フロー（例）
+```mermaid
+flowchart LR
+  A[起動] --> B{simd128 対応?}
+  B -- Yes --> C[SIMD バンドル読込]
+  B -- No  --> D[非SIMD バンドル読込]
+  C --> E[Wasm初期化/実行]
+  D --> E[Wasm初期化/実行]
+```
+
 ## 実測（Node.js, wasm-pack --target nodejs）
 - 条件: len=256, reps=500,000, 同一マシン（Node v22）, `engine-wasm` を simd 版/非 simd 版でビルド
 - 測定スクリプト（概略）
