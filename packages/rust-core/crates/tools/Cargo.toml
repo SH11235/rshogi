@@ -33,6 +33,10 @@ once_cell = { workspace = true }
 [features]
 zstd = ["dep:zstd"]
 plots = ["dep:plotters"]
+# engine-core feature passthroughs for A/B
+simd = ["engine-core/nnue_simd"]
+fast-fma = ["engine-core/nnue_fast_fma"]
+diff-agg-hash = ["engine-core/diff_agg_hash"]
 
 [dev-dependencies]
 tempfile = "3.10"
