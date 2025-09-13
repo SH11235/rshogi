@@ -159,10 +159,10 @@ done | tee benchmark_results.txt
 
 ## ベンチマーク実行例と期待される出力
 
-### NNUE性能ベンチマーク
+### NNUE性能ベンチマーク（固定ライン対応）
 
 ```bash
-cargo run --release --bin nnue_benchmark
+cargo run --release -p tools --bin nnue_benchmark -- --single-weights path/to/weights.bin
 ```
 
 期待される出力例（リリースビルド、2025年7月15日測定）：
@@ -203,7 +203,49 @@ Search Comparison:
   NNUE search overhead: 78.3%
 ```
 
-注: デバッグビルドでは約20倍遅くなります（NNUE評価関数: 約10,000 評価/秒）
+固定ラインモード（MoveGenの影響を排除した再現性の高いEPS）:
+
+```bash
+# 事前生成ライン（startpos + 手列指定）
+cargo run --release -p tools --bin nnue_benchmark -- \
+  --single-weights path/to/weights.bin \
+  --fixed-line --startpos --moves "7g7f,3c3d,2g2f,8c8d" \
+  --seconds 5 --warmup-seconds 2 \
+  --json docs/reports/nnue_fixed_startpos.json \
+  --report docs/reports/nnue_fixed_startpos.md
+
+# 決定論ライン（seed で固定）
+cargo run --release -p tools --bin nnue_benchmark -- \
+  --single-weights path/to/weights.bin \
+  --fixed-line --deterministic-line --startpos --seed 0xC0FFEE --length 128 \
+  --seconds 5 --json -
+```
+
+出力指標（EPS）:
+- Update-only 系: `refresh_update_eps`/`apply_update_eps`/`chain_update_eps`
+- Eval-included 系: `refresh_eval_eps`/`apply_eval_eps`/`chain_eval_eps`
+
+注: デバッグビルドでは約20倍遅くなります（NNUE評価関数: 約10,000 評価/秒）。比較は常にリリースビルド・単スレで実施してください。
+
+#### JSON比較（回帰検知）
+
+固定ラインの JSON 出力同士を比較し、主指標（apply/chain の Update/Eval 系）の相対低下をチェックします。
+
+```bash
+cargo run --release -p tools --bin compare_nnue_bench -- \
+  docs/reports/head.json docs/reports/base.json \
+  --update-threshold -15 --eval-threshold -10 \
+  --update-baseline-min 100000 --eval-baseline-min 50000
+```
+
+出力:
+- JSON: 各指標の delta と warn を標準出力（人間可読の警告行も併記）
+- 既定閾値: Update 系 -15%、Eval 系 -10%（ベースが十分に大きいときのみ判定）
+
+#### 探索中テレメトリのログ（開発時）
+- feature `nnue_telemetry` 有効時、探索中に 1 秒ごと `kind=eval_path` を出力します。
+- 複数スレッドからの同時 `process_events()` 呼び出しによる重複リセットを避けるため、グローバルな秒エポックを `AtomicU64` で管理し、各秒につき1スレッドのみが `snapshot_and_reset()` を実行します。
+- 初回 0ms ログは抑制され、実時間 1 秒経過後から集計が更新されます。
 
 ### 5. 並列探索ベンチマーク
 
