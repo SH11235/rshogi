@@ -79,14 +79,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p runs
-          try_api() {
-            local url="$1"
-            curl -sSLf \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/octet-stream" \
-              -H "User-Agent: nnue-bench-regression-ci" \
-              -o "$WEIGHTS_PATH" "$url"
-          }
           cleanup_if_empty() {
             if [ -f "$WEIGHTS_PATH" ] && [ ! -s "$WEIGHTS_PATH" ]; then
               echo "::warning::Downloaded '$WEIGHTS_PATH' is empty; removing"
@@ -94,28 +86,14 @@ jobs:
             fi
           }
           if [ ! -s "$WEIGHTS_PATH" ]; then
-            echo "Attempting API download of $WEIGHTS_ASSET_NAME from tag $WEIGHTS_RELEASE_TAG"
-            API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${WEIGHTS_RELEASE_TAG}"
-            ASSET_URL=$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" -H "User-Agent: nnue-bench-regression-ci" "$API" \
-              | python3 - <<'PY'
-              import sys, json, os
-              try:
-                  j = json.load(sys.stdin)
-                  name = os.environ.get('WEIGHTS_ASSET_NAME','')
-                  for x in (j.get('assets') or []):
-                      if x.get('name') == name:
-                          print(x.get('url',''))
-                          break
-                  else:
-                      print('')
-              except Exception:
-                  print('')
-              PY
-            )
-            if [ -n "$ASSET_URL" ]; then
-              try_api "$ASSET_URL" || echo "::warning::Failed to download asset via API"
-              cleanup_if_empty
-            fi
+            echo "Attempting gh release download of $WEIGHTS_ASSET_NAME from tag $WEIGHTS_RELEASE_TAG"
+            gh release download "$WEIGHTS_RELEASE_TAG" \
+              -R "$GITHUB_REPOSITORY" \
+              -p "$WEIGHTS_ASSET_NAME" \
+              -D runs \
+              -O "$(basename "$WEIGHTS_PATH")" \
+              || echo "::warning::gh release download failed"
+            cleanup_if_empty
           fi
           if [ ! -s "$WEIGHTS_PATH" ]; then
             echo "Attempting direct download (public repos only)"
@@ -189,33 +167,8 @@ jobs:
         if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json,statistics,sys
-          import os
-          files=[f for f in ["runs/head_1.json","runs/head_2.json","runs/head_3.json"] if os.path.exists(f)]
-          if len(files) < 2:
-              print(f"::error::Insufficient head benchmarks: found {len(files)} (<2). Failing.")
-              sys.exit(2)
-          js=[json.load(open(f)) for f in files]
-          keys=["refresh_update_eps","apply_update_eps","chain_update_eps","refresh_eval_eps","apply_eval_eps","chain_eval_eps"]
-          out={}
-          out["env"]=js[0].get("env",{})
-          # line meta: combined
-          lens=[j.get("line",{}).get("line_len",0) for j in js]
-          out["line"]={"mode":"combined","cases":len(js),"line_len":int(round(sum(lens)/len(lens))) if lens else 0}
-          out["metrics"]={}
-          for k in keys:
-              vals=[j.get("metrics",{}).get(k) for j in js]
-              vals=[v for v in vals if isinstance(v,(int,float))]
-              if vals:
-                  out["metrics"][k]=int(round(statistics.median(vals)))
-          # seconds: median of seconds
-          secs=[j.get("metrics",{}).get("seconds") for j in js]
-          secs=[s for s in secs if isinstance(s,(int,float))]
-          if secs:
-              out["metrics"]["seconds"]=int(statistics.median(secs))
-          json.dump(out,open("runs/head.json","w"),indent=2)
-          PY
+          target/release/combine_nnue_bench -o runs/head.json \
+            runs/head_1.json runs/head_2.json runs/head_3.json
 
       - name: Download baseline artifact (main)
         if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
@@ -293,38 +246,8 @@ jobs:
             cat runs/compare.warn.log >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
-          # Key EPS deltas table (quick view)
-          python3 - <<'PY' || true
-          import json, os
-          p="runs/compare.json"
-          if os.path.exists(p):
-              j=json.load(open(p))
-              keys=["apply_update_eps","chain_update_eps","apply_eval_eps","chain_eval_eps"]
-              rows=[]
-              for k in keys:
-                  m=next((x for x in j.get("metrics",[]) if x.get("metric")==k),None)
-                  if m:
-                      rows.append((k, m.get("base"), m.get("head"), m.get("delta_pct")))
-              if rows:
-                  with open(os.environ.get("GITHUB_STEP_SUMMARY",""),"a") as fp:
-                      fp.write("\n### Key metrics\n\n")
-                      fp.write("| metric | base | head | delta% |\n")
-                      fp.write("|---|---:|---:|---:|\n")
-                      for k,b,h,d in rows:
-                          fp.write(f"| {k} | {b} | {h} | {d}% |\n")
-          PY
-          # Worst regression quick view (if any)
-          python3 - <<'PY' || true
-          import json,os
-          p="runs/compare.json"
-          if os.path.exists(p):
-              j=json.load(open(p))
-              warns=j.get("warns") or []
-              if warns:
-                  worst=min(warns, key=lambda x: x.get("delta_pct", 0))
-                  print("\n### Worst regression\n")
-                  print(f"- {worst.get('metric')}: {worst.get('delta_pct')}%  (head={worst.get('head')}, base={worst.get('base')})\n")
-          PY
+          # Summary table + worst regression
+          target/release/summarize_nnue_compare runs/compare.json >> $GITHUB_STEP_SUMMARY || true
 
       - name: Upload head result (PR)
         if: ${{ always() && github.event_name == 'pull_request' }}
@@ -383,30 +306,8 @@ jobs:
         if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json,statistics,sys,os
-          files=[f for f in ["runs/base_1.json","runs/base_2.json","runs/base_3.json"] if os.path.exists(f)]
-          if len(files) < 2:
-              print(f"::error::Insufficient baseline benchmarks: found {len(files)} (<2). Failing.")
-              sys.exit(2)
-          js=[json.load(open(f)) for f in files]
-          keys=["refresh_update_eps","apply_update_eps","chain_update_eps","refresh_eval_eps","apply_eval_eps","chain_eval_eps"]
-          out={}
-          out["env"]=js[0].get("env",{})
-          lens=[j.get("line",{}).get("line_len",0) for j in js]
-          out["line"]={"mode":"combined","cases":len(js),"line_len":int(round(sum(lens)/len(lens))) if lens else 0}
-          out["metrics"]={}
-          for k in keys:
-              vals=[j.get("metrics",{}).get(k) for j in js]
-              vals=[v for v in vals if isinstance(v,(int,float))]
-              if vals:
-                  out["metrics"][k]=int(round(statistics.median(vals)))
-          secs=[j.get("metrics",{}).get("seconds") for j in js]
-          secs=[s for s in secs if isinstance(s,(int,float))]
-          if secs:
-              out["metrics"]["seconds"]=int(statistics.median(secs))
-          json.dump(out,open("runs/base.json","w"),indent=2)
-          PY
+          target/release/combine_nnue_bench -o runs/base.json \
+            runs/base_1.json runs/base_2.json runs/base_3.json
 
       - name: Stage baseline for artifact
         if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
