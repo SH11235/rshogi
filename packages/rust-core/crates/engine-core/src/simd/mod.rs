@@ -8,11 +8,11 @@ pub mod dispatch {
     /// Check if AVX2 is available at runtime
     #[inline]
     pub fn has_avx2() -> bool {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             std::is_x86_feature_detected!("avx2")
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         {
             false
         }
@@ -21,11 +21,11 @@ pub mod dispatch {
     /// Check if AVX is available at runtime
     #[inline]
     pub fn has_avx() -> bool {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             std::is_x86_feature_detected!("avx")
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         {
             false
         }
@@ -34,11 +34,11 @@ pub mod dispatch {
     /// Check if AVX-512F is available at runtime
     #[inline]
     pub fn has_avx512f() -> bool {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             std::is_x86_feature_detected!("avx512f")
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         {
             false
         }
@@ -47,11 +47,11 @@ pub mod dispatch {
     /// Check if SSE2 is available at runtime
     #[inline]
     pub fn has_sse2() -> bool {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             std::is_x86_feature_detected!("sse2")
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         {
             false
         }
@@ -60,11 +60,11 @@ pub mod dispatch {
     /// Check if SSE4.1 is available at runtime
     #[inline]
     pub fn has_sse41() -> bool {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             std::is_x86_feature_detected!("sse4.1")
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         {
             false
         }
@@ -129,10 +129,20 @@ mod wasm32;
 mod x86;
 
 #[inline(always)]
-fn k_fastpath(k: f32) -> Option<i8> {
+pub(super) fn k_fastpath(k: f32) -> Option<i8> {
     match k.to_bits() {
         0x3f80_0000 => Some(1),  //  1.0
         0xbf80_0000 => Some(-1), // -1.0
+        _ => None,
+    }
+}
+
+/// 小整数 k（±2）の高速経路
+#[inline(always)]
+pub(super) fn k_int_fastpath(k: f32) -> Option<i8> {
+    match k.to_bits() {
+        0x4000_0000 => Some(2),  //  2.0
+        0xc000_0000 => Some(-2), // -2.0
         _ => None,
     }
 }
@@ -150,6 +160,17 @@ fn add_row_scaled_f32_scalar(dst: &mut [f32], row: &[f32], k: f32) {
                 *d -= *r;
             }
         }
+    } else if let Some(t) = k_int_fastpath(k) {
+        if t > 0 {
+            for (d, r) in dst.iter_mut().zip(row.iter()) {
+                // 2.0: r+r を加算（mul/fma を避ける）
+                *d += *r + *r;
+            }
+        } else {
+            for (d, r) in dst.iter_mut().zip(row.iter()) {
+                *d -= *r + *r;
+            }
+        }
     } else {
         for (d, r) in dst.iter_mut().zip(row.iter()) {
             *d += k * *r;
@@ -158,6 +179,10 @@ fn add_row_scaled_f32_scalar(dst: &mut [f32], row: &[f32], k: f32) {
 }
 
 /// fp32 行加算の公開 API: `dst[i] += k * row[i]`
+///
+/// 契約:
+/// - `dst.len() == row.len()` であること。
+/// - `dst` と `row` は同一領域を指してはならない（エイリアス禁止）。
 #[inline]
 pub fn add_row_scaled_f32(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
@@ -294,6 +319,50 @@ mod tests {
             add_row_scaled_f32(&mut dst_b, &row, -1.0);
             for i in 0..len {
                 assert!(same_bits(dst_a[i], dst_b[i]), "mismatch at {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_row_scaled_k_pos2_bits() {
+        for &len in &[
+            0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 255, 256, 257, 511, 512, 513,
+        ] {
+            let mut dst_ref = vec![0.0f32; len];
+            let mut dst_k2 = vec![0.0f32; len];
+            let mut row = vec![0.0f32; len];
+            for i in 0..len {
+                row[i] = ((i as f32 + 0.5) * 0.01).sin();
+            }
+            // 参照: k=1.0 を2回
+            add_row_scaled_f32(&mut dst_ref, &row, 1.0);
+            add_row_scaled_f32(&mut dst_ref, &row, 1.0);
+            // 最適化経路: k=2.0（±2 専用分岐）
+            add_row_scaled_f32(&mut dst_k2, &row, 2.0);
+            for i in 0..len {
+                assert!(same_bits(dst_ref[i], dst_k2[i]), "mismatch at {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_row_scaled_k_neg2_bits() {
+        for &len in &[
+            0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 255, 256, 257, 511, 512, 513,
+        ] {
+            let mut dst_ref = vec![0.0f32; len];
+            let mut dst_k2 = vec![0.0f32; len];
+            let mut row = vec![0.0f32; len];
+            for i in 0..len {
+                row[i] = ((i as f32 + 0.25) * 0.02).cos();
+            }
+            // 参照: k=-1.0 を2回
+            add_row_scaled_f32(&mut dst_ref, &row, -1.0);
+            add_row_scaled_f32(&mut dst_ref, &row, -1.0);
+            // 最適化経路: k=-2.0（±2 専用分岐）
+            add_row_scaled_f32(&mut dst_k2, &row, -2.0);
+            for i in 0..len {
+                assert!(same_bits(dst_ref[i], dst_k2[i]), "mismatch at {i}");
             }
         }
     }
