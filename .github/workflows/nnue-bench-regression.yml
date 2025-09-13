@@ -2,7 +2,7 @@ name: nnue-bench-regression
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'packages/rust-core/**'
       - '.github/workflows/nnue-bench-regression.yml'
@@ -45,6 +45,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install mold linker
         run: |
@@ -80,7 +82,7 @@ jobs:
           try_api() {
             local url="$1"
             curl -sSLf \
-              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/octet-stream" \
               -H "User-Agent: nnue-bench-regression-ci" \
               -o "$WEIGHTS_PATH" "$url"
@@ -94,7 +96,7 @@ jobs:
           if [ ! -s "$WEIGHTS_PATH" ]; then
             echo "Attempting API download of $WEIGHTS_ASSET_NAME from tag $WEIGHTS_RELEASE_TAG"
             API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${WEIGHTS_RELEASE_TAG}"
-            ASSET_URL=$(curl -sSL -H "Authorization: token ${GH_TOKEN}" -H "User-Agent: nnue-bench-regression-ci" "$API" \
+            ASSET_URL=$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" -H "User-Agent: nnue-bench-regression-ci" "$API" \
               | python3 - <<'PY'
               import sys, json, os
               try:
@@ -135,7 +137,7 @@ jobs:
           fi
 
       - name: Smoke load weights
-        if: env.NO_WEIGHTS != '1'
+        if: ${{ env.NO_WEIGHTS != '1' }}
         run: |
           set -euo pipefail
           if [ -x target/release/nnue_smoke ]; then
@@ -145,7 +147,7 @@ jobs:
             fi
           else
             echo "nnue_smoke not found; falling back to 1s nnue_benchmark smoke"
-            if ! target/release/nnue_benchmark --single-weights "$WEIGHTS_PATH" --fixed-line --startpos --seconds 1 --warmup-seconds 0 --json runs/_smoke.json; then
+            if ! target/release/nnue_benchmark --single-weights "$WEIGHTS_PATH" --seconds 1 --warmup-seconds 0 --json runs/_smoke.json; then
               echo "::warning::Benchmark smoke failed; skipping benchmark and gating"
               echo "NO_WEIGHTS=1" >> $GITHUB_ENV
             fi
@@ -153,7 +155,7 @@ jobs:
 
       # --- Pull Request path: run head bench, download baseline from main, compare & gate ---
       - name: Run head benchmark 1/3 (fixed startpos line)
-        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
         continue-on-error: true
         run: |
           target/release/nnue_benchmark \
@@ -163,7 +165,7 @@ jobs:
             --json runs/head_1.json
 
       - name: Run head benchmark 2/3 (deterministic from startpos)
-        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
         continue-on-error: true
         run: |
           target/release/nnue_benchmark \
@@ -173,7 +175,7 @@ jobs:
             --json runs/head_2.json
 
       - name: Run head benchmark 3/3 (deterministic from midgame)
-        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
         continue-on-error: true
         run: |
           MID_SFEN="k8/1r1b3g1/p1p1ppp1p/1p1ps2p1/2P6/PP1P1S2P/2SGPPP2/1B5R1/LN1K2GNL b - 1"
@@ -184,7 +186,7 @@ jobs:
             --json runs/head_3.json
 
       - name: Combine head JSON (median)
-        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -216,7 +218,7 @@ jobs:
           PY
 
       - name: Download baseline artifact (main)
-        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: nnue-bench-regression.yml
@@ -227,7 +229,7 @@ jobs:
           if_no_artifact_found: warn
 
       - name: Prepare baseline path
-        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' }}
         run: |
           set -euo pipefail
           if [ -f runs/base.json ]; then
@@ -248,7 +250,7 @@ jobs:
           fi
 
       - name: Compare and gate
-        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' && env.NO_BASELINE != '1'
+        if: ${{ github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' && env.NO_BASELINE != '1' }}
         run: |
           set -euo pipefail
           target/release/compare_nnue_bench runs/head.json "$BASE_JSON" \
@@ -258,7 +260,7 @@ jobs:
             2> >(tee runs/compare.warn.log >&2) | tee runs/compare.json
 
       - name: Upload compare result (PR)
-        if: always() && github.event_name == 'pull_request'
+        if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: nnue-compare-result
@@ -267,7 +269,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload compare WARN log (PR)
-        if: always() && github.event_name == 'pull_request'
+        if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: nnue-compare-warn
@@ -276,7 +278,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Write job summary (compare)
-        if: always() && github.event_name == 'pull_request'
+        if: ${{ always() && github.event_name == 'pull_request' }}
         run: |
           set -euo pipefail
           echo "## NNUE compare (head vs base)" >> $GITHUB_STEP_SUMMARY
@@ -291,6 +293,26 @@ jobs:
             cat runs/compare.warn.log >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
+          # Key EPS deltas table (quick view)
+          python3 - <<'PY' || true
+          import json, os
+          p="runs/compare.json"
+          if os.path.exists(p):
+              j=json.load(open(p))
+              keys=["apply_update_eps","chain_update_eps","apply_eval_eps","chain_eval_eps"]
+              rows=[]
+              for k in keys:
+                  m=next((x for x in j.get("metrics",[]) if x.get("metric")==k),None)
+                  if m:
+                      rows.append((k, m.get("base"), m.get("head"), m.get("delta_pct")))
+              if rows:
+                  with open(os.environ.get("GITHUB_STEP_SUMMARY",""),"a") as fp:
+                      fp.write("\n### Key metrics\n\n")
+                      fp.write("| metric | base | head | delta% |\n")
+                      fp.write("|---|---:|---:|---:|\n")
+                      for k,b,h,d in rows:
+                          fp.write(f"| {k} | {b} | {h} | {d}% |\n")
+          PY
           # Worst regression quick view (if any)
           python3 - <<'PY' || true
           import json,os
@@ -305,7 +327,7 @@ jobs:
           PY
 
       - name: Upload head result (PR)
-        if: always() && github.event_name == 'pull_request'
+        if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: nnue-fixedline-head
@@ -314,7 +336,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload head shards (PR)
-        if: always() && github.event_name == 'pull_request'
+        if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: nnue-fixedline-head-shards
@@ -327,7 +349,7 @@ jobs:
 
       # --- Push to main path: generate and publish baseline artifact ---
       - name: Run baseline benchmark 1/3 (fixed startpos line)
-        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
         continue-on-error: true
         run: |
           target/release/nnue_benchmark \
@@ -337,7 +359,7 @@ jobs:
             --json runs/base_1.json
 
       - name: Run baseline benchmark 2/3 (deterministic from startpos)
-        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
         continue-on-error: true
         run: |
           target/release/nnue_benchmark \
@@ -347,7 +369,7 @@ jobs:
             --json runs/base_2.json
 
       - name: Run baseline benchmark 3/3 (deterministic from midgame)
-        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
         continue-on-error: true
         run: |
           MID_SFEN="k8/1r1b3g1/p1p1ppp1p/1p1ps2p1/2P6/PP1P1S2P/2SGPPP2/1B5R1/LN1K2GNL b - 1"
@@ -358,7 +380,7 @@ jobs:
             --json runs/base_3.json
 
       - name: Combine baseline JSON (median)
-        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -387,19 +409,19 @@ jobs:
           PY
 
       - name: Stage baseline for artifact
-        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
         run: |
           set -euo pipefail
           cp runs/base.json .nnue_baseline.json
 
       - name: Upload baseline artifact (main)
-        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        if: ${{ github.event_name == 'push' && env.NO_WEIGHTS != '1' }}
         uses: actions/upload-artifact@v4
         with:
           name: nnue-fixedline-baseline
-          path: .nnue_baseline.json
+          path: packages/rust-core/.nnue_baseline.json
           retention-days: 14
 
       - name: sccache stats
-        if: always()
+        if: ${{ always() }}
         run: sccache --show-stats || true
