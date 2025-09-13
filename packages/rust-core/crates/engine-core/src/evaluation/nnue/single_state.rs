@@ -90,7 +90,7 @@ impl SingleAcc {
                 }
                 let base = fid * d;
                 debug_assert!(
-                    base <= net.w0.len().saturating_sub(d),
+                    base.checked_add(d).is_some_and(|end| end <= net.w0.len()),
                     "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
                     net.w0.len()
                 );
@@ -108,7 +108,7 @@ impl SingleAcc {
                 }
                 let base = fid * d;
                 debug_assert!(
-                    base <= net.w0.len().saturating_sub(d),
+                    base.checked_add(d).is_some_and(|end| end <= net.w0.len()),
                     "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
                     net.w0.len()
                 );
@@ -263,7 +263,7 @@ impl SingleAcc {
             }
             let base = fid * d;
             debug_assert!(
-                base <= net.w0.len().saturating_sub(d),
+                base.checked_add(d).is_some_and(|end| end <= net.w0.len()),
                 "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
                 net.w0.len()
             );
@@ -276,7 +276,7 @@ impl SingleAcc {
             }
             let base = fid * d;
             debug_assert!(
-                base <= net.w0.len().saturating_sub(d),
+                base.checked_add(d).is_some_and(|end| end <= net.w0.len()),
                 "w0 out of bounds: fid={fid}, d={d}, w0_len={}",
                 net.w0.len()
             );
