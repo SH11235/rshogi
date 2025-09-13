@@ -41,6 +41,7 @@ thread_local = "1.1"
 [dev-dependencies]
 criterion = { version = "0.6", features = ["html_reports"] }
 serde_yaml = { workspace = true }
+proptest = "1"
 
 [[bench]]
 name = "search_benchmarks"

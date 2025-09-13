@@ -727,6 +727,7 @@ mod tests {
             b0: Some(vec![0.2; d]),
             w2: vec![1.0; d],
             b2: 0.0,
+            uid: 12,
         };
 
         let mut pos = Position::empty();
@@ -1060,6 +1061,7 @@ mod tests {
             b0: Some(vec![0.05; d]),
             w2: vec![1.0; d],
             b2: 0.3,
+            uid: 13,
         };
 
         let mut pos = Position::startpos();
