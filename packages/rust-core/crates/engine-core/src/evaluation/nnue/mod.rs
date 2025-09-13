@@ -68,6 +68,9 @@ pub fn enabled_features_str() -> String {
     if cfg!(feature = "diff_agg_hash") {
         v.push("diff_agg_hash");
     }
+    if cfg!(feature = "nnue_simd") {
+        v.push("nnue_simd");
+    }
     if cfg!(feature = "nightly") {
         v.push("nightly");
     }

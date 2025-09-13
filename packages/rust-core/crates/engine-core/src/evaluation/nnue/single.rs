@@ -66,11 +66,9 @@ impl SingleChannelNet {
             }
         }
 
-        // ReLU
+        // ReLU (branchless)
         for v in &mut acc[..d] {
-            if *v < 0.0 {
-                *v = 0.0;
-            }
+            *v = (*v).max(0.0);
         }
 
         // Output（FMA オプトインで acc 経路と丸めを揃える）
