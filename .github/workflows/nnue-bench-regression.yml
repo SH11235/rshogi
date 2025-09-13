@@ -79,11 +79,16 @@ jobs:
             API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${WEIGHTS_RELEASE_TAG}"
             ASSET_URL=$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" "$API" \
               | python3 - <<'PY'
-import sys, json
+import sys, json, os
 try:
-    j=json.load(sys.stdin)
-    a=j.get('assets') or []
-    print(next((x.get('url','') for x in a if x.get('name')=='${WEIGHTS_ASSET_NAME}'), ''))
+    j = json.load(sys.stdin)
+    name = os.environ.get('WEIGHTS_ASSET_NAME','')
+    for x in (j.get('assets') or []):
+        if x.get('name') == name:
+            print(x.get('url',''))
+            break
+    else:
+        print('')
 except Exception:
     print('')
 PY
@@ -145,6 +150,7 @@ PY
       - name: Combine head JSON (median)
         if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           import json,statistics,sys
           import os
@@ -212,7 +218,7 @@ PY
             2> >(tee runs/compare.warn.log >&2) | tee runs/compare.json
 
       - name: Upload compare result (PR)
-        if: (github.event_name == 'pull_request') && always()
+        if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: nnue-compare-result
@@ -220,15 +226,32 @@ PY
           if-no-files-found: ignore
 
       - name: Upload compare WARN log (PR)
-        if: (github.event_name == 'pull_request') && always()
+        if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: nnue-compare-warn
           path: packages/rust-core/runs/compare.warn.log
           if-no-files-found: ignore
 
+      - name: Write job summary (compare)
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          echo "## NNUE compare (head vs base)" >> $GITHUB_STEP_SUMMARY
+          if [ -f runs/compare.json ]; then
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            cat runs/compare.json >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -s runs/compare.warn.log ]; then
+            echo "### WARN" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat runs/compare.warn.log >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Upload head result (PR)
-        if: (github.event_name == 'pull_request') && always()
+        if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: nnue-fixedline-head
@@ -236,7 +259,7 @@ PY
           if-no-files-found: ignore
 
       - name: Upload head shards (PR)
-        if: (github.event_name == 'pull_request') && always()
+        if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: nnue-fixedline-head-shards
@@ -281,6 +304,7 @@ PY
       - name: Combine baseline JSON (median)
         if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           import json,statistics,sys,os
           files=[f for f in ["runs/base_1.json","runs/base_2.json","runs/base_3.json"] if os.path.exists(f)]
