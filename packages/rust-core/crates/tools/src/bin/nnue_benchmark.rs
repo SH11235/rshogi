@@ -10,6 +10,7 @@ use rand_xoshiro::Xoshiro256Plus;
 use regex::Regex;
 use serde_json::json;
 use std::fs;
+use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -247,7 +248,8 @@ fn bench_refresh_eval(
     while start.elapsed() < target {
         let case = &cases[i % cases.len()];
         let acc = SingleAcc::refresh(&case.root, net);
-        let _s = net.evaluate_from_accumulator(acc.acc_for(case.root.side_to_move));
+        let _s = net.evaluate_from_accumulator_pre(acc.acc_for(case.root.side_to_move));
+        black_box(_s);
         iters += 1;
         i = i.wrapping_add(1);
     }
@@ -317,7 +319,8 @@ fn bench_apply_eval(
             let next = SingleAcc::apply_update(acc0, &case.pre_positions[k], mv, net);
             // after move, side_to_move flips
             let stm = case.pre_positions[k].side_to_move.opposite();
-            let _s = net.evaluate_from_accumulator(next.acc_for(stm));
+            let _s = net.evaluate_from_accumulator_pre(next.acc_for(stm));
+            black_box(_s);
             iters += 1;
             if start.elapsed() >= target {
                 break;
@@ -381,7 +384,8 @@ fn bench_chain_eval(
         for (k, &mv) in case.moves.iter().enumerate() {
             acc = SingleAcc::apply_update(&acc, &case.pre_positions[k], mv, net);
             stm = stm.opposite();
-            let _s = net.evaluate_from_accumulator(acc.acc_for(stm));
+            let _s = net.evaluate_from_accumulator_pre(acc.acc_for(stm));
+            black_box(_s);
             iters += 1;
             if start.elapsed() >= target {
                 break;

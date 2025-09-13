@@ -330,11 +330,12 @@ impl NNUEEvaluatorWrapper {
 
     /// SINGLE 用: 指定の Acc を現在ノードとして復元し、tracked_hash を pos に合わせる
     #[cfg(feature = "nnue_single_diff")]
+    #[track_caller]
     pub fn restore_single_at(&mut self, pos: &Position, acc: single_state::SingleAcc) {
         if let Backend::Single { net, acc_stack, .. } = &mut self.backend {
             // 開発時の寸止め検証：異なる net 由来の Acc を誤って渡していないか
-            debug_assert_eq!(acc.post_black.len(), net.acc_dim);
-            debug_assert_eq!(acc.post_white.len(), net.acc_dim);
+            debug_assert_eq!(acc.pre_black.len(), net.acc_dim);
+            debug_assert_eq!(acc.pre_white.len(), net.acc_dim);
             // 追加検査：重み UID の一致（不一致なら安全側で refresh）
             if acc.weights_uid == net.uid {
                 acc_stack.clear();
@@ -408,15 +409,20 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 tmp.refresh(pos, evaluator.feature_transformer());
                 evaluator.evaluate_with_accumulator(pos, &tmp)
             }
-            Backend::Single { net, .. } => {
+            Backend::Single {
+                net,
                 #[cfg(feature = "nnue_single_diff")]
-                if let Backend::Single { acc_stack, .. } = &self.backend {
+                acc_stack,
+            } => {
+                #[cfg(feature = "nnue_single_diff")]
+                {
                     let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
                     if use_acc {
                         if let Some(acc) = acc_stack.last() {
                             #[cfg(feature = "nnue_telemetry")]
                             telemetry::record_acc_eval();
-                            return net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move));
+                            return net
+                                .evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move));
                         } else {
                             #[cfg(feature = "nnue_telemetry")]
                             telemetry::record_fb_acc_empty();
@@ -428,11 +434,17 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 }
                 #[cfg(all(not(feature = "nnue_single_diff"), feature = "nnue_telemetry"))]
                 telemetry::record_fb_feature_off();
+
+                #[cold]
+                #[inline(never)]
+                fn eval_fallback(net: &single::SingleChannelNet, pos: &Position) -> i32 {
+                    net.evaluate(pos)
+                }
                 #[cfg(test)]
                 {
                     SINGLE_FALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                net.evaluate(pos)
+                eval_fallback(net, pos)
             }
         }
     }
@@ -678,7 +690,7 @@ mod tests {
         pos.side_to_move = Color::Black;
         let acc_b = super::single_state::SingleAcc::refresh(&pos, &net);
         let eval_full_b = net.evaluate(&pos);
-        let eval_acc_b = net.evaluate_from_accumulator(acc_b.acc_for(Color::Black));
+        let eval_acc_b = net.evaluate_from_accumulator_pre(acc_b.acc_for(Color::Black));
         assert_eq!(eval_full_b, eval_acc_b);
         assert_ne!(eval_full_b, 0);
 
@@ -686,7 +698,7 @@ mod tests {
         pos.side_to_move = Color::White;
         let acc_w = super::single_state::SingleAcc::refresh(&pos, &net);
         let eval_full_w = net.evaluate(&pos);
-        let eval_acc_w = net.evaluate_from_accumulator(acc_w.acc_for(Color::White));
+        let eval_acc_w = net.evaluate_from_accumulator_pre(acc_w.acc_for(Color::White));
         assert_eq!(eval_full_w, eval_acc_w);
         assert_ne!(eval_full_w, 0);
     }
@@ -719,10 +731,10 @@ mod tests {
         let undo = pos.do_move(mv);
 
         // eval via acc (side-to-move has flipped)
-        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         // eval via full refresh
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
 
         pos.undo_move(mv, undo);
@@ -754,9 +766,9 @@ mod tests {
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
         let undo = pos.do_move(mv);
 
-        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
 
         pos.undo_move(mv, undo);
@@ -799,9 +811,9 @@ mod tests {
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
         let undo = pos.do_move(mv);
 
-        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
 
         pos.undo_move(mv, undo);
@@ -847,9 +859,9 @@ mod tests {
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
         let undo = pos.do_move(mv);
 
-        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
 
         pos.undo_move(mv, undo);
@@ -886,9 +898,9 @@ mod tests {
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
 
         let undo = pos.do_move(mv);
-        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
         pos.undo_move(mv, undo);
     }
@@ -937,9 +949,9 @@ mod tests {
         let _u2 = pos.do_move(mv2);
 
         // フル再構築と一致
-        let eval_acc = net.evaluate_from_accumulator(acc2.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc2.acc_for(pos.side_to_move));
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
     }
 
@@ -982,9 +994,9 @@ mod tests {
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
         let undo = pos.do_move(mv);
 
-        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let acc_full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(acc_full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(acc_full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
 
         pos.undo_move(mv, undo);
@@ -1074,18 +1086,18 @@ mod tests {
         let mv1 = Move::make_drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv1, &net);
         let u1 = pos.do_move(mv1);
-        let eval_acc1 = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc1 = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let full1 = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full1 = net.evaluate_from_accumulator(full1.acc_for(pos.side_to_move));
+        let eval_full1 = net.evaluate_from_accumulator_pre(full1.acc_for(pos.side_to_move));
         assert_eq!(eval_acc1, eval_full1);
 
         // 2nd drop (now White to move): 3e (different file to avoid ni-fu rule)
         let mv2 = Move::make_drop(PieceType::Pawn, parse_usi_square("3e").unwrap());
         let acc2 = super::single_state::SingleAcc::apply_update(&acc1, &pos, mv2, &net);
         let u2 = pos.do_move(mv2);
-        let eval_acc2 = net.evaluate_from_accumulator(acc2.acc_for(pos.side_to_move));
+        let eval_acc2 = net.evaluate_from_accumulator_pre(acc2.acc_for(pos.side_to_move));
         let full2 = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full2 = net.evaluate_from_accumulator(full2.acc_for(pos.side_to_move));
+        let eval_full2 = net.evaluate_from_accumulator_pre(full2.acc_for(pos.side_to_move));
         assert_eq!(eval_acc2, eval_full2);
 
         // cleanup
@@ -1134,9 +1146,9 @@ mod tests {
         );
         let acc1 = super::single_state::SingleAcc::apply_update(&acc0, &pos, mv, &net);
         let u = pos.do_move(mv);
-        let eval_acc = net.evaluate_from_accumulator(acc1.acc_for(pos.side_to_move));
+        let eval_acc = net.evaluate_from_accumulator_pre(acc1.acc_for(pos.side_to_move));
         let full = super::single_state::SingleAcc::refresh(&pos, &net);
-        let eval_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+        let eval_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
         assert_eq!(eval_acc, eval_full);
         pos.undo_move(mv, u);
     }
@@ -1176,7 +1188,7 @@ mod tests {
             // 子局面に同期した acc（refresh）経由の評価とも一致することを確認
             let s_acc_refreshed = {
                 let full = super::single_state::SingleAcc::refresh(&pos, net);
-                net.evaluate_from_accumulator(full.acc_for(pos.side_to_move))
+                net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move))
             };
             assert_eq!(s_wrap, s_dir);
             assert_eq!(s_wrap, s_acc_refreshed);
@@ -1224,9 +1236,9 @@ mod tests {
             let _u = pos.do_move(mv);
 
             // Compare
-            let eval_acc = net.evaluate_from_accumulator(next.acc_for(pos.side_to_move));
+            let eval_acc = net.evaluate_from_accumulator_pre(next.acc_for(pos.side_to_move));
             let full = super::single_state::SingleAcc::refresh(&pos, &net);
-            let eval_full = net.evaluate_from_accumulator(full.acc_for(pos.side_to_move));
+            let eval_full = net.evaluate_from_accumulator_pre(full.acc_for(pos.side_to_move));
             let eval_direct = net.evaluate(&pos);
             assert_eq!(eval_acc, eval_full);
             assert_eq!(eval_acc, eval_direct);
@@ -1270,7 +1282,7 @@ mod tests {
         let s_wrap = wrapper.evaluate(&pos);
         let s_acc = wrapper
             .snapshot_single()
-            .map(|acc| net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move)))
+            .map(|acc| net.evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move)))
             .unwrap_or_else(|| net.evaluate(&pos));
         let s_full = net.evaluate(&pos);
         assert_eq!(s_wrap, s_acc);
@@ -1341,7 +1353,7 @@ mod tests {
                         let s_d = wrap
                             .snapshot_single()
                             .map(|acc| {
-                                net_cl.evaluate_from_accumulator(acc.acc_for(pos.side_to_move))
+                                net_cl.evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move))
                             })
                             .unwrap_or_else(|| net_cl.evaluate(&pos));
                         let s_full = net_cl.evaluate(&pos);
@@ -1358,5 +1370,97 @@ mod tests {
 
         // NOTE: 他テストと並列実行されるため、グローバルカウンタの厳密値は検証しない。
         // 本スモークでは acc 経由評価とフル評価の一致のみを確認する。
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_refresh_with_no_bias_b0_none() {
+        use crate::usi::parse_usi_square;
+
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 4usize;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.1; n_feat * d], // small non-zero
+            b0: None,                  // no bias
+            w2: vec![1.0; d],
+            b2: 0.0,
+            uid: 21,
+        };
+
+        let mut pos = Position::empty();
+        // Place kings only
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        let acc = super::single_state::SingleAcc::refresh(&pos, &net);
+        let s_acc = net.evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move));
+        let s_dir = net.evaluate(&pos);
+        assert_eq!(s_acc, s_dir);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_restore_mismatched_uid_triggers_refresh() {
+        // two nets with same shape but different uid
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let d = 4usize;
+        let net1 = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.2; n_feat * d],
+            b0: Some(vec![0.01; d]),
+            w2: vec![1.0; d],
+            b2: 0.0,
+            uid: 31,
+        };
+        let net2 = super::single::SingleChannelNet {
+            uid: 32,
+            ..net1.clone()
+        };
+        let mut pos = Position::startpos();
+
+        // Build wrapper with net1
+        let mut wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net1.clone());
+        wrapper.set_position(&pos);
+
+        // Make acc from net2 (mismatched uid)
+        let acc2 = super::single_state::SingleAcc::refresh(&pos, &net2);
+        // Restore into wrapper - must refresh to net1 uid
+        wrapper.restore_single_at(&pos, acc2);
+        let acc_after = wrapper.snapshot_single().expect("acc present");
+        assert_eq!(acc_after.weights_uid, net1.uid);
+
+        // Evaluation must equal direct
+        let s_w = wrapper.evaluate(&pos);
+        let s_d = net1.evaluate(&pos);
+        assert_eq!(s_w, s_d);
+    }
+
+    #[test]
+    #[cfg(feature = "nnue_single_diff")]
+    fn test_single_eval_clamps_to_bounds() {
+        // Design a tiny net that saturates beyond clip
+        let d = 1usize;
+        let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
+        let net = super::single::SingleChannelNet {
+            n_feat,
+            acc_dim: d,
+            scale: 600.0,
+            w0: vec![0.0; n_feat * d], // no feature contribution
+            b0: Some(vec![1.0; d]),    // pre = 1.0
+            w2: vec![100000.0; d],     // large weight to saturate
+            b2: 0.0,
+            uid: 41,
+        };
+        let pos = Position::startpos();
+        let acc = super::single_state::SingleAcc::refresh(&pos, &net);
+        let s = net.evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move));
+        assert_eq!(s, 32000);
     }
 }
