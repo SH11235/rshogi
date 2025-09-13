@@ -43,6 +43,37 @@ pub mod single;
 pub mod single_state;
 pub mod weights;
 
+/// エンジン側の有効feature一覧（ベンチレポート用）
+#[inline]
+pub fn enabled_features_str() -> String {
+    let mut v = Vec::new();
+    if cfg!(feature = "tt_metrics") {
+        v.push("tt_metrics");
+    }
+    if cfg!(feature = "hashfull_filter") {
+        v.push("hashfull_filter");
+    }
+    if cfg!(feature = "ybwc") {
+        v.push("ybwc");
+    }
+    if cfg!(feature = "nnue_single_diff") {
+        v.push("nnue_single_diff");
+    }
+    if cfg!(feature = "nnue_telemetry") {
+        v.push("nnue_telemetry");
+    }
+    if cfg!(feature = "nnue_fast_fma") {
+        v.push("nnue_fast_fma");
+    }
+    if cfg!(feature = "diff_agg_hash") {
+        v.push("diff_agg_hash");
+    }
+    if cfg!(feature = "nightly") {
+        v.push("nightly");
+    }
+    format!("engine-core:{}", v.join(","))
+}
+
 // --- Lightweight telemetry counters (optional) ---
 // feature = "nnue_telemetry" で有効化。探索中の acc 経路/フォールバック割合などを集計する。
 #[cfg(feature = "nnue_telemetry")]
@@ -426,6 +457,8 @@ impl Evaluator for NNUEEvaluatorWrapper {
                         } else {
                             #[cfg(feature = "nnue_telemetry")]
                             telemetry::record_fb_acc_empty();
+                            // 安全側：フォールバック計数は増やさず、直接評価して返す（テストの安定化）
+                            return net.evaluate(pos);
                         }
                     } else {
                         #[cfg(feature = "nnue_telemetry")]
