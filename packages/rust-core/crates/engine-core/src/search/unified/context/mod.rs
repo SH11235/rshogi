@@ -33,10 +33,7 @@ pub struct SearchContext {
     /// Minimum mate distance found so far (for pruning deeper searches)
     /// When a mate is found, we can limit search depth based on this
     best_mate_distance: Option<u8>,
-
-    #[cfg(feature = "nnue_telemetry")]
-    /// 最後にテレメトリをログした時刻
-    last_telemetry_log: Option<std::time::Instant>,
+    // (nnue_telemetry) 単調秒でガードするためのフィールドは不要。グローバル原子で制御する。
 }
 
 impl Default for SearchContext {
@@ -57,8 +54,6 @@ impl SearchContext {
             current_depth: 0,
             time_stop_logged: false,
             best_mate_distance: None,
-            #[cfg(feature = "nnue_telemetry")]
-            last_telemetry_log: None,
         }
     }
 
@@ -71,10 +66,7 @@ impl SearchContext {
         self.current_depth = 0;
         self.time_stop_logged = false;
         self.best_mate_distance = None;
-        #[cfg(feature = "nnue_telemetry")]
-        {
-            self.last_telemetry_log = None;
-        }
+        // nnue_telemetry: フィールドのリセットは不要（単調秒ガードで制御）
     }
 
     /// Set search limits
@@ -131,22 +123,18 @@ impl SearchContext {
             }
         }
 
-        // 1秒毎に eval 経路テレメトリをデバッグログへ出力
+        // 1秒毎に eval 経路テレメトリをデバッグログへ出力（単調秒ベース）
         #[cfg(feature = "nnue_telemetry")]
         {
-            // プロセス全体で1秒に1回だけスナップショットする（UNIXエポック秒基準）。
-            // 検索ごとに start_time が異なると新規検索の初期秒が永続的に抑止される問題を避けるため、
-            // 相対秒ではなくエポック秒を用いる。
+            use std::sync::OnceLock;
+            static BASE: OnceLock<Instant> = OnceLock::new();
             static LAST_LOG_SEC: std::sync::atomic::AtomicU64 =
                 std::sync::atomic::AtomicU64::new(0);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let sec = BASE.get_or_init(Instant::now).elapsed().as_secs();
             let prev = LAST_LOG_SEC.load(Ordering::Relaxed);
-            if now > prev
+            if sec > prev
                 && LAST_LOG_SEC
-                    .compare_exchange(prev, now, Ordering::AcqRel, Ordering::Relaxed)
+                    .compare_exchange(prev, sec, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
             {
                 let snap = crate::evaluation::nnue::telemetry::snapshot_and_reset();
@@ -159,7 +147,8 @@ impl SearchContext {
                 };
                 // 経路ログ（acc vs fallback 割合）
                 log::debug!(
-                    "kind=eval_path\tms={}\tacc={}\tfb={}\tfb_hash={}\tfb_empty={}\tfb_feat_off={}\trate={:.1}%",
+                    "kind=eval_path\tsec={}\tms={}\tacc={}\tfb={}\tfb_hash={}\tfb_empty={}\tfb_feat_off={}\trate={:.1}%",
+                    sec,
                     self.elapsed().as_millis(),
                     snap.acc,
                     fb_total,
@@ -171,7 +160,8 @@ impl SearchContext {
                 // 差分適用のリフレッシュ頻度（原因別）
                 let apply_total = snap.apply_refresh_king + snap.apply_refresh_other;
                 log::debug!(
-                    "kind=apply_refresh\tms={}\tking={}\tother={}\ttotal={}",
+                    "kind=apply_refresh\tsec={}\tms={}\tking={}\tother={}\ttotal={}",
+                    sec,
                     self.elapsed().as_millis(),
                     snap.apply_refresh_king,
                     snap.apply_refresh_other,

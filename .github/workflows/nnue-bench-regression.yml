@@ -1,0 +1,263 @@
+name: nnue-bench-regression
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/nnue-bench-regression.yml'
+  pull_request:
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/nnue-bench-regression.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+  # Benchmark target SINGLE_CHANNEL weights path (relative to packages/rust-core)
+  # Provide a fixed reference weights file here (e.g., via LFS or Release download in a prior step).
+  WEIGHTS_PATH: runs/ref.nnue
+  # Release tag and asset name for downloading reference weights
+  WEIGHTS_RELEASE_TAG: weights-ref-v1
+  WEIGHTS_ASSET_NAME: ref.nnue
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: packages/rust-core
+
+jobs:
+  bench:
+    name: NNUE Fixed-Line Regression (artifact baseline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Cache Rust (workspace)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
+
+      - name: Build tools (release, locked)
+        run: cargo build -p tools --release --locked
+
+      - name: Download reference weights (Release asset)
+        run: |
+          set -e
+          mkdir -p runs
+          if [ ! -f "$WEIGHTS_PATH" ]; then
+            echo "Attempting to download $WEIGHTS_ASSET_NAME from release $WEIGHTS_RELEASE_TAG"
+            # GITHUB_REPOSITORY is owner/repo
+            curl -sSLf -o "$WEIGHTS_PATH" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${WEIGHTS_RELEASE_TAG}/${WEIGHTS_ASSET_NAME}" \
+              || echo "::warning::Failed to download release asset ${WEIGHTS_ASSET_NAME} from tag ${WEIGHTS_RELEASE_TAG}"
+          fi
+
+      - name: Ensure weights
+        id: weights
+        run: |
+          mkdir -p runs
+          if [ ! -f "$WEIGHTS_PATH" ]; then
+            echo "::warning::Weights not found at '$WEIGHTS_PATH'. Skipping benchmark and gating."
+            echo "NO_WEIGHTS=1" >> $GITHUB_ENV
+          else
+            echo "Found weights: $WEIGHTS_PATH"
+          fi
+
+      # --- Pull Request path: run head bench, download baseline from main, compare & gate ---
+      - name: Run head benchmark 1/3 (fixed startpos line)
+        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        continue-on-error: true
+        run: |
+          target/release/nnue_benchmark \
+            --single-weights "$WEIGHTS_PATH" \
+            --fixed-line --startpos --moves "7g7f,3c3d,2g2f,8c8d" \
+            --seconds 10 --warmup-seconds 2 \
+            --json runs/head_1.json
+
+      - name: Run head benchmark 2/3 (deterministic from startpos)
+        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        continue-on-error: true
+        run: |
+          target/release/nnue_benchmark \
+            --single-weights "$WEIGHTS_PATH" \
+            --fixed-line --deterministic-line --startpos --seed 0xC0FFEE --length 128 \
+            --seconds 10 --warmup-seconds 2 \
+            --json runs/head_2.json
+
+      - name: Run head benchmark 3/3 (deterministic from midgame)
+        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        continue-on-error: true
+        run: |
+          MID_SFEN="k8/1r1b3g1/p1p1ppp1p/1p1ps2p1/2P6/PP1P1S2P/2SGPPP2/1B5R1/LN1K2GNL b - 1"
+          target/release/nnue_benchmark \
+            --single-weights "$WEIGHTS_PATH" \
+            --fixed-line --deterministic-line --sfen "$MID_SFEN" --seed 0xC0FFEE --length 96 \
+            --seconds 10 --warmup-seconds 2 \
+            --json runs/head_3.json
+
+      - name: Combine head JSON (median)
+        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        run: |
+          python3 - <<'PY'
+          import json,statistics,sys
+          import os
+          files=[f for f in ["packages/rust-core/runs/head_1.json","packages/rust-core/runs/head_2.json","packages/rust-core/runs/head_3.json"] if os.path.exists(f)]
+          if len(files) < 2:
+              print(f"::error::Insufficient head benchmarks: found {len(files)} (<2). Failing.")
+              sys.exit(2)
+          js=[json.load(open(f)) for f in files]
+          keys=["refresh_update_eps","apply_update_eps","chain_update_eps","refresh_eval_eps","apply_eval_eps","chain_eval_eps"]
+          out={}
+          out["env"]=js[0].get("env",{})
+          # line meta: combined
+          lens=[j.get("line",{}).get("line_len",0) for j in js]
+          out["line"]={"mode":"combined","cases":len(js),"line_len":int(round(sum(lens)/len(lens))) if lens else 0}
+          out["metrics"]={}
+          for k in keys:
+              vals=[j.get("metrics",{}).get(k) for j in js]
+              vals=[v for v in vals if isinstance(v,(int,float))]
+              if vals:
+                  out["metrics"][k]=int(statistics.median(vals))
+          # seconds: median of seconds
+          secs=[j.get("metrics",{}).get("seconds") for j in js]
+          secs=[s for s in secs if isinstance(s,(int,float))]
+          if secs:
+              out["metrics"]["seconds"]=int(statistics.median(secs))
+          json.dump(out,open("packages/rust-core/runs/head.json","w"),indent=2)
+          PY
+
+      - name: Download baseline artifact (main)
+        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: nnue-bench-regression.yml
+          workflow_conclusion: success
+          branch: main
+          name: nnue-fixedline-baseline
+          path: packages/rust-core/runs
+          if_no_artifact_found: warn
+
+      - name: Prepare baseline path
+        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1'
+        run: |
+          set -e
+          if [ -f runs/base.json ]; then
+            echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
+          elif [ -f runs/nnue-fixedline-baseline/base.json ]; then
+            cp runs/nnue-fixedline-baseline/base.json runs/base.json
+            echo "BASE_JSON=runs/base.json" >> $GITHUB_ENV
+          else
+            echo "::warning::Baseline JSON not found in artifacts. Skipping comparison and gating."
+            echo "NO_BASELINE=1" >> $GITHUB_ENV
+          fi
+
+      - name: Compare and gate
+        if: github.event_name == 'pull_request' && env.NO_WEIGHTS != '1' && env.NO_BASELINE != '1'
+        run: |
+          set -e
+          target/release/compare_nnue_bench runs/head.json "$BASE_JSON" \
+            --update-threshold -15 --eval-threshold -10 \
+            --update-baseline-min 100000 --eval-baseline-min 50000 \
+            --fail-on-warn
+
+      - name: Upload head result (PR)
+        if: (github.event_name == 'pull_request') && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue-fixedline-head
+          path: packages/rust-core/runs/head.json
+          if-no-files-found: ignore
+
+      # --- Push to main path: generate and publish baseline artifact ---
+      - name: Run baseline benchmark 1/3 (fixed startpos line)
+        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        continue-on-error: true
+        run: |
+          target/release/nnue_benchmark \
+            --single-weights "$WEIGHTS_PATH" \
+            --fixed-line --startpos --moves "7g7f,3c3d,2g2f,8c8d" \
+            --seconds 10 --warmup-seconds 2 \
+            --json runs/base_1.json
+
+      - name: Run baseline benchmark 2/3 (deterministic from startpos)
+        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        continue-on-error: true
+        run: |
+          target/release/nnue_benchmark \
+            --single-weights "$WEIGHTS_PATH" \
+            --fixed-line --deterministic-line --startpos --seed 0xC0FFEE --length 128 \
+            --seconds 10 --warmup-seconds 2 \
+            --json runs/base_2.json
+
+      - name: Run baseline benchmark 3/3 (deterministic from midgame)
+        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        continue-on-error: true
+        run: |
+          MID_SFEN="k8/1r1b3g1/p1p1ppp1p/1p1ps2p1/2P6/PP1P1S2P/2SGPPP2/1B5R1/LN1K2GNL b - 1"
+          target/release/nnue_benchmark \
+            --single-weights "$WEIGHTS_PATH" \
+            --fixed-line --deterministic-line --sfen "$MID_SFEN" --seed 0xC0FFEE --length 96 \
+            --seconds 10 --warmup-seconds 2 \
+            --json runs/base_3.json
+
+      - name: Combine baseline JSON (median)
+        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        run: |
+          python3 - <<'PY'
+          import json,statistics,sys,os
+          files=[f for f in ["packages/rust-core/runs/base_1.json","packages/rust-core/runs/base_2.json","packages/rust-core/runs/base_3.json"] if os.path.exists(f)]
+          if len(files) < 2:
+              print(f"::error::Insufficient baseline benchmarks: found {len(files)} (<2). Failing.")
+              sys.exit(2)
+          js=[json.load(open(f)) for f in files]
+          keys=["refresh_update_eps","apply_update_eps","chain_update_eps","refresh_eval_eps","apply_eval_eps","chain_eval_eps"]
+          out={}
+          out["env"]=js[0].get("env",{})
+          lens=[j.get("line",{}).get("line_len",0) for j in js]
+          out["line"]={"mode":"combined","cases":len(js),"line_len":int(round(sum(lens)/len(lens))) if lens else 0}
+          out["metrics"]={}
+          for k in keys:
+              vals=[j.get("metrics",{}).get(k) for j in js]
+              vals=[v for v in vals if isinstance(v,(int,float))]
+              if vals:
+                  out["metrics"][k]=int(statistics.median(vals))
+          secs=[j.get("metrics",{}).get("seconds") for j in js]
+          secs=[s for s in secs if isinstance(s,(int,float))]
+          if secs:
+              out["metrics"]["seconds"]=int(statistics.median(secs))
+          json.dump(out,open("packages/rust-core/runs/base.json","w"),indent=2)
+          PY
+
+      - name: Upload baseline artifact (main)
+        if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue-fixedline-baseline
+          path: packages/rust-core/runs/base.json
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

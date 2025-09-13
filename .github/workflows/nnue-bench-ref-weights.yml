@@ -1,0 +1,118 @@
+name: nnue-bench-ref-weights
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g., weights-ref-v1)'
+        required: true
+        default: 'weights-ref-v1'
+      asset_name:
+        description: 'Release asset filename'
+        required: true
+        default: 'ref.nnue'
+      acc_dim:
+        description: 'Accumulator dimension (smaller -> smaller file)'
+        required: true
+        default: '8'
+      epochs:
+        description: 'Training epochs (1 is enough to get a valid file)'
+        required: true
+        default: '1'
+      seed:
+        description: 'RNG seed for reproducibility'
+        required: true
+        default: '1'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: packages/rust-core
+
+jobs:
+  build-and-release:
+    name: Build and Release Reference Weights
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Cache Rust (workspace)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
+
+      - name: Build tools (release, locked)
+        run: cargo build -p tools --release --locked
+
+      - name: Prepare tiny JSONL data
+        run: |
+          set -euo pipefail
+          mkdir -p sample_data
+          cat > sample_data/train.jsonl << 'EOF'
+          {"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":50}
+          {"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1","eval":150,"depth":20,"seldepth":30,"bound1":"Exact","bound2":"Exact","best2_gap_cp":30}
+          EOF
+          cp sample_data/train.jsonl sample_data/val.jsonl
+
+      - name: Train (minimal) and export SINGLE_CHANNEL
+        run: |
+          set -euo pipefail
+          mkdir -p runs/ref
+          ./target/release/train_nnue \
+            --input sample_data/train.jsonl \
+            --validation sample_data/val.jsonl \
+            --epochs ${{ inputs.epochs }} \
+            --batch-size 128 \
+            --acc-dim ${{ inputs.acc_dim }} \
+            --seed ${{ inputs.seed }} \
+            --out runs/ref
+          cp runs/ref/nn.fp32.bin runs/${{ inputs.asset_name }}
+          echo "Produced weights: runs/${{ inputs.asset_name }}"
+          ls -lh runs/${{ inputs.asset_name }}
+
+      - name: Verify weights load (smoke)
+        run: |
+          set -euo pipefail
+          ./target/release/nnue_smoke runs/${{ inputs.asset_name }}
+
+      - name: Upload release asset
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ inputs.tag }}
+          file: packages/rust-core/runs/${{ inputs.asset_name }}
+          asset_name: ${{ inputs.asset_name }}
+          overwrite: true
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+

@@ -122,7 +122,9 @@ fn main() -> Result<()> {
     let mut deltas_out: Vec<Value> = Vec::new();
 
     for t in targets.iter() {
-        match (get_metric(&head, t.key), get_metric(&base, t.key)) {
+        let hv = get_metric(&head, t.key);
+        let bv = get_metric(&base, t.key);
+        match (hv, bv) {
             (Some(h), Some(b)) => {
                 if let Some(delta) = pct_delta(h, b) {
                     deltas_out.push(json!({ "metric": t.key, "base": b, "head": h, "delta_pct": (delta * 10.0).round()/10.0 }));
@@ -136,8 +138,14 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            _ => {
-                deltas_out.push(json!({ "metric": t.key, "status": "missing" }));
+            (None, Some(_)) => {
+                deltas_out.push(json!({ "metric": t.key, "status": "missing_head" }));
+            }
+            (Some(_), None) => {
+                deltas_out.push(json!({ "metric": t.key, "status": "missing_base" }));
+            }
+            (None, None) => {
+                deltas_out.push(json!({ "metric": t.key, "status": "missing_both" }));
             }
         }
     }
@@ -194,17 +202,21 @@ fn main() -> Result<()> {
     if get(&head, &["env", "schema_version"]) != get(&base, &["env", "schema_version"]) {
         notices.push("schema_version differs; comparison may be invalid".into());
     }
+    let mut env_mismatch = false;
+    let mut line_mismatch = false;
     for k in ["uid", "acc_dim", "n_feat"] {
         if get(&head, &["env", "weights", k]) != get(&base, &["env", "weights", k]) {
             notices.push(format!("weights.{k} differs; skip WARN (advisory only)"));
+            env_mismatch = true;
         }
     }
     for k in ["mode", "line_len", "cases"] {
         if get(&head, &["line", k]) != get(&base, &["line", k]) {
             notices.push(format!("line.{k} differs; skip WARN (advisory only)"));
+            line_mismatch = true;
         }
     }
-    let suppress_warns = notices.iter().any(|s| s.contains("weights.") || s.contains("line."));
+    let suppress_warns = env_mismatch || line_mismatch;
     let warns_json_out = if suppress_warns {
         Vec::new()
     } else {
