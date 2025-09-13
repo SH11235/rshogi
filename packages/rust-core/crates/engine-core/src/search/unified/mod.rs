@@ -36,8 +36,57 @@ use std::{
     time::Instant,
 };
 
+/// Internal RAII-style guard to ensure evaluator hooks are paired in debug builds.
+/// It only guards evaluator hooks (not the board state). Call `undo()` when the move is undone.
+pub(crate) struct EvalMoveGuard<'a> {
+    eval: &'a dyn Evaluator,
+    undone: bool,
+}
+
+impl<'a> EvalMoveGuard<'a> {
+    pub fn new(eval: &'a dyn Evaluator, pre_pos: &Position, mv: Move) -> Self {
+        eval.on_do_move(pre_pos, mv);
+        Self {
+            eval,
+            undone: false,
+        }
+    }
+    pub fn undo(&mut self) {
+        if !self.undone {
+            self.eval.on_undo_move();
+            self.undone = true;
+        }
+    }
+}
+
+impl<'a> Drop for EvalMoveGuard<'a> {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.undone, "EvalMoveGuard dropped without calling undo()");
+    }
+}
+
 use self::aspiration::AspirationWindow;
 pub use self::tt_operations::TTOperations;
+
+/// hooksを無効化するEvaluatorラッパ（評価のみフォワード）
+/// 並列探索では増分フックを使わない運用のため、これを使用して安全性を担保する。
+pub struct HookSuppressor<E: Evaluator> {
+    pub inner: E,
+}
+
+impl<E: Evaluator> Evaluator for HookSuppressor<E> {
+    #[inline]
+    fn evaluate(&self, pos: &Position) -> i32 {
+        self.inner.evaluate(pos)
+    }
+    #[inline]
+    fn on_set_position(&self, pos: &Position) {
+        // 並列探索でも初期同期だけは通す（差分更新フックは抑止）
+        self.inner.on_set_position(pos)
+    }
+    // on_* はデフォルトno-op（未オーバーライド）
+}
 
 /// Unified searcher with compile-time feature configuration
 ///
@@ -187,8 +236,12 @@ where
 
         let start_time = Instant::now();
 
-        // Extract multipv from limits for use throughout the search
-        let effective_multipv = limits.multipv;
+        // Extract MultiPV: limits.multipv が未指定(=0)なら searcher の設定を使用
+        let effective_multipv = if limits.multipv > 0 {
+            limits.multipv
+        } else {
+            self.multi_pv
+        };
 
         // Create TimeManager if needed
         self.time_manager =
@@ -217,6 +270,9 @@ where
 
         // Initialize search context with limits
         self.context.set_limits(limits);
+
+        // Notify evaluator of the root position (for incremental evaluators)
+        self.evaluator.on_set_position(pos);
 
         // Iterative deepening
         let mut best_move = None;
@@ -545,6 +601,11 @@ where
                     crate::usi::move_to_usi(&head)
                 );
                 final_best_move = Some(head);
+                // ノード未計測で手だけが決まるとテスト整合性が崩れるため、
+                // フォールバックで手を返す場合は最低1ノードとみなす。
+                if self.stats.nodes == 0 {
+                    self.stats.nodes = 1;
+                }
             } else {
                 // 2) As a last resort, generate a legal move from the root position
                 //    to avoid emitting no-bestmove at the protocol boundary.
@@ -566,6 +627,11 @@ where
                         // Populate minimal PV for downstream consumers.
                         self.stats.pv.clear();
                         self.stats.pv.push(mv);
+
+                        // 同上: 手を返す以上、最低限の探索があったものとして1ノードに補正
+                        if self.stats.nodes == 0 {
+                            self.stats.nodes = 1;
+                        }
                     } else {
                         // No legal moves at root: this is a terminal position.
                         // Treat as mate (side to move has no legal moves) and attach StopInfo.

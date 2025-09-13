@@ -16,6 +16,10 @@ tt_metrics = []
 hashfull_filter = []
 # Feature to enable YBWC (Young Brothers Wait Concept) parallel search
 ybwc = []
+# Feature gate: SINGLE_CHANNEL の差分更新土台（acc リフレッシュと安全フォールバック）
+nnue_single_diff = []
+# 軽量テレメトリ（探索中の eval 経路割合などの統計を収集・ログ出力）
+nnue_telemetry = []
 
 [dependencies]
 serde = { workspace = true }
@@ -34,10 +38,12 @@ crossbeam-utils = "0.8"
 crossbeam-deque = "0.8"
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true }
+thread_local = "1.1"
 
 [dev-dependencies]
 criterion = { version = "0.6", features = ["html_reports"] }
 serde_yaml = { workspace = true }
+proptest = "1"
 
 [[bench]]
 name = "search_benchmarks"
