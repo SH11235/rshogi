@@ -1,0 +1,25 @@
+extends: default
+
+rules:
+  # GitHub Actions uses many long command lines; be lenient.
+  line-length:
+    max: 200
+    allow-non-breakable-words: true
+
+  # Do not require '---' at the start of files.
+  document-start: disable
+
+  # Indentation conventions used in this repo.
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+
+  # Avoid false positives for GitHub-specific strings like 'on'.
+  truthy: disable
+
+# Lint common YAML, including GitHub workflows by default.
+yaml-files:
+  - '*.yml'
+  - '*.yaml'
+  - '.github/workflows/*.yml'
+  - '.github/workflows/*.yaml'

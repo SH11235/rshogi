@@ -33,6 +33,7 @@ pub struct SearchContext {
     /// Minimum mate distance found so far (for pruning deeper searches)
     /// When a mate is found, we can limit search depth based on this
     best_mate_distance: Option<u8>,
+    // (nnue_telemetry) 単調秒でガードするためのフィールドは不要。グローバル原子で制御する。
 }
 
 impl Default for SearchContext {
@@ -65,6 +66,7 @@ impl SearchContext {
         self.current_depth = 0;
         self.time_stop_logged = false;
         self.best_mate_distance = None;
+        // nnue_telemetry: フィールドのリセットは不要（単調秒ガードで制御）
     }
 
     /// Set search limits
@@ -118,6 +120,53 @@ impl SearchContext {
                     tm.ponder_hit(Some(&time_limits), ponder_elapsed_ms);
                     log::info!("TimeManager notified of ponder hit after {ponder_elapsed_ms}ms");
                 }
+            }
+        }
+
+        // 1秒毎に eval 経路テレメトリをデバッグログへ出力（単調秒ベース）
+        #[cfg(feature = "nnue_telemetry")]
+        {
+            use std::sync::OnceLock;
+            static BASE: OnceLock<Instant> = OnceLock::new();
+            static LAST_LOG_SEC: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let sec = BASE.get_or_init(Instant::now).elapsed().as_secs();
+            let prev = LAST_LOG_SEC.load(Ordering::Relaxed);
+            if sec > prev
+                && LAST_LOG_SEC
+                    .compare_exchange(prev, sec, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            {
+                let snap = crate::evaluation::nnue::telemetry::snapshot_and_reset();
+                let fb_total = snap.fb_hash_mismatch + snap.fb_acc_empty + snap.fb_feature_off;
+                let total = snap.acc + fb_total;
+                let acc_rate = if total > 0 {
+                    100.0 * (snap.acc as f64) / (total as f64)
+                } else {
+                    0.0
+                };
+                // 経路ログ（acc vs fallback 割合）
+                log::debug!(
+                    "kind=eval_path\tsec={}\tms={}\tacc={}\tfb={}\tfb_hash={}\tfb_empty={}\tfb_feat_off={}\trate={:.1}%",
+                    sec,
+                    self.elapsed().as_millis(),
+                    snap.acc,
+                    fb_total,
+                    snap.fb_hash_mismatch,
+                    snap.fb_acc_empty,
+                    snap.fb_feature_off,
+                    acc_rate
+                );
+                // 差分適用のリフレッシュ頻度（原因別）
+                let apply_total = snap.apply_refresh_king + snap.apply_refresh_other;
+                log::debug!(
+                    "kind=apply_refresh\tsec={}\tms={}\tking={}\tother={}\ttotal={}",
+                    sec,
+                    self.elapsed().as_millis(),
+                    snap.apply_refresh_king,
+                    snap.apply_refresh_other,
+                    apply_total
+                );
             }
         }
     }

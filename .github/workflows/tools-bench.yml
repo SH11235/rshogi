@@ -2,7 +2,7 @@ name: Tools Bench
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'packages/rust-core/crates/tools/**'
       - '.github/workflows/tools-bench.yml'

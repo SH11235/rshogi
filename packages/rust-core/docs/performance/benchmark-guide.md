@@ -159,51 +159,84 @@ done | tee benchmark_results.txt
 
 ## ベンチマーク実行例と期待される出力
 
-### NNUE性能ベンチマーク
+### NNUE性能ベンチマーク（固定ライン対応）
 
 ```bash
-cargo run --release --bin nnue_benchmark
+cargo run --release -p tools --bin nnue_benchmark -- --single-weights path/to/weights.bin
 ```
 
-期待される出力例（リリースビルド、2025年7月15日測定）：
+期待される出力例（リリースビルド、単スレ）:
 ```
-=== NNUE Performance Benchmark ===
-
-1. Direct Evaluation Function Comparison
-========================================
-Material Evaluator:
-  - Evaluations/sec: 12,106,317
-  - Avg time: 82 ns
-
-NNUE Evaluator:
-  - Evaluations/sec: 1,140,383
-  - Avg time: 876 ns
-
-Performance Comparison:
-  - NNUE is 10.6x slower than Material evaluator
-  - NNUE overhead: 961.6%
-
-2. Search Performance Comparison
-=================================
-Position 1:
-  Material Engine:
-    Nodes: 26,718,665
-    Time: 5.000009636s
-    NPS: 5,343,723
-    
-  NNUE Engine:
-    Nodes: 2,903,757
-    Time: 2.502101829s
-    NPS: 1,160,527
-    
-Search Comparison:
-  Material NPS: 5,343,723
-  NNUE NPS: 1,160,527
-  NPS ratio: 4.60x
-  NNUE search overhead: 78.3%
+=== NNUE Single Benchmark ===
+Weights: path/to/weights.bin
+Update-only EPS: refresh=1_230_000 apply=2_860_000 chain=2_710_000
+Eval-included EPS: refresh=1_150_000 apply=2_100_000 chain=2_040_000
+Speedup (apply/refresh eval): 1.83x
+Speedup (chain/refresh eval): 1.77x
 ```
 
-注: デバッグビルドでは約20倍遅くなります（NNUE評価関数: 約10,000 評価/秒）
+固定ラインモード（MoveGenの影響を排除した再現性の高いEPS）:
+
+```bash
+# 事前生成ライン（startpos + 手列指定）
+cargo run --release -p tools --bin nnue_benchmark -- \
+  --single-weights path/to/weights.bin \
+  --fixed-line --startpos --moves "7g7f,3c3d,2g2f,8c8d" \
+  --seconds 5 --warmup-seconds 2 \
+  --json docs/reports/nnue_fixed_startpos.json \
+  --report docs/reports/nnue_fixed_startpos.md
+
+# 決定論ライン（seed で固定）
+cargo run --release -p tools --bin nnue_benchmark -- \
+  --single-weights path/to/weights.bin \
+  --fixed-line --deterministic-line --startpos --seed 0xC0FFEE --length 128 \
+  --seconds 5 --json -
+```
+
+出力指標（EPS）:
+- Update-only 系: `refresh_update_eps`/`apply_update_eps`/`chain_update_eps`
+- Eval-included 系: `refresh_eval_eps`/`apply_eval_eps`/`chain_eval_eps`
+
+注: デバッグビルドでは約20倍遅くなります（NNUE評価関数: 約10,000 評価/秒）。比較は常にリリースビルド・単スレで実施してください。
+また、実行秒数 `--seconds` が短すぎる（< 2秒）と分散が大きくなります。推奨は `--seconds >= 5` と `--warmup-seconds >= 2` です。
+
+補足: `--seed` は10進と16進（`0x`/`0X`接頭辞）どちらの表記も受け付けます。
+
+#### JSON比較（回帰検知）
+
+固定ラインの JSON 出力同士を比較し、主指標（apply/chain の Update/Eval 系）の相対低下をチェックします。
+
+```bash
+cargo run --release -p tools --bin compare_nnue_bench -- \
+  docs/reports/head.json docs/reports/base.json \
+  --update-threshold -15 --eval-threshold -10 \
+  --update-baseline-min 100000 --eval-baseline-min 50000 \
+  --fail-on-warn
+```
+
+出力:
+- JSON: 各指標の delta と warn を標準出力（stdout）
+- WARN行: 人間可読の警告を標準エラー（stderr）に出力
+- 既定閾値: Update 系 -15%、Eval 系 -10%（ベースが十分に大きいときのみ判定）
+- --fail-on-warn: 警告があれば終了コード2で終了（CIゲート向け）
+
+#### 探索中テレメトリのログ（開発時）
+- feature `nnue_telemetry` 有効時、探索中に 1 秒ごと `kind=eval_path` / `kind=apply_refresh` を出力します（`RUST_LOG=debug`）。
+- 複数スレッドからの同時 `process_events()` を単調時計（起動後の経過秒）でガードし、各秒につき1回のみ `snapshot_and_reset()` を実行します。
+- サンプル:
+  ```
+  kind=eval_path	sec=12	ms=1206	acc=34567	fb=1234	fb_hash=1200	fb_empty=34	fb_feat_off=0	rate=96.6%
+  kind=apply_refresh	sec=12	ms=1206	king=12	other=3	total=15
+  ```
+  - `acc` は差分acc経路の評価回数、`fb_*` はフォールバック理由別の回数です。
+  - `king/other` は差分適用が安全側 refresh になった件数（王手・玉移動/その他）です。
+
+有効化例（エンジン実行時）:
+```bash
+RUST_LOG=debug cargo run --release -p engine-usi
+```
+
+注: `nnue_telemetry` はオーバーヘッドを抑えた軽量な集計（Relaxedの原子加算/スワップ）ですが、本番計測ではオフにすることを推奨します。
 
 ### 5. 並列探索ベンチマーク
 

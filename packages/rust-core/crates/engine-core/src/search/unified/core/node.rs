@@ -332,7 +332,9 @@ where
             None
         };
 
-        // Make move
+        // Make move (pair evaluator hooks with move using guard)
+        let eval_arc = searcher.evaluator.clone();
+        let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
         let undo_info = pos.do_move(mv);
 
         // Save child hash for PV owner validation (avoids second do/undo)
@@ -465,6 +467,7 @@ where
 
         // Undo move
         pos.undo_move(mv, undo_info);
+        eval_guard.undo();
 
         // Check stop flag after alpha-beta recursion
         if searcher.context.should_stop() {

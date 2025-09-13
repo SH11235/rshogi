@@ -2,7 +2,7 @@ name: train-dashboard
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'packages/rust-core/**'
       - '!packages/rust-core/docs/**'

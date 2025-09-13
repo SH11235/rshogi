@@ -2,7 +2,7 @@ name: tools-ci
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'packages/rust-core/crates/tools/**'
       - 'packages/rust-core/crates/engine-core/**'
@@ -132,11 +132,11 @@ jobs:
         env:
           TRAIN: ${{ github.event.inputs.train }}
           VALID: ${{ github.event.inputs.valid }}
-          TEST:  ${{ github.event.inputs.test  }}
+          TEST: ${{ github.event.inputs.test }}
         run: |
           set -euo pipefail
           echo "Running cross-dedup on real datasets"
-          
+
           # Check if files exist and log their extensions
           for file in "$TRAIN" "$VALID" "$TEST"; do
             if [[ -f "$file" ]]; then
@@ -146,7 +146,7 @@ jobs:
               exit 1
             fi
           done
-          
+
           ./target/release/check_cross_dedup \
             --train "$TRAIN" \
             --valid "$VALID" \

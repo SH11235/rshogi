@@ -47,10 +47,10 @@ jobs:
           - os: ubuntu-latest
             rust: nightly
             experimental: true
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
@@ -58,13 +58,13 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.6
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "packages/rust-core -> target"
           key: ${{ matrix.os }}-rust-${{ matrix.rust }}-large-stack
           cache-on-failure: true
-      
+
       - name: Set stack size
         id: stack
         shell: bash
@@ -76,7 +76,7 @@ jobs:
           else
             echo "size=${{ env.DEFAULT_STACK_SIZE }}" >> $GITHUB_OUTPUT
           fi
-      
+
       - name: Run ignored tests (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -97,7 +97,7 @@ jobs:
           else
             RUST_MIN_STACK=${{ steps.stack.outputs.size }} cargo test --release -- --ignored --nocapture --skip test_benchmark
           fi
-      
+
       - name: Run ignored tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -114,7 +114,7 @@ jobs:
           } else {
             cargo test --release -- --ignored --nocapture --skip test_benchmark
           }
-      
+
       - name: Test Summary
         if: always()
         shell: bash
@@ -137,7 +137,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     continue-on-error: true
-    
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -149,12 +149,12 @@ jobs:
         with:
           workspaces: "packages/rust-core -> target"
           cache-on-failure: true
-      
+
       - name: Test different stack sizes
         run: |
           echo "Testing minimum stack size requirements..."
           echo ""
-          
+
           for size in 1048576 2097152 4194304 8388608 16777216; do
             echo "Testing with stack size: $((size / 1048576))MB ($size bytes)"
             if RUST_MIN_STACK=$size timeout 60s cargo test -- --ignored --skip test_benchmark > /dev/null 2>&1; then
@@ -172,7 +172,7 @@ jobs:
     name: Debug vs Release Mode
     runs-on: ubuntu-latest
     continue-on-error: true
-    
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -184,19 +184,19 @@ jobs:
         with:
           workspaces: "packages/rust-core -> target"
           cache-on-failure: true
-      
+
       - name: Compare debug and release modes
         run: |
           echo "## Comparing Debug vs Release mode stack requirements"
           echo ""
-          
+
           echo "### Release mode (typically requires less stack):"
           if timeout 60s cargo test --release -- --ignored --skip test_benchmark; then
             echo "✓ Release mode tests passed"
           else
             echo "✗ Release mode tests failed"
           fi
-          
+
           echo ""
           echo "### Debug mode with large stack:"
           if RUST_MIN_STACK=8388608 timeout 60s cargo test -- --ignored --skip test_benchmark; then

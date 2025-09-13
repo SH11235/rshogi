@@ -113,7 +113,9 @@ where
             );
         }
 
-        // Make move
+        // Make move (pair evaluator hooks with move using guard)
+        let eval_arc = searcher.evaluator.clone();
+        let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
         let undo_info = pos.do_move(mv);
 
         // Note: Node counting is done in alpha_beta() to avoid double counting
@@ -157,8 +159,9 @@ where
             }
         };
 
-        // Undo move
+        // Undo move (guarantee evaluator hook pairing)
         pos.undo_move(mv, undo_info);
+        eval_guard.undo();
 
         // Check stop flag immediately after alpha-beta search
         if searcher.context.should_stop() {
@@ -382,7 +385,9 @@ where
             break;
         }
 
-        // Make move
+        // Make move with evaluator hooks
+        let eval_arc = searcher.evaluator.clone();
+        let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
         let undo = pos.do_move(mv);
 
         // Optional prefetch
@@ -448,6 +453,7 @@ where
 
         // Undo move
         pos.undo_move(mv, undo);
+        eval_guard.undo();
 
         // Update alpha and store candidate
         if score > alpha {
@@ -501,6 +507,9 @@ where
         let gen = MoveGenerator::new();
         if let Ok(moves) = gen.generate_all(pos) {
             if let Some(&mv) = moves.as_slice().first() {
+                let eval_arc = searcher.evaluator.clone();
+                let mut eval_guard =
+                    crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
                 let undo = pos.do_move(mv);
                 let s = -super::alpha_beta(
                     searcher,
@@ -524,6 +533,7 @@ where
                     pv.push(m);
                 }
                 pos.undo_move(mv, undo);
+                eval_guard.undo();
 
                 let line = RootLine {
                     multipv_index: 1,
@@ -564,6 +574,8 @@ where
 
         // Budget guard: re-search only if we have sufficient remaining budget
         if bound != Bound::Exact && has_budget_for_exactify(searcher) {
+            let eval_arc = searcher.evaluator.clone();
+            let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
             let undo = pos.do_move(mv);
 
             // Re-search with full window for robustness
@@ -587,6 +599,7 @@ where
             }
 
             pos.undo_move(mv, undo);
+            eval_guard.undo();
 
             score = s2;
             bound = Bound::Exact; // Full-window re-search yields exact root score
