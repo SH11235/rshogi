@@ -184,8 +184,8 @@ impl NNUEEvaluatorWrapper {
                         evaluator: evaluator.clone(),
                         accumulator_stack: Vec::new(),
                     },
-                    // set_position 前の評価はフル再構築へ落とす
-                    tracked_hash: Some(u64::MAX),
+                    // 初期状態は None（evaluate はスタック空→フル再構築）
+                    tracked_hash: None,
                 }
             }
             Backend::Single { net, .. } => Self {
@@ -194,8 +194,8 @@ impl NNUEEvaluatorWrapper {
                     #[cfg(feature = "nnue_single_diff")]
                     acc_stack: Vec::new(),
                 },
-                // set_position 前の評価はフル経路
-                tracked_hash: Some(u64::MAX),
+                // 初期状態は None（evaluate は acc 不在→フル経路）
+                tracked_hash: None,
             },
         }
     }
@@ -383,6 +383,18 @@ impl NNUEEvaluatorWrapper {
                 evaluator,
                 accumulator_stack,
             } => {
+                // Null move: Acc は変更しない（複製して積むだけ）
+                if mv.is_null() {
+                    if let Some(cur) = accumulator_stack.last().cloned() {
+                        accumulator_stack.push(cur);
+                    } else {
+                        let mut acc = accumulator::Accumulator::new();
+                        acc.refresh(pos, &evaluator.feature_transformer);
+                        accumulator_stack.push(acc);
+                    }
+                    self.tracked_hash = None;
+                    return Ok(());
+                }
                 let current_acc =
                     accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
                 let mut new_acc = current_acc.clone();
