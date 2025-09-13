@@ -340,6 +340,33 @@ mod tests {
     }
 }
 
+// Endianness-aware float reader for SINGLE weights
+#[cfg(target_endian = "little")]
+fn read_f32_vec(
+    r: &mut std::io::Cursor<&[u8]>,
+    n: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let mut out = vec![0f32; n];
+    // Safe: direct byte copy on little-endian targets
+    let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
+    r.read_exact(bytes)?;
+    Ok(out)
+}
+
+#[cfg(not(target_endian = "little"))]
+fn read_f32_vec(
+    r: &mut std::io::Cursor<&[u8]>,
+    n: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut b = [0u8; 4];
+        r.read_exact(&mut b)?;
+        out.push(f32::from_le_bytes(b));
+    }
+    Ok(out)
+}
+
 /// Try to load SINGLE_CHANNEL (Version 2) weights with text header (trainer format)
 pub fn load_single_weights(
     path: &str,
@@ -417,17 +444,6 @@ pub fn load_single_weights(
         )
         .into());
     };
-
-    fn read_f32_vec(
-        r: &mut std::io::Cursor<&[u8]>,
-        n: usize,
-    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let mut out = vec![0f32; n];
-        // Safe: transmute bytes for exact size
-        let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
-        r.read_exact(bytes)?;
-        Ok(out)
-    }
 
     let w0 = read_f32_vec(&mut rdr, input_dim * acc_dim)?;
     let b0 = if has_b0 {
