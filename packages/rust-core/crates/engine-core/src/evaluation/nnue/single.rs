@@ -73,8 +73,13 @@ impl SingleChannelNet {
             }
         }
 
-        // Output
+        // Output（FMA オプトインで acc 経路と丸めを揃える）
         let mut cp = self.b2;
+        #[cfg(feature = "nnue_fast_fma")]
+        for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
+            cp = w.mul_add(*a, cp);
+        }
+        #[cfg(not(feature = "nnue_fast_fma"))]
         for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
             cp += (*w) * (*a);
         }

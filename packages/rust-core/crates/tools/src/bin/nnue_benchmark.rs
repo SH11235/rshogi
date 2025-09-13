@@ -421,7 +421,7 @@ fn gather_env_json(
     };
     let target = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
     let rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-    let features = "engine-core:tt_metrics,hashfull_filter,nnue_single_diff,nnue_telemetry";
+    let features = engine_core::evaluation::nnue::enabled_features_str();
     json!({
         "schema_version": "nnue_bench_v1",
         "tool_version": tool_version,

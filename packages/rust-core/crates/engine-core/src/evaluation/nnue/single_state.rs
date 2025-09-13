@@ -9,8 +9,29 @@ use smallvec::SmallVec;
 #[inline]
 fn add_row_scaled(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
-    for (d, r) in dst.iter_mut().zip(row.iter()) {
-        *d += k * *r;
+    #[cfg(feature = "nnue_simd")]
+    {
+        use core::simd::Simd;
+        const LANES: usize = 8;
+        let ks = Simd::<f32, LANES>::splat(k);
+        let (d_head, d_tail) = dst.split_at_mut(dst.len() - dst.len() % LANES);
+        let (r_head, r_tail) = row.split_at(row.len() - row.len() % LANES);
+        for (dch, rch) in d_head.chunks_exact_mut(LANES).zip(r_head.chunks_exact(LANES)) {
+            let a = Simd::<f32, LANES>::from_slice(dch);
+            let b = Simd::<f32, LANES>::from_slice(rch);
+            let c = a + b * ks;
+            dch.copy_from_slice(&c.to_array());
+        }
+        for (d, r) in d_tail.iter_mut().zip(r_tail.iter()) {
+            *d += k * *r;
+        }
+        return;
+    }
+    #[cfg(not(feature = "nnue_simd"))]
+    {
+        for (d, r) in dst.iter_mut().zip(row.iter()) {
+            *d += k * *r;
+        }
     }
 }
 

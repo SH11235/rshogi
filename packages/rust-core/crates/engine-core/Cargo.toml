@@ -24,6 +24,8 @@ nnue_telemetry = []
 nnue_fast_fma = []
 # 差分集計をHashMapで行うA/B用（デフォルトは線形マップ）
 diff_agg_hash = []
+# SIMD 最適化の前段: std::simd を使った行加算
+nnue_simd = []
 
 [dependencies]
 serde = { workspace = true }
