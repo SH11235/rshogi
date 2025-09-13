@@ -107,6 +107,8 @@ impl SingleAcc {
         if mv.piece_type() == Some(PieceType::King) && !mv.is_drop() {
             let mut post = pre_pos.clone();
             let _u = post.do_move(mv);
+            #[cfg(feature = "nnue_telemetry")]
+            crate::evaluation::nnue::telemetry::record_apply_refresh_king();
             return SingleAcc::refresh(&post, net);
         }
 
@@ -121,6 +123,8 @@ impl SingleAcc {
             None => {
                 let mut post = pre_pos.clone();
                 let _u = post.do_move(mv);
+                #[cfg(feature = "nnue_telemetry")]
+                crate::evaluation::nnue::telemetry::record_apply_refresh_other();
                 return SingleAcc::refresh(&post, net);
             }
         };

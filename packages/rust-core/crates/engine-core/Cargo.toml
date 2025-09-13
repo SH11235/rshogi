@@ -18,6 +18,8 @@ hashfull_filter = []
 ybwc = []
 # Feature gate: SINGLE_CHANNEL の差分更新土台（acc リフレッシュと安全フォールバック）
 nnue_single_diff = []
+# 軽量テレメトリ（探索中の eval 経路割合などの統計を収集・ログ出力）
+nnue_telemetry = []
 
 [dependencies]
 serde = { workspace = true }

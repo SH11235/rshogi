@@ -43,6 +43,76 @@ pub mod single;
 pub mod single_state;
 pub mod weights;
 
+// --- Lightweight telemetry counters (optional) ---
+// feature = "nnue_telemetry" で有効化。探索中の acc 経路/フォールバック割合などを集計する。
+#[cfg(feature = "nnue_telemetry")]
+pub mod telemetry {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Evaluate 経路
+    pub static ACC_EVAL_COUNT: AtomicU64 = AtomicU64::new(0);
+    pub static FB_HASH_MISMATCH: AtomicU64 = AtomicU64::new(0);
+    pub static FB_ACC_EMPTY: AtomicU64 = AtomicU64::new(0);
+    pub static FB_FEATURE_OFF: AtomicU64 = AtomicU64::new(0);
+
+    // 差分適用が安全側 refresh になった件数（原因別）
+    pub static APPLY_REFRESH_KING: AtomicU64 = AtomicU64::new(0);
+    pub static APPLY_REFRESH_OTHER: AtomicU64 = AtomicU64::new(0);
+
+    #[inline]
+    pub fn record_acc_eval() {
+        ACC_EVAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn record_fb_hash_mismatch() {
+        FB_HASH_MISMATCH.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn record_fb_acc_empty() {
+        FB_ACC_EMPTY.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn record_fb_feature_off() {
+        FB_FEATURE_OFF.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn record_apply_refresh_king() {
+        APPLY_REFRESH_KING.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn record_apply_refresh_other() {
+        APPLY_REFRESH_OTHER.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Snapshot {
+        pub acc: u64,
+        pub fb_hash_mismatch: u64,
+        pub fb_acc_empty: u64,
+        pub fb_feature_off: u64,
+        pub apply_refresh_king: u64,
+        pub apply_refresh_other: u64,
+    }
+
+    #[inline]
+    pub fn snapshot_and_reset() -> Snapshot {
+        let acc = ACC_EVAL_COUNT.swap(0, Ordering::Relaxed);
+        let fb_hash_mismatch = FB_HASH_MISMATCH.swap(0, Ordering::Relaxed);
+        let fb_acc_empty = FB_ACC_EMPTY.swap(0, Ordering::Relaxed);
+        let fb_feature_off = FB_FEATURE_OFF.swap(0, Ordering::Relaxed);
+        let apply_refresh_king = APPLY_REFRESH_KING.swap(0, Ordering::Relaxed);
+        let apply_refresh_other = APPLY_REFRESH_OTHER.swap(0, Ordering::Relaxed);
+        Snapshot {
+            acc,
+            fb_hash_mismatch,
+            fb_acc_empty,
+            fb_feature_off,
+            apply_refresh_king,
+            apply_refresh_other,
+        }
+    }
+}
+
 use crate::shogi::Move;
 use crate::{Color, Position};
 
@@ -305,6 +375,8 @@ impl Evaluator for NNUEEvaluatorWrapper {
             } => {
                 // 初期状態（fork_stateless 直後などでスタック空）は常にフル再構築
                 if accumulator_stack.is_empty() {
+                    #[cfg(feature = "nnue_telemetry")]
+                    telemetry::record_fb_acc_empty();
                     let mut tmp = accumulator::Accumulator::new();
                     tmp.refresh(pos, evaluator.feature_transformer());
                     return evaluator.evaluate_with_accumulator(pos, &tmp);
@@ -315,8 +387,16 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
                 if use_acc {
                     if let Some(acc) = accumulator_stack.last() {
+                        #[cfg(feature = "nnue_telemetry")]
+                        telemetry::record_acc_eval();
                         return evaluator.evaluate_with_accumulator(pos, acc);
+                    } else {
+                        #[cfg(feature = "nnue_telemetry")]
+                        telemetry::record_fb_acc_empty();
                     }
+                } else {
+                    #[cfg(feature = "nnue_telemetry")]
+                    telemetry::record_fb_hash_mismatch();
                 }
 
                 // フォールバック: 一時 Accumulator を構築してフル評価
@@ -334,10 +414,20 @@ impl Evaluator for NNUEEvaluatorWrapper {
                     let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
                     if use_acc {
                         if let Some(acc) = acc_stack.last() {
+                            #[cfg(feature = "nnue_telemetry")]
+                            telemetry::record_acc_eval();
                             return net.evaluate_from_accumulator(acc.acc_for(pos.side_to_move));
+                        } else {
+                            #[cfg(feature = "nnue_telemetry")]
+                            telemetry::record_fb_acc_empty();
                         }
+                    } else {
+                        #[cfg(feature = "nnue_telemetry")]
+                        telemetry::record_fb_hash_mismatch();
                     }
                 }
+                #[cfg(all(not(feature = "nnue_single_diff"), feature = "nnue_telemetry"))]
+                telemetry::record_fb_feature_off();
                 #[cfg(test)]
                 {
                     SINGLE_FALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
