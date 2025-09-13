@@ -43,6 +43,7 @@ jobs:
   build-and-release:
     name: Build and Release Reference Weights
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,6 +72,21 @@ jobs:
 
       - name: Build tools (release, locked)
         run: cargo build -p tools --release --locked
+
+      - name: Ensure required binaries exist (train_nnue, nnue_smoke)
+        run: |
+          set -euo pipefail
+          need_fallback=0
+          for bin in train_nnue nnue_smoke; do
+            if [ ! -x "target/release/$bin" ]; then
+              echo "WARN: target/release/$bin not found after tools build"
+              need_fallback=1
+            fi
+          done
+          if [ "$need_fallback" = "1" ]; then
+            echo "Building all workspace bins as fallback..."
+            cargo build --release --locked --bins
+          fi
 
       - name: Prepare tiny JSONL data
         run: |
@@ -115,4 +131,3 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
-

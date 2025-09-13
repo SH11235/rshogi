@@ -33,7 +33,7 @@ jobs:
   bench:
     name: NNUE Fixed-Line Regression (artifact baseline)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -65,12 +65,23 @@ jobs:
         run: cargo build -p tools --release --locked
 
       - name: Download reference weights (Release asset)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           mkdir -p runs
           if [ ! -f "$WEIGHTS_PATH" ]; then
-            echo "Attempting to download $WEIGHTS_ASSET_NAME from release $WEIGHTS_RELEASE_TAG"
-            # GITHUB_REPOSITORY is owner/repo
+            echo "Attempting API download of $WEIGHTS_ASSET_NAME from tag $WEIGHTS_RELEASE_TAG"
+            API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${WEIGHTS_RELEASE_TAG}"
+            ASSET_URL=$(curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" "$API" \
+              | python3 -c "import sys,json; j=json.load(sys.stdin); a=j.get('assets') or []; print(next((x.get('url','') for x in a if x.get('name')=='${WEIGHTS_ASSET_NAME}'),''))")
+            if [ -n "$ASSET_URL" ]; then
+              curl -sSLf -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/octet-stream" -o "$WEIGHTS_PATH" "$ASSET_URL" \
+                || echo "::warning::Failed to download asset via API"
+            fi
+          fi
+          if [ ! -f "$WEIGHTS_PATH" ]; then
+            echo "Attempting direct download (public repos only)"
             curl -sSLf -o "$WEIGHTS_PATH" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${WEIGHTS_RELEASE_TAG}/${WEIGHTS_ASSET_NAME}" \
               || echo "::warning::Failed to download release asset ${WEIGHTS_ASSET_NAME} from tag ${WEIGHTS_RELEASE_TAG}"
           fi
@@ -124,7 +135,7 @@ jobs:
           python3 - <<'PY'
           import json,statistics,sys
           import os
-          files=[f for f in ["packages/rust-core/runs/head_1.json","packages/rust-core/runs/head_2.json","packages/rust-core/runs/head_3.json"] if os.path.exists(f)]
+          files=[f for f in ["runs/head_1.json","runs/head_2.json","runs/head_3.json"] if os.path.exists(f)]
           if len(files) < 2:
               print(f"::error::Insufficient head benchmarks: found {len(files)} (<2). Failing.")
               sys.exit(2)
@@ -146,7 +157,7 @@ jobs:
           secs=[s for s in secs if isinstance(s,(int,float))]
           if secs:
               out["metrics"]["seconds"]=int(statistics.median(secs))
-          json.dump(out,open("packages/rust-core/runs/head.json","w"),indent=2)
+          json.dump(out,open("runs/head.json","w"),indent=2)
           PY
 
       - name: Download baseline artifact (main)
@@ -191,6 +202,17 @@ jobs:
           path: packages/rust-core/runs/head.json
           if-no-files-found: ignore
 
+      - name: Upload head shards (PR)
+        if: (github.event_name == 'pull_request') && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue-fixedline-head-shards
+          path: |
+            packages/rust-core/runs/head_1.json
+            packages/rust-core/runs/head_2.json
+            packages/rust-core/runs/head_3.json
+          if-no-files-found: ignore
+
       # --- Push to main path: generate and publish baseline artifact ---
       - name: Run baseline benchmark 1/3 (fixed startpos line)
         if: github.event_name == 'push' && env.NO_WEIGHTS != '1'
@@ -228,7 +250,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json,statistics,sys,os
-          files=[f for f in ["packages/rust-core/runs/base_1.json","packages/rust-core/runs/base_2.json","packages/rust-core/runs/base_3.json"] if os.path.exists(f)]
+          files=[f for f in ["runs/base_1.json","runs/base_2.json","runs/base_3.json"] if os.path.exists(f)]
           if len(files) < 2:
               print(f"::error::Insufficient baseline benchmarks: found {len(files)} (<2). Failing.")
               sys.exit(2)
@@ -248,7 +270,7 @@ jobs:
           secs=[s for s in secs if isinstance(s,(int,float))]
           if secs:
               out["metrics"]["seconds"]=int(statistics.median(secs))
-          json.dump(out,open("packages/rust-core/runs/base.json","w"),indent=2)
+          json.dump(out,open("runs/base.json","w"),indent=2)
           PY
 
       - name: Upload baseline artifact (main)
