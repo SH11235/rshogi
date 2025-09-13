@@ -33,6 +33,10 @@ pub struct SearchContext {
     /// Minimum mate distance found so far (for pruning deeper searches)
     /// When a mate is found, we can limit search depth based on this
     best_mate_distance: Option<u8>,
+
+    #[cfg(feature = "nnue_telemetry")]
+    /// 最後にテレメトリをログした時刻
+    last_telemetry_log: Option<std::time::Instant>,
 }
 
 impl Default for SearchContext {
@@ -53,6 +57,8 @@ impl SearchContext {
             current_depth: 0,
             time_stop_logged: false,
             best_mate_distance: None,
+            #[cfg(feature = "nnue_telemetry")]
+            last_telemetry_log: None,
         }
     }
 
@@ -65,6 +71,10 @@ impl SearchContext {
         self.current_depth = 0;
         self.time_stop_logged = false;
         self.best_mate_distance = None;
+        #[cfg(feature = "nnue_telemetry")]
+        {
+            self.last_telemetry_log = None;
+        }
     }
 
     /// Set search limits
@@ -118,6 +128,39 @@ impl SearchContext {
                     tm.ponder_hit(Some(&time_limits), ponder_elapsed_ms);
                     log::info!("TimeManager notified of ponder hit after {ponder_elapsed_ms}ms");
                 }
+            }
+        }
+
+        // 1秒毎に eval 経路テレメトリをデバッグログへ出力
+        #[cfg(feature = "nnue_telemetry")]
+        {
+            let now = Instant::now();
+            let should_log = match self.last_telemetry_log {
+                None => true,
+                Some(t0) => now.duration_since(t0).as_secs() >= 1,
+            };
+            if should_log {
+                self.last_telemetry_log = Some(now);
+                let snap = crate::evaluation::nnue::telemetry::snapshot_and_reset();
+                let fb_total = snap.fb_hash_mismatch + snap.fb_acc_empty + snap.fb_feature_off;
+                let total = snap.acc + fb_total;
+                let acc_rate = if total > 0 {
+                    100.0 * (snap.acc as f64) / (total as f64)
+                } else {
+                    0.0
+                };
+                log::debug!(
+                    "kind=eval_path\tms={}\tacc={}\tfb={}\tfb_hash={}\tfb_empty={}\tfb_feat_off={}\trate={:.1}%\tapply_refresh_king={}\tapply_refresh_other={}",
+                    self.elapsed().as_millis(),
+                    snap.acc,
+                    fb_total,
+                    snap.fb_hash_mismatch,
+                    snap.fb_acc_empty,
+                    snap.fb_feature_off,
+                    acc_rate,
+                    snap.apply_refresh_king,
+                    snap.apply_refresh_other
+                );
             }
         }
     }
