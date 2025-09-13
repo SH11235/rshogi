@@ -6,11 +6,13 @@ use log::{debug, error, info, warn};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(feature = "nnue_single_diff"))]
+use crate::search::unified::HookSuppressor;
 use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::parallel::ParallelSearcher,
-    search::unified::{HookSuppressor, UnifiedSearcher},
+    search::unified::UnifiedSearcher,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
 };
@@ -45,6 +47,12 @@ type NnueEnhancedSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, true>;
 
 /// Type alias for parallel searchers
 type MaterialParallelSearcher = ParallelSearcher<MaterialEvaluator>;
+// 差分Accを並列でも使う場合（feature=nnue_single_diff）は HookSuppressor を外し、
+// 各スレッドで on_set_position/do/undo フック対を踏んで差分更新を有効化する。
+// 互換モード（feature無効）では HookSuppressor を介して安全なフォールバック運用。
+#[cfg(feature = "nnue_single_diff")]
+type NnueParallelSearcher = ParallelSearcher<NNUEEvaluatorProxy>;
+#[cfg(not(feature = "nnue_single_diff"))]
 type NnueParallelSearcher = ParallelSearcher<HookSuppressor<NNUEEvaluatorProxy>>;
 
 /// Engine type selection
@@ -583,12 +591,25 @@ impl Engine {
                     let nnue_proxy = NNUEEvaluatorProxy {
                         evaluator: self.nnue_evaluator.clone(),
                     };
-                    let hookless = HookSuppressor { inner: nnue_proxy };
-                    *searcher_guard = Some(NnueParallelSearcher::new(
-                        Arc::new(hookless),
-                        self.shared_tt.clone(),
-                        self.num_threads, // Use max threads, not active threads
-                    ));
+                    #[cfg(feature = "nnue_single_diff")]
+                    {
+                        // 差分Accを並列でも使う：HookSuppressorなしでフック対が有効
+                        *searcher_guard = Some(NnueParallelSearcher::new(
+                            Arc::new(nnue_proxy),
+                            self.shared_tt.clone(),
+                            self.num_threads, // Use max threads, not active threads
+                        ));
+                    }
+                    #[cfg(not(feature = "nnue_single_diff"))]
+                    {
+                        // 互換モード：HookSuppressor経路（フック抑止→評価はフォールバック中心）
+                        let hookless = HookSuppressor { inner: nnue_proxy };
+                        *searcher_guard = Some(NnueParallelSearcher::new(
+                            Arc::new(hookless),
+                            self.shared_tt.clone(),
+                            self.num_threads, // Use max threads, not active threads
+                        ));
+                    }
                 }
 
                 // Always adjust to current active thread count
@@ -1148,12 +1169,18 @@ impl Evaluator for NNUEEvaluatorProxy {
     }
 
     fn on_do_null_move(&self, _pre_pos: &Position) {
-        // Classic/Single backends don't require accumulator changes for null move.
-        // Intentionally no-op to keep hook symmetry.
+        // 差分Acc運用のため、null move でもスタック整合を保つ
+        let mut guard = self.evaluator.write();
+        if let Some(wrapper) = guard.as_mut() {
+            let _ = wrapper.do_move(_pre_pos, crate::shogi::Move::null());
+        }
     }
 
     fn on_undo_null_move(&self) {
-        // Intentionally no-op
+        let mut guard = self.evaluator.write();
+        if let Some(wrapper) = guard.as_mut() {
+            wrapper.undo_move();
+        }
     }
 }
 

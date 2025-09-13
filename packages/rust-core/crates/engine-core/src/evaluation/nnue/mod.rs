@@ -238,7 +238,10 @@ impl NNUEEvaluatorWrapper {
     /// SINGLE 用: 指定の Acc を現在ノードとして復元し、tracked_hash を pos に合わせる
     #[cfg(feature = "nnue_single_diff")]
     pub fn restore_single_at(&mut self, pos: &Position, acc: single_state::SingleAcc) {
-        if let Backend::Single { acc_stack, .. } = &mut self.backend {
+        if let Backend::Single { net, acc_stack, .. } = &mut self.backend {
+            // 開発時の寸止め検証：異なる net 由来の Acc を誤って渡していないか
+            debug_assert_eq!(acc.post_black.len(), net.acc_dim);
+            debug_assert_eq!(acc.post_white.len(), net.acc_dim);
             acc_stack.clear();
             acc_stack.push(acc);
             self.tracked_hash = Some(pos.zobrist_hash);
@@ -420,11 +423,6 @@ impl NNUEEvaluatorWrapper {
                 {
                     if acc_stack.len() > 1 {
                         acc_stack.pop();
-                    } else if acc_stack.len() == 1 {
-                        // set_position を通っていない誤用パスの保険：
-                        // 親局面へ戻る undo の時に同期が取れていない Acc を捨てる。
-                        // 次回 evaluate は安全側でフル評価にフォールバックする。
-                        acc_stack.clear();
                     }
                 }
                 self.tracked_hash = None;

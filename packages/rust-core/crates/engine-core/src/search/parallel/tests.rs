@@ -136,6 +136,79 @@ fn test_parallel_qnodes_overshoot_minimal() {
 }
 
 #[test]
+#[cfg(feature = "nnue_single_diff")]
+fn test_parallel_nnue_diff_hooks_no_fallback() {
+    use crate::evaluation::evaluate::Evaluator;
+    use crate::evaluation::nnue::single::SingleChannelNet;
+    use crate::evaluation::nnue::NNUEEvaluatorWrapper;
+    use crate::evaluation::nnue::{reset_single_fallback_hits, single_fallback_hits};
+    use crate::shogi::SHOGI_BOARD_SIZE;
+
+    let n_feat = SHOGI_BOARD_SIZE * crate::evaluation::nnue::features::FE_END;
+    let d = 8usize;
+    let net = SingleChannelNet {
+        n_feat,
+        acc_dim: d,
+        scale: 600.0,
+        w0: vec![0.1; n_feat * d],
+        b0: Some(vec![0.01; d]),
+        w2: vec![1.0; d],
+        b2: 0.0,
+    };
+    let wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net);
+    // Local proxy to forward hooks with interior mutability
+    struct TestNnueProxy(std::sync::RwLock<NNUEEvaluatorWrapper>);
+    impl Evaluator for TestNnueProxy {
+        fn evaluate(&self, pos: &crate::Position) -> i32 {
+            self.0.read().unwrap().evaluate(pos)
+        }
+        fn on_set_position(&self, pos: &crate::Position) {
+            if let Ok(mut g) = self.0.write() {
+                g.set_position(pos);
+            }
+        }
+        fn on_do_move(&self, pre_pos: &crate::Position, mv: crate::shogi::Move) {
+            if let Ok(mut g) = self.0.write() {
+                let _ = g.do_move(pre_pos, mv);
+            }
+        }
+        fn on_undo_move(&self) {
+            if let Ok(mut g) = self.0.write() {
+                g.undo_move();
+            }
+        }
+        fn on_do_null_move(&self, pre_pos: &crate::Position) {
+            if let Ok(mut g) = self.0.write() {
+                // Use Move::null() path in do_move to keep acc stack in sync
+                let _ = g.do_move(pre_pos, crate::shogi::Move::null());
+            }
+        }
+        fn on_undo_null_move(&self) {
+            if let Ok(mut g) = self.0.write() {
+                g.undo_move();
+            }
+        }
+    }
+
+    let evaluator = std::sync::Arc::new(TestNnueProxy(std::sync::RwLock::new(wrapper)));
+    let tt = std::sync::Arc::new(TranspositionTable::new(16));
+    // 2スレッドで並列探索（差分フック経路）
+    let mut ps = ParallelSearcher::new(evaluator, tt, 2);
+
+    let mut pos = Position::startpos();
+    let limits = SearchLimits::builder().depth(3).build();
+
+    reset_single_fallback_hits();
+    let _ = ps.search(&mut pos, limits);
+    // フック経路ではフォールバックしない（端数ノイズは 1 以下に収まる想定）
+    assert!(
+        single_fallback_hits() <= 1,
+        "unexpected fallback hits: {}",
+        single_fallback_hits()
+    );
+}
+
+#[test]
 fn test_completion_wait_robustness() {
     // Test that completion detection properly waits for all work
     let evaluator = Arc::new(MaterialEvaluator);
