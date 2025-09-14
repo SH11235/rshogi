@@ -47,6 +47,24 @@ pub struct WeightReader {
     file: File,
 }
 
+/// Marker trait restricting generic weight-reading helpers to plain-old-data integer types.
+///
+/// 目的: 重みファイル読み込み時に任意型への誤用（未定義ビットパターンを持つ型 / Drop を伴う型）を防ぎ、
+/// `read_exact` で得た生バイト列をそのまま `mem::transmute_copy` 相当の解釈で安全に扱える型に限定する。
+///
+/// # Safety
+/// このトレイトを実装できるのは「全てのビットパターンが有効で、レイアウトが安定し、`Drop`/内部参照/パディング
+/// に起因する未定義動作を招かない」POD 整数型のみであることを呼び出し側に保証する必要がある。
+/// 具体的には以下を満たすこと:
+/// * 任意の 8bit チャンク列をその型として再解釈しても未定義動作にならない（全ビットパターン有効）。
+/// * `Copy` であり、`Drop` 実装が無い。
+/// * メモリ再解釈時に内部不変条件（例: enum 判別子整合など）を壊さない。
+/// * 現状は標準整数型（i8/i16/i32）のみ実装し、外部から追加実装できないよう `pub(crate)` に制限している。
+pub(crate) unsafe trait PlainBytes: Copy {}
+unsafe impl PlainBytes for i8 {}
+unsafe impl PlainBytes for i16 {}
+unsafe impl PlainBytes for i32 {}
+
 impl WeightReader {
     /// Create reader from file path
     pub fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {
@@ -117,28 +135,39 @@ impl WeightReader {
         Ok(header)
     }
 
-    /// Read weights of type T
-    pub fn read_weights<T: Copy + Default>(
+    /// Read weights of type T (aligned safely). T must be a POD integer type.
+    pub(crate) fn read_weights<T: PlainBytes>(
         &mut self,
         count: usize,
     ) -> Result<Vec<T>, Box<dyn Error>> {
-        let size = count * mem::size_of::<T>();
-        let mut buffer = vec![0u8; size];
-        self.file.read_exact(&mut buffer)?;
+        use std::mem::MaybeUninit;
+        let size = count
+            .checked_mul(mem::size_of::<T>())
+            .ok_or_else(|| "weight size overflow".to_string())?;
 
-        let mut result = vec![T::default(); count];
-        unsafe {
-            std::ptr::copy_nonoverlapping(buffer.as_ptr() as *const T, result.as_mut_ptr(), count);
-        }
-
-        Ok(result)
+        // Allocate uninitialized buffer for T and read as bytes into it.
+        let mut v: Vec<MaybeUninit<T>> = Vec::with_capacity(count);
+        let dst_bytes = unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, size) };
+        self.file.read_exact(dst_bytes)?;
+        unsafe { v.set_len(count) };
+        let v: Vec<T> = unsafe { std::mem::transmute(v) };
+        Ok(v)
     }
 }
 
 /// Load NNUE weights from file
 pub fn load_weights(path: &str) -> Result<(FeatureTransformer, Network), Box<dyn Error>> {
+    let meta_len = std::fs::metadata(path)?.len();
     let mut reader = WeightReader::from_file(path)?;
-    let _header = reader.read_header()?;
+    let header = reader.read_header()?;
+    // Validate declared size matches actual file size (strict check for v1)
+    if meta_len != header.size as u64 {
+        return Err(format!(
+            "NNUE file size mismatch: header={} bytes, actual={} bytes",
+            header.size, meta_len
+        )
+        .into());
+    }
 
     // Read feature transformer weights
     let ft_weights = reader.read_weights::<i16>(EXPECTED_FT_WEIGHTS)?;
@@ -266,8 +295,11 @@ pub fn save_weights(
         size: 0, // Will be updated later
     };
 
-    let header_bytes: [u8; mem::size_of::<NNUEHeader>()] = unsafe { mem::transmute_copy(&header) };
-    file.write_all(&header_bytes)?;
+    // Write header fields explicitly (LE), avoid transmute of struct layout
+    file.write_all(b"NNUE")?;
+    file.write_all(&1u32.to_le_bytes())?;
+    file.write_all(&HALFKP_256X2_32_32.to_le_bytes())?;
+    file.write_all(&0u32.to_le_bytes())?; // placeholder, update below
 
     // Write feature transformer
     let ft_weight_bytes: Vec<u8> =
