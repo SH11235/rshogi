@@ -808,7 +808,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // Create split point for remaining moves
                             // NOTE: 現在は Position のみを共有。差分Accのスナップショット配布は
                             // Evaluator ラッパ（NNUE）側の on_set_position で子ルート同期し、
-                            // 以降のノードは do/undo フック対で差分適用される（feature=nnue_single_diff）。
+                            // 以降のノードは do/undo フック対で差分適用（常時有効）。
                             // 将来的に snapshot/restore の配布を導入する場合は、SplitPoint に
                             // Acc を持たせ、SearchThread 側で restore_single_at() を呼ぶ設計に拡張可能。
                             let split_point = SplitPoint::new(

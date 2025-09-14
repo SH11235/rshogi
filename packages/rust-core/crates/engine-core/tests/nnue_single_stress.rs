@@ -1,5 +1,3 @@
-#![cfg(feature = "nnue_single_diff")]
-
 use engine_core::evaluation::nnue::{single::SingleChannelNet, single_state::SingleAcc};
 use engine_core::movegen::MoveGenerator;
 use engine_core::Position;

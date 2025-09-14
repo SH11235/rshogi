@@ -79,7 +79,7 @@ quit
 - 推奨ビルド（最適化）
   - `RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release`
 - フィーチャー（engine-usi から engine-core へ伝播）
-  - 既定ON: `nnue-diff`（SINGLE 差分NNUE）
+  - 注: `nnue_single_diff`（SINGLE 差分NNUE）は恒久化され常時有効です
   - 任意ON:
     - `fast-fma`: FMAで出力加算を高速化（丸め微差を許容できる場合）
     - `diff-agg-hash`: 差分集計をHashMap実装でA/B（大N向け）

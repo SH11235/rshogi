@@ -136,7 +136,6 @@ fn test_parallel_qnodes_overshoot_minimal() {
 }
 
 #[test]
-#[cfg(feature = "nnue_single_diff")]
 fn test_parallel_nnue_diff_hooks_no_fallback() {
     use crate::evaluation::evaluate::Evaluator;
     use crate::evaluation::nnue::single::SingleChannelNet;

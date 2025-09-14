@@ -16,8 +16,6 @@ tt_metrics = []
 hashfull_filter = []
 # Feature to enable YBWC (Young Brothers Wait Concept) parallel search
 ybwc = []
-# Feature gate: SINGLE_CHANNEL の差分更新土台（acc リフレッシュと安全フォールバック）
-nnue_single_diff = []
 # 軽量テレメトリ（探索中の eval 経路割合などの統計を収集・ログ出力）
 nnue_telemetry = []
 # （任意）FMAを許可して僅かな丸め差と引き換えに加算を高速化
@@ -91,4 +89,8 @@ harness = false
 
 [[bench]]
 name = "nnue_add_row_bench"
+harness = false
+
+[[bench]]
+name = "nnue_single_chain_bench"
 harness = false
