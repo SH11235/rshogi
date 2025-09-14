@@ -116,6 +116,20 @@ pub mod utils {
     }
 }
 
+#[inline(always)]
+fn debug_assert_no_alias(dst: &[f32], row: &[f32]) {
+    #[cfg(debug_assertions)]
+    {
+        let dp = dst.as_ptr() as usize;
+        let rp = row.as_ptr() as usize;
+        let dn = dst.len().saturating_mul(core::mem::size_of::<f32>());
+        let rn = row.len().saturating_mul(core::mem::size_of::<f32>());
+        let dend = dp.saturating_add(dn);
+        let rend = rp.saturating_add(rn);
+        debug_assert!(dend <= rp || rend <= dp, "add_row_scaled_f32: dst/row must not alias");
+    }
+}
+
 // -------------------------------------------------------------------------------------
 // fp32 row add: dst[i] += k * row[i]
 // 実行時 CPU 検出 + OnceLock キャッシュで最適カーネルにディスパッチ
@@ -186,6 +200,7 @@ pub(super) fn add_row_scaled_f32_scalar(dst: &mut [f32], row: &[f32], k: f32) {
 #[inline]
 pub fn add_row_scaled_f32(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
+    debug_assert_no_alias(dst, row);
 
     // wasm32: simd128 が有効なら常時ON、無効ならスカラ
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -428,55 +443,55 @@ mod tests {
     // Property-based tests: k=±1.0 でビット一致
     use proptest::prelude::*;
     proptest! {
-        #[test]
-        fn prop_add_row_scaled_k_pos1_bits(len in 0usize..514) {
-            let mut dst_a = vec![0.0f32; len];
-            let mut dst_b = vec![0.0f32; len];
-            // 乱数でなく決定論的だが十分
-            let mut row = vec![0.0f32; len];
-            for i in 0..len { row[i] = ((i as f32 + 0.5) * 0.01).sin(); }
-            scalar_ref(&mut dst_a, &row, 1.0);
-            add_row_scaled_f32(&mut dst_b, &row, 1.0);
-            for i in 0..len { prop_assert!(dst_a[i].to_bits() == dst_b[i].to_bits()); }
-        }
+            #[test]
+            fn prop_add_row_scaled_k_pos1_bits(len in 0usize..514) {
+                let mut dst_a = vec![0.0f32; len];
+                let mut dst_b = vec![0.0f32; len];
+                // 乱数でなく決定論的だが十分
+                let mut row = vec![0.0f32; len];
+                for i in 0..len { row[i] = ((i as f32 + 0.5) * 0.01).sin(); }
+                scalar_ref(&mut dst_a, &row, 1.0);
+                add_row_scaled_f32(&mut dst_b, &row, 1.0);
+                for i in 0..len { prop_assert!(dst_a[i].to_bits() == dst_b[i].to_bits()); }
+            }
 
-        #[test]
-        fn prop_add_row_scaled_k_neg1_bits(len in 0usize..514) {
-            let mut dst_a = vec![0.0f32; len];
-            let mut dst_b = vec![0.0f32; len];
-            let mut row = vec![0.0f32; len];
-            for i in 0..len { row[i] = ((i as f32 + 0.25) * 0.02).cos(); }
-            scalar_ref(&mut dst_a, &row, -1.0);
-            add_row_scaled_f32(&mut dst_b, &row, -1.0);
-            for i in 0..len { prop_assert!(dst_a[i].to_bits() == dst_b[i].to_bits()); }
-        }
+            #[test]
+            fn prop_add_row_scaled_k_neg1_bits(len in 0usize..514) {
+                let mut dst_a = vec![0.0f32; len];
+                let mut dst_b = vec![0.0f32; len];
+                let mut row = vec![0.0f32; len];
+                for i in 0..len { row[i] = ((i as f32 + 0.25) * 0.02).cos(); }
+                scalar_ref(&mut dst_a, &row, -1.0);
+                add_row_scaled_f32(&mut dst_b, &row, -1.0);
+                for i in 0..len { prop_assert!(dst_a[i].to_bits() == dst_b[i].to_bits()); }
+            }
 
-        #[test]
-        fn prop_add_row_scaled_k_pos2_bits(len in 0usize..64) {
-            let mut dst_ref = vec![0.0f32; len];
-            let mut dst_k2  = vec![0.0f32; len];
-            let mut row = vec![0.0f32; len];
-            for i in 0..len { row[i] = ((i as f32 + 0.5) * 0.01).sin(); }
-            // 参照: k=1.0 を2回
-            add_row_scaled_f32(&mut dst_ref, &row, 1.0);
-            add_row_scaled_f32(&mut dst_ref, &row, 1.0);
-            // 最適化経路: k=2.0
-            add_row_scaled_f32(&mut dst_k2, &row, 2.0);
-            for i in 0..len { prop_assert!(dst_ref[i].to_bits() == dst_k2[i].to_bits()); }
-        }
+            #[test]
+            fn prop_add_row_scaled_k_pos2_bits(len in 0usize..64) {
+                let mut dst_ref = vec![0.0f32; len];
+                let mut dst_k2  = vec![0.0f32; len];
+                let mut row = vec![0.0f32; len];
+                for i in 0..len { row[i] = ((i as f32 + 0.5) * 0.01).sin(); }
+                // 参照: k=1.0 を2回
+                add_row_scaled_f32(&mut dst_ref, &row, 1.0);
+                add_row_scaled_f32(&mut dst_ref, &row, 1.0);
+                // 最適化経路: k=2.0
+                add_row_scaled_f32(&mut dst_k2, &row, 2.0);
+                for i in 0..len { prop_assert!(dst_ref[i].to_bits() == dst_k2[i].to_bits()); }
+            }
 
-        #[test]
-        fn prop_add_row_scaled_k_neg2_bits(len in 0usize..64) {
-            let mut dst_ref = vec![0.0f32; len];
-            let mut dst_k2  = vec![0.0f32; len];
-            let mut row = vec![0.0f32; len];
-            for i in 0..len { row[i] = ((i as f32 + 0.25) * 0.02).cos(); }
-            // 参照: k=-1.0 を2回
-            add_row_scaled_f32(&mut dst_ref, &row, -1.0);
-            add_row_scaled_f32(&mut dst_ref, &row, -1.0);
-            // 最適化経路: k=-2.0
-            add_row_scaled_f32(&mut dst_k2, &row, -2.0);
-            for i in 0..len { prop_assert!(dst_ref[i].to_bits() == dst_k2[i].to_bits()); }
-        }
+            #[test]
+            fn prop_add_row_scaled_k_neg2_bits(len in 0usize..64) {
+                let mut dst_ref = vec![0.0f32; len];
+                let mut dst_k2  = vec![0.0f32; len];
+                let mut row = vec![0.0f32; len];
+                for i in 0..len { row[i] = ((i as f32 + 0.25) * 0.02).cos(); }
+                // 参照: k=-1.0 を2回
+                add_row_scaled_f32(&mut dst_ref, &row, -1.0);
+                add_row_scaled_f32(&mut dst_ref, &row, -1.0);
+                // 最適化経路: k=-2.0
+                add_row_scaled_f32(&mut dst_k2, &row, -2.0);
+                for i in 0..len { prop_assert!(dst_ref[i].to_bits() == dst_k2[i].to_bits()); }
+            }
     }
 }
