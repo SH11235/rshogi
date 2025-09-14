@@ -892,7 +892,7 @@ pub enum SingleWeightsError {
     #[error("Malformed SINGLE_CHANNEL header (no newline)")]
     HeaderMalformed,
     #[error("Invalid SINGLE_CHANNEL dims")]
-    InvalidDims,
+    DimsInvalid,
     #[error("SINGLE_CHANNEL size overflow")]
     SizeOverflow,
     #[error("SINGLE_CHANNEL size mismatch: rem={rem} (expect {with_b0} with b0 or {without_b0} without b0)")]
@@ -934,7 +934,7 @@ pub fn load_single_weights(
     rdr.read_exact(&mut u4)?;
     let acc_dim = u32::from_le_bytes(u4) as usize;
     if input_dim == 0 || acc_dim == 0 {
-        return Err(SingleWeightsError::InvalidDims);
+        return Err(SingleWeightsError::DimsInvalid);
     }
 
     #[cfg(debug_assertions)]

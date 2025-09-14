@@ -6,6 +6,7 @@ use super::weights::{SingleWeightsError, WeightsError};
 use crate::{Color, Square};
 
 /// NNUE-specific errors
+#[non_exhaustive]
 #[derive(thiserror::Error, Debug)]
 pub enum NNUEError {
     /// King not found for a specific color
@@ -35,6 +36,13 @@ pub enum NNUEError {
     /// SINGLE weights loader error (typed)
     #[error(transparent)]
     SingleWeights(#[from] SingleWeightsError),
+
+    /// Both classic and SINGLE loaders failed (contains both causes)
+    #[error("Both weight loaders failed: classic={classic}, single={single}")]
+    BothWeightsLoadFailed {
+        classic: WeightsError,
+        single: SingleWeightsError,
+    },
 
     /// Weight dimension mismatch
     #[error("Weight dimension mismatch: expected {expected}, got {actual}")]
