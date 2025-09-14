@@ -184,7 +184,9 @@ pub mod telemetry {
 /// The NNUE network outputs values in a higher resolution internal scale.
 /// This factor is used to scale up the network output before final normalization.
 /// The value 16 is chosen to provide sufficient precision while avoiding overflow.
-const FV_SCALE: i32 = 16;
+// When propagate() returns a Q16 fixed-point like integer, we only need to
+// right-shift by 16 to convert to centipawns. Keep the numerator at 1.
+const FV_SCALE: i32 = 1;
 
 /// Output scaling shift: right shift by 16 bits to normalize the scaled output
 ///
@@ -464,7 +466,7 @@ impl NNUEEvaluatorWrapper {
                 acc_stack.clear();
                 acc_stack.push(single_state::SingleAcc::refresh(pos, net));
             }
-            self.tracked_hash = Some(pos.zobrist_hash);
+            self.tracked_hash = Some(pos.zobrist_hash());
         }
     }
 
@@ -510,7 +512,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
 
                 // 単スレ探索（on_do/undo 経路）では tracked_hash=None とし、acc が常に同期済み
                 // 並列探索では tracked_hash=Some(root_hash) で root 以外は不一致→フル評価へフォールバック
-                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
+                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash());
                 if use_acc {
                     if let Some(acc) = accumulator_stack.last() {
                         #[cfg(feature = "nnue_telemetry")]
@@ -535,7 +537,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 evaluator.evaluate_with_accumulator(pos, &tmp)
             }
             Backend::Single { net, acc_stack } => {
-                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
+                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash());
                 if use_acc {
                     if let Some(acc) = acc_stack.last() {
                         #[cfg(feature = "nnue_telemetry")]
@@ -575,12 +577,12 @@ impl NNUEEvaluatorWrapper {
                 let mut acc = Accumulator::new();
                 acc.refresh(pos, &evaluator.feature_transformer);
                 accumulator_stack.push(acc);
-                self.tracked_hash = Some(pos.zobrist_hash);
+                self.tracked_hash = Some(pos.zobrist_hash());
             }
             Backend::Single { net, acc_stack } => {
                 acc_stack.clear();
                 acc_stack.push(single_state::SingleAcc::refresh(pos, net));
-                self.tracked_hash = Some(pos.zobrist_hash);
+                self.tracked_hash = Some(pos.zobrist_hash());
             }
         }
     }
