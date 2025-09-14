@@ -131,25 +131,28 @@ impl Accumulator {
         perspective: Color,
         transformer: &FeatureTransformer,
     ) {
-        let (accumulator, removed, added) = match perspective {
+        let (accumulator, removed_src, added_src) = match perspective {
             Color::Black => (&mut self.black, &delta.removed_b, &delta.added_b),
             Color::White => (&mut self.white, &delta.removed_w, &delta.added_w),
         };
 
-        if !removed.is_empty() {
+        // Bridge u32 indices -> usize (SmallVec; typically no heap allocation)
+        if !removed_src.is_empty() {
+            let removed_us = bridge_u32_to_usize(removed_src);
             SimdDispatcher::update_accumulator(
                 accumulator,
                 &transformer.weights,
-                removed,
+                &removed_us,
                 false,
                 transformer.acc_dim(),
             );
         }
-        if !added.is_empty() {
+        if !added_src.is_empty() {
+            let added_us = bridge_u32_to_usize(added_src);
             SimdDispatcher::update_accumulator(
                 accumulator,
                 &transformer.weights,
-                added,
+                &added_us,
                 true,
                 transformer.acc_dim(),
             );
@@ -157,17 +160,28 @@ impl Accumulator {
     }
 }
 
+#[inline]
+fn bridge_u32_to_usize(xs: &[u32]) -> SmallVec<[usize; 12]> {
+    let mut out: SmallVec<[usize; 12]> = SmallVec::with_capacity(xs.len().min(12));
+    for &i in xs {
+        let iu = i as usize;
+        debug_assert_eq!(iu as u32, i);
+        out.push(iu);
+    }
+    out
+}
+
 /// 視点別（黒/白）に分割した差分集合
 #[derive(Debug)]
 pub struct AccumulatorDelta {
     /// Black-perspective features to remove
-    pub removed_b: SmallVec<[usize; 12]>,
+    pub removed_b: SmallVec<[u32; 12]>,
     /// Black-perspective features to add
-    pub added_b: SmallVec<[usize; 12]>,
+    pub added_b: SmallVec<[u32; 12]>,
     /// White-perspective features to remove
-    pub removed_w: SmallVec<[usize; 12]>,
+    pub removed_w: SmallVec<[u32; 12]>,
     /// White-perspective features to add
-    pub added_w: SmallVec<[usize; 12]>,
+    pub added_w: SmallVec<[u32; 12]>,
 }
 
 impl Default for AccumulatorDelta {
@@ -221,14 +235,18 @@ pub fn calculate_update_into(
         // Add new piece for both perspectives
         // Black perspective
         if let Some(bona_black) = BonaPiece::from_board(piece, to) {
-            out.added_b.push(halfkp_index(black_king, bona_black));
+            let idx = halfkp_index(black_king, bona_black);
+            debug_assert!(idx <= u32::MAX as usize);
+            out.added_b.push(idx as u32);
         }
 
         // White perspective
         let piece_white = piece.flip_color();
         let to_white = to.flip();
         if let Some(bona_white) = BonaPiece::from_board(piece_white, to_white) {
-            out.added_w.push(halfkp_index(white_king_flipped, bona_white));
+            let idx = halfkp_index(white_king_flipped, bona_white);
+            debug_assert!(idx <= u32::MAX as usize);
+            out.added_w.push(idx as u32);
         }
 
         // Remove from hand
@@ -239,7 +257,11 @@ pub fn calculate_update_into(
 
         // Remove old hand count
         match BonaPiece::from_hand(piece_type, color, count) {
-            Ok(bona_hand_black) => out.removed_b.push(halfkp_index(black_king, bona_hand_black)),
+            Ok(bona_hand_black) => {
+                let idx = halfkp_index(black_king, bona_hand_black);
+                debug_assert!(idx <= u32::MAX as usize);
+                out.removed_b.push(idx as u32)
+            }
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 error!("[NNUE] Error creating BonaPiece from hand: {_e}");
@@ -249,7 +271,9 @@ pub fn calculate_update_into(
         let color_white = color.flip();
         match BonaPiece::from_hand(piece_type, color_white, count) {
             Ok(bona_hand_white) => {
-                out.removed_w.push(halfkp_index(white_king_flipped, bona_hand_white))
+                let idx = halfkp_index(white_king_flipped, bona_hand_white);
+                debug_assert!(idx <= u32::MAX as usize);
+                out.removed_w.push(idx as u32)
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]
@@ -261,7 +285,9 @@ pub fn calculate_update_into(
         if count > 1 {
             match BonaPiece::from_hand(piece_type, color, count - 1) {
                 Ok(bona_hand_black_new) => {
-                    out.added_b.push(halfkp_index(black_king, bona_hand_black_new))
+                    let idx = halfkp_index(black_king, bona_hand_black_new);
+                    debug_assert!(idx <= u32::MAX as usize);
+                    out.added_b.push(idx as u32)
                 }
                 Err(_e) => {
                     #[cfg(debug_assertions)]
@@ -271,7 +297,9 @@ pub fn calculate_update_into(
 
             match BonaPiece::from_hand(piece_type, color_white, count - 1) {
                 Ok(bona_hand_white_new) => {
-                    out.added_w.push(halfkp_index(white_king_flipped, bona_hand_white_new))
+                    let idx = halfkp_index(white_king_flipped, bona_hand_white_new);
+                    debug_assert!(idx <= u32::MAX as usize);
+                    out.added_w.push(idx as u32)
                 }
                 Err(_e) => {
                     #[cfg(debug_assertions)]
@@ -296,13 +324,17 @@ pub fn calculate_update_into(
 
         // Remove piece from source
         if let Some(bona_from_black) = BonaPiece::from_board(moving_piece, from) {
-            out.removed_b.push(halfkp_index(black_king, bona_from_black));
+            let idx = halfkp_index(black_king, bona_from_black);
+            debug_assert!(idx <= u32::MAX as usize);
+            out.removed_b.push(idx as u32);
         }
 
         let moving_piece_white = moving_piece.flip_color();
         let from_white = from.flip();
         if let Some(bona_from_white) = BonaPiece::from_board(moving_piece_white, from_white) {
-            out.removed_w.push(halfkp_index(white_king_flipped, bona_from_white));
+            let idx = halfkp_index(white_king_flipped, bona_from_white);
+            debug_assert!(idx <= u32::MAX as usize);
+            out.removed_w.push(idx as u32);
         }
 
         // Add piece to destination (possibly promoted)
@@ -313,25 +345,33 @@ pub fn calculate_update_into(
         };
 
         if let Some(bona_to_black) = BonaPiece::from_board(dest_piece, to) {
-            out.added_b.push(halfkp_index(black_king, bona_to_black));
+            let idx = halfkp_index(black_king, bona_to_black);
+            debug_assert!(idx <= u32::MAX as usize);
+            out.added_b.push(idx as u32);
         }
 
         let dest_piece_white = dest_piece.flip_color();
         let to_white = to.flip();
         if let Some(bona_to_white) = BonaPiece::from_board(dest_piece_white, to_white) {
-            out.added_w.push(halfkp_index(white_king_flipped, bona_to_white));
+            let idx = halfkp_index(white_king_flipped, bona_to_white);
+            debug_assert!(idx <= u32::MAX as usize);
+            out.added_w.push(idx as u32);
         }
 
         // Handle capture
         if let Some(captured) = pos.piece_at(to) {
             // Remove captured piece
             if let Some(bona_cap_black) = BonaPiece::from_board(captured, to) {
-                out.removed_b.push(halfkp_index(black_king, bona_cap_black));
+                let idx = halfkp_index(black_king, bona_cap_black);
+                debug_assert!(idx <= u32::MAX as usize);
+                out.removed_b.push(idx as u32);
             }
 
             let captured_white = captured.flip_color();
             if let Some(bona_cap_white) = BonaPiece::from_board(captured_white, to_white) {
-                out.removed_w.push(halfkp_index(white_king_flipped, bona_cap_white));
+                let idx = halfkp_index(white_king_flipped, bona_cap_white);
+                debug_assert!(idx <= u32::MAX as usize);
+                out.removed_w.push(idx as u32);
             }
 
             // Add to hand
@@ -344,7 +384,11 @@ pub fn calculate_update_into(
             let new_count = pos.hands[hand_color as usize][hand_idx] + 1;
 
             match BonaPiece::from_hand(hand_type, hand_color, new_count) {
-                Ok(bona_hand_black) => out.added_b.push(halfkp_index(black_king, bona_hand_black)),
+                Ok(bona_hand_black) => {
+                    let idx = halfkp_index(black_king, bona_hand_black);
+                    debug_assert!(idx <= u32::MAX as usize);
+                    out.added_b.push(idx as u32)
+                }
                 Err(_e) => {
                     #[cfg(debug_assertions)]
                     log::warn!("[NNUE] Error creating BonaPiece from hand: {}", _e);
@@ -354,7 +398,9 @@ pub fn calculate_update_into(
             let hand_color_white = hand_color.flip();
             match BonaPiece::from_hand(hand_type, hand_color_white, new_count) {
                 Ok(bona_hand_white) => {
-                    out.added_w.push(halfkp_index(white_king_flipped, bona_hand_white))
+                    let idx = halfkp_index(white_king_flipped, bona_hand_white);
+                    debug_assert!(idx <= u32::MAX as usize);
+                    out.added_w.push(idx as u32)
                 }
                 Err(_e) => {
                     #[cfg(debug_assertions)]
@@ -366,7 +412,9 @@ pub fn calculate_update_into(
             if new_count > 1 {
                 match BonaPiece::from_hand(hand_type, hand_color, new_count - 1) {
                     Ok(bona_hand_old_black) => {
-                        out.removed_b.push(halfkp_index(black_king, bona_hand_old_black))
+                        let idx = halfkp_index(black_king, bona_hand_old_black);
+                        debug_assert!(idx <= u32::MAX as usize);
+                        out.removed_b.push(idx as u32)
                     }
                     Err(_e) => {
                         #[cfg(debug_assertions)]
@@ -376,7 +424,9 @@ pub fn calculate_update_into(
 
                 match BonaPiece::from_hand(hand_type, hand_color_white, new_count - 1) {
                     Ok(bona_hand_old_white) => {
-                        out.removed_w.push(halfkp_index(white_king_flipped, bona_hand_old_white))
+                        let idx = halfkp_index(white_king_flipped, bona_hand_old_white);
+                        debug_assert!(idx <= u32::MAX as usize);
+                        out.removed_w.push(idx as u32)
                     }
                     Err(_e) => {
                         #[cfg(debug_assertions)]
@@ -442,10 +492,10 @@ mod tests {
                 // lazily fill rows for any unseen features (distinct values per perspective)
                 // Update Black perspective using only black deltas
                 for &f in delta.removed_b.iter() {
-                    fill_row(&mut transformer, f, 1);
+                    fill_row(&mut transformer, f as usize, 1);
                 }
                 for &f in delta.added_b.iter() {
-                    fill_row(&mut transformer, f, 1);
+                    fill_row(&mut transformer, f as usize, 1);
                 }
                 // Refresh pre-accumulator after assigning rows so removed features exist in acc
                 acc.refresh(&pos, &transformer);
@@ -609,10 +659,10 @@ mod tests {
         // Assign distinct values for black perspective only for this test
         // Use different constants so net delta is non-zero
         for &f in delta.removed_b.iter() {
-            fill_row(&mut transformer, f, 2);
+            fill_row(&mut transformer, f as usize, 2);
         }
         for &f in delta.added_b.iter() {
-            fill_row(&mut transformer, f, 3);
+            fill_row(&mut transformer, f as usize, 3);
         }
 
         let mut acc0 = Accumulator::new();
@@ -652,10 +702,10 @@ mod tests {
             }
         }
         for &f in delta.removed_b.iter() {
-            fill_row(&mut transformer, f, 2);
+            fill_row(&mut transformer, f as usize, 2);
         }
         for &f in delta.added_b.iter() {
-            fill_row(&mut transformer, f, 3);
+            fill_row(&mut transformer, f as usize, 3);
         }
 
         // Acc at pre position (refresh after assigning black rows)
@@ -709,10 +759,10 @@ mod tests {
 
         // Lazily assign non-zero rows per perspective, then apply
         for &f in delta.removed_b.iter() {
-            fill_row(&mut transformer, f, 1);
+            fill_row(&mut transformer, f as usize, 1);
         }
         for &f in delta.added_b.iter() {
-            fill_row(&mut transformer, f, 1);
+            fill_row(&mut transformer, f as usize, 1);
         }
         // Apply delta then compare to full refresh after making the move
         let mut acc_pre = Accumulator::new();
