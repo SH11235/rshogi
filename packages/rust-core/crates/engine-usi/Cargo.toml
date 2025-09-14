@@ -14,9 +14,7 @@ serde_json = { workspace = true }
 engine-core = { path = "../engine-core" }
 
 [features]
-default = ["nnue-diff"]
 # パススルー: engine-core の機能を再エクスポート（ビルド時切替用）
-nnue-diff = ["engine-core/nnue_single_diff"]
 nnue-telemetry = ["engine-core/nnue_telemetry"]
 fast-fma = ["engine-core/nnue_fast_fma"]
 diff-agg-hash = ["engine-core/diff_agg_hash"]
