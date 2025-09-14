@@ -243,7 +243,13 @@ fn benchmark_update_accumulator() {
         let start = Instant::now();
 
         for _ in 0..iterations {
-            simd::scalar::update_accumulator_scalar(&mut accumulator, &weights, &indices, true);
+            simd::scalar::update_accumulator_scalar(
+                &mut accumulator,
+                &weights,
+                &indices,
+                true,
+                256,
+            );
         }
 
         let elapsed = start.elapsed();
@@ -262,7 +268,13 @@ fn benchmark_update_accumulator() {
 
         for _ in 0..iterations {
             unsafe {
-                simd::x86_64::update_accumulator_sse41(&mut accumulator, &weights, &indices, true);
+                simd::x86_64::update_accumulator_sse41(
+                    &mut accumulator,
+                    &weights,
+                    &indices,
+                    true,
+                    256,
+                );
             }
         }
 
@@ -282,7 +294,13 @@ fn benchmark_update_accumulator() {
 
         for _ in 0..iterations {
             unsafe {
-                simd::x86_64::update_accumulator_avx2(&mut accumulator, &weights, &indices, true);
+                simd::x86_64::update_accumulator_avx2(
+                    &mut accumulator,
+                    &weights,
+                    &indices,
+                    true,
+                    256,
+                );
             }
         }
 

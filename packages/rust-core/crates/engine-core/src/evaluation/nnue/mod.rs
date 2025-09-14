@@ -41,6 +41,16 @@ pub mod simd;
 pub mod single;
 pub mod single_state;
 pub mod weights;
+use crate::shogi::Move;
+use crate::{Color, Position};
+
+use super::evaluate::Evaluator;
+use accumulator::Accumulator;
+use error::{NNUEError, NNUEResult};
+use network::Network;
+use std::error::Error;
+use std::sync::Arc;
+use weights::{load_single_weights, load_weights};
 
 /// エンジン側の有効feature一覧（ベンチレポート用）
 #[inline]
@@ -67,6 +77,9 @@ pub fn enabled_features_str() -> String {
     if cfg!(feature = "nightly") {
         v.push("nightly");
     }
+    // acc_dim の軽い可視化（現状は Classic=256 固定）
+    v.push("acc_dim=256");
+
     // 補助ログ: x86/x86_64 の SIMD 検出結果
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -164,17 +177,6 @@ pub mod telemetry {
         }
     }
 }
-
-use crate::shogi::Move;
-use crate::{Color, Position};
-
-use super::evaluate::Evaluator;
-use accumulator::Accumulator;
-use error::{NNUEError, NNUEResult};
-use network::Network;
-use std::error::Error;
-use std::sync::Arc;
-use weights::{load_single_weights, load_weights};
 
 /// Scale factor for converting network output to centipawns
 ///

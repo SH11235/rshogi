@@ -33,8 +33,8 @@ const MAX_SUPPORTED_VERSION: u32 = 1;
 const MAX_FILE_SIZE: u32 = 200 * 1024 * 1024;
 
 /// Expected weight sizes for validation
-const EXPECTED_FT_WEIGHTS: usize = SHOGI_BOARD_SIZE * FE_END * 256; // Feature transformer weights
-const EXPECTED_FT_BIASES: usize = 256; // Feature transformer biases
+const EXPECTED_FT_WEIGHTS: usize = SHOGI_BOARD_SIZE * FE_END * FeatureTransformer::DEFAULT_DIM; // Feature transformer weights
+const EXPECTED_FT_BIASES: usize = FeatureTransformer::DEFAULT_DIM; // Feature transformer biases
 const EXPECTED_H1_WEIGHTS: usize = 512 * 32; // Hidden layer 1 weights
 const EXPECTED_H1_BIASES: usize = 32; // Hidden layer 1 biases
 const EXPECTED_H2_WEIGHTS: usize = 32 * 32; // Hidden layer 2 weights
@@ -229,6 +229,7 @@ pub fn load_weights(path: &str) -> Result<(FeatureTransformer, Network), Box<dyn
     let feature_transformer = FeatureTransformer {
         weights: ft_weights,
         biases: ft_biases,
+        acc_dim: FeatureTransformer::DEFAULT_DIM,
     };
 
     let network = Network {
@@ -238,6 +239,9 @@ pub fn load_weights(path: &str) -> Result<(FeatureTransformer, Network), Box<dyn
         hidden2_biases,
         output_weights,
         output_bias,
+        input_dim: 512, // 256 x 2 (current classic)
+        h1_dim: 32,
+        h2_dim: 32,
     };
 
     Ok((feature_transformer, network))

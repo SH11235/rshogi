@@ -333,20 +333,21 @@ pub unsafe fn update_accumulator_avx2(
     weights: &[i16],
     indices: &[usize],
     add: bool,
+    row_len: usize,
 ) {
     // Debug assertions for boundary checks
-    debug_assert!(accumulator.len() >= 256, "Accumulator must have at least 256 elements");
+    debug_assert!(accumulator.len() >= row_len, "Accumulator must have at least row_len elements");
     for &idx in indices {
-        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {idx} out of bounds");
+        debug_assert!(idx * row_len + row_len <= weights.len(), "Weight index {idx} out of bounds");
     }
     const CHUNK_SIZE: usize = 16;
 
     for &idx in indices {
-        let weight_offset = idx * 256;
+        let weight_offset = idx * row_len;
         let weight_ptr = weights.as_ptr().add(weight_offset);
 
         let mut i = 0;
-        while i + CHUNK_SIZE <= 256 {
+        while i + CHUNK_SIZE <= row_len {
             let acc_vec = _mm256_loadu_si256(accumulator.as_ptr().add(i) as *const __m256i);
             let weight_vec = _mm256_loadu_si256(weight_ptr.add(i) as *const __m256i);
 
@@ -362,7 +363,7 @@ pub unsafe fn update_accumulator_avx2(
         }
 
         // Handle remaining elements
-        while i < 256 {
+        while i < row_len {
             if add {
                 accumulator[i] = accumulator[i].saturating_add(weights[weight_offset + i]);
             } else {
@@ -670,21 +671,22 @@ pub unsafe fn update_accumulator_sse41(
     weights: &[i16],
     indices: &[usize],
     add: bool,
+    row_len: usize,
 ) {
     // Debug assertions for boundary checks
-    debug_assert!(accumulator.len() >= 256, "Accumulator must have at least 256 elements");
+    debug_assert!(accumulator.len() >= row_len, "Accumulator must have at least row_len elements");
     for &idx in indices {
-        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {idx} out of bounds");
+        debug_assert!(idx * row_len + row_len <= weights.len(), "Weight index {idx} out of bounds");
     }
     const CHUNK_SIZE: usize = 32; // Process 32 elements per iteration (4 x 128-bit)
 
     for &idx in indices {
-        let weight_offset = idx * 256;
+        let weight_offset = idx * row_len;
         let weight_ptr = weights.as_ptr().add(weight_offset);
 
         let mut i = 0;
         // Process 32 elements at a time using 4 SSE registers
-        while i + CHUNK_SIZE <= 256 {
+        while i + CHUNK_SIZE <= row_len {
             // Load 32 elements (4 x 8 i16)
             let acc0 = _mm_loadu_si128(accumulator.as_ptr().add(i) as *const __m128i);
             let acc1 = _mm_loadu_si128(accumulator.as_ptr().add(i + 8) as *const __m128i);
@@ -726,7 +728,7 @@ pub unsafe fn update_accumulator_sse41(
         }
 
         // Handle remaining elements with SSE
-        while i + 8 <= 256 {
+        while i + 8 <= row_len {
             let acc_vec = _mm_loadu_si128(accumulator.as_ptr().add(i) as *const __m128i);
             let weight_vec = _mm_loadu_si128(weight_ptr.add(i) as *const __m128i);
 
@@ -740,8 +742,8 @@ pub unsafe fn update_accumulator_sse41(
             i += 8;
         }
 
-        // Handle remaining elements (should not happen with 256 elements)
-        while i < 256 {
+        // Handle remaining elements
+        while i < row_len {
             if add {
                 accumulator[i] = accumulator[i].saturating_add(weights[weight_offset + i]);
             } else {
@@ -881,7 +883,7 @@ mod tests {
 
         // Test addition
         unsafe {
-            update_accumulator_avx2(&mut accumulator, &weights, &indices, true);
+            update_accumulator_avx2(&mut accumulator, &weights, &indices, true, 256);
         }
 
         // Each element should be 100 + 10 + 10 = 120
@@ -891,7 +893,7 @@ mod tests {
 
         // Test subtraction
         unsafe {
-            update_accumulator_avx2(&mut accumulator, &weights, &indices, false);
+            update_accumulator_avx2(&mut accumulator, &weights, &indices, false, 256);
         }
 
         // Each element should be 120 - 10 - 10 = 100
@@ -913,7 +915,7 @@ mod tests {
 
         // Test addition
         unsafe {
-            update_accumulator_sse41(&mut accumulator, &weights, &indices, true);
+            update_accumulator_sse41(&mut accumulator, &weights, &indices, true, 256);
         }
 
         // Each element should be 50 + 5 = 55
