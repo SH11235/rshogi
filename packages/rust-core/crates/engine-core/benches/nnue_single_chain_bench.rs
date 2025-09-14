@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use std::hint::black_box;
+use std::time::Duration;
 
 // ベンチの目的:
 // - SINGLE 差分経路の評価スループットを測定する（常時有効化）
@@ -36,6 +37,9 @@ fn bench_single_chain(c: &mut Criterion) {
     use engine_core::{Color, Position};
 
     let mut g = c.benchmark_group("nnue_single_chain");
+    g.sample_size(50);
+    g.warm_up_time(Duration::from_secs(2));
+    g.measurement_time(Duration::from_secs(5));
     // 反復回数（長すぎるとCIが重くなるため控えめに）
     let iters = [2000usize, 8000usize];
 
@@ -64,8 +68,9 @@ fn bench_single_chain(c: &mut Criterion) {
                                 m_black,
                                 &net,
                             );
+                            let acc1 = black_box(acc1);
                             let undo_b = pos.do_move(m_black);
-                            // 子局面(黒手後)は白番
+                            // 子局面(黒手後)は白番のため、White 視点の pre を評価
                             let eval = engine_core::evaluation::nnue::single::SingleChannelNet::evaluate_from_accumulator_pre(
                                 &net,
                                 acc1.acc_for(Color::White),

@@ -2,7 +2,7 @@
 
 [![codecov](https://codecov.io/gh/SH11235/shogi/branch/main/graph/badge.svg?flag=rust-core)](https://codecov.io/gh/SH11235/shogi)
 
-This package contains the WebAssembly (WASM) implementation for advanced Shogi features including WebRTC communication, mate search, and opening book functionality.
+This workspace contains the Rust core engine and WebAssembly (WASM) modules for advanced Shogi features, including WebRTC communication, mate search, and opening book functionality.
 
 ## Features
 
@@ -18,7 +18,7 @@ This package contains the WebAssembly (WASM) implementation for advanced Shogi f
 ## Prerequisites
 
 - Rust toolchain (install from https://rustup.rs/)
-- wasm-pack (`cargo install wasm-pack`)
+- wasm-pack (`cargo install wasm-pack`) — only required for WASM builds
 - cargo-tarpaulin (optional, for coverage reports): `cargo install cargo-tarpaulin`
 
 ## Project Structure
@@ -112,6 +112,8 @@ cargo run -p engine-usi --release --features fast-fma
 | EngineType | Combo | Material | Material/Nnue/Enhanced/EnhancedNnue | Engine evaluation and search type |
 | ByoyomiPeriods | Spin | 1 | 1-10 or 'default' | Number of byoyomi periods (USI_ByoyomiPeriods alias also supported) |
 
+> Note: `ByoyomiPeriods` accepts the literal `default` to reset to the initial value (the engine handles this as a special case).
+
 #### ByoyomiPeriods Option
 
 Controls the number of byoyomi periods when using byoyomi time control:
@@ -145,7 +147,7 @@ npm run build:wasm:dev  # Development build (faster)
 The build process:
 1. Compiles Rust code to WebAssembly
 2. Generates JavaScript bindings and TypeScript definitions
-3. Copies the generated files to `packages/web/src/wasm/`
+3. Copies the generated files to `packages/web/src/wasm/` (when using the web frontend in this monorepo)
 
 The generated files in `packages/web/src/wasm/` are:
 - Excluded from git (in .gitignore)
@@ -189,6 +191,18 @@ Reports are generated under:
 ```
 target/criterion/nnue_single_chain/*/report/index.html
 ```
+
+Open the latest report in your browser (example on macOS):
+
+```
+open target/criterion/nnue_single_chain/*/report/index.html
+```
+
+Tips for reproducible results:
+
+- Pin CPU cores (e.g., `taskset -c 0` on Linux)
+- Keep the system idle during runs
+- Consider disabling turbo/CPU frequency scaling during measurement
 
 ## Code Quality
 
