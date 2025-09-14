@@ -1,5 +1,3 @@
-#![cfg(feature = "nnue_single_diff")]
-
 use engine_core::evaluation::nnue::{single::SingleChannelNet, single_state::SingleAcc};
 use engine_core::shogi::Move;
 use engine_core::usi::parse_usi_square;

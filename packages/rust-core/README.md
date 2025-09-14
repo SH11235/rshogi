@@ -2,7 +2,7 @@
 
 [![codecov](https://codecov.io/gh/SH11235/shogi/branch/main/graph/badge.svg?flag=rust-core)](https://codecov.io/gh/SH11235/shogi)
 
-This package contains the WebAssembly (WASM) implementation for advanced Shogi features including WebRTC communication, mate search, and opening book functionality.
+This workspace contains the Rust core engine and WebAssembly (WASM) modules for advanced Shogi features, including WebRTC communication, mate search, and opening book functionality.
 
 ## Features
 
@@ -18,7 +18,7 @@ This package contains the WebAssembly (WASM) implementation for advanced Shogi f
 ## Prerequisites
 
 - Rust toolchain (install from https://rustup.rs/)
-- wasm-pack (`cargo install wasm-pack`)
+- wasm-pack (`cargo install wasm-pack`) — only required for WASM builds
 - cargo-tarpaulin (optional, for coverage reports): `cargo install cargo-tarpaulin`
 
 ## Project Structure
@@ -79,7 +79,7 @@ quit
 - 推奨ビルド（最適化）
   - `RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release`
 - フィーチャー（engine-usi から engine-core へ伝播）
-  - 既定ON: `nnue-diff`（SINGLE 差分NNUE）
+  - 注: `nnue_single_diff`（SINGLE 差分NNUE）は恒久化され常時有効です
   - 任意ON:
     - `fast-fma`: FMAで出力加算を高速化（丸め微差を許容できる場合）
     - `diff-agg-hash`: 差分集計をHashMap実装でA/B（大N向け）
@@ -111,6 +111,8 @@ cargo run -p engine-usi --release --features fast-fma
 | USI_Ponder | Check | true | true/false | Enable pondering (thinking on opponent's time) |
 | EngineType | Combo | Material | Material/Nnue/Enhanced/EnhancedNnue | Engine evaluation and search type |
 | ByoyomiPeriods | Spin | 1 | 1-10 or 'default' | Number of byoyomi periods (USI_ByoyomiPeriods alias also supported) |
+
+> Note: `ByoyomiPeriods` accepts the literal `default` to reset to the initial value (the engine handles this as a special case).
 
 #### ByoyomiPeriods Option
 
@@ -145,7 +147,7 @@ npm run build:wasm:dev  # Development build (faster)
 The build process:
 1. Compiles Rust code to WebAssembly
 2. Generates JavaScript bindings and TypeScript definitions
-3. Copies the generated files to `packages/web/src/wasm/`
+3. Copies the generated files to `packages/web/src/wasm/` (when using the web frontend in this monorepo)
 
 The generated files in `packages/web/src/wasm/` are:
 - Excluded from git (in .gitignore)
@@ -175,6 +177,32 @@ cargo test -- --ignored              # Run only ignored tests (benchmarks)
 cargo test -- --include-ignored      # Run all tests including benchmarks
 cargo test test_benchmark -- --ignored  # Run specific benchmark test
 ```
+
+### Criterion Benches
+
+Run the always-on SINGLE NNUE chain benchmark:
+
+```bash
+cargo bench -p engine-core --bench nnue_single_chain_bench -- nnue_single_chain
+```
+
+Reports are generated under:
+
+```
+target/criterion/nnue_single_chain/*/report/index.html
+```
+
+Open the latest report in your browser (example on macOS):
+
+```
+open target/criterion/nnue_single_chain/*/report/index.html
+```
+
+Tips for reproducible results:
+
+- Pin CPU cores (e.g., `taskset -c 0` on Linux)
+- Keep the system idle during runs
+- Consider disabling turbo/CPU frequency scaling during measurement
 
 ## Code Quality
 

@@ -5,7 +5,7 @@ edition = "2021"
 
 # No library, only binaries
 [dependencies]
-engine-core = { path = "../engine-core", features = ["tt_metrics", "hashfull_filter", "nnue_single_diff", "nnue_telemetry"] }
+engine-core = { path = "../engine-core", features = ["tt_metrics", "hashfull_filter", "nnue_telemetry"] }
 anyhow = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
