@@ -337,20 +337,19 @@ impl NNUEEvaluatorWrapper {
                     tracked_hash: Some(u64::MAX),
                 })
             }
-            Err(classic_err) => {
-                if let Ok(net) = load_single_weights(weights_path) {
-                    Ok(NNUEEvaluatorWrapper {
-                        backend: Backend::Single {
-                            net: std::sync::Arc::new(net),
-                            acc_stack: Vec::new(),
-                        },
-                        tracked_hash: Some(u64::MAX),
-                    })
-                } else {
-                    // prefer classic error details
-                    Err(NNUEError::from(classic_err))
-                }
-            }
+            Err(classic_err) => match load_single_weights(weights_path) {
+                Ok(net) => Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Single {
+                        net: std::sync::Arc::new(net),
+                        acc_stack: Vec::new(),
+                    },
+                    tracked_hash: Some(u64::MAX),
+                }),
+                Err(single_err) => Err(NNUEError::BothWeightsLoadFailed {
+                    classic: classic_err,
+                    single: single_err,
+                }),
+            },
         }
     }
     /// 現在の重みを共有しつつ、状態（acc_stack/tracked_hash）のない新インスタンスを作る
@@ -408,20 +407,19 @@ impl NNUEEvaluatorWrapper {
                     tracked_hash: Some(u64::MAX),
                 })
             }
-            Err(classic_err) => {
-                // Try SINGLE
-                if let Ok(net) = load_single_weights(weights_path) {
-                    return Ok(NNUEEvaluatorWrapper {
-                        backend: Backend::Single {
-                            net: std::sync::Arc::new(net),
-                            acc_stack: Vec::new(),
-                        },
-                        tracked_hash: Some(u64::MAX),
-                    });
-                }
-                // Prefer classic error details
-                Err(Box::new(NNUEError::from(classic_err)))
-            }
+            Err(classic_err) => match load_single_weights(weights_path) {
+                Ok(net) => Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Single {
+                        net: std::sync::Arc::new(net),
+                        acc_stack: Vec::new(),
+                    },
+                    tracked_hash: Some(u64::MAX),
+                }),
+                Err(single_err) => Err(Box::new(NNUEError::BothWeightsLoadFailed {
+                    classic: classic_err,
+                    single: single_err,
+                })),
+            },
         }
     }
 

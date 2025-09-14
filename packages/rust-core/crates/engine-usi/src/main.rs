@@ -200,6 +200,20 @@ fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {
                     log::debug!("  caused by: {}", src);
                 }
             }
+            NNUEError::BothWeightsLoadFailed { classic, single } => {
+                log::error!(
+                    "[NNUE] Failed to load weights '{}': classic={}, single={}",
+                    path,
+                    classic,
+                    single
+                );
+                if let Some(src) = classic.source() {
+                    log::debug!("  classic caused by: {}", src);
+                }
+                if let Some(src) = single.source() {
+                    log::debug!("  single caused by: {}", src);
+                }
+            }
             NNUEError::Io(ioe) => {
                 log::error!("[NNUE] I/O error reading '{}': {}", path, ioe);
             }
@@ -220,6 +234,10 @@ fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {
                     "[NNUE] Weight dimension mismatch (expected {}, got {}) for '{}': please use matching weights",
                     expected, actual, path
                 );
+            }
+            _ => {
+                // Future-proof for non_exhaustive
+                log::error!("[NNUE] Error while loading weights '{}': {}", path, ne);
             }
         }
         return;
