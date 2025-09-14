@@ -1,6 +1,7 @@
 //! NNUE (Efficiently Updatable Neural Network) evaluation function
 //!
-//! Implements HalfKP 256x2-32-32 architecture with incremental updates
+//! Implements NNUE with HalfKP features. Classic weights (v1) use 256x2-32-32-1.
+//! Version 2 (v2) supports dynamic dimensions specified in the weight file header.
 //!
 //! # Architecture Overview
 //!
@@ -77,8 +78,8 @@ pub fn enabled_features_str() -> String {
     if cfg!(feature = "nightly") {
         v.push("nightly");
     }
-    // acc_dim の軽い可視化（現状は Classic=256 固定）
-    v.push("acc_dim=256");
+    // acc_dim の軽い可視化（ランタイム決定: v1=256 / v2=dims）
+    v.push("acc_dim=runtime");
 
     // 補助ログ: x86/x86_64 の SIMD 検出結果
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -210,7 +211,8 @@ pub struct NNUEEvaluator {
 impl NNUEEvaluator {
     /// Create new NNUE evaluator from weights file
     pub fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {
-        let (feature_transformer, network) = load_weights(path)?;
+        let (feature_transformer, network) =
+            load_weights(path).map_err(|e| -> Box<dyn Error> { Box::new(e) })?;
         Ok(NNUEEvaluator {
             feature_transformer: Arc::new(feature_transformer),
             network: Arc::new(network),
@@ -365,7 +367,11 @@ impl NNUEEvaluatorWrapper {
                 tracked_hash: Some(u64::MAX),
             });
         }
-        Err("Failed to load NNUE weights (unsupported format)".into())
+        // Prefer classic error details when available
+        match load_weights(weights_path) {
+            Err(e) => Err(Box::new(NNUEError::from(e))),
+            Ok(_) => Err("unexpected state".into()),
+        }
     }
 
     // NOTE: set_position/do_move/undo_move は下部の実装へ集約
