@@ -7,6 +7,7 @@ use engine_core::usi::{
     append_usi_score_and_bound, create_position, move_to_usi, score_view_from_internal,
 };
 use log::info;
+use std::error::Error as StdError;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -170,7 +171,7 @@ impl EngineState {
                 if let Some(ref path) = self.opts.eval_file {
                     if !path.is_empty() {
                         if let Err(e) = eng.load_nnue_weights(path) {
-                            log::error!("Failed to load NNUE weights: {}", e);
+                            log_nnue_load_error(path, &*e);
                         }
                     }
                 }
@@ -179,6 +180,71 @@ impl EngineState {
         // MateEarlyStop: global toggle
         engine_core::search::config::set_mate_early_stop_enabled(self.opts.mate_early_stop);
     }
+}
+
+fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {
+    use engine_core::evaluation::nnue::error::NNUEError;
+
+    // Try to downcast to typed NNUEError for structured reporting
+    if let Some(ne) = err.downcast_ref::<NNUEError>() {
+        match ne {
+            NNUEError::Weights(we) => {
+                log::error!("[NNUE] Failed to load classic weights '{}': {}", path, we);
+                if let Some(src) = we.source() {
+                    log::debug!("  caused by: {}", src);
+                }
+            }
+            NNUEError::SingleWeights(se) => {
+                log::error!("[NNUE] Failed to load SINGLE weights '{}': {}", path, se);
+                if let Some(src) = se.source() {
+                    log::debug!("  caused by: {}", src);
+                }
+            }
+            NNUEError::BothWeightsLoadFailed { classic, single } => {
+                log::error!(
+                    "[NNUE] Failed to load weights '{}': classic={}, single={}",
+                    path,
+                    classic,
+                    single
+                );
+                if let Some(src) = classic.source() {
+                    log::debug!("  classic caused by: {}", src);
+                }
+                if let Some(src) = single.source() {
+                    log::debug!("  single caused by: {}", src);
+                }
+            }
+            NNUEError::Io(ioe) => {
+                log::error!("[NNUE] I/O error reading '{}': {}", path, ioe);
+            }
+            NNUEError::KingNotFound(color) => {
+                log::error!("[NNUE] Internal error: king not found for {:?}", color);
+            }
+            NNUEError::EmptyAccumulatorStack => {
+                log::error!("[NNUE] Internal error: empty accumulator stack");
+            }
+            NNUEError::InvalidPiece(sq) => {
+                log::error!("[NNUE] Internal error: invalid piece at {:?}", sq);
+            }
+            NNUEError::InvalidMove(desc) => {
+                log::error!("[NNUE] Internal error: invalid move: {}", desc);
+            }
+            NNUEError::DimensionMismatch { expected, actual } => {
+                log::error!(
+                    "[NNUE] Weight dimension mismatch (expected {}, got {}) for '{}': please use matching weights",
+                    expected, actual, path
+                );
+            }
+            _ => {
+                // Future-proof for non_exhaustive
+                log::error!("[NNUE] Error while loading weights '{}': {}", path, ne);
+            }
+        }
+        return;
+    }
+
+    // Fallback: untyped error
+    log::error!("[NNUE] Failed to load NNUE weights '{}': {}", path, err);
 }
 
 fn print_engine_type_options() {
@@ -1247,19 +1313,6 @@ fn main() -> Result<()> {
                                         .current_root_hash
                                         .map(|h| h != state.position.zobrist_hash())
                                         .unwrap_or(false);
-                                    let _committed = if !stale {
-                                        Some(engine_core::search::CommittedIteration {
-                                            depth: result.stats.depth,
-                                            seldepth: result.stats.seldepth,
-                                            score: result.score,
-                                            pv: result.stats.pv.clone(),
-                                            node_type: result.node_type,
-                                            nodes: result.stats.nodes,
-                                            elapsed: result.stats.elapsed,
-                                        })
-                                    } else {
-                                        None
-                                    };
                                     finalize_and_send(
                                         &mut state,
                                         "stop_finalize",

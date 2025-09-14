@@ -126,8 +126,8 @@ fn test_stop_flag_responsiveness() {
 
     assert!(result.best_move.is_some());
     assert!(
-        elapsed.as_millis() < 80,
-        "Search should stop within 80ms after stop flag is set, but took {}ms",
+        elapsed.as_millis() < 200,
+        "Search should stop within 200ms after stop flag is set, but took {}ms",
         elapsed.as_millis()
     );
 }

@@ -25,7 +25,7 @@ pub fn bench_add_row_scaled(len: usize, k: f32, reps: u32) -> f64 {
     acc as f64
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;

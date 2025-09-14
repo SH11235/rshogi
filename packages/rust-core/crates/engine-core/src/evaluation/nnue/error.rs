@@ -2,71 +2,51 @@
 //!
 //! Provides error handling for NNUE operations
 
-use std::error::Error;
-use std::fmt;
-
+use super::weights::{SingleWeightsError, WeightsError};
 use crate::{Color, Square};
 
 /// NNUE-specific errors
-#[derive(Debug, Clone)]
+#[non_exhaustive]
+#[derive(thiserror::Error, Debug)]
 pub enum NNUEError {
     /// King not found for a specific color
+    #[error("King not found for {0:?}")]
     KingNotFound(Color),
 
     /// Empty accumulator stack
+    #[error("Empty accumulator stack")]
     EmptyAccumulatorStack,
 
     /// Invalid piece at a square
+    #[error("Invalid piece at {0:?}")]
     InvalidPiece(Square),
 
     /// Invalid move for differential update
+    #[error("Invalid move: {0}")]
     InvalidMove(String),
 
     /// File I/O error
-    IoError(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 
-    /// Invalid NNUE file format
-    InvalidFormat(String),
+    /// Classic/weights loader error (typed)
+    #[error(transparent)]
+    Weights(#[from] WeightsError),
+
+    /// SINGLE weights loader error (typed)
+    #[error(transparent)]
+    SingleWeights(#[from] SingleWeightsError),
+
+    /// Both classic and SINGLE loaders failed (contains both causes)
+    #[error("Both weight loaders failed: classic={classic}, single={single}")]
+    BothWeightsLoadFailed {
+        classic: WeightsError,
+        single: SingleWeightsError,
+    },
 
     /// Weight dimension mismatch
+    #[error("Weight dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
-}
-
-impl fmt::Display for NNUEError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NNUEError::KingNotFound(color) => {
-                write!(f, "King not found for {color:?}")
-            }
-            NNUEError::EmptyAccumulatorStack => {
-                write!(f, "Empty accumulator stack")
-            }
-            NNUEError::InvalidPiece(square) => {
-                write!(f, "Invalid piece at {square:?}")
-            }
-            NNUEError::InvalidMove(desc) => {
-                write!(f, "Invalid move: {desc}")
-            }
-            NNUEError::IoError(msg) => {
-                write!(f, "I/O error: {msg}")
-            }
-            NNUEError::InvalidFormat(msg) => {
-                write!(f, "Invalid NNUE format: {msg}")
-            }
-            NNUEError::DimensionMismatch { expected, actual } => {
-                write!(f, "Weight dimension mismatch: expected {expected}, got {actual}")
-            }
-        }
-    }
-}
-
-impl Error for NNUEError {}
-
-/// Convert std::io::Error to NNUEError
-impl From<std::io::Error> for NNUEError {
-    fn from(err: std::io::Error) -> Self {
-        NNUEError::IoError(err.to_string())
-    }
 }
 
 /// Result type for NNUE operations

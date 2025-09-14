@@ -96,16 +96,17 @@ pub mod scalar {
         weights: &[i16],
         indices: &[usize],
         add: bool,
+        row_len: usize,
     ) {
         for &idx in indices {
-            let weight_offset = idx * 256;
+            let weight_offset = idx * row_len;
 
             if add {
-                for i in 0..256 {
+                for i in 0..row_len {
                     accumulator[i] = accumulator[i].saturating_add(weights[weight_offset + i]);
                 }
             } else {
-                for i in 0..256 {
+                for i in 0..row_len {
                     accumulator[i] = accumulator[i].saturating_sub(weights[weight_offset + i]);
                 }
             }
@@ -201,24 +202,37 @@ impl SimdDispatcher {
         weights: &[i16],
         indices: &[usize],
         add: bool,
+        row_len: usize,
     ) {
         #[cfg(target_arch = "x86_64")]
         {
             if is_x86_feature_detected!("avx2") {
                 unsafe {
-                    return x86_64::update_accumulator_avx2(accumulator, weights, indices, add);
+                    return x86_64::update_accumulator_avx2(
+                        accumulator,
+                        weights,
+                        indices,
+                        add,
+                        row_len,
+                    );
                 }
             }
 
             if is_x86_feature_detected!("sse4.1") {
                 unsafe {
-                    return x86_64::update_accumulator_sse41(accumulator, weights, indices, add);
+                    return x86_64::update_accumulator_sse41(
+                        accumulator,
+                        weights,
+                        indices,
+                        add,
+                        row_len,
+                    );
                 }
             }
         }
 
         // Fallback to scalar
-        scalar::update_accumulator_scalar(accumulator, weights, indices, add);
+        scalar::update_accumulator_scalar(accumulator, weights, indices, add, row_len);
     }
 }
 
