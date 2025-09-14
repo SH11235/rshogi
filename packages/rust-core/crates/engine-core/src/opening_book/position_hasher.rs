@@ -113,19 +113,6 @@ impl PositionHasher {
         // let turn = parts[1];
         let hands = parts[2];
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            web_sys::console::log_1(
-                &format!(
-                    "[Rust PositionHasher] Parts: board={}, hands={}, move_count={}",
-                    board,
-                    hands,
-                    parts.get(3).unwrap_or(&"none")
-                )
-                .into(),
-            );
-        }
-
         // Start with board position hash
         let mut hash = self.hash_board_position(board)?;
 
@@ -143,13 +130,6 @@ impl PositionHasher {
 
         // XOR with hands hash
         hash ^= self.hash_hands(hands)?;
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            web_sys::console::log_1(
-                &format!("[Rust PositionHasher] Generated hash: {:#016x}", hash).into(),
-            );
-        }
 
         Ok(hash)
     }
