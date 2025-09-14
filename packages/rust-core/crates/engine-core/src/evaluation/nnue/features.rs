@@ -104,35 +104,53 @@ pub fn halfkp_index(king_sq: Square, piece: BonaPiece) -> usize {
     index
 }
 
-/// Feature transformer for HalfKP -> 256-dimensional features
+/// Feature transformer for HalfKP -> acc_dim-dimensional features
 pub struct FeatureTransformer {
-    /// Weights for feature transformation \[INPUT_DIM\]\[256\]
+    /// Weights for feature transformation \[INPUT_DIM\]\[acc_dim\]
     pub weights: Vec<i16>,
-    /// Biases for output features \[256\]
+    /// Biases for output features \[acc_dim\]
     pub biases: Vec<i32>,
+    /// Output feature dimension (formerly fixed to 256)
+    pub(crate) acc_dim: usize,
 }
 
 impl FeatureTransformer {
-    /// Create zero-initialized feature transformer
+    /// Default accumulator/output dimension
+    pub const DEFAULT_DIM: usize = 256;
+
+    /// Create zero-initialized feature transformer with default dimension (256)
     pub fn zero() -> Self {
+        Self::zero_with_dim(Self::DEFAULT_DIM)
+    }
+
+    /// Create zero-initialized feature transformer with given dimension
+    pub fn zero_with_dim(acc_dim: usize) -> Self {
         FeatureTransformer {
-            weights: vec![0; SHOGI_BOARD_SIZE * FE_END * 256], // king squares * features * 256 outputs
-            biases: vec![0; 256],
+            // king squares * features * acc_dim outputs
+            weights: vec![0; SHOGI_BOARD_SIZE * FE_END * acc_dim],
+            biases: vec![0; acc_dim],
+            acc_dim,
         }
+    }
+
+    /// Get output feature dimension (acc_dim)
+    #[inline]
+    pub fn acc_dim(&self) -> usize {
+        self.acc_dim
     }
 
     /// Get weight for specific feature and output index
     pub fn weight(&self, feature_idx: usize, output_idx: usize) -> i16 {
         debug_assert!(feature_idx < SHOGI_BOARD_SIZE * FE_END); // HalfKP index includes king position
-        debug_assert!(output_idx < 256);
-        self.weights[feature_idx * 256 + output_idx]
+        debug_assert!(output_idx < self.acc_dim);
+        self.weights[feature_idx * self.acc_dim + output_idx]
     }
 
     /// Get mutable weight reference
     pub fn weight_mut(&mut self, feature_idx: usize, output_idx: usize) -> &mut i16 {
         debug_assert!(feature_idx < SHOGI_BOARD_SIZE * FE_END);
-        debug_assert!(output_idx < 256);
-        &mut self.weights[feature_idx * 256 + output_idx]
+        debug_assert!(output_idx < self.acc_dim);
+        &mut self.weights[feature_idx * self.acc_dim + output_idx]
     }
 }
 
