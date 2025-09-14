@@ -128,11 +128,10 @@ impl From<std::io::Error> for WeightsError {
 /// * 任意の 8bit チャンク列をその型として再解釈しても未定義動作にならない（全ビットパターン有効）。
 /// * `Copy` であり、`Drop` 実装が無い。
 /// * メモリ再解釈時に内部不変条件（例: enum 判別子整合など）を壊さない。
-/// * 現状は標準整数型（i8/i16/i32）のみ実装し、外部から追加実装できないよう `pub(crate)` に制限している。
+/// * 現状は標準整数型（i8）のみ実装し、外部から追加実装できないよう `pub(crate)` に制限している。
 pub(crate) unsafe trait PlainBytes: Copy {}
 unsafe impl PlainBytes for i8 {}
-unsafe impl PlainBytes for i16 {}
-unsafe impl PlainBytes for i32 {}
+// Restrict generic byte reader to i8 only to avoid accidental misuse for LE types
 
 impl WeightReader {
     /// Create reader from file path
@@ -221,6 +220,21 @@ impl WeightReader {
     }
 
     /// Read `count` little-endian i16 values (portable across host endianness)
+    #[cfg(target_endian = "little")]
+    pub(crate) fn read_i16_le_vec(&mut self, count: usize) -> Result<Vec<i16>, WeightsError> {
+        use std::mem::MaybeUninit;
+        let bytes = count.checked_mul(2).ok_or(WeightsError::Overflow("weight size overflow"))?;
+        let mut v: Vec<MaybeUninit<i16>> = Vec::with_capacity(count);
+        let dst = unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, bytes) };
+        self.file.read_exact(dst)?;
+        unsafe { v.set_len(count) };
+        // Safety: i16 is Plain Old Data; we just filled bytes in LE order on LE host
+        let v: Vec<i16> = unsafe { std::mem::transmute(v) };
+        Ok(v)
+    }
+
+    /// Read `count` little-endian i16 values (portable across host endianness)
+    #[cfg(not(target_endian = "little"))]
     pub(crate) fn read_i16_le_vec(&mut self, count: usize) -> Result<Vec<i16>, WeightsError> {
         let bytes = count.checked_mul(2).ok_or(WeightsError::Overflow("weight size overflow"))?;
         let mut buf = vec![0u8; bytes];
@@ -234,6 +248,21 @@ impl WeightReader {
     }
 
     /// Read `count` little-endian i32 values (portable across host endianness)
+    #[cfg(target_endian = "little")]
+    pub(crate) fn read_i32_le_vec(&mut self, count: usize) -> Result<Vec<i32>, WeightsError> {
+        use std::mem::MaybeUninit;
+        let bytes = count.checked_mul(4).ok_or(WeightsError::Overflow("weight size overflow"))?;
+        let mut v: Vec<MaybeUninit<i32>> = Vec::with_capacity(count);
+        let dst = unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, bytes) };
+        self.file.read_exact(dst)?;
+        unsafe { v.set_len(count) };
+        // Safety: i32 is Plain Old Data; we just filled bytes in LE order on LE host
+        let v: Vec<i32> = unsafe { std::mem::transmute(v) };
+        Ok(v)
+    }
+
+    /// Read `count` little-endian i32 values (portable across host endianness)
+    #[cfg(not(target_endian = "little"))]
     pub(crate) fn read_i32_le_vec(&mut self, count: usize) -> Result<Vec<i32>, WeightsError> {
         let bytes = count.checked_mul(4).ok_or(WeightsError::Overflow("weight size overflow"))?;
         let mut buf = vec![0u8; bytes];
@@ -252,17 +281,17 @@ pub fn load_weights(path: &str) -> Result<(FeatureTransformer, Network), Weights
     let meta_len = std::fs::metadata(path)?.len();
     let mut reader = WeightReader::from_file(path)?;
     let header = reader.read_header()?;
-    // Validate declared size matches actual file size (strict check for v1)
-    if meta_len != header.size as u64 {
-        return Err(WeightsError::SizeMismatchV1 {
-            expected: header.size as u64,
-            actual: meta_len,
-        });
-    }
 
     // Branch by version/architecture
     match header.version {
         1 => {
+            // Validate declared size matches actual file size (strict check for v1)
+            if meta_len != header.size as u64 {
+                return Err(WeightsError::SizeMismatchV1 {
+                    expected: header.size as u64,
+                    actual: meta_len,
+                });
+            }
             // Validate architecture for v1
             if header.architecture != HALFKP_256X2_32_32 {
                 return Err(WeightsError::UnsupportedArchitectureV1(header.architecture));
@@ -359,6 +388,13 @@ pub fn load_weights(path: &str) -> Result<(FeatureTransformer, Network), Weights
             Ok((feature_transformer, network))
         }
         2 => {
+            // Validate declared size matches actual file size (use v2 variant)
+            if meta_len != header.size as u64 {
+                return Err(WeightsError::SizeMismatchV2 {
+                    expected: header.size as u64,
+                    actual: meta_len,
+                });
+            }
             // Validate architecture for v2
             if header.architecture != HALFKP_X2_DYNAMIC {
                 return Err(WeightsError::UnsupportedArchitectureV2(header.architecture));
@@ -495,7 +531,7 @@ pub fn save_weights(
     path: &str,
     transformer: &FeatureTransformer,
     network: &Network,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{Seek, SeekFrom, Write};
 
     let mut file = File::create(path)?;
@@ -548,7 +584,7 @@ pub fn save_weights_v2(
     acc_dim: usize,
     h1_dim: usize,
     h2_dim: usize,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{Seek, SeekFrom, Write};
     let input_dim = acc_dim * 2;
     let mut f = File::create(path)?;
@@ -606,10 +642,17 @@ mod tests {
     #[test]
     fn test_invalid_magic() {
         let path = "/tmp/invalid_nnue.bin";
-        std::fs::write(path, b"BADMAGIC").unwrap();
+        // Write at least 16 bytes so header read succeeds and magic check triggers
+        let mut data = Vec::new();
+        data.extend_from_slice(b"BAD!"); // invalid magic
+        data.extend_from_slice(&[0u8; 12]); // pad for version/arch/size
+        std::fs::write(path, data).unwrap();
 
-        let result = load_weights(path);
-        assert!(result.is_err());
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(matches!(err, WeightsError::InvalidMagic));
 
         std::fs::remove_file(path).ok();
     }
@@ -829,11 +872,10 @@ mod tests {
     }
 
     // Property-based: small dims must succeed
-    #[test]
-    fn proptest_v2_small_dims_roundtrip() {
-        use proptest::prelude::*;
-        let strategy = (1usize..=3, 1usize..=3, 1usize..=3);
-        proptest!(|(ad in 1usize..=3, h1 in 1usize..=3, h2 in 1usize..=3)| {
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn v2_small_dims_roundtrip(ad in 1usize..=3, h1 in 1usize..=3, h2 in 1usize..=3) {
             let acc_dim = ad; let h1_dim = h1; let h2_dim = h2; let input_dim = acc_dim*2;
             let path = format!("/tmp/nnue_v2_prop_{}_{}_{}.bin", acc_dim, h1_dim, h2_dim);
             save_weights_v2(&path, acc_dim, h1_dim, h2_dim).unwrap();
@@ -843,7 +885,7 @@ mod tests {
             prop_assert_eq!(net.h1_dim, h1_dim);
             prop_assert_eq!(net.h2_dim, h2_dim);
             std::fs::remove_file(&path).ok();
-        });
+        }
     }
 }
 
