@@ -209,6 +209,15 @@ pub struct NNUEEvaluator {
 }
 
 impl NNUEEvaluator {
+    /// Create new NNUE evaluator from weights file (typed error)
+    pub fn from_file_typed(path: &str) -> NNUEResult<Self> {
+        let (feature_transformer, network) = load_weights(path)?;
+        Ok(NNUEEvaluator {
+            feature_transformer: Arc::new(feature_transformer),
+            network: Arc::new(network),
+        })
+    }
+
     /// Create new NNUE evaluator from weights file
     pub fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {
         let (feature_transformer, network) =
@@ -303,6 +312,47 @@ pub fn reset_single_fallback_hits() {
 }
 
 impl NNUEEvaluatorWrapper {
+    /// Create new wrapper from weights file (typed error)
+    pub fn new_typed(weights_path: &str) -> NNUEResult<Self> {
+        match load_weights(weights_path) {
+            Ok((ft, net)) => {
+                let evaluator = NNUEEvaluator {
+                    feature_transformer: std::sync::Arc::new(ft),
+                    network: std::sync::Arc::new(net),
+                };
+                let mut initial_acc = Accumulator::new();
+                let empty_pos = Position::empty();
+                initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
+                Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Classic {
+                        evaluator,
+                        accumulator_stack: vec![initial_acc],
+                        delta_scratch: accumulator::AccumulatorDelta {
+                            removed_b: smallvec::SmallVec::new(),
+                            added_b: smallvec::SmallVec::new(),
+                            removed_w: smallvec::SmallVec::new(),
+                            added_w: smallvec::SmallVec::new(),
+                        },
+                    },
+                    tracked_hash: Some(u64::MAX),
+                })
+            }
+            Err(classic_err) => {
+                if let Ok(net) = load_single_weights(weights_path) {
+                    Ok(NNUEEvaluatorWrapper {
+                        backend: Backend::Single {
+                            net: std::sync::Arc::new(net),
+                            acc_stack: Vec::new(),
+                        },
+                        tracked_hash: Some(u64::MAX),
+                    })
+                } else {
+                    // prefer classic error details
+                    Err(NNUEError::from(classic_err))
+                }
+            }
+        }
+    }
     /// 現在の重みを共有しつつ、状態（acc_stack/tracked_hash）のない新インスタンスを作る
     pub fn fork_stateless(&self) -> Self {
         match &self.backend {
@@ -334,43 +384,44 @@ impl NNUEEvaluatorWrapper {
     }
     /// Create new wrapper from weights file
     pub fn new(weights_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        if let Ok((ft, net)) = load_weights(weights_path) {
-            let evaluator = NNUEEvaluator {
-                feature_transformer: std::sync::Arc::new(ft),
-                network: std::sync::Arc::new(net),
-            };
-            let mut initial_acc = Accumulator::new();
-            let empty_pos = Position::empty();
-            initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
-            return Ok(NNUEEvaluatorWrapper {
-                backend: Backend::Classic {
-                    evaluator,
-                    accumulator_stack: vec![initial_acc],
-                    delta_scratch: accumulator::AccumulatorDelta {
-                        removed_b: smallvec::SmallVec::new(),
-                        added_b: smallvec::SmallVec::new(),
-                        removed_w: smallvec::SmallVec::new(),
-                        added_w: smallvec::SmallVec::new(),
-                    },
-                },
-                // set_position まで評価で Acc を使わない安全側にする
-                tracked_hash: Some(u64::MAX),
-            });
-        }
-        if let Ok(net) = load_single_weights(weights_path) {
-            return Ok(NNUEEvaluatorWrapper {
-                backend: Backend::Single {
-                    net: std::sync::Arc::new(net),
-                    acc_stack: Vec::new(),
-                },
-                // set_position まで評価で Acc を使わない安全側にする
-                tracked_hash: Some(u64::MAX),
-            });
-        }
-        // Prefer classic error details when available
+        // Try classic first and capture error for later reporting if needed
         match load_weights(weights_path) {
-            Err(e) => Err(Box::new(NNUEError::from(e))),
-            Ok(_) => Err("unexpected state".into()),
+            Ok((ft, net)) => {
+                let evaluator = NNUEEvaluator {
+                    feature_transformer: std::sync::Arc::new(ft),
+                    network: std::sync::Arc::new(net),
+                };
+                let mut initial_acc = Accumulator::new();
+                let empty_pos = Position::empty();
+                initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
+                Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Classic {
+                        evaluator,
+                        accumulator_stack: vec![initial_acc],
+                        delta_scratch: accumulator::AccumulatorDelta {
+                            removed_b: smallvec::SmallVec::new(),
+                            added_b: smallvec::SmallVec::new(),
+                            removed_w: smallvec::SmallVec::new(),
+                            added_w: smallvec::SmallVec::new(),
+                        },
+                    },
+                    tracked_hash: Some(u64::MAX),
+                })
+            }
+            Err(classic_err) => {
+                // Try SINGLE
+                if let Ok(net) = load_single_weights(weights_path) {
+                    return Ok(NNUEEvaluatorWrapper {
+                        backend: Backend::Single {
+                            net: std::sync::Arc::new(net),
+                            acc_stack: Vec::new(),
+                        },
+                        tracked_hash: Some(u64::MAX),
+                    });
+                }
+                // Prefer classic error details
+                Err(Box::new(NNUEError::from(classic_err)))
+            }
         }
     }
 
