@@ -24,13 +24,20 @@ pub struct NNUEHeader {
 
 /// Architecture ID for HalfKP 256x2-32-32
 const HALFKP_256X2_32_32: u32 = 0x7AF32F16;
+/// Architecture ID for HalfKP x2 dynamic dims (v2)
+const HALFKP_X2_DYNAMIC: u32 = 0xD15C_A11C; // made-up stable tag for dynamic HalfKP×2
 
 /// Supported NNUE format versions
 const MIN_SUPPORTED_VERSION: u32 = 1;
-const MAX_SUPPORTED_VERSION: u32 = 1;
+const MAX_SUPPORTED_VERSION: u32 = 2;
 
 /// Maximum reasonable file size (200MB)
-const MAX_FILE_SIZE: u32 = 200 * 1024 * 1024;
+const MAX_FILE_SIZE: u64 = 200 * 1024 * 1024;
+
+/// Upper bounds for v2 dims (sanity checks)
+const ACC_DIM_MAX: u32 = 4096;
+const H1_DIM_MAX: u32 = 1024;
+const H2_DIM_MAX: u32 = 1024;
 
 /// Expected weight sizes for validation
 const EXPECTED_FT_WEIGHTS: usize = SHOGI_BOARD_SIZE * FE_END * FeatureTransformer::DEFAULT_DIM; // Feature transformer weights
@@ -114,8 +121,8 @@ impl WeightReader {
             .into());
         }
 
-        // Validate file size
-        if header.size > MAX_FILE_SIZE {
+        // Validate file size (upper bound only here; exact match is checked by caller)
+        if (header.size as u64) > MAX_FILE_SIZE {
             return Err(format!(
                 "NNUE file too large: {} bytes, maximum: {} bytes",
                 header.size, MAX_FILE_SIZE
@@ -123,16 +130,14 @@ impl WeightReader {
             .into());
         }
 
-        // Validate architecture
-        let arch = header.architecture; // Copy to avoid unaligned access
-        if arch != HALFKP_256X2_32_32 {
-            return Err(format!(
-                "Unsupported architecture: 0x{arch:08X}, expected 0x{HALFKP_256X2_32_32:08X}"
-            )
-            .into());
-        }
-
         Ok(header)
+    }
+
+    /// Read a little-endian u32 value from the file
+    fn read_u32_le(&mut self) -> Result<u32, Box<dyn Error>> {
+        let mut buf = [0u8; 4];
+        self.file.read_exact(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
     }
 
     /// Read weights of type T (aligned safely). T must be a POD integer type.
@@ -169,111 +174,174 @@ pub fn load_weights(path: &str) -> Result<(FeatureTransformer, Network), Box<dyn
         .into());
     }
 
-    // Read feature transformer weights
-    let ft_weights = reader.read_weights::<i16>(EXPECTED_FT_WEIGHTS)?;
-    if ft_weights.len() != EXPECTED_FT_WEIGHTS {
-        return Err(format!(
-            "Feature transformer weights dimension mismatch: expected {}, got {}",
-            EXPECTED_FT_WEIGHTS,
-            ft_weights.len()
-        )
-        .into());
+    // Branch by version/architecture
+    match header.version {
+        1 => {
+            // Validate architecture for v1
+            if header.architecture != HALFKP_256X2_32_32 {
+                return Err(format!(
+                    "Unsupported architecture for v1: 0x{:08X}",
+                    header.architecture
+                )
+                .into());
+            }
+
+            // Read feature transformer weights
+            let ft_weights = reader.read_weights::<i16>(EXPECTED_FT_WEIGHTS)?;
+            let ft_biases = reader.read_weights::<i32>(EXPECTED_FT_BIASES)?;
+            // Read hidden layer 1
+            let hidden1_weights = reader.read_weights::<i8>(EXPECTED_H1_WEIGHTS)?;
+            let hidden1_biases = reader.read_weights::<i32>(EXPECTED_H1_BIASES)?;
+            // Read hidden layer 2
+            let hidden2_weights = reader.read_weights::<i8>(EXPECTED_H2_WEIGHTS)?;
+            let hidden2_biases = reader.read_weights::<i32>(EXPECTED_H2_BIASES)?;
+            // Read output layer
+            let output_weights = reader.read_weights::<i8>(EXPECTED_OUT_WEIGHTS)?;
+            let output_bias_vec = reader.read_weights::<i32>(EXPECTED_OUT_BIASES)?;
+            let output_bias = output_bias_vec
+                .first()
+                .copied()
+                .ok_or_else(|| "SectionTruncated: output bias".to_string())?;
+
+            // Create structures
+            let feature_transformer = FeatureTransformer {
+                weights: ft_weights,
+                biases: ft_biases,
+                acc_dim: FeatureTransformer::DEFAULT_DIM,
+            };
+            let network = Network {
+                hidden1_weights,
+                hidden1_biases,
+                hidden2_weights,
+                hidden2_biases,
+                output_weights,
+                output_bias,
+                input_dim: 512, // 256 x 2 (current classic)
+                h1_dim: 32,
+                h2_dim: 32,
+            };
+            Ok((feature_transformer, network))
+        }
+        2 => {
+            // Validate architecture for v2
+            if header.architecture != HALFKP_X2_DYNAMIC {
+                return Err(format!(
+                    "Unsupported architecture for v2: 0x{:08X}",
+                    header.architecture
+                )
+                .into());
+            }
+
+            // Read dims block: acc_dim, h1_dim, h2_dim (LE u32)
+            let acc_dim_u32 = reader.read_u32_le()?;
+            let h1_dim_u32 = reader.read_u32_le()?;
+            let h2_dim_u32 = reader.read_u32_le()?;
+
+            // Basic range checks
+            if acc_dim_u32 == 0
+                || h1_dim_u32 == 0
+                || h2_dim_u32 == 0
+                || acc_dim_u32 > ACC_DIM_MAX
+                || h1_dim_u32 > H1_DIM_MAX
+                || h2_dim_u32 > H2_DIM_MAX
+            {
+                return Err("DimsInvalid: zero or exceeds maximum".into());
+            }
+
+            let acc_dim = acc_dim_u32 as usize;
+            let h1_dim = h1_dim_u32 as usize;
+            let h2_dim = h2_dim_u32 as usize;
+            let input_dim = acc_dim
+                .checked_mul(2)
+                .ok_or_else(|| "DimsInconsistent: acc_dim*2 overflow".to_string())?;
+
+            // Compute expected byte size with u64 checked math
+            let mut expect_total: u64 = 16 + 12; // header + dims
+
+            // FT weights: 81 * FE_END * acc_dim (i16)
+            let ft_w_count = (SHOGI_BOARD_SIZE as u64)
+                .checked_mul(FE_END as u64)
+                .and_then(|v| v.checked_mul(acc_dim as u64))
+                .ok_or_else(|| "DimsInconsistent: FT weights count overflow".to_string())?;
+            expect_total = expect_total
+                .checked_add(ft_w_count.checked_mul(2).ok_or("overflow")?)
+                .ok_or("overflow")?;
+            // FT biases: acc_dim (i32)
+            expect_total = expect_total
+                .checked_add((acc_dim as u64).checked_mul(4).ok_or("overflow")?)
+                .ok_or("overflow")?;
+            // H1 weights: input_dim * h1_dim (i8)
+            let h1_w_count = (input_dim as u64)
+                .checked_mul(h1_dim as u64)
+                .ok_or("DimsInconsistent: H1 weights overflow")?;
+            expect_total = expect_total.checked_add(h1_w_count).ok_or("overflow")?;
+            // H1 biases: h1_dim (i32)
+            expect_total = expect_total
+                .checked_add((h1_dim as u64).checked_mul(4).ok_or("overflow")?)
+                .ok_or("overflow")?;
+            // H2 weights: h1_dim * h2_dim (i8)
+            let h2_w_count = (h1_dim as u64)
+                .checked_mul(h2_dim as u64)
+                .ok_or("DimsInconsistent: H2 weights overflow")?;
+            expect_total = expect_total.checked_add(h2_w_count).ok_or("overflow")?;
+            // H2 biases: h2_dim (i32)
+            expect_total = expect_total
+                .checked_add((h2_dim as u64).checked_mul(4).ok_or("overflow")?)
+                .ok_or("overflow")?;
+            // OUT weights: h2_dim (i8)
+            expect_total = expect_total.checked_add(h2_dim as u64).ok_or("overflow")?;
+            // OUT bias: 1 (i32)
+            expect_total = expect_total.checked_add(4).ok_or("overflow")?;
+
+            if expect_total > MAX_FILE_SIZE {
+                return Err("DimsInconsistent: expected size exceeds MAX_FILE_SIZE".into());
+            }
+            if expect_total != meta_len {
+                return Err(format!(
+                    "SizeMismatch: dims imply {} bytes, actual {} bytes",
+                    expect_total, meta_len
+                )
+                .into());
+            }
+
+            // Now read sections according to dims
+            let ft_weights = reader.read_weights::<i16>(
+                (SHOGI_BOARD_SIZE * FE_END).checked_mul(acc_dim).ok_or("overflow")?,
+            )?;
+            let ft_biases = reader.read_weights::<i32>(acc_dim)?;
+            let hidden1_weights =
+                reader.read_weights::<i8>(input_dim.checked_mul(h1_dim).ok_or("overflow")?)?;
+            let hidden1_biases = reader.read_weights::<i32>(h1_dim)?;
+            let hidden2_weights =
+                reader.read_weights::<i8>(h1_dim.checked_mul(h2_dim).ok_or("overflow")?)?;
+            let hidden2_biases = reader.read_weights::<i32>(h2_dim)?;
+            let output_weights = reader.read_weights::<i8>(h2_dim)?;
+            let output_bias_vec = reader.read_weights::<i32>(1)?;
+            let output_bias = output_bias_vec
+                .first()
+                .copied()
+                .ok_or_else(|| "SectionTruncated: output bias".to_string())?;
+
+            let feature_transformer = FeatureTransformer {
+                weights: ft_weights,
+                biases: ft_biases,
+                acc_dim,
+            };
+            let network = Network {
+                hidden1_weights,
+                hidden1_biases,
+                hidden2_weights,
+                hidden2_biases,
+                output_weights,
+                output_bias,
+                input_dim,
+                h1_dim,
+                h2_dim,
+            };
+            Ok((feature_transformer, network))
+        }
+        _ => Err("UnsupportedVersion".into()),
     }
-
-    let ft_biases = reader.read_weights::<i32>(EXPECTED_FT_BIASES)?;
-    if ft_biases.len() != EXPECTED_FT_BIASES {
-        return Err(format!(
-            "Feature transformer biases dimension mismatch: expected {}, got {}",
-            EXPECTED_FT_BIASES,
-            ft_biases.len()
-        )
-        .into());
-    }
-
-    // Read hidden layer 1
-    let hidden1_weights = reader.read_weights::<i8>(EXPECTED_H1_WEIGHTS)?;
-    if hidden1_weights.len() != EXPECTED_H1_WEIGHTS {
-        return Err(format!(
-            "Hidden layer 1 weights dimension mismatch: expected {}, got {}",
-            EXPECTED_H1_WEIGHTS,
-            hidden1_weights.len()
-        )
-        .into());
-    }
-
-    let hidden1_biases = reader.read_weights::<i32>(EXPECTED_H1_BIASES)?;
-    if hidden1_biases.len() != EXPECTED_H1_BIASES {
-        return Err(format!(
-            "Hidden layer 1 biases dimension mismatch: expected {}, got {}",
-            EXPECTED_H1_BIASES,
-            hidden1_biases.len()
-        )
-        .into());
-    }
-
-    // Read hidden layer 2
-    let hidden2_weights = reader.read_weights::<i8>(EXPECTED_H2_WEIGHTS)?;
-    if hidden2_weights.len() != EXPECTED_H2_WEIGHTS {
-        return Err(format!(
-            "Hidden layer 2 weights dimension mismatch: expected {}, got {}",
-            EXPECTED_H2_WEIGHTS,
-            hidden2_weights.len()
-        )
-        .into());
-    }
-
-    let hidden2_biases = reader.read_weights::<i32>(EXPECTED_H2_BIASES)?;
-    if hidden2_biases.len() != EXPECTED_H2_BIASES {
-        return Err(format!(
-            "Hidden layer 2 biases dimension mismatch: expected {}, got {}",
-            EXPECTED_H2_BIASES,
-            hidden2_biases.len()
-        )
-        .into());
-    }
-
-    // Read output layer
-    let output_weights = reader.read_weights::<i8>(EXPECTED_OUT_WEIGHTS)?;
-    if output_weights.len() != EXPECTED_OUT_WEIGHTS {
-        return Err(format!(
-            "Output layer weights dimension mismatch: expected {}, got {}",
-            EXPECTED_OUT_WEIGHTS,
-            output_weights.len()
-        )
-        .into());
-    }
-
-    let output_bias_vec = reader.read_weights::<i32>(EXPECTED_OUT_BIASES)?;
-    if output_bias_vec.len() != EXPECTED_OUT_BIASES {
-        return Err(format!(
-            "Output layer bias dimension mismatch: expected {}, got {}",
-            EXPECTED_OUT_BIASES,
-            output_bias_vec.len()
-        )
-        .into());
-    }
-    let output_bias = output_bias_vec[0];
-
-    // Create structures
-    let feature_transformer = FeatureTransformer {
-        weights: ft_weights,
-        biases: ft_biases,
-        acc_dim: FeatureTransformer::DEFAULT_DIM,
-    };
-
-    let network = Network {
-        hidden1_weights,
-        hidden1_biases,
-        hidden2_weights,
-        hidden2_biases,
-        output_weights,
-        output_bias,
-        input_dim: 512, // 256 x 2 (current classic)
-        h1_dim: 32,
-        h2_dim: 32,
-    };
-
-    Ok((feature_transformer, network))
 }
 
 /// Save NNUE weights to file (for testing)
@@ -286,14 +354,6 @@ pub fn save_weights(
     use std::io::{Seek, SeekFrom, Write};
 
     let mut file = File::create(path)?;
-
-    // Write header
-    let header = NNUEHeader {
-        magic: *b"NNUE",
-        version: 1,
-        architecture: HALFKP_256X2_32_32,
-        size: 0, // Will be updated later
-    };
 
     // Write header fields explicitly (LE), avoid transmute of struct layout
     file.write_all(b"NNUE")?;
@@ -371,6 +431,212 @@ mod tests {
 
         let result = load_weights(path);
         assert!(result.is_err());
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_v1_version_mismatch() {
+        use std::io::Write;
+        let path = "/tmp/test_nnue_v1_version.bin";
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&9999u32.to_le_bytes()).unwrap(); // unsupported version
+        f.write_all(&HALFKP_256X2_32_32.to_le_bytes()).unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap(); // header size only
+        drop(f);
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for unsupported version"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("Unsupported NNUE version"), "got: {}", s);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_v1_architecture_mismatch() {
+        use std::io::Write;
+        let path = "/tmp/test_nnue_v1_arch.bin";
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&0xDEAD_BEEFu32.to_le_bytes()).unwrap(); // wrong arch
+        f.write_all(&16u32.to_le_bytes()).unwrap();
+        drop(f);
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for v1 arch mismatch"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("Unsupported architecture for v1"), "got: {}", s);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_v1_size_mismatch() {
+        use std::io::Write;
+        let path = "/tmp/test_nnue_v1_size.bin";
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&HALFKP_256X2_32_32.to_le_bytes()).unwrap();
+        f.write_all(&999_999u32.to_le_bytes()).unwrap(); // wrong size
+        drop(f);
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected size mismatch error"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("file size mismatch"), "got: {}", s);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_v2_architecture_mismatch() {
+        use std::io::Write;
+        // Header + dims only to pass size==len check
+        let path = "/tmp/test_nnue_v2_arch.bin";
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&0xCAFEBABEu32.to_le_bytes()).unwrap(); // wrong arch for v2
+        f.write_all(&28u32.to_le_bytes()).unwrap(); // header + dims
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // acc
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // h1
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // h2
+        drop(f);
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for v2 arch mismatch"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("Unsupported architecture for v2"), "got: {}", s);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_v2_dims_zero_invalid() {
+        use std::io::Write;
+        let path = "/tmp/test_nnue_v2_dims_zero.bin";
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&HALFKP_X2_DYNAMIC.to_le_bytes()).unwrap();
+        f.write_all(&28u32.to_le_bytes()).unwrap(); // header + dims only
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // acc_dim = 0 -> invalid
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        drop(f);
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected dims invalid error"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("DimsInvalid"), "got: {}", s);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_v2_dims_exceed_max() {
+        use std::io::Write;
+        let path = "/tmp/test_nnue_v2_dims_exceed.bin";
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&HALFKP_X2_DYNAMIC.to_le_bytes()).unwrap();
+        f.write_all(&28u32.to_le_bytes()).unwrap(); // header + dims only
+        let too_big = super::ACC_DIM_MAX + 1;
+        f.write_all(&too_big.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        drop(f);
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected dims invalid error"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("DimsInvalid"), "got: {}", s);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_v2_size_mismatch_due_to_truncated_sections() {
+        use std::io::Write;
+        // Use tiny dims to keep file small
+        let acc_dim = 1u32;
+        let h1_dim = 1u32;
+        let h2_dim = 1u32;
+        let path = "/tmp/test_nnue_v2_size_mismatch.bin";
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&HALFKP_X2_DYNAMIC.to_le_bytes()).unwrap();
+        // We'll write header size equal to actual len (small), but dims imply much larger total
+        let body_stub_len = 28u32 + 16; // header + dims + 16 bytes only
+        f.write_all(&body_stub_len.to_le_bytes()).unwrap();
+        // dims
+        f.write_all(&acc_dim.to_le_bytes()).unwrap();
+        f.write_all(&h1_dim.to_le_bytes()).unwrap();
+        f.write_all(&h2_dim.to_le_bytes()).unwrap();
+        // write just a few bytes, far fewer than expected
+        f.write_all(&[0u8; 16]).unwrap();
+        drop(f);
+        let err = match load_weights(path) {
+            Err(e) => e,
+            Ok(_) => panic!("expected size mismatch error"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("SizeMismatch"), "got: {}", s);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_load_v2_zero_weights() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let acc_dim: usize = 256;
+        let h1_dim: usize = 32;
+        let h2_dim: usize = 32;
+        let input_dim = acc_dim * 2;
+
+        let path = "/tmp/test_nnue_v2.bin";
+        let mut f = File::create(path).unwrap();
+
+        // Header (v2, dynamic arch, size placeholder)
+        f.write_all(b"NNUE").unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&HALFKP_X2_DYNAMIC.to_le_bytes()).unwrap();
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // size placeholder
+
+        // Dims block (acc_dim, h1_dim, h2_dim)
+        f.write_all(&(acc_dim as u32).to_le_bytes()).unwrap();
+        f.write_all(&(h1_dim as u32).to_le_bytes()).unwrap();
+        f.write_all(&(h2_dim as u32).to_le_bytes()).unwrap();
+
+        // Sections in order
+        let ft_w = SHOGI_BOARD_SIZE * FE_END * acc_dim;
+        f.write_all(&vec![0u8; ft_w * 2]).unwrap(); // i16 -> 2 bytes
+        f.write_all(&vec![0u8; acc_dim * 4]).unwrap(); // i32 biases
+        f.write_all(&vec![0u8; input_dim * h1_dim]).unwrap(); // i8
+        f.write_all(&vec![0u8; h1_dim * 4]).unwrap(); // i32
+        f.write_all(&vec![0u8; h1_dim * h2_dim]).unwrap(); // i8
+        f.write_all(&vec![0u8; h2_dim * 4]).unwrap(); // i32
+        f.write_all(&vec![0u8; h2_dim]).unwrap(); // i8
+        f.write_all(&0i32.to_le_bytes()).unwrap(); // out bias
+
+        // Patch size
+        let size = f.seek(SeekFrom::End(0)).unwrap() as u32;
+        f.seek(SeekFrom::Start(12)).unwrap();
+        f.write_all(&size.to_le_bytes()).unwrap();
+        drop(f);
+
+        // Load and verify dims reflected
+        let (ft, net) = load_weights(path).unwrap();
+        assert_eq!(ft.acc_dim(), acc_dim);
+        assert_eq!(net.input_dim, input_dim);
+        assert_eq!(net.h1_dim, h1_dim);
+        assert_eq!(net.h2_dim, h2_dim);
 
         std::fs::remove_file(path).ok();
     }
