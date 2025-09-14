@@ -1313,19 +1313,6 @@ fn main() -> Result<()> {
                                         .current_root_hash
                                         .map(|h| h != state.position.zobrist_hash())
                                         .unwrap_or(false);
-                                    let _committed = if !stale {
-                                        Some(engine_core::search::CommittedIteration {
-                                            depth: result.stats.depth,
-                                            seldepth: result.stats.seldepth,
-                                            score: result.score,
-                                            pv: result.stats.pv.clone(),
-                                            node_type: result.node_type,
-                                            nodes: result.stats.nodes,
-                                            elapsed: result.stats.elapsed,
-                                        })
-                                    } else {
-                                        None
-                                    };
                                     finalize_and_send(
                                         &mut state,
                                         "stop_finalize",

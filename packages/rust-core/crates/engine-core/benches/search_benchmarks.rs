@@ -172,7 +172,7 @@ fn bench_tt_performance(c: &mut Criterion) {
             |b, &size_mb| {
                 let tt = engine_core::search::tt::TranspositionTable::new(size_mb);
                 let pos = Position::startpos();
-                let hash = pos.zobrist_hash;
+                let hash = pos.zobrist_hash();
 
                 // Pre-fill TT
                 for i in 0..1000 {
@@ -196,7 +196,7 @@ fn bench_tt_performance(c: &mut Criterion) {
             |b, &size_mb| {
                 let tt = engine_core::search::tt::TranspositionTable::new(size_mb);
                 let pos = Position::startpos();
-                let hash = pos.zobrist_hash;
+                let hash = pos.zobrist_hash();
 
                 // Pre-fill TT
                 for i in 0..1000 {
