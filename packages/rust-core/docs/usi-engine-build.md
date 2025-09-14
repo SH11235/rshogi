@@ -14,13 +14,13 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release
 - NNUE 重みは `setoption name EvalFile value /path/to/weights.nnue`。
 
 ## フィーチャー（engine-usi → engine-core 伝播）
-- 既定ON
-  - `nnue-diff` → `engine-core/nnue_single_diff`（SINGLE 差分NNUE）
 - 任意ON（用途別）
   - `fast-fma` → `engine-core/nnue_fast_fma`（FMAで加算高速化、丸め微差を許容）
   - `diff-agg-hash` → `engine-core/diff_agg_hash`（差分集計のHashMap実装をA/B）
   - `nnue-telemetry` → `engine-core/nnue_telemetry`（軽量テレメトリ）
   - `tt-metrics`, `ybwc`, `nightly`（必要に応じて）
+
+注: `nnue_single_diff`（SINGLE 差分NNUE）は恒久化され、常時有効です。ビルド時の切替は不要になりました。
 
 ### 例
 ```bash

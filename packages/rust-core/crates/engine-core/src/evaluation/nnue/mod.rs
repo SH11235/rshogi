@@ -39,7 +39,6 @@ pub mod features;
 pub mod network;
 pub mod simd;
 pub mod single;
-#[cfg(feature = "nnue_single_diff")]
 pub mod single_state;
 pub mod weights;
 
@@ -55,9 +54,6 @@ pub fn enabled_features_str() -> String {
     }
     if cfg!(feature = "ybwc") {
         v.push("ybwc");
-    }
-    if cfg!(feature = "nnue_single_diff") {
-        v.push("nnue_single_diff");
     }
     if cfg!(feature = "nnue_telemetry") {
         v.push("nnue_telemetry");
@@ -257,7 +253,6 @@ enum Backend {
     },
     Single {
         net: std::sync::Arc<single::SingleChannelNet>,
-        #[cfg(feature = "nnue_single_diff")]
         acc_stack: Vec<single_state::SingleAcc>,
     },
 }
@@ -317,7 +312,6 @@ impl NNUEEvaluatorWrapper {
             Backend::Single { net, .. } => Self {
                 backend: Backend::Single {
                     net: net.clone(),
-                    #[cfg(feature = "nnue_single_diff")]
                     acc_stack: Vec::new(),
                 },
                 // 初期状態は None（evaluate は acc 不在→フル経路）
@@ -348,7 +342,6 @@ impl NNUEEvaluatorWrapper {
             return Ok(NNUEEvaluatorWrapper {
                 backend: Backend::Single {
                     net: std::sync::Arc::new(net),
-                    #[cfg(feature = "nnue_single_diff")]
                     acc_stack: Vec::new(),
                 },
                 // set_position まで評価で Acc を使わない安全側にする
@@ -366,7 +359,6 @@ impl NNUEEvaluatorWrapper {
         NNUEEvaluatorWrapper {
             backend: Backend::Single {
                 net: std::sync::Arc::new(net),
-                #[cfg(feature = "nnue_single_diff")]
                 acc_stack: Vec::new(),
             },
             tracked_hash: None,
@@ -374,7 +366,6 @@ impl NNUEEvaluatorWrapper {
     }
 
     /// SINGLE 用: 現在ノードの Acc スナップショットを返す
-    #[cfg(feature = "nnue_single_diff")]
     #[must_use]
     pub fn snapshot_single(&self) -> Option<single_state::SingleAcc> {
         if let Backend::Single { acc_stack, .. } = &self.backend {
@@ -385,7 +376,6 @@ impl NNUEEvaluatorWrapper {
     }
 
     /// SINGLE 用: 指定の Acc を現在ノードとして復元し、tracked_hash を pos に合わせる
-    #[cfg(feature = "nnue_single_diff")]
     #[track_caller]
     pub fn restore_single_at(&mut self, pos: &Position, acc: single_state::SingleAcc) {
         if let Backend::Single { net, acc_stack, .. } = &mut self.backend {
@@ -465,44 +455,29 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 tmp.refresh(pos, evaluator.feature_transformer());
                 evaluator.evaluate_with_accumulator(pos, &tmp)
             }
-            Backend::Single {
-                net,
-                #[cfg(feature = "nnue_single_diff")]
-                acc_stack,
-            } => {
-                #[cfg(feature = "nnue_single_diff")]
-                {
-                    let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
-                    if use_acc {
-                        if let Some(acc) = acc_stack.last() {
-                            #[cfg(feature = "nnue_telemetry")]
-                            telemetry::record_acc_eval();
-                            return net
-                                .evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move));
-                        } else {
-                            #[cfg(feature = "nnue_telemetry")]
-                            telemetry::record_fb_acc_empty();
-                            // 安全側：フォールバック計数は増やさず、直接評価して返す（テストの安定化）
-                            return net.evaluate(pos);
-                        }
+            Backend::Single { net, acc_stack } => {
+                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
+                if use_acc {
+                    if let Some(acc) = acc_stack.last() {
+                        #[cfg(feature = "nnue_telemetry")]
+                        telemetry::record_acc_eval();
+                        return net.evaluate_from_accumulator_pre(acc.acc_for(pos.side_to_move));
                     } else {
                         #[cfg(feature = "nnue_telemetry")]
-                        telemetry::record_fb_hash_mismatch();
+                        telemetry::record_fb_acc_empty();
+                        // 安全側：直接評価
+                        return net.evaluate(pos);
                     }
+                } else {
+                    #[cfg(feature = "nnue_telemetry")]
+                    telemetry::record_fb_hash_mismatch();
                 }
-                #[cfg(all(not(feature = "nnue_single_diff"), feature = "nnue_telemetry"))]
-                telemetry::record_fb_feature_off();
 
-                #[cold]
-                #[inline(never)]
-                fn eval_fallback(net: &single::SingleChannelNet, pos: &Position) -> i32 {
-                    net.evaluate(pos)
-                }
                 #[cfg(test)]
                 {
                     SINGLE_FALLBACK_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                eval_fallback(net, pos)
+                net.evaluate(pos)
             }
         }
     }
@@ -522,26 +497,17 @@ impl NNUEEvaluatorWrapper {
                 accumulator_stack.push(acc);
                 self.tracked_hash = Some(pos.zobrist_hash);
             }
-            Backend::Single {
-                net,
-                #[cfg(feature = "nnue_single_diff")]
-                acc_stack,
-            } => {
-                #[cfg(not(feature = "nnue_single_diff"))]
-                let _ = net; // silence unused when feature disabled
-                #[cfg(feature = "nnue_single_diff")]
-                {
-                    acc_stack.clear();
-                    acc_stack.push(single_state::SingleAcc::refresh(pos, net));
-                }
+            Backend::Single { net, acc_stack } => {
+                acc_stack.clear();
+                acc_stack.push(single_state::SingleAcc::refresh(pos, net));
                 self.tracked_hash = Some(pos.zobrist_hash);
             }
         }
     }
 
     /// Hook: do_move（増分）。
-    /// - feature=nnue_single_diff 有効時の Single は差分更新を行う
-    /// - それ以外は安全側にフォールバック
+    /// - Single は差分更新を行う（常時有効）
+    /// - Classic は安全側フォールバックを併用
     pub fn do_move(&mut self, pos: &Position, mv: Move) -> NNUEResult<()> {
         match &mut self.backend {
             Backend::Classic {
@@ -571,36 +537,27 @@ impl NNUEEvaluatorWrapper {
                 self.tracked_hash = None;
                 Ok(())
             }
-            Backend::Single {
-                net,
-                #[cfg(feature = "nnue_single_diff")]
-                acc_stack,
-            } => {
-                #[cfg(not(feature = "nnue_single_diff"))]
-                let _ = net; // silence unused when feature disabled
-                #[cfg(feature = "nnue_single_diff")]
-                {
-                    // Null move: Acc は変更しない（複製して積むだけ）
-                    if mv.is_null() {
-                        if let Some(cur) = acc_stack.last().cloned() {
-                            acc_stack.push(cur);
-                        } else {
-                            acc_stack.push(single_state::SingleAcc::refresh(pos, net));
-                        }
-                        self.tracked_hash = None;
-                        return Ok(());
-                    }
-                    let current = acc_stack.last().cloned();
-                    if let Some(cur) = current {
-                        let next = single_state::SingleAcc::apply_update(&cur, pos, mv, net);
-                        acc_stack.push(next);
+            Backend::Single { net, acc_stack } => {
+                // Null move: Acc は変更しない（複製して積むだけ）
+                if mv.is_null() {
+                    if let Some(cur) = acc_stack.last().cloned() {
+                        acc_stack.push(cur);
                     } else {
-                        // 初回 do_move で acc_stack が空の場合でも、
-                        // 子局面の Acc を積む（親局面ではなく post で初期化）。
-                        let mut post = pos.clone();
-                        let _u = post.do_move(mv);
-                        acc_stack.push(single_state::SingleAcc::refresh(&post, net));
+                        acc_stack.push(single_state::SingleAcc::refresh(pos, net));
                     }
+                    self.tracked_hash = None;
+                    return Ok(());
+                }
+                let current = acc_stack.last().cloned();
+                if let Some(cur) = current {
+                    let next = single_state::SingleAcc::apply_update(&cur, pos, mv, net);
+                    acc_stack.push(next);
+                } else {
+                    // 初回 do_move で acc_stack が空の場合でも、
+                    // 子局面の Acc を積む（親局面ではなく post で初期化）。
+                    let mut post = pos.clone();
+                    let _u = post.do_move(mv);
+                    acc_stack.push(single_state::SingleAcc::refresh(&post, net));
                 }
                 self.tracked_hash = None;
                 Ok(())
@@ -624,18 +581,11 @@ impl NNUEEvaluatorWrapper {
                 }
                 self.tracked_hash = None;
             }
-            Backend::Single {
-                #[cfg(feature = "nnue_single_diff")]
-                acc_stack,
-                ..
-            } => {
-                #[cfg(feature = "nnue_single_diff")]
-                {
-                    #[cfg(debug_assertions)]
-                    debug_assert!(!acc_stack.is_empty(), "undo_move called with empty acc_stack");
-                    if acc_stack.len() > 1 {
-                        acc_stack.pop();
-                    }
+            Backend::Single { acc_stack, .. } => {
+                #[cfg(debug_assertions)]
+                debug_assert!(!acc_stack.is_empty(), "undo_move called with empty acc_stack");
+                if acc_stack.len() > 1 {
+                    acc_stack.pop();
                 }
                 self.tracked_hash = None;
             }
@@ -718,7 +668,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_refresh_matches_direct_evaluate() {
         use crate::shogi::SHOGI_BOARD_SIZE;
         let n_feat = SHOGI_BOARD_SIZE * super::features::FE_END;
@@ -757,7 +706,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_apply_update_matches_refresh_trivial() {
         use crate::shogi::SHOGI_BOARD_SIZE;
         let n_feat = SHOGI_BOARD_SIZE * super::features::FE_END;
@@ -794,7 +742,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_drop_update_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -828,7 +775,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_capture_update_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -873,7 +819,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_promotion_update_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -921,7 +866,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_king_move_refresh_fallback_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -959,7 +903,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_two_step_update_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -1009,7 +952,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_capture_promoted_to_hand_update_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -1056,7 +998,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_wrapper_chain_matches_direct_eval() {
         use crate::usi::parse_usi_square;
 
@@ -1105,7 +1046,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_drop_two_times_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -1159,7 +1099,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_non_promotion_update_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -1207,7 +1146,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_wrapper_fallback_on_mismatch() {
         use crate::usi::parse_usi_square;
 
@@ -1255,7 +1193,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_random_chain_matches_refresh() {
         use crate::movegen::MoveGenerator;
         use rand::{RngCore, SeedableRng};
@@ -1301,7 +1238,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_null_move_keeps_acc_and_matches_refresh() {
         use crate::usi::parse_usi_square;
 
@@ -1351,7 +1287,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_thread_local_acc_parallel_smoke() {
         use crate::movegen::MoveGenerator;
         use crossbeam::scope;
@@ -1426,7 +1361,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_refresh_with_no_bias_b0_none() {
         use crate::usi::parse_usi_square;
 
@@ -1457,7 +1391,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_restore_mismatched_uid_triggers_refresh() {
         // two nets with same shape but different uid
         let n_feat = crate::shogi::SHOGI_BOARD_SIZE * super::features::FE_END;
@@ -1496,7 +1429,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nnue_single_diff")]
     fn test_single_eval_clamps_to_bounds() {
         // Design a tiny net that saturates beyond clip
         let d = 1usize;
