@@ -246,10 +246,12 @@ impl NNUEEvaluator {
 }
 
 /// Wrapper for integration with Phase 1 Evaluator trait
+#[allow(clippy::large_enum_variant)]
 enum Backend {
     Classic {
         evaluator: NNUEEvaluator,
         accumulator_stack: Vec<Accumulator>,
+        delta_scratch: accumulator::AccumulatorDelta,
     },
     Single {
         net: std::sync::Arc<single::SingleChannelNet>,
@@ -304,6 +306,12 @@ impl NNUEEvaluatorWrapper {
                     backend: Backend::Classic {
                         evaluator: evaluator.clone(),
                         accumulator_stack: Vec::new(),
+                        delta_scratch: accumulator::AccumulatorDelta {
+                            removed_b: smallvec::SmallVec::new(),
+                            added_b: smallvec::SmallVec::new(),
+                            removed_w: smallvec::SmallVec::new(),
+                            added_w: smallvec::SmallVec::new(),
+                        },
                     },
                     // 初期状態は None（evaluate はスタック空→フル再構築）
                     tracked_hash: None,
@@ -333,6 +341,12 @@ impl NNUEEvaluatorWrapper {
                 backend: Backend::Classic {
                     evaluator,
                     accumulator_stack: vec![initial_acc],
+                    delta_scratch: accumulator::AccumulatorDelta {
+                        removed_b: smallvec::SmallVec::new(),
+                        added_b: smallvec::SmallVec::new(),
+                        removed_w: smallvec::SmallVec::new(),
+                        added_w: smallvec::SmallVec::new(),
+                    },
                 },
                 // set_position まで評価で Acc を使わない安全側にする
                 tracked_hash: Some(u64::MAX),
@@ -406,6 +420,12 @@ impl NNUEEvaluatorWrapper {
             backend: Backend::Classic {
                 evaluator,
                 accumulator_stack: vec![initial_acc],
+                delta_scratch: accumulator::AccumulatorDelta {
+                    removed_b: smallvec::SmallVec::new(),
+                    added_b: smallvec::SmallVec::new(),
+                    removed_w: smallvec::SmallVec::new(),
+                    added_w: smallvec::SmallVec::new(),
+                },
             },
             // set_position まで評価で Acc を使わない安全側にする
             tracked_hash: Some(u64::MAX),
@@ -419,6 +439,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
             Backend::Classic {
                 evaluator,
                 accumulator_stack,
+                ..
             } => {
                 // 初期状態（fork_stateless 直後などでスタック空）は常にフル再構築
                 if accumulator_stack.is_empty() {
@@ -490,6 +511,7 @@ impl NNUEEvaluatorWrapper {
             Backend::Classic {
                 evaluator,
                 accumulator_stack,
+                ..
             } => {
                 accumulator_stack.clear();
                 let mut acc = Accumulator::new();
@@ -513,6 +535,7 @@ impl NNUEEvaluatorWrapper {
             Backend::Classic {
                 evaluator,
                 accumulator_stack,
+                delta_scratch,
             } => {
                 // Null move: Acc は変更しない（複製して積むだけ）
                 if mv.is_null() {
@@ -528,11 +551,22 @@ impl NNUEEvaluatorWrapper {
                 }
                 let current_acc =
                     accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
-                let mut new_acc = current_acc.clone();
-                let update = accumulator::calculate_update(pos, mv)?;
-                new_acc.update(&update, Color::Black, &evaluator.feature_transformer);
-                new_acc.update(&update, Color::White, &evaluator.feature_transformer);
-                accumulator_stack.push(new_acc);
+                match accumulator::calculate_update_into(delta_scratch, pos, mv)? {
+                    accumulator::UpdateOp::Delta => {
+                        let mut new_acc = current_acc.clone();
+                        new_acc.update(delta_scratch, Color::Black, &evaluator.feature_transformer);
+                        new_acc.update(delta_scratch, Color::White, &evaluator.feature_transformer);
+                        accumulator_stack.push(new_acc);
+                    }
+                    accumulator::UpdateOp::FullRefresh => {
+                        // 安全側: 子局面でフル再構築
+                        let mut post = pos.clone();
+                        let _u = post.do_move(mv);
+                        let mut acc = accumulator::Accumulator::new();
+                        acc.refresh(&post, &evaluator.feature_transformer);
+                        accumulator_stack.push(acc);
+                    }
+                }
                 // Classic は子局面に同期済みなので、ハッシュを無効化（安全側）。
                 self.tracked_hash = None;
                 Ok(())
