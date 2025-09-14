@@ -205,7 +205,7 @@ impl Network {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    // use std::time::Instant; // benches removed
 
     #[test]
     fn test_network_zero() {

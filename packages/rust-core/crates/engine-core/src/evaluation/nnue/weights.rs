@@ -54,66 +54,32 @@ pub struct WeightReader {
 }
 
 /// Errors that can occur while loading NNUE weight files
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum WeightsError {
+    #[error("Invalid NNUE file magic")]
     InvalidMagic,
+    #[error("Unsupported NNUE version: {found}, supported range: {min}-{max}")]
     UnsupportedVersion { found: u32, min: u32, max: u32 },
+    #[error("Unsupported architecture for v1: 0x{0:08X}")]
     UnsupportedArchitectureV1(u32),
+    #[error("Unsupported architecture for v2: 0x{0:08X}")]
     UnsupportedArchitectureV2(u32),
+    #[error("NNUE file too large: {size} bytes, maximum: {max} bytes")]
     SizeTooLarge { size: u64, max: u64 },
+    #[error("SizeMismatch(v1): expected {expected}, actual {actual}")]
     SizeMismatchV1 { expected: u64, actual: u64 },
+    #[error("SizeMismatch(v2): expected {expected} bytes, actual {actual} bytes")]
     SizeMismatchV2 { expected: u64, actual: u64 },
+    #[error("DimsInvalid: zero or exceeds maximum")]
     DimsInvalid,
+    #[error("DimsInconsistent: {0}")]
     DimsInconsistent(&'static str),
+    #[error("SectionTruncated: {0}")]
     SectionTruncated(&'static str),
+    #[error("Overflow: {0}")]
     Overflow(&'static str),
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for WeightsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WeightsError::InvalidMagic => write!(f, "Invalid NNUE file magic"),
-            WeightsError::UnsupportedVersion { found, min, max } => {
-                write!(f, "Unsupported NNUE version: {}, supported range: {}-{}", found, min, max)
-            }
-            WeightsError::UnsupportedArchitectureV1(a) => {
-                write!(f, "Unsupported architecture for v1: 0x{a:08X}")
-            }
-            WeightsError::UnsupportedArchitectureV2(a) => {
-                write!(f, "Unsupported architecture for v2: 0x{a:08X}")
-            }
-            WeightsError::SizeTooLarge { size, max } => {
-                write!(f, "NNUE file too large: {} bytes, maximum: {} bytes", size, max)
-            }
-            WeightsError::SizeMismatchV1 { expected, actual } => {
-                write!(f, "SizeMismatch(v1): expected {}, actual {}", expected, actual)
-            }
-            WeightsError::SizeMismatchV2 { expected, actual } => {
-                write!(f, "SizeMismatch(v2): expected {} bytes, actual {} bytes", expected, actual)
-            }
-            WeightsError::DimsInvalid => write!(f, "DimsInvalid: zero or exceeds maximum"),
-            WeightsError::DimsInconsistent(m) => write!(f, "DimsInconsistent: {m}"),
-            WeightsError::SectionTruncated(m) => write!(f, "SectionTruncated: {m}"),
-            WeightsError::Overflow(m) => write!(f, "Overflow: {m}"),
-            WeightsError::Io(e) => write!(f, "IO error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for WeightsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            WeightsError::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for WeightsError {
-    fn from(e: std::io::Error) -> Self {
-        WeightsError::Io(e)
-    }
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 /// Marker trait restricting generic weight-reading helpers to plain-old-data integer types.
@@ -899,10 +865,7 @@ mod tests {
 
 // Endianness-aware float reader for SINGLE weights
 #[cfg(target_endian = "little")]
-fn read_f32_vec(
-    r: &mut std::io::Cursor<&[u8]>,
-    n: usize,
-) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+fn read_f32_vec(r: &mut std::io::Cursor<&[u8]>, n: usize) -> Result<Vec<f32>, std::io::Error> {
     let mut out = vec![0f32; n];
     // Safe: direct byte copy on little-endian targets
     let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
@@ -911,10 +874,7 @@ fn read_f32_vec(
 }
 
 #[cfg(not(target_endian = "little"))]
-fn read_f32_vec(
-    r: &mut std::io::Cursor<&[u8]>,
-    n: usize,
-) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+fn read_f32_vec(r: &mut std::io::Cursor<&[u8]>, n: usize) -> Result<Vec<f32>, std::io::Error> {
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let mut b = [0u8; 4];
@@ -925,9 +885,29 @@ fn read_f32_vec(
 }
 
 /// Try to load SINGLE_CHANNEL (Version 2) weights with text header (trainer format)
+#[derive(thiserror::Error, Debug)]
+pub enum SingleWeightsError {
+    #[error("SINGLE_CHANNEL header not found")]
+    HeaderNotFound,
+    #[error("Malformed SINGLE_CHANNEL header (no newline)")]
+    HeaderMalformed,
+    #[error("Invalid SINGLE_CHANNEL dims")]
+    InvalidDims,
+    #[error("SINGLE_CHANNEL size overflow")]
+    SizeOverflow,
+    #[error("SINGLE_CHANNEL size mismatch: rem={rem} (expect {with_b0} with b0 or {without_b0} without b0)")]
+    SizeMismatch {
+        rem: usize,
+        with_b0: usize,
+        without_b0: usize,
+    },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
 pub fn load_single_weights(
     path: &str,
-) -> Result<super::single::SingleChannelNet, Box<dyn std::error::Error>> {
+) -> Result<super::single::SingleChannelNet, SingleWeightsError> {
     use std::fs;
     let data = fs::read(path)?;
     // Find END_HEADER
@@ -935,14 +915,14 @@ pub fn load_single_weights(
     let hdr_pos = data
         .windows(hdr_tag.len())
         .position(|w| w == hdr_tag)
-        .ok_or_else(|| "SINGLE_CHANNEL header not found".to_string())?;
+        .ok_or(SingleWeightsError::HeaderNotFound)?;
     // Find newline after END_HEADER
     let mut i = hdr_pos + hdr_tag.len();
     while i < data.len() && data[i] != b'\n' {
         i += 1;
     }
     if i >= data.len() {
-        return Err("Malformed SINGLE_CHANNEL header (no newline)".into());
+        return Err(SingleWeightsError::HeaderMalformed);
     }
     let bin_off = i + 1;
 
@@ -954,7 +934,7 @@ pub fn load_single_weights(
     rdr.read_exact(&mut u4)?;
     let acc_dim = u32::from_le_bytes(u4) as usize;
     if input_dim == 0 || acc_dim == 0 {
-        return Err("Invalid SINGLE_CHANNEL dims".into());
+        return Err(SingleWeightsError::InvalidDims);
     }
 
     #[cfg(debug_assertions)]
@@ -975,31 +955,31 @@ pub fn load_single_weights(
     let bytes_w0 = input_dim
         .checked_mul(acc_dim)
         .and_then(|v| v.checked_mul(4))
-        .ok_or("SINGLE_CHANNEL size overflow")?;
-    let bytes_b0 = acc_dim.checked_mul(4).ok_or("SINGLE_CHANNEL size overflow")?;
-    let bytes_w2 = acc_dim.checked_mul(4).ok_or("SINGLE_CHANNEL size overflow")?;
+        .ok_or(SingleWeightsError::SizeOverflow)?;
+    let bytes_b0 = acc_dim.checked_mul(4).ok_or(SingleWeightsError::SizeOverflow)?;
+    let bytes_w2 = acc_dim.checked_mul(4).ok_or(SingleWeightsError::SizeOverflow)?;
     let bytes_b2 = 4usize;
 
     let need_with_b0 = bytes_w0
         .checked_add(bytes_b0)
         .and_then(|v| v.checked_add(bytes_w2))
         .and_then(|v| v.checked_add(bytes_b2))
-        .ok_or("SINGLE_CHANNEL size overflow")?;
+        .ok_or(SingleWeightsError::SizeOverflow)?;
     let need_without_b0 = bytes_w0
         .checked_add(bytes_w2)
         .and_then(|v| v.checked_add(bytes_b2))
-        .ok_or("SINGLE_CHANNEL size overflow")?;
+        .ok_or(SingleWeightsError::SizeOverflow)?;
 
     let has_b0 = if bytes_after_dims == need_with_b0 {
         true
     } else if bytes_after_dims == need_without_b0 {
         false
     } else {
-        return Err(format!(
-            "SINGLE_CHANNEL size mismatch: rem={} (expect {} with b0 or {} without b0)",
-            bytes_after_dims, need_with_b0, need_without_b0
-        )
-        .into());
+        return Err(SingleWeightsError::SizeMismatch {
+            rem: bytes_after_dims,
+            with_b0: need_with_b0,
+            without_b0: need_without_b0,
+        });
     };
 
     let w0 = read_f32_vec(&mut rdr, input_dim * acc_dim)?;
