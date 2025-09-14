@@ -607,11 +607,12 @@ mod tests {
         }
 
         // Assign distinct values for black perspective only for this test
+        // Use different constants so net delta is non-zero
         for &f in delta.removed_b.iter() {
-            fill_row(&mut transformer, f, 1);
+            fill_row(&mut transformer, f, 2);
         }
         for &f in delta.added_b.iter() {
-            fill_row(&mut transformer, f, 1);
+            fill_row(&mut transformer, f, 3);
         }
 
         let mut acc0 = Accumulator::new();

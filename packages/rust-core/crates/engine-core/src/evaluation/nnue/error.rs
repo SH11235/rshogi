@@ -5,6 +5,7 @@
 use std::error::Error;
 use std::fmt;
 
+use super::weights::WeightsError;
 use crate::{Color, Square};
 
 /// NNUE-specific errors
@@ -66,6 +67,38 @@ impl Error for NNUEError {}
 impl From<std::io::Error> for NNUEError {
     fn from(err: std::io::Error) -> Self {
         NNUEError::IoError(err.to_string())
+    }
+}
+
+/// Convert weight-loading errors into NNUEError (for unified handling)
+impl From<WeightsError> for NNUEError {
+    fn from(e: WeightsError) -> Self {
+        match e {
+            WeightsError::Io(ioe) => NNUEError::IoError(ioe.to_string()),
+            WeightsError::InvalidMagic => NNUEError::InvalidFormat("invalid magic".into()),
+            WeightsError::UnsupportedVersion { found, min, max } => NNUEError::InvalidFormat(
+                format!("unsupported version: {}, supported {}-{}", found, min, max),
+            ),
+            WeightsError::UnsupportedArchitectureV1(a)
+            | WeightsError::UnsupportedArchitectureV2(a) => {
+                NNUEError::InvalidFormat(format!("unsupported architecture: 0x{a:08X}"))
+            }
+            WeightsError::SizeTooLarge { size, max } => {
+                NNUEError::InvalidFormat(format!("file too large: {} (max {})", size, max))
+            }
+            WeightsError::SizeMismatchV1 { expected, actual }
+            | WeightsError::SizeMismatchV2 { expected, actual } => NNUEError::InvalidFormat(
+                format!("size mismatch: expected {}, actual {}", expected, actual),
+            ),
+            WeightsError::DimsInvalid => NNUEError::InvalidFormat("invalid dims".into()),
+            WeightsError::DimsInconsistent(m) => {
+                NNUEError::InvalidFormat(format!("dims inconsistent: {m}"))
+            }
+            WeightsError::SectionTruncated(m) => {
+                NNUEError::InvalidFormat(format!("section truncated: {m}"))
+            }
+            WeightsError::Overflow(m) => NNUEError::InvalidFormat(format!("overflow: {m}")),
+        }
     }
 }
 

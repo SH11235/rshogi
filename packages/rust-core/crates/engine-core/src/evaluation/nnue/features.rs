@@ -220,7 +220,12 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
             let mut bb = pos.board.piece_bb[color as usize][pt as usize];
 
             while let Some(sq) = bb.pop_lsb() {
-                let piece = Piece::new(pt, color);
+                // Respect promotion state recorded on the board
+                let is_promoted = pos.board.promoted_bb.test(sq);
+                let mut piece = Piece::new(pt, color);
+                if is_promoted && pt.can_promote() {
+                    piece = piece.promote();
+                }
 
                 // Adjust for perspective
                 let (piece_adj, sq_adj) = if perspective == Color::Black {
