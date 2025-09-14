@@ -1,6 +1,7 @@
 //! NNUE (Efficiently Updatable Neural Network) evaluation function
 //!
-//! Implements HalfKP 256x2-32-32 architecture with incremental updates
+//! Implements NNUE with HalfKP features. Classic weights (v1) use 256x2-32-32-1.
+//! Version 2 (v2) supports dynamic dimensions specified in the weight file header.
 //!
 //! # Architecture Overview
 //!
@@ -41,6 +42,16 @@ pub mod simd;
 pub mod single;
 pub mod single_state;
 pub mod weights;
+use crate::shogi::Move;
+use crate::{Color, Position};
+
+use super::evaluate::Evaluator;
+use accumulator::Accumulator;
+use error::{NNUEError, NNUEResult};
+use network::Network;
+use std::error::Error;
+use std::sync::Arc;
+use weights::{load_single_weights, load_weights};
 
 /// エンジン側の有効feature一覧（ベンチレポート用）
 #[inline]
@@ -67,6 +78,9 @@ pub fn enabled_features_str() -> String {
     if cfg!(feature = "nightly") {
         v.push("nightly");
     }
+    // acc_dim の軽い可視化（ランタイム決定: v1=256 / v2=dims）
+    v.push("acc_dim=runtime");
+
     // 補助ログ: x86/x86_64 の SIMD 検出結果
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -165,23 +179,14 @@ pub mod telemetry {
     }
 }
 
-use crate::shogi::Move;
-use crate::{Color, Position};
-
-use super::evaluate::Evaluator;
-use accumulator::Accumulator;
-use error::{NNUEError, NNUEResult};
-use network::Network;
-use std::error::Error;
-use std::sync::Arc;
-use weights::{load_single_weights, load_weights};
-
 /// Scale factor for converting network output to centipawns
 ///
 /// The NNUE network outputs values in a higher resolution internal scale.
 /// This factor is used to scale up the network output before final normalization.
 /// The value 16 is chosen to provide sufficient precision while avoiding overflow.
-const FV_SCALE: i32 = 16;
+// When propagate() returns a Q16 fixed-point like integer, we only need to
+// right-shift by 16 to convert to centipawns. Keep the numerator at 1.
+const FV_SCALE: i32 = 1;
 
 /// Output scaling shift: right shift by 16 bits to normalize the scaled output
 ///
@@ -206,9 +211,19 @@ pub struct NNUEEvaluator {
 }
 
 impl NNUEEvaluator {
+    /// Create new NNUE evaluator from weights file (typed error)
+    pub fn from_file_typed(path: &str) -> NNUEResult<Self> {
+        let (feature_transformer, network) = load_weights(path)?;
+        Ok(NNUEEvaluator {
+            feature_transformer: Arc::new(feature_transformer),
+            network: Arc::new(network),
+        })
+    }
+
     /// Create new NNUE evaluator from weights file
     pub fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {
-        let (feature_transformer, network) = load_weights(path)?;
+        let (feature_transformer, network) =
+            load_weights(path).map_err(|e| -> Box<dyn Error> { Box::new(e) })?;
         Ok(NNUEEvaluator {
             feature_transformer: Arc::new(feature_transformer),
             network: Arc::new(network),
@@ -246,10 +261,13 @@ impl NNUEEvaluator {
 }
 
 /// Wrapper for integration with Phase 1 Evaluator trait
+// Classic は delta_scratch を by-value で保持し、fork 時の alloc を避ける（NPS 優先）。
+#[allow(clippy::large_enum_variant)]
 enum Backend {
     Classic {
         evaluator: NNUEEvaluator,
         accumulator_stack: Vec<Accumulator>,
+        delta_scratch: accumulator::AccumulatorDelta,
     },
     Single {
         net: std::sync::Arc<single::SingleChannelNet>,
@@ -296,6 +314,46 @@ pub fn reset_single_fallback_hits() {
 }
 
 impl NNUEEvaluatorWrapper {
+    /// Create new wrapper from weights file (typed error)
+    pub fn new_typed(weights_path: &str) -> NNUEResult<Self> {
+        match load_weights(weights_path) {
+            Ok((ft, net)) => {
+                let evaluator = NNUEEvaluator {
+                    feature_transformer: std::sync::Arc::new(ft),
+                    network: std::sync::Arc::new(net),
+                };
+                let mut initial_acc = Accumulator::new();
+                let empty_pos = Position::empty();
+                initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
+                Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Classic {
+                        evaluator,
+                        accumulator_stack: vec![initial_acc],
+                        delta_scratch: accumulator::AccumulatorDelta {
+                            removed_b: smallvec::SmallVec::new(),
+                            added_b: smallvec::SmallVec::new(),
+                            removed_w: smallvec::SmallVec::new(),
+                            added_w: smallvec::SmallVec::new(),
+                        },
+                    },
+                    tracked_hash: Some(u64::MAX),
+                })
+            }
+            Err(classic_err) => match load_single_weights(weights_path) {
+                Ok(net) => Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Single {
+                        net: std::sync::Arc::new(net),
+                        acc_stack: Vec::new(),
+                    },
+                    tracked_hash: Some(u64::MAX),
+                }),
+                Err(single_err) => Err(NNUEError::BothWeightsLoadFailed {
+                    classic: classic_err,
+                    single: single_err,
+                }),
+            },
+        }
+    }
     /// 現在の重みを共有しつつ、状態（acc_stack/tracked_hash）のない新インスタンスを作る
     pub fn fork_stateless(&self) -> Self {
         match &self.backend {
@@ -304,6 +362,12 @@ impl NNUEEvaluatorWrapper {
                     backend: Backend::Classic {
                         evaluator: evaluator.clone(),
                         accumulator_stack: Vec::new(),
+                        delta_scratch: accumulator::AccumulatorDelta {
+                            removed_b: smallvec::SmallVec::new(),
+                            added_b: smallvec::SmallVec::new(),
+                            removed_w: smallvec::SmallVec::new(),
+                            added_w: smallvec::SmallVec::new(),
+                        },
                     },
                     // 初期状態は None（evaluate はスタック空→フル再構築）
                     tracked_hash: None,
@@ -321,34 +385,44 @@ impl NNUEEvaluatorWrapper {
     }
     /// Create new wrapper from weights file
     pub fn new(weights_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        if let Ok((ft, net)) = load_weights(weights_path) {
-            let evaluator = NNUEEvaluator {
-                feature_transformer: std::sync::Arc::new(ft),
-                network: std::sync::Arc::new(net),
-            };
-            let mut initial_acc = Accumulator::new();
-            let empty_pos = Position::empty();
-            initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
-            return Ok(NNUEEvaluatorWrapper {
-                backend: Backend::Classic {
-                    evaluator,
-                    accumulator_stack: vec![initial_acc],
-                },
-                // set_position まで評価で Acc を使わない安全側にする
-                tracked_hash: Some(u64::MAX),
-            });
+        // Try classic first and capture error for later reporting if needed
+        match load_weights(weights_path) {
+            Ok((ft, net)) => {
+                let evaluator = NNUEEvaluator {
+                    feature_transformer: std::sync::Arc::new(ft),
+                    network: std::sync::Arc::new(net),
+                };
+                let mut initial_acc = Accumulator::new();
+                let empty_pos = Position::empty();
+                initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
+                Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Classic {
+                        evaluator,
+                        accumulator_stack: vec![initial_acc],
+                        delta_scratch: accumulator::AccumulatorDelta {
+                            removed_b: smallvec::SmallVec::new(),
+                            added_b: smallvec::SmallVec::new(),
+                            removed_w: smallvec::SmallVec::new(),
+                            added_w: smallvec::SmallVec::new(),
+                        },
+                    },
+                    tracked_hash: Some(u64::MAX),
+                })
+            }
+            Err(classic_err) => match load_single_weights(weights_path) {
+                Ok(net) => Ok(NNUEEvaluatorWrapper {
+                    backend: Backend::Single {
+                        net: std::sync::Arc::new(net),
+                        acc_stack: Vec::new(),
+                    },
+                    tracked_hash: Some(u64::MAX),
+                }),
+                Err(single_err) => Err(Box::new(NNUEError::BothWeightsLoadFailed {
+                    classic: classic_err,
+                    single: single_err,
+                })),
+            },
         }
-        if let Ok(net) = load_single_weights(weights_path) {
-            return Ok(NNUEEvaluatorWrapper {
-                backend: Backend::Single {
-                    net: std::sync::Arc::new(net),
-                    acc_stack: Vec::new(),
-                },
-                // set_position まで評価で Acc を使わない安全側にする
-                tracked_hash: Some(u64::MAX),
-            });
-        }
-        Err("Failed to load NNUE weights (unsupported format)".into())
     }
 
     // NOTE: set_position/do_move/undo_move は下部の実装へ集約
@@ -392,7 +466,7 @@ impl NNUEEvaluatorWrapper {
                 acc_stack.clear();
                 acc_stack.push(single_state::SingleAcc::refresh(pos, net));
             }
-            self.tracked_hash = Some(pos.zobrist_hash);
+            self.tracked_hash = Some(pos.zobrist_hash());
         }
     }
 
@@ -406,6 +480,12 @@ impl NNUEEvaluatorWrapper {
             backend: Backend::Classic {
                 evaluator,
                 accumulator_stack: vec![initial_acc],
+                delta_scratch: accumulator::AccumulatorDelta {
+                    removed_b: smallvec::SmallVec::new(),
+                    added_b: smallvec::SmallVec::new(),
+                    removed_w: smallvec::SmallVec::new(),
+                    added_w: smallvec::SmallVec::new(),
+                },
             },
             // set_position まで評価で Acc を使わない安全側にする
             tracked_hash: Some(u64::MAX),
@@ -419,6 +499,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
             Backend::Classic {
                 evaluator,
                 accumulator_stack,
+                ..
             } => {
                 // 初期状態（fork_stateless 直後などでスタック空）は常にフル再構築
                 if accumulator_stack.is_empty() {
@@ -431,7 +512,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
 
                 // 単スレ探索（on_do/undo 経路）では tracked_hash=None とし、acc が常に同期済み
                 // 並列探索では tracked_hash=Some(root_hash) で root 以外は不一致→フル評価へフォールバック
-                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
+                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash());
                 if use_acc {
                     if let Some(acc) = accumulator_stack.last() {
                         #[cfg(feature = "nnue_telemetry")]
@@ -456,7 +537,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
                 evaluator.evaluate_with_accumulator(pos, &tmp)
             }
             Backend::Single { net, acc_stack } => {
-                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash);
+                let use_acc = self.tracked_hash.is_none_or(|h| h == pos.zobrist_hash());
                 if use_acc {
                     if let Some(acc) = acc_stack.last() {
                         #[cfg(feature = "nnue_telemetry")]
@@ -490,17 +571,18 @@ impl NNUEEvaluatorWrapper {
             Backend::Classic {
                 evaluator,
                 accumulator_stack,
+                ..
             } => {
                 accumulator_stack.clear();
                 let mut acc = Accumulator::new();
                 acc.refresh(pos, &evaluator.feature_transformer);
                 accumulator_stack.push(acc);
-                self.tracked_hash = Some(pos.zobrist_hash);
+                self.tracked_hash = Some(pos.zobrist_hash());
             }
             Backend::Single { net, acc_stack } => {
                 acc_stack.clear();
                 acc_stack.push(single_state::SingleAcc::refresh(pos, net));
-                self.tracked_hash = Some(pos.zobrist_hash);
+                self.tracked_hash = Some(pos.zobrist_hash());
             }
         }
     }
@@ -513,6 +595,7 @@ impl NNUEEvaluatorWrapper {
             Backend::Classic {
                 evaluator,
                 accumulator_stack,
+                delta_scratch,
             } => {
                 // Null move: Acc は変更しない（複製して積むだけ）
                 if mv.is_null() {
@@ -528,11 +611,22 @@ impl NNUEEvaluatorWrapper {
                 }
                 let current_acc =
                     accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
-                let mut new_acc = current_acc.clone();
-                let update = accumulator::calculate_update(pos, mv)?;
-                new_acc.update(&update, Color::Black, &evaluator.feature_transformer);
-                new_acc.update(&update, Color::White, &evaluator.feature_transformer);
-                accumulator_stack.push(new_acc);
+                match accumulator::calculate_update_into(delta_scratch, pos, mv)? {
+                    accumulator::UpdateOp::Delta => {
+                        let mut new_acc = current_acc.clone();
+                        new_acc.update(delta_scratch, Color::Black, &evaluator.feature_transformer);
+                        new_acc.update(delta_scratch, Color::White, &evaluator.feature_transformer);
+                        accumulator_stack.push(new_acc);
+                    }
+                    accumulator::UpdateOp::FullRefresh => {
+                        // 安全側: 子局面でフル再構築
+                        let mut post = pos.clone();
+                        let _u = post.do_move(mv);
+                        let mut acc = accumulator::Accumulator::new();
+                        acc.refresh(&post, &evaluator.feature_transformer);
+                        accumulator_stack.push(acc);
+                    }
+                }
                 // Classic は子局面に同期済みなので、ハッシュを無効化（安全側）。
                 self.tracked_hash = None;
                 Ok(())
@@ -1409,7 +1503,7 @@ mod tests {
             uid: 32,
             ..net1.clone()
         };
-        let mut pos = Position::startpos();
+        let pos = Position::startpos();
 
         // Build wrapper with net1
         let mut wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net1.clone());
