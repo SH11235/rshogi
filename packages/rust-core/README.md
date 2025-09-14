@@ -74,6 +74,28 @@ go movetime 1000
 quit
 ```
 
+### Performance Build & Features
+
+- 推奨ビルド（最適化）
+  - `RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release`
+- フィーチャー（engine-usi から engine-core へ伝播）
+  - 既定ON: `nnue-diff`（SINGLE 差分NNUE）
+  - 任意ON:
+    - `fast-fma`: FMAで出力加算を高速化（丸め微差を許容できる場合）
+    - `diff-agg-hash`: 差分集計をHashMap実装でA/B（大N向け）
+    - `nnue-telemetry`: 軽量テレメトリ（探索中の経路割合など）
+    - `tt-metrics`, `ybwc`, `nightly`: 必要に応じて
+
+例: 差分NNUE + FMA 有効
+```bash
+RUSTFLAGS="-C target-cpu=native" \
+cargo run -p engine-usi --release --features fast-fma
+```
+
+注: fp32 行加算用 SIMD は Dispatcher に統合済みで常時ON（実行時 CPU 検出: AVX/FMA/SSE2/NEON/Scalar）。`simd` フィーチャは不要です。
+
+起動時に `info string core_features=engine-core:...` を出力します（再現性・ログ用途）。
+
 ### Engine Types
 - **EnhancedNnue** (推奨): 最強 - 高度な探索 + NNUE評価
 - **Nnue**: 高速分析用

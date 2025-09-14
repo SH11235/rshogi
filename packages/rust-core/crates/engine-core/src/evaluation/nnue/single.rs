@@ -17,6 +17,29 @@ pub struct SingleChannelNet {
 }
 
 impl SingleChannelNet {
+    /// Accumulator(pre-activation) からの推論（差分更新用）。
+    /// pre 値に対して出力直前に一度だけ ReLU(=max(pre,0)) を適用する。
+    #[inline]
+    pub fn evaluate_from_accumulator_pre(&self, pre: &[f32]) -> i32 {
+        let d = self.acc_dim;
+        debug_assert_eq!(pre.len(), d);
+
+        // Output（ReLU 遅延: 非負のみ寄与、分岐レス）
+        let mut cp = self.b2;
+        let w2 = &self.w2[..d];
+        for (&w, &p) in w2.iter().zip(pre.iter()) {
+            let a = p.max(0.0);
+            #[cfg(feature = "nnue_fast_fma")]
+            {
+                cp = w.mul_add(a, cp);
+            }
+            #[cfg(not(feature = "nnue_fast_fma"))]
+            {
+                cp += w * a;
+            }
+        }
+        cp.clamp(-32000.0, 32000.0) as i32
+    }
     #[inline]
     fn infer_with_active_indices(&self, active: &[usize], _stm: Color) -> i32 {
         let d = self.acc_dim;
@@ -43,15 +66,18 @@ impl SingleChannelNet {
             }
         }
 
-        // ReLU
+        // ReLU (branchless)
         for v in &mut acc[..d] {
-            if *v < 0.0 {
-                *v = 0.0;
-            }
+            *v = (*v).max(0.0);
         }
 
-        // Output
+        // Output（FMA オプトインで acc 経路と丸めを揃える）
         let mut cp = self.b2;
+        #[cfg(feature = "nnue_fast_fma")]
+        for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
+            cp = w.mul_add(*a, cp);
+        }
+        #[cfg(not(feature = "nnue_fast_fma"))]
         for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
             cp += (*w) * (*a);
         }
@@ -77,6 +103,7 @@ impl SingleChannelNet {
     }
 
     /// Accumulator からの推論（差分更新用）。ReLU 済みの acc を仮定。
+    #[deprecated(note = "Use evaluate_from_accumulator_pre for SINGLE diff path")]
     #[inline]
     pub fn evaluate_from_accumulator(&self, acc: &[f32]) -> i32 {
         let d = self.acc_dim;

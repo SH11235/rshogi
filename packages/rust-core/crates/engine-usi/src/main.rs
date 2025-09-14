@@ -678,6 +678,10 @@ fn main() -> Result<()> {
     let stdin = io::stdin();
     let mut state = EngineState::new();
 
+    // 起動時に core のビルド時 feature を一度だけ出力（デバッグ/再現に有用）
+    let feat = engine_core::evaluation::nnue::enabled_features_str();
+    info_string(format!("core_features={}", feat));
+
     // Start background reaper thread to join detached workers
     let (reaper_tx, reaper_rx) = mpsc::channel::<thread::JoinHandle<()>>();
     let reaper_queue_len = Arc::clone(&state.reaper_queue_len);

@@ -20,6 +20,10 @@ ybwc = []
 nnue_single_diff = []
 # 軽量テレメトリ（探索中の eval 経路割合などの統計を収集・ログ出力）
 nnue_telemetry = []
+# （任意）FMAを許可して僅かな丸め差と引き換えに加算を高速化
+nnue_fast_fma = []
+# 差分集計をHashMapで行うA/B用（デフォルトは線形マップ）
+diff_agg_hash = []
 
 [dependencies]
 serde = { workspace = true }
@@ -83,4 +87,8 @@ harness = false
 
 [[bench]]
 name = "regression_nodes_bench"
+harness = false
+
+[[bench]]
+name = "nnue_add_row_bench"
 harness = false
