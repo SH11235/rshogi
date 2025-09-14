@@ -3,6 +3,7 @@ use std::hint::black_box;
 
 // ベンチの目的:
 // - SINGLE 差分経路の評価スループットを測定する（常時有効化）
+// - 黒手（3g→3f）を n 回: 適用→評価→Undo を繰り返す
 
 fn make_test_single_net() -> engine_core::evaluation::nnue::single::SingleChannelNet {
     use engine_core::evaluation::nnue::{features, single::SingleChannelNet};
@@ -27,10 +28,8 @@ fn make_move_black() -> engine_core::shogi::Move {
     Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap())
 }
 
-/// 差分ON/非差分OFF 共通のチェーンベンチ
-/// - N 回、親局面から「黒手→評価→Undo」「白手→評価→Undo」を繰り返す
-/// - 差分ON: SingleAcc を差分更新して評価
-/// - 差分OFF: 直接 net.evaluate(pos) 実行
+/// 差分チェーンベンチ（常時有効）
+/// - N 回、親局面から「黒手→評価→Undo」を繰り返す
 fn bench_single_chain(c: &mut Criterion) {
     use engine_core::evaluation::nnue::single::SingleChannelNet;
     use engine_core::evaluation::nnue::single_state::SingleAcc;
@@ -55,7 +54,7 @@ fn bench_single_chain(c: &mut Criterion) {
                         let acc = SingleAcc::refresh(&pos, &net);
                         (pos, acc)
                     },
-                    // 黒→評価→Undo、白→評価→Undo を n/2 回繰り返す
+                    // 黒→評価→Undo を n 回繰り返す
                     |(mut pos, mut acc)| {
                         for _ in 0..n {
                             // 黒手（子局面は白番）。戻して原状復帰。
@@ -67,10 +66,12 @@ fn bench_single_chain(c: &mut Criterion) {
                             );
                             let undo_b = pos.do_move(m_black);
                             // 子局面(黒手後)は白番
-                            let _ = engine_core::evaluation::nnue::single::SingleChannelNet::evaluate_from_accumulator_pre(
+                            let eval = engine_core::evaluation::nnue::single::SingleChannelNet::evaluate_from_accumulator_pre(
                                 &net,
                                 acc1.acc_for(Color::White),
                             );
+                            // 最適化除け
+                            black_box(eval);
                             pos.undo_move(m_black, undo_b);
                             acc = acc; // 原状復帰（acc1 は破棄）
                         }

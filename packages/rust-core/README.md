@@ -176,6 +176,20 @@ cargo test -- --include-ignored      # Run all tests including benchmarks
 cargo test test_benchmark -- --ignored  # Run specific benchmark test
 ```
 
+### Criterion Benches
+
+Run the always-on SINGLE NNUE chain benchmark:
+
+```bash
+cargo bench -p engine-core --bench nnue_single_chain_bench -- nnue_single_chain
+```
+
+Reports are generated under:
+
+```
+target/criterion/nnue_single_chain/*/report/index.html
+```
+
 ## Code Quality
 
 ### Required Checks (run automatically on pre-commit)
