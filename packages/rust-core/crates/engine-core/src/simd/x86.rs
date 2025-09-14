@@ -61,10 +61,9 @@ pub(super) unsafe fn add_row_scaled_f32_avx_fma(dst: &mut [f32], row: &[f32], k:
         }
     }
 
-    // tail: スカラ
-    while i < n {
-        dst[i] += k * row[i];
-        i += 1;
+    // tail: 共通スカラに委譲（±1/±2 の最適化を一元化）
+    if i < n {
+        super::add_row_scaled_f32_scalar(&mut dst[i..], &row[i..], k);
     }
 }
 
@@ -124,10 +123,9 @@ pub(super) unsafe fn add_row_scaled_f32_avx(dst: &mut [f32], row: &[f32], k: f32
         }
     }
 
-    // tail: スカラ
-    while i < n {
-        dst[i] += k * row[i];
-        i += 1;
+    // tail: 共通スカラに委譲（±1/±2 の最適化を一元化）
+    if i < n {
+        super::add_row_scaled_f32_scalar(&mut dst[i..], &row[i..], k);
     }
 }
 
@@ -187,10 +185,9 @@ pub(super) unsafe fn add_row_scaled_f32_sse2(dst: &mut [f32], row: &[f32], k: f3
         }
     }
 
-    // tail: スカラ
-    while i < n {
-        dst[i] += k * row[i];
-        i += 1;
+    // tail: 共通スカラに委譲（±1/±2 の最適化を一元化）
+    if i < n {
+        super::add_row_scaled_f32_scalar(&mut dst[i..], &row[i..], k);
     }
 }
 /// AVX512F 経路（f32×16）

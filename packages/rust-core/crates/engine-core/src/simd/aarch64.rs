@@ -3,6 +3,7 @@ use super::{k_fastpath, k_int_fastpath};
 use core::arch::aarch64::*;
 
 /// AArch64 NEON 経路（f32×4）
+#[inline(always)]
 #[cfg(target_arch = "aarch64")]
 pub(super) unsafe fn add_row_scaled_f32_neon(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
@@ -61,8 +62,7 @@ pub(super) unsafe fn add_row_scaled_f32_neon(dst: &mut [f32], row: &[f32], k: f3
         }
     }
 
-    while i < n {
-        dst[i] += k * row[i];
-        i += 1;
+    if i < n {
+        super::add_row_scaled_f32_scalar(&mut dst[i..], &row[i..], k);
     }
 }
