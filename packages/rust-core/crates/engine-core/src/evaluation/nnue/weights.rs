@@ -90,7 +90,7 @@ impl std::fmt::Display for WeightsError {
                 write!(f, "SizeMismatch(v1): expected {}, actual {}", expected, actual)
             }
             WeightsError::SizeMismatchV2 { expected, actual } => {
-                write!(f, "SizeMismatch: dims imply {} bytes, actual {} bytes", expected, actual)
+                write!(f, "SizeMismatch(v2): expected {} bytes, actual {} bytes", expected, actual)
             }
             WeightsError::DimsInvalid => write!(f, "DimsInvalid: zero or exceeds maximum"),
             WeightsError::DimsInconsistent(m) => write!(f, "DimsInconsistent: {m}"),
@@ -182,7 +182,7 @@ impl WeightReader {
             });
         }
 
-        // Validate file size (upper bound only here; exact match is checked by caller)
+        // Validate file size (upper bound only here; exact match is checked in the version branch below)
         if (header.size as u64) > MAX_FILE_SIZE {
             return Err(WeightsError::SizeTooLarge {
                 size: header.size as u64,
@@ -219,7 +219,13 @@ impl WeightReader {
         Ok(v)
     }
 
-    /// Read `count` little-endian i16 values (portable across host endianness)
+    /// Read `count` little-endian i16 values (portable across host endianness).
+    ///
+    /// Safety rationale (LE fast-path):
+    /// * We allocate a `Vec<MaybeUninit<i16>>` with capacity `count` and obtain a raw byte slice.
+    /// * `read_exact` fully initializes all `bytes = count*2` bytes; on success every element is initialized.
+    /// * `i16` accepts every 16-bit pattern, so transmuting `Vec<MaybeUninit<i16>>` -> `Vec<i16>` is sound.
+    /// * We call `set_len(count)` only after the successful read, so no uninitialized elements are observed.
     #[cfg(target_endian = "little")]
     pub(crate) fn read_i16_le_vec(&mut self, count: usize) -> Result<Vec<i16>, WeightsError> {
         use std::mem::MaybeUninit;
@@ -228,7 +234,7 @@ impl WeightReader {
         let dst = unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, bytes) };
         self.file.read_exact(dst)?;
         unsafe { v.set_len(count) };
-        // Safety: i16 is Plain Old Data; we just filled bytes in LE order on LE host
+        // Safety: fully initialized; i16 is POD and all bit patterns are valid.
         let v: Vec<i16> = unsafe { std::mem::transmute(v) };
         Ok(v)
     }
@@ -247,7 +253,9 @@ impl WeightReader {
         Ok(out)
     }
 
-    /// Read `count` little-endian i32 values (portable across host endianness)
+    /// Read `count` little-endian i32 values (portable across host endianness).
+    ///
+    /// Safety rationale parallels `read_i16_le_vec` (see above): fully filled buffer + POD i32.
     #[cfg(target_endian = "little")]
     pub(crate) fn read_i32_le_vec(&mut self, count: usize) -> Result<Vec<i32>, WeightsError> {
         use std::mem::MaybeUninit;
@@ -256,7 +264,7 @@ impl WeightReader {
         let dst = unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut u8, bytes) };
         self.file.read_exact(dst)?;
         unsafe { v.set_len(count) };
-        // Safety: i32 is Plain Old Data; we just filled bytes in LE order on LE host
+        // Safety: fully initialized; i32 is POD and all bit patterns valid.
         let v: Vec<i32> = unsafe { std::mem::transmute(v) };
         Ok(v)
     }

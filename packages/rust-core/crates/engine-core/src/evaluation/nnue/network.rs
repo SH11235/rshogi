@@ -3,6 +3,22 @@
 //! Implements 256x2-32-32-1 architecture with ClippedReLU activation
 
 use crate::nnue::simd::SimdDispatcher;
+use std::cell::RefCell;
+
+thread_local! {
+    static WORKSPACE: RefCell<Workspace> = RefCell::new(Workspace::default());
+}
+
+#[derive(Default)]
+struct Workspace {
+    input: Vec<i8>,
+    h1: Vec<i32>,
+    h1_out: Vec<i8>,
+    h2: Vec<i32>,
+    h2_out: Vec<i8>,
+}
+
+impl Workspace {}
 
 /// Neural network for NNUE evaluation
 pub struct Network {
@@ -56,43 +72,103 @@ impl Network {
             input_dim, self.input_dim
         );
 
-        // Transform features to 8-bit (quantization)
+        // Try to reuse thread-local workspace; fall back to local buffers if re-entrant
+        if let Some(result) = WORKSPACE
+            .try_with(|ws| {
+                if let Ok(mut ws) = ws.try_borrow_mut() {
+                    // Move out buffers to avoid nested borrows; put them back at the end
+                    let mut input = std::mem::take(&mut ws.input);
+                    let mut h1 = std::mem::take(&mut ws.h1);
+                    let mut h1_out = std::mem::take(&mut ws.h1_out);
+                    let mut h2 = std::mem::take(&mut ws.h2);
+                    let mut h2_out = std::mem::take(&mut ws.h2_out);
+
+                    // Ensure sizes
+                    if input.len() != input_dim {
+                        input.resize(input_dim, 0);
+                    }
+                    if h1.len() != self.h1_dim {
+                        h1.resize(self.h1_dim, 0);
+                    }
+                    if h1_out.len() != self.h1_dim {
+                        h1_out.resize(self.h1_dim, 0);
+                    }
+                    if h2.len() != self.h2_dim {
+                        h2.resize(self.h2_dim, 0);
+                    }
+                    if h2_out.len() != self.h2_dim {
+                        h2_out.resize(self.h2_dim, 0);
+                    }
+
+                    // Transform features to 8-bit (quantization)
+                    self.transform_features(acc_us, acc_them, &mut input);
+
+                    // Hidden layer 1
+                    self.affine_propagate_dyn(
+                        &input,
+                        &self.hidden1_weights,
+                        &self.hidden1_biases,
+                        &mut h1,
+                    );
+
+                    // ClippedReLU activation
+                    self.clipped_relu_dyn(&h1, &mut h1_out);
+
+                    // Hidden layer 2
+                    self.affine_propagate_dyn(
+                        &h1_out,
+                        &self.hidden2_weights,
+                        &self.hidden2_biases,
+                        &mut h2,
+                    );
+
+                    // ClippedReLU activation
+                    self.clipped_relu_dyn(&h2, &mut h2_out);
+
+                    // Output layer (dot-product)
+                    let mut output = self.output_bias;
+                    // Iterate directly (avoid needless_range_loop)
+                    for (i, &v) in h2_out.iter().enumerate() {
+                        if i == self.h2_dim {
+                            break;
+                        }
+                        output += v as i32 * self.output_weights[i] as i32;
+                    }
+
+                    // Put buffers back into workspace
+                    ws.input = input;
+                    ws.h1 = h1;
+                    ws.h1_out = h1_out;
+                    ws.h2 = h2;
+                    ws.h2_out = h2_out;
+
+                    Some(output)
+                } else {
+                    None
+                }
+            })
+            .ok()
+            .flatten()
+        {
+            return result;
+        }
+
+        // Fallback: allocate local buffers if TLS workspace is busy
         let mut input = vec![0i8; input_dim];
         self.transform_features(acc_us, acc_them, &mut input);
-
-        // Hidden layer 1
-        let mut hidden1 = vec![0i32; self.h1_dim];
-        self.affine_propagate_dyn(
-            &input,
-            &self.hidden1_weights,
-            &self.hidden1_biases,
-            &mut hidden1,
-        );
-
-        // ClippedReLU activation
-        let mut hidden1_out = vec![0i8; self.h1_dim];
-        self.clipped_relu_dyn(&hidden1, &mut hidden1_out);
-
-        // Hidden layer 2
-        let mut hidden2 = vec![0i32; self.h2_dim];
-        self.affine_propagate_dyn(
-            &hidden1_out,
-            &self.hidden2_weights,
-            &self.hidden2_biases,
-            &mut hidden2,
-        );
-
-        // ClippedReLU activation
-        let mut hidden2_out = vec![0i8; self.h2_dim];
-        self.clipped_relu_dyn(&hidden2, &mut hidden2_out);
-
-        // Output layer (dot-product)
+        let mut h1 = vec![0i32; self.h1_dim];
+        self.affine_propagate_dyn(&input, &self.hidden1_weights, &self.hidden1_biases, &mut h1);
+        let mut h1_out = vec![0i8; self.h1_dim];
+        self.clipped_relu_dyn(&h1, &mut h1_out);
+        let mut h2 = vec![0i32; self.h2_dim];
+        self.affine_propagate_dyn(&h1_out, &self.hidden2_weights, &self.hidden2_biases, &mut h2);
+        let mut h2_out = vec![0i8; self.h2_dim];
+        self.clipped_relu_dyn(&h2, &mut h2_out);
         let mut output = self.output_bias;
-        // Iterate directly to avoid needless_range_loop warning
-        for (i, &v) in hidden2_out.iter().enumerate() {
+        for (i, &v) in h2_out.iter().enumerate() {
             if i == self.h2_dim {
                 break;
-            } // defensive (length should match)
+            }
             output += v as i32 * self.output_weights[i] as i32;
         }
         output
@@ -129,6 +205,7 @@ impl Network {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn test_network_zero() {
@@ -182,5 +259,24 @@ mod tests {
         assert_eq!(output[2], 50); // 50 -> 50
         assert_eq!(output[3], 100); // 100 -> 100
         assert_eq!(output[4], 127); // 150 -> 127 (clipped)
+    }
+
+    // フォールバック経路（TLSワークスペースが借用中でも動作すること）の機能テスト
+    #[test]
+    fn propagate_falls_back_when_workspace_borrowed() {
+        let net = Network::zero();
+        let acc_us = vec![0i16; 256];
+        let acc_them = vec![0i16; 256];
+
+        // 通常経路の結果
+        let out_normal = net.propagate(&acc_us, &acc_them);
+
+        // ワークスペースを敢えて借用中にし、フォールバックを踏ませる
+        let out_fallback = WORKSPACE.with(|cell| {
+            let _guard = cell.borrow_mut();
+            net.propagate(&acc_us, &acc_them)
+        });
+
+        assert_eq!(out_normal, out_fallback);
     }
 }
