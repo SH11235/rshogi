@@ -82,6 +82,20 @@ pub fn enabled_features_str() -> String {
             crate::simd::dispatch::SimdLevel::Scalar => "simd=scalar",
         });
     }
+    // 補助ログ: AArch64（NEON 常時ON）
+    #[cfg(target_arch = "aarch64")]
+    {
+        v.push("simd=neon");
+    }
+    // 補助ログ: WASM の SIMD 有無
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        v.push("simd=wasm128");
+    }
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+    {
+        v.push("simd=wasm-scalar");
+    }
     format!("engine-core:{}", v.join(","))
 }
 
@@ -601,11 +615,10 @@ impl NNUEEvaluatorWrapper {
                 accumulator_stack, ..
             } => {
                 #[cfg(debug_assertions)]
-                {
-                    if accumulator_stack.is_empty() {
-                        debug_assert!(false, "undo_move called with empty accumulator_stack");
-                    }
-                }
+                debug_assert!(
+                    !accumulator_stack.is_empty(),
+                    "undo_move called with empty accumulator_stack"
+                );
                 if accumulator_stack.len() > 1 {
                     accumulator_stack.pop();
                 }
@@ -619,11 +632,7 @@ impl NNUEEvaluatorWrapper {
                 #[cfg(feature = "nnue_single_diff")]
                 {
                     #[cfg(debug_assertions)]
-                    {
-                        if acc_stack.is_empty() {
-                            debug_assert!(false, "undo_move called with empty acc_stack");
-                        }
-                    }
+                    debug_assert!(!acc_stack.is_empty(), "undo_move called with empty acc_stack");
                     if acc_stack.len() > 1 {
                         acc_stack.pop();
                     }
