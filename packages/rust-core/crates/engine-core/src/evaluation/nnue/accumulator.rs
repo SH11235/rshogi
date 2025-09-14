@@ -75,10 +75,13 @@ impl Accumulator {
             &mut self.white
         };
 
-        // Initialize with biases
-        for (i, acc) in accumulator.iter_mut().enumerate().take(256) {
-            *acc = transformer.biases[i] as i16;
-        }
+        // Initialize with biases（将来 acc_dim 可変化を見据え）
+        let dim = 256; // TODO: transformer.acc_dim()
+        accumulator
+            .iter_mut()
+            .zip(transformer.biases.iter())
+            .take(dim)
+            .for_each(|(dst, &b)| *dst = b as i16);
 
         // Get active features
         let features = extract_features(pos, king_sq, perspective);
@@ -97,6 +100,7 @@ impl Accumulator {
     }
 
     /// Update accumulator with differential changes
+    #[inline]
     pub fn update(
         &mut self,
         delta: &AccumulatorDelta,
@@ -128,6 +132,17 @@ pub struct AccumulatorDelta {
     pub removed_w: SmallVec<[usize; 12]>,
     /// White-perspective features to add
     pub added_w: SmallVec<[usize; 12]>,
+}
+
+impl Default for AccumulatorDelta {
+    fn default() -> Self {
+        Self {
+            removed_b: SmallVec::new(),
+            added_b: SmallVec::new(),
+            removed_w: SmallVec::new(),
+            added_w: SmallVec::new(),
+        }
+    }
 }
 
 /// 差分の有無（王移動など安全側でのフル再構築を含む）
@@ -336,6 +351,18 @@ pub fn calculate_update_into(
         }
     }
 
+    // Telemetry: record total delta length（最大値を観測）
+    #[cfg(feature = "nnue_telemetry")]
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering::*};
+        static MAX_DELTA_LEN: AtomicUsize = AtomicUsize::new(0);
+        let cur = out.removed_b.len() + out.added_b.len() + out.removed_w.len() + out.added_w.len();
+        let old = MAX_DELTA_LEN.load(Relaxed);
+        if cur > old {
+            let _ = MAX_DELTA_LEN.compare_exchange(old, cur, Relaxed, Relaxed);
+        }
+    }
+
     Ok(UpdateOp::Delta)
 }
 
@@ -344,6 +371,79 @@ mod tests {
     use crate::usi::parse_usi_square;
 
     use super::*;
+
+    #[test]
+    fn test_classic_random_chain_matches_refresh() {
+        use crate::movegen::MoveGenerator;
+        use rand::{RngCore, SeedableRng};
+
+        let mut pos = Position::startpos();
+        let gen = MoveGenerator::new();
+        let mut rng = rand_xoshiro::Xoshiro128Plus::seed_from_u64(0xC1A55E);
+
+        // Transformer starts with zeros; we will fill rows lazily for encountered features
+        let mut transformer = FeatureTransformer {
+            weights: vec![
+                0;
+                crate::shogi::SHOGI_BOARD_SIZE
+                    * crate::evaluation::nnue::features::FE_END
+                    * 256
+            ],
+            biases: vec![0; 256],
+        };
+
+        // helper to ensure row is non-zero to catch mistakes
+        fn fill_row(transformer: &mut FeatureTransformer, feat: usize, val: i16) {
+            for o in 0..256 {
+                *transformer.weight_mut(feat, o) = val;
+            }
+        }
+
+        let mut acc = Accumulator::new();
+        acc.refresh(&pos, &transformer);
+
+        let mut delta = AccumulatorDelta::default();
+        // apply ~20 moves
+        for step in 0..20 {
+            let legal = gen.generate_all(&pos).unwrap_or_default();
+            if legal.is_empty() {
+                break;
+            }
+            let mv = legal[(rng.next_u32() as usize) % legal.len()];
+            if calculate_update_into(&mut delta, &pos, mv).unwrap() == UpdateOp::Delta {
+                // lazily fill rows for any unseen features (give distinct values per side)
+                for &f in delta.removed_b.iter() {
+                    fill_row(&mut transformer, f, 1);
+                }
+                for &f in delta.added_b.iter() {
+                    fill_row(&mut transformer, f, 2);
+                }
+                for &f in delta.removed_w.iter() {
+                    fill_row(&mut transformer, f, 3);
+                }
+                for &f in delta.added_w.iter() {
+                    fill_row(&mut transformer, f, 4);
+                }
+
+                // incremental update
+                acc.update(&delta, Color::Black, &transformer);
+                acc.update(&delta, Color::White, &transformer);
+            } else {
+                // Full refresh path
+                let _ = pos.do_move(mv);
+                acc.refresh(&pos, &transformer);
+                // continue with next step
+                continue;
+            }
+
+            // advance position and compare against full refresh
+            let _u = pos.do_move(mv);
+            let mut full = Accumulator::new();
+            full.refresh(&pos, &transformer);
+            assert_eq!(acc.black, full.black, "black acc mismatch at step {}", step);
+            assert_eq!(acc.white, full.white, "white acc mismatch at step {}", step);
+        }
+    }
 
     #[test]
     fn test_accumulator_new() {
@@ -575,5 +675,73 @@ mod tests {
 
         assert_eq!(acc_inc.black, acc_full.black, "black acc must match full refresh");
         assert_eq!(acc_inc.white, acc_full.white, "white acc must match full refresh");
+    }
+
+    #[test]
+    fn test_classic_capture_promoted_piece_hand_unpromoted() {
+        use crate::usi::parse_usi_square;
+
+        // Kings
+        let mut pos = Position::empty();
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        // Black pawn at 3g, White promoted silver (成銀) at 3f
+        pos.board
+            .put_piece(parse_usi_square("3g").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+        let ws = Piece::new(PieceType::Silver, Color::White).promote();
+        pos.board.put_piece(parse_usi_square("3f").unwrap(), ws);
+        pos.side_to_move = Color::Black;
+
+        // Build transformer with zero weights; we will fill rows lazily for delta indices
+        let mut transformer = FeatureTransformer {
+            weights: vec![
+                0;
+                crate::shogi::SHOGI_BOARD_SIZE
+                    * crate::evaluation::nnue::features::FE_END
+                    * 256
+            ],
+            biases: vec![0; 256],
+        };
+        let mut fill_row = |feat: usize, val: i16| {
+            for o in 0..256 {
+                *transformer.weight_mut(feat, o) = val;
+            }
+        };
+
+        let mv =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap());
+        let mut delta = AccumulatorDelta::default();
+        let op = calculate_update_into(&mut delta, &pos, mv).expect("delta or refresh");
+        assert_eq!(op, UpdateOp::Delta);
+
+        // Lazily assign non-zero rows
+        for &f in delta.removed_b.iter() {
+            fill_row(f, 1);
+        }
+        for &f in delta.added_b.iter() {
+            fill_row(f, 2);
+        }
+        for &f in delta.removed_w.iter() {
+            fill_row(f, 3);
+        }
+        for &f in delta.added_w.iter() {
+            fill_row(f, 4);
+        }
+
+        // Apply delta then compare to full refresh after making the move
+        let mut acc_pre = Accumulator::new();
+        acc_pre.refresh(&pos, &transformer);
+        let mut acc_inc = acc_pre.clone();
+        acc_inc.update(&delta, Color::Black, &transformer);
+        acc_inc.update(&delta, Color::White, &transformer);
+
+        let _u = pos.do_move(mv);
+        let mut acc_full = Accumulator::new();
+        acc_full.refresh(&pos, &transformer);
+        assert_eq!(acc_inc.black, acc_full.black);
+        assert_eq!(acc_inc.white, acc_full.white);
     }
 }
