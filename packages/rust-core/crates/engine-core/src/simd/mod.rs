@@ -148,7 +148,7 @@ pub(super) fn k_int_fastpath(k: f32) -> Option<i8> {
 }
 
 #[inline(always)]
-fn add_row_scaled_f32_scalar(dst: &mut [f32], row: &[f32], k: f32) {
+pub(super) fn add_row_scaled_f32_scalar(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
     if let Some(s) = k_fastpath(k) {
         if s > 0 {
@@ -449,6 +449,34 @@ mod tests {
             scalar_ref(&mut dst_a, &row, -1.0);
             add_row_scaled_f32(&mut dst_b, &row, -1.0);
             for i in 0..len { prop_assert!(dst_a[i].to_bits() == dst_b[i].to_bits()); }
+        }
+
+        #[test]
+        fn prop_add_row_scaled_k_pos2_bits(len in 0usize..64) {
+            let mut dst_ref = vec![0.0f32; len];
+            let mut dst_k2  = vec![0.0f32; len];
+            let mut row = vec![0.0f32; len];
+            for i in 0..len { row[i] = ((i as f32 + 0.5) * 0.01).sin(); }
+            // 参照: k=1.0 を2回
+            add_row_scaled_f32(&mut dst_ref, &row, 1.0);
+            add_row_scaled_f32(&mut dst_ref, &row, 1.0);
+            // 最適化経路: k=2.0
+            add_row_scaled_f32(&mut dst_k2, &row, 2.0);
+            for i in 0..len { prop_assert!(dst_ref[i].to_bits() == dst_k2[i].to_bits()); }
+        }
+
+        #[test]
+        fn prop_add_row_scaled_k_neg2_bits(len in 0usize..64) {
+            let mut dst_ref = vec![0.0f32; len];
+            let mut dst_k2  = vec![0.0f32; len];
+            let mut row = vec![0.0f32; len];
+            for i in 0..len { row[i] = ((i as f32 + 0.25) * 0.02).cos(); }
+            // 参照: k=-1.0 を2回
+            add_row_scaled_f32(&mut dst_ref, &row, -1.0);
+            add_row_scaled_f32(&mut dst_ref, &row, -1.0);
+            // 最適化経路: k=-2.0
+            add_row_scaled_f32(&mut dst_k2, &row, -2.0);
+            for i in 0..len { prop_assert!(dst_ref[i].to_bits() == dst_k2[i].to_bits()); }
         }
     }
 }

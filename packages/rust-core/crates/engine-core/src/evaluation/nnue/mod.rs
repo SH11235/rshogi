@@ -71,6 +71,17 @@ pub fn enabled_features_str() -> String {
     if cfg!(feature = "nightly") {
         v.push("nightly");
     }
+    // 補助ログ: x86/x86_64 の SIMD 検出結果
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        let level = crate::simd::dispatch::SimdLevel::detect();
+        v.push(match level {
+            crate::simd::dispatch::SimdLevel::Avx512f => "simd=avx512f",
+            crate::simd::dispatch::SimdLevel::Avx => "simd=avx",
+            crate::simd::dispatch::SimdLevel::Sse2 => "simd=sse2",
+            crate::simd::dispatch::SimdLevel::Scalar => "simd=scalar",
+        });
+    }
     format!("engine-core:{}", v.join(","))
 }
 

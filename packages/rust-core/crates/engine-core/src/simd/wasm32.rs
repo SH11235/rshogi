@@ -4,6 +4,7 @@ use super::{k_fastpath, k_int_fastpath};
 use core::arch::wasm32::*;
 
 /// wasm32 simd128 経路（f32×4）
+#[inline(always)]
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 pub(super) unsafe fn add_row_scaled_f32_wasm128(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
@@ -59,8 +60,7 @@ pub(super) unsafe fn add_row_scaled_f32_wasm128(dst: &mut [f32], row: &[f32], k:
         }
     }
 
-    while i < n {
-        dst[i] += k * row[i];
-        i += 1;
+    if i < n {
+        super::add_row_scaled_f32_scalar(&mut dst[i..], &row[i..], k);
     }
 }
