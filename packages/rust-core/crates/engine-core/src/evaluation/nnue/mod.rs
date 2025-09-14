@@ -1446,7 +1446,7 @@ mod tests {
             uid: 32,
             ..net1.clone()
         };
-        let mut pos = Position::startpos();
+        let pos = Position::startpos();
 
         // Build wrapper with net1
         let mut wrapper = NNUEEvaluatorWrapper::new_with_single_net_for_test(net1.clone());
