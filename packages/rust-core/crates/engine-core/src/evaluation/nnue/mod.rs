@@ -246,6 +246,7 @@ impl NNUEEvaluator {
 }
 
 /// Wrapper for integration with Phase 1 Evaluator trait
+// Classic は delta_scratch を by-value で保持し、fork 時の alloc を避ける（NPS 優先）。
 #[allow(clippy::large_enum_variant)]
 enum Backend {
     Classic {
