@@ -163,16 +163,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_bytes: u64 = 0;
 
     let mut warned_pvmax: bool = false;
-    loop {
+    'outer: loop {
         match read_one_record(&mut reader, &mut rec_buf) {
             Ok(true) => {
                 total_bytes += RECORD_SIZE_YO_V1 as u64;
                 processed += 1;
-                if let Some(limit) = opt.limit {
-                    if processed > limit {
-                        break;
-                    }
-                }
                 if opt.sample_rate < 1.0 && prand01(processed) > opt.sample_rate {
                     continue;
                 }
@@ -204,7 +199,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if eval.abs() >= MATE_SCORE_THRESH {
                             rec_out.mate_boundary = Some(true);
                         }
-                        if opt.with_pv && opt.pv_max_moves >= 1 {
+                        if opt.with_pv {
+                            if opt.pv_max_moves > 1 && !warned_pvmax {
+                                eprintln!(
+                                    "Warning: --pv-max-moves > 1 is not supported for yo_v1; using 1"
+                                );
+                                warned_pvmax = true;
+                            }
                             if let Some(line) = first_move_usi_from_move16(rec_buf[34], rec_buf[35])
                             {
                                 rec_out.lines = Some(vec![JsonLine {
@@ -213,15 +214,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     pv: vec![line],
                                 }]);
                             }
-                        } else if opt.with_pv && opt.pv_max_moves > 1 && !warned_pvmax {
-                            eprintln!(
-                                "Warning: --pv-max-moves > 1 is not supported for yo_v1; using 1"
-                            );
-                            warned_pvmax = true;
                         }
                         serde_json::to_writer(&mut writer, &rec_out)?;
                         writer.write_all(b"\n")?;
                         success += 1;
+                        if let Some(limit) = opt.limit {
+                            if success >= limit {
+                                break 'outer;
+                            }
+                        }
                     }
                     Err(RecError::InvalidGamePly {
                         game_ply,
