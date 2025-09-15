@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -95,6 +95,7 @@ struct YoV1Header {
 #[derive(Debug)]
 struct DecodeResult {
     sfen: String,
+    coerced_gameply: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -111,7 +112,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reader: Box<dyn Read> = if opt.input == "-" {
         let stdin = io::stdin();
         let stdin_lock = stdin.lock();
-        let base: Box<dyn Read> = Box::new(stdin_lock);
+        let base: Box<dyn Read> =
+            Box::new(BufReader::with_capacity(opt.io_buf_mb * 1024 * 1024, stdin_lock));
         match opt.decompress.as_deref() {
             Some("gz") => {
                 use flate2::read::MultiGzDecoder;
@@ -138,12 +140,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Use magic-based detection for files (supports gz/zst)
         let buf_bytes = opt.io_buf_mb * 1024 * 1024;
         let r = open_maybe_compressed_reader(&opt.input, buf_bytes)?;
-        // open_maybe_compressed_reader returns BufRead; wrap as Read
         Box::new(r)
     };
 
     let mut writer: Box<dyn Write> = if opt.output == "-" {
-        Box::new(io::stdout().lock())
+        let out = io::stdout();
+        Box::new(BufWriter::with_capacity(1 << 20, out.lock()))
     } else {
         let f = File::create(&opt.output)?;
         Box::new(BufWriter::with_capacity(1 << 20, f))
@@ -160,9 +162,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rec_buf = [0u8; RECORD_SIZE_YO_V1];
     let mut total_bytes: u64 = 0;
 
+    let mut warned_pvmax: bool = false;
     loop {
-        match reader.read_exact(&mut rec_buf) {
-            Ok(()) => {
+        match read_one_record(&mut reader, &mut rec_buf) {
+            Ok(true) => {
                 total_bytes += RECORD_SIZE_YO_V1 as u64;
                 processed += 1;
                 if let Some(limit) = opt.limit {
@@ -175,7 +178,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 match process_one_record(&rec_buf, opt.coerce_ply_min_1) {
-                    Ok(DecodeResult { sfen }) => {
+                    Ok(DecodeResult {
+                        sfen,
+                        coerced_gameply,
+                    }) => {
+                        if coerced_gameply {
+                            invalid_gameply += 1;
+                            errors += 1;
+                            log_err_json(
+                                "coerced_gameply",
+                                processed,
+                                total_bytes,
+                                "gamePly=0 -> 1",
+                                Some(&sfen),
+                            );
+                        }
                         // score i16 LE at offset 32
                         let eval = i16::from_le_bytes([rec_buf[32], rec_buf[33]]) as i32;
                         let mut rec_out = JsonRec {
@@ -196,6 +213,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     pv: vec![line],
                                 }]);
                             }
+                        } else if opt.with_pv && opt.pv_max_moves > 1 && !warned_pvmax {
+                            eprintln!(
+                                "Warning: --pv-max-moves > 1 is not supported for yo_v1; using 1"
+                            );
+                            warned_pvmax = true;
                         }
                         serde_json::to_writer(&mut writer, &rec_out)?;
                         writer.write_all(b"\n")?;
@@ -269,14 +291,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     last_metrics = Instant::now();
                 }
             }
+            Ok(false) => break,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                eprintln!("Error: {}", e);
+                std::process::exit(2);
+            }
             Err(e) => {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    // EOF reached; verify no trailing bytes
-                    break;
-                } else {
-                    eprintln!("Error reading input: {}", e);
-                    std::process::exit(2);
-                }
+                eprintln!("Error reading input: {}", e);
+                std::process::exit(2);
             }
         }
     }
@@ -339,10 +361,14 @@ fn process_one_record(
 
     // gamePly policy
     let mut gp = game_ply;
+    let mut coerced = false;
     if gp == 0 {
         if coerce_ply_min_1 {
             gp = 1;
+            coerced = true;
         } else {
+            // reflect side-to-move for stub
+            pos.side_to_move = header.side_to_move;
             let stub = Some(position_to_sfen(&pos));
             return Err(RecError::InvalidGamePly {
                 game_ply,
@@ -362,7 +388,10 @@ fn process_one_record(
         }) as u16;
 
     let sfen = position_to_sfen(&pos);
-    Ok(DecodeResult { sfen })
+    Ok(DecodeResult {
+        sfen,
+        coerced_gameply: coerced,
+    })
 }
 
 fn first_move_usi_from_move16(lo: u8, hi: u8) -> Option<String> {
@@ -407,6 +436,26 @@ fn sqidx_to_usi(idx: u8) -> String {
     let file_ch = (b'1' + f) as char;
     let rank_ch = (b'a' + r) as char;
     format!("{}{}", file_ch, rank_ch)
+}
+
+// Read exactly one fixed-size record; detect truncated EOF (fail-closed)
+fn read_one_record<R: Read>(r: &mut R, buf: &mut [u8; RECORD_SIZE_YO_V1]) -> io::Result<bool> {
+    let mut off = 0usize;
+    while off < RECORD_SIZE_YO_V1 {
+        let n = r.read(&mut buf[off..])?;
+        if n == 0 {
+            return if off == 0 {
+                Ok(false) // clean EOF
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("truncated record: got {} bytes (need {})", off, RECORD_SIZE_YO_V1),
+                ))
+            };
+        }
+        off += n;
+    }
+    Ok(true)
 }
 
 // JSON output structs with deterministic field ordering

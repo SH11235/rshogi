@@ -16,10 +16,10 @@
 
 ```
 # 変換（STDOUTへ）
-cargo run -p tools --bin psv2jsonl -- -i tiny.psv -o -
+cargo run -p tools --bin psv2jsonl -- -i docs/tools/psv2jsonl/fixtures/tiny.psv -o -
 
 # ファイルへ出力
-cargo run -p tools --bin psv2jsonl -- -i tiny.psv -o out.jsonl
+cargo run -p tools --bin psv2jsonl -- -i docs/tools/psv2jsonl/fixtures/tiny.psv -o out.jsonl
 ```
 
 圧縮入力（自動判定）:
@@ -68,6 +68,9 @@ psv2jsonl \
 - Square 番号→USI は `f=idx/9 -> '1'+f`, `r=idx%9 -> 'a'+r`。内部 Square は `parse_usi_square` で写像。
 - 盤面/手駒/手番を復元し、本エンジンの `position_to_sfen()` で整形。
 - `gamePly` は PSV の値を採用（`pos.ply = (gamePly-1)*2 + (stm=='w'?1:0)`）。
+  - `gamePly==0` は不正。
+    - `--coerce-ply-min-1` 無効: 直ちに致命（exit=2）
+    - 有効: `gamePly=1` に丸め、`coerced_gameply` の警告ログを1行出力（エラー件数に加算）
 
 ## 既知の制約
 
@@ -84,13 +87,20 @@ psv2jsonl \
 
 ```
 # 変換
-cargo run -p tools --bin psv2jsonl -- -i tiny.psv -o out.jsonl
+cargo run -p tools --bin psv2jsonl -- -i docs/tools/psv2jsonl/fixtures/tiny.psv -o out.jsonl
 
 # 差分（行ごと）
-diff -u expected.jsonl out.jsonl
+diff -u docs/tools/psv2jsonl/fixtures/expected.jsonl out.jsonl
 ```
 
 差分が空であれば成功です。
+
+### 端数検出（fail-closed の確認）
+
+```
+# 端数（41Bなど）で致命エラー（exit=2）
+target/debug/psv2jsonl -i docs/tools/psv2jsonl/fixtures/tiny_bad.psv -o /dev/null
+```
 
 ## 今後の拡張プラン（スコープ外の設計メモ）
 
@@ -123,4 +133,3 @@ diff -u expected.jsonl out.jsonl
   - 仕様案:
     - `--structured-log <PATH|->` で JSONL メタを出力
     - 入力ファイルの SHA-256/バイト数、処理件数、スキップ/エラー件数、出力の SHA-256/パート一覧
-
