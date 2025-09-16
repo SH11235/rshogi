@@ -42,7 +42,7 @@ use tools::nnfc_v1::{
     open_payload_reader as open_cache_payload_reader_shared, FEATURE_SET_ID_HALF,
 };
 
-use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
+use clap::{arg, value_parser, Arg, ArgAction, Command, ValueEnum, ValueHint};
 use engine_core::game_phase::{detect_game_phase, GamePhase, Profile};
 use engine_core::{
     evaluation::nnue::features::{extract_features, FE_END},
@@ -93,6 +93,12 @@ const MIN_ELAPSED_TIME: f64 = 1e-6;
 const QUANTIZATION_MIN: f32 = -128.0;
 const QUANTIZATION_MAX: f32 = 127.0;
 const QUANTIZATION_METADATA_SIZE: usize = 3 * 8 + 4;
+const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
+const I8_QMAX: i32 = 127;
+const I16_QMAX: i32 = 32767;
+const CLASSIC_ACC_DIM: usize = 256;
+const CLASSIC_H1_DIM: usize = 32;
+const CLASSIC_H2_DIM: usize = 32;
 
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
@@ -156,6 +162,708 @@ struct Config {
     lr_decay_epochs: Option<u32>, // mutually exclusive with steps
     lr_decay_steps: Option<u64>,  // mutually exclusive with epochs
     lr_plateau_patience: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ArchKind {
+    Single,
+    Classic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ExportFormat {
+    Fp32,
+    #[clap(name = "single-i8")]
+    SingleI8,
+    #[clap(name = "classic-v1")]
+    ClassicV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum QuantScheme {
+    #[clap(name = "per-tensor")]
+    PerTensor,
+    #[clap(name = "per-channel")]
+    PerChannel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DistillLossKind {
+    #[clap(name = "mse")]
+    Mse,
+    #[clap(name = "bce")]
+    Bce,
+    #[clap(name = "kl")]
+    Kl,
+}
+
+#[derive(Clone, Debug)]
+struct DistillOptions {
+    teacher_path: Option<PathBuf>,
+    loss: DistillLossKind,
+    temperature: f32,
+    alpha: f32,
+}
+
+impl Default for DistillOptions {
+    fn default() -> Self {
+        Self {
+            teacher_path: None,
+            loss: DistillLossKind::Mse,
+            temperature: 1.0,
+            alpha: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ExportOptions {
+    arch: ArchKind,
+    format: ExportFormat,
+    quant_ft: QuantScheme,
+    quant_h1: QuantScheme,
+    quant_h2: QuantScheme,
+    quant_out: QuantScheme,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            arch: ArchKind::Single,
+            format: ExportFormat::Fp32,
+            quant_ft: QuantScheme::PerTensor,
+            quant_h1: QuantScheme::PerChannel,
+            quant_h2: QuantScheme::PerChannel,
+            quant_out: QuantScheme::PerChannel,
+        }
+    }
+}
+
+#[inline]
+fn round_away_from_zero(val: f32) -> i32 {
+    if val.is_nan() || val.is_infinite() {
+        return 0;
+    }
+    if val >= 0.0 {
+        (val + 0.5).floor() as i32
+    } else {
+        (val - 0.5).ceil() as i32
+    }
+}
+
+#[inline]
+fn clip_sym(value: i32, qmax: i32) -> i32 {
+    value.clamp(-qmax, qmax)
+}
+
+fn quantize_symmetric_i8(
+    weights: &[f32],
+    per_channel: bool,
+    channels: usize,
+) -> (Vec<i8>, Vec<f32>) {
+    if weights.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut scales = if per_channel {
+        vec![0.0f32; channels]
+    } else {
+        vec![0.0f32; 1]
+    };
+    let mut quantized = Vec::with_capacity(weights.len());
+    if per_channel {
+        let stride = weights.len() / channels;
+        for (ch, slice) in weights.chunks(stride).enumerate() {
+            let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
+            let scale = max_abs / I8_QMAX as f32;
+            scales[ch] = scale;
+            for &w in slice {
+                let q = round_away_from_zero(w / scale);
+                quantized.push(clip_sym(q, I8_QMAX) as i8);
+            }
+        }
+    } else {
+        let max_abs = weights.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
+        let scale = max_abs / I8_QMAX as f32;
+        scales[0] = scale;
+        for &w in weights {
+            let q = round_away_from_zero(w / scale);
+            quantized.push(clip_sym(q, I8_QMAX) as i8);
+        }
+    }
+    (quantized, scales)
+}
+
+fn quantize_symmetric_i16(
+    weights: &[f32],
+    per_channel: bool,
+    channels: usize,
+) -> (Vec<i16>, Vec<f32>) {
+    if weights.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut scales = if per_channel {
+        vec![0.0f32; channels]
+    } else {
+        vec![0.0f32; 1]
+    };
+    let mut quantized = Vec::with_capacity(weights.len());
+    if per_channel {
+        let stride = weights.len() / channels;
+        for (ch, slice) in weights.chunks(stride).enumerate() {
+            let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
+            let scale = max_abs / I16_QMAX as f32;
+            scales[ch] = scale;
+            for &w in slice {
+                let q = round_away_from_zero(w / scale);
+                quantized.push(clip_sym(q, I16_QMAX) as i16);
+            }
+        }
+    } else {
+        let max_abs = weights.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
+        let scale = max_abs / I16_QMAX as f32;
+        scales[0] = scale;
+        for &w in weights {
+            let q = round_away_from_zero(w / scale);
+            quantized.push(clip_sym(q, I16_QMAX) as i16);
+        }
+    }
+    (quantized, scales)
+}
+
+fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) -> Vec<i32> {
+    if weight_scales.is_empty() {
+        return vec![0; bias.len()];
+    }
+    bias.iter()
+        .zip(weight_scales.iter().cycle())
+        .map(|(&b, &s_w)| {
+            let denom = (input_scale * s_w).max(1e-20);
+            round_away_from_zero(b / denom)
+        })
+        .collect()
+}
+
+#[inline]
+fn clamp_i32_to_i16(v: i32) -> i16 {
+    v.clamp(-I16_QMAX, I16_QMAX) as i16
+}
+
+#[derive(Clone, Debug)]
+struct ClassicFeatureTransformerInt {
+    weights: Vec<i16>,
+    biases: Vec<i32>,
+    acc_dim: usize,
+    input_dim: usize,
+}
+
+impl ClassicFeatureTransformerInt {
+    fn new(weights: Vec<i16>, biases: Vec<i32>, acc_dim: usize) -> Self {
+        let input_dim = if acc_dim == 0 {
+            0
+        } else {
+            weights.len() / acc_dim
+        };
+        Self {
+            weights,
+            biases,
+            acc_dim,
+            input_dim,
+        }
+    }
+
+    fn accumulate_u32(&self, features: &[u32], out: &mut [i16]) {
+        let features_usize: Vec<usize> = features.iter().map(|&f| f as usize).collect();
+        self.accumulate(&features_usize, out);
+    }
+
+    fn accumulate(&self, features: &[usize], out: &mut [i16]) {
+        debug_assert_eq!(out.len(), self.acc_dim);
+        out.iter_mut()
+            .zip(self.biases.iter())
+            .for_each(|(dst, &b)| *dst = clamp_i32_to_i16(b));
+
+        for &feat in features {
+            if feat >= self.input_dim {
+                continue;
+            }
+            let base = feat * self.acc_dim;
+            let row = &self.weights[base..base + self.acc_dim];
+            for (dst, &w) in out.iter_mut().zip(row.iter()) {
+                let sum = *dst as i32 + w as i32;
+                *dst = clamp_i32_to_i16(sum);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ClassicQuantizedNetwork {
+    hidden1_weights: Vec<i8>,
+    hidden1_biases: Vec<i32>,
+    hidden2_weights: Vec<i8>,
+    hidden2_biases: Vec<i32>,
+    output_weights: Vec<i8>,
+    output_bias: i32,
+    acc_dim: usize,
+    h1_dim: usize,
+    h2_dim: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ClassicQuantizedNetworkParams {
+    hidden1_weights: Vec<i8>,
+    hidden1_biases: Vec<i32>,
+    hidden2_weights: Vec<i8>,
+    hidden2_biases: Vec<i32>,
+    output_weights: Vec<i8>,
+    output_bias: i32,
+    acc_dim: usize,
+    h1_dim: usize,
+    h2_dim: usize,
+}
+
+impl ClassicQuantizedNetwork {
+    fn new(p: ClassicQuantizedNetworkParams) -> Self {
+        Self {
+            hidden1_weights: p.hidden1_weights,
+            hidden1_biases: p.hidden1_biases,
+            hidden2_weights: p.hidden2_weights,
+            hidden2_biases: p.hidden2_biases,
+            output_weights: p.output_weights,
+            output_bias: p.output_bias,
+            acc_dim: p.acc_dim,
+            h1_dim: p.h1_dim,
+            h2_dim: p.h2_dim,
+        }
+    }
+
+    fn propagate_from_acc(&self, acc_us: &[i16], acc_them: &[i16]) -> i32 {
+        debug_assert_eq!(acc_us.len(), self.acc_dim);
+        debug_assert_eq!(acc_them.len(), self.acc_dim);
+
+        let input_dim = self.acc_dim * 2;
+        let mut input = vec![0i8; input_dim];
+        for i in 0..self.acc_dim {
+            input[i] = Self::quantize_ft_output(acc_us[i]);
+            input[self.acc_dim + i] = Self::quantize_ft_output(acc_them[i]);
+        }
+
+        let mut h1 = vec![0i32; self.h1_dim];
+        let mut h1_act = vec![0i8; self.h1_dim];
+        self.affine_layer(
+            &input,
+            &self.hidden1_weights,
+            &self.hidden1_biases,
+            input_dim,
+            self.h1_dim,
+            &mut h1,
+        );
+        Self::apply_clipped_relu(&h1, &mut h1_act);
+
+        let mut h2 = vec![0i32; self.h2_dim];
+        let mut h2_act = vec![0i8; self.h2_dim];
+        self.affine_layer(
+            &h1_act,
+            &self.hidden2_weights,
+            &self.hidden2_biases,
+            self.h1_dim,
+            self.h2_dim,
+            &mut h2,
+        );
+        Self::apply_clipped_relu(&h2, &mut h2_act);
+
+        let mut output = self.output_bias;
+        for (i, &w) in self.output_weights.iter().enumerate() {
+            if i >= self.h2_dim {
+                break;
+            }
+            output += w as i32 * h2_act[i] as i32;
+        }
+
+        output
+    }
+
+    fn affine_layer(
+        &self,
+        input: &[i8],
+        weights: &[i8],
+        biases: &[i32],
+        in_dim: usize,
+        out_dim: usize,
+        out: &mut [i32],
+    ) {
+        debug_assert_eq!(input.len(), in_dim);
+        debug_assert_eq!(out.len(), out_dim);
+        debug_assert_eq!(weights.len(), in_dim * out_dim);
+        debug_assert_eq!(biases.len(), out_dim);
+
+        for i in 0..out_dim {
+            let mut acc = biases[i];
+            let row = &weights[i * in_dim..(i + 1) * in_dim];
+            for (j, &w) in row.iter().enumerate() {
+                acc += input[j] as i32 * w as i32;
+            }
+            out[i] = acc;
+        }
+    }
+
+    fn apply_clipped_relu(input: &[i32], output: &mut [i8]) {
+        debug_assert_eq!(input.len(), output.len());
+        for (dst, &src) in output.iter_mut().zip(input.iter()) {
+            let clipped = src.clamp(0, I8_QMAX);
+            *dst = clipped as i8;
+        }
+    }
+
+    #[inline]
+    fn quantize_ft_output(v: i16) -> i8 {
+        let shifted = (v as i32) >> 6;
+        shifted.clamp(-I8_QMAX, I8_QMAX) as i8
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ClassicIntNetworkBundle {
+    transformer: ClassicFeatureTransformerInt,
+    network: ClassicQuantizedNetwork,
+}
+
+impl ClassicIntNetworkBundle {
+    fn new(transformer: ClassicFeatureTransformerInt, network: ClassicQuantizedNetwork) -> Self {
+        Self {
+            transformer,
+            network,
+        }
+    }
+
+    fn as_serialized(&self) -> ClassicV1Serialized<'_> {
+        ClassicV1Serialized {
+            acc_dim: self.transformer.acc_dim,
+            input_dim: self.transformer.input_dim,
+            h1_dim: self.network.h1_dim,
+            h2_dim: self.network.h2_dim,
+            ft_weights: &self.transformer.weights,
+            ft_biases: &self.transformer.biases,
+            hidden1_weights: &self.network.hidden1_weights,
+            hidden1_biases: &self.network.hidden1_biases,
+            hidden2_weights: &self.network.hidden2_weights,
+            hidden2_biases: &self.network.hidden2_biases,
+            output_weights: &self.network.output_weights,
+            output_bias: self.network.output_bias,
+        }
+    }
+
+    fn propagate_with_features(&self, features_us: &[u32], features_them: &[u32]) -> i32 {
+        let mut acc_us = vec![0i16; self.transformer.acc_dim];
+        let mut acc_them = vec![0i16; self.transformer.acc_dim];
+        self.transformer.accumulate_u32(features_us, &mut acc_us);
+        self.transformer.accumulate_u32(features_them, &mut acc_them);
+        self.network.propagate_from_acc(&acc_us, &acc_them)
+    }
+
+    fn from_float(float_net: &ClassicFloatNetwork) -> Self {
+        let transformer = ClassicFeatureTransformerInt::new(
+            float_net
+                .ft_weights
+                .iter()
+                .map(|&v| clamp_i32_to_i16(round_away_from_zero(v)))
+                .collect(),
+            float_net.ft_biases.iter().map(|&v| round_away_from_zero(v)).collect(),
+            float_net.acc_dim,
+        );
+        let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+            hidden1_weights: float_net
+                .hidden1_weights
+                .iter()
+                .map(|&v| clip_sym(round_away_from_zero(v), I8_QMAX) as i8)
+                .collect(),
+            hidden1_biases: float_net
+                .hidden1_biases
+                .iter()
+                .map(|&v| round_away_from_zero(v))
+                .collect(),
+            hidden2_weights: float_net
+                .hidden2_weights
+                .iter()
+                .map(|&v| clip_sym(round_away_from_zero(v), I8_QMAX) as i8)
+                .collect(),
+            hidden2_biases: float_net
+                .hidden2_biases
+                .iter()
+                .map(|&v| round_away_from_zero(v))
+                .collect(),
+            output_weights: float_net
+                .output_weights
+                .iter()
+                .map(|&v| clip_sym(round_away_from_zero(v), I8_QMAX) as i8)
+                .collect(),
+            output_bias: round_away_from_zero(float_net.output_bias),
+            acc_dim: float_net.acc_dim,
+            h1_dim: float_net.h1_dim,
+            h2_dim: float_net.h2_dim,
+        });
+        ClassicIntNetworkBundle::new(transformer, network)
+    }
+}
+
+struct ClassicV1Serialized<'a> {
+    acc_dim: usize,
+    input_dim: usize,
+    h1_dim: usize,
+    h2_dim: usize,
+    ft_weights: &'a [i16],
+    ft_biases: &'a [i32],
+    hidden1_weights: &'a [i8],
+    hidden1_biases: &'a [i32],
+    hidden2_weights: &'a [i8],
+    hidden2_biases: &'a [i32],
+    output_weights: &'a [i8],
+    output_bias: i32,
+}
+
+struct ClassicFloatNetwork {
+    acc_dim: usize,
+    input_dim: usize,
+    h1_dim: usize,
+    h2_dim: usize,
+    ft_weights: Vec<f32>,
+    ft_biases: Vec<f32>,
+    hidden1_weights: Vec<f32>,
+    hidden1_biases: Vec<f32>,
+    hidden2_weights: Vec<f32>,
+    hidden2_biases: Vec<f32>,
+    output_weights: Vec<f32>,
+    output_bias: f32,
+}
+
+impl ClassicFloatNetwork {
+    fn zero() -> Self {
+        let input_dim = SHOGI_BOARD_SIZE * FE_END;
+        ClassicFloatNetwork {
+            acc_dim: CLASSIC_ACC_DIM,
+            input_dim,
+            h1_dim: CLASSIC_H1_DIM,
+            h2_dim: CLASSIC_H2_DIM,
+            ft_weights: vec![0.0; input_dim * CLASSIC_ACC_DIM],
+            ft_biases: vec![0.0; CLASSIC_ACC_DIM],
+            hidden1_weights: vec![0.0; CLASSIC_ACC_DIM * 2 * CLASSIC_H1_DIM],
+            hidden1_biases: vec![0.0; CLASSIC_H1_DIM],
+            hidden2_weights: vec![0.0; CLASSIC_H1_DIM * CLASSIC_H2_DIM],
+            hidden2_biases: vec![0.0; CLASSIC_H2_DIM],
+            output_weights: vec![0.0; CLASSIC_H2_DIM],
+            output_bias: 0.0,
+        }
+    }
+
+    fn accumulate_ft(&mut self, feat_idx: usize, values: &[f32]) {
+        let base = feat_idx * self.acc_dim;
+        for (dst, &src) in self.ft_weights[base..base + self.acc_dim].iter_mut().zip(values.iter())
+        {
+            *dst += src;
+        }
+    }
+
+    fn accumulate_ft_bias(&mut self, delta: &[f32]) {
+        for (dst, &src) in self.ft_biases.iter_mut().zip(delta.iter()) {
+            *dst += src;
+        }
+    }
+
+    fn accumulate_hidden1(&mut self, delta_w: &[f32], delta_b: &[f32]) {
+        for (dst, &src) in self.hidden1_weights.iter_mut().zip(delta_w.iter()) {
+            *dst += src;
+        }
+        for (dst, &src) in self.hidden1_biases.iter_mut().zip(delta_b.iter()) {
+            *dst += src;
+        }
+    }
+
+    fn accumulate_hidden2(&mut self, delta_w: &[f32], delta_b: &[f32]) {
+        for (dst, &src) in self.hidden2_weights.iter_mut().zip(delta_w.iter()) {
+            *dst += src;
+        }
+        for (dst, &src) in self.hidden2_biases.iter_mut().zip(delta_b.iter()) {
+            *dst += src;
+        }
+    }
+
+    fn accumulate_output(&mut self, delta_w: &[f32], delta_b: f32) {
+        for (dst, &src) in self.output_weights.iter_mut().zip(delta_w.iter()) {
+            *dst += src;
+        }
+        self.output_bias += delta_b;
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
+            return Err("Classic float network dims must be non-zero".into());
+        }
+        if self.ft_weights.len() != self.input_dim * self.acc_dim {
+            return Err("Classic float network ft_weights length mismatch".into());
+        }
+        if self.ft_biases.len() != self.acc_dim {
+            return Err("Classic float network ft_biases length mismatch".into());
+        }
+        if self.hidden1_weights.len() != (self.acc_dim * 2) * self.h1_dim {
+            return Err("Classic float network hidden1_weights length mismatch".into());
+        }
+        if self.hidden1_biases.len() != self.h1_dim {
+            return Err("Classic float network hidden1_biases length mismatch".into());
+        }
+        if self.hidden2_weights.len() != self.h1_dim * self.h2_dim {
+            return Err("Classic float network hidden2_weights length mismatch".into());
+        }
+        if self.hidden2_biases.len() != self.h2_dim {
+            return Err("Classic float network hidden2_biases length mismatch".into());
+        }
+        if self.output_weights.len() != self.h2_dim {
+            return Err("Classic float network output_weights length mismatch".into());
+        }
+        Ok(())
+    }
+
+    fn quantize_round(&self) -> Result<ClassicIntNetworkBundle, String> {
+        self.validate()?;
+
+        let ft_weights = self
+            .ft_weights
+            .iter()
+            .map(|&w| clamp_i32_to_i16(round_away_from_zero(w)))
+            .collect::<Vec<_>>();
+        let ft_biases = self.ft_biases.iter().map(|&b| round_away_from_zero(b)).collect::<Vec<_>>();
+
+        let hidden1_weights = self
+            .hidden1_weights
+            .iter()
+            .map(|&w| clip_sym(round_away_from_zero(w), I8_QMAX) as i8)
+            .collect::<Vec<_>>();
+        let hidden1_biases =
+            self.hidden1_biases.iter().map(|&b| round_away_from_zero(b)).collect::<Vec<_>>();
+
+        let hidden2_weights = self
+            .hidden2_weights
+            .iter()
+            .map(|&w| clip_sym(round_away_from_zero(w), I8_QMAX) as i8)
+            .collect::<Vec<_>>();
+        let hidden2_biases =
+            self.hidden2_biases.iter().map(|&b| round_away_from_zero(b)).collect::<Vec<_>>();
+
+        let output_weights = self
+            .output_weights
+            .iter()
+            .map(|&w| clip_sym(round_away_from_zero(w), I8_QMAX) as i8)
+            .collect::<Vec<_>>();
+        let output_bias = round_away_from_zero(self.output_bias);
+
+        let transformer = ClassicFeatureTransformerInt::new(ft_weights, ft_biases, self.acc_dim);
+        let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+            hidden1_weights,
+            hidden1_biases,
+            hidden2_weights,
+            hidden2_biases,
+            output_weights,
+            output_bias,
+            acc_dim: self.acc_dim,
+            h1_dim: self.h1_dim,
+            h2_dim: self.h2_dim,
+        });
+        Ok(ClassicIntNetworkBundle::new(transformer, network))
+    }
+}
+
+impl<'a> ClassicV1Serialized<'a> {
+    fn validate(&self) -> Result<(), String> {
+        if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
+            return Err("dimensions must be non-zero".into());
+        }
+        if self.ft_weights.len() != self.input_dim * self.acc_dim {
+            return Err("ft_weights length mismatch".into());
+        }
+        if self.ft_biases.len() != self.acc_dim {
+            return Err("ft_biases length mismatch".into());
+        }
+        let classic_input_dim = self.acc_dim * 2;
+        if self.hidden1_weights.len() != classic_input_dim * self.h1_dim {
+            return Err("hidden1_weights length mismatch".into());
+        }
+        if self.hidden1_biases.len() != self.h1_dim {
+            return Err("hidden1_biases length mismatch".into());
+        }
+        if self.hidden2_weights.len() != self.h1_dim * self.h2_dim {
+            return Err("hidden2_weights length mismatch".into());
+        }
+        if self.hidden2_biases.len() != self.h2_dim {
+            return Err("hidden2_biases length mismatch".into());
+        }
+        if self.output_weights.len() != self.h2_dim {
+            return Err("output_weights length mismatch".into());
+        }
+        Ok(())
+    }
+
+    fn total_bytes(&self) -> u64 {
+        let mut total = 16u64; // header
+        total += (self.ft_weights.len() * 2) as u64;
+        total += (self.ft_biases.len() * 4) as u64;
+        total += self.hidden1_weights.len() as u64;
+        total += (self.hidden1_biases.len() * 4) as u64;
+        total += self.hidden2_weights.len() as u64;
+        total += (self.hidden2_biases.len() * 4) as u64;
+        total += self.output_weights.len() as u64;
+        total += 4; // output bias
+        total
+    }
+}
+
+fn write_classic_v1_file(
+    path: &Path,
+    data: &ClassicV1Serialized<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    data.validate().map_err(|msg| msg.to_string())?;
+
+    let total_bytes = data.total_bytes();
+    if total_bytes > u32::MAX as u64 {
+        return Err("Classic v1 blob exceeds 4GB".into());
+    }
+
+    let mut writer = std::io::BufWriter::new(File::create(path)?);
+    writer.write_all(b"NNUE")?;
+    writer.write_all(&1u32.to_le_bytes())?;
+    writer.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes())?;
+    writer.write_all(&(total_bytes as u32).to_le_bytes())?;
+
+    for &w in data.ft_weights {
+        writer.write_all(&w.to_le_bytes())?;
+    }
+    for &b in data.ft_biases {
+        writer.write_all(&b.to_le_bytes())?;
+    }
+    for &w in data.hidden1_weights {
+        writer.write_all(&[w as u8])?;
+    }
+    for &b in data.hidden1_biases {
+        writer.write_all(&b.to_le_bytes())?;
+    }
+    for &w in data.hidden2_weights {
+        writer.write_all(&[w as u8])?;
+    }
+    for &b in data.hidden2_biases {
+        writer.write_all(&b.to_le_bytes())?;
+    }
+    for &w in data.output_weights {
+        writer.write_all(&[w as u8])?;
+    }
+    writer.write_all(&data.output_bias.to_le_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_classic_v1_bundle(
+    path: &Path,
+    bundle: &ClassicIntNetworkBundle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let serialized = bundle.as_serialized();
+    write_classic_v1_file(path, &serialized)
 }
 
 #[derive(Clone, Debug)]
@@ -800,6 +1508,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .arg(arg!(--"acc-dim" <N> "Accumulator dimension").default_value(DEFAULT_ACC_DIM))
         .arg(arg!(--"relu-clip" <N> "ReLU clipping value").default_value(DEFAULT_RELU_CLIP))
+        .arg(
+            Arg::new("arch")
+                .long("arch")
+                .help("Training architecture: single or classic")
+                .value_parser(clap::value_parser!(ArchKind))
+                .default_value("single"),
+        )
+        .arg(
+            Arg::new("export-format")
+                .long("export-format")
+                .help("Export format: fp32|single-i8|classic-v1")
+                .value_parser(clap::value_parser!(ExportFormat))
+                .default_value("fp32"),
+        )
+        .arg(
+            Arg::new("quant-ft")
+                .long("quant-ft")
+                .help("Quantization scheme for feature transformer weights")
+                .value_parser(clap::value_parser!(QuantScheme))
+                .default_value("per-tensor"),
+        )
+        .arg(
+            Arg::new("quant-h1")
+                .long("quant-h1")
+                .help("Quantization scheme for hidden layer 1 weights")
+                .value_parser(clap::value_parser!(QuantScheme))
+                .default_value("per-channel"),
+        )
+        .arg(
+            Arg::new("quant-h2")
+                .long("quant-h2")
+                .help("Quantization scheme for hidden layer 2 weights")
+                .value_parser(clap::value_parser!(QuantScheme))
+                .default_value("per-channel"),
+        )
+        .arg(
+            Arg::new("quant-out")
+                .long("quant-out")
+                .help("Quantization scheme for output layer weights")
+                .value_parser(clap::value_parser!(QuantScheme))
+                .default_value("per-channel"),
+        )
+        .arg(
+            Arg::new("distill-from-single")
+                .long("distill-from-single")
+                .help("Path to teacher Single FP32 weights for knowledge distillation")
+                .value_hint(ValueHint::FilePath),
+        )
+        .arg(
+            Arg::new("kd-loss")
+                .long("kd-loss")
+                .help("Knowledge distillation loss: mse|bce|kl")
+                .value_parser(clap::value_parser!(DistillLossKind))
+                .default_value("mse"),
+        )
+        .arg(
+            Arg::new("kd-temperature")
+                .long("kd-temperature")
+                .help("Knowledge distillation softmax temperature")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
+        .arg(
+            Arg::new("kd-alpha")
+                .long("kd-alpha")
+                .help("Knowledge distillation blending coefficient (teacher weight)")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
         .arg(arg!(--shuffle "Shuffle training data"))
         .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves (JSONL input)"))
         .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used (JSONL input)"))
@@ -923,6 +1700,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.get_one::<f32>("w-mate-ring").copied(),
     );
 
+    let arch = *app.get_one::<ArchKind>("arch").unwrap_or(&ArchKind::Single);
+    let export_format =
+        *app.get_one::<ExportFormat>("export-format").unwrap_or(&ExportFormat::Fp32);
+    let quant_ft = *app.get_one::<QuantScheme>("quant-ft").unwrap_or(&QuantScheme::PerTensor);
+    let quant_h1 = *app.get_one::<QuantScheme>("quant-h1").unwrap_or(&QuantScheme::PerChannel);
+    let quant_h2 = *app.get_one::<QuantScheme>("quant-h2").unwrap_or(&QuantScheme::PerChannel);
+    let quant_out = *app.get_one::<QuantScheme>("quant-out").unwrap_or(&QuantScheme::PerChannel);
+    let distill_teacher = app.get_one::<String>("distill-from-single").map(PathBuf::from);
+    let distill_loss = *app.get_one::<DistillLossKind>("kd-loss").unwrap_or(&DistillLossKind::Mse);
+    let distill_temperature = *app.get_one::<f32>("kd-temperature").unwrap();
+    let distill_alpha = *app.get_one::<f32>("kd-alpha").unwrap();
+
     let config = Config {
         epochs: app.get_one::<String>("epochs").unwrap().parse()?,
         batch_size: app.get_one::<String>("batch-size").unwrap().parse()?,
@@ -954,11 +1743,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lr_plateau_patience: app.get_one::<u32>("lr-plateau-patience").copied(),
     };
 
+    let export_options = ExportOptions {
+        arch,
+        format: export_format,
+        quant_ft,
+        quant_h1,
+        quant_h2,
+        quant_out,
+    };
+    let distill_options = DistillOptions {
+        teacher_path: distill_teacher,
+        loss: distill_loss,
+        temperature: distill_temperature,
+        alpha: distill_alpha,
+    };
+
     if config.scale <= 0.0 {
         return Err("Invalid --scale: must be > 0".into());
     }
     if config.throughput_interval_sec <= 0.0 {
         return Err("Invalid --throughput-interval: must be > 0".into());
+    }
+    if export_options.arch == ArchKind::Single
+        && matches!(export_options.format, ExportFormat::ClassicV1)
+    {
+        return Err("--arch=single does not support --export-format classic-v1".into());
+    }
+    if export_options.arch == ArchKind::Classic
+        && matches!(export_options.format, ExportFormat::SingleI8)
+    {
+        return Err("--arch=classic does not support --export-format single-i8".into());
+    }
+    if distill_options.temperature <= 0.0 {
+        return Err("--kd-temperature must be > 0".into());
     }
     if config.prefetch_batches > MAX_PREFETCH_BATCHES {
         return Err(format!("Invalid --prefetch-batches: must be <= {MAX_PREFETCH_BATCHES}").into());
@@ -1015,6 +1832,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  Settings: {:?}", config);
     } else {
         println!("  Settings: {:?}", config);
+    }
+    if human_to_stderr {
+        eprintln!(
+            "  Export: arch={:?}, format={:?}, q_ft={:?}, q_h1={:?}, q_h2={:?}, q_out={:?}",
+            export_options.arch,
+            export_options.format,
+            export_options.quant_ft,
+            export_options.quant_h1,
+            export_options.quant_h2,
+            export_options.quant_out
+        );
+    } else {
+        println!(
+            "  Export: arch={:?}, format={:?}, q_ft={:?}, q_h1={:?}, q_h2={:?}, q_out={:?}",
+            export_options.arch,
+            export_options.format,
+            export_options.quant_ft,
+            export_options.quant_h1,
+            export_options.quant_h2,
+            export_options.quant_out
+        );
+    }
+    if human_to_stderr {
+        match &distill_options.teacher_path {
+            Some(path) => eprintln!(
+                "  Distill: teacher={:?}, loss={:?}, temp={}, alpha={}",
+                path, distill_options.loss, distill_options.temperature, distill_options.alpha
+            ),
+            None => eprintln!(
+                "  Distill: teacher=None, loss={:?}, temp={}, alpha={}",
+                distill_options.loss, distill_options.temperature, distill_options.alpha
+            ),
+        }
+    } else {
+        match &distill_options.teacher_path {
+            Some(path) => println!(
+                "  Distill: teacher={:?}, loss={:?}, temp={}, alpha={}",
+                path, distill_options.loss, distill_options.temperature, distill_options.alpha
+            ),
+            None => println!(
+                "  Distill: teacher=None, loss={:?}, temp={}, alpha={}",
+                distill_options.loss, distill_options.temperature, distill_options.alpha
+            ),
+        }
     }
     if human_to_stderr {
         eprintln!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
@@ -1203,6 +2064,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_val_loss: Option<f32> = None;
     let mut best_epoch: Option<usize> = None;
 
+    let mut classic_bundle: Option<ClassicIntNetworkBundle> = None;
+
     // Training mode dispatch (scope to release borrows when done)
     {
         // Compose training_config for JSONL: include whether phase weighting was actually applied
@@ -1248,6 +2111,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             global_step: 0,
             training_config_json: training_cfg_json,
             plateau: plateau_state,
+            export: export_options.clone(),
+            distill: distill_options.clone(),
+            classic_bundle: &mut classic_bundle,
         };
         if is_cache && config.stream_cache {
             train_model_stream_cache(
@@ -1280,13 +2146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Save final model
-    save_network(&network, &out_dir.join("nn.fp32.bin"))?;
-
-    // Save quantized version if requested
-    if app.get_flag("quantized") {
-        save_network_quantized(&network, &out_dir.join("nn.i8.bin"))?;
-    }
+    // Resolve export format
+    finalize_export(
+        &network,
+        &out_dir,
+        export_options,
+        app.get_flag("quantized"),
+        classic_bundle.as_ref(),
+    )?;
 
     // Save config
     let mut config_file = File::create(out_dir.join("config.json"))?;
@@ -1795,6 +2662,12 @@ struct TrainContext<'a> {
     global_step: u64,
     training_config_json: Option<serde_json::Value>,
     plateau: Option<LrPlateauState>,
+
+    export: ExportOptions,
+
+    distill: DistillOptions,
+
+    classic_bundle: &'a mut Option<ClassicIntNetworkBundle>,
 }
 
 // LR Plateau state (Spec #11 overlay)
@@ -4527,6 +5400,67 @@ fn save_network(network: &Network, path: &Path) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+fn finalize_export(
+    network: &Network,
+    out_dir: &Path,
+    export: ExportOptions,
+    emit_single_quant: bool,
+    classic_bundle: Option<&ClassicIntNetworkBundle>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match export.format {
+        ExportFormat::Fp32 => {
+            save_network(network, &out_dir.join("nn.fp32.bin"))?;
+            if emit_single_quant {
+                save_network_quantized(network, &out_dir.join("nn.i8.bin"))?;
+            }
+        }
+        ExportFormat::SingleI8 => {
+            save_network_quantized(network, &out_dir.join("nn.i8.bin"))?;
+        }
+        ExportFormat::ClassicV1 => {
+            let fallback;
+            let bundle = match (classic_bundle, export.arch) {
+                (Some(b), _) => b,
+                (None, ArchKind::Classic) => {
+                    log::warn!(
+                        "Classic export requested but no Classic bundle was produced; exporting zero weights"
+                    );
+                    fallback = ClassicFloatNetwork::zero()
+                        .quantize_round()
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    &fallback
+                }
+                (None, ArchKind::Single) => {
+                    log::warn!(
+                        "Classic export requested for single architecture; generating zero Classic weights"
+                    );
+                    fallback = ClassicFloatNetwork::zero()
+                        .quantize_round()
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    &fallback
+                }
+            };
+
+            let ser = bundle.as_serialized();
+            if ser.acc_dim != CLASSIC_ACC_DIM
+                || ser.h1_dim != CLASSIC_H1_DIM
+                || ser.h2_dim != CLASSIC_H2_DIM
+                || ser.input_dim != SHOGI_BOARD_SIZE * FE_END
+            {
+                log::warn!(
+                    "Classic bundle dimensions unexpected (acc_dim={}, h1_dim={}, h2_dim={}, input_dim={})",
+                    ser.acc_dim,
+                    ser.h1_dim,
+                    ser.h2_dim,
+                    ser.input_dim
+                );
+            }
+            write_classic_v1_bundle(&out_dir.join("nn.classic.nnue"), bundle)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4767,6 +5701,147 @@ mod tests {
                     .unwrap();
             assert!(v.is_empty());
         }
+    }
+
+    #[test]
+    fn classic_transformer_accumulates_and_clamps() {
+        let acc_dim = 2;
+        let weights = vec![128i16, 256, -400, -800, 5000, -5000];
+        let biases = vec![10i32, -20i32];
+        let transformer = ClassicFeatureTransformerInt::new(weights, biases, acc_dim);
+
+        let mut acc = vec![0i16; acc_dim];
+        transformer.accumulate(&[0, 1, 2], &mut acc);
+
+        assert_eq!(acc, vec![4738i16, -5564i16]);
+    }
+
+    #[test]
+    fn classic_integer_network_matches_manual_flow() {
+        let acc_dim = 2;
+        let transformer = ClassicFeatureTransformerInt::new(
+            vec![128, 256, -128, -64, 64, 64],
+            vec![0, 0],
+            acc_dim,
+        );
+
+        let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+            hidden1_weights: vec![10, 20, 30, 40, -10, 5, -5, 10],
+            hidden1_biases: vec![100, -50],
+            hidden2_weights: vec![1, 2, 3, 4],
+            hidden2_biases: vec![0, 50],
+            output_weights: vec![2, -3],
+            output_bias: 10,
+            acc_dim,
+            h1_dim: 2,
+            h2_dim: 2,
+        });
+        let bundle = ClassicIntNetworkBundle::new(transformer, network);
+
+        let features_us = vec![0u32, 2];
+        let features_them = vec![1u32];
+        let output = bundle.propagate_with_features(&features_us, &features_them);
+        assert_eq!(output, -117);
+    }
+
+    #[test]
+    fn classic_v1_writer_emits_expected_layout() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("classic.bin");
+        let transformer =
+            ClassicFeatureTransformerInt::new(vec![0x1234, -5, 7, 9, -10, 0x2222], vec![42, -7], 2);
+        let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+            hidden1_weights: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            hidden1_biases: vec![11, -12],
+            hidden2_weights: vec![9, 8, 7, 6],
+            hidden2_biases: vec![5, -4],
+            output_weights: vec![3, -2],
+            output_bias: 99,
+            acc_dim: 2,
+            h1_dim: 2,
+            h2_dim: 2,
+        });
+        let bundle = ClassicIntNetworkBundle::new(transformer, network);
+        write_classic_v1_bundle(&path, &bundle).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 70);
+        assert_eq!(&bytes[0..4], b"NNUE");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), CLASSIC_V1_ARCH_ID);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 70u32);
+
+        // First FT weight (0x1234)
+        assert_eq!(i16::from_le_bytes(bytes[16..18].try_into().unwrap()), 0x1234);
+        // Second bias (-7)
+        let serialized = bundle.as_serialized();
+        let bias_offset = 16 + serialized.ft_weights.len() * 2 + 4; // first bias consumed
+        assert_eq!(i32::from_le_bytes(bytes[bias_offset..bias_offset + 4].try_into().unwrap()), -7);
+
+        // Last 4 bytes = output bias (99)
+        let tail = &bytes[bytes.len() - 4..];
+        assert_eq!(i32::from_le_bytes(tail.try_into().unwrap()), 99);
+    }
+
+    #[test]
+    fn classic_v1_validate_rejects_inconsistent_lengths() {
+        let transformer = ClassicFeatureTransformerInt::new(vec![1, 2, 3, 4], vec![0, 0], 2);
+        let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+            hidden1_weights: vec![1, 2, 3, 4],
+            hidden1_biases: vec![0, 0],
+            hidden2_weights: vec![1, 2, 3, 4],
+            hidden2_biases: vec![0, 0],
+            output_weights: vec![1, 2],
+            output_bias: 0,
+            acc_dim: 2,
+            h1_dim: 2,
+            h2_dim: 2,
+        });
+        let bundle = ClassicIntNetworkBundle::new(transformer, network);
+        let mut serialized = bundle.as_serialized();
+        serialized.h1_dim = 4; // break invariant
+        assert!(serialized.validate().is_err());
+    }
+
+    #[test]
+    fn classic_float_round_quantization() {
+        let float_net = ClassicFloatNetwork {
+            acc_dim: 2,
+            input_dim: 3,
+            h1_dim: 2,
+            h2_dim: 2,
+            ft_weights: vec![0.4, -1.6, 2.0, -2.2, 3.8, -4.4],
+            ft_biases: vec![0.9, -0.4],
+            hidden1_weights: vec![0.5, -0.5, 1.2, -2.4, 0.75, -0.9, 1.5, 1.9],
+            hidden1_biases: vec![1.2, -1.2],
+            hidden2_weights: vec![0.4, -0.7, 1.1, -1.3],
+            hidden2_biases: vec![0.2, -0.4],
+            output_weights: vec![0.3, -0.5],
+            output_bias: 0.8,
+        };
+        let bundle = float_net.quantize_round().unwrap();
+        let serialized = bundle.as_serialized();
+        assert_eq!(serialized.ft_weights, &[0i16, -2, 2, -2, 4, -4]);
+        assert_eq!(serialized.ft_biases, &[1, 0]);
+        assert_eq!(serialized.hidden1_weights, &[1, -1, 1, -2, 1, -1, 2, 2]);
+        assert_eq!(serialized.hidden1_biases, &[1, -1]);
+        assert_eq!(serialized.hidden2_weights, &[0, -1, 1, -1]);
+        assert_eq!(serialized.hidden2_biases, &[0, 0]);
+        assert_eq!(serialized.output_weights, &[0, -1]);
+        assert_eq!(serialized.output_bias, 1);
+    }
+
+    #[test]
+    fn finalize_export_writes_zero_when_bundle_missing() {
+        use rand::SeedableRng;
+
+        let td = tempdir().unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let network = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+        let mut export = ExportOptions::default();
+        export.arch = ArchKind::Classic;
+        export.format = ExportFormat::ClassicV1;
+        finalize_export(&network, td.path(), export, false, None).unwrap();
+        assert!(td.path().join("nn.classic.nnue").exists());
     }
 
     #[test]
@@ -5123,6 +6198,7 @@ mod tests {
         let mut bvl1 = f32::INFINITY;
         let mut ll1 = None;
         let mut be1 = None;
+        let mut classic_bundle1 = None;
         let mut ctx1 = super::TrainContext {
             out_dir,
             save_every: None,
@@ -5137,6 +6213,9 @@ mod tests {
             global_step: 0,
             training_config_json: None,
             plateau: None,
+            export: super::ExportOptions::default(),
+            distill: super::DistillOptions::default(),
+            classic_bundle: &mut classic_bundle1,
         };
         train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
         let dash2 = super::DashboardOpts {
@@ -5149,6 +6228,7 @@ mod tests {
         let mut bvl2 = f32::INFINITY;
         let mut ll2 = None;
         let mut be2 = None;
+        let mut classic_bundle2 = None;
         let mut ctx2 = super::TrainContext {
             out_dir,
             save_every: None,
@@ -5163,6 +6243,9 @@ mod tests {
             global_step: 0,
             training_config_json: None,
             plateau: None,
+            export: super::ExportOptions::default(),
+            distill: super::DistillOptions::default(),
+            classic_bundle: &mut classic_bundle2,
         };
         train_model(&mut net2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
 
@@ -5311,6 +6394,7 @@ mod tests {
         let mut best_val_loss = f32::INFINITY;
         let mut last_val_loss: Option<f32> = None;
         let mut best_epoch: Option<usize> = None;
+        let mut classic_bundle_in = None;
         let mut ctx_in = super::TrainContext {
             out_dir,
             save_every: None,
@@ -5325,6 +6409,9 @@ mod tests {
             global_step: 0,
             training_config_json: None,
             plateau: None,
+            export: super::ExportOptions::default(),
+            distill: super::DistillOptions::default(),
+            classic_bundle: &mut classic_bundle_in,
         };
         train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
             .unwrap();
@@ -5339,6 +6426,7 @@ mod tests {
         let mut best_val_loss2 = f32::INFINITY;
         let mut last_val_loss2: Option<f32> = None;
         let mut best_epoch2: Option<usize> = None;
+        let mut classic_bundle_stream = None;
         let mut ctx_st = super::TrainContext {
             out_dir,
             save_every: None,
@@ -5353,6 +6441,9 @@ mod tests {
             global_step: 0,
             training_config_json: None,
             plateau: None,
+            export: super::ExportOptions::default(),
+            distill: super::DistillOptions::default(),
+            classic_bundle: &mut classic_bundle_stream,
         };
         train_model_stream_cache(
             &mut net_stream,
@@ -5452,6 +6543,7 @@ mod tests {
         let mut best_val_loss = f32::INFINITY;
         let mut last_val_loss: Option<f32> = None;
         let mut best_epoch: Option<usize> = None;
+        let mut classic_bundle_log = None;
         let mut ctx = TrainContext {
             out_dir,
             save_every: None,
@@ -5466,6 +6558,9 @@ mod tests {
             global_step: 0,
             training_config_json: Some(serde_json::json!({"exp_id": "unit"})),
             plateau: None,
+            export: ExportOptions::default(),
+            distill: DistillOptions::default(),
+            classic_bundle: &mut classic_bundle_log,
         };
 
         train_model_with_loader(
@@ -5559,6 +6654,7 @@ mod tests {
         let mut best_val_loss = f32::INFINITY;
         let mut last_val_loss: Option<f32> = None;
         let mut best_epoch: Option<usize> = None;
+        let mut classic_bundle_zero = None;
         let mut ctx = TrainContext {
             out_dir,
             save_every: None,
@@ -5573,6 +6669,9 @@ mod tests {
             global_step: 0,
             training_config_json: None,
             plateau: None,
+            export: ExportOptions::default(),
+            distill: DistillOptions::default(),
+            classic_bundle: &mut classic_bundle_zero,
         };
 
         train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
@@ -5649,6 +6748,7 @@ mod tests {
         let mut best_val_loss = f32::INFINITY;
         let mut last_val_loss: Option<f32> = None;
         let mut best_epoch: Option<usize> = None;
+        let mut classic_bundle_err = None;
         let mut ctx = super::TrainContext {
             out_dir,
             save_every: None,
@@ -5663,6 +6763,9 @@ mod tests {
             global_step: 0,
             training_config_json: None,
             plateau: None,
+            export: super::ExportOptions::default(),
+            distill: super::DistillOptions::default(),
+            classic_bundle: &mut classic_bundle_err,
         };
         let err = train_model_stream_cache(
             &mut net,
@@ -5732,6 +6835,7 @@ mod tests {
         let mut best_val_loss = f32::INFINITY;
         let mut last_val_loss: Option<f32> = None;
         let mut best_epoch: Option<usize> = None;
+        let mut classic_bundle_smoke = None;
         let mut ctx = super::TrainContext {
             out_dir,
             save_every: None,
@@ -5746,6 +6850,9 @@ mod tests {
             global_step: 0,
             training_config_json: None,
             plateau: None,
+            export: super::ExportOptions::default(),
+            distill: super::DistillOptions::default(),
+            classic_bundle: &mut classic_bundle_smoke,
         };
         train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
 
