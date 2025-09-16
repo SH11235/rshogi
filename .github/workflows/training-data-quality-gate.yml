@@ -1,4 +1,4 @@
-name: tools-ci
+name: Training Data Quality Gate
 
 on:
   push:
@@ -7,13 +7,13 @@ on:
       - 'packages/rust-core/crates/tools/**'
       - 'packages/rust-core/crates/engine-core/**'
       - 'packages/rust-core/Cargo.*'
-      - '.github/workflows/tools-ci.yml'
+      - '.github/workflows/training-data-quality-gate.yml'
   pull_request:
     paths:
       - 'packages/rust-core/crates/tools/**'
       - 'packages/rust-core/crates/engine-core/**'
       - 'packages/rust-core/Cargo.*'
-      - '.github/workflows/tools-ci.yml'
+      - '.github/workflows/training-data-quality-gate.yml'
   workflow_dispatch:
     inputs:
       train:
@@ -44,34 +44,37 @@ concurrency:
 
 jobs:
   tools:
+    name: Build Tools + Run Quality Gate (Samples)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: packages/rust-core
     steps:
-      - uses: actions/checkout@v4
-      - name: Install mold linker
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install mold and clang
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y mold clang
           mold --version || true
           clang --version || true
-      - name: Rust toolchain
+      - name: Setup Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
-      - name: Setup sccache
+      - name: Setup sccache action
         uses: mozilla-actions/sccache-action@v0.0.6
-      - name: Enable sccache
+      - name: Enable sccache via RUSTC_WRAPPER
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust build (Swatinem/rust-cache)
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: "packages/rust-core -> target"
           cache-on-failure: true
-      - name: Build tools (locked)
+      - name: Build tools crate (release, locked)
         run: |
           set -euo pipefail
           cargo build -p tools --release --locked
-      - name: Run gate
+      - name: Run Teaching Quality Gate (Sample Data)
         run: |
           set -euo pipefail
           ./target/release/analyze_teaching_quality \
@@ -79,7 +82,7 @@ jobs:
             --no-manifest-autoload \
             --gate ./crates/tools/ci_gate.sample.json \
             --gate-mode fail
-      - name: Cross-dedup check
+      - name: Run Cross-Dedup on Sample Data
         run: |
           set -euo pipefail
           ./target/release/check_cross_dedup \
@@ -87,17 +90,18 @@ jobs:
             --valid ./crates/tools/tests/data/cross/valid.jsonl \
             --test  ./crates/tools/tests/data/cross/test.jsonl \
             --report leak_report.csv
-      - name: sccache stats
+      - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
-      - name: Upload cross-dedup report
+      - name: Upload Cross-Dedup Report (Sample Data)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cross-dedup-report
+          name: cross-dedup-report-sample
           path: packages/rust-core/leak_report.csv
 
   cross-dedup-real:
+    name: Cross-Dedup Report (Real Data)
     needs: tools
     if: ${{ github.event.inputs.train != '' && github.event.inputs.valid != '' && github.event.inputs.test != '' }}
     runs-on: ubuntu-latest
@@ -105,30 +109,32 @@ jobs:
       run:
         working-directory: packages/rust-core
     steps:
-      - uses: actions/checkout@v4
-      - name: Install mold linker
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install mold and clang
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y mold clang
           mold --version || true
           clang --version || true
-      - name: Rust toolchain
+      - name: Setup Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
-      - name: Setup sccache
+      - name: Setup sccache action
         uses: mozilla-actions/sccache-action@v0.0.6
-      - name: Enable sccache
+      - name: Enable sccache via RUSTC_WRAPPER
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust build (Swatinem/rust-cache)
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: "packages/rust-core -> target"
           key: tools-zstd
           cache-on-failure: true
-      - name: Build tools with zstd support (locked)
+      - name: Build tools crate (release, locked, zstd)
         run: |
           set -euo pipefail
           cargo build -p tools --release --locked --features zstd
-      - name: Cross-dedup (real datasets)
+      - name: Run Cross-Dedup on Real Data
         env:
           TRAIN: ${{ github.event.inputs.train }}
           VALID: ${{ github.event.inputs.valid }}
@@ -153,12 +159,12 @@ jobs:
             --test  "$TEST" \
             --report leak_report_real.csv \
             $([[ "${{ github.event.inputs.include_intra }}" == "true" ]] && echo --include-intra || true)
-      - name: Upload real cross-dedup report
+      - name: Upload Cross-Dedup Report (Real Data)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cross-dedup-report-real
           path: packages/rust-core/leak_report_real.csv
-      - name: sccache stats
+      - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
