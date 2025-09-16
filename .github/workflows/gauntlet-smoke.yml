@@ -1,0 +1,175 @@
+name: gauntlet-smoke
+
+on:
+  push:
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/gauntlet-smoke.yml'
+      - 'packages/rust-core/docs/reports/fixtures/opening/**'
+  pull_request:
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/gauntlet-smoke.yml'
+      - 'packages/rust-core/docs/reports/fixtures/opening/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CC: clang
+  CXX: clang++
+  RUSTFLAGS: -C linker=clang -C link-arg=-fuse-ld=mold
+
+defaults:
+  run:
+    working-directory: packages/rust-core
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Gauntlet (stub) Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # スモークはブロックしない（gauntlet ステップのみ非ブロッキング）
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold/clang/jq (if needed)
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mold clang jq
+          mold --version || true
+          clang --version || true
+          jq --version || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Env info
+        run: |
+          {
+            echo "## Runner environment"
+            echo ""
+            echo '```'
+            uname -a
+            echo ""
+            lscpu || true
+            echo ""
+            rustc -Vv || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
+
+      - name: Build tools (release, locked)
+        run: |
+          set -Eeuo pipefail
+          cargo build -p tools --release --locked
+          # quick sanity
+          ./target/release/gauntlet --help >/dev/null || true
+
+      - name: Run gauntlet (stub, 20 games)
+        continue-on-error: true
+        env:
+          RAYON_NUM_THREADS: "1"
+        run: |
+          set -Eeuo pipefail
+          mkdir -p runs/gauntlet_smoke
+
+          BASE_ARG=""; CAND_ARG=""; BOOK_ARG=""
+          [[ -f runs/nnue_local/baseline.nnue  ]] && BASE_ARG="--base runs/nnue_local/baseline.nnue"
+          [[ -f runs/nnue_local/candidate.nnue ]] && CAND_ARG="--cand runs/nnue_local/candidate.nnue"
+          [[ -f docs/reports/fixtures/opening/representative.epd ]] && \
+            BOOK_ARG="--book docs/reports/fixtures/opening/representative.epd"
+
+          set +e
+          target/release/gauntlet \
+            ${BASE_ARG} ${CAND_ARG} ${BOOK_ARG} \
+            --time "0/1+0.1" --games 20 --threads 1 --hash-mb 64 --multipv 1 \
+            --seed 12345 \
+            --json runs/gauntlet_smoke/out.json --report runs/gauntlet_smoke/report.md \
+            --stub > runs/gauntlet_smoke/structured.jsonl 2> runs/gauntlet_smoke/console.err
+          RC=$?
+          set -e
+          echo "$RC" > runs/gauntlet_smoke/gauntlet_exit_code.txt
+          {
+            echo ""
+            echo "### Invocation"
+            echo '```bash'
+            echo target/release/gauntlet ${BASE_ARG} ${CAND_ARG} ${BOOK_ARG} \
+              --time "0/1+0.1" --games 20 --threads 1 --hash-mb 64 --multipv 1 --seed 12345 \
+              --json runs/gauntlet_smoke/out.json --report runs/gauntlet_smoke/report.md --stub
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish report to Summary
+        if: always()
+        run: |
+          echo "## Gauntlet Smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo "games=20, time=0/1+0.1, seed=12345" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f runs/nnue_local/baseline.nnue ]]; then
+            echo "base_sha256=$(sha256sum runs/nnue_local/baseline.nnue | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f runs/nnue_local/candidate.nnue ]]; then
+            echo "cand_sha256=$(sha256sum runs/nnue_local/candidate.nnue | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f runs/gauntlet_smoke/gauntlet_exit_code.txt ]]; then
+            RC=$(cat runs/gauntlet_smoke/gauntlet_exit_code.txt)
+            echo "exit_code=${RC}" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${RC}" != "0" ]]; then
+              echo "🚨 gauntlet exited with non-zero code" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "exit_code=unknown" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f runs/gauntlet_smoke/report.md ]]; then
+            cat runs/gauntlet_smoke/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report generated (stub or run failure)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Quick stats (jq)
+        if: always()
+        run: |
+          if [[ -f runs/gauntlet_smoke/out.json ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Quick stats" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '
+              (.summary // {}) as $s
+              | "games=\(((( $s.games      | tonumber? ) // 0)))  " +
+                "wins=\((((  $s.wins       | tonumber? ) // 0)))  " +
+                "losses=\(((( $s.losses    | tonumber? ) // 0)))  " +
+                "draws=\((((  $s.draws     | tonumber? ) // 0)))  " +
+                "score_rate=\(((((( $s.winrate? | tonumber? ) // 0) * 100) | round)))%  " +
+                "nps_delta=\((( $s.nps_delta_pct? ) // 0))  pv_p90=\(((( $s.pv_spread_p90_cp? | tonumber? ) // 0)))cp"
+            ' runs/gauntlet_smoke/out.json >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gauntlet-smoke-${{ github.sha }}-${{ github.run_id }}
+          path: packages/rust-core/runs/gauntlet_smoke
+          if-no-files-found: warn
+          retention-days: 7
