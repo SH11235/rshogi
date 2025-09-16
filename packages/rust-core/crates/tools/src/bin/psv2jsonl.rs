@@ -221,14 +221,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 warned_pvmax = true;
                             }
-                            if let Some(line) = first_move_usi_from_move16(rec_buf[34], rec_buf[35])
-                            {
-                                rec_out.lines = Some(vec![JsonLine {
-                                    score_cp: eval,
-                                    multipv: 1,
-                                    pv: vec![line],
-                                }]);
-                            }
+                            let line = match first_move_usi_from_move16(rec_buf[34], rec_buf[35]) {
+                                Ok(line) => line,
+                                Err(detail) => {
+                                    errors += 1;
+                                    match strict {
+                                        StrictMode::FailClosed => {
+                                            log_err_json(
+                                                "decode_pv",
+                                                processed,
+                                                total_bytes,
+                                                &detail,
+                                                Some(&sfen),
+                                            );
+                                            std::process::exit(2);
+                                        }
+                                        StrictMode::AllowSkip => {
+                                            log_err_json(
+                                                "decode_pv",
+                                                processed,
+                                                total_bytes,
+                                                &detail,
+                                                Some(&sfen),
+                                            );
+                                            skipped += 1;
+                                            continue 'outer;
+                                        }
+                                        StrictMode::MaxErrors(maxn) => {
+                                            log_err_json(
+                                                "decode_pv",
+                                                processed,
+                                                total_bytes,
+                                                &detail,
+                                                Some(&sfen),
+                                            );
+                                            skipped += 1;
+                                            if maxn > 0 && errors >= maxn {
+                                                eprintln!("Reached max-errors={}", maxn);
+                                                std::process::exit(3);
+                                            }
+                                            continue 'outer;
+                                        }
+                                    }
+                                }
+                            };
+                            rec_out.lines = Some(vec![JsonLine {
+                                score_cp: eval,
+                                multipv: 1,
+                                pv: vec![line],
+                            }]);
                         }
                         serde_json::to_writer(&mut writer, &rec_out)?;
                         writer.write_all(b"\n")?;
@@ -421,13 +462,13 @@ fn process_one_record(
     })
 }
 
-fn first_move_usi_from_move16(lo: u8, hi: u8) -> Option<String> {
+fn first_move_usi_from_move16(lo: u8, hi: u8) -> Result<String, String> {
     let m = u16::from_le_bytes([lo, hi]);
     let drop = (m & 0x4000) != 0;
     let promote = (m & 0x8000) != 0;
     let to_idx = (m & 0x7f) as u8; // 0..80
     if to_idx > 80 {
-        return None;
+        return Err(format!("invalid to square index: {}", to_idx));
     }
     let to_usi = sqidx_to_usi(to_idx);
     if drop {
@@ -440,19 +481,19 @@ fn first_move_usi_from_move16(lo: u8, hi: u8) -> Option<String> {
             5 => 'B',
             6 => 'R',
             7 => 'G',
-            _ => return None,
+            _ => return Err(format!("invalid drop piece code: {}", pt_code)),
         };
-        Some(format!("{}*{}", piece_char, to_usi))
+        Ok(format!("{}*{}", piece_char, to_usi))
     } else {
         let from_idx = ((m >> 7) & 0x7f) as u8;
         if from_idx > 80 {
-            return None;
+            return Err(format!("invalid from square index: {}", from_idx));
         }
         let from_usi = sqidx_to_usi(from_idx);
         if promote {
-            Some(format!("{}{}+", from_usi, to_usi))
+            Ok(format!("{}{}+", from_usi, to_usi))
         } else {
-            Some(format!("{}{}", from_usi, to_usi))
+            Ok(format!("{}{}", from_usi, to_usi))
         }
     }
 }
@@ -807,5 +848,15 @@ mod tests {
             .failure()
             .code(2);
         Ok(())
+    }
+
+    #[test]
+    fn first_move_rejects_invalid_indices() {
+        let err =
+            first_move_usi_from_move16(0x5a, 0x00).expect_err("expected invalid to square to fail");
+        assert!(err.contains("to square"));
+        let err = first_move_usi_from_move16(0x00, 0x2d)
+            .expect_err("expected invalid from square to fail");
+        assert!(err.contains("from square"));
     }
 }
