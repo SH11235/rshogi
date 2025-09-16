@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -108,21 +108,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Error: --format must be yo_v1|auto");
         std::process::exit(2);
     }
+    if fmt == "auto" {
+        eprintln!("Warning: --format=auto is treated as yo_v1 in this version.");
+    }
 
-    let mut reader: Box<dyn Read> = if opt.input == "-" {
+    let mut reader: Box<dyn BufRead> = if opt.input == "-" {
         let stdin = io::stdin();
         let stdin_lock = stdin.lock();
-        let base: Box<dyn Read> =
+        let base: Box<dyn BufRead> =
             Box::new(BufReader::with_capacity(opt.io_buf_mb * 1024 * 1024, stdin_lock));
         match opt.decompress.as_deref() {
             Some("gz") => {
                 use flate2::read::MultiGzDecoder;
-                Box::new(MultiGzDecoder::new(base))
+                Box::new(BufReader::with_capacity(
+                    opt.io_buf_mb * 1024 * 1024,
+                    MultiGzDecoder::new(base),
+                ))
             }
             Some("zst") => {
                 #[cfg(feature = "zstd")]
                 {
-                    Box::new(zstd::Decoder::new(base)?)
+                    Box::new(BufReader::with_capacity(
+                        opt.io_buf_mb * 1024 * 1024,
+                        zstd::Decoder::new(base)?,
+                    ))
                 }
                 #[cfg(not(feature = "zstd"))]
                 {
@@ -152,6 +161,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let strict = parse_strict(&opt.strict);
+    let s = opt.strict.to_ascii_lowercase();
+    if !(s == "fail-closed" || s == "allow-skip" || s.starts_with("max-errors=")) {
+        eprintln!("Error: --strict must be 'fail-closed' | 'allow-skip' | 'max-errors=N'");
+        std::process::exit(2);
+    }
     let mut processed: u64 = 0;
     let mut success: u64 = 0;
     let mut skipped: u64 = 0;
@@ -168,7 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(true) => {
                 total_bytes += RECORD_SIZE_YO_V1 as u64;
                 processed += 1;
-                if opt.sample_rate < 1.0 && prand01(processed) > opt.sample_rate {
+                if opt.sample_rate < 1.0 && !sample_hit(&rec_buf, opt.sample_rate) {
                     continue;
                 }
 
@@ -308,6 +322,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if opt.metrics.eq_ignore_ascii_case("plain") {
         eprintln!();
     }
+    let _ = writer.flush();
 
     Ok(())
 }
@@ -561,10 +576,15 @@ fn decode_packed_sfen(data: &[u8; 32]) -> Result<(Position, YoV1Header), String>
 }
 
 #[inline]
-fn prand01(n: u64) -> f64 {
-    // Very simple LCG-based pseudo-random in [0,1), deterministic by n
-    let x = n.wrapping_mul(1103515245).wrapping_add(12345) & 0x7fffffff;
-    (x as f64) / 2147483647.0
+fn sample_hit(buf: &[u8], rate: f64) -> bool {
+    // Deterministic FNV-like hash over first up-to-16 bytes
+    let mut x: u64 = 0xcbf29ce484222325;
+    let n = buf.len().min(16);
+    for &b in &buf[..n] {
+        x ^= b as u64;
+        x = x.wrapping_mul(0x100000001b3);
+    }
+    ((x & 0xffff_ffff) as f64 / 4294967295.0) < rate
 }
 
 // Returns (piece or None if empty, consumed)
