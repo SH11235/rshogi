@@ -166,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Error: --strict must be 'fail-closed' | 'allow-skip' | 'max-errors=N'");
         std::process::exit(2);
     }
+    let start_time = Instant::now();
     let mut processed: u64 = 0;
     let mut success: u64 = 0;
     let mut skipped: u64 = 0;
@@ -288,18 +289,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if last_metrics.elapsed() >= metrics_interval {
+                    let elapsed = start_time.elapsed();
+                    let elapsed_secs = elapsed.as_secs_f64();
+                    let mb = total_bytes as f64 / (1024.0 * 1024.0);
+                    let rps = if elapsed_secs > 0.0 {
+                        processed as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
                     match opt.metrics.as_str() {
                         s if s.eq_ignore_ascii_case("json") => {
                             let m = serde_json::json!({
                                 "kind":"metrics","processed":processed,"success":success,"skipped":skipped,
                                 "errors":errors,"invalid_gameply":invalid_gameply,
+                                "in_mb":mb,
+                                "rps":rps,
                             });
                             eprintln!("{}", m);
                         }
                         _ => {
                             eprint!(
-                                "\rprocessed={} success={} skipped={} errors={} invalid_gameply={}",
-                                processed, success, skipped, errors, invalid_gameply
+                                "\rprocessed={} success={} skipped={} errors={} invalid_gameply={} in_mb={:.3} rps={:.1}",
+                                processed, success, skipped, errors, invalid_gameply, mb, rps
                             );
                         }
                     }
@@ -590,6 +601,7 @@ fn sample_hit(buf: &[u8], rate: f64) -> bool {
 // Returns (piece or None if empty, consumed)
 fn read_board_piece(r: &mut BitReader<'_>) -> Result<(Option<Piece>, usize), String> {
     // Huffman table for board (NO, P, L, N, S, B, R, G)
+    // 出典: YaneuraOu packedSfenValue (packedSfen.cpp の yo_v1 テーブル)
     const CODES: [u32; 8] = [0x00, 0x01, 0x03, 0x0b, 0x07, 0x1f, 0x3f, 0x0f];
     const BITS: [usize; 8] = [1, 2, 4, 4, 4, 6, 6, 5];
     let mut code: u32 = 0;
@@ -641,6 +653,7 @@ fn read_board_piece(r: &mut BitReader<'_>) -> Result<(Option<Piece>, usize), Str
 // Returns (piece, is_piecebox)
 fn read_hand_or_piecebox(r: &mut BitReader<'_>) -> Result<(Piece, bool), String> {
     // Hand codes: board codes >>1 (except NO). Bits-1
+    // 出典: YaneuraOu packedSfenValue (packedSfen.cpp の yo_v1 テーブル)
     const BOARD_CODES: [u32; 8] = [0x00, 0x01, 0x03, 0x0b, 0x07, 0x1f, 0x3f, 0x0f];
     const BOARD_BITS: [usize; 8] = [1, 2, 4, 4, 4, 6, 6, 5];
     const PIECEBOX_CODES: [u32; 8] = [0x00, 0x02, 0x09, 0x0d, 0x0b, 0x2f, 0x3f, 0x1b];
@@ -705,5 +718,94 @@ fn read_hand_or_piecebox(r: &mut BitReader<'_>) -> Result<(Piece, bool), String>
         if bits > 6 {
             return Err("invalid hand/piecebox token".into());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_cmd::Command;
+    use engine_core::usi::parse_usi_square;
+    use predicates::prelude::*;
+    use std::fs::File;
+    use std::io::Read;
+    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest
+            .parent()
+            .expect("crate dir has parent")
+            .parent()
+            .expect("workspace root");
+        root.join("docs/tools/psv2jsonl/fixtures").join(name)
+    }
+
+    #[test]
+    fn sqidx_roundtrip() -> TestResult {
+        for idx in 0u8..=80 {
+            let usi = sqidx_to_usi(idx);
+            let square = parse_usi_square(&usi)?;
+            assert_eq!(square.to_string(), usi);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pv_warning_emitted() -> TestResult {
+        let input = fixture_path("tiny.psv");
+        let mut cmd = Command::cargo_bin("psv2jsonl")?;
+        let assert = cmd
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg("-")
+            .arg("--with-pv")
+            .arg("--pv-max-moves")
+            .arg("2")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Warning: --pv-max-moves > 1"));
+        // Ensure stdout is not empty (processing occurred)
+        assert.stdout(predicate::str::is_match(r"\S").unwrap());
+        Ok(())
+    }
+
+    #[test]
+    fn limit_outputs_single_record() -> TestResult {
+        let input = fixture_path("tiny.psv");
+        let output_file = NamedTempFile::new()?;
+        Command::cargo_bin("psv2jsonl")?
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(output_file.path())
+            .arg("--limit")
+            .arg("1")
+            .assert()
+            .success();
+
+        let mut buf = String::new();
+        File::open(output_file.path())?.read_to_string(&mut buf)?;
+        let lines: Vec<_> = buf.lines().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one JSONL line");
+        Ok(())
+    }
+
+    #[test]
+    fn truncated_input_fails_closed() -> TestResult {
+        let input = fixture_path("tiny_bad.psv");
+        Command::cargo_bin("psv2jsonl")?
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg("-")
+            .assert()
+            .failure()
+            .code(2);
+        Ok(())
     }
 }
