@@ -376,7 +376,6 @@ pub fn distill_classic_after_training(
                     let target_prob = (distill.alpha * teacher_prob
                         + (1.0 - distill.alpha) * label_prob)
                         .clamp(PROB_EPS, 1.0 - PROB_EPS);
-
                     match loss_kind {
                         DistillLossKind::Mse => {
                             let target_logit = stable_logit(target_prob);
@@ -392,9 +391,11 @@ pub fn distill_classic_after_training(
                     }
                 }
                 "cp" => {
-                    // 教師出力は logit (WDL) である可能性があるため cp ドメインへ換算
-                    // 教師が既に cp 単位でも scale 掛けは実害ほぼ無し (将来 teacher モード判定を導入可)
-                    let teacher_cp = sample.teacher_output * config.scale;
+                    use crate::types::TeacherValueDomain;
+                    let teacher_cp = match distill.teacher_domain {
+                        TeacherValueDomain::Cp => sample.teacher_output,
+                        TeacherValueDomain::WdlLogit => sample.teacher_output * config.scale,
+                    };
                     let target = distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
                     let diff = prediction - target;
                     let loss = 0.5 * diff * diff * sample.weight;
@@ -427,6 +428,7 @@ pub fn distill_classic_after_training(
                 },
                 "alpha": distill.alpha,
                 "temperature": temperature,
+                "teacher_domain": match distill.teacher_domain { crate::types::TeacherValueDomain::Cp => "cp", crate::types::TeacherValueDomain::WdlLogit => "wdl-logit" },
             });
             lg.write_json(&rec);
         }
