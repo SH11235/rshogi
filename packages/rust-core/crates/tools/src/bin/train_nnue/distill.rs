@@ -596,12 +596,8 @@ pub fn evaluate_distill(
                 TeacherValueDomain::Cp => teacher_raw,
                 TeacherValueDomain::WdlLogit => teacher_raw * config.scale,
             };
-            let s = if matches!(teacher_domain, TeacherValueDomain::WdlLogit) {
-                // student_logit is logit space; convert
-                student_logit * config.scale
-            } else {
-                student_logit
-            };
+            // label_type=="cp" のとき、生徒出力は常に cp ドメイン。teacher_domain に依存してスケールしない。
+            let s = student_logit;
             (t, s)
         };
 

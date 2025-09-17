@@ -322,7 +322,7 @@ cargo run --release -p tools --bin train_nnue -- \
 
 - `--arch classic --export-format classic-v1` を同時指定すると Classic 蒸留が有効になります。
 - 教師ネット（Single FP32）のパスは `--distill-from-single` で必須指定です。
-- `--teacher-domain cp|wdl-logit` で教師出力のスケール/意味空間を指定します。WDL ラベル + logit 教師の場合は `wdl-logit` を推奨。cp 評価を出す旧教師の場合は `cp` を指定してください（未指定時は label 種別から自動推定: cp ラベル=cp / それ以外=cp 既定, 将来的に変更される可能性があります）。
+- `--teacher-domain cp|wdl-logit` で教師出力のスケール/意味空間を指定します。WDL ラベル + logit 教師の場合は `wdl-logit` を推奨。cp 評価を出す旧教師の場合は `cp` を指定してください（未指定時の自動推定: `label=cp` → `cp`, `label=wdl` → `wdl-logit`）。
 - `--quant-ft` と `--quant-out` は `per-tensor` 固定です。Hidden 層 (`--quant-h1/-h2`) は 
   `per-tensor` / `per-channel` を切り替え可能です（既定: `per-channel`）。
 
