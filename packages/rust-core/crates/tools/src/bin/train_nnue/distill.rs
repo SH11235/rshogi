@@ -501,6 +501,24 @@ fn convert_logit_to_cp(logit: f32, config: &Config) -> f32 {
     logit * config.scale
 }
 
+#[cfg(test)]
+mod tests {
+    use super::weighted_percentile;
+
+    #[test]
+    fn weighted_percentile_extremes() {
+        let base = vec![(0.0, 1.0), (10.0, 1.0)];
+        assert_eq!(weighted_percentile(base.clone(), 0.0), Some(0.0));
+        assert_eq!(weighted_percentile(base.clone(), 1.0), Some(10.0));
+    }
+
+    #[test]
+    fn weighted_percentile_skewed_weights() {
+        let skew = vec![(0.0, 0.001), (100.0, 1000.0)];
+        assert_eq!(weighted_percentile(skew, 0.5), Some(100.0));
+    }
+}
+
 pub fn evaluate_distill(
     teacher: &Network,
     classic_fp32: &ClassicFloatNetwork,
