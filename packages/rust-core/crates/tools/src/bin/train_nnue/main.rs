@@ -15,7 +15,7 @@ pub(crate) mod types;
 
 use std::fs::{create_dir_all, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use chrono::Utc;
@@ -23,7 +23,7 @@ use clap::parser::ValueSource;
 use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-use model::Network;
+use model::{Network, SingleNetwork};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use tools::common::weighting as wcfg;
@@ -37,7 +37,10 @@ use distill::{
 use error_messages::*;
 use export::{finalize_export, save_network};
 use logging::StructuredLogger;
-use params::{DEFAULT_ACC_DIM, DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES};
+use params::{
+    CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP, DEFAULT_ACC_DIM,
+    DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES,
+};
 use training::{
     compute_val_auc, compute_val_auc_and_ece, train_model, train_model_stream_cache,
     train_model_with_loader, DashboardOpts, LrPlateauState, TrainContext, TrainTrackers,
@@ -395,7 +398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let config = Config {
+    let mut config = Config {
         epochs: app.get_one::<String>("epochs").unwrap().parse()?,
         batch_size: app.get_one::<String>("batch-size").unwrap().parse()?,
         learning_rate: app.get_one::<String>("lr").unwrap().parse()?,
@@ -459,6 +462,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
     let distill_seed = seed_u64_opt.map(|s| s ^ 0xC1A5_51C0_5EED_u64);
     distill_options.seed = distill_seed;
+
+    let distill_only = arch == ArchKind::Classic
+        && export_format == ExportFormat::ClassicV1
+        && distill_options.teacher_path.is_some();
+    if arch == ArchKind::Classic && !distill_only {
+        return Err("Classic FP32 学習は未実装です。--arch classic を使う場合は --export-format classic-v1 と --distill-from-single を指定してください。".into());
+    }
+
+    if arch == ArchKind::Classic && config.relu_clip != CLASSIC_RELU_CLIP {
+        if human_to_stderr {
+            eprintln!(
+                "Warning: Classic アーキの relu_clip は 127 固定です (--relu-clip={} → 127 に上書き)",
+                config.relu_clip
+            );
+        } else {
+            println!(
+                "Warning: Classic アーキの relu_clip は 127 固定です (--relu-clip={} → 127 に上書き)",
+                config.relu_clip
+            );
+        }
+        config.relu_clip = CLASSIC_RELU_CLIP;
+    }
 
     if config.scale <= 0.0 {
         return Err("Invalid --scale: must be > 0".into());
@@ -622,10 +647,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
     }
+    let network_desc = match arch {
+        ArchKind::Single => {
+            format!("{} -> {} -> 1 (Single)", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim)
+        }
+        ArchKind::Classic => format!(
+            "HALFKP -> {}x2 -> {} -> {} -> 1 (Classic)",
+            CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM
+        ),
+    };
     if human_to_stderr {
-        eprintln!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+        eprintln!("  Network: {}", network_desc);
     } else {
-        println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
+        println!("  Network: {}", network_desc);
     }
 
     // Decide input mode
@@ -676,6 +710,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if config.shuffle {
             eprintln!("Note: shuffle is disabled in --stream-cache mode.");
+        }
+    }
+
+    if distill_only {
+        if train_samples.is_empty() {
+            if is_cache {
+                if human_to_stderr {
+                    eprintln!(
+                        "Distill-only モード: stream-cache を無効化してキャッシュを読み込みます"
+                    );
+                } else {
+                    println!(
+                        "Distill-only モード: stream-cache を無効化してキャッシュを読み込みます"
+                    );
+                }
+                train_samples = load_samples_from_cache(input_path, &weighting_cfg)?;
+            } else {
+                if human_to_stderr {
+                    eprintln!("Distill-only モード: 訓練データをメモリへ読み込みます");
+                } else {
+                    println!("Distill-only モード: 訓練データをメモリへ読み込みます");
+                }
+                train_samples = load_samples(input_path, &config, &weighting_cfg)?;
+            }
+        }
+        if train_samples.is_empty() {
+            return Err("Distill-only モードにはメモリ上の訓練サンプルが必要です".into());
         }
     }
 
@@ -741,10 +802,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Initialize network
-    let mut network = Network::new(config.accumulator_dim, config.relu_clip, &mut rng);
+    let mut network = match arch {
+        ArchKind::Single => Network::new_single(config.accumulator_dim, config.relu_clip, &mut rng),
+        ArchKind::Classic => {
+            Network::new_classic(config.relu_clip, config.estimated_features_per_sample, &mut rng)
+        }
+    };
 
-    // Train the model
-    if human_to_stderr {
+    if distill_only {
+        if human_to_stderr {
+            eprintln!("\nDistilling Classic model...");
+        } else {
+            println!("\nDistilling Classic model...");
+        }
+    } else if human_to_stderr {
         eprintln!("\nTraining...");
     } else {
         println!("\nTraining...");
@@ -800,187 +871,244 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut distill_metrics: Option<DistillEvalMetrics> = None;
     let mut quant_metrics: Option<QuantEvalMetrics> = None;
 
-    // Training mode dispatch (scope to release borrows when done)
-    {
-        // Compose training_config for JSONL: include whether phase weighting was actually applied
-        let mut training_cfg_json = serde_json::to_value(&weighting_cfg).ok();
-        if let Some(obj) = training_cfg_json.as_mut().and_then(|v| v.as_object_mut()) {
-            let phase_applied =
-                !is_cache && weighting_cfg.active.contains(&wcfg::WeightingKind::Phase);
-            obj.insert("phase_applied".into(), serde_json::json!(phase_applied));
+    if distill_only {
+        let teacher_path = distill_options.teacher_path.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, ERR_CLASSIC_NEEDS_TEACHER)
+        })?;
+        let teacher = SingleNetwork::load(Path::new(teacher_path)).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Failed to load teacher network '{}': {}", teacher_path.display(), e),
+            )
+        })?;
+
+        let artifacts = distill_classic_after_training(
+            &teacher,
+            &train_samples,
+            &config,
+            &distill_options,
+            distill::ClassicDistillConfig::new(
+                export_options.quant_ft,
+                export_options.quant_h1,
+                export_options.quant_h2,
+                export_options.quant_out,
+                structured_logger.as_ref(),
+            ),
+        )
+        .map_err(std::io::Error::other)?;
+
+        let eval_samples_slice: &[Sample] = validation_samples
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.as_slice())
+            .unwrap_or_else(|| train_samples.as_slice());
+
+        if !eval_samples_slice.is_empty() {
+            distill_metrics = Some(evaluate_distill(
+                &teacher,
+                &artifacts.classic_fp32,
+                eval_samples_slice,
+                &config,
+                distill_options.teacher_domain,
+            ));
+            quant_metrics = Some(evaluate_quantization_gap(
+                &artifacts.classic_fp32,
+                &artifacts.bundle_int,
+                &artifacts.scales,
+                eval_samples_slice,
+                &config,
+            ));
         }
 
-        // Initialize plateau state if configured and validation is present
-        let mut plateau_state = None;
-        if let Some(pat) = config.lr_plateau_patience {
-            if pat > 0 {
-                if validation_samples.is_some() {
-                    plateau_state = Some(LrPlateauState::new(pat));
-                } else {
-                    // Warn once if plateau requested but no validation
-                    if human_to_stderr {
-                        eprintln!(
-                            "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
-                        );
+        classic_scales = Some(artifacts.scales.clone());
+        classic_bundle = Some(artifacts.bundle_int);
+    } else {
+        // Training mode dispatch (scope to release borrows when done)
+        {
+            // Compose training_config for JSONL: include whether phase weighting was actually applied
+            let mut training_cfg_json = serde_json::to_value(&weighting_cfg).ok();
+            if let Some(obj) = training_cfg_json.as_mut().and_then(|v| v.as_object_mut()) {
+                let phase_applied =
+                    !is_cache && weighting_cfg.active.contains(&wcfg::WeightingKind::Phase);
+                obj.insert("phase_applied".into(), serde_json::json!(phase_applied));
+            }
+
+            // Initialize plateau state if configured and validation is present
+            let mut plateau_state = None;
+            if let Some(pat) = config.lr_plateau_patience {
+                if pat > 0 {
+                    if validation_samples.is_some() {
+                        plateau_state = Some(LrPlateauState::new(pat));
                     } else {
-                        println!(
-                            "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
-                        );
+                        // Warn once if plateau requested but no validation
+                        if human_to_stderr {
+                            eprintln!(
+                                "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
+                            );
+                        } else {
+                            println!(
+                                "Warning: --lr-plateau-patience specified but no validation data provided; plateau disabled"
+                            );
+                        }
                     }
                 }
             }
-        }
 
-        let mut ctx = TrainContext {
-            out_dir: &out_dir,
-            save_every,
-            dash,
-            trackers: TrainTrackers {
-                best_network: &mut best_network,
-                best_val_loss: &mut best_val_loss,
-                last_val_loss: &mut last_val_loss,
-                best_epoch: &mut best_epoch,
-            },
-            structured: structured_logger.take(),
-            global_step: 0,
-            training_config_json: training_cfg_json,
-            plateau: plateau_state,
-            export: export_options.clone(),
-            distill: distill_options.clone(),
-            classic_bundle: &mut classic_bundle,
-        };
-        if is_cache && config.stream_cache {
-            train_model_stream_cache(
-                &mut network,
-                input_path,
-                &validation_samples,
-                &config,
-                &mut rng,
-                &mut ctx,
-                &weighting_cfg,
-            )?;
-        } else if is_cache {
-            train_model_with_loader(
-                &mut network,
-                train_samples.clone(),
-                &validation_samples,
-                &config,
-                &mut rng,
-                &mut ctx,
-            )?;
-        } else {
-            train_model(
-                &mut network,
-                &mut train_samples,
-                &validation_samples,
-                &config,
-                &mut rng,
-                &mut ctx,
-            )?;
-        }
+            let mut ctx = TrainContext {
+                out_dir: &out_dir,
+                save_every,
+                dash,
+                trackers: TrainTrackers {
+                    best_network: &mut best_network,
+                    best_val_loss: &mut best_val_loss,
+                    last_val_loss: &mut last_val_loss,
+                    best_epoch: &mut best_epoch,
+                },
+                structured: structured_logger.take(),
+                global_step: 0,
+                training_config_json: training_cfg_json,
+                plateau: plateau_state,
+                export: export_options.clone(),
+                distill: distill_options.clone(),
+                classic_bundle: &mut classic_bundle,
+            };
+            if is_cache && config.stream_cache {
+                train_model_stream_cache(
+                    &mut network,
+                    input_path,
+                    &validation_samples,
+                    &config,
+                    &mut rng,
+                    &mut ctx,
+                    &weighting_cfg,
+                )?;
+            } else if is_cache {
+                train_model_with_loader(
+                    &mut network,
+                    train_samples.clone(),
+                    &validation_samples,
+                    &config,
+                    &mut rng,
+                    &mut ctx,
+                )?;
+            } else {
+                train_model(
+                    &mut network,
+                    &mut train_samples,
+                    &validation_samples,
+                    &config,
+                    &mut rng,
+                    &mut ctx,
+                )?;
+            }
 
-        if arch == ArchKind::Classic && export_format == ExportFormat::ClassicV1 {
-            if train_samples.is_empty() {
-                if human_to_stderr {
-                    eprintln!(
-                        "Classic distillation skipped: training samples not loaded in-memory (stream-cache mode)."
-                    );
-                } else {
-                    println!(
-                        "Classic distillation skipped: training samples not loaded in-memory (stream-cache mode)."
-                    );
-                }
-            } else if let Some(path) = &distill_options.teacher_path {
-                match Network::load(path) {
-                    Ok(teacher) => match distill_classic_after_training(
-                        &teacher,
-                        &train_samples,
-                        &config,
-                        &distill_options,
-                        distill::ClassicDistillConfig::new(
-                            export_options.quant_ft,
-                            export_options.quant_h1,
-                            export_options.quant_h2,
-                            export_options.quant_out,
-                            ctx.structured.as_ref(),
-                        ),
-                    ) {
-                        Ok(artifacts) => {
-                            let distill::DistillArtifacts {
-                                classic_fp32,
-                                bundle_int,
-                                scales,
-                            } = artifacts;
+            if arch == ArchKind::Classic && export_format == ExportFormat::ClassicV1 {
+                if train_samples.is_empty() {
+                    if human_to_stderr {
+                        eprintln!(
+                            "Classic distillation skipped: training samples not loaded in-memory (stream-cache mode)."
+                        );
+                    } else {
+                        println!(
+                            "Classic distillation skipped: training samples not loaded in-memory (stream-cache mode)."
+                        );
+                    }
+                } else if let Some(path) = &distill_options.teacher_path {
+                    match SingleNetwork::load(path) {
+                        Ok(teacher) => match distill_classic_after_training(
+                            &teacher,
+                            &train_samples,
+                            &config,
+                            &distill_options,
+                            distill::ClassicDistillConfig::new(
+                                export_options.quant_ft,
+                                export_options.quant_h1,
+                                export_options.quant_h2,
+                                export_options.quant_out,
+                                ctx.structured.as_ref(),
+                            ),
+                        ) {
+                            Ok(artifacts) => {
+                                let distill::DistillArtifacts {
+                                    classic_fp32,
+                                    bundle_int,
+                                    scales,
+                                } = artifacts;
 
-                            let eval_samples_slice: &[Sample] =
-                                if let Some(val) = validation_samples.as_ref() {
-                                    if !val.is_empty() {
-                                        val.as_slice()
+                                let eval_samples_slice: &[Sample] =
+                                    if let Some(val) = validation_samples.as_ref() {
+                                        if !val.is_empty() {
+                                            val.as_slice()
+                                        } else {
+                                            train_samples.as_slice()
+                                        }
                                     } else {
                                         train_samples.as_slice()
-                                    }
-                                } else {
-                                    train_samples.as_slice()
-                                };
+                                    };
 
-                            if !eval_samples_slice.is_empty() {
-                                let dm = evaluate_distill(
-                                    &teacher,
-                                    &classic_fp32,
-                                    eval_samples_slice,
-                                    &config,
-                                    distill_options.teacher_domain,
-                                );
-                                let qm = evaluate_quantization_gap(
-                                    &classic_fp32,
-                                    &bundle_int,
-                                    &scales,
-                                    eval_samples_slice,
-                                    &config,
-                                );
-                                distill_metrics = Some(dm);
-                                quant_metrics = Some(qm);
+                                if !eval_samples_slice.is_empty() {
+                                    let dm = evaluate_distill(
+                                        &teacher,
+                                        &classic_fp32,
+                                        eval_samples_slice,
+                                        &config,
+                                        distill_options.teacher_domain,
+                                    );
+                                    let qm = evaluate_quantization_gap(
+                                        &classic_fp32,
+                                        &bundle_int,
+                                        &scales,
+                                        eval_samples_slice,
+                                        &config,
+                                    );
+                                    distill_metrics = Some(dm);
+                                    quant_metrics = Some(qm);
+                                }
+
+                                classic_scales = Some(scales.clone());
+                                *ctx.classic_bundle = Some(bundle_int);
                             }
-
-                            classic_scales = Some(scales.clone());
-                            *ctx.classic_bundle = Some(bundle_int);
-                        }
+                            Err(e) => {
+                                if human_to_stderr {
+                                    eprintln!(
+                                        "Classic distillation failed (falling back to zero bundle): {}",
+                                        e
+                                    );
+                                } else {
+                                    println!(
+                                        "Classic distillation failed (falling back to zero bundle): {}",
+                                        e
+                                    );
+                                }
+                            }
+                        },
                         Err(e) => {
                             if human_to_stderr {
                                 eprintln!(
-                                    "Classic distillation failed (falling back to zero bundle): {}",
+                                    "Failed to load teacher network for classic distillation: {}",
                                     e
                                 );
                             } else {
                                 println!(
-                                    "Classic distillation failed (falling back to zero bundle): {}",
+                                    "Failed to load teacher network for classic distillation: {}",
                                     e
                                 );
                             }
                         }
-                    },
-                    Err(e) => {
-                        if human_to_stderr {
-                            eprintln!(
-                                "Failed to load teacher network for classic distillation: {}",
-                                e
-                            );
-                        } else {
-                            println!(
-                                "Failed to load teacher network for classic distillation: {}",
-                                e
-                            );
-                        }
                     }
+                } else if human_to_stderr {
+                    eprintln!(
+                        "Classic distillation skipped: --distill-from-single was not provided."
+                    );
+                } else {
+                    println!(
+                        "Classic distillation skipped: --distill-from-single was not provided."
+                    );
                 }
-            } else if human_to_stderr {
-                eprintln!("Classic distillation skipped: --distill-from-single was not provided.");
-            } else {
-                println!("Classic distillation skipped: --distill-from-single was not provided.");
             }
-        }
 
-        structured_logger = ctx.structured.take();
+            structured_logger = ctx.structured.take();
+        }
     }
 
     // Resolve export format

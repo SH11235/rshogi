@@ -6,10 +6,20 @@ pub fn train_model(
     rng: &mut StdRng,
     ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let network = match network {
+        Network::Single(inner) => inner,
+        Network::Classic(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Classic アーキの学習ループは実装中です",
+            )
+            .into());
+        }
+    };
     let n_samples = train_samples.len();
     let n_batches = n_samples.div_ceil(config.batch_size);
     let mut adam_state = if config.optimizer == "adam" {
-        Some(AdamState::new(network))
+        Some(SingleAdamState::new(network))
     } else {
         None
     };
@@ -127,7 +137,7 @@ pub fn train_model(
                 if total_batches % interval == 0 {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
-                    save_network(network, &checkpoint_path)?;
+                    save_single_network(network, &checkpoint_path)?;
                     if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                         eprintln!("Saved checkpoint: {}", checkpoint_path.display());
                     } else {
@@ -149,24 +159,19 @@ pub fn train_model(
         let mut val_ece: Option<f64> = None;
         let mut val_wsum: Option<f64> = None;
         if let Some(val_samples) = validation_samples {
-            let vl = compute_validation_loss(network, val_samples, config);
+            let mut scratch = SingleForwardScratch::new(network.acc_dim);
+            let vl = compute_validation_loss_single(network, val_samples, config);
             val_loss = Some(vl);
-            val_auc = compute_val_auc(network, val_samples, config);
+            val_auc = compute_val_auc_single(network, val_samples, config);
             if ctx.dash.val_is_jsonl && config.label_type == "wdl" {
                 // Build bins and write CSV/PNG
                 let mut cps = Vec::with_capacity(val_samples.len());
                 let mut probs = Vec::with_capacity(val_samples.len());
                 let mut labels = Vec::with_capacity(val_samples.len());
                 let mut wts = Vec::with_capacity(val_samples.len());
-                let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
                 for s in val_samples.iter() {
                     if let Some(cp) = s.cp {
-                        let out = network.forward_with_buffers(
-                            &s.features,
-                            &mut acc_buffer,
-                            &mut activated_buffer,
-                        );
+                        let out = network.forward_with_scratch(&s.features, &mut scratch);
                         let p = 1.0 / (1.0 + (-out).exp());
                         cps.push(cp);
                         probs.push(p);
@@ -238,17 +243,11 @@ pub fn train_model(
                         GamePhase::EndGame => 2,
                     }
                 }
-                let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
                 match config.label_type.as_str() {
                     "wdl" => {
                         for s in val_samples.iter() {
                             if let Some(ph) = s.phase {
-                                let out = network.forward_with_buffers(
-                                    &s.features,
-                                    &mut acc_buffer,
-                                    &mut activated_buffer,
-                                );
+                                let out = network.forward_with_scratch(&s.features, &mut scratch);
                                 let p = 1.0 / (1.0 + (-out).exp());
                                 let b = &mut probs_buckets[idx_of(ph)];
                                 b.0.push(p);
@@ -260,11 +259,7 @@ pub fn train_model(
                     "cp" => {
                         for s in val_samples.iter() {
                             if let Some(ph) = s.phase {
-                                let out = network.forward_with_buffers(
-                                    &s.features,
-                                    &mut acc_buffer,
-                                    &mut activated_buffer,
-                                );
+                                let out = network.forward_with_scratch(&s.features, &mut scratch);
                                 let b = &mut cp_buckets[idx_of(ph)];
                                 b.0.push(out);
                                 b.1.push(s.label);
@@ -341,7 +336,7 @@ pub fn train_model(
         if let Some(vl) = val_loss {
             if vl < *ctx.trackers.best_val_loss {
                 *ctx.trackers.best_val_loss = vl;
-                *ctx.trackers.best_network = Some(network.clone());
+                *ctx.trackers.best_network = Some(Network::Single(network.clone()));
                 *ctx.trackers.best_epoch = Some(epoch + 1);
             }
             *ctx.trackers.last_val_loss = Some(vl);
@@ -483,11 +478,21 @@ pub fn train_model_stream_cache(
     ctx: &mut TrainContext,
     weighting: &wcfg::WeightingConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let network = match network {
+        Network::Single(inner) => inner,
+        Network::Classic(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Classic アーキの学習ループは実装中です",
+            )
+            .into());
+        }
+    };
     // Use ctx fields directly in this function to avoid borrow confusion
     // If prefetch=0, run synchronous streaming in the training thread (no background worker)
     if config.prefetch_batches == 0 {
         let mut adam_state = if config.optimizer == "adam" {
-            Some(AdamState::new(network))
+            Some(SingleAdamState::new(network))
         } else {
             None
         };
@@ -710,8 +715,9 @@ pub fn train_model_stream_cache(
                 Option<f64>,
                 Option<f64>,
             ) = if let Some(val_samples) = validation_samples {
-                let vl = compute_validation_loss(network, val_samples, config);
-                let (auc, ece) = compute_val_auc_and_ece(network, val_samples, config, &ctx.dash);
+                let vl = compute_validation_loss_single(network, val_samples, config);
+                let (auc, ece) =
+                    compute_val_auc_and_ece_single(network, val_samples, config, &ctx.dash);
                 let wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
                 (vl, auc, ece, wsum)
             } else {
@@ -727,7 +733,7 @@ pub fn train_model_stream_cache(
             if has_val {
                 if val_loss < *ctx.trackers.best_val_loss {
                     *ctx.trackers.best_val_loss = val_loss;
-                    *ctx.trackers.best_network = Some(network.clone());
+                    *ctx.trackers.best_network = Some(Network::Single(network.clone()));
                     *ctx.trackers.best_epoch = Some(epoch + 1);
                 }
                 *ctx.trackers.last_val_loss = Some(val_loss);
@@ -892,7 +898,7 @@ pub fn train_model_stream_cache(
         weighting.clone(),
     );
     let mut adam_state = if config.optimizer == "adam" {
-        Some(AdamState::new(network))
+        Some(SingleAdamState::new(network))
     } else {
         None
     };
@@ -1020,7 +1026,7 @@ pub fn train_model_stream_cache(
                 if total_batches % interval == 0 {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
-                    save_network(network, &checkpoint_path)?;
+                    save_single_network(network, &checkpoint_path)?;
                     if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                         eprintln!("Saved checkpoint: {}", checkpoint_path.display());
                     } else {
@@ -1040,24 +1046,19 @@ pub fn train_model_stream_cache(
         let mut val_ece: Option<f64> = None;
         let mut val_wsum: Option<f64> = None;
         if let Some(val_samples) = validation_samples {
-            let vl = compute_validation_loss(network, val_samples, config);
+            let vl = compute_validation_loss_single(network, val_samples, config);
             val_loss = Some(vl);
-            val_auc = compute_val_auc(network, val_samples, config);
+            val_auc = compute_val_auc_single(network, val_samples, config);
             if ctx.dash.val_is_jsonl && config.label_type == "wdl" {
                 // Calibration CSV/PNG
                 let mut cps = Vec::new();
                 let mut probs = Vec::new();
                 let mut labels = Vec::new();
                 let mut wts = Vec::new();
-                let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                let mut scratch_val = SingleForwardScratch::new(network.acc_dim);
                 for s in val_samples.iter() {
                     if let Some(cp) = s.cp {
-                        let out = network.forward_with_buffers(
-                            &s.features,
-                            &mut acc_buffer,
-                            &mut activated_buffer,
-                        );
+                        let out = network.forward_with_scratch(&s.features, &mut scratch_val);
                         let p = 1.0 / (1.0 + (-out).exp());
                         cps.push(cp);
                         probs.push(p);
@@ -1127,17 +1128,12 @@ pub fn train_model_stream_cache(
                         GamePhase::EndGame => 2,
                     }
                 }
-                let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                let mut activated_buffer = Vec::with_capacity(network.acc_dim);
                 match config.label_type.as_str() {
                     "wdl" => {
+                        let mut scratch_phase = SingleForwardScratch::new(network.acc_dim);
                         for s in val_samples.iter() {
                             if let Some(ph) = s.phase {
-                                let out = network.forward_with_buffers(
-                                    &s.features,
-                                    &mut acc_buffer,
-                                    &mut activated_buffer,
-                                );
+                                let out = network.forward_with_scratch(&s.features, &mut scratch_phase);
                                 let p = 1.0 / (1.0 + (-out).exp());
                                 let b = &mut probs_buckets[idx_of(ph)];
                                 b.0.push(p);
@@ -1147,13 +1143,10 @@ pub fn train_model_stream_cache(
                         }
                     }
                     "cp" => {
+                        let mut scratch_phase = SingleForwardScratch::new(network.acc_dim);
                         for s in val_samples.iter() {
                             if let Some(ph) = s.phase {
-                                let out = network.forward_with_buffers(
-                                    &s.features,
-                                    &mut acc_buffer,
-                                    &mut activated_buffer,
-                                );
+                                let out = network.forward_with_scratch(&s.features, &mut scratch_phase);
                                 let b = &mut cp_buckets[idx_of(ph)];
                                 b.0.push(out);
                                 b.1.push(s.label);
@@ -1234,7 +1227,7 @@ pub fn train_model_stream_cache(
         if let Some(vl) = val_loss {
             if vl < *ctx.trackers.best_val_loss {
                 *ctx.trackers.best_val_loss = vl;
-                *ctx.trackers.best_network = Some(network.clone());
+                *ctx.trackers.best_network = Some(Network::Single(network.clone()));
                 *ctx.trackers.best_epoch = Some(epoch + 1);
             }
             *ctx.trackers.last_val_loss = Some(vl);
@@ -1350,6 +1343,16 @@ pub fn train_model_with_loader(
     rng: &mut StdRng,
     ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let network = match network {
+        Network::Single(inner) => inner,
+        Network::Classic(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Classic アーキの学習ループは実装中です",
+            )
+            .into());
+        }
+    };
     // Local aliases to minimize code churn (avoid double references)
     let out_dir = ctx.out_dir;
     let dash = &ctx.dash;
@@ -1360,7 +1363,7 @@ pub fn train_model_with_loader(
     let best_epoch: &mut Option<usize> = ctx.trackers.best_epoch;
     let train_samples_arc = Arc::new(train_samples);
     let mut adam_state = if config.optimizer == "adam" {
-        Some(AdamState::new(network))
+        Some(SingleAdamState::new(network))
     } else {
         None
     };
@@ -1500,7 +1503,7 @@ pub fn train_model_with_loader(
                     if total_batches % interval == 0 {
                         let checkpoint_path =
                             out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
-                        save_network(network, &checkpoint_path)?;
+                        save_single_network(network, &checkpoint_path)?;
                         println!("Saved checkpoint: {}", checkpoint_path.display());
                     }
                 }
@@ -1516,23 +1519,18 @@ pub fn train_model_with_loader(
             let mut val_ece: Option<f64> = None;
             let mut val_wsum: Option<f64> = None;
             if let Some(val_samples) = validation_samples {
-                let vl = compute_validation_loss(network, val_samples, config);
+                let vl = compute_validation_loss_single(network, val_samples, config);
                 val_loss = Some(vl);
-                val_auc = compute_val_auc(network, val_samples, config);
+                val_auc = compute_val_auc_single(network, val_samples, config);
                 if dash.val_is_jsonl && config.label_type == "wdl" {
                     let mut cps = Vec::new();
                     let mut probs = Vec::new();
                     let mut labels = Vec::new();
                     let mut wts = Vec::new();
-                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                    let mut scratch_val = SingleForwardScratch::new(network.acc_dim);
                     for s in val_samples.iter() {
                         if let Some(cp) = s.cp {
-                            let out = network.forward_with_buffers(
-                                &s.features,
-                                &mut acc_buffer,
-                                &mut activated_buffer,
-                            );
+                            let out = network.forward_with_scratch(&s.features, &mut scratch_val);
                             let p = 1.0 / (1.0 + (-out).exp());
                             cps.push(cp);
                             probs.push(p);
@@ -1602,17 +1600,12 @@ pub fn train_model_with_loader(
                             GamePhase::EndGame => 2,
                         }
                     }
-                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
                     match config.label_type.as_str() {
                         "wdl" => {
+                            let mut scratch_phase = SingleForwardScratch::new(network.acc_dim);
                             for s in val_samples.iter() {
                                 if let Some(ph) = s.phase {
-                                    let out = network.forward_with_buffers(
-                                        &s.features,
-                                        &mut acc_buffer,
-                                        &mut activated_buffer,
-                                    );
+                                    let out = network.forward_with_scratch(&s.features, &mut scratch_phase);
                                     let p = 1.0 / (1.0 + (-out).exp());
                                     let b = &mut probs_buckets[idx_of(ph)];
                                     b.0.push(p);
@@ -1622,13 +1615,10 @@ pub fn train_model_with_loader(
                             }
                         }
                         "cp" => {
+                            let mut scratch_phase = SingleForwardScratch::new(network.acc_dim);
                             for s in val_samples.iter() {
                                 if let Some(ph) = s.phase {
-                                    let out = network.forward_with_buffers(
-                                        &s.features,
-                                        &mut acc_buffer,
-                                        &mut activated_buffer,
-                                    );
+                                    let out = network.forward_with_scratch(&s.features, &mut scratch_phase);
                                     let b = &mut cp_buckets[idx_of(ph)];
                                     b.0.push(out);
                                     b.1.push(s.label);
@@ -1710,7 +1700,7 @@ pub fn train_model_with_loader(
             if let Some(vl) = val_loss {
                 if vl < *best_val_loss {
                     *best_val_loss = vl;
-                    *best_network = Some(network.clone());
+                    *best_network = Some(Network::Single(network.clone()));
                     *best_epoch = Some(epoch + 1);
                 }
                 *last_val_loss = Some(vl);
@@ -1918,7 +1908,7 @@ pub fn train_model_with_loader(
                     if total_batches % interval == 0 {
                         let checkpoint_path =
                             out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
-                        save_network(network, &checkpoint_path)?;
+                        save_single_network(network, &checkpoint_path)?;
                         if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                             eprintln!("Saved checkpoint: {}", checkpoint_path.display());
                         } else {
@@ -1939,23 +1929,18 @@ pub fn train_model_with_loader(
             let mut val_ece: Option<f64> = None;
             let mut val_wsum: Option<f64> = None;
             if let Some(val_samples) = validation_samples {
-                let vl = compute_validation_loss(network, val_samples, config);
+                let vl = compute_validation_loss_single(network, val_samples, config);
                 val_loss = Some(vl);
-                val_auc = compute_val_auc(network, val_samples, config);
+                val_auc = compute_val_auc_single(network, val_samples, config);
                 if dash.val_is_jsonl && config.label_type == "wdl" {
                     let mut cps = Vec::new();
                     let mut probs = Vec::new();
                     let mut labels = Vec::new();
                     let mut wts = Vec::new();
-                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+                    let mut scratch_val = SingleForwardScratch::new(network.acc_dim);
                     for s in val_samples.iter() {
                         if let Some(cp) = s.cp {
-                            let out = network.forward_with_buffers(
-                                &s.features,
-                                &mut acc_buffer,
-                                &mut activated_buffer,
-                            );
+                            let out = network.forward_with_scratch(&s.features, &mut scratch_val);
                             let p = 1.0 / (1.0 + (-out).exp());
                             cps.push(cp);
                             probs.push(p);
@@ -2025,17 +2010,12 @@ pub fn train_model_with_loader(
                             GamePhase::EndGame => 2,
                         }
                     }
-                    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-                    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
                     match config.label_type.as_str() {
                         "wdl" => {
+                            let mut scratch_phase = SingleForwardScratch::new(network.acc_dim);
                             for s in val_samples.iter() {
                                 if let Some(ph) = s.phase {
-                                    let out = network.forward_with_buffers(
-                                        &s.features,
-                                        &mut acc_buffer,
-                                        &mut activated_buffer,
-                                    );
+                                    let out = network.forward_with_scratch(&s.features, &mut scratch_phase);
                                     let p = 1.0 / (1.0 + (-out).exp());
                                     let b = &mut probs_buckets[idx_of(ph)];
                                     b.0.push(p);
@@ -2045,13 +2025,10 @@ pub fn train_model_with_loader(
                             }
                         }
                         "cp" => {
+                            let mut scratch_phase = SingleForwardScratch::new(network.acc_dim);
                             for s in val_samples.iter() {
                                 if let Some(ph) = s.phase {
-                                    let out = network.forward_with_buffers(
-                                        &s.features,
-                                        &mut acc_buffer,
-                                        &mut activated_buffer,
-                                    );
+                                    let out = network.forward_with_scratch(&s.features, &mut scratch_phase);
                                     let b = &mut cp_buckets[idx_of(ph)];
                                     b.0.push(out);
                                     b.1.push(s.label);
@@ -2127,7 +2104,7 @@ pub fn train_model_with_loader(
             if let Some(vl) = val_loss {
                 if vl < *best_val_loss {
                     *best_val_loss = vl;
-                    *best_network = Some(network.clone());
+                    *best_network = Some(Network::Single(network.clone()));
                     *best_epoch = Some(epoch + 1);
                 }
                 *last_val_loss = Some(vl);
@@ -2222,11 +2199,11 @@ pub fn train_model_with_loader(
 }
 
 fn train_batch_by_indices(
-    network: &mut Network,
+    network: &mut SingleNetwork,
     samples: &[Sample],
     indices: &[usize],
     config: &Config,
-    adam_state: &mut Option<AdamState>,
+    adam_state: &mut Option<SingleAdamState>,
     lr_base: f32,
 ) -> f32 {
     let mut total_loss = 0.0;
@@ -2236,9 +2213,8 @@ fn train_batch_by_indices(
     let mut grad_w2 = vec![0.0f32; network.w2.len()];
     let mut grad_b2 = 0.0f32;
 
-    // Pre-allocate buffers for forward pass
-    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-    let mut activated_buffer = vec![0.0f32; network.acc_dim];
+    // Reusable forward scratch buffers
+    let mut forward_scratch = SingleForwardScratch::new(network.acc_dim);
 
     // Pre-compute learning rate for Adam
     let lr_t = if let Some(adam) = adam_state.as_mut() {
@@ -2255,8 +2231,7 @@ fn train_batch_by_indices(
             continue; // skip updates entirely for zero-weight samples
         }
         // Forward pass with reused buffers
-        let output =
-            forward_into(network, &sample.features, &mut acc_buffer, &mut activated_buffer);
+        let output = network.forward_with_scratch(&sample.features, &mut forward_scratch);
 
         // Compute loss and output gradient using numerically stable BCE
         let (loss, grad_output) = match config.label_type.as_str() {
@@ -2276,14 +2251,15 @@ fn train_batch_by_indices(
 
         // Accumulate output layer gradients
         grad_b2 += grad_output;
-        for i in 0..network.acc_dim {
-            grad_w2[i] += grad_output * activated_buffer[i];
+        let activations = forward_scratch.activations();
+        for (i, &act) in activations.iter().enumerate() {
+            grad_w2[i] += grad_output * act;
         }
 
         // Immediate update for input layer (row-sparse)
         if let Some(adam) = adam_state.as_mut() {
             // Adam updates
-            for (i, &act_val) in activated_buffer.iter().enumerate() {
+            for (i, &act_val) in activations.iter().enumerate() {
                 // Check if neuron is in linear region (ReLU derivative)
                 if act_val <= 0.0 || act_val >= network.relu_clip {
                     continue;
@@ -2311,7 +2287,7 @@ fn train_batch_by_indices(
             }
         } else {
             // SGD updates
-            for (i, &act_val) in activated_buffer.iter().enumerate() {
+            for (i, &act_val) in activations.iter().enumerate() {
                 // Check if neuron is in linear region
                 if act_val <= 0.0 || act_val >= network.relu_clip {
                     continue;
@@ -2379,17 +2355,18 @@ fn bce_with_logits(logit: f32, target: f32) -> (f32, f32) {
     (loss, grad)
 }
 
-pub fn compute_validation_loss(network: &Network, samples: &[Sample], config: &Config) -> f32 {
+pub(crate) fn compute_validation_loss_single(
+    network: &SingleNetwork,
+    samples: &[Sample],
+    config: &Config,
+) -> f32 {
     let mut total_loss = 0.0;
     let mut total_weight = 0.0;
 
-    // Pre-allocate buffers for forward pass
-    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+    let mut scratch = SingleForwardScratch::new(network.acc_dim);
 
     for sample in samples {
-        let output =
-            network.forward_with_buffers(&sample.features, &mut acc_buffer, &mut activated_buffer);
+        let output = network.forward_with_scratch(&sample.features, &mut scratch);
 
         let loss = match config.label_type.as_str() {
             "wdl" => {
@@ -2414,7 +2391,11 @@ pub fn compute_validation_loss(network: &Network, samples: &[Sample], config: &C
     }
 }
 
-pub fn compute_val_auc(network: &Network, samples: &[Sample], config: &Config) -> Option<f64> {
+pub(crate) fn compute_val_auc_single(
+    network: &SingleNetwork,
+    samples: &[Sample],
+    config: &Config,
+) -> Option<f64> {
     if config.label_type != "wdl" || samples.is_empty() {
         return None;
     }
@@ -2422,10 +2403,9 @@ pub fn compute_val_auc(network: &Network, samples: &[Sample], config: &Config) -
     let mut labels: Vec<f32> = Vec::with_capacity(samples.len());
     let mut weights: Vec<f32> = Vec::with_capacity(samples.len());
 
-    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+    let mut scratch = SingleForwardScratch::new(network.acc_dim);
     for s in samples {
-        let out = network.forward_with_buffers(&s.features, &mut acc_buffer, &mut activated_buffer);
+        let out = network.forward_with_scratch(&s.features, &mut scratch);
         let p = 1.0 / (1.0 + (-out).exp());
         // Treat strict positives/negatives only; skip exact boundary (label==0.5)
         if s.label > 0.5 {
@@ -2445,13 +2425,13 @@ pub fn compute_val_auc(network: &Network, samples: &[Sample], config: &Config) -
     }
 }
 
-pub fn compute_val_auc_and_ece(
-    network: &Network,
+pub(crate) fn compute_val_auc_and_ece_single(
+    network: &SingleNetwork,
     samples: &[Sample],
     config: &Config,
     dash_val: &impl DashboardValKind,
 ) -> (Option<f64>, Option<f64>) {
-    let auc = compute_val_auc(network, samples, config);
+    let auc = compute_val_auc_single(network, samples, config);
     if config.label_type != "wdl" || !dash_val.is_jsonl() {
         return (auc, None);
     }
@@ -2460,12 +2440,10 @@ pub fn compute_val_auc_and_ece(
     let mut probs: Vec<f32> = Vec::new();
     let mut labels: Vec<f32> = Vec::new();
     let mut wts: Vec<f32> = Vec::new();
-    let mut acc_buffer = vec![0.0f32; network.acc_dim];
-    let mut activated_buffer = Vec::with_capacity(network.acc_dim);
+    let mut scratch = SingleForwardScratch::new(network.acc_dim);
     for s in samples {
         if let Some(cp) = s.cp {
-            let out =
-                network.forward_with_buffers(&s.features, &mut acc_buffer, &mut activated_buffer);
+            let out = network.forward_with_scratch(&s.features, &mut scratch);
             let p = 1.0 / (1.0 + (-out).exp());
             cps.push(cp);
             probs.push(p);
@@ -2476,6 +2454,86 @@ pub fn compute_val_auc_and_ece(
     if cps.is_empty() {
         return (auc, None);
     }
+    let bins = calibration_bins(&cps, &probs, &labels, &wts, config.cp_clip, dash_val.calib_bins());
+    let ece = ece_from_bins(&bins);
+    (auc, ece)
+}
+
+pub(crate) fn compute_val_auc_classic(
+    network: &ClassicNetwork,
+    samples: &[Sample],
+    config: &Config,
+) -> Option<f64> {
+    if config.label_type != "wdl" || samples.is_empty() {
+        return None;
+    }
+    let mut probs: Vec<f32> = Vec::with_capacity(samples.len());
+    let mut labels: Vec<f32> = Vec::with_capacity(samples.len());
+    let mut weights: Vec<f32> = Vec::with_capacity(samples.len());
+
+    let mut scratch = ClassicForwardScratch::new(
+        network.fp32.acc_dim,
+        network.fp32.h1_dim,
+        network.fp32.h2_dim,
+    );
+
+    for s in samples {
+        let out = network.forward_with_scratch(&s.features, &mut scratch);
+        let p = 1.0 / (1.0 + (-out).exp());
+        if s.label > 0.5 {
+            probs.push(p);
+            labels.push(1.0);
+            weights.push(s.weight);
+        } else if s.label < 0.5 {
+            probs.push(p);
+            labels.push(0.0);
+            weights.push(s.weight);
+        }
+    }
+    if probs.is_empty() {
+        None
+    } else {
+        roc_auc_weighted(&probs, &labels, &weights)
+    }
+}
+
+pub(crate) fn compute_val_auc_and_ece_classic(
+    network: &ClassicNetwork,
+    samples: &[Sample],
+    config: &Config,
+    dash_val: &impl DashboardValKind,
+) -> (Option<f64>, Option<f64>) {
+    let auc = compute_val_auc_classic(network, samples, config);
+    if config.label_type != "wdl" || !dash_val.is_jsonl() {
+        return (auc, None);
+    }
+
+    let mut cps: Vec<i32> = Vec::new();
+    let mut probs: Vec<f32> = Vec::new();
+    let mut labels: Vec<f32> = Vec::new();
+    let mut wts: Vec<f32> = Vec::new();
+
+    let mut scratch = ClassicForwardScratch::new(
+        network.fp32.acc_dim,
+        network.fp32.h1_dim,
+        network.fp32.h2_dim,
+    );
+
+    for s in samples {
+        if let Some(cp) = s.cp {
+            let out = network.forward_with_scratch(&s.features, &mut scratch);
+            let p = 1.0 / (1.0 + (-out).exp());
+            cps.push(cp);
+            probs.push(p);
+            labels.push(s.label);
+            wts.push(s.weight);
+        }
+    }
+
+    if cps.is_empty() {
+        return (auc, None);
+    }
+
     let bins = calibration_bins(&cps, &probs, &labels, &wts, config.cp_clip, dash_val.calib_bins());
     let ece = ece_from_bins(&bins);
     (auc, ece)
