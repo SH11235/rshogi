@@ -272,7 +272,7 @@ fn classic_integer_network_matches_manual_flow() {
     let transformer =
         ClassicFeatureTransformerInt::new(vec![128, 256, -128, -64, 64, 64], vec![0, 0], acc_dim);
 
-    let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+    let network = ClassicQuantizedSingleNetwork::new(ClassicQuantizedNetworkParams {
         hidden1_weights: vec![10, 20, 30, 40, -10, 5, -5, 10],
         hidden1_biases: vec![100, -50],
         hidden2_weights: vec![1, 2, 3, 4],
@@ -331,7 +331,7 @@ fn classic_v1_writer_emits_expected_layout() {
     output_weights[1] = -2;
 
     let transformer = ClassicFeatureTransformerInt::new(ft_weights, ft_biases, acc_dim);
-    let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+    let network = ClassicQuantizedSingleNetwork::new(ClassicQuantizedNetworkParams {
         hidden1_weights,
         hidden1_biases,
         hidden2_weights,
@@ -385,7 +385,7 @@ fn classic_v1_writer_emits_expected_layout() {
 #[test]
 fn classic_v1_validate_rejects_inconsistent_lengths() {
     let transformer = ClassicFeatureTransformerInt::new(vec![1, 2, 3, 4], vec![0, 0], 2);
-    let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+    let network = ClassicQuantizedSingleNetwork::new(ClassicQuantizedNetworkParams {
         hidden1_weights: vec![1, 2, 3, 4],
         hidden1_biases: vec![0, 0],
         hidden2_weights: vec![1, 2, 3, 4],
@@ -436,7 +436,7 @@ fn finalize_export_writes_zero_when_bundle_missing() {
 
     let td = tempdir().unwrap();
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-    let network = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let network = SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     let export = ExportOptions {
         arch: ArchKind::Classic,
         format: ExportFormat::ClassicV1,
@@ -570,7 +570,7 @@ fn unknown_flags_warning_and_continue() {
 fn auc_boundary_labels_skipped() {
     // Network with zero weights outputs 0.0 logits -> p=0.5
     let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-    let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let mut net = SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     // Zero out all weights/biases to make output exactly 0
     for w in net.w0.iter_mut() {
         *w = 0.0;
@@ -776,8 +776,8 @@ fn test_training_reproducibility_with_seed() {
     // 同じseedで2つのネットワークを初期化
     let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
     let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
-    let mut net1 = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng1);
-    let mut net2 = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng2);
+    let mut net1 = SingleNetwork::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng1);
+    let mut net2 = SingleNetwork::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng2);
 
     // 同じ条件・同じデータで学習
     let out_dir = td.path();
@@ -969,8 +969,10 @@ fn stream_sync_vs_inmem_equivalence() {
     // 同じseedで2つのネットを初期化
     let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
     let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
-    let mut net_inmem = Network::new(cfg_inmem.accumulator_dim, cfg_inmem.relu_clip, &mut rng1);
-    let mut net_stream = Network::new(cfg_stream.accumulator_dim, cfg_stream.relu_clip, &mut rng2);
+    let mut net_inmem =
+        SingleNetwork::new(cfg_inmem.accumulator_dim, cfg_inmem.relu_clip, &mut rng1);
+    let mut net_stream =
+        SingleNetwork::new(cfg_stream.accumulator_dim, cfg_stream.relu_clip, &mut rng2);
 
     let out_dir = td.path();
     let mut dummy_rng = rand::rngs::StdRng::seed_from_u64(123);
@@ -1098,7 +1100,7 @@ fn structured_training_config_present_in_inmem_async_loader() {
         .collect();
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-    let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let mut net = SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     let cfg = Config {
         epochs: 1,
         batch_size: 2,
@@ -1230,7 +1232,7 @@ fn zero_weight_batches_do_not_update() {
     };
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-    let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+    let mut net = SingleNetwork::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
     let before = net.clone();
 
     let dash = DashboardOpts {
@@ -1325,7 +1327,7 @@ fn stream_async_propagates_errors() {
     };
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-    let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+    let mut net = SingleNetwork::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
     let out_dir = td.path();
     let dash = super::DashboardOpts {
         emit: false,
@@ -1413,7 +1415,7 @@ fn train_one_batch_with_zero_feature_sample_smoke() {
     let out_dir = td.path();
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-    let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+    let mut net = SingleNetwork::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
     let dash = super::DashboardOpts {
         emit: false,
         calib_bins_n: DEFAULT_CALIBRATION_BINS,
@@ -1547,7 +1549,7 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
 
     let transformer =
         ClassicFeatureTransformerInt::new(ft_weights.clone(), ft_biases.clone(), acc_dim);
-    let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+    let network = ClassicQuantizedSingleNetwork::new(ClassicQuantizedNetworkParams {
         hidden1_weights: hidden1_weights.clone(),
         hidden1_biases: hidden1_biases.clone(),
         hidden2_weights: hidden2_weights.clone(),
@@ -1681,7 +1683,7 @@ fn cp_distillation_unit_smoke_loss_ordering() {
 
     // 単純ネット (全0 初期バイアス) を構築
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-    let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let mut net = SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     // ゼロ化して決定的
     for w in net.w0.iter_mut() {
         *w = 0.0;

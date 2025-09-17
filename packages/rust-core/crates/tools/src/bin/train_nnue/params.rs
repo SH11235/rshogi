@@ -33,3 +33,5 @@ pub const CLASSIC_ACC_DIM: usize = 256;
 pub const CLASSIC_H1_DIM: usize = 32;
 pub const CLASSIC_H2_DIM: usize = 32;
 pub const CLASSIC_FT_SHIFT: i32 = 6;
+pub const CLASSIC_RELU_CLIP: i32 = 127;
+pub const CLASSIC_RELU_CLIP_F32: f32 = 127.0;

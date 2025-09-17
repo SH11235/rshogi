@@ -4,8 +4,8 @@ use std::time::Instant;
 use crate::classic::ClassicScratchViews;
 use crate::classic::{ClassicFloatNetwork, ClassicIntNetworkBundle, ClassicQuantizationScales};
 use crate::logging::StructuredLogger;
-use crate::model::Network;
-use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM};
+use crate::model::SingleNetwork;
+use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP_F32};
 use crate::types::{
     Config, DistillLossKind, DistillOptions, QuantScheme, Sample, TeacherValueDomain,
 };
@@ -14,7 +14,6 @@ use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
-const CLASSIC_RELU_CLIP: f32 = 127.0;
 const MAX_DISTILL_SAMPLES: usize = 50_000;
 const DISTILL_EPOCHS: usize = 2;
 const DISTILL_LR: f32 = 1e-4;
@@ -96,10 +95,10 @@ pub struct QuantEvalMetrics {
 
 #[inline]
 fn relu_clip(x: f32) -> f32 {
-    x.clamp(0.0, CLASSIC_RELU_CLIP)
+    x.clamp(0.0, CLASSIC_RELU_CLIP_F32)
 }
 fn relu_clip_grad(z: f32) -> f32 {
-    if z > 0.0 && z < CLASSIC_RELU_CLIP {
+    if z > 0.0 && z < CLASSIC_RELU_CLIP_F32 {
         1.0
     } else {
         0.0
@@ -319,7 +318,7 @@ fn backward_update(
 
 /// 教師 forward 結果と反転特徴を事前計算し、蒸留処理での再利用を容易にする。
 fn prepare_distill_samples(
-    teacher: &Network,
+    teacher: &SingleNetwork,
     samples: &[Sample],
     max_samples: usize,
 ) -> Vec<DistillSample> {
@@ -374,7 +373,7 @@ impl<'a> ClassicDistillConfig<'a> {
 }
 
 pub fn distill_classic_after_training(
-    teacher: &Network,
+    teacher: &SingleNetwork,
     samples: &[Sample],
     config: &Config,
     distill: &DistillOptions,
@@ -713,7 +712,7 @@ fn convert_logit_to_cp(logit: f32, config: &Config) -> f32 {
 }
 
 pub fn evaluate_distill(
-    teacher: &Network,
+    teacher: &SingleNetwork,
     classic_fp32: &ClassicFloatNetwork,
     samples: &[Sample],
     config: &Config,
