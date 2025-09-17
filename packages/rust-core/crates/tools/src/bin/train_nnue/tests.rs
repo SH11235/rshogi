@@ -1471,5 +1471,5 @@ fn test_classic_output_per_channel_error() {
     );
     assert!(result_channel.is_err());
     let err_msg = result_channel.unwrap_err();
-    assert!(err_msg.contains("Classic output layer supports --quant-out=per-tensor only"));
+    assert!(err_msg.contains("Classic v1: output layer does not support per-channel quantization"));
 }

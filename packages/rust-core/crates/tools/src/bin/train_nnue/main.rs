@@ -5,6 +5,7 @@
 pub(crate) mod classic;
 pub(crate) mod dataset;
 pub(crate) mod distill;
+pub(crate) mod error_messages;
 pub(crate) mod export;
 pub(crate) mod logging;
 pub(crate) mod model;
@@ -29,6 +30,7 @@ use tools::common::weighting as wcfg;
 use classic::ClassicIntNetworkBundle;
 use dataset::{load_samples, load_samples_from_cache};
 use distill::distill_classic_after_training;
+use error_messages::*;
 use export::{finalize_export, save_network};
 use logging::StructuredLogger;
 use params::{DEFAULT_ACC_DIM, DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES};
@@ -123,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("quant-ft")
                 .long("quant-ft")
-                .help("Quantization scheme for feature transformer weights")
+                .help("Quantization scheme for feature transformer weights (Classic v1: per-tensor only)")
                 .value_parser(clap::value_parser!(QuantScheme))
                 .default_value("per-tensor"),
         )
@@ -144,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("quant-out")
                 .long("quant-out")
-                .help("Quantization scheme for output layer weights")
+                .help("Quantization scheme for output layer weights (Classic v1: per-tensor only)")
                 .value_parser(clap::value_parser!(QuantScheme))
                 .default_value("per-tensor"),
         )
@@ -318,7 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if arch == ArchKind::Classic && export_format == ExportFormat::ClassicV1 {
         if distill_teacher.is_none() {
-            return Err("Classic export requires --distill-from-single".into());
+            return Err(ERR_CLASSIC_NEEDS_TEACHER.into());
         }
         if kd_loss_source == Some(ValueSource::DefaultValue) {
             distill_loss = DistillLossKind::Mse;
@@ -386,22 +388,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if export_options.arch == ArchKind::Single
         && matches!(export_options.format, ExportFormat::ClassicV1)
     {
-        return Err("--arch=single does not support --export-format classic-v1".into());
+        return Err(ERR_SINGLE_NO_CLASSIC_V1.into());
     }
     if export_options.arch == ArchKind::Classic
         && matches!(export_options.format, ExportFormat::SingleI8)
     {
-        return Err("--arch=classic does not support --export-format single-i8".into());
+        return Err(ERR_CLASSIC_NO_SINGLE_I8.into());
     }
     if export_options.arch == ArchKind::Classic
         && export_options.quant_ft == QuantScheme::PerChannel
     {
-        return Err("--arch=classic currently supports only --quant-ft=per-tensor".into());
+        return Err(ERR_CLASSIC_FT_PER_CHANNEL.into());
     }
     if export_options.arch == ArchKind::Classic
         && export_options.quant_out == QuantScheme::PerChannel
     {
-        return Err("--arch=classic currently supports only --quant-out=per-tensor".into());
+        return Err(ERR_CLASSIC_OUT_PER_CHANNEL.into());
     }
     if distill_options.temperature <= 0.0 {
         return Err("--kd-temperature must be > 0".into());
@@ -983,3 +985,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cli_tests;
