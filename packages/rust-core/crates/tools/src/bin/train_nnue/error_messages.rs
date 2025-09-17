@@ -1,4 +1,4 @@
-//! Common error messages for train_nnue
+// Common error messages for train_nnue
 
 /// Error message for Classic architecture not supporting per-channel quantization on output layer
 pub const ERR_CLASSIC_OUT_PER_CHANNEL: &str = "Classic v1: output layer does not support per-channel quantization; use --quant-out=per-tensor (default)";
