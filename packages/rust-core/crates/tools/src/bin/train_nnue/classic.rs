@@ -1,7 +1,5 @@
-use crate::params::{
-    CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX, QUANTIZATION_MAX,
-    QUANTIZATION_METADATA_SIZE, QUANTIZATION_MIN,
-};
+use crate::params::{CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX};
+use crate::types::QuantScheme;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -181,9 +179,10 @@ impl ClassicFeatureTransformerInt {
         I: IntoIterator<Item = usize>,
     {
         debug_assert_eq!(out.len(), self.acc_dim);
-        out.iter_mut()
-            .zip(self.biases.iter())
-            .for_each(|(dst, &b)| *dst = clamp_i32_to_i16(b));
+        debug_assert_eq!(self.biases.len(), self.acc_dim);
+
+        // Classic v1 実装に合わせ、蓄積は i32 で行い最後にのみ飽和させる
+        let mut tmp = self.biases.clone();
 
         for feat in features {
             if feat >= self.input_dim {
@@ -191,10 +190,13 @@ impl ClassicFeatureTransformerInt {
             }
             let base = feat * self.acc_dim;
             let row = &self.weights[base..base + self.acc_dim];
-            for (dst, &w) in out.iter_mut().zip(row.iter()) {
-                let sum = *dst as i32 + w as i32;
-                *dst = clamp_i32_to_i16(sum);
+            for (acc, &w) in tmp.iter_mut().zip(row.iter()) {
+                *acc += w as i32;
             }
+        }
+
+        for (dst, &sum) in out.iter_mut().zip(tmp.iter()) {
+            *dst = clamp_i32_to_i16(sum);
         }
     }
 }
@@ -545,8 +547,16 @@ impl ClassicFloatNetwork {
     /// Classic アーキ用の対称量子化（per-tensor / per-channel 指定済み）
     pub fn quantize_symmetric(
         &self,
+        quant_ft: QuantScheme,
+        quant_h1: QuantScheme,
+        quant_h2: QuantScheme,
+        quant_out: QuantScheme,
     ) -> Result<(ClassicIntNetworkBundle, ClassicQuantizationScales), String> {
         self.validate()?;
+
+        if matches!(quant_ft, QuantScheme::PerChannel) {
+            return Err("Classic feature transformer only supports --quant-ft=per-tensor".into());
+        }
 
         let (ft_weights_q, ft_scales) = quantize_symmetric_i16(&self.ft_weights, false, 1);
         let s_w0 = ft_scales.first().copied().unwrap_or(1.0);
@@ -555,17 +565,36 @@ impl ClassicFloatNetwork {
         let transformer =
             ClassicFeatureTransformerInt::new(ft_weights_q, ft_biases_q, self.acc_dim);
 
+        let h1_per_channel = matches!(quant_h1, QuantScheme::PerChannel);
+        let h1_channels = if h1_per_channel {
+            self.h1_dim.max(1)
+        } else {
+            1
+        };
         let (h1_weights_q, h1_scales) =
-            quantize_symmetric_i8(&self.hidden1_weights, true, self.h1_dim);
+            quantize_symmetric_i8(&self.hidden1_weights, h1_per_channel, h1_channels);
         let s_in_1 = s_w0 / (1 << CLASSIC_FT_SHIFT) as f32;
         let hidden1_biases_q = quantize_bias_i32(&self.hidden1_biases, s_in_1, &h1_scales);
 
+        let h2_per_channel = matches!(quant_h2, QuantScheme::PerChannel);
+        let h2_channels = if h2_per_channel {
+            self.h2_dim.max(1)
+        } else {
+            1
+        };
         let (h2_weights_q, h2_scales) =
-            quantize_symmetric_i8(&self.hidden2_weights, true, self.h2_dim);
+            quantize_symmetric_i8(&self.hidden2_weights, h2_per_channel, h2_channels);
         let s_in_2 = 1.0f32;
         let hidden2_biases_q = quantize_bias_i32(&self.hidden2_biases, s_in_2, &h2_scales);
 
-        let (out_weights_q, out_scales) = quantize_symmetric_i8(&self.output_weights, true, 1);
+        let out_per_channel = matches!(quant_out, QuantScheme::PerChannel);
+        let out_channels = if out_per_channel {
+            self.output_weights.len().max(1)
+        } else {
+            1
+        };
+        let (out_weights_q, out_scales) =
+            quantize_symmetric_i8(&self.output_weights, out_per_channel, out_channels);
         let s_in_3 = 1.0f32;
         let output_bias_q = quantize_bias_i32(&[self.output_bias], s_in_3, &out_scales)
             .into_iter()
@@ -716,13 +745,6 @@ impl ClassicFloatNetwork {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
-pub struct QuantizationParams {
-    pub scale: f32,
-    pub zero_point: i32,
-}
-
-#[derive(Clone, Debug)]
 pub struct ClassicQuantizationScales {
     pub s_w0: f32,
     pub s_w1: Vec<f32>,
@@ -757,7 +779,14 @@ mod tests {
     #[test]
     fn test_quantize_symmetric_bias_scales() {
         let net = sample_network();
-        let (bundle, scales) = net.quantize_symmetric().expect("quantize symmetric");
+        let (bundle, scales) = net
+            .quantize_symmetric(
+                QuantScheme::PerTensor,
+                QuantScheme::PerChannel,
+                QuantScheme::PerChannel,
+                QuantScheme::PerTensor,
+            )
+            .expect("quantize symmetric");
 
         assert_eq!(bundle.transformer.acc_dim, 2);
         assert!((scales.s_in_1 - scales.s_w0 / (1 << CLASSIC_FT_SHIFT) as f32).abs() < 1e-6);
@@ -784,36 +813,5 @@ mod tests {
         let denom_out = scales.s_in_3 * scales.s_w3[0];
         let expected_out = round_away_from_zero(net.output_bias / denom_out);
         assert_eq!(bundle.network.output_bias, expected_out);
-    }
-}
-
-#[allow(dead_code)]
-impl QuantizationParams {
-    pub fn from_weights(weights: &[f32]) -> Self {
-        if weights.is_empty() {
-            return Self {
-                scale: 1.0,
-                zero_point: 0,
-            };
-        }
-        let min_val = weights.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let max_val = weights.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-
-        if !min_val.is_finite() || !max_val.is_finite() || (max_val - min_val).abs() < 1e-12 {
-            return Self {
-                scale: 1.0,
-                zero_point: 0,
-            };
-        }
-
-        let scale = (max_val - min_val) / 255.0;
-        let zero_point =
-            (-min_val / scale - 128.0).round().clamp(QUANTIZATION_MIN, QUANTIZATION_MAX) as i32;
-
-        Self { scale, zero_point }
-    }
-
-    pub fn metadata_size() -> usize {
-        QUANTIZATION_METADATA_SIZE
     }
 }
