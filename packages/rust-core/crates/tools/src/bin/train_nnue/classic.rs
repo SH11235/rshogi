@@ -1,3 +1,4 @@
+use crate::error_messages::*;
 use crate::params::{CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX};
 use crate::types::QuantScheme;
 use std::fs::File;
@@ -555,7 +556,7 @@ impl ClassicFloatNetwork {
         self.validate()?;
 
         if matches!(quant_ft, QuantScheme::PerChannel) {
-            return Err("Classic feature transformer only supports --quant-ft=per-tensor".into());
+            return Err(ERR_CLASSIC_FT_PER_CHANNEL.into());
         }
 
         let (ft_weights_q, ft_scales) = quantize_symmetric_i16(&self.ft_weights, false, 1);
@@ -588,7 +589,7 @@ impl ClassicFloatNetwork {
         let hidden2_biases_q = quantize_bias_i32(&self.hidden2_biases, s_in_2, &h2_scales);
 
         if matches!(quant_out, QuantScheme::PerChannel) {
-            return Err("Classic output layer supports --quant-out=per-tensor only".into());
+            return Err(ERR_CLASSIC_OUT_PER_CHANNEL.into());
         }
         let out_per_channel = false;
         let out_channels = 1;
