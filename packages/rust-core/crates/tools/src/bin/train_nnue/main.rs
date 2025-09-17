@@ -18,6 +18,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
+use chrono::Utc;
 use clap::parser::ValueSource;
 use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::evaluation::nnue::features::FE_END;
@@ -27,9 +28,12 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use tools::common::weighting as wcfg;
 
-use classic::ClassicIntNetworkBundle;
+use classic::{ClassicIntNetworkBundle, ClassicQuantizationScales};
 use dataset::{load_samples, load_samples_from_cache};
-use distill::distill_classic_after_training;
+use distill::{
+    distill_classic_after_training, evaluate_distill, evaluate_quantization_gap,
+    DistillEvalMetrics, QuantEvalMetrics,
+};
 use error_messages::*;
 use export::{finalize_export, save_network};
 use logging::StructuredLogger;
@@ -224,6 +228,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(["warn", "fail"]) 
                 .default_value("warn"),
         )
+        .arg(
+            Arg::new("gate-distill-cp-mae")
+                .long("gate-distill-cp-mae")
+                .value_parser(clap::value_parser!(f32))
+                .help("Maximum allowed MAE (cp) between teacher Single FP32 and distilled Classic FP32"),
+        )
+        .arg(
+            Arg::new("gate-distill-cp-p95")
+                .long("gate-distill-cp-p95")
+                .value_parser(clap::value_parser!(f32))
+                .help("Maximum allowed 95th percentile (cp) between teacher Single FP32 and distilled Classic FP32"),
+        )
+        .arg(
+            Arg::new("gate-distill-logit-mae")
+                .long("gate-distill-logit-mae")
+                .value_parser(clap::value_parser!(f32))
+                .help("Maximum allowed MAE (logit) between teacher Single FP32 and distilled Classic FP32 (WDL only)"),
+        )
+        .arg(
+            Arg::new("gate-classic-int-cp-mae")
+                .long("gate-classic-int-cp-mae")
+                .value_parser(clap::value_parser!(f32))
+                .help("Maximum allowed MAE (cp) between Classic FP32 and Classic INT inference"),
+        )
+        .arg(
+            Arg::new("gate-classic-int-cp-p95")
+                .long("gate-classic-int-cp-p95")
+                .value_parser(clap::value_parser!(f32))
+                .help("Maximum allowed 95th percentile (cp) between Classic FP32 and Classic INT inference"),
+        )
+        .arg(
+            Arg::new("gate-classic-int-logit-mae")
+                .long("gate-classic-int-logit-mae")
+                .value_parser(clap::value_parser!(f32))
+                .help("Maximum allowed MAE (logit) between Classic FP32 and Classic INT inference (WDL only)"),
+        )
         // LR scheduler (Spec #11)
         .arg(
             arg!(--"lr-schedule" <KIND> "LR scheduler: constant|step|cosine")
@@ -258,7 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     // Prepare structured logger early for stdout/stderr routing decisions
-    let structured_logger: Option<StructuredLogger> = app
+    let mut structured_logger: Option<StructuredLogger> = app
         .get_one::<String>("structured-log")
         .and_then(|p| match StructuredLogger::new(p) {
             Ok(lg) => Some(lg),
@@ -428,6 +468,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gate_last_epoch_best = app.get_flag("gate-val-loss-non-increase");
     let gate_min_auc = app.get_one::<f64>("gate-min-auc").copied();
     let gate_mode_fail = app.get_one::<String>("gate-mode").map(|s| s == "fail").unwrap_or(false);
+    let gate_distill_cp_mae = app.get_one::<f32>("gate-distill-cp-mae").copied();
+    let gate_distill_cp_p95 = app.get_one::<f32>("gate-distill-cp-p95").copied();
+    let gate_distill_logit_mae = app.get_one::<f32>("gate-distill-logit-mae").copied();
+    let gate_classic_int_cp_mae = app.get_one::<f32>("gate-classic-int-cp-mae").copied();
+    let gate_classic_int_cp_p95 = app.get_one::<f32>("gate-classic-int-cp-p95").copied();
+    let gate_classic_int_logit_mae = app.get_one::<f32>("gate-classic-int-logit-mae").copied();
     let save_every: Option<usize> =
         app.get_one::<String>("save-every").map(|s| s.parse()).transpose()?;
 
@@ -689,6 +735,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut best_epoch: Option<usize> = None;
 
     let mut classic_bundle: Option<ClassicIntNetworkBundle> = None;
+    let mut classic_scales: Option<ClassicQuantizationScales> = None;
+    let mut distill_metrics: Option<DistillEvalMetrics> = None;
+    let mut quant_metrics: Option<QuantEvalMetrics> = None;
 
     // Training mode dispatch (scope to release borrows when done)
     {
@@ -731,7 +780,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_val_loss: &mut last_val_loss,
                 best_epoch: &mut best_epoch,
             },
-            structured: structured_logger,
+            structured: structured_logger.take(),
             global_step: 0,
             training_config_json: training_cfg_json,
             plateau: plateau_state,
@@ -795,8 +844,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ctx.structured.as_ref(),
                         ),
                     ) {
-                        Ok((bundle, _scales)) => {
-                            *ctx.classic_bundle = Some(bundle);
+                        Ok(artifacts) => {
+                            let distill::DistillArtifacts {
+                                classic_fp32,
+                                bundle_int,
+                                scales,
+                            } = artifacts;
+
+                            let eval_samples_slice: &[Sample] =
+                                if let Some(val) = validation_samples.as_ref() {
+                                    if !val.is_empty() {
+                                        val.as_slice()
+                                    } else {
+                                        train_samples.as_slice()
+                                    }
+                                } else {
+                                    train_samples.as_slice()
+                                };
+
+                            if !eval_samples_slice.is_empty() {
+                                let dm = evaluate_distill(
+                                    &teacher,
+                                    &classic_fp32,
+                                    eval_samples_slice,
+                                    &config,
+                                );
+                                let qm = evaluate_quantization_gap(
+                                    &classic_fp32,
+                                    &bundle_int,
+                                    &scales,
+                                    eval_samples_slice,
+                                    &config,
+                                );
+                                distill_metrics = Some(dm);
+                                quant_metrics = Some(qm);
+                            }
+
+                            classic_scales = Some(scales.clone());
+                            *ctx.classic_bundle = Some(bundle_int);
                         }
                         Err(e) => {
                             if human_to_stderr {
@@ -832,6 +917,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Classic distillation skipped: --distill-from-single was not provided.");
             }
         }
+
+        structured_logger = ctx.structured.take();
     }
 
     // Resolve export format
@@ -846,6 +933,353 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save config
     let mut config_file = File::create(out_dir.join("config.json"))?;
     writeln!(config_file, "{}", serde_json::to_string_pretty(&config)?)?;
+
+    // Emit evaluation metrics & gates for distillation / quantization
+    let mut fail_due_to_gate = false;
+    let fmt_opt = |v: Option<f32>| -> String {
+        v.map(|x| format!("{:.4}", x)).unwrap_or_else(|| "NA".to_string())
+    };
+
+    if let Some(metrics) = distill_metrics.as_ref() {
+        if metrics.n == 0 {
+            let msg = "Distill eval: SKIP (no samples)";
+            if human_to_stderr {
+                eprintln!("{}", msg);
+            } else {
+                println!("{}", msg);
+            }
+        } else {
+            let mut evaluated = false;
+            let mut pass = true;
+            let mut detail_parts = Vec::new();
+            let mut gate_map = serde_json::Map::new();
+
+            if let Some(th) = gate_distill_cp_mae {
+                evaluated = true;
+                gate_map.insert("cp_mae_le".into(), serde_json::json!(th));
+                match metrics.mae_cp {
+                    Some(val) => {
+                        let ok = val <= th;
+                        pass &= ok;
+                        detail_parts.push(format!(
+                            "cp_mae={} (<= {:.3}) {}",
+                            fmt_opt(Some(val)),
+                            th,
+                            if ok { "PASS" } else { "FAIL" }
+                        ));
+                    }
+                    None => {
+                        pass = false;
+                        detail_parts.push(format!("cp_mae=NA (<= {:.3}) FAIL", th));
+                    }
+                }
+            }
+            if let Some(th) = gate_distill_cp_p95 {
+                evaluated = true;
+                gate_map.insert("cp_p95_le".into(), serde_json::json!(th));
+                match metrics.p95_cp {
+                    Some(val) => {
+                        let ok = val <= th;
+                        pass &= ok;
+                        detail_parts.push(format!(
+                            "cp_p95={} (<= {:.3}) {}",
+                            fmt_opt(Some(val)),
+                            th,
+                            if ok { "PASS" } else { "FAIL" }
+                        ));
+                    }
+                    None => {
+                        pass = false;
+                        detail_parts.push(format!("cp_p95=NA (<= {:.3}) FAIL", th));
+                    }
+                }
+            }
+            if let Some(th) = gate_distill_logit_mae {
+                evaluated = true;
+                gate_map.insert("logit_mae_le".into(), serde_json::json!(th));
+                match metrics.mae_logit {
+                    Some(val) => {
+                        let ok = val <= th;
+                        pass &= ok;
+                        detail_parts.push(format!(
+                            "logit_mae={} (<= {:.4}) {}",
+                            fmt_opt(Some(val)),
+                            th,
+                            if ok { "PASS" } else { "FAIL" }
+                        ));
+                    }
+                    None => {
+                        pass = false;
+                        detail_parts.push(format!("logit_mae=NA (<= {:.4}) FAIL", th));
+                    }
+                }
+            }
+
+            gate_map.insert("pass".into(), serde_json::json!(pass));
+
+            if let Some(lg) = structured_logger.as_ref() {
+                let mut rec = serde_json::Map::new();
+                rec.insert("ts".into(), serde_json::json!(Utc::now().to_rfc3339()));
+                rec.insert("phase".into(), serde_json::json!("distill_eval"));
+                rec.insert("n".into(), serde_json::json!(metrics.n as i64));
+                rec.insert(
+                    "mae_cp".into(),
+                    metrics.mae_cp.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "p95_cp".into(),
+                    metrics.p95_cp.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "max_cp".into(),
+                    metrics.max_cp.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "r2_cp".into(),
+                    metrics.r2_cp.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "mae_logit".into(),
+                    metrics
+                        .mae_logit
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "p95_logit".into(),
+                    metrics
+                        .p95_logit
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "max_logit".into(),
+                    metrics
+                        .max_logit
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert("gate".into(), serde_json::Value::Object(gate_map.clone()));
+                lg.write_json(&serde_json::Value::Object(rec));
+            }
+
+            let status = if !evaluated {
+                "NO-THRESHOLD"
+            } else if pass {
+                "PASS"
+            } else {
+                "FAIL"
+            };
+
+            let mut summary = format!(
+                "Distill eval: n={} mae_cp={} p95_cp={} max_cp={} r2_cp={}",
+                metrics.n,
+                fmt_opt(metrics.mae_cp),
+                fmt_opt(metrics.p95_cp),
+                fmt_opt(metrics.max_cp),
+                fmt_opt(metrics.r2_cp)
+            );
+            if metrics.mae_logit.is_some() {
+                summary.push_str(&format!(
+                    " mae_logit={} p95_logit={} max_logit={}",
+                    fmt_opt(metrics.mae_logit),
+                    fmt_opt(metrics.p95_logit),
+                    fmt_opt(metrics.max_logit)
+                ));
+            }
+            if !detail_parts.is_empty() {
+                summary.push_str(&format!(" | {}", detail_parts.join(", ")));
+            }
+            summary.push_str(&format!(" -> {}", status));
+
+            if human_to_stderr {
+                eprintln!("{}", summary);
+            } else {
+                println!("{}", summary);
+            }
+
+            if evaluated && !pass && gate_mode_fail {
+                fail_due_to_gate = true;
+            }
+        }
+    }
+
+    if let Some(metrics) = quant_metrics.as_ref() {
+        if metrics.n == 0 {
+            let msg = "Quant eval: SKIP (no samples)";
+            if human_to_stderr {
+                eprintln!("{}", msg);
+            } else {
+                println!("{}", msg);
+            }
+        } else {
+            let mut evaluated = false;
+            let mut pass = true;
+            let mut detail_parts = Vec::new();
+            let mut gate_map = serde_json::Map::new();
+
+            if let Some(th) = gate_classic_int_cp_mae {
+                evaluated = true;
+                gate_map.insert("cp_mae_le".into(), serde_json::json!(th));
+                match metrics.mae_cp {
+                    Some(val) => {
+                        let ok = val <= th;
+                        pass &= ok;
+                        detail_parts.push(format!(
+                            "cp_mae={} (<= {:.3}) {}",
+                            fmt_opt(Some(val)),
+                            th,
+                            if ok { "PASS" } else { "FAIL" }
+                        ));
+                    }
+                    None => {
+                        pass = false;
+                        detail_parts.push(format!("cp_mae=NA (<= {:.3}) FAIL", th));
+                    }
+                }
+            }
+            if let Some(th) = gate_classic_int_cp_p95 {
+                evaluated = true;
+                gate_map.insert("cp_p95_le".into(), serde_json::json!(th));
+                match metrics.p95_cp {
+                    Some(val) => {
+                        let ok = val <= th;
+                        pass &= ok;
+                        detail_parts.push(format!(
+                            "cp_p95={} (<= {:.3}) {}",
+                            fmt_opt(Some(val)),
+                            th,
+                            if ok { "PASS" } else { "FAIL" }
+                        ));
+                    }
+                    None => {
+                        pass = false;
+                        detail_parts.push(format!("cp_p95=NA (<= {:.3}) FAIL", th));
+                    }
+                }
+            }
+            if let Some(th) = gate_classic_int_logit_mae {
+                evaluated = true;
+                gate_map.insert("logit_mae_le".into(), serde_json::json!(th));
+                match metrics.mae_logit {
+                    Some(val) => {
+                        let ok = val <= th;
+                        pass &= ok;
+                        detail_parts.push(format!(
+                            "logit_mae={} (<= {:.4}) {}",
+                            fmt_opt(Some(val)),
+                            th,
+                            if ok { "PASS" } else { "FAIL" }
+                        ));
+                    }
+                    None => {
+                        pass = false;
+                        detail_parts.push(format!("logit_mae=NA (<= {:.4}) FAIL", th));
+                    }
+                }
+            }
+
+            gate_map.insert("pass".into(), serde_json::json!(pass));
+
+            if let Some(lg) = structured_logger.as_ref() {
+                let mut rec = serde_json::Map::new();
+                rec.insert("ts".into(), serde_json::json!(Utc::now().to_rfc3339()));
+                rec.insert("phase".into(), serde_json::json!("quant_eval"));
+                rec.insert("n".into(), serde_json::json!(metrics.n as i64));
+                rec.insert(
+                    "mae_cp".into(),
+                    metrics.mae_cp.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "p95_cp".into(),
+                    metrics.p95_cp.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "max_cp".into(),
+                    metrics.max_cp.map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "mae_logit".into(),
+                    metrics
+                        .mae_logit
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "p95_logit".into(),
+                    metrics
+                        .p95_logit
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                rec.insert(
+                    "max_logit".into(),
+                    metrics
+                        .max_logit
+                        .map(|v| serde_json::json!(v))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                if let Some(scales) = classic_scales.as_ref() {
+                    rec.insert(
+                        "scales".into(),
+                        serde_json::json!({
+                            "s_w0": scales.s_w0,
+                            "s_w1": scales.s_w1,
+                            "s_w2": scales.s_w2,
+                            "s_w3": scales.s_w3,
+                            "s_in_1": scales.s_in_1,
+                            "s_in_2": scales.s_in_2,
+                            "s_in_3": scales.s_in_3,
+                        }),
+                    );
+                }
+                rec.insert("gate".into(), serde_json::Value::Object(gate_map.clone()));
+                lg.write_json(&serde_json::Value::Object(rec));
+            }
+
+            let status = if !evaluated {
+                "NO-THRESHOLD"
+            } else if pass {
+                "PASS"
+            } else {
+                "FAIL"
+            };
+
+            let mut summary = format!(
+                "Quant eval: n={} mae_cp={} p95_cp={} max_cp={}",
+                metrics.n,
+                fmt_opt(metrics.mae_cp),
+                fmt_opt(metrics.p95_cp),
+                fmt_opt(metrics.max_cp)
+            );
+            if metrics.mae_logit.is_some() {
+                summary.push_str(&format!(
+                    " mae_logit={} p95_logit={} max_logit={}",
+                    fmt_opt(metrics.mae_logit),
+                    fmt_opt(metrics.p95_logit),
+                    fmt_opt(metrics.max_logit)
+                ));
+            }
+            if !detail_parts.is_empty() {
+                summary.push_str(&format!(" | {}", detail_parts.join(", ")));
+            }
+            summary.push_str(&format!(" -> {}", status));
+
+            if human_to_stderr {
+                eprintln!("{}", summary);
+            } else {
+                println!("{}", summary);
+            }
+
+            if evaluated && !pass && gate_mode_fail {
+                fail_due_to_gate = true;
+            }
+        }
+    }
+
+    if fail_due_to_gate {
+        std::process::exit(1);
+    }
 
     // Save best network and meta when validation present
     if let Some(val_samples) = &validation_samples {

@@ -5,7 +5,6 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-#[allow(dead_code)]
 #[inline]
 pub fn round_away_from_zero(val: f32) -> i32 {
     if val.is_nan() || val.is_infinite() {
@@ -18,13 +17,11 @@ pub fn round_away_from_zero(val: f32) -> i32 {
     }
 }
 
-#[allow(dead_code)]
 #[inline]
 pub fn clip_sym(value: i32, qmax: i32) -> i32 {
     value.clamp(-qmax, qmax)
 }
 
-#[allow(dead_code)]
 pub fn quantize_symmetric_i8(
     weights: &[f32],
     per_channel: bool,
@@ -53,8 +50,12 @@ pub fn quantize_symmetric_i8(
             channels
         );
         for (ch, slice) in weights.chunks_exact(stride).enumerate() {
-            let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
-            let scale = max_abs / I8_QMAX as f32;
+            let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+            let scale = if max_abs == 0.0 {
+                1.0
+            } else {
+                max_abs / I8_QMAX as f32
+            };
             scales[ch] = scale;
             for &w in slice {
                 let q = round_away_from_zero(w / scale);
@@ -62,8 +63,12 @@ pub fn quantize_symmetric_i8(
             }
         }
     } else {
-        let max_abs = weights.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
-        let scale = max_abs / I8_QMAX as f32;
+        let max_abs = weights.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        let scale = if max_abs == 0.0 {
+            1.0
+        } else {
+            max_abs / I8_QMAX as f32
+        };
         scales[0] = scale;
         for &w in weights {
             let q = round_away_from_zero(w / scale);
@@ -73,7 +78,6 @@ pub fn quantize_symmetric_i8(
     (quantized, scales)
 }
 
-#[allow(dead_code)]
 pub fn quantize_symmetric_i16(
     weights: &[f32],
     per_channel: bool,
@@ -102,8 +106,12 @@ pub fn quantize_symmetric_i16(
             channels
         );
         for (ch, slice) in weights.chunks_exact(stride).enumerate() {
-            let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
-            let scale = max_abs / I16_QMAX as f32;
+            let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+            let scale = if max_abs == 0.0 {
+                1.0
+            } else {
+                max_abs / I16_QMAX as f32
+            };
             scales[ch] = scale;
             for &w in slice {
                 let q = round_away_from_zero(w / scale);
@@ -111,8 +119,12 @@ pub fn quantize_symmetric_i16(
             }
         }
     } else {
-        let max_abs = weights.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
-        let scale = max_abs / I16_QMAX as f32;
+        let max_abs = weights.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        let scale = if max_abs == 0.0 {
+            1.0
+        } else {
+            max_abs / I16_QMAX as f32
+        };
         scales[0] = scale;
         for &w in weights {
             let q = round_away_from_zero(w / scale);
@@ -122,7 +134,6 @@ pub fn quantize_symmetric_i16(
     (quantized, scales)
 }
 
-#[allow(dead_code)]
 pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) -> Vec<i32> {
     if weight_scales.is_empty() {
         return vec![0; bias.len()];
@@ -136,14 +147,12 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
         .collect()
 }
 
-#[allow(dead_code)]
 #[inline]
 pub fn clamp_i32_to_i16(v: i32) -> i16 {
     v.clamp(-I16_QMAX, I16_QMAX) as i16
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ClassicFeatureTransformerInt {
     pub weights: Vec<i16>,
     pub biases: Vec<i32>,
@@ -151,7 +160,6 @@ pub struct ClassicFeatureTransformerInt {
     pub input_dim: usize,
 }
 
-#[allow(dead_code)]
 impl ClassicFeatureTransformerInt {
     pub fn new(weights: Vec<i16>, biases: Vec<i32>, acc_dim: usize) -> Self {
         let input_dim = if acc_dim == 0 {
@@ -171,6 +179,7 @@ impl ClassicFeatureTransformerInt {
         self.accumulate_impl(features.iter().map(|&f| f as usize), out);
     }
 
+    #[cfg(test)]
     pub fn accumulate(&self, features: &[usize], out: &mut [i16]) {
         self.accumulate_impl(features.iter().copied(), out);
     }
@@ -203,7 +212,6 @@ impl ClassicFeatureTransformerInt {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ClassicQuantizedNetwork {
     pub hidden1_weights: Vec<i8>,
     pub hidden1_biases: Vec<i32>,
@@ -252,9 +260,6 @@ impl ClassicQuantizedNetwork {
         let input_dim = self.acc_dim * 2;
         let mut input = vec![0i8; input_dim];
         for (i, (&us, &them)) in acc_us.iter().zip(acc_them.iter()).enumerate() {
-            if i >= self.acc_dim {
-                break;
-            }
             input[i] = Self::quantize_ft_output(us);
             input[self.acc_dim + i] = Self::quantize_ft_output(them);
         }
@@ -335,13 +340,11 @@ impl ClassicQuantizedNetwork {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ClassicIntNetworkBundle {
     pub transformer: ClassicFeatureTransformerInt,
     pub network: ClassicQuantizedNetwork,
 }
 
-#[allow(dead_code)]
 impl ClassicIntNetworkBundle {
     pub fn new(
         transformer: ClassicFeatureTransformerInt,
@@ -439,15 +442,20 @@ impl<'a> ClassicV1Serialized<'a> {
     }
 }
 
-#[allow(dead_code)]
 pub fn write_classic_v1_file(
     path: &Path,
     data: &ClassicV1Serialized<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     data.validate().map_err(|msg| msg.to_string())?;
 
+    // Classic v1 は固定寸法 (HALFKP_256X2_32_32) のみ正式サポート
+    if !(data.acc_dim == 256 && data.h1_dim == 32 && data.h2_dim == 32) {
+        return Err("Classic v1 requires acc_dim=256, h1_dim=32, h2_dim=32".into());
+    }
+
     let payload_bytes = data.payload_bytes();
-    if payload_bytes > u32::MAX as u64 {
+    let total_bytes = 16u64 + payload_bytes;
+    if total_bytes > u32::MAX as u64 {
         return Err("Classic v1 blob exceeds 4GB".into());
     }
 
@@ -574,7 +582,7 @@ impl ClassicFloatNetwork {
         };
         let (h1_weights_q, h1_scales) =
             quantize_symmetric_i8(&self.hidden1_weights, h1_per_channel, h1_channels);
-        let s_in_1 = s_w0 / (1 << CLASSIC_FT_SHIFT) as f32;
+        let s_in_1 = s_w0 * (1 << CLASSIC_FT_SHIFT) as f32;
         let hidden1_biases_q = quantize_bias_i32(&self.hidden1_biases, s_in_1, &h1_scales);
 
         let h2_per_channel = matches!(quant_h2, QuantScheme::PerChannel);
@@ -789,7 +797,7 @@ mod tests {
             .expect("quantize symmetric");
 
         assert_eq!(bundle.transformer.acc_dim, 2);
-        assert!((scales.s_in_1 - scales.s_w0 / (1 << CLASSIC_FT_SHIFT) as f32).abs() < 1e-6);
+        assert!((scales.s_in_1 - scales.s_w0 * (1 << CLASSIC_FT_SHIFT) as f32).abs() < 1e-6);
         assert_eq!(scales.s_in_2, 1.0);
         assert_eq!(scales.s_in_3, 1.0);
         assert_eq!(scales.s_w3.len(), 1);

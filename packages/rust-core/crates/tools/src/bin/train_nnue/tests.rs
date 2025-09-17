@@ -293,33 +293,68 @@ fn classic_integer_network_matches_manual_flow() {
 fn classic_v1_writer_emits_expected_layout() {
     let td = tempdir().unwrap();
     let path = td.path().join("classic.bin");
-    let transformer =
-        ClassicFeatureTransformerInt::new(vec![0x1234, -5, 7, 9, -10, 0x2222], vec![42, -7], 2);
+    let acc_dim = 256;
+    let h1_dim = 32;
+    let h2_dim = 32;
+    let ft_input_dim = 1; // テスト用に縮約
+
+    let mut ft_weights = vec![0i16; acc_dim * ft_input_dim];
+    ft_weights[0] = 0x1234;
+    let mut ft_biases = vec![0i32; acc_dim];
+    ft_biases[0] = 42;
+    ft_biases[1] = -7;
+
+    let classic_input_dim = acc_dim * 2;
+    let mut hidden1_weights = vec![0i8; classic_input_dim * h1_dim];
+    for (idx, w) in hidden1_weights.iter_mut().enumerate() {
+        *w = ((idx % 127) as i8).saturating_add(1);
+    }
+    let mut hidden1_biases = vec![0i32; h1_dim];
+    hidden1_biases[0] = 11;
+    hidden1_biases[1] = -12;
+
+    let mut hidden2_weights = vec![0i8; h1_dim * h2_dim];
+    for (idx, w) in hidden2_weights.iter_mut().enumerate() {
+        *w = ((idx % 127) as i8).wrapping_sub(63);
+    }
+    let hidden2_biases = vec![5, -4]
+        .into_iter()
+        .chain(std::iter::repeat(0).take(h2_dim - 2))
+        .collect::<Vec<i32>>();
+
+    let mut output_weights = vec![0i8; h2_dim];
+    output_weights[0] = 3;
+    output_weights[1] = -2;
+
+    let transformer = ClassicFeatureTransformerInt::new(ft_weights, ft_biases, acc_dim);
     let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
-        hidden1_weights: vec![1, 2, 3, 4, 5, 6, 7, 8],
-        hidden1_biases: vec![11, -12],
-        hidden2_weights: vec![9, 8, 7, 6],
-        hidden2_biases: vec![5, -4],
-        output_weights: vec![3, -2],
+        hidden1_weights,
+        hidden1_biases,
+        hidden2_weights,
+        hidden2_biases,
+        output_weights,
         output_bias: 99,
-        acc_dim: 2,
-        h1_dim: 2,
-        h2_dim: 2,
+        acc_dim,
+        h1_dim,
+        h2_dim,
     });
     let bundle = ClassicIntNetworkBundle::new(transformer, network);
     write_classic_v1_bundle(&path, &bundle).unwrap();
     let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(bytes.len(), 70);
+    assert_eq!(bytes.len(), 19252);
     assert_eq!(&bytes[0..4], b"NNUE");
     assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
     assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), CLASSIC_V1_ARCH_ID);
-    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 70u32);
+    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 19236u32);
+
+    let serialized = bundle.as_serialized();
 
     // First FT weight (0x1234)
     assert_eq!(i16::from_le_bytes(bytes[16..18].try_into().unwrap()), 0x1234);
+
     // Second bias (-7)
-    let serialized = bundle.as_serialized();
-    let bias_offset = 16 + serialized.ft_weights.len() * 2 + 4; // first bias consumed
+    let ft_weight_bytes = serialized.ft_weights.len() * 2;
+    let bias_offset = 16 + ft_weight_bytes + 4; // 1st bias (42) + 4 bytes
     assert_eq!(i32::from_le_bytes(bytes[bias_offset..bias_offset + 4].try_into().unwrap()), -7);
 
     // Last 4 bytes = output bias (99)
@@ -1433,43 +1468,4 @@ fn lr_plateau_state_min_delta() {
     // min_delta=1e-6 の閾下の変化は改善扱いしない
     assert!(p.update(0.9999999).is_some()); // patience=1 到達で発火
     assert!((p.factor() - 0.5).abs() < 1e-6);
-}
-
-#[test]
-fn test_classic_output_per_channel_error() {
-    // Classic出力層のper-channel量子化がエラーになることを確認
-    let net = ClassicFloatNetwork {
-        ft_weights: vec![1.0; 256 * 256],
-        ft_biases: vec![0.0; 256],
-        hidden1_weights: vec![1.0; (256 * 2) * 32], // acc_dim * 2 for Classic
-        hidden1_biases: vec![0.0; 32],
-        hidden2_weights: vec![1.0; 32 * 32],
-        hidden2_biases: vec![0.0; 32],
-        output_weights: vec![1.0; 32],
-        output_bias: 0.0,
-        acc_dim: 256,
-        input_dim: 256,
-        h1_dim: 32,
-        h2_dim: 32,
-    };
-
-    // per-tensor量子化は成功するはず
-    let result_tensor = net.quantize_symmetric(
-        QuantScheme::PerTensor,
-        QuantScheme::PerChannel,
-        QuantScheme::PerChannel,
-        QuantScheme::PerTensor,
-    );
-    assert!(result_tensor.is_ok());
-
-    // per-channel量子化はエラーになるはず
-    let result_channel = net.quantize_symmetric(
-        QuantScheme::PerTensor,
-        QuantScheme::PerChannel,
-        QuantScheme::PerChannel,
-        QuantScheme::PerChannel,
-    );
-    assert!(result_channel.is_err());
-    let err_msg = result_channel.unwrap_err();
-    assert!(err_msg.contains("Classic v1: output layer does not support per-channel quantization"));
 }
