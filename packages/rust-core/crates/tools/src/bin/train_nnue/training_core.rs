@@ -885,8 +885,12 @@ pub fn train_model_stream_cache(
             }
         }
     }
-    let mut loader =
-        StreamCacheLoader::new(cache_path.to_string(), config.batch_size, effective_prefetch);
+    let mut loader = StreamCacheLoader::new(
+        cache_path.to_string(),
+        config.batch_size,
+        effective_prefetch,
+        weighting.clone(),
+    );
     let mut adam_state = if config.optimizer == "adam" {
         Some(AdamState::new(network))
     } else {
@@ -2476,4 +2480,3 @@ pub fn compute_val_auc_and_ece(
     let ece = ece_from_bins(&bins);
     (auc, ece)
 }
-

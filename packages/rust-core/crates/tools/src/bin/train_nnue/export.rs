@@ -143,18 +143,28 @@ pub fn finalize_export(
                     log::warn!(
                         "Classic export requested but no Classic bundle was produced; exporting zero weights"
                     );
-                    fallback = ClassicFloatNetwork::zero()
-                        .quantize_round()
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    fallback = ClassicFloatNetwork::zeros_with_dims(
+                        SHOGI_BOARD_SIZE * FE_END,
+                        CLASSIC_ACC_DIM,
+                        CLASSIC_H1_DIM,
+                        CLASSIC_H2_DIM,
+                    )
+                    .quantize_round()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                     &fallback
                 }
                 (None, ArchKind::Single) => {
                     log::warn!(
                         "Classic export requested for single architecture; generating zero Classic weights"
                     );
-                    fallback = ClassicFloatNetwork::zero()
-                        .quantize_round()
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    fallback = ClassicFloatNetwork::zeros_with_dims(
+                        SHOGI_BOARD_SIZE * FE_END,
+                        CLASSIC_ACC_DIM,
+                        CLASSIC_H1_DIM,
+                        CLASSIC_H2_DIM,
+                    )
+                    .quantize_round()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
                     &fallback
                 }
             };
