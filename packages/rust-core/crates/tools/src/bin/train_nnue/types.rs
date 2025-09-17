@@ -100,6 +100,7 @@ pub struct DistillOptions {
     pub loss: DistillLossKind,
     pub temperature: f32,
     pub alpha: f32,
+    pub scale_temp2: bool,
     /// 教師ネットワーク出力の数値ドメイン
     /// - Cp: 評価値(cp) 例: ±300, ±1200
     /// - WdlLogit: WDLロジット (シグモイド前の値)
@@ -113,6 +114,7 @@ impl Default for DistillOptions {
             loss: DistillLossKind::Mse,
             temperature: 1.0,
             alpha: 1.0,
+            scale_temp2: false,
             teacher_domain: TeacherValueDomain::Cp,
         }
     }

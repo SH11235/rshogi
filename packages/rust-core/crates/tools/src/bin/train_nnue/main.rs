@@ -189,6 +189,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(clap::value_parser!(f32))
                 .default_value("1.0"),
         )
+        .arg(
+            Arg::new("kd-loss-scale-temp2")
+                .long("kd-loss-scale-temp2")
+                .help("Scale distillation loss/gradient by (temperature)^2")
+                .action(ArgAction::SetTrue),
+        )
         .arg(arg!(--shuffle "Shuffle training data"))
         .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves (JSONL input)"))
         .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used (JSONL input)"))
@@ -360,6 +366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kd_loss_source = app.value_source("kd-loss");
     let kd_temp_source = app.value_source("kd-temperature");
     let kd_alpha_source = app.value_source("kd-alpha");
+    let kd_scale_temp2 = app.get_flag("kd-loss-scale-temp2");
 
     let mut distill_loss =
         *app.get_one::<DistillLossKind>("kd-loss").unwrap_or(&DistillLossKind::Mse);
@@ -435,6 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         loss: distill_loss,
         temperature: distill_temperature,
         alpha: distill_alpha,
+        scale_temp2: kd_scale_temp2,
         teacher_domain,
     };
 
