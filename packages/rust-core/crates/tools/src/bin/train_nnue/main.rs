@@ -393,6 +393,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--arch=classic does not support --export-format single-i8".into());
     }
+    if export_options.arch == ArchKind::Classic
+        && export_options.quant_ft == QuantScheme::PerChannel
+    {
+        return Err("--arch=classic currently supports only --quant-ft=per-tensor".into());
+    }
     if distill_options.temperature <= 0.0 {
         return Err("--kd-temperature must be > 0".into());
     }
@@ -775,7 +780,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &train_samples,
                         &config,
                         &distill_options,
-                        ctx.structured.as_ref(),
+                        distill::ClassicDistillConfig::new(
+                            export_options.quant_ft,
+                            export_options.quant_h1,
+                            export_options.quant_h2,
+                            export_options.quant_out,
+                            ctx.structured.as_ref(),
+                        ),
                     ) {
                         Ok((bundle, _scales)) => {
                             *ctx.classic_bundle = Some(bundle);

@@ -4,7 +4,7 @@ use crate::classic::{ClassicFloatNetwork, ClassicIntNetworkBundle, ClassicQuanti
 use crate::logging::StructuredLogger;
 use crate::model::Network;
 use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM};
-use crate::types::{Config, DistillLossKind, DistillOptions, Sample};
+use crate::types::{Config, DistillLossKind, DistillOptions, QuantScheme, Sample};
 use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
@@ -13,6 +13,7 @@ const CLASSIC_RELU_CLIP: f32 = 127.0;
 const MAX_DISTILL_SAMPLES: usize = 50_000;
 const DISTILL_EPOCHS: usize = 2;
 const DISTILL_LR: f32 = 1e-4;
+const PROB_EPS: f32 = 1e-6;
 
 struct ClassicScratch {
     acc_us: Vec<f32>,
@@ -51,7 +52,8 @@ impl ClassicScratch {
 struct DistillSample {
     features_us: Vec<u32>,
     features_them: Vec<u32>,
-    target: f32,
+    teacher_output: f32,
+    label: f32,
     weight: f32,
 }
 
@@ -65,6 +67,26 @@ fn relu_clip_grad(z: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+#[inline]
+fn stable_logit(p: f32) -> f32 {
+    let clamped = p.clamp(PROB_EPS, 1.0 - PROB_EPS);
+    (clamped / (1.0 - clamped)).ln()
+}
+
+#[inline]
+fn bce_with_logits_soft(logit: f32, target: f32) -> (f32, f32) {
+    // target は [0,1] の任意値（ソフトラベル）
+    let max_val = 0.0f32.max(logit);
+    let loss = max_val - logit * target + ((-logit.abs()).exp() + 1.0).ln();
+    let grad = sigmoid(logit) - target;
+    (loss, grad)
 }
 
 fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut ClassicScratch) -> f32 {
@@ -236,7 +258,8 @@ fn prepare_distill_samples(
         result.push(DistillSample {
             features_us: sample.features.clone(),
             features_them,
-            target: teacher_out,
+            teacher_output: teacher_out,
+            label: sample.label,
             weight: sample.weight,
         });
     }
@@ -244,16 +267,39 @@ fn prepare_distill_samples(
     result
 }
 
+pub struct ClassicDistillConfig<'a> {
+    pub quant_ft: QuantScheme,
+    pub quant_h1: QuantScheme,
+    pub quant_h2: QuantScheme,
+    pub quant_out: QuantScheme,
+    pub structured: Option<&'a StructuredLogger>,
+}
+
+impl<'a> ClassicDistillConfig<'a> {
+    pub fn new(
+        quant_ft: QuantScheme,
+        quant_h1: QuantScheme,
+        quant_h2: QuantScheme,
+        quant_out: QuantScheme,
+        structured: Option<&'a StructuredLogger>,
+    ) -> Self {
+        Self {
+            quant_ft,
+            quant_h1,
+            quant_h2,
+            quant_out,
+            structured,
+        }
+    }
+}
+
 pub fn distill_classic_after_training(
     teacher: &Network,
     samples: &[Sample],
     config: &Config,
     distill: &DistillOptions,
-    structured: Option<&StructuredLogger>,
+    classic_cfg: ClassicDistillConfig<'_>,
 ) -> Result<(ClassicIntNetworkBundle, ClassicQuantizationScales), String> {
-    if distill.loss != DistillLossKind::Mse {
-        return Err("Classic distillation currently supports --kd-loss=mse only".into());
-    }
     if samples.is_empty() {
         return Err("Classic distillation requires in-memory training samples".into());
     }
@@ -262,6 +308,12 @@ pub fn distill_classic_after_training(
             "Classic distillation unsupported for label_type={}",
             config.label_type
         ));
+    }
+    if distill.temperature <= 0.0 {
+        return Err("--kd-temperature must be > 0".into());
+    }
+    if config.label_type == "cp" && distill.loss != DistillLossKind::Mse {
+        return Err("Classic distillation with cp labels supports --kd-loss=mse only".into());
     }
 
     let start = Instant::now();
@@ -278,19 +330,52 @@ pub fn distill_classic_after_training(
     );
 
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+    let temperature = distill.temperature;
+    let loss_kind = distill.loss;
 
     for epoch in 0..DISTILL_EPOCHS {
         let mut epoch_loss = 0.0f64;
         let mut epoch_weight = 0.0f64;
         for sample in &prepared {
             let prediction = forward(&classic, sample, &mut scratch);
-            let diff = prediction - sample.target;
-            let grad = diff * sample.weight;
-            epoch_loss += 0.5f64 * (diff as f64) * (diff as f64) * (sample.weight as f64);
+            let (loss_contrib, grad_output) = match config.label_type.as_str() {
+                "wdl" => {
+                    let teacher_prob = sigmoid(sample.teacher_output / temperature);
+                    let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
+                    let target_prob = (distill.alpha * teacher_prob
+                        + (1.0 - distill.alpha) * label_prob)
+                        .clamp(PROB_EPS, 1.0 - PROB_EPS);
+
+                    match loss_kind {
+                        DistillLossKind::Mse => {
+                            let target_logit = stable_logit(target_prob);
+                            let diff = prediction - target_logit;
+                            let loss = 0.5 * diff * diff * sample.weight;
+                            let grad = diff * sample.weight;
+                            (loss as f64, grad)
+                        }
+                        DistillLossKind::Bce | DistillLossKind::Kl => {
+                            let (loss, grad) = bce_with_logits_soft(prediction, target_prob);
+                            ((loss * sample.weight) as f64, grad * sample.weight)
+                        }
+                    }
+                }
+                "cp" => {
+                    let target = distill.alpha * sample.teacher_output
+                        + (1.0 - distill.alpha) * sample.label;
+                    let diff = prediction - target;
+                    let loss = 0.5 * diff * diff * sample.weight;
+                    let grad = diff * sample.weight;
+                    (loss as f64, grad)
+                }
+                _ => unreachable!(),
+            };
+
+            epoch_loss += loss_contrib;
             epoch_weight += sample.weight as f64;
-            backward_update(&mut classic, &mut scratch, sample, grad, DISTILL_LR);
+            backward_update(&mut classic, &mut scratch, sample, grad_output, DISTILL_LR);
         }
-        if let Some(lg) = structured {
+        if let Some(lg) = classic_cfg.structured {
             let loss_avg = if epoch_weight > 0.0 {
                 epoch_loss / epoch_weight
             } else {
@@ -300,18 +385,30 @@ pub fn distill_classic_after_training(
                 "ts": chrono::Utc::now().to_rfc3339(),
                 "phase": "distill_classic",
                 "epoch": (epoch + 1) as i64,
-                "loss_mse": loss_avg,
+                "loss": loss_avg,
                 "samples": prepared.len(),
+                "loss_kind": match loss_kind {
+                    DistillLossKind::Mse => "mse",
+                    DistillLossKind::Bce => "bce",
+                    DistillLossKind::Kl => "kl",
+                },
+                "alpha": distill.alpha,
+                "temperature": temperature,
             });
             lg.write_json(&rec);
         }
     }
 
     let (bundle, scales) = classic
-        .quantize_symmetric()
+        .quantize_symmetric(
+            classic_cfg.quant_ft,
+            classic_cfg.quant_h1,
+            classic_cfg.quant_h2,
+            classic_cfg.quant_out,
+        )
         .map_err(|e| format!("quantize_symmetric failed: {e}"))?;
 
-    if let Some(lg) = structured {
+    if let Some(lg) = classic_cfg.structured {
         let rec = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "phase": "classic_quantize",
