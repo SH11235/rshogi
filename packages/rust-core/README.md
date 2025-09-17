@@ -54,6 +54,7 @@ src/                         # Legacy WASM modules
 - [Development Guide](docs/development/) - TDD開発ガイド、テスト戦略
 - [Implementation Docs](docs/implementation/) - 実装詳細
 - [Reference](docs/reference/) - フォーマット仕様など
+- [Distillation: Teacher Value Domain](docs/distillation/teacher_value_domain.md) - 教師値ドメインと Classic 蒸留ガイド
 
 ## USI Engine Usage
 
