@@ -93,7 +93,7 @@ fn structured_schema_fixture_valid() {
             continue;
         }
         let v: serde_json::Value =
-            serde_json::from_str(&line).expect(&format!("valid json at {}", i));
+            serde_json::from_str(&line).unwrap_or_else(|_| panic!("valid json at {}", i));
         assert!(
             validate_structured_line(&v),
             "schema-like validation failed at line {}: {}",

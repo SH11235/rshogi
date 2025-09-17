@@ -5,7 +5,9 @@ use crate::classic::{ClassicFloatNetwork, ClassicIntNetworkBundle, ClassicQuanti
 use crate::logging::StructuredLogger;
 use crate::model::Network;
 use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM};
-use crate::types::{Config, DistillLossKind, DistillOptions, QuantScheme, Sample};
+use crate::types::{
+    Config, DistillLossKind, DistillOptions, QuantScheme, Sample, TeacherValueDomain,
+};
 use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
@@ -391,7 +393,6 @@ pub fn distill_classic_after_training(
                     }
                 }
                 "cp" => {
-                    use crate::types::TeacherValueDomain;
                     let teacher_cp = match distill.teacher_domain {
                         TeacherValueDomain::Cp => sample.teacher_output,
                         TeacherValueDomain::WdlLogit => sample.teacher_output * config.scale,
@@ -501,24 +502,6 @@ fn to_features_them(features_us: &[u32]) -> Vec<u32> {
 
 fn convert_logit_to_cp(logit: f32, config: &Config) -> f32 {
     logit * config.scale
-}
-
-#[cfg(test)]
-mod tests {
-    use super::weighted_percentile;
-
-    #[test]
-    fn weighted_percentile_extremes() {
-        let base = vec![(0.0, 1.0), (10.0, 1.0)];
-        assert_eq!(weighted_percentile(base.clone(), 0.0), Some(0.0));
-        assert_eq!(weighted_percentile(base.clone(), 1.0), Some(10.0));
-    }
-
-    #[test]
-    fn weighted_percentile_skewed_weights() {
-        let skew = vec![(0.0, 0.001), (100.0, 1000.0)];
-        assert_eq!(weighted_percentile(skew, 0.5), Some(100.0));
-    }
 }
 
 pub fn evaluate_distill(
@@ -734,4 +717,22 @@ pub fn evaluate_quantization_gap(
     }
 
     metrics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::weighted_percentile;
+
+    #[test]
+    fn weighted_percentile_extremes() {
+        let base = vec![(0.0, 1.0), (10.0, 1.0)];
+        assert_eq!(weighted_percentile(base.clone(), 0.0), Some(0.0));
+        assert_eq!(weighted_percentile(base.clone(), 1.0), Some(10.0));
+    }
+
+    #[test]
+    fn weighted_percentile_skewed_weights() {
+        let skew = vec![(0.0, 0.001), (100.0, 1000.0)];
+        assert_eq!(weighted_percentile(skew, 0.5), Some(100.0));
+    }
 }

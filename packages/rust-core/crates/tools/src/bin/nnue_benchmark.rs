@@ -489,25 +489,6 @@ fn write_report_md(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests_seed_parse {
-    use super::parse_u64_any;
-
-    #[test]
-    fn parse_decimal_ok() {
-        assert_eq!(parse_u64_any("12648430").unwrap(), 12_648_430u64);
-        assert_eq!(parse_u64_any("0").unwrap(), 0);
-        assert!(parse_u64_any("-1").is_err());
-    }
-
-    #[test]
-    fn parse_hex_ok() {
-        assert_eq!(parse_u64_any("0xC0FFEE").unwrap(), 0xC0FFEEu64);
-        assert_eq!(parse_u64_any("0XdeadBEEF").unwrap(), 0xDEADBEEFu64);
-        assert!(parse_u64_any("0x").is_err());
-    }
-}
-
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
@@ -652,4 +633,23 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_seed_parse {
+    use super::parse_u64_any;
+
+    #[test]
+    fn parse_decimal_ok() {
+        assert_eq!(parse_u64_any("12648430").unwrap(), 12_648_430u64);
+        assert_eq!(parse_u64_any("0").unwrap(), 0);
+        assert!(parse_u64_any("-1").is_err());
+    }
+
+    #[test]
+    fn parse_hex_ok() {
+        assert_eq!(parse_u64_any("0xC0FFEE").unwrap(), 0xC0FFEEu64);
+        assert_eq!(parse_u64_any("0XdeadBEEF").unwrap(), 0xDEADBEEFu64);
+        assert!(parse_u64_any("0x").is_err());
+    }
 }

@@ -47,6 +47,8 @@ use types::{
     Sample,
 };
 
+use crate::types::TeacherValueDomain;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Command::new("train_nnue")
         .about("Train NNUE model from JSONL data")
@@ -419,7 +421,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant_out,
     };
     // Teacher domain (cp or wdl-logit). Default depends on label type: if label_type is "cp" assume cp, else wdl-logit for classic case.
-    use crate::types::TeacherValueDomain;
     let teacher_domain =
         app.get_one::<TeacherValueDomain>("teacher-domain").copied().unwrap_or_else(|| {
             if label_type_value == "cp" {
