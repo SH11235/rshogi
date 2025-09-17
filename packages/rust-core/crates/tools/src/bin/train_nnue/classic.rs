@@ -941,6 +941,8 @@ impl ClassicFloatNetwork {
 }
 
 #[derive(Clone, Debug)]
+/// Classic v1 の量子化スケールセット。`s_w*` は各層の重みスケール、`s_in_*` は層入力の追加スケール。
+/// 現状は hidden1 入力のみ FT 変換シフトと組み合わせたスケールを持ち、hidden2/output は 1.0 固定。
 pub struct ClassicQuantizationScales {
     pub s_w0: f32,
     pub s_w1: Vec<f32>,
