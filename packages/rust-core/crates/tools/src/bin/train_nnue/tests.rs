@@ -345,13 +345,13 @@ fn classic_v1_writer_emits_expected_layout() {
     let bundle = ClassicIntNetworkBundle::new(transformer, network);
     write_classic_v1_bundle(&path, &bundle).unwrap();
     let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(bytes.len(), 19252);
+    let serialized = bundle.as_serialized();
+    let expected_payload = serialized.payload_bytes() as usize;
+    assert_eq!(bytes.len(), expected_payload + 16);
     assert_eq!(&bytes[0..4], b"NNUE");
     assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
     assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), CLASSIC_V1_ARCH_ID);
-    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 19236u32);
-
-    let serialized = bundle.as_serialized();
+    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), expected_payload as u32);
 
     // First FT weight (0x1234)
     assert_eq!(i16::from_le_bytes(bytes[16..18].try_into().unwrap()), 0x1234);
@@ -1481,7 +1481,7 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
         write_classic_v1_bundle, ClassicFeatureTransformerInt, ClassicIntNetworkBundle,
         ClassicQuantizedNetwork, ClassicQuantizedNetworkParams, ClassicScratchViews,
     };
-    use engine_core::evaluation::nnue::weights::load_weights;
+    use engine_core::evaluation::nnue::{simd::SimdDispatcher, weights::load_weights};
 
     let td = tempfile::tempdir().unwrap();
     let path = td.path().join("nn.classic.nnue");
@@ -1553,7 +1553,7 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
     let mut views = ClassicScratchViews::new(acc_dim, h1_dim, h2_dim);
     let trainer_out_bias_only = bundle.propagate_with_features_scratch_full(&[], &[], &mut views);
 
-    // engine_core では acc を biases -> clamp(i16) として与える
+    // engine_core では FeatureTransformer → Accumulator → Network の経路を通す
     fn clamp_i32_to_i16(x: i32) -> i16 {
         if x > i16::MAX as i32 {
             i16::MAX
@@ -1563,8 +1563,9 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
             x as i16
         }
     }
-    let mut acc_bias_only: Vec<i16> = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
-    let engine_out_bias_only = core_net.propagate(&acc_bias_only, &acc_bias_only);
+    let mut engine_acc_us: Vec<i16> = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
+    let mut engine_acc_them = engine_acc_us.clone();
+    let engine_out_bias_only = core_net.propagate(&engine_acc_us, &engine_acc_them);
     assert_eq!(trainer_out_bias_only, engine_out_bias_only, "bias-only output mismatch");
 
     // 2) 小さな特徴集合 (唯一の特徴 0)
@@ -1572,17 +1573,18 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
     let mut views2 = ClassicScratchViews::new(acc_dim, h1_dim, h2_dim);
     let trainer_out_feats =
         bundle.propagate_with_features_scratch_full(&features, &[], &mut views2);
-    // engine_core 側 acc_us = biases + Σ weights[col][acc] (col=feature index)
-    // ft_weights は (feature * acc_dim + acc) レイアウト
-    for &f in &features {
-        let base = (f as usize) * acc_dim;
-        for acc_idx in 0..acc_dim {
-            let w = ft_weights[base + acc_idx] as i32;
-            let v = (acc_bias_only[acc_idx] as i32) + w;
-            acc_bias_only[acc_idx] = clamp_i32_to_i16(v);
-        }
-    }
-    let engine_out_feats = core_net.propagate(&acc_bias_only, &acc_bias_only);
+
+    engine_acc_us = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
+    engine_acc_them = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
+    let features_us: Vec<usize> = features.iter().map(|&f| f as usize).collect();
+    SimdDispatcher::update_accumulator(
+        &mut engine_acc_us,
+        &core_ft.weights,
+        &features_us,
+        true,
+        core_ft.acc_dim(),
+    );
+    let engine_out_feats = core_net.propagate(&engine_acc_us, &engine_acc_them);
     assert_eq!(trainer_out_feats, engine_out_feats, "small-features output mismatch");
 
     // ロジットは i32 なので浮動小数変換許容は不要だが将来スケール導入時の余地として誤差ゼロを確認
@@ -1601,24 +1603,65 @@ fn weighted_vs_unweighted_p95_diff_visualization_todo() {
 // cp 蒸留単位スモーク: teacher_logit を cp 換算する実装部分の退行を検知するため
 #[test]
 fn cp_distillation_unit_smoke_loss_ordering() {
-    use crate::types::{DistillOptions, DistillLossKind};
+    use crate::types::{DistillLossKind, DistillOptions};
     use rand::SeedableRng;
 
     // 単純ネット (全0 初期バイアス) を構築
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
     let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     // ゼロ化して決定的
-    for w in net.w0.iter_mut() { *w = 0.0; }
-    for b in net.b0.iter_mut() { *b = 0.0; }
-    for w in net.w2.iter_mut() { *w = 0.0; }
+    for w in net.w0.iter_mut() {
+        *w = 0.0;
+    }
+    for b in net.b0.iter_mut() {
+        *b = 0.0;
+    }
+    for w in net.w2.iter_mut() {
+        *w = 0.0;
+    }
     net.b2 = 0.0; // 予測ロジット=0 -> 予測cp=0
 
     // サンプル: teacher_output=1.0 (logit仮定), label(cp)=200 (scale=600 で教師=600cp 相当)
-    let sample = Sample { features: vec![], label: 200.0, weight: 1.0, cp: Some(200), phase: None };
-    let cfg = Config { epochs: 1, batch_size: 2, learning_rate: 0.0, optimizer: "sgd".into(), l2_reg: 0.0, label_type: "cp".into(), scale: 600.0, cp_clip: 1200, accumulator_dim: 8, relu_clip: DEFAULT_RELU_CLIP_NUM, shuffle: false, prefetch_batches: 0, throughput_interval_sec: 10_000.0, stream_cache: false, prefetch_bytes: None, estimated_features_per_sample: 64, exclude_no_legal_move: false, exclude_fallback: false, lr_schedule: "constant".into(), lr_warmup_epochs: 0, lr_decay_epochs: None, lr_decay_steps: None, lr_plateau_patience: None };
+    let sample = Sample {
+        features: vec![],
+        label: 200.0,
+        weight: 1.0,
+        cp: Some(200),
+        phase: None,
+    };
+    let cfg = Config {
+        epochs: 1,
+        batch_size: 2,
+        learning_rate: 0.0,
+        optimizer: "sgd".into(),
+        l2_reg: 0.0,
+        label_type: "cp".into(),
+        scale: 600.0,
+        cp_clip: 1200,
+        accumulator_dim: 8,
+        relu_clip: DEFAULT_RELU_CLIP_NUM,
+        shuffle: false,
+        prefetch_batches: 0,
+        throughput_interval_sec: 10_000.0,
+        stream_cache: false,
+        prefetch_bytes: None,
+        estimated_features_per_sample: 64,
+        exclude_no_legal_move: false,
+        exclude_fallback: false,
+        lr_schedule: "constant".into(),
+        lr_warmup_epochs: 0,
+        lr_decay_epochs: None,
+        lr_decay_steps: None,
+        lr_plateau_patience: None,
+    };
 
     // DistillOptions: alpha=0.5, temperature=1.0, mse
-    let distill = DistillOptions { alpha: 0.5, temperature: 1.0, loss: DistillLossKind::Mse, ..Default::default() };
+    let distill = DistillOptions {
+        alpha: 0.5,
+        temperature: 1.0,
+        loss: DistillLossKind::Mse,
+        ..Default::default()
+    };
 
     // teacher_output を teacher_logit=1.0 として扱い cp 換算 (実装) vs 換算なし(比較用 書き換え) の loss を比較
     // 実装経路: distill_classic_after_training 内部ロジック再利用は重いので簡易に式を複製

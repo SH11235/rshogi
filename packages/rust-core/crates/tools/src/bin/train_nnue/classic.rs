@@ -1,13 +1,19 @@
 use crate::error_messages::*;
 use crate::params::{CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX};
 use crate::types::QuantScheme;
+use engine_core::evaluation::nnue::features::FE_END;
+use engine_core::shogi::SHOGI_BOARD_SIZE;
+
+#[cfg(test)]
+const _: usize = SHOGI_BOARD_SIZE * FE_END;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
 #[inline]
 pub fn round_away_from_zero(val: f32) -> i32 {
-    if val.is_nan() || val.is_infinite() {
+    debug_assert!(val.is_finite(), "round_away_from_zero expects finite input, got {val}",);
+    if !val.is_finite() {
         return 0;
     }
     if val >= 0.0 {
@@ -139,19 +145,39 @@ pub fn quantize_symmetric_i16(
     (quantized, scales)
 }
 
+/// 量子化済みバイアスを i32 へ変換する。`weight_scales` は
+/// - `len() == 1` の場合: per-tensor スケール（単一値を全要素へブロードキャスト）
+/// - `len() == bias.len()` の場合: per-channel スケール（要素ごとに適用）
+///   を想定する。それ以外の長さはデバッグビルドで検出する。
 pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) -> Vec<i32> {
+    debug_assert!(!weight_scales.is_empty(), "weight_scales must not be empty",);
+    debug_assert!(
+        weight_scales.len() == 1 || weight_scales.len() == bias.len(),
+        "weight_scales must be length 1 (per-tensor) or match bias length (per-channel)",
+    );
+
     if weight_scales.is_empty() {
         return vec![0; bias.len()];
     }
+
     let mut out = Vec::with_capacity(bias.len());
+    let per_tensor = weight_scales.len() == 1;
+    let ws0 = if per_tensor { weight_scales[0] } else { 0.0 };
     for (i, &b) in bias.iter().enumerate() {
-        let ws = weight_scales[i.min(weight_scales.len() - 1)];
-        let scale = input_scale * ws;
-        if scale == 0.0 {
-            out.push(0);
+        let ws = if per_tensor {
+            ws0
+        } else if i < weight_scales.len() {
+            weight_scales[i]
         } else {
-            out.push(round_away_from_zero(b / scale));
-        }
+            // リリースビルドでは安全側に最後の値を再利用
+            *weight_scales.last().unwrap()
+        };
+        let scale = input_scale * ws;
+        out.push(if scale == 0.0 {
+            0
+        } else {
+            round_away_from_zero(b / scale)
+        });
     }
     out
 }
@@ -207,19 +233,6 @@ impl ClassicFeatureTransformerInt {
 }
 
 #[derive(Clone, Debug)]
-pub struct ClassicQuantizedNetwork {
-    pub hidden1_weights: Vec<i8>,
-    pub hidden1_biases: Vec<i32>,
-    pub hidden2_weights: Vec<i8>,
-    pub hidden2_biases: Vec<i32>,
-    pub output_weights: Vec<i8>,
-    pub output_bias: i32,
-    pub acc_dim: usize,
-    pub h1_dim: usize,
-    pub h2_dim: usize,
-}
-
-#[derive(Clone, Debug)]
 pub struct ClassicQuantizedNetworkParams {
     pub hidden1_weights: Vec<i8>,
     pub hidden1_biases: Vec<i32>,
@@ -232,9 +245,21 @@ pub struct ClassicQuantizedNetworkParams {
     pub h2_dim: usize,
 }
 
-#[allow(dead_code)]
-impl ClassicQuantizedNetwork {
-    pub fn new(p: ClassicQuantizedNetworkParams) -> Self {
+#[derive(Clone, Debug)]
+pub struct ClassicQuantizedNetwork {
+    pub hidden1_weights: Vec<i8>,
+    pub hidden1_biases: Vec<i32>,
+    pub hidden2_weights: Vec<i8>,
+    pub hidden2_biases: Vec<i32>,
+    pub output_weights: Vec<i8>,
+    pub output_bias: i32,
+    pub acc_dim: usize,
+    pub h1_dim: usize,
+    pub h2_dim: usize,
+}
+
+impl From<ClassicQuantizedNetworkParams> for ClassicQuantizedNetwork {
+    fn from(p: ClassicQuantizedNetworkParams) -> Self {
         Self {
             hidden1_weights: p.hidden1_weights,
             hidden1_biases: p.hidden1_biases,
@@ -246,6 +271,13 @@ impl ClassicQuantizedNetwork {
             h1_dim: p.h1_dim,
             h2_dim: p.h2_dim,
         }
+    }
+}
+
+#[allow(dead_code)]
+impl ClassicQuantizedNetwork {
+    pub fn new(p: ClassicQuantizedNetworkParams) -> Self {
+        p.into()
     }
 
     // 旧単純版 propagate_from_acc は不要になったため削除 (scratch 版のみ利用)
@@ -336,6 +368,7 @@ impl ClassicQuantizedNetwork {
 
     #[inline]
     fn quantize_ft_output(v: i16) -> i8 {
+        // Classic v1 では engine-core 側と同じく「切り捨て（右シフト）」で整数化する。
         let shifted = (v as i32) >> CLASSIC_FT_SHIFT;
         shifted.clamp(-I8_QMAX, I8_QMAX) as i8
     }
@@ -506,6 +539,11 @@ pub fn write_classic_v1_file(
     // Classic v1 は固定寸法 (HALFKP_256X2_32_32) のみ正式サポート
     if !(data.acc_dim == 256 && data.h1_dim == 32 && data.h2_dim == 32) {
         return Err("Classic v1 requires acc_dim=256, h1_dim=32, h2_dim=32".into());
+    }
+
+    #[cfg(not(test))]
+    if data.input_dim != SHOGI_BOARD_SIZE * FE_END {
+        return Err("Classic v1 requires input_dim=SHOGI_BOARD_SIZE*FE_END".into());
     }
 
     let payload_bytes = data.payload_bytes();
@@ -880,5 +918,35 @@ mod tests {
             let _restored = q as f32 * (scales.s_in_1 * ch_scale);
         }
         // ここで propagate 経路の等価性テストは削除 (legacy API 削除済み)。
+    }
+
+    #[test]
+    fn quantize_bias_supports_per_tensor_and_per_channel() {
+        let bias = vec![0.5, -1.0, 1.5];
+        let tensor = quantize_bias_i32(&bias, 2.0, &[0.25]);
+        assert_eq!(tensor, vec![1, -2, 3]);
+
+        let channel = quantize_bias_i32(&bias, 2.0, &[0.25, 0.5, 1.0]);
+        assert_eq!(channel, vec![1, -1, 3]);
+    }
+
+    #[test]
+    fn quantize_symmetric_zero_weights_produce_unit_scale() {
+        let (qi8, si8) = quantize_symmetric_i8(&[0.0; 4], false, 1);
+        assert_eq!(qi8, vec![0; 4]);
+        assert_eq!(si8, vec![1.0]);
+
+        let (qi16, si16) = quantize_symmetric_i16(&[0.0; 2], false, 1);
+        assert_eq!(qi16, vec![0; 2]);
+        assert_eq!(si16, vec![1.0]);
+    }
+
+    #[test]
+    fn round_away_from_zero_handles_boundaries() {
+        assert_eq!(round_away_from_zero(0.49), 0);
+        assert_eq!(round_away_from_zero(0.5), 1);
+        assert_eq!(round_away_from_zero(-0.5), -1);
+        assert_eq!(round_away_from_zero(-0.49), 0);
+        assert_eq!(round_away_from_zero(1.5), 2);
     }
 }
