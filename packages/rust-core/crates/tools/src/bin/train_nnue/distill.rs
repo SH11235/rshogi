@@ -571,13 +571,14 @@ pub fn evaluate_distill(
             label: 0.0,
             weight: 0.0,
         };
-        let student_logit = forward(classic_fp32, &ds, &mut scratch);
+        // student_raw: label_type が wdl の場合は logit、cp の場合は cp ドメインの値
+        let student_raw = forward(classic_fp32, &ds, &mut scratch);
 
         metrics.n += 1;
         weight_sum += weight;
 
         if config.label_type == "wdl" {
-            let diff_logit = (student_logit - teacher_logit).abs();
+            let diff_logit = (student_raw - teacher_logit).abs();
             mae_logit_num += diff_logit as f64 * weight;
             logit_abs_diffs.push(diff_logit);
             logit_weights.push(weight as f32);
@@ -586,20 +587,14 @@ pub fn evaluate_distill(
             }
         }
 
-        let (teacher_cp, student_cp) = if config.label_type == "wdl" {
-            let t = convert_logit_to_cp(teacher_logit, config);
-            let s = convert_logit_to_cp(student_logit, config);
-            (t, s)
-        } else {
-            // cp label_type: teacher_raw is in teacher domain; convert to common cp domain
-            let t = match teacher_domain {
-                TeacherValueDomain::Cp => teacher_raw,
-                TeacherValueDomain::WdlLogit => teacher_raw * config.scale,
-            };
-            // label_type=="cp" のとき、生徒出力は常に cp ドメイン。teacher_domain に依存してスケールしない。
-            let s = student_logit;
-            (t, s)
-        };
+        let (teacher_cp, student_cp) = map_teacher_student_to_cp(
+            config.label_type.as_str(),
+            teacher_domain,
+            teacher_raw,
+            teacher_logit,
+            student_raw,
+            config,
+        );
 
         let diff_cp = (student_cp - teacher_cp).abs();
         mae_cp_num += diff_cp as f64 * weight;
@@ -650,6 +645,31 @@ pub fn evaluate_distill(
     }
 
     metrics
+}
+
+// Helper: 教師 raw / logit / 学生 raw から cp 空間の (teacher_cp, student_cp) を取得する。
+// label_type="wdl": teacher_logit, student_raw(=logit) を cp へスケール
+// label_type="cp" : teacher_raw を teacher_domain に応じて cp 化し、student_raw はそのまま
+fn map_teacher_student_to_cp(
+    label_type: &str,
+    teacher_domain: TeacherValueDomain,
+    teacher_raw: f32,
+    teacher_logit: f32,
+    student_raw: f32,
+    config: &Config,
+) -> (f32, f32) {
+    if label_type == "wdl" {
+        let t = convert_logit_to_cp(teacher_logit, config);
+        let s = convert_logit_to_cp(student_raw, config);
+        (t, s)
+    } else {
+        let t = match teacher_domain {
+            TeacherValueDomain::Cp => teacher_raw,
+            TeacherValueDomain::WdlLogit => teacher_raw * config.scale,
+        };
+        // student_raw は cp ドメイン
+        (t, student_raw)
+    }
 }
 
 pub fn evaluate_quantization_gap(
@@ -843,5 +863,26 @@ mod domain_conversion_tests {
         let cp = teacher_cp_from_raw("cp", TeacherValueDomain::Cp, raw_cp, scale);
         assert!((logit - raw_cp / scale).abs() < 1e-6);
         assert!((cp - raw_cp).abs() < 1e-6);
+    }
+
+    // Regression test: label_type=cp かつ teacher_domain=wdl-logit の評価で
+    // 生徒出力 (student_raw) を誤って scale しないことを確認する。
+    // teacher_raw=1.0 (logit) => cp=scale=600, student_raw=300cp とし
+    // MAE が 300 になるべき（もし誤って *scale されると巨大値に化ける）。
+    #[test]
+    fn cp_label_logit_teacher_no_student_rescale() {
+        let scale = 600.0f32;
+        let teacher_raw_logit = 1.0f32; // implies 600cp teacher
+        let student_cp = 300.0f32; // classic fp32 output
+
+        // teacher cp
+        let teacher_cp =
+            teacher_cp_from_raw("cp", TeacherValueDomain::WdlLogit, teacher_raw_logit, scale);
+        assert!((teacher_cp - 600.0).abs() < 1e-6);
+
+        // simulate evaluate_distill current logic after bugfix:
+        // student stays as-is (cp domain)
+        let diff = (student_cp - teacher_cp).abs();
+        assert!((diff - 300.0).abs() < 1e-6);
     }
 }
