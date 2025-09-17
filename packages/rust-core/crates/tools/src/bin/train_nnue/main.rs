@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("quant-out")
                 .help("Quantization scheme for output layer weights")
                 .value_parser(clap::value_parser!(QuantScheme))
-                .default_value("per-channel"),
+                .default_value("per-tensor"),
         )
         .arg(
             Arg::new("distill-from-single")
@@ -304,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quant_ft = *app.get_one::<QuantScheme>("quant-ft").unwrap_or(&QuantScheme::PerTensor);
     let quant_h1 = *app.get_one::<QuantScheme>("quant-h1").unwrap_or(&QuantScheme::PerChannel);
     let quant_h2 = *app.get_one::<QuantScheme>("quant-h2").unwrap_or(&QuantScheme::PerChannel);
-    let quant_out = *app.get_one::<QuantScheme>("quant-out").unwrap_or(&QuantScheme::PerChannel);
+    let quant_out = *app.get_one::<QuantScheme>("quant-out").unwrap_or(&QuantScheme::PerTensor);
     let label_type_value = app.get_one::<String>("label").unwrap().to_string();
     let distill_teacher = app.get_one::<String>("distill-from-single").map(PathBuf::from);
     let kd_loss_source = app.value_source("kd-loss");
@@ -397,6 +397,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && export_options.quant_ft == QuantScheme::PerChannel
     {
         return Err("--arch=classic currently supports only --quant-ft=per-tensor".into());
+    }
+    if export_options.arch == ArchKind::Classic
+        && export_options.quant_out == QuantScheme::PerChannel
+    {
+        return Err("--arch=classic currently supports only --quant-out=per-tensor".into());
     }
     if distill_options.temperature <= 0.0 {
         return Err("--kd-temperature must be > 0".into());

@@ -587,12 +587,11 @@ impl ClassicFloatNetwork {
         let s_in_2 = 1.0f32;
         let hidden2_biases_q = quantize_bias_i32(&self.hidden2_biases, s_in_2, &h2_scales);
 
-        let out_per_channel = matches!(quant_out, QuantScheme::PerChannel);
-        let out_channels = if out_per_channel {
-            self.output_weights.len().max(1)
-        } else {
-            1
-        };
+        if matches!(quant_out, QuantScheme::PerChannel) {
+            return Err("Classic output layer supports --quant-out=per-tensor only".into());
+        }
+        let out_per_channel = false;
+        let out_channels = 1;
         let (out_weights_q, out_scales) =
             quantize_symmetric_i8(&self.output_weights, out_per_channel, out_channels);
         let s_in_3 = 1.0f32;
