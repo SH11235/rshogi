@@ -960,8 +960,8 @@ mod tests {
 
         for (idx, &bias) in net.hidden1_biases.iter().enumerate() {
             // hidden1 bias 量子化整合性 (スケール依存) の簡易検証
-            let ch_scale = scales.s_w1[idx / 1];
-            // Round bias to i32 then dequant back (粗い再現チェック)
+            let ch_scale = scales.s_w1[idx]; // idx / 1
+                                             // Round bias to i32 then dequant back (粗い再現チェック)
             let q = round_away_from_zero(bias / (scales.s_in_1 * ch_scale));
             let _restored = q as f32 * (scales.s_in_1 * ch_scale);
         }

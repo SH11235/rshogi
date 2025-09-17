@@ -323,7 +323,7 @@ fn classic_v1_writer_emits_expected_layout() {
     }
     let hidden2_biases = vec![5, -4]
         .into_iter()
-        .chain(std::iter::repeat(0).take(h2_dim - 2))
+        .chain(std::iter::repeat_n(0, h2_dim - 2))
         .collect::<Vec<i32>>();
 
     let mut output_weights = vec![0i8; h2_dim];
@@ -437,9 +437,11 @@ fn finalize_export_writes_zero_when_bundle_missing() {
     let td = tempdir().unwrap();
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
     let network = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
-    let mut export = ExportOptions::default();
-    export.arch = ArchKind::Classic;
-    export.format = ExportFormat::ClassicV1;
+    let export = ExportOptions {
+        arch: ArchKind::Classic,
+        format: ExportFormat::ClassicV1,
+        ..ExportOptions::default()
+    };
     finalize_export(&network, td.path(), export, false, None).unwrap();
     assert!(td.path().join("nn.classic.nnue").exists());
 }
@@ -1564,7 +1566,7 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
         load_weights(path.to_str().unwrap()).expect("engine_core load failed");
     // Sanity: dims
     assert_eq!(core_ft.acc_dim(), acc_dim);
-    let canonical_ft_weights = (SHOGI_BOARD_SIZE * FE_END * acc_dim) as usize;
+    let canonical_ft_weights = SHOGI_BOARD_SIZE * FE_END * acc_dim;
     assert_eq!(core_ft.weights.len(), canonical_ft_weights);
     assert_eq!(&core_ft.weights[..ft_weights.len()], ft_weights.as_slice());
     assert_eq!(core_ft.biases.as_slice(), ft_biases.as_slice());
