@@ -343,7 +343,7 @@ fn classic_v1_writer_emits_expected_layout() {
         h2_dim,
     });
     let bundle = ClassicIntNetworkBundle::new(transformer, network);
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::Read;
 
     write_classic_v1_bundle(&path, &bundle).unwrap();
     let serialized = bundle.as_serialized();
