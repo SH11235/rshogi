@@ -57,6 +57,36 @@ struct DistillSample {
     weight: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct DistillArtifacts {
+    pub classic_fp32: ClassicFloatNetwork,
+    pub bundle_int: ClassicIntNetworkBundle,
+    pub scales: ClassicQuantizationScales,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DistillEvalMetrics {
+    pub n: usize,
+    pub mae_cp: Option<f32>,
+    pub p95_cp: Option<f32>,
+    pub max_cp: Option<f32>,
+    pub r2_cp: Option<f32>,
+    pub mae_logit: Option<f32>,
+    pub p95_logit: Option<f32>,
+    pub max_logit: Option<f32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct QuantEvalMetrics {
+    pub n: usize,
+    pub mae_cp: Option<f32>,
+    pub p95_cp: Option<f32>,
+    pub max_cp: Option<f32>,
+    pub mae_logit: Option<f32>,
+    pub p95_logit: Option<f32>,
+    pub max_logit: Option<f32>,
+}
+
 #[inline]
 fn relu_clip(x: f32) -> f32 {
     x.clamp(0.0, CLASSIC_RELU_CLIP)
@@ -299,7 +329,7 @@ pub fn distill_classic_after_training(
     config: &Config,
     distill: &DistillOptions,
     classic_cfg: ClassicDistillConfig<'_>,
-) -> Result<(ClassicIntNetworkBundle, ClassicQuantizationScales), String> {
+) -> Result<DistillArtifacts, String> {
     if samples.is_empty() {
         return Err("Classic distillation requires in-memory training samples".into());
     }
@@ -399,6 +429,8 @@ pub fn distill_classic_after_training(
         }
     }
 
+    let classic_fp32 = classic.clone();
+
     let (bundle, scales) = classic
         .quantize_symmetric(
             classic_cfg.quant_ft,
@@ -424,5 +456,209 @@ pub fn distill_classic_after_training(
         lg.write_json(&rec);
     }
 
-    Ok((bundle, scales))
+    Ok(DistillArtifacts {
+        classic_fp32,
+        bundle_int: bundle,
+        scales,
+    })
+}
+
+fn percentile(mut xs: Vec<f32>, q: f32) -> Option<f32> {
+    if xs.is_empty() {
+        return None;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((xs.len() - 1) as f32 * q).round() as usize;
+    xs.get(idx).copied()
+}
+
+fn to_features_them(features_us: &[u32]) -> Vec<u32> {
+    features_us.iter().map(|&f| flip_us_them(f as usize) as u32).collect()
+}
+
+fn convert_logit_to_cp(logit: f32, config: &Config) -> f32 {
+    logit * config.scale
+}
+
+pub fn evaluate_distill(
+    teacher: &Network,
+    classic_fp32: &ClassicFloatNetwork,
+    samples: &[Sample],
+    config: &Config,
+) -> DistillEvalMetrics {
+    let mut metrics = DistillEvalMetrics::default();
+    let mut acc_buf = vec![0.0f32; teacher.acc_dim];
+    let mut act_buf = vec![0.0f32; teacher.acc_dim];
+    let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+
+    let mut cp_abs_diffs = Vec::new();
+    let mut logit_abs_diffs = Vec::new();
+
+    let mut mae_cp_num = 0.0f64;
+    let mut mae_logit_num = 0.0f64;
+    let mut weight_sum = 0.0f64;
+    let mut teacher_cp_weighted_sum = 0.0f64;
+    let mut teacher_cp_values = Vec::new();
+    let mut student_cp_values = Vec::new();
+
+    let mut max_cp = 0.0f32;
+    let mut max_logit = 0.0f32;
+
+    for sample in samples.iter().filter(|s| s.weight > 0.0).take(MAX_DISTILL_SAMPLES) {
+        let weight = sample.weight as f64;
+        let teacher_logit =
+            teacher.forward_with_buffers(&sample.features, &mut acc_buf, &mut act_buf);
+
+        let features_them = to_features_them(&sample.features);
+        let ds = DistillSample {
+            features_us: sample.features.clone(),
+            features_them,
+            teacher_output: 0.0,
+            label: 0.0,
+            weight: 0.0,
+        };
+        let student_logit = forward(classic_fp32, &ds, &mut scratch);
+
+        metrics.n += 1;
+        weight_sum += weight;
+
+        if config.label_type == "wdl" {
+            let diff_logit = (student_logit - teacher_logit).abs();
+            mae_logit_num += diff_logit as f64 * weight;
+            logit_abs_diffs.push(diff_logit);
+            if diff_logit > max_logit {
+                max_logit = diff_logit;
+            }
+        }
+
+        let (teacher_cp, student_cp) = if config.label_type == "wdl" {
+            let t = convert_logit_to_cp(teacher_logit, config);
+            let s = convert_logit_to_cp(student_logit, config);
+            (t, s)
+        } else {
+            (teacher_logit, student_logit)
+        };
+
+        let diff_cp = (student_cp - teacher_cp).abs();
+        mae_cp_num += diff_cp as f64 * weight;
+        cp_abs_diffs.push(diff_cp);
+        if diff_cp > max_cp {
+            max_cp = diff_cp;
+        }
+
+        teacher_cp_weighted_sum += teacher_cp as f64 * weight;
+        teacher_cp_values.push((teacher_cp as f64, weight));
+        student_cp_values.push(student_cp as f64);
+    }
+
+    if metrics.n == 0 || weight_sum == 0.0 {
+        metrics.n = 0;
+        return metrics;
+    }
+
+    metrics.mae_cp = Some((mae_cp_num / weight_sum) as f32);
+    metrics.max_cp = Some(max_cp);
+    metrics.p95_cp = percentile(cp_abs_diffs, 0.95);
+
+    if config.label_type == "wdl" {
+        metrics.mae_logit = Some((mae_logit_num / weight_sum) as f32);
+        metrics.max_logit = Some(max_logit);
+        metrics.p95_logit = percentile(logit_abs_diffs, 0.95);
+    }
+
+    let teacher_mean = teacher_cp_weighted_sum / weight_sum;
+    let mut ss_res = 0.0f64;
+    let mut ss_tot = 0.0f64;
+    for ((teacher_cp, w), student_cp) in teacher_cp_values.iter().zip(student_cp_values.iter()) {
+        let diff = student_cp - teacher_cp;
+        ss_res += (*w) * diff * diff;
+        let centered = teacher_cp - teacher_mean;
+        ss_tot += (*w) * centered * centered;
+    }
+    if ss_tot > f64::EPSILON {
+        metrics.r2_cp = Some((1.0 - ss_res / ss_tot) as f32);
+    }
+
+    metrics
+}
+
+pub fn evaluate_quantization_gap(
+    classic_fp32: &ClassicFloatNetwork,
+    bundle: &ClassicIntNetworkBundle,
+    scales: &ClassicQuantizationScales,
+    samples: &[Sample],
+    config: &Config,
+) -> QuantEvalMetrics {
+    let mut metrics = QuantEvalMetrics::default();
+    let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+
+    let mut cp_abs_diffs = Vec::new();
+    let mut logit_abs_diffs = Vec::new();
+
+    let mut mae_cp_num = 0.0f64;
+    let mut mae_logit_num = 0.0f64;
+    let mut weight_sum = 0.0f64;
+
+    let mut max_cp = 0.0f32;
+    let mut max_logit = 0.0f32;
+
+    for sample in samples.iter().filter(|s| s.weight > 0.0).take(MAX_DISTILL_SAMPLES) {
+        let weight = sample.weight as f64;
+
+        let features_them = to_features_them(&sample.features);
+        let ds = DistillSample {
+            features_us: sample.features.clone(),
+            features_them: features_them.clone(),
+            teacher_output: 0.0,
+            label: 0.0,
+            weight: 0.0,
+        };
+        let fp32_logit = forward(classic_fp32, &ds, &mut scratch);
+
+        let int_output = bundle.propagate_with_features(&sample.features, &features_them) as f32;
+        let scale_out = scales.s_in_3 * scales.s_w3.first().copied().unwrap_or(1.0);
+        let int_logit = int_output * scale_out;
+
+        metrics.n += 1;
+        weight_sum += weight;
+
+        if config.label_type == "wdl" {
+            let diff_logit = (int_logit - fp32_logit).abs();
+            mae_logit_num += diff_logit as f64 * weight;
+            logit_abs_diffs.push(diff_logit);
+            if diff_logit > max_logit {
+                max_logit = diff_logit;
+            }
+        }
+
+        let (fp32_cp, int_cp) = if config.label_type == "wdl" {
+            (convert_logit_to_cp(fp32_logit, config), convert_logit_to_cp(int_logit, config))
+        } else {
+            (fp32_logit, int_logit)
+        };
+
+        let diff_cp = (int_cp - fp32_cp).abs();
+        mae_cp_num += diff_cp as f64 * weight;
+        cp_abs_diffs.push(diff_cp);
+        if diff_cp > max_cp {
+            max_cp = diff_cp;
+        }
+    }
+
+    if metrics.n == 0 || weight_sum == 0.0 {
+        metrics.n = 0;
+        return metrics;
+    }
+
+    metrics.mae_cp = Some((mae_cp_num / weight_sum) as f32);
+    metrics.max_cp = Some(max_cp);
+    metrics.p95_cp = percentile(cp_abs_diffs, 0.95);
+
+    if config.label_type == "wdl" {
+        metrics.mae_logit = Some((mae_logit_num / weight_sum) as f32);
+        metrics.max_logit = Some(max_logit);
+        metrics.p95_logit = percentile(logit_abs_diffs, 0.95);
+    }
+
+    metrics
 }
