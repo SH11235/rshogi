@@ -34,6 +34,7 @@ pub fn quantize_symmetric_i8(
     if weights.is_empty() {
         return (Vec::new(), Vec::new());
     }
+    debug_assert!(channels > 0 || !per_channel, "channels must be > 0 when per_channel is true");
     let mut scales = if per_channel {
         vec![0.0f32; channels]
     } else {
@@ -41,8 +42,18 @@ pub fn quantize_symmetric_i8(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        let stride = weights.len() / channels;
-        for (ch, slice) in weights.chunks(stride).enumerate() {
+        let stride = weights
+            .len()
+            .checked_div(channels)
+            .expect("channels must be > 0 for per-channel quantization");
+        assert_eq!(
+            stride * channels,
+            weights.len(),
+            "weights.len() ({}) must be divisible by channels ({})",
+            weights.len(),
+            channels
+        );
+        for (ch, slice) in weights.chunks_exact(stride).enumerate() {
             let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
             let scale = max_abs / I8_QMAX as f32;
             scales[ch] = scale;
@@ -72,6 +83,7 @@ pub fn quantize_symmetric_i16(
     if weights.is_empty() {
         return (Vec::new(), Vec::new());
     }
+    debug_assert!(channels > 0 || !per_channel, "channels must be > 0 when per_channel is true");
     let mut scales = if per_channel {
         vec![0.0f32; channels]
     } else {
@@ -79,8 +91,18 @@ pub fn quantize_symmetric_i16(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        let stride = weights.len() / channels;
-        for (ch, slice) in weights.chunks(stride).enumerate() {
+        let stride = weights
+            .len()
+            .checked_div(channels)
+            .expect("channels must be > 0 for per-channel quantization");
+        assert_eq!(
+            stride * channels,
+            weights.len(),
+            "weights.len() ({}) must be divisible by channels ({})",
+            weights.len(),
+            channels
+        );
+        for (ch, slice) in weights.chunks_exact(stride).enumerate() {
             let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs())).max(1e-12);
             let scale = max_abs / I16_QMAX as f32;
             scales[ch] = scale;
@@ -221,7 +243,9 @@ impl ClassicQuantizedNetwork {
         let input_dim = self.acc_dim * 2;
         let mut input = vec![0i8; input_dim];
         for (i, (&us, &them)) in acc_us.iter().zip(acc_them.iter()).enumerate() {
-            if i >= self.acc_dim { break; }
+            if i >= self.acc_dim {
+                break;
+            }
             input[i] = Self::quantize_ft_output(us);
             input[self.acc_dim + i] = Self::quantize_ft_output(them);
         }
@@ -391,17 +415,17 @@ impl<'a> ClassicV1Serialized<'a> {
         Ok(())
     }
 
-    pub fn total_bytes(&self) -> u64 {
-        let mut total = 16u64;
-        total += (self.ft_weights.len() * 2) as u64;
-        total += (self.ft_biases.len() * 4) as u64;
-        total += self.hidden1_weights.len() as u64;
-        total += (self.hidden1_biases.len() * 4) as u64;
-        total += self.hidden2_weights.len() as u64;
-        total += (self.hidden2_biases.len() * 4) as u64;
-        total += self.output_weights.len() as u64;
-        total += 4;
-        total
+    pub fn payload_bytes(&self) -> u64 {
+        let mut payload = 0u64;
+        payload += (self.ft_weights.len() * 2) as u64;
+        payload += (self.ft_biases.len() * 4) as u64;
+        payload += self.hidden1_weights.len() as u64;
+        payload += (self.hidden1_biases.len() * 4) as u64;
+        payload += self.hidden2_weights.len() as u64;
+        payload += (self.hidden2_biases.len() * 4) as u64;
+        payload += self.output_weights.len() as u64;
+        payload += 4;
+        payload
     }
 }
 
@@ -412,8 +436,8 @@ pub fn write_classic_v1_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
     data.validate().map_err(|msg| msg.to_string())?;
 
-    let total_bytes = data.total_bytes();
-    if total_bytes > u32::MAX as u64 {
+    let payload_bytes = data.payload_bytes();
+    if payload_bytes > u32::MAX as u64 {
         return Err("Classic v1 blob exceeds 4GB".into());
     }
 
@@ -421,7 +445,7 @@ pub fn write_classic_v1_file(
     writer.write_all(b"NNUE")?;
     writer.write_all(&1u32.to_le_bytes())?;
     writer.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes())?;
-    writer.write_all(&(total_bytes as u32).to_le_bytes())?;
+    writer.write_all(&(payload_bytes as u32).to_le_bytes())?;
 
     for &w in data.ft_weights {
         writer.write_all(&w.to_le_bytes())?;
@@ -491,6 +515,23 @@ impl ClassicFloatNetwork {
             input_dim: 0,
             h1_dim: 0,
             h2_dim: 0,
+        }
+    }
+
+    pub fn zeros_with_dims(input_dim: usize, acc_dim: usize, h1_dim: usize, h2_dim: usize) -> Self {
+        ClassicFloatNetwork {
+            ft_weights: vec![0.0; input_dim * acc_dim],
+            ft_biases: vec![0.0; acc_dim],
+            hidden1_weights: vec![0.0; (acc_dim * 2) * h1_dim],
+            hidden1_biases: vec![0.0; h1_dim],
+            hidden2_weights: vec![0.0; h1_dim * h2_dim],
+            hidden2_biases: vec![0.0; h2_dim],
+            output_weights: vec![0.0; h2_dim],
+            output_bias: 0.0,
+            acc_dim,
+            input_dim,
+            h1_dim,
+            h2_dim,
         }
     }
 

@@ -43,7 +43,7 @@ mod core {
     use crate::training::ctx::lr_base_for;
     use crate::training::ctx::{DashboardValKind, TrainContext};
     use crate::training::loaders::{AsyncBatchLoader, BatchLoader, StreamCacheLoader};
-    
+
     use rand::Rng;
     use tools::nnfc_v1::flags as fc_flags;
 

@@ -137,16 +137,23 @@ pub(super) struct StreamCacheLoader {
     path: String,
     batch_size: usize,
     prefetch_batches: usize,
+    weighting: wcfg::WeightingConfig,
     rx: Option<Receiver<BatchMsg>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl StreamCacheLoader {
-    pub(super) fn new(path: String, batch_size: usize, prefetch_batches: usize) -> Self {
+    pub(super) fn new(
+        path: String,
+        batch_size: usize,
+        prefetch_batches: usize,
+        weighting: wcfg::WeightingConfig,
+    ) -> Self {
         Self {
             path,
             batch_size,
             prefetch_batches,
+            weighting,
             rx: None,
             worker: None,
         }
@@ -160,6 +167,7 @@ impl StreamCacheLoader {
         let path = self.path.clone();
         let batch_size = self.batch_size;
         let (tx, rx) = sync_channel::<BatchMsg>(self.prefetch_batches.max(1));
+        let weighting = self.weighting.clone();
 
         let handle = std::thread::spawn(move || {
             // Use shared nnfc_v1 reader
@@ -289,12 +297,21 @@ impl StreamCacheLoader {
                 } else {
                     NON_EXACT_BOUND_WEIGHT
                 };
-                if (flags & fc_flags::MATE_BOUNDARY) != 0 {
+                let mate_ring = (flags & fc_flags::MATE_BOUNDARY) != 0;
+                if mate_ring {
                     weight *= 0.5;
                 }
                 if seldepth < depth.saturating_add(SELECTIVE_DEPTH_MARGIN as u8) {
                     weight *= SELECTIVE_DEPTH_WEIGHT;
                 }
+                weight = wcfg::apply_weighting(
+                    weight,
+                    &weighting,
+                    Some(both_exact),
+                    Some(gap as i32),
+                    None,
+                    Some(mate_ring),
+                );
 
                 batch.push(Sample {
                     features,
