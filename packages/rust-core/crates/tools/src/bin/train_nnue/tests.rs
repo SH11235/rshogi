@@ -343,27 +343,43 @@ fn classic_v1_writer_emits_expected_layout() {
         h2_dim,
     });
     let bundle = ClassicIntNetworkBundle::new(transformer, network);
+    use std::io::{Read, Seek, SeekFrom};
+
     write_classic_v1_bundle(&path, &bundle).unwrap();
-    let bytes = std::fs::read(&path).unwrap();
     let serialized = bundle.as_serialized();
-    let expected_payload = serialized.payload_bytes() as usize;
-    assert_eq!(bytes.len(), expected_payload + 16);
-    assert_eq!(&bytes[0..4], b"NNUE");
-    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), CLASSIC_V1_ARCH_ID);
-    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), expected_payload as u32);
+    let expected_payload = serialized.payload_bytes();
+    let expected_total = expected_payload + 16;
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert_eq!(metadata.len(), expected_total);
+
+    let mut file = std::fs::File::open(&path).unwrap();
+
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header).unwrap();
+    assert_eq!(&header[0..4], b"NNUE");
+    assert_eq!(u32::from_le_bytes(header[4..8].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(header[8..12].try_into().unwrap()), CLASSIC_V1_ARCH_ID);
+    assert_eq!(u32::from_le_bytes(header[12..16].try_into().unwrap()), expected_total as u32);
 
     // First FT weight (0x1234)
-    assert_eq!(i16::from_le_bytes(bytes[16..18].try_into().unwrap()), 0x1234);
+    let mut ft_weight_bytes = [0u8; 2];
+    file.read_exact(&mut ft_weight_bytes).unwrap();
+    assert_eq!(i16::from_le_bytes(ft_weight_bytes), 0x1234);
 
     // Second bias (-7)
-    let ft_weight_bytes = serialized.ft_weights.len() * 2;
-    let bias_offset = 16 + ft_weight_bytes + 4; // 1st bias (42) + 4 bytes
-    assert_eq!(i32::from_le_bytes(bytes[bias_offset..bias_offset + 4].try_into().unwrap()), -7);
+    let canonical_ft_weights = (SHOGI_BOARD_SIZE * FE_END * serialized.acc_dim) as u64;
+    let ft_payload_bytes = canonical_ft_weights * 2;
+    let bias_offset = 16 + ft_payload_bytes + 4; // 1st bias (42) + 4 bytes
+    file.seek(SeekFrom::Start(bias_offset)).unwrap();
+    let mut bias_bytes = [0u8; 4];
+    file.read_exact(&mut bias_bytes).unwrap();
+    assert_eq!(i32::from_le_bytes(bias_bytes), -7);
 
     // Last 4 bytes = output bias (99)
-    let tail = &bytes[bytes.len() - 4..];
-    assert_eq!(i32::from_le_bytes(tail.try_into().unwrap()), 99);
+    file.seek(SeekFrom::End(-4)).unwrap();
+    let mut tail = [0u8; 4];
+    file.read_exact(&mut tail).unwrap();
+    assert_eq!(i32::from_le_bytes(tail), 99);
 }
 
 #[test]
@@ -1548,10 +1564,22 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
         load_weights(path.to_str().unwrap()).expect("engine_core load failed");
     // Sanity: dims
     assert_eq!(core_ft.acc_dim(), acc_dim);
+    let canonical_ft_weights = (SHOGI_BOARD_SIZE * FE_END * acc_dim) as usize;
+    assert_eq!(core_ft.weights.len(), canonical_ft_weights);
+    assert_eq!(&core_ft.weights[..ft_weights.len()], ft_weights.as_slice());
+    assert_eq!(core_ft.biases.as_slice(), ft_biases.as_slice());
+    assert_eq!(core_net.hidden1_weights.as_slice(), hidden1_weights.as_slice());
+    assert_eq!(core_net.hidden1_biases.as_slice(), hidden1_biases.as_slice());
+    assert_eq!(core_net.hidden2_weights.as_slice(), hidden2_weights.as_slice());
+    assert_eq!(core_net.hidden2_biases.as_slice(), hidden2_biases.as_slice());
+    assert_eq!(core_net.output_weights.as_slice(), output_weights.as_slice());
+    assert_eq!(core_net.output_bias, output_bias);
 
     // 1) 空特徴 (bias のみ) — trainer 側 int 推論
     let mut views = ClassicScratchViews::new(acc_dim, h1_dim, h2_dim);
     let trainer_out_bias_only = bundle.propagate_with_features_scratch_full(&[], &[], &mut views);
+    let trainer_acc_us = views.acc_us.clone();
+    let trainer_acc_them = views.acc_them.clone();
 
     // engine_core では FeatureTransformer → Accumulator → Network の経路を通す
     fn clamp_i32_to_i16(x: i32) -> i16 {
@@ -1565,8 +1593,49 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
     }
     let mut engine_acc_us: Vec<i16> = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
     let mut engine_acc_them = engine_acc_us.clone();
+    assert_eq!(trainer_acc_us, engine_acc_us);
+    assert_eq!(trainer_acc_them, engine_acc_them);
     let engine_out_bias_only = core_net.propagate(&engine_acc_us, &engine_acc_them);
-    assert_eq!(trainer_out_bias_only, engine_out_bias_only, "bias-only output mismatch");
+
+    let mut manual_input = vec![0i8; classic_input_dim];
+    SimdDispatcher::transform_features(
+        &engine_acc_us,
+        &engine_acc_them,
+        &mut manual_input,
+        acc_dim,
+    );
+    let mut manual_h1 = vec![0i32; h1_dim];
+    for i in 0..h1_dim {
+        let mut acc = hidden1_biases[i];
+        let row = &hidden1_weights[i * classic_input_dim..(i + 1) * classic_input_dim];
+        for (j, &w) in row.iter().enumerate() {
+            acc += manual_input[j] as i32 * w as i32;
+        }
+        manual_h1[i] = acc;
+    }
+    let mut manual_h1_act = vec![0i8; h1_dim];
+    for (dst, &src) in manual_h1_act.iter_mut().zip(manual_h1.iter()) {
+        *dst = src.clamp(0, I8_QMAX) as i8;
+    }
+    let mut manual_h2 = vec![0i32; h2_dim];
+    for i in 0..h2_dim {
+        let mut acc = hidden2_biases[i];
+        let row = &hidden2_weights[i * h1_dim..(i + 1) * h1_dim];
+        for (j, &w) in row.iter().enumerate() {
+            acc += manual_h1_act[j] as i32 * w as i32;
+        }
+        manual_h2[i] = acc;
+    }
+    let mut manual_h2_act = vec![0i8; h2_dim];
+    for (dst, &src) in manual_h2_act.iter_mut().zip(manual_h2.iter()) {
+        *dst = src.clamp(0, I8_QMAX) as i8;
+    }
+    let mut manual_out_bias_only = output_bias;
+    for (i, &w) in output_weights.iter().enumerate() {
+        manual_out_bias_only += manual_h2_act[i] as i32 * w as i32;
+    }
+    assert_eq!(manual_out_bias_only, trainer_out_bias_only);
+    assert_eq!(manual_out_bias_only, engine_out_bias_only);
 
     // 2) 小さな特徴集合 (唯一の特徴 0)
     let features = vec![0u32];
@@ -1577,6 +1646,8 @@ fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
     engine_acc_us = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
     engine_acc_them = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
     let features_us: Vec<usize> = features.iter().map(|&f| f as usize).collect();
+    // SimdDispatcher は対象プラットフォームに応じてスカラ実装へフォールバックするため、
+    // 非 x86_64 環境でも同じコード経路で検証可能。
     SimdDispatcher::update_accumulator(
         &mut engine_acc_us,
         &core_ft.weights,

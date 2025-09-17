@@ -1,7 +1,7 @@
 use crate::error_messages::*;
 use crate::params::{CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX};
 use crate::types::QuantScheme;
-use engine_core::evaluation::nnue::features::FE_END;
+use engine_core::evaluation::nnue::{features::FE_END, simd::SimdDispatcher};
 use engine_core::shogi::SHOGI_BOARD_SIZE;
 
 #[cfg(test)]
@@ -37,11 +37,13 @@ pub fn quantize_symmetric_i8(
     weights: &[f32],
     per_channel: bool,
     channels: usize,
-) -> (Vec<i8>, Vec<f32>) {
+) -> Result<(Vec<i8>, Vec<f32>), String> {
     if weights.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
-    debug_assert!(channels > 0 || !per_channel, "channels must be > 0 when per_channel is true");
+    if per_channel && channels == 0 {
+        return Err("per-channel quantization requires channels > 0".into());
+    }
     let mut scales = if per_channel {
         vec![0.0f32; channels]
     } else {
@@ -49,17 +51,17 @@ pub fn quantize_symmetric_i8(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        let stride = weights
-            .len()
-            .checked_div(channels)
-            .expect("channels must be > 0 for per-channel quantization");
-        assert_eq!(
-            stride * channels,
-            weights.len(),
-            "weights.len() ({}) must be divisible by channels ({})",
-            weights.len(),
-            channels
-        );
+        let stride = weights.len().checked_div(channels).ok_or_else(|| {
+            format!("weights len {} not divisible by channels {}", weights.len(), channels)
+        })?;
+        if stride * channels != weights.len() {
+            return Err(format!(
+                "weights len {} not divisible by channels {} (stride {})",
+                weights.len(),
+                channels,
+                stride
+            ));
+        }
         for (ch, slice) in weights.chunks_exact(stride).enumerate() {
             let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
             let scale = if max_abs == 0.0 {
@@ -86,18 +88,20 @@ pub fn quantize_symmetric_i8(
             quantized.push(clip_sym(q, I8_QMAX) as i8);
         }
     }
-    (quantized, scales)
+    Ok((quantized, scales))
 }
 
 pub fn quantize_symmetric_i16(
     weights: &[f32],
     per_channel: bool,
     channels: usize,
-) -> (Vec<i16>, Vec<f32>) {
+) -> Result<(Vec<i16>, Vec<f32>), String> {
     if weights.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
-    debug_assert!(channels > 0 || !per_channel, "channels must be > 0 when per_channel is true");
+    if per_channel && channels == 0 {
+        return Err("per-channel quantization requires channels > 0".into());
+    }
     let mut scales = if per_channel {
         vec![0.0f32; channels]
     } else {
@@ -105,17 +109,17 @@ pub fn quantize_symmetric_i16(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        let stride = weights
-            .len()
-            .checked_div(channels)
-            .expect("channels must be > 0 for per-channel quantization");
-        assert_eq!(
-            stride * channels,
-            weights.len(),
-            "weights.len() ({}) must be divisible by channels ({})",
-            weights.len(),
-            channels
-        );
+        let stride = weights.len().checked_div(channels).ok_or_else(|| {
+            format!("weights len {} not divisible by channels {}", weights.len(), channels)
+        })?;
+        if stride * channels != weights.len() {
+            return Err(format!(
+                "weights len {} not divisible by channels {} (stride {})",
+                weights.len(),
+                channels,
+                stride
+            ));
+        }
         for (ch, slice) in weights.chunks_exact(stride).enumerate() {
             let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
             let scale = if max_abs == 0.0 {
@@ -142,13 +146,15 @@ pub fn quantize_symmetric_i16(
             quantized.push(clip_sym(q, I16_QMAX) as i16);
         }
     }
-    (quantized, scales)
+    Ok((quantized, scales))
 }
 
 /// 量子化済みバイアスを i32 へ変換する。`weight_scales` は
 /// - `len() == 1` の場合: per-tensor スケール（単一値を全要素へブロードキャスト）
 /// - `len() == bias.len()` の場合: per-channel スケール（要素ごとに適用）
-///   を想定する。それ以外の長さはデバッグビルドで検出する。
+///   を想定する。それ以外の長さはデバッグビルドで検出し、リリースでは末尾値を再利用する。
+///   計算式: `q_bias[i] = round_away_from_zero(bias[i] / (input_scale * weight_scale[i]))`。
+///   `input_scale` は前段アクチベーションの実効スケール（例: `s_in_1 = s_w0 * 2^CLASSIC_FT_SHIFT`）。
 pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) -> Vec<i32> {
     debug_assert!(!weight_scales.is_empty(), "weight_scales must not be empty",);
     debug_assert!(
@@ -170,6 +176,11 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
             weight_scales[i]
         } else {
             // リリースビルドでは安全側に最後の値を再利用
+            log::warn!(
+                "quantize_bias_i32: weight_scales len {} < bias len {} (using last scale)",
+                weight_scales.len(),
+                bias.len()
+            );
             *weight_scales.last().unwrap()
         };
         let scale = input_scale * ws;
@@ -217,6 +228,12 @@ impl ClassicFeatureTransformerInt {
         tmp_i32.copy_from_slice(&self.biases);
         for &feat_u32 in features {
             let feat = feat_u32 as usize;
+            debug_assert!(
+                feat < self.input_dim,
+                "feature index {} out of range {}",
+                feat,
+                self.input_dim
+            );
             if feat >= self.input_dim {
                 continue;
             }
@@ -297,11 +314,8 @@ impl ClassicQuantizedNetwork {
         debug_assert_eq!(scratch.h2.len(), self.h2_dim);
         debug_assert_eq!(scratch.h2_act.len(), self.h2_dim);
 
-        // pack input
-        for (i, (&us, &them)) in acc_us.iter().zip(acc_them.iter()).enumerate() {
-            scratch.input[i] = Self::quantize_ft_output(us);
-            scratch.input[self.acc_dim + i] = Self::quantize_ft_output(them);
-        }
+        // pack input (engine_core SIMD 実装と同じ丸め規約を使用)
+        SimdDispatcher::transform_features(acc_us, acc_them, &mut scratch.input, self.acc_dim);
 
         self.affine_layer(
             &scratch.input,
@@ -364,13 +378,6 @@ impl ClassicQuantizedNetwork {
             let clipped = src.clamp(0, I8_QMAX);
             *dst = clipped as i8;
         }
-    }
-
-    #[inline]
-    fn quantize_ft_output(v: i16) -> i8 {
-        // Classic v1 では engine-core 側と同じく「切り捨て（右シフト）」で整数化する。
-        let shifted = (v as i32) >> CLASSIC_FT_SHIFT;
-        shifted.clamp(-I8_QMAX, I8_QMAX) as i8
     }
 }
 
@@ -491,8 +498,15 @@ impl<'a> ClassicV1Serialized<'a> {
         if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
             return Err("dimensions must be non-zero".into());
         }
+        if self.input_dim == 0 {
+            return Err("input_dim must be non-zero".into());
+        }
         if self.ft_weights.len() != self.input_dim * self.acc_dim {
             return Err("ft_weights length mismatch".into());
+        }
+        let canonical_input_dim = SHOGI_BOARD_SIZE * FE_END;
+        if self.input_dim > canonical_input_dim {
+            return Err("input_dim exceeds Classic v1 canonical spec".into());
         }
         if self.ft_biases.len() != self.acc_dim {
             return Err("ft_biases length mismatch".into());
@@ -517,14 +531,22 @@ impl<'a> ClassicV1Serialized<'a> {
     }
 
     pub fn payload_bytes(&self) -> u64 {
+        let acc_dim = self.acc_dim as u64;
+        let h1_dim = self.h1_dim as u64;
+        let h2_dim = self.h2_dim as u64;
+        let canonical_input_dim = (SHOGI_BOARD_SIZE * FE_END) as u64;
         let mut payload = 0u64;
-        payload += (self.ft_weights.len() * 2) as u64;
-        payload += (self.ft_biases.len() * 4) as u64;
-        payload += self.hidden1_weights.len() as u64;
-        payload += (self.hidden1_biases.len() * 4) as u64;
-        payload += self.hidden2_weights.len() as u64;
-        payload += (self.hidden2_biases.len() * 4) as u64;
-        payload += self.output_weights.len() as u64;
+        payload += canonical_input_dim
+            .checked_mul(acc_dim)
+            .and_then(|v| v.checked_mul(2))
+            .expect("ft_weights payload overflow");
+        payload += acc_dim.checked_mul(4).expect("ft_bias payload overflow");
+        let classic_input_dim = acc_dim.checked_mul(2).expect("classic input dim overflow");
+        payload += classic_input_dim.checked_mul(h1_dim).expect("hidden1 weight payload overflow");
+        payload += h1_dim.checked_mul(4).expect("hidden1 bias payload overflow");
+        payload += h1_dim.checked_mul(h2_dim).expect("hidden2 weight payload overflow");
+        payload += h2_dim.checked_mul(4).expect("hidden2 bias payload overflow");
+        payload += h2_dim;
         payload += 4;
         payload
     }
@@ -556,10 +578,29 @@ pub fn write_classic_v1_file(
     writer.write_all(b"NNUE")?;
     writer.write_all(&1u32.to_le_bytes())?;
     writer.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes())?;
-    writer.write_all(&(payload_bytes as u32).to_le_bytes())?;
+    writer.write_all(&(total_bytes as u32).to_le_bytes())?;
+
+    let canonical_ft_weights = SHOGI_BOARD_SIZE
+        .checked_mul(FE_END)
+        .and_then(|v| v.checked_mul(data.acc_dim))
+        .expect("Classic v1 canonical ft weight count overflow");
+    if data.ft_weights.len() > canonical_ft_weights {
+        return Err("ft_weights length exceeds Classic v1 canonical spec".into());
+    }
 
     for &w in data.ft_weights {
         writer.write_all(&w.to_le_bytes())?;
+    }
+    let remaining_weights = canonical_ft_weights - data.ft_weights.len();
+    if remaining_weights > 0 {
+        const ZERO_CHUNK: [u8; 8192] = [0u8; 8192];
+        let mut remaining_bytes =
+            (remaining_weights as u64).checked_mul(2).expect("ft_weights padding overflow");
+        while remaining_bytes > 0 {
+            let chunk = ZERO_CHUNK.len().min(remaining_bytes as usize);
+            writer.write_all(&ZERO_CHUNK[..chunk])?;
+            remaining_bytes -= chunk as u64;
+        }
     }
     for &b in data.ft_biases {
         writer.write_all(&b.to_le_bytes())?;
@@ -660,7 +701,7 @@ impl ClassicFloatNetwork {
             return Err(ERR_CLASSIC_FT_PER_CHANNEL.into());
         }
 
-        let (ft_weights_q, ft_scales) = quantize_symmetric_i16(&self.ft_weights, false, 1);
+        let (ft_weights_q, ft_scales) = quantize_symmetric_i16(&self.ft_weights, false, 1)?;
         let s_w0 = ft_scales.first().copied().unwrap_or(1.0);
         let ft_biases_q = quantize_bias_i32(&self.ft_biases, 1.0, &[s_w0]);
 
@@ -674,7 +715,7 @@ impl ClassicFloatNetwork {
             1
         };
         let (h1_weights_q, h1_scales) =
-            quantize_symmetric_i8(&self.hidden1_weights, h1_per_channel, h1_channels);
+            quantize_symmetric_i8(&self.hidden1_weights, h1_per_channel, h1_channels)?;
         let s_in_1 = s_w0 * (1 << CLASSIC_FT_SHIFT) as f32;
         let hidden1_biases_q = quantize_bias_i32(&self.hidden1_biases, s_in_1, &h1_scales);
 
@@ -685,7 +726,7 @@ impl ClassicFloatNetwork {
             1
         };
         let (h2_weights_q, h2_scales) =
-            quantize_symmetric_i8(&self.hidden2_weights, h2_per_channel, h2_channels);
+            quantize_symmetric_i8(&self.hidden2_weights, h2_per_channel, h2_channels)?;
         let s_in_2 = 1.0f32;
         let hidden2_biases_q = quantize_bias_i32(&self.hidden2_biases, s_in_2, &h2_scales);
 
@@ -695,7 +736,7 @@ impl ClassicFloatNetwork {
         let out_per_channel = false;
         let out_channels = 1;
         let (out_weights_q, out_scales) =
-            quantize_symmetric_i8(&self.output_weights, out_per_channel, out_channels);
+            quantize_symmetric_i8(&self.output_weights, out_per_channel, out_channels)?;
         let s_in_3 = 1.0f32;
         let output_bias_q = quantize_bias_i32(&[self.output_bias], s_in_3, &out_scales)
             .into_iter()
@@ -927,16 +968,16 @@ mod tests {
         assert_eq!(tensor, vec![1, -2, 3]);
 
         let channel = quantize_bias_i32(&bias, 2.0, &[0.25, 0.5, 1.0]);
-        assert_eq!(channel, vec![1, -1, 3]);
+        assert_eq!(channel, vec![1, -1, 1]);
     }
 
     #[test]
     fn quantize_symmetric_zero_weights_produce_unit_scale() {
-        let (qi8, si8) = quantize_symmetric_i8(&[0.0; 4], false, 1);
+        let (qi8, si8) = quantize_symmetric_i8(&[0.0; 4], false, 1).unwrap();
         assert_eq!(qi8, vec![0; 4]);
         assert_eq!(si8, vec![1.0]);
 
-        let (qi16, si16) = quantize_symmetric_i16(&[0.0; 2], false, 1);
+        let (qi16, si16) = quantize_symmetric_i16(&[0.0; 2], false, 1).unwrap();
         assert_eq!(qi16, vec![0; 2]);
         assert_eq!(si16, vec![1.0]);
     }
