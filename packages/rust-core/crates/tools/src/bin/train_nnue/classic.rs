@@ -51,17 +51,15 @@ pub fn quantize_symmetric_i8(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        let stride = weights.len().checked_div(channels).ok_or_else(|| {
-            format!("weights len {} not divisible by channels {}", weights.len(), channels)
-        })?;
-        if stride * channels != weights.len() {
+        if weights.len() % channels != 0 {
             return Err(format!(
                 "weights len {} not divisible by channels {} (stride {})",
                 weights.len(),
                 channels,
-                stride
+                weights.len() / channels
             ));
         }
+        let stride = weights.len() / channels;
         for (ch, slice) in weights.chunks_exact(stride).enumerate() {
             let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
             let scale = if max_abs == 0.0 {
@@ -109,17 +107,15 @@ pub fn quantize_symmetric_i16(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        let stride = weights.len().checked_div(channels).ok_or_else(|| {
-            format!("weights len {} not divisible by channels {}", weights.len(), channels)
-        })?;
-        if stride * channels != weights.len() {
+        if weights.len() % channels != 0 {
             return Err(format!(
                 "weights len {} not divisible by channels {} (stride {})",
                 weights.len(),
                 channels,
-                stride
+                weights.len() / channels
             ));
         }
+        let stride = weights.len() / channels;
         for (ch, slice) in weights.chunks_exact(stride).enumerate() {
             let max_abs = slice.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
             let scale = if max_abs == 0.0 {
@@ -169,6 +165,7 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
     let mut out = Vec::with_capacity(bias.len());
     let per_tensor = weight_scales.len() == 1;
     let ws0 = if per_tensor { weight_scales[0] } else { 0.0 };
+    let mut warned_mismatch = false;
     for (i, &b) in bias.iter().enumerate() {
         let ws = if per_tensor {
             ws0
@@ -176,11 +173,14 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
             weight_scales[i]
         } else {
             // リリースビルドでは安全側に最後の値を再利用
-            log::warn!(
-                "quantize_bias_i32: weight_scales len {} < bias len {} (using last scale)",
-                weight_scales.len(),
-                bias.len()
-            );
+            if !warned_mismatch {
+                log::warn!(
+                    "quantize_bias_i32: weight_scales len {} < bias len {} (using last scale)",
+                    weight_scales.len(),
+                    bias.len()
+                );
+                warned_mismatch = true;
+            }
             *weight_scales.last().unwrap()
         };
         let scale = input_scale * ws;
@@ -204,6 +204,12 @@ pub struct ClassicFeatureTransformerInt {
 
 impl ClassicFeatureTransformerInt {
     pub fn new(weights: Vec<i16>, biases: Vec<i32>, acc_dim: usize) -> Self {
+        debug_assert!(
+            acc_dim == 0 || weights.len() % acc_dim == 0,
+            "ft_weights.len() must be multiple of acc_dim ({} % {} != 0)",
+            weights.len(),
+            acc_dim
+        );
         let input_dim = if acc_dim == 0 {
             0
         } else {
@@ -337,11 +343,9 @@ impl ClassicQuantizedNetwork {
         );
         Self::apply_clipped_relu(&scratch.h2, &mut scratch.h2_act);
 
+        debug_assert_eq!(self.output_weights.len(), self.h2_dim);
         let mut output = self.output_bias;
         for (i, &w) in self.output_weights.iter().enumerate() {
-            if i >= self.h2_dim {
-                break;
-            }
             output += w as i32 * scratch.h2_act[i] as i32;
         }
         output
@@ -494,6 +498,7 @@ pub struct ClassicV1Serialized<'a> {
 }
 
 impl<'a> ClassicV1Serialized<'a> {
+    /// Canonical Classic v1 layout検証（テストでは input_dim を縮約するが本番は HALFKP サイズ固定）。
     pub fn validate(&self) -> Result<(), String> {
         if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
             return Err("dimensions must be non-zero".into());
@@ -530,6 +535,7 @@ impl<'a> ClassicV1Serialized<'a> {
         Ok(())
     }
 
+    /// Classic v1 canonical payload（ヘッダ 16B を除外）を返す。
     pub fn payload_bytes(&self) -> u64 {
         let acc_dim = self.acc_dim as u64;
         let h1_dim = self.h1_dim as u64;
@@ -569,6 +575,7 @@ pub fn write_classic_v1_file(
     }
 
     let payload_bytes = data.payload_bytes();
+    // v1 ヘッダの size フィールドは「ヘッダ(16B)を含むファイル総バイト数」。
     let total_bytes = 16u64 + payload_bytes;
     if total_bytes > u32::MAX as u64 {
         return Err("Classic v1 blob exceeds 4GB".into());
@@ -980,6 +987,29 @@ mod tests {
         let (qi16, si16) = quantize_symmetric_i16(&[0.0; 2], false, 1).unwrap();
         assert_eq!(qi16, vec![0; 2]);
         assert_eq!(si16, vec![1.0]);
+    }
+
+    #[test]
+    fn quantize_symmetric_per_channel_zero_weights() {
+        let (qi8, si8) = quantize_symmetric_i8(&[0.0; 4], true, 2).unwrap();
+        assert_eq!(qi8, vec![0; 4]);
+        assert_eq!(si8, vec![1.0, 1.0]);
+
+        let (qi16, si16) = quantize_symmetric_i16(&[0.0; 6], true, 3).unwrap();
+        assert_eq!(qi16, vec![0; 6]);
+        assert_eq!(si16, vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn quantize_symmetric_len_mismatch_errors() {
+        let err = quantize_symmetric_i8(&[1.0, 2.0, 3.0], true, 0).unwrap_err();
+        assert!(err.contains("channels > 0"));
+
+        let err = quantize_symmetric_i8(&[1.0, 2.0, 3.0], true, 2).unwrap_err();
+        assert!(err.contains("not divisible"));
+
+        let err = quantize_symmetric_i16(&[1.0, 2.0], true, 3).unwrap_err();
+        assert!(err.contains("not divisible"));
     }
 
     #[test]
