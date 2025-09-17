@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::classic::ClassicScratchViews;
@@ -18,6 +19,8 @@ const MAX_DISTILL_SAMPLES: usize = 50_000;
 const DISTILL_EPOCHS: usize = 2;
 const DISTILL_LR: f32 = 1e-4;
 const PROB_EPS: f32 = 1e-6;
+static WARNED_OOR_FWD: AtomicBool = AtomicBool::new(false);
+static WARNED_OOR_BWD: AtomicBool = AtomicBool::new(false);
 
 struct ClassicScratch {
     acc_us: Vec<f32>,
@@ -142,11 +145,9 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     for &feat in &sample.features_us {
         let idx = feat as usize * net.acc_dim;
         if idx + net.acc_dim > net.ft_weights.len() {
-            log::warn!(
-                "feature index {} out of range (ft_weights.len={})",
-                feat,
-                net.ft_weights.len()
-            );
+            if !WARNED_OOR_FWD.swap(true, Ordering::Relaxed) {
+                log::warn!("feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed", feat, net.ft_weights.len());
+            }
             continue;
         }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
@@ -288,6 +289,12 @@ fn backward_update(
     // Update FT weights for active features
     for &feat in &sample.features_us {
         let base = feat as usize * acc_dim;
+        if base + acc_dim > net.ft_weights.len() {
+            if !WARNED_OOR_BWD.swap(true, Ordering::Relaxed) {
+                log::warn!("backward_update: feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed", feat, net.ft_weights.len());
+            }
+            continue;
+        }
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_us.iter()) {
             *w -= lr * grad;
@@ -295,6 +302,14 @@ fn backward_update(
     }
     for &feat in &sample.features_them {
         let base = feat as usize * acc_dim;
+        if base + acc_dim > net.ft_weights.len() {
+            log::warn!(
+                "backward_update: feature index {} out of range (ft_weights.len={})",
+                feat,
+                net.ft_weights.len()
+            );
+            continue;
+        }
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_them.iter()) {
             *w -= lr * grad;
@@ -1047,6 +1062,22 @@ mod distill_training_tests {
         let mut scratch = ClassicScratch::new(2, 2, 2);
         let out = forward(&net, &sample, &mut scratch);
         assert!((out - net.output_bias).abs() < 1e-6);
+    }
+
+    #[test]
+    fn backward_update_skips_out_of_range_features_without_panic() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(101);
+        let mut net = ClassicFloatNetwork::he_uniform_with_dims(4, 2, 2, 2, 2, &mut rng);
+        let sample = DistillSample {
+            features_us: vec![10_000],
+            features_them: vec![20_000],
+            teacher_output: 0.0,
+            label: 0.0,
+            weight: 1.0,
+        };
+        let mut scratch = ClassicScratch::new(2, 2, 2);
+        let _ = forward(&net, &sample, &mut scratch);
+        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2);
     }
 }
 
