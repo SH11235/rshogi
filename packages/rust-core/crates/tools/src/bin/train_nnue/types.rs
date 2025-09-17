@@ -100,6 +100,10 @@ pub struct DistillOptions {
     pub loss: DistillLossKind,
     pub temperature: f32,
     pub alpha: f32,
+    /// 教師ネットワーク出力の数値ドメイン
+    /// - Cp: 評価値(cp) 例: ±300, ±1200
+    /// - WdlLogit: WDLロジット (シグモイド前の値)
+    pub teacher_domain: TeacherValueDomain,
 }
 
 impl Default for DistillOptions {
@@ -109,8 +113,17 @@ impl Default for DistillOptions {
             loss: DistillLossKind::Mse,
             temperature: 1.0,
             alpha: 1.0,
+            teacher_domain: TeacherValueDomain::Cp,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum TeacherValueDomain {
+    #[clap(name = "cp")]
+    Cp,
+    #[clap(name = "wdl-logit")]
+    WdlLogit,
 }
 
 #[derive(Clone, Debug)]

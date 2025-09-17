@@ -161,6 +161,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_hint(ValueHint::FilePath),
         )
         .arg(
+            Arg::new("teacher-domain")
+                .long("teacher-domain")
+                .help("Teacher output domain: cp|wdl-logit (default: inferred from --label)")
+                .value_parser(clap::value_parser!(TeacherValueDomain)),
+        )
+        .arg(
             Arg::new("kd-loss")
                 .long("kd-loss")
                 .help("Knowledge distillation loss: mse|bce|kl")
@@ -412,11 +418,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant_h2,
         quant_out,
     };
+    // Teacher domain (cp or wdl-logit). Default depends on label type: if label_type is "cp" assume cp, else wdl-logit for classic case.
+    use crate::types::TeacherValueDomain;
+    let teacher_domain =
+        app.get_one::<TeacherValueDomain>("teacher-domain").copied().unwrap_or_else(|| {
+            if label_type_value == "cp" {
+                TeacherValueDomain::Cp
+            } else {
+                TeacherValueDomain::WdlLogit
+            }
+        });
+
     let distill_options = DistillOptions {
         teacher_path: distill_teacher.clone(),
         loss: distill_loss,
         temperature: distill_temperature,
         alpha: distill_alpha,
+        teacher_domain,
     };
 
     if config.scale <= 0.0 {
