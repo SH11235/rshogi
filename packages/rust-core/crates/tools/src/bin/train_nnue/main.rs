@@ -553,23 +553,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if human_to_stderr {
         match &distill_options.teacher_path {
             Some(path) => eprintln!(
-                "  Distill: teacher={:?}, loss={:?}, temp={}, alpha={}",
-                path, distill_options.loss, distill_options.temperature, distill_options.alpha
+                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}",
+                path,
+                distill_options.teacher_domain,
+                distill_options.loss,
+                distill_options.temperature,
+                distill_options.alpha
             ),
             None => eprintln!(
-                "  Distill: teacher=None, loss={:?}, temp={}, alpha={}",
-                distill_options.loss, distill_options.temperature, distill_options.alpha
+                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}",
+                distill_options.teacher_domain,
+                distill_options.loss,
+                distill_options.temperature,
+                distill_options.alpha
             ),
         }
     } else {
         match &distill_options.teacher_path {
             Some(path) => println!(
-                "  Distill: teacher={:?}, loss={:?}, temp={}, alpha={}",
-                path, distill_options.loss, distill_options.temperature, distill_options.alpha
+                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}",
+                path,
+                distill_options.teacher_domain,
+                distill_options.loss,
+                distill_options.temperature,
+                distill_options.alpha
             ),
             None => println!(
-                "  Distill: teacher=None, loss={:?}, temp={}, alpha={}",
-                distill_options.loss, distill_options.temperature, distill_options.alpha
+                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}",
+                distill_options.teacher_domain,
+                distill_options.loss,
+                distill_options.temperature,
+                distill_options.alpha
             ),
         }
     }
@@ -887,6 +901,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &classic_fp32,
                                     eval_samples_slice,
                                     &config,
+                                    distill_options.teacher_domain,
                                 );
                                 let qm = evaluate_quantization_gap(
                                     &classic_fp32,

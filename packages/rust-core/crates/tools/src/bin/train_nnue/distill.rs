@@ -373,7 +373,12 @@ pub fn distill_classic_after_training(
             let prediction = forward(&classic, sample, &mut scratch);
             let (loss_contrib, grad_output) = match config.label_type.as_str() {
                 "wdl" => {
-                    let teacher_prob = sigmoid(sample.teacher_output / temperature);
+                    // Teacher may be cp or wdl-logit; normalize to logit space before temperature
+                    let teacher_logit = match distill.teacher_domain {
+                        TeacherValueDomain::WdlLogit => sample.teacher_output,
+                        TeacherValueDomain::Cp => sample.teacher_output / config.scale,
+                    };
+                    let teacher_prob = sigmoid(teacher_logit / temperature);
                     let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
                     let target_prob = (distill.alpha * teacher_prob
                         + (1.0 - distill.alpha) * label_prob)
@@ -386,9 +391,20 @@ pub fn distill_classic_after_training(
                             let grad = diff * sample.weight;
                             (loss as f64, grad)
                         }
-                        DistillLossKind::Bce | DistillLossKind::Kl => {
+                        DistillLossKind::Bce => {
                             let (loss, grad) = bce_with_logits_soft(prediction, target_prob);
                             ((loss * sample.weight) as f64, grad * sample.weight)
+                        }
+                        DistillLossKind::Kl => {
+                            // KL(p_t || p_s)
+                            let p_t = target_prob;
+                            let p_s = sigmoid(prediction);
+                            let p_t_c = p_t.clamp(PROB_EPS, 1.0 - PROB_EPS);
+                            let p_s_c = p_s.clamp(PROB_EPS, 1.0 - PROB_EPS);
+                            let kl = p_t_c * (p_t_c / p_s_c).ln()
+                                + (1.0 - p_t_c) * ((1.0 - p_t_c) / (1.0 - p_s_c)).ln();
+                            let grad = (p_s - p_t_c) * sample.weight; // d/dz KL
+                            ((kl * sample.weight) as f64, grad)
                         }
                     }
                 }
@@ -397,7 +413,10 @@ pub fn distill_classic_after_training(
                         TeacherValueDomain::Cp => sample.teacher_output,
                         TeacherValueDomain::WdlLogit => sample.teacher_output * config.scale,
                     };
-                    let target = distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
+                    let mut target =
+                        distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
+                    // Clip target for stability
+                    target = target.clamp(-(config.cp_clip as f32), config.cp_clip as f32);
                     let diff = prediction - target;
                     let loss = 0.5 * diff * diff * sample.weight;
                     let grad = diff * sample.weight;
@@ -509,6 +528,7 @@ pub fn evaluate_distill(
     classic_fp32: &ClassicFloatNetwork,
     samples: &[Sample],
     config: &Config,
+    teacher_domain: TeacherValueDomain,
 ) -> DistillEvalMetrics {
     let mut metrics = DistillEvalMetrics::default();
     let mut acc_buf = vec![0.0f32; teacher.acc_dim];
@@ -532,8 +552,16 @@ pub fn evaluate_distill(
 
     for sample in samples.iter().filter(|s| s.weight > 0.0).take(MAX_DISTILL_SAMPLES) {
         let weight = sample.weight as f64;
-        let teacher_logit =
+        let teacher_raw =
             teacher.forward_with_buffers(&sample.features, &mut acc_buf, &mut act_buf);
+        // Normalize teacher to logit domain (for wdl metrics) and cp domain (for cp metrics)
+        let teacher_logit = match (config.label_type.as_str(), teacher_domain) {
+            ("wdl", TeacherValueDomain::WdlLogit) => teacher_raw,
+            ("wdl", TeacherValueDomain::Cp) => teacher_raw / config.scale,
+            ("cp", TeacherValueDomain::WdlLogit) => teacher_raw, // raw already logit
+            ("cp", TeacherValueDomain::Cp) => teacher_raw / config.scale, // to reuse logit metrics if needed
+            _ => teacher_raw,
+        };
 
         let features_them = to_features_them(&sample.features);
         let ds = DistillSample {
@@ -563,7 +591,18 @@ pub fn evaluate_distill(
             let s = convert_logit_to_cp(student_logit, config);
             (t, s)
         } else {
-            (teacher_logit, student_logit)
+            // cp label_type: teacher_raw is in teacher domain; convert to common cp domain
+            let t = match teacher_domain {
+                TeacherValueDomain::Cp => teacher_raw,
+                TeacherValueDomain::WdlLogit => teacher_raw * config.scale,
+            };
+            let s = if matches!(teacher_domain, TeacherValueDomain::WdlLogit) {
+                // student_logit is logit space; convert
+                student_logit * config.scale
+            } else {
+                student_logit
+            };
+            (t, s)
         };
 
         let diff_cp = (student_cp - teacher_cp).abs();
@@ -720,7 +759,7 @@ pub fn evaluate_quantization_gap(
 }
 
 #[cfg(test)]
-mod tests {
+mod percentile_tests {
     use super::weighted_percentile;
 
     #[test]
@@ -734,5 +773,79 @@ mod tests {
     fn weighted_percentile_skewed_weights() {
         let skew = vec![(0.0, 0.001), (100.0, 1000.0)];
         assert_eq!(weighted_percentile(skew, 0.5), Some(100.0));
+    }
+}
+
+// --- Domain conversion helpers (exposed for tests via unit test module) ---
+#[cfg(test)]
+fn teacher_logit_from_raw(
+    _label_type: &str,
+    domain: TeacherValueDomain,
+    raw: f32,
+    scale: f32,
+) -> f32 {
+    match domain {
+        TeacherValueDomain::WdlLogit => raw,   // raw already logit
+        TeacherValueDomain::Cp => raw / scale, // normalize cp -> logit
+    }
+}
+
+#[cfg(test)]
+fn teacher_cp_from_raw(label_type: &str, domain: TeacherValueDomain, raw: f32, scale: f32) -> f32 {
+    if label_type == "wdl" {
+        // raw interpreted as (maybe) logit; convert logit->cp after normalizing
+        let logit = teacher_logit_from_raw(label_type, domain, raw, scale);
+        logit * scale
+    } else {
+        // label_type == cp : raw is either cp or logit depending on domain
+        match domain {
+            TeacherValueDomain::Cp => raw,
+            TeacherValueDomain::WdlLogit => raw * scale,
+        }
+    }
+}
+
+#[cfg(test)]
+mod domain_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn teacher_domain_wdl_teacher_logit_roundtrip() {
+        let scale = 600.0;
+        let raw_logit = 0.75f32; // teacher raw in logit domain
+        let logit = teacher_logit_from_raw("wdl", TeacherValueDomain::WdlLogit, raw_logit, scale);
+        let cp = teacher_cp_from_raw("wdl", TeacherValueDomain::WdlLogit, raw_logit, scale);
+        assert!((logit - raw_logit).abs() < 1e-6);
+        assert!((cp - raw_logit * scale).abs() < 1e-4);
+    }
+
+    #[test]
+    fn teacher_domain_wdl_teacher_cp_normalization() {
+        let scale = 600.0;
+        let raw_cp = 300.0f32; // raw in cp domain when domain=Cp
+        let logit = teacher_logit_from_raw("wdl", TeacherValueDomain::Cp, raw_cp, scale);
+        let cp = teacher_cp_from_raw("wdl", TeacherValueDomain::Cp, raw_cp, scale);
+        assert!((logit - raw_cp / scale).abs() < 1e-6);
+        assert!((cp - raw_cp).abs() < 1e-6);
+    }
+
+    #[test]
+    fn teacher_domain_cp_teacher_logit_conversion() {
+        let scale = 600.0;
+        let raw_logit = 1.2f32; // raw in logit when domain=WdlLogit
+        let logit = teacher_logit_from_raw("cp", TeacherValueDomain::WdlLogit, raw_logit, scale);
+        let cp = teacher_cp_from_raw("cp", TeacherValueDomain::WdlLogit, raw_logit, scale);
+        assert!((logit - raw_logit).abs() < 1e-6);
+        assert!((cp - raw_logit * scale).abs() < 1e-4);
+    }
+
+    #[test]
+    fn teacher_domain_cp_teacher_cp_identity() {
+        let scale = 600.0;
+        let raw_cp = 480.0f32; // raw cp when domain=Cp
+        let logit = teacher_logit_from_raw("cp", TeacherValueDomain::Cp, raw_cp, scale);
+        let cp = teacher_cp_from_raw("cp", TeacherValueDomain::Cp, raw_cp, scale);
+        assert!((logit - raw_cp / scale).abs() < 1e-6);
+        assert!((cp - raw_cp).abs() < 1e-6);
     }
 }

@@ -315,12 +315,14 @@ Classic v1 形式（`nn.classic.nnue`）への書き出しは、Single アーキ
 cargo run --release -p tools --bin train_nnue -- \
   --input runs/out.cache --arch classic --export-format classic-v1 \
   --distill-from-single runs/single_best.fp32.bin \
+  --teacher-domain wdl-logit \
   --kd-loss bce --kd-temperature 2.0 --kd-alpha 0.8 \
   --out runs/classic_export
 ```
 
 - `--arch classic --export-format classic-v1` を同時指定すると Classic 蒸留が有効になります。
 - 教師ネット（Single FP32）のパスは `--distill-from-single` で必須指定です。
+- `--teacher-domain cp|wdl-logit` で教師出力のスケール/意味空間を指定します。WDL ラベル + logit 教師の場合は `wdl-logit` を推奨。cp 評価を出す旧教師の場合は `cp` を指定してください（未指定時は label 種別から自動推定: cp ラベル=cp / それ以外=cp 既定, 将来的に変更される可能性があります）。
 - `--quant-ft` と `--quant-out` は `per-tensor` 固定です。Hidden 層 (`--quant-h1/-h2`) は 
   `per-tensor` / `per-channel` を切り替え可能です（既定: `per-channel`）。
 
@@ -341,6 +343,7 @@ cargo run --release -p tools --bin train_nnue -- \
   soft target を生成します。`--kd-alpha` は教師とデータラベルの線形合成比率です。
 - CP ラベル時は `--kd-loss=mse` のみ有効です（`bce`/`kl` 指定時はエラー）。
 - 損失値やスケール情報は構造化ログ (`phase: "distill_classic" / "classic_quantize"`) に JSON で出力します。
+- 教師値ドメインと変換ロジックの詳細は `docs/distillation/teacher_value_domain.md` を参照してください。
 
 ### 注意事項
 
