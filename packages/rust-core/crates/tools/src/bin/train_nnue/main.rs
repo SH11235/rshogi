@@ -192,7 +192,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("kd-loss-scale-temp2")
                 .long("kd-loss-scale-temp2")
-                .help("Scale distillation teacher loss/gradient by (temperature)^2 (WDL distillation only)")
+                .help("Scale distillation teacher loss/gradient by (temperature)^2 (WDL distillation only;推奨: --kd-soften-student と併用)")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("kd-soften-student")
+                .long("kd-soften-student")
+                .help("教師BCE/KLで生徒ロジットも温度Tで割る (WDL distillationのみ) ")
                 .action(ArgAction::SetTrue),
         )
         .arg(arg!(--shuffle "Shuffle training data"))
@@ -367,6 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kd_temp_source = app.value_source("kd-temperature");
     let kd_alpha_source = app.value_source("kd-alpha");
     let kd_scale_temp2 = app.get_flag("kd-loss-scale-temp2");
+    let kd_soften_student = app.get_flag("kd-soften-student");
 
     let mut distill_loss =
         *app.get_one::<DistillLossKind>("kd-loss").unwrap_or(&DistillLossKind::Mse);
@@ -443,6 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         temperature: distill_temperature,
         alpha: distill_alpha,
         scale_temp2: kd_scale_temp2,
+        soften_student: kd_soften_student,
         seed: None,
         teacher_domain,
     };
@@ -567,37 +575,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if human_to_stderr {
         match &distill_options.teacher_path {
             Some(path) => eprintln!(
-                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}",
+                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
                 path,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
-                distill_options.alpha
+                distill_options.alpha,
+                distill_options.scale_temp2,
+                distill_options.soften_student
             ),
             None => eprintln!(
-                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}",
+                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
-                distill_options.alpha
+                distill_options.alpha,
+                distill_options.scale_temp2,
+                distill_options.soften_student
             ),
         }
     } else {
         match &distill_options.teacher_path {
             Some(path) => println!(
-                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}",
+                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
                 path,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
-                distill_options.alpha
+                distill_options.alpha,
+                distill_options.scale_temp2,
+                distill_options.soften_student
             ),
             None => println!(
-                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}",
+                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
-                distill_options.alpha
+                distill_options.alpha,
+                distill_options.scale_temp2,
+                distill_options.soften_student
             ),
         }
     }

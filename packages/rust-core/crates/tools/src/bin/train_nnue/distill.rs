@@ -141,6 +141,14 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     scratch.acc_us.copy_from_slice(&net.ft_biases);
     for &feat in &sample.features_us {
         let idx = feat as usize * net.acc_dim;
+        if idx + net.acc_dim > net.ft_weights.len() {
+            log::warn!(
+                "feature index {} out of range (ft_weights.len={})",
+                feat,
+                net.ft_weights.len()
+            );
+            continue;
+        }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
         for (dst, &w) in scratch.acc_us.iter_mut().zip(row.iter()) {
             *dst += w;
@@ -150,6 +158,14 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     scratch.acc_them.copy_from_slice(&net.ft_biases);
     for &feat in &sample.features_them {
         let idx = feat as usize * net.acc_dim;
+        if idx + net.acc_dim > net.ft_weights.len() {
+            log::warn!(
+                "feature index {} out of range (ft_weights.len={})",
+                feat,
+                net.ft_weights.len()
+            );
+            continue;
+        }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
         for (dst, &w) in scratch.acc_them.iter_mut().zip(row.iter()) {
             *dst += w;
@@ -286,6 +302,7 @@ fn backward_update(
     }
 }
 
+/// 教師 forward 結果と反転特徴を事前計算し、蒸留処理での再利用を容易にする。
 fn prepare_distill_samples(
     teacher: &Network,
     samples: &[Sample],
@@ -370,13 +387,8 @@ pub fn distill_classic_after_training(
         return Err("No samples available for classic distillation".into());
     }
 
-    let mut rng: StdRng = match distill.seed {
-        Some(seed) => StdRng::seed_from_u64(seed),
-        None => {
-            let fallback: u64 = rand::rng().random();
-            StdRng::seed_from_u64(fallback)
-        }
-    };
+    let distill_seed = distill.seed.unwrap_or_else(|| rand::rng().random::<u64>());
+    let mut rng: StdRng = StdRng::seed_from_u64(distill_seed);
     let mut classic = ClassicFloatNetwork::he_uniform_with_dims(
         SHOGI_BOARD_SIZE * FE_END,
         CLASSIC_ACC_DIM,
@@ -451,6 +463,9 @@ pub fn distill_classic_after_training(
             "label_type": config.label_type,
             "teacher_domain": match distill.teacher_domain { TeacherValueDomain::Cp => "cp", TeacherValueDomain::WdlLogit => "wdl-logit" },
             "samples": bias_samples,
+            "scale_temp2": distill.scale_temp2,
+            "soften_student": distill.soften_student,
+            "seed": distill_seed,
         });
         lg.write_json(&rec);
     }
@@ -458,6 +473,8 @@ pub fn distill_classic_after_training(
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
     let temperature = distill.temperature;
     let loss_kind = distill.loss;
+    let mut warn_soften_mse_once =
+        distill.soften_student && matches!(loss_kind, DistillLossKind::Mse);
 
     for epoch in 0..DISTILL_EPOCHS {
         let mut epoch_loss = 0.0f64;
@@ -478,6 +495,10 @@ pub fn distill_classic_after_training(
                     let weight = sample.weight;
                     match loss_kind {
                         DistillLossKind::Mse => {
+                            if warn_soften_mse_once {
+                                log::warn!("--kd-soften-student は --kd-loss=mse では効果がありません (epoch={})", epoch + 1);
+                                warn_soften_mse_once = false;
+                            }
                             let teacher_target = stable_logit(teacher_prob);
                             let label_target = stable_logit(label_prob);
                             let diff_teacher = prediction - teacher_target;
@@ -497,12 +518,20 @@ pub fn distill_classic_after_training(
                             (loss, grad)
                         }
                         DistillLossKind::Bce => {
+                            let student_logit_teacher = if distill.soften_student {
+                                prediction / temperature
+                            } else {
+                                prediction
+                            };
                             let (loss_teacher_raw, grad_teacher_raw) =
-                                bce_with_logits_soft(prediction, teacher_prob);
+                                bce_with_logits_soft(student_logit_teacher, teacher_prob);
                             let (loss_label_raw, grad_label_raw) =
                                 bce_with_logits_soft(prediction, label_prob);
                             let mut loss_teacher = loss_teacher_raw * weight;
                             let mut grad_teacher = grad_teacher_raw * weight;
+                            if distill.soften_student {
+                                grad_teacher /= temperature;
+                            }
                             let loss_label = loss_label_raw * weight;
                             let grad_label = grad_label_raw * weight;
                             scale_teacher_by_temperature(
@@ -518,13 +547,21 @@ pub fn distill_classic_after_training(
                         DistillLossKind::Kl => {
                             // KL(p_t || p_s)
                             let p_t = teacher_prob;
-                            let p_s = sigmoid(prediction);
+                            let student_logit_teacher = if distill.soften_student {
+                                prediction / temperature
+                            } else {
+                                prediction
+                            };
+                            let p_s = sigmoid(student_logit_teacher);
                             let p_t_c = p_t.clamp(PROB_EPS, 1.0 - PROB_EPS);
                             let p_s_c = p_s.clamp(PROB_EPS, 1.0 - PROB_EPS);
                             let mut loss_teacher = (p_t_c * (p_t_c / p_s_c).ln()
                                 + (1.0 - p_t_c) * ((1.0 - p_t_c) / (1.0 - p_s_c)).ln())
                                 * weight;
                             let mut grad_teacher = (p_s - p_t_c) * weight; // d/dz KL
+                            if distill.soften_student {
+                                grad_teacher /= temperature;
+                            }
                             scale_teacher_by_temperature(
                                 &mut loss_teacher,
                                 &mut grad_teacher,
@@ -581,6 +618,9 @@ pub fn distill_classic_after_training(
                 },
                 "alpha": distill.alpha,
                 "temperature": temperature,
+                "scale_temp2": distill.scale_temp2,
+                "soften_student": distill.soften_student,
+                "seed": distill_seed,
                 "teacher_domain": match distill.teacher_domain { crate::types::TeacherValueDomain::Cp => "cp", crate::types::TeacherValueDomain::WdlLogit => "wdl-logit" },
             });
             lg.write_json(&rec);
@@ -622,6 +662,7 @@ pub fn distill_classic_after_training(
 }
 
 // 重み付き分位点（左閉右開累積方式）: 最小の値 v で累積重み >= q * total を満たすもの
+/// 重み付き分位点（左閉右開累積）を返す。累積重みが `q * total` 以上になる最小値を選択。
 fn weighted_percentile(mut pairs: Vec<(f32, f32)>, q: f32) -> Option<f32> {
     if pairs.is_empty() {
         return None;
@@ -986,6 +1027,26 @@ mod distill_training_tests {
         scale_teacher_by_temperature(&mut loss_no, &mut grad_no, 2.0, false);
         assert!((loss_no - 0.5).abs() < 1e-6);
         assert!((grad_no - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn forward_skips_out_of_range_features_without_panic() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        let mut net = ClassicFloatNetwork::he_uniform_with_dims(4, 2, 2, 2, 2, &mut rng);
+        net.ft_weights.fill(0.0);
+        net.ft_biases.fill(0.0);
+        net.output_bias = 1.23;
+
+        let sample = DistillSample {
+            features_us: vec![10_000], // clearly越境
+            features_them: vec![20_000],
+            teacher_output: 0.0,
+            label: 0.0,
+            weight: 1.0,
+        };
+        let mut scratch = ClassicScratch::new(2, 2, 2);
+        let out = forward(&net, &sample, &mut scratch);
+        assert!((out - net.output_bias).abs() < 1e-6);
     }
 }
 

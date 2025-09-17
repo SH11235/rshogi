@@ -101,6 +101,7 @@ pub struct DistillOptions {
     pub temperature: f32,
     pub alpha: f32,
     pub scale_temp2: bool,
+    pub soften_student: bool,
     pub seed: Option<u64>,
     /// 教師ネットワーク出力の数値ドメイン
     /// - Cp: 評価値(cp) 例: ±300, ±1200
@@ -116,6 +117,7 @@ impl Default for DistillOptions {
             temperature: 1.0,
             alpha: 1.0,
             scale_temp2: false,
+            soften_student: false,
             seed: None,
             teacher_domain: TeacherValueDomain::Cp,
         }
