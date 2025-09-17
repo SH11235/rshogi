@@ -1434,3 +1434,42 @@ fn lr_plateau_state_min_delta() {
     assert!(p.update(0.9999999).is_some()); // patience=1 到達で発火
     assert!((p.factor() - 0.5).abs() < 1e-6);
 }
+
+#[test]
+fn test_classic_output_per_channel_error() {
+    // Classic出力層のper-channel量子化がエラーになることを確認
+    let net = ClassicFloatNetwork {
+        ft_weights: vec![1.0; 256 * 256],
+        ft_biases: vec![0.0; 256],
+        hidden1_weights: vec![1.0; (256 * 2) * 32], // acc_dim * 2 for Classic
+        hidden1_biases: vec![0.0; 32],
+        hidden2_weights: vec![1.0; 32 * 32],
+        hidden2_biases: vec![0.0; 32],
+        output_weights: vec![1.0; 32],
+        output_bias: 0.0,
+        acc_dim: 256,
+        input_dim: 256,
+        h1_dim: 32,
+        h2_dim: 32,
+    };
+
+    // per-tensor量子化は成功するはず
+    let result_tensor = net.quantize_symmetric(
+        QuantScheme::PerTensor,
+        QuantScheme::PerChannel,
+        QuantScheme::PerChannel,
+        QuantScheme::PerTensor,
+    );
+    assert!(result_tensor.is_ok());
+
+    // per-channel量子化はエラーになるはず
+    let result_channel = net.quantize_symmetric(
+        QuantScheme::PerTensor,
+        QuantScheme::PerChannel,
+        QuantScheme::PerChannel,
+        QuantScheme::PerChannel,
+    );
+    assert!(result_channel.is_err());
+    let err_msg = result_channel.unwrap_err();
+    assert!(err_msg.contains("Classic output layer supports --quant-out=per-tensor only"));
+}

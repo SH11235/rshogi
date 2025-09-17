@@ -321,15 +321,15 @@ cargo run --release -p tools --bin train_nnue -- \
 
 - `--arch classic --export-format classic-v1` を同時指定すると Classic 蒸留が有効になります。
 - 教師ネット（Single FP32）のパスは `--distill-from-single` で必須指定です。
-- `--quant-ft` は `per-tensor` 固定です。Hidden 層 (`--quant-h1/-h2`) と Output
-  (`--quant-out`) は `per-tensor` / `per-channel` を切り替え可能です。
+- `--quant-ft` と `--quant-out` は `per-tensor` 固定です。Hidden 層 (`--quant-h1/-h2`) は 
+  `per-tensor` / `per-channel` を切り替え可能です（既定: `per-channel`）。
 
 ### 量子化と整数パイプライン
 
 - Feature Transformer (FT): i16 対称量子化 (per-tensor)。スケール `s_w0 = maxabs / 32767`。
 - FT 出力は右シフト `CLASSIC_FT_SHIFT = 6`（除算 64）で i8 に落とし、`[-127,127]` へ飽和します。
 - Hidden1 / Hidden2: 既定は per-channel i8 対称量子化（出力チャネル毎に maxabs を取得）。
-- Output: 既定は per-tensor i8。`--quant-out per-channel` で各要素に個別スケールを持たせられます。
+- Output: 既定は per-tensor i8。Classic v1では per-channel 量子化はサポートされません。
 - バイアスは `round_away_from_zero(b / (s_in * s_w))` で i32 化し、整数推論側と同一スケールになります。
 - 書き出されたバイナリのレイアウトは
   `NNUE | version=1 | arch=HALFKP_256X2_32_32 | payload_len` のヘッダに続き、
