@@ -6,6 +6,7 @@ use engine_core::shogi::SHOGI_BOARD_SIZE;
 
 #[cfg(test)]
 const _: usize = SHOGI_BOARD_SIZE * FE_END;
+use rand::Rng;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -694,6 +695,57 @@ impl ClassicFloatNetwork {
         }
     }
 
+    /// He/Xavier 初期化で Classic ネットワークを構築する。
+    pub fn he_uniform_with_dims(
+        input_dim: usize,
+        acc_dim: usize,
+        h1_dim: usize,
+        h2_dim: usize,
+        estimated_active_features: usize,
+        rng: &mut impl Rng,
+    ) -> Self {
+        let mut net = Self::zeros_with_dims(input_dim, acc_dim, h1_dim, h2_dim);
+
+        // Feature transformer: fan_in ≒ サンプル当たりの活性特徴数（片側）。
+        let fan_in_ft = estimated_active_features.max(1) as f32;
+        let a_ft = (6.0 / fan_in_ft).sqrt();
+        for row in net.ft_weights.chunks_mut(acc_dim.max(1)) {
+            for w in row {
+                *w = rng.random_range(-a_ft..a_ft);
+            }
+        }
+
+        // Hidden1: 入力は us/them を連結した 2 * acc_dim。
+        let input_dim_h1 = (2 * acc_dim).max(1);
+        let fan_in_h1 = input_dim_h1 as f32;
+        let a_h1 = (6.0 / fan_in_h1).sqrt();
+        for row in net.hidden1_weights.chunks_mut(input_dim_h1) {
+            for w in row {
+                *w = rng.random_range(-a_h1..a_h1);
+            }
+        }
+
+        // Hidden2: 入力は hidden1 の出力。
+        let input_dim_h2 = h1_dim.max(1);
+        let fan_in_h2 = input_dim_h2 as f32;
+        let a_h2 = (6.0 / fan_in_h2).sqrt();
+        for row in net.hidden2_weights.chunks_mut(input_dim_h2) {
+            for w in row {
+                *w = rng.random_range(-a_h2..a_h2);
+            }
+        }
+
+        // Output: 線形出力なので Xavier Uniform。
+        let fan_in_out = h2_dim.max(1) as f32;
+        let fan_out_out = 1.0f32;
+        let a_out = (6.0 / (fan_in_out + fan_out_out)).sqrt();
+        for w in net.output_weights.iter_mut() {
+            *w = rng.random_range(-a_out..a_out);
+        }
+
+        net
+    }
+
     /// Classic アーキ用の対称量子化（per-tensor / per-channel 指定済み）
     pub fn quantize_symmetric(
         &self,
@@ -910,7 +962,7 @@ impl ClassicQuantizationScales {
     /// 呼び出し側（INT→float 復元部）の修正を局所化できる。
     #[inline]
     pub fn output_scale(&self) -> f32 {
-        debug_assert_eq!(self.s_w3.len(), 1, "Classic v1 expects single output scale (per-tensor)");
+        debug_assert_eq!(self.s_w3.len(), 1, "Classic v1 supports only per-tensor output scale",);
         self.s_in_3 * self.s_w3[0]
     }
 }
@@ -918,6 +970,7 @@ impl ClassicQuantizationScales {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     fn sample_network() -> ClassicFloatNetwork {
         ClassicFloatNetwork {
@@ -934,6 +987,18 @@ mod tests {
             h1_dim: 2,
             h2_dim: 2,
         }
+    }
+
+    #[test]
+    fn he_uniform_initializes_non_zero() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let net = ClassicFloatNetwork::he_uniform_with_dims(16, 8, 4, 2, 6, &mut rng);
+
+        assert!(net.ft_weights.iter().any(|&w| w != 0.0));
+        assert!(net.hidden1_weights.iter().any(|&w| w != 0.0));
+        assert!(net.hidden2_weights.iter().any(|&w| w != 0.0));
+        assert!(net.output_weights.iter().any(|&w| w != 0.0));
+        assert_eq!(net.output_bias, 0.0);
     }
 
     #[test]

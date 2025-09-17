@@ -114,6 +114,15 @@ fn stable_logit(p: f32) -> f32 {
 }
 
 #[inline]
+fn maybe_scale_by_temperature(loss: &mut f64, grad: &mut f32, temperature: f32, enabled: bool) {
+    if enabled {
+        let scale = temperature * temperature;
+        *loss *= scale as f64;
+        *grad *= scale;
+    }
+}
+
+#[inline]
 fn bce_with_logits_soft(logit: f32, target: f32) -> (f32, f32) {
     // target は [0,1] の任意値（ソフトラベル）
     let max_val = 0.0f32.max(logit);
@@ -355,12 +364,62 @@ pub fn distill_classic_after_training(
         return Err("No samples available for classic distillation".into());
     }
 
-    let mut classic = ClassicFloatNetwork::zeros_with_dims(
+    let mut rng = rand::rng();
+    let mut classic = ClassicFloatNetwork::he_uniform_with_dims(
         SHOGI_BOARD_SIZE * FE_END,
         CLASSIC_ACC_DIM,
         CLASSIC_H1_DIM,
         CLASSIC_H2_DIM,
+        config.estimated_features_per_sample,
+        &mut rng,
     );
+
+    // 出力バイアスを教師ターゲットの平均で初期化して初期収束を安定化させる。
+    let mut bias_num = 0.0f64;
+    let mut bias_den = 0.0f64;
+    for sample in &prepared {
+        let weight = sample.weight as f64;
+        if weight <= 0.0 {
+            continue;
+        }
+        let target = match config.label_type.as_str() {
+            "wdl" => {
+                let teacher_logit = match distill.teacher_domain {
+                    TeacherValueDomain::WdlLogit => sample.teacher_output,
+                    TeacherValueDomain::Cp => sample.teacher_output / config.scale,
+                };
+                let teacher_prob = sigmoid(teacher_logit / distill.temperature);
+                let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
+                let target_prob = (distill.alpha * teacher_prob
+                    + (1.0 - distill.alpha) * label_prob)
+                    .clamp(PROB_EPS, 1.0 - PROB_EPS);
+                stable_logit(target_prob)
+            }
+            "cp" => {
+                let teacher_cp = match distill.teacher_domain {
+                    TeacherValueDomain::Cp => sample.teacher_output,
+                    TeacherValueDomain::WdlLogit => sample.teacher_output * config.scale,
+                };
+                let blended = distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
+                blended.clamp(-(config.cp_clip as f32), config.cp_clip as f32)
+            }
+            _ => continue,
+        } as f64;
+        bias_num += target * weight;
+        bias_den += weight;
+    }
+    if bias_den > 0.0 {
+        classic.output_bias = (bias_num / bias_den) as f32;
+    }
+
+    if let Some(lg) = classic_cfg.structured {
+        let rec = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "phase": "distill_classic_init",
+            "output_bias_init": classic.output_bias,
+        });
+        lg.write_json(&rec);
+    }
 
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
     let temperature = distill.temperature;
@@ -371,7 +430,7 @@ pub fn distill_classic_after_training(
         let mut epoch_weight = 0.0f64;
         for sample in &prepared {
             let prediction = forward(&classic, sample, &mut scratch);
-            let (loss_contrib, grad_output) = match config.label_type.as_str() {
+            let (mut loss_contrib, mut grad_output) = match config.label_type.as_str() {
                 "wdl" => {
                     // Teacher may be cp or wdl-logit; normalize to logit space before temperature
                     let teacher_logit = match distill.teacher_domain {
@@ -424,6 +483,13 @@ pub fn distill_classic_after_training(
                 }
                 _ => unreachable!(),
             };
+
+            maybe_scale_by_temperature(
+                &mut loss_contrib,
+                &mut grad_output,
+                temperature,
+                distill.scale_temp2,
+            );
 
             epoch_loss += loss_contrib;
             epoch_weight += sample.weight as f64;
@@ -789,6 +855,70 @@ mod percentile_tests {
     fn weighted_percentile_skewed_weights() {
         let skew = vec![(0.0, 0.001), (100.0, 1000.0)];
         assert_eq!(weighted_percentile(skew, 0.5), Some(100.0));
+    }
+}
+
+#[cfg(test)]
+mod distill_training_tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    #[test]
+    fn backward_update_changes_weights_with_he_init() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut net = ClassicFloatNetwork::he_uniform_with_dims(4, 2, 2, 2, 2, &mut rng);
+        net.hidden1_biases.iter_mut().for_each(|b| *b = 0.1);
+        net.hidden2_biases.iter_mut().for_each(|b| *b = 0.1);
+
+        let before_ft = net.ft_weights.clone();
+        let before_h1 = net.hidden1_weights.clone();
+        let before_h2 = net.hidden2_weights.clone();
+
+        let sample = DistillSample {
+            features_us: vec![0],
+            features_them: vec![1],
+            teacher_output: 0.0,
+            label: 0.0,
+            weight: 1.0,
+        };
+        let mut scratch = ClassicScratch::new(2, 2, 2);
+
+        let _ = forward(&net, &sample, &mut scratch);
+        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2);
+
+        let delta_threshold: f32 = 1e-6;
+        let changed_ft = net
+            .ft_weights
+            .iter()
+            .zip(before_ft.iter())
+            .any(|(a, b)| (*a - *b).abs() > delta_threshold);
+        let changed_h1 = net
+            .hidden1_weights
+            .iter()
+            .zip(before_h1.iter())
+            .any(|(a, b)| (*a - *b).abs() > delta_threshold);
+        let changed_h2 = net
+            .hidden2_weights
+            .iter()
+            .zip(before_h2.iter())
+            .any(|(a, b)| (*a - *b).abs() > delta_threshold);
+
+        assert!(changed_ft || changed_h1 || changed_h2);
+    }
+
+    #[test]
+    fn maybe_scale_by_temperature_applies_when_enabled() {
+        let mut loss = 0.5f64;
+        let mut grad = 0.25f32;
+        maybe_scale_by_temperature(&mut loss, &mut grad, 2.0, true);
+        assert!((loss - 2.0).abs() < 1e-6);
+        assert!((grad - 1.0).abs() < 1e-6);
+
+        let mut loss_no = 0.5f64;
+        let mut grad_no = 0.25f32;
+        maybe_scale_by_temperature(&mut loss_no, &mut grad_no, 2.0, false);
+        assert!((loss_no - 0.5).abs() < 1e-6);
+        assert!((grad_no - 0.25).abs() < 1e-6);
     }
 }
 
