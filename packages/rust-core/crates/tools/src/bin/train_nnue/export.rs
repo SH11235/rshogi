@@ -5,6 +5,7 @@ use crate::params::{
     QUANTIZATION_MAX, QUANTIZATION_METADATA_SIZE, QUANTIZATION_MIN,
 };
 use crate::types::{ArchKind, ExportFormat, ExportOptions};
+use bytemuck::cast_slice;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
 use std::fs::File;
@@ -18,10 +19,21 @@ pub struct QuantizationParams {
 
 impl QuantizationParams {
     pub fn from_weights(weights: &[f32]) -> Self {
+        if weights.is_empty() {
+            return Self {
+                scale: 1.0,
+                zero_point: 0,
+            };
+        }
         let min_val = weights.iter().fold(f32::INFINITY, |a, &b| a.min(b));
         let max_val = weights.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        let range = (max_val - min_val).max(1e-8);
-        let scale = range / 255.0;
+        if !min_val.is_finite() || !max_val.is_finite() || (max_val - min_val).abs() < 1e-12 {
+            return Self {
+                scale: 1.0,
+                zero_point: 0,
+            };
+        }
+        let scale = (max_val - min_val) / 255.0;
         let zero_point =
             (-min_val / scale - 128.0).round().clamp(QUANTIZATION_MIN, QUANTIZATION_MAX) as i32;
         Self { scale, zero_point }
@@ -54,22 +66,23 @@ pub fn save_network_quantized(
     writeln!(file, "END_HEADER")?;
 
     let params_w0 = QuantizationParams::from_weights(&network.w0);
+    // scales/zero-points are little-endian f32/i32, followed by signed i8 payload (two's complement)
     file.write_all(&params_w0.scale.to_le_bytes())?;
     file.write_all(&params_w0.zero_point.to_le_bytes())?;
     let quantized_w0 = quantize_weights(&network.w0, &params_w0);
-    file.write_all(&quantized_w0.iter().map(|&x| x as u8).collect::<Vec<_>>())?;
+    file.write_all(cast_slice::<i8, u8>(&quantized_w0))?;
 
     let params_b0 = QuantizationParams::from_weights(&network.b0);
     file.write_all(&params_b0.scale.to_le_bytes())?;
     file.write_all(&params_b0.zero_point.to_le_bytes())?;
     let quantized_b0 = quantize_weights(&network.b0, &params_b0);
-    file.write_all(&quantized_b0.iter().map(|&x| x as u8).collect::<Vec<_>>())?;
+    file.write_all(cast_slice::<i8, u8>(&quantized_b0))?;
 
     let params_w2 = QuantizationParams::from_weights(&network.w2);
     file.write_all(&params_w2.scale.to_le_bytes())?;
     file.write_all(&params_w2.zero_point.to_le_bytes())?;
     let quantized_w2 = quantize_weights(&network.w2, &params_w2);
-    file.write_all(&quantized_w2.iter().map(|&x| x as u8).collect::<Vec<_>>())?;
+    file.write_all(cast_slice::<i8, u8>(&quantized_w2))?;
 
     file.write_all(&network.b2.to_le_bytes())?;
     file.flush()?;

@@ -104,6 +104,85 @@ pub fn halfkp_index(king_sq: Square, piece: BonaPiece) -> usize {
     index
 }
 
+/// us 視点の HalfKP インデックスを them 視点へ写像する
+///
+/// - 王位置は盤面反転 (`Square::flip()`)
+/// - 盤上駒は色を反転し座標を反転
+/// - 手駒は色のみ反転（個数は不変）
+#[inline]
+pub fn flip_us_them(feature_idx: usize) -> usize {
+    debug_assert!(feature_idx < SHOGI_BOARD_SIZE * FE_END);
+
+    let king_idx = feature_idx / FE_END;
+    let piece_idx = feature_idx % FE_END;
+
+    let king_sq = Square(king_idx as u8);
+    let king_sq_flipped = king_sq.flip();
+
+    let flipped_piece_idx = flip_bona_piece_index(piece_idx);
+
+    king_sq_flipped.index() * FE_END + flipped_piece_idx
+}
+
+const BOARD_FEATURE_GROUPS: usize = 13;
+const HAND_BASE_INDEX: usize = 2106;
+const HAND_ENTRIES_PER_COLOR: usize = 38;
+const HAND_OFFSETS: [usize; 7] = [0, 2, 4, 8, 12, 16, 20];
+const HAND_LENGTHS: [usize; 7] = [2, 2, 4, 4, 4, 4, 18];
+
+#[inline]
+fn flip_bona_piece_index(idx: usize) -> usize {
+    if idx < HAND_BASE_INDEX {
+        flip_board_piece_index(idx)
+    } else {
+        flip_hand_piece_index(idx)
+    }
+}
+
+#[inline]
+fn flip_board_piece_index(idx: usize) -> usize {
+    let per_color = BOARD_FEATURE_GROUPS * SHOGI_BOARD_SIZE;
+    debug_assert!(idx < per_color * 2);
+
+    let (color_offset, piece_within_color) = if idx >= per_color {
+        (per_color, idx - per_color)
+    } else {
+        (0, idx)
+    };
+
+    let piece_group = piece_within_color / SHOGI_BOARD_SIZE;
+    let sq_idx = piece_within_color % SHOGI_BOARD_SIZE;
+    let flipped_sq_idx = Square(sq_idx as u8).flip().index();
+
+    let new_color_offset = if color_offset == 0 { per_color } else { 0 };
+    piece_group * SHOGI_BOARD_SIZE + flipped_sq_idx + new_color_offset
+}
+
+#[inline]
+fn flip_hand_piece_index(idx: usize) -> usize {
+    debug_assert!(idx < HAND_BASE_INDEX + HAND_ENTRIES_PER_COLOR * 2);
+    let offset = idx - HAND_BASE_INDEX;
+    let (color_offset, within_color) = if offset >= HAND_ENTRIES_PER_COLOR {
+        (HAND_ENTRIES_PER_COLOR, offset - HAND_ENTRIES_PER_COLOR)
+    } else {
+        (0, offset)
+    };
+
+    let (piece_offset, _piece_len) = HAND_OFFSETS
+        .iter()
+        .zip(HAND_LENGTHS.iter())
+        .find(|(start, len)| within_color >= **start && within_color < **start + **len)
+        .map(|(start, len)| (*start, *len))
+        .unwrap_or_else(|| unreachable!("within_color out of range: {within_color}"));
+    let count_offset = within_color - piece_offset;
+    let new_color_offset = if color_offset == 0 {
+        HAND_ENTRIES_PER_COLOR
+    } else {
+        0
+    };
+    HAND_BASE_INDEX + piece_offset + count_offset + new_color_offset
+}
+
 /// Feature transformer for HalfKP -> acc_dim-dimensional features
 pub struct FeatureTransformer {
     /// Weights for feature transformation \[INPUT_DIM\]\[acc_dim\]
@@ -317,5 +396,25 @@ mod tests {
         // Starting position has 40 pieces (including kings)
         // Minus 2 kings = 38 features
         assert_eq!(features.len(), 38);
+    }
+
+    #[test]
+    fn test_flip_us_them_involution() {
+        let sample_pieces = [
+            0,
+            SHOGI_BOARD_SIZE - 1,
+            HAND_BASE_INDEX - 1,
+            HAND_BASE_INDEX,
+            HAND_BASE_INDEX + HAND_ENTRIES_PER_COLOR - 1,
+            FE_END - 1,
+        ];
+        let sample_kings = [0, 10, 40, 80];
+
+        for &k in &sample_kings {
+            for &p in &sample_pieces {
+                let idx = k * FE_END + p;
+                assert_eq!(flip_us_them(flip_us_them(idx)), idx);
+            }
+        }
     }
 }

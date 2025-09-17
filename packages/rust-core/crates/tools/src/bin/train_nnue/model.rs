@@ -2,6 +2,9 @@ use crate::params::{ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON};
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
 use rand::Rng;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
 
 #[derive(Clone)]
 pub struct Network {
@@ -102,6 +105,88 @@ impl Network {
             out += self.w2[i] * act_val;
         }
         out
+    }
+
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        let mut line = String::new();
+        reader.read_line(&mut line)?; // NNUE
+        if !line.trim().eq_ignore_ascii_case("nnue") {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid NNUE magic"));
+        }
+
+        let mut acc_dim: Option<usize> = None;
+        let mut relu_clip: Option<f32> = None;
+
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Unexpected EOF before END_HEADER",
+                ));
+            }
+            let trimmed = line.trim();
+            if trimmed == "END_HEADER" {
+                break;
+            }
+            if let Some(rest) = trimmed.strip_prefix("ACC_DIM") {
+                acc_dim = rest.trim().parse::<usize>().ok();
+            } else if let Some(rest) = trimmed.strip_prefix("RELU_CLIP") {
+                relu_clip = rest.trim().parse::<f32>().ok();
+            }
+        }
+
+        let acc_dim = acc_dim.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Missing ACC_DIM header")
+        })?;
+        let relu_clip = relu_clip.unwrap_or(127.0);
+
+        let read_u32 = |reader: &mut BufReader<File>| -> std::io::Result<u32> {
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf)?;
+            Ok(u32::from_le_bytes(buf))
+        };
+
+        let input_dim = read_u32(&mut reader)? as usize;
+        let acc_dim_file = read_u32(&mut reader)? as usize;
+        if acc_dim_file != acc_dim {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ACC_DIM mismatch: header {} vs payload {}", acc_dim, acc_dim_file),
+            ));
+        }
+
+        let read_f32_vec =
+            |reader: &mut BufReader<File>, len: usize| -> std::io::Result<Vec<f32>> {
+                let mut buf = vec![0u8; len * 4];
+                reader.read_exact(&mut buf)?;
+                Ok(buf
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect())
+            };
+
+        let w0 = read_f32_vec(&mut reader, input_dim * acc_dim)?;
+        let b0 = read_f32_vec(&mut reader, acc_dim)?;
+        let w2 = read_f32_vec(&mut reader, acc_dim)?;
+
+        let mut b2_bytes = [0u8; 4];
+        reader.read_exact(&mut b2_bytes)?;
+        let b2 = f32::from_le_bytes(b2_bytes);
+
+        Ok(Self {
+            w0,
+            b0,
+            w2,
+            b2,
+            input_dim,
+            acc_dim,
+            relu_clip,
+        })
     }
 }
 

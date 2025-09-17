@@ -1,6 +1,6 @@
 use crate::params::{
-    CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX, QUANTIZATION_MAX, QUANTIZATION_METADATA_SIZE,
-    QUANTIZATION_MIN,
+    CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX, QUANTIZATION_MAX,
+    QUANTIZATION_METADATA_SIZE, QUANTIZATION_MIN,
 };
 use std::fs::File;
 use std::io::Write;
@@ -169,17 +169,23 @@ impl ClassicFeatureTransformerInt {
     }
 
     pub fn accumulate_u32(&self, features: &[u32], out: &mut [i16]) {
-        let features_usize: Vec<usize> = features.iter().map(|&f| f as usize).collect();
-        self.accumulate(&features_usize, out);
+        self.accumulate_impl(features.iter().map(|&f| f as usize), out);
     }
 
     pub fn accumulate(&self, features: &[usize], out: &mut [i16]) {
+        self.accumulate_impl(features.iter().copied(), out);
+    }
+
+    fn accumulate_impl<I>(&self, features: I, out: &mut [i16])
+    where
+        I: IntoIterator<Item = usize>,
+    {
         debug_assert_eq!(out.len(), self.acc_dim);
         out.iter_mut()
             .zip(self.biases.iter())
             .for_each(|(dst, &b)| *dst = clamp_i32_to_i16(b));
 
-        for &feat in features {
+        for feat in features {
             if feat >= self.input_dim {
                 continue;
             }
@@ -311,6 +317,7 @@ impl ClassicQuantizedNetwork {
 
     fn apply_clipped_relu(input: &[i32], output: &mut [i8]) {
         debug_assert_eq!(input.len(), output.len());
+        // Classic 推論は常に int8 の 0..=127 クリップを前提とする
         for (dst, &src) in output.iter_mut().zip(input.iter()) {
             let clipped = src.clamp(0, I8_QMAX);
             *dst = clipped as i8;
@@ -319,7 +326,7 @@ impl ClassicQuantizedNetwork {
 
     #[inline]
     fn quantize_ft_output(v: i16) -> i8 {
-        let shifted = (v as i32) >> 6;
+        let shifted = (v as i32) >> CLASSIC_FT_SHIFT;
         shifted.clamp(-I8_QMAX, I8_QMAX) as i8
     }
 }
@@ -535,7 +542,63 @@ impl ClassicFloatNetwork {
         }
     }
 
+    /// Classic アーキ用の対称量子化（per-tensor / per-channel 指定済み）
+    pub fn quantize_symmetric(
+        &self,
+    ) -> Result<(ClassicIntNetworkBundle, ClassicQuantizationScales), String> {
+        self.validate()?;
+
+        let (ft_weights_q, ft_scales) = quantize_symmetric_i16(&self.ft_weights, false, 1);
+        let s_w0 = ft_scales.first().copied().unwrap_or(1.0);
+        let ft_biases_q = quantize_bias_i32(&self.ft_biases, 1.0, &[s_w0]);
+
+        let transformer =
+            ClassicFeatureTransformerInt::new(ft_weights_q, ft_biases_q, self.acc_dim);
+
+        let (h1_weights_q, h1_scales) =
+            quantize_symmetric_i8(&self.hidden1_weights, true, self.h1_dim);
+        let s_in_1 = s_w0 / (1 << CLASSIC_FT_SHIFT) as f32;
+        let hidden1_biases_q = quantize_bias_i32(&self.hidden1_biases, s_in_1, &h1_scales);
+
+        let (h2_weights_q, h2_scales) =
+            quantize_symmetric_i8(&self.hidden2_weights, true, self.h2_dim);
+        let s_in_2 = 1.0f32;
+        let hidden2_biases_q = quantize_bias_i32(&self.hidden2_biases, s_in_2, &h2_scales);
+
+        let (out_weights_q, out_scales) = quantize_symmetric_i8(&self.output_weights, true, 1);
+        let s_in_3 = 1.0f32;
+        let output_bias_q = quantize_bias_i32(&[self.output_bias], s_in_3, &out_scales)
+            .into_iter()
+            .next()
+            .unwrap_or(0);
+
+        let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+            hidden1_weights: h1_weights_q,
+            hidden1_biases: hidden1_biases_q,
+            hidden2_weights: h2_weights_q,
+            hidden2_biases: hidden2_biases_q,
+            output_weights: out_weights_q,
+            output_bias: output_bias_q,
+            acc_dim: self.acc_dim,
+            h1_dim: self.h1_dim,
+            h2_dim: self.h2_dim,
+        });
+
+        let scales = ClassicQuantizationScales {
+            s_w0,
+            s_w1: h1_scales.clone(),
+            s_w2: h2_scales.clone(),
+            s_w3: out_scales.clone(),
+            s_in_1,
+            s_in_2,
+            s_in_3,
+        };
+
+        Ok((ClassicIntNetworkBundle::new(transformer, network), scales))
+    }
+
     pub fn accumulate_ft(&mut self, base: usize, values: &[f32]) {
+        debug_assert_eq!(values.len(), self.acc_dim);
         for (dst, &src) in self.ft_weights[base..base + self.acc_dim].iter_mut().zip(values.iter())
         {
             *dst += src;
@@ -543,6 +606,7 @@ impl ClassicFloatNetwork {
     }
 
     pub fn accumulate_ft_bias(&mut self, delta: &[f32]) {
+        debug_assert_eq!(delta.len(), self.acc_dim);
         for (dst, &src) in self.ft_biases.iter_mut().zip(delta.iter()) {
             *dst += src;
         }
@@ -602,6 +666,7 @@ impl ClassicFloatNetwork {
     }
 
     pub fn quantize_round(&self) -> Result<ClassicIntNetworkBundle, String> {
+        // Fallback: スケールを持たない単純丸め。実運用では quantize_symmetric() を使用すること。
         self.validate()?;
 
         let ft_weights = self
@@ -657,14 +722,91 @@ pub struct QuantizationParams {
     pub zero_point: i32,
 }
 
+#[derive(Clone, Debug)]
+pub struct ClassicQuantizationScales {
+    pub s_w0: f32,
+    pub s_w1: Vec<f32>,
+    pub s_w2: Vec<f32>,
+    pub s_w3: Vec<f32>,
+    pub s_in_1: f32,
+    pub s_in_2: f32,
+    pub s_in_3: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_network() -> ClassicFloatNetwork {
+        ClassicFloatNetwork {
+            ft_weights: vec![0.5, -0.5, 0.25, -0.25],
+            ft_biases: vec![0.1, -0.2],
+            hidden1_weights: vec![0.05, -0.07, 0.02, 0.03, -0.04, 0.01, 0.06, -0.02],
+            hidden1_biases: vec![0.01, -0.015],
+            hidden2_weights: vec![0.03, -0.02, 0.07, -0.05],
+            hidden2_biases: vec![0.02, -0.03],
+            output_weights: vec![0.04, -0.06],
+            output_bias: 0.005,
+            acc_dim: 2,
+            input_dim: 2,
+            h1_dim: 2,
+            h2_dim: 2,
+        }
+    }
+
+    #[test]
+    fn test_quantize_symmetric_bias_scales() {
+        let net = sample_network();
+        let (bundle, scales) = net.quantize_symmetric().expect("quantize symmetric");
+
+        assert_eq!(bundle.transformer.acc_dim, 2);
+        assert!((scales.s_in_1 - scales.s_w0 / (1 << CLASSIC_FT_SHIFT) as f32).abs() < 1e-6);
+        assert_eq!(scales.s_in_2, 1.0);
+        assert_eq!(scales.s_in_3, 1.0);
+        assert_eq!(scales.s_w3.len(), 1);
+
+        let ft_bias_expected: Vec<_> =
+            net.ft_biases.iter().map(|&b| round_away_from_zero(b / scales.s_w0)).collect();
+        assert_eq!(bundle.transformer.biases, ft_bias_expected);
+
+        for (idx, &bias) in net.hidden1_biases.iter().enumerate() {
+            let denom = scales.s_in_1 * scales.s_w1[idx];
+            let expected = round_away_from_zero(bias / denom);
+            assert_eq!(bundle.network.hidden1_biases[idx], expected);
+        }
+
+        for (idx, &bias) in net.hidden2_biases.iter().enumerate() {
+            let denom = scales.s_in_2 * scales.s_w2[idx];
+            let expected = round_away_from_zero(bias / denom);
+            assert_eq!(bundle.network.hidden2_biases[idx], expected);
+        }
+
+        let denom_out = scales.s_in_3 * scales.s_w3[0];
+        let expected_out = round_away_from_zero(net.output_bias / denom_out);
+        assert_eq!(bundle.network.output_bias, expected_out);
+    }
+}
+
 #[allow(dead_code)]
 impl QuantizationParams {
     pub fn from_weights(weights: &[f32]) -> Self {
+        if weights.is_empty() {
+            return Self {
+                scale: 1.0,
+                zero_point: 0,
+            };
+        }
         let min_val = weights.iter().fold(f32::INFINITY, |a, &b| a.min(b));
         let max_val = weights.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
 
-        let range = (max_val - min_val).max(1e-8);
-        let scale = range / 255.0;
+        if !min_val.is_finite() || !max_val.is_finite() || (max_val - min_val).abs() < 1e-12 {
+            return Self {
+                scale: 1.0,
+                zero_point: 0,
+            };
+        }
+
+        let scale = (max_val - min_val) / 255.0;
         let zero_point =
             (-min_val / scale - 128.0).round().clamp(QUANTIZATION_MIN, QUANTIZATION_MAX) as i32;
 
