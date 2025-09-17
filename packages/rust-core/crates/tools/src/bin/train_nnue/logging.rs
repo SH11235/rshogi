@@ -37,6 +37,17 @@ impl StructuredLogger {
             }
         }
     }
+
+    /// 明示的に内部バッファを flush する。stdout モードの場合は何もしない。
+    #[cfg(test)]
+    pub fn flush(&self) -> std::io::Result<()> {
+        if let Some(ref file) = self.file {
+            let mut w = file.lock().unwrap();
+            std::io::Write::flush(&mut *w)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// ゼロ重みのバッチをエポック毎にダンプするデバッグヘルパ。

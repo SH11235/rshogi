@@ -4,6 +4,7 @@
 
 pub(crate) mod classic;
 pub(crate) mod dataset;
+pub(crate) mod distill;
 pub(crate) mod export;
 pub(crate) mod logging;
 pub(crate) mod model;
@@ -16,6 +17,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
+use clap::parser::ValueSource;
 use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
@@ -26,6 +28,7 @@ use tools::common::weighting as wcfg;
 
 use classic::ClassicIntNetworkBundle;
 use dataset::{load_samples, load_samples_from_cache};
+use distill::distill_classic_after_training;
 use export::{finalize_export, save_network};
 use logging::StructuredLogger;
 use params::{DEFAULT_ACC_DIM, DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES};
@@ -302,10 +305,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quant_h1 = *app.get_one::<QuantScheme>("quant-h1").unwrap_or(&QuantScheme::PerChannel);
     let quant_h2 = *app.get_one::<QuantScheme>("quant-h2").unwrap_or(&QuantScheme::PerChannel);
     let quant_out = *app.get_one::<QuantScheme>("quant-out").unwrap_or(&QuantScheme::PerChannel);
+    let label_type_value = app.get_one::<String>("label").unwrap().to_string();
     let distill_teacher = app.get_one::<String>("distill-from-single").map(PathBuf::from);
-    let distill_loss = *app.get_one::<DistillLossKind>("kd-loss").unwrap_or(&DistillLossKind::Mse);
-    let distill_temperature = *app.get_one::<f32>("kd-temperature").unwrap();
-    let distill_alpha = *app.get_one::<f32>("kd-alpha").unwrap();
+    let kd_loss_source = app.value_source("kd-loss");
+    let kd_temp_source = app.value_source("kd-temperature");
+    let kd_alpha_source = app.value_source("kd-alpha");
+
+    let mut distill_loss =
+        *app.get_one::<DistillLossKind>("kd-loss").unwrap_or(&DistillLossKind::Mse);
+    let mut distill_temperature = *app.get_one::<f32>("kd-temperature").unwrap();
+    let mut distill_alpha = *app.get_one::<f32>("kd-alpha").unwrap();
+
+    if arch == ArchKind::Classic && export_format == ExportFormat::ClassicV1 {
+        if distill_teacher.is_none() {
+            return Err("Classic export requires --distill-from-single".into());
+        }
+        if kd_loss_source == Some(ValueSource::DefaultValue) {
+            distill_loss = DistillLossKind::Mse;
+        }
+        if kd_temp_source == Some(ValueSource::DefaultValue) && label_type_value == "wdl" {
+            distill_temperature = 2.0;
+        }
+        if kd_alpha_source == Some(ValueSource::DefaultValue) {
+            distill_alpha = 1.0;
+        }
+    }
 
     let config = Config {
         epochs: app.get_one::<String>("epochs").unwrap().parse()?,
@@ -313,7 +337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         learning_rate: app.get_one::<String>("lr").unwrap().parse()?,
         optimizer: app.get_one::<String>("opt").unwrap().to_string(),
         l2_reg: app.get_one::<String>("l2").unwrap().parse()?,
-        label_type: app.get_one::<String>("label").unwrap().to_string(),
+        label_type: label_type_value.clone(),
         scale: *app.get_one::<f32>("scale").unwrap(),
         cp_clip: *app.get_one::<i32>("cp-clip").unwrap(),
         accumulator_dim: app.get_one::<String>("acc-dim").unwrap().parse()?,
@@ -347,7 +371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant_out,
     };
     let distill_options = DistillOptions {
-        teacher_path: distill_teacher,
+        teacher_path: distill_teacher.clone(),
         loss: distill_loss,
         temperature: distill_temperature,
         alpha: distill_alpha,
@@ -716,7 +740,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if is_cache {
             train_model_with_loader(
                 &mut network,
-                train_samples,
+                train_samples.clone(),
                 &validation_samples,
                 &config,
                 &mut rng,
@@ -731,6 +755,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut rng,
                 &mut ctx,
             )?;
+        }
+
+        if arch == ArchKind::Classic && export_format == ExportFormat::ClassicV1 {
+            if train_samples.is_empty() {
+                if human_to_stderr {
+                    eprintln!(
+                        "Classic distillation skipped: training samples not loaded in-memory (stream-cache mode)."
+                    );
+                } else {
+                    println!(
+                        "Classic distillation skipped: training samples not loaded in-memory (stream-cache mode)."
+                    );
+                }
+            } else if let Some(path) = &distill_options.teacher_path {
+                match Network::load(path) {
+                    Ok(teacher) => match distill_classic_after_training(
+                        &teacher,
+                        &train_samples,
+                        &config,
+                        &distill_options,
+                        ctx.structured.as_ref(),
+                    ) {
+                        Ok((bundle, _scales)) => {
+                            *ctx.classic_bundle = Some(bundle);
+                        }
+                        Err(e) => {
+                            if human_to_stderr {
+                                eprintln!(
+                                    "Classic distillation failed (falling back to zero bundle): {}",
+                                    e
+                                );
+                            } else {
+                                println!(
+                                    "Classic distillation failed (falling back to zero bundle): {}",
+                                    e
+                                );
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        if human_to_stderr {
+                            eprintln!(
+                                "Failed to load teacher network for classic distillation: {}",
+                                e
+                            );
+                        } else {
+                            println!(
+                                "Failed to load teacher network for classic distillation: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            } else if human_to_stderr {
+                eprintln!("Classic distillation skipped: --distill-from-single was not provided.");
+            } else {
+                println!("Classic distillation skipped: --distill-from-single was not provided.");
+            }
         }
     }
 

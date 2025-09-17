@@ -32,3 +32,4 @@ pub const I16_QMAX: i32 = 32767;
 pub const CLASSIC_ACC_DIM: usize = 256;
 pub const CLASSIC_H1_DIM: usize = 32;
 pub const CLASSIC_H2_DIM: usize = 32;
+pub const CLASSIC_FT_SHIFT: i32 = 6;

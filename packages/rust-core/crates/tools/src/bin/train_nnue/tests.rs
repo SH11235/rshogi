@@ -1,13 +1,18 @@
 use super::{classic, dataset, export, logging, model, params, training, types};
 use classic::*;
 use dataset::*;
+use engine_core::{nnue::features::FE_END, shogi::SHOGI_BOARD_SIZE};
 use export::*;
 use logging::*;
 use model::*;
 use params::*;
-use std::io::{Seek, SeekFrom, Write};
+use rand::SeedableRng;
+use std::{
+    fs::File,
+    io::{Seek, SeekFrom, Write},
+};
 use tempfile::tempdir;
-use tools::common::weighting as wcfg;
+use tools::{common::weighting as wcfg, nnfc_v1::FEATURE_SET_ID_HALF};
 use training::*;
 use types::*;
 
@@ -1105,10 +1110,7 @@ fn structured_training_config_present_in_inmem_async_loader() {
 
     // 構造化ログのバッファを明示的にフラッシュ
     if let Some(ref lg) = ctx.structured {
-        if let Some(ref f) = lg.file {
-            use std::io::Write as _;
-            f.lock().unwrap().flush().unwrap();
-        }
+        lg.flush().unwrap();
     }
 
     // JSONLを読んで、phase=val のレコードに training_config があることを確認
