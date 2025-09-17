@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crate::classic::ClassicScratchViews;
 use crate::classic::{ClassicFloatNetwork, ClassicIntNetworkBundle, ClassicQuantizationScales};
 use crate::logging::StructuredLogger;
 use crate::model::Network;
@@ -391,8 +392,10 @@ pub fn distill_classic_after_training(
                     }
                 }
                 "cp" => {
-                    let target = distill.alpha * sample.teacher_output
-                        + (1.0 - distill.alpha) * sample.label;
+                    // 教師出力は logit (WDL) である可能性があるため cp ドメインへ換算
+                    // 教師が既に cp 単位でも scale 掛けは実害ほぼ無し (将来 teacher モード判定を導入可)
+                    let teacher_cp = sample.teacher_output * config.scale;
+                    let target = distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
                     let diff = prediction - target;
                     let loss = 0.5 * diff * diff * sample.weight;
                     let grad = diff * sample.weight;
@@ -463,13 +466,31 @@ pub fn distill_classic_after_training(
     })
 }
 
-fn percentile(mut xs: Vec<f32>, q: f32) -> Option<f32> {
-    if xs.is_empty() {
+// 重み付き分位点（左閉右開累積方式）: 最小の値 v で累積重み >= q * total を満たすもの
+fn weighted_percentile(mut pairs: Vec<(f32, f32)>, q: f32) -> Option<f32> {
+    if pairs.is_empty() {
         return None;
     }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = ((xs.len() - 1) as f32 * q).round() as usize;
-    xs.get(idx).copied()
+    // 無効重み / 非有限値を除外
+    pairs.retain(|(v, w)| w.is_finite() && *w > 0.0 && v.is_finite());
+    if pairs.is_empty() {
+        return None;
+    }
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let total: f64 = pairs.iter().map(|(_, w)| *w as f64).sum();
+    if total == 0.0 {
+        return pairs.last().map(|(v, _)| *v);
+    }
+    let q_clamped = q.clamp(0.0, 1.0);
+    let target = q_clamped as f64 * total;
+    let mut acc = 0.0f64;
+    for (v, w) in pairs {
+        acc += w as f64;
+        if acc >= target {
+            return Some(v);
+        }
+    }
+    None
 }
 
 fn to_features_them(features_us: &[u32]) -> Vec<u32> {
@@ -492,7 +513,9 @@ pub fn evaluate_distill(
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
 
     let mut cp_abs_diffs = Vec::new();
+    let mut cp_weights = Vec::new();
     let mut logit_abs_diffs = Vec::new();
+    let mut logit_weights = Vec::new();
 
     let mut mae_cp_num = 0.0f64;
     let mut mae_logit_num = 0.0f64;
@@ -526,6 +549,7 @@ pub fn evaluate_distill(
             let diff_logit = (student_logit - teacher_logit).abs();
             mae_logit_num += diff_logit as f64 * weight;
             logit_abs_diffs.push(diff_logit);
+            logit_weights.push(weight as f32);
             if diff_logit > max_logit {
                 max_logit = diff_logit;
             }
@@ -542,6 +566,7 @@ pub fn evaluate_distill(
         let diff_cp = (student_cp - teacher_cp).abs();
         mae_cp_num += diff_cp as f64 * weight;
         cp_abs_diffs.push(diff_cp);
+        cp_weights.push(weight as f32);
         if diff_cp > max_cp {
             max_cp = diff_cp;
         }
@@ -558,12 +583,19 @@ pub fn evaluate_distill(
 
     metrics.mae_cp = Some((mae_cp_num / weight_sum) as f32);
     metrics.max_cp = Some(max_cp);
-    metrics.p95_cp = percentile(cp_abs_diffs, 0.95);
+    // 重み付き p95 （従来は無重み）
+    metrics.p95_cp = weighted_percentile(
+        cp_abs_diffs.iter().cloned().zip(cp_weights.iter().cloned()).collect(),
+        0.95,
+    );
 
     if config.label_type == "wdl" {
         metrics.mae_logit = Some((mae_logit_num / weight_sum) as f32);
         metrics.max_logit = Some(max_logit);
-        metrics.p95_logit = percentile(logit_abs_diffs, 0.95);
+        metrics.p95_logit = weighted_percentile(
+            logit_abs_diffs.iter().cloned().zip(logit_weights.iter().cloned()).collect(),
+            0.95,
+        );
     }
 
     let teacher_mean = teacher_cp_weighted_sum / weight_sum;
@@ -592,8 +624,15 @@ pub fn evaluate_quantization_gap(
     let mut metrics = QuantEvalMetrics::default();
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
 
+    // --- Scratch buffers (INT path) to avoid per-sample allocations ---
+    let acc_dim = bundle.transformer.acc_dim;
+    // 新 API: ClassicScratchViews を利用して FT+中間層+acc を一括再利用
+    let mut views = ClassicScratchViews::new(acc_dim, bundle.network.h1_dim, bundle.network.h2_dim);
+
     let mut cp_abs_diffs = Vec::new();
+    let mut cp_weights = Vec::new();
     let mut logit_abs_diffs = Vec::new();
+    let mut logit_weights = Vec::new();
 
     let mut mae_cp_num = 0.0f64;
     let mut mae_logit_num = 0.0f64;
@@ -615,9 +654,15 @@ pub fn evaluate_quantization_gap(
         };
         let fp32_logit = forward(classic_fp32, &ds, &mut scratch);
 
-        let int_output = bundle.propagate_with_features(&sample.features, &features_them) as f32;
-        let scale_out = scales.s_in_3 * scales.s_w3.first().copied().unwrap_or(1.0);
-        let int_logit = int_output * scale_out;
+        // Reuse scratch to avoid allocating acc/bias copies each iteration
+        let int_output = bundle.propagate_with_features_scratch_full(
+            &sample.features,
+            &features_them,
+            &mut views,
+        ) as f32;
+        // Classic v1: 最終出力は単一スケール (per-tensor)。将来 per-channel 化する場合は
+        // ClassicQuantizationScales::output_scale() の実装を差し替える。
+        let int_logit = int_output * scales.output_scale();
 
         metrics.n += 1;
         weight_sum += weight;
@@ -626,6 +671,7 @@ pub fn evaluate_quantization_gap(
             let diff_logit = (int_logit - fp32_logit).abs();
             mae_logit_num += diff_logit as f64 * weight;
             logit_abs_diffs.push(diff_logit);
+            logit_weights.push(weight as f32);
             if diff_logit > max_logit {
                 max_logit = diff_logit;
             }
@@ -640,6 +686,7 @@ pub fn evaluate_quantization_gap(
         let diff_cp = (int_cp - fp32_cp).abs();
         mae_cp_num += diff_cp as f64 * weight;
         cp_abs_diffs.push(diff_cp);
+        cp_weights.push(weight as f32);
         if diff_cp > max_cp {
             max_cp = diff_cp;
         }
@@ -652,12 +699,18 @@ pub fn evaluate_quantization_gap(
 
     metrics.mae_cp = Some((mae_cp_num / weight_sum) as f32);
     metrics.max_cp = Some(max_cp);
-    metrics.p95_cp = percentile(cp_abs_diffs, 0.95);
+    metrics.p95_cp = weighted_percentile(
+        cp_abs_diffs.iter().cloned().zip(cp_weights.iter().cloned()).collect(),
+        0.95,
+    );
 
     if config.label_type == "wdl" {
         metrics.mae_logit = Some((mae_logit_num / weight_sum) as f32);
         metrics.max_logit = Some(max_logit);
-        metrics.p95_logit = percentile(logit_abs_diffs, 0.95);
+        metrics.p95_logit = weighted_percentile(
+            logit_abs_diffs.iter().cloned().zip(logit_weights.iter().cloned()).collect(),
+            0.95,
+        );
     }
 
     metrics

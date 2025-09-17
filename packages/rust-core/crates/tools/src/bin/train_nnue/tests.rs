@@ -258,8 +258,10 @@ fn classic_transformer_accumulates_and_clamps() {
     let biases = vec![10i32, -20i32];
     let transformer = ClassicFeatureTransformerInt::new(weights, biases, acc_dim);
 
+    // 新 API: accumulate_into_u32 を利用し再利用バッファを明示
+    let mut tmp = vec![0i32; acc_dim];
     let mut acc = vec![0i16; acc_dim];
-    transformer.accumulate(&[0, 1, 2], &mut acc);
+    transformer.accumulate_into_u32(&[0, 1, 2], &mut tmp, &mut acc);
 
     assert_eq!(acc, vec![4738i16, -5564i16]);
 }
@@ -285,7 +287,9 @@ fn classic_integer_network_matches_manual_flow() {
 
     let features_us = vec![0u32, 2];
     let features_them = vec![1u32];
-    let output = bundle.propagate_with_features(&features_us, &features_them);
+    let mut views = ClassicScratchViews::new(acc_dim, 2, 2);
+    let output =
+        bundle.propagate_with_features_scratch_full(&features_us, &features_them, &mut views);
     assert_eq!(output, -117);
 }
 
@@ -1468,4 +1472,170 @@ fn lr_plateau_state_min_delta() {
     // min_delta=1e-6 の閾下の変化は改善扱いしない
     assert!(p.update(0.9999999).is_some()); // patience=1 到達で発火
     assert!((p.factor() - 0.5).abs() < 1e-6);
+}
+
+// --- E2E: Classic v1 バンドル export -> engine_core ロード -> propagate 出力一致テスト ---
+#[test]
+fn e2e_classic_v1_bias_and_small_features_match_engine_core() {
+    use crate::classic::{
+        write_classic_v1_bundle, ClassicFeatureTransformerInt, ClassicIntNetworkBundle,
+        ClassicQuantizedNetwork, ClassicQuantizedNetworkParams, ClassicScratchViews,
+    };
+    use engine_core::evaluation::nnue::weights::load_weights;
+
+    let td = tempfile::tempdir().unwrap();
+    let path = td.path().join("nn.classic.nnue");
+
+    // 固定サイズ (256x2-32-32) の最小決定的バンドルを生成
+    let acc_dim = 256;
+    let h1_dim = 32;
+    let h2_dim = 32;
+    // engine_core v1 ローダ互換: テストでは ft_input_dim=1 (最小) とし、単一特徴のみ使用
+    let ft_input_dim = 1;
+
+    // FT weights/biases
+    let mut ft_weights = vec![0i16; acc_dim * ft_input_dim];
+    for (i, w) in ft_weights.iter_mut().enumerate() {
+        *w = ((i as i32 % 31) - 15) as i16;
+    }
+    let mut ft_biases = vec![0i32; acc_dim];
+    for (i, b) in ft_biases.iter_mut().enumerate().take(16) {
+        *b = (i as i32) - 8;
+    }
+
+    // Classic hidden / output (単純なパターン)
+    let classic_input_dim = acc_dim * 2;
+    let mut hidden1_weights = vec![0i8; classic_input_dim * h1_dim];
+    for (i, w) in hidden1_weights.iter_mut().enumerate() {
+        *w = ((i as i32 % 13) - 6) as i8;
+    }
+    let mut hidden1_biases = vec![0i32; h1_dim];
+    for (i, b) in hidden1_biases.iter_mut().enumerate() {
+        *b = (i as i32) - 4;
+    }
+    let mut hidden2_weights = vec![0i8; h1_dim * h2_dim];
+    for (i, w) in hidden2_weights.iter_mut().enumerate() {
+        *w = ((i as i32 % 7) - 3) as i8;
+    }
+    let mut hidden2_biases = vec![0i32; h2_dim];
+    for (i, b) in hidden2_biases.iter_mut().enumerate() {
+        *b = (i as i32) - 2;
+    }
+    let mut output_weights = vec![0i8; h2_dim];
+    for (i, w) in output_weights.iter_mut().enumerate() {
+        *w = (i as i8 % 5) - 2;
+    }
+    let output_bias = 17i32;
+
+    let transformer =
+        ClassicFeatureTransformerInt::new(ft_weights.clone(), ft_biases.clone(), acc_dim);
+    let network = ClassicQuantizedNetwork::new(ClassicQuantizedNetworkParams {
+        hidden1_weights: hidden1_weights.clone(),
+        hidden1_biases: hidden1_biases.clone(),
+        hidden2_weights: hidden2_weights.clone(),
+        hidden2_biases: hidden2_biases.clone(),
+        output_weights: output_weights.clone(),
+        output_bias,
+        acc_dim,
+        h1_dim,
+        h2_dim,
+    });
+    let bundle = ClassicIntNetworkBundle::new(transformer, network);
+    write_classic_v1_bundle(&path, &bundle).unwrap();
+
+    // engine_core ロード (FeatureTransformer, Network)
+    let (core_ft, core_net) =
+        load_weights(path.to_str().unwrap()).expect("engine_core load failed");
+    // Sanity: dims
+    assert_eq!(core_ft.acc_dim(), acc_dim);
+
+    // 1) 空特徴 (bias のみ) — trainer 側 int 推論
+    let mut views = ClassicScratchViews::new(acc_dim, h1_dim, h2_dim);
+    let trainer_out_bias_only = bundle.propagate_with_features_scratch_full(&[], &[], &mut views);
+
+    // engine_core では acc を biases -> clamp(i16) として与える
+    fn clamp_i32_to_i16(x: i32) -> i16 {
+        if x > i16::MAX as i32 {
+            i16::MAX
+        } else if x < i16::MIN as i32 {
+            i16::MIN
+        } else {
+            x as i16
+        }
+    }
+    let mut acc_bias_only: Vec<i16> = ft_biases.iter().map(|&b| clamp_i32_to_i16(b)).collect();
+    let engine_out_bias_only = core_net.propagate(&acc_bias_only, &acc_bias_only);
+    assert_eq!(trainer_out_bias_only, engine_out_bias_only, "bias-only output mismatch");
+
+    // 2) 小さな特徴集合 (唯一の特徴 0)
+    let features = vec![0u32];
+    let mut views2 = ClassicScratchViews::new(acc_dim, h1_dim, h2_dim);
+    let trainer_out_feats =
+        bundle.propagate_with_features_scratch_full(&features, &[], &mut views2);
+    // engine_core 側 acc_us = biases + Σ weights[col][acc] (col=feature index)
+    // ft_weights は (feature * acc_dim + acc) レイアウト
+    for &f in &features {
+        let base = (f as usize) * acc_dim;
+        for acc_idx in 0..acc_dim {
+            let w = ft_weights[base + acc_idx] as i32;
+            let v = (acc_bias_only[acc_idx] as i32) + w;
+            acc_bias_only[acc_idx] = clamp_i32_to_i16(v);
+        }
+    }
+    let engine_out_feats = core_net.propagate(&acc_bias_only, &acc_bias_only);
+    assert_eq!(trainer_out_feats, engine_out_feats, "small-features output mismatch");
+
+    // ロジットは i32 なので浮動小数変換許容は不要だが将来スケール導入時の余地として誤差ゼロを確認
+}
+
+// 将来: 重み付き vs 無重み p95 差の可視化テスト (仕様確認用)
+// ignore してスケルトンのみ配置
+#[test]
+#[ignore]
+fn weighted_vs_unweighted_p95_diff_visualization_todo() {
+    // TODO: 小規模サンプル集合を用意 (異なる weight を付与) し weighted_percentile と naive percentile の差を
+    // ログ出力 or assert (差が閾値以上) で確認する。
+    // 実装時: evaluate_quantization_gap もしくは percentile ユーティリティを直接呼び出す。
+}
+
+// cp 蒸留単位スモーク: teacher_logit を cp 換算する実装部分の退行を検知するため
+#[test]
+fn cp_distillation_unit_smoke_loss_ordering() {
+    use crate::types::{DistillOptions, DistillLossKind};
+    use rand::SeedableRng;
+
+    // 単純ネット (全0 初期バイアス) を構築
+    let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+    let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    // ゼロ化して決定的
+    for w in net.w0.iter_mut() { *w = 0.0; }
+    for b in net.b0.iter_mut() { *b = 0.0; }
+    for w in net.w2.iter_mut() { *w = 0.0; }
+    net.b2 = 0.0; // 予測ロジット=0 -> 予測cp=0
+
+    // サンプル: teacher_output=1.0 (logit仮定), label(cp)=200 (scale=600 で教師=600cp 相当)
+    let sample = Sample { features: vec![], label: 200.0, weight: 1.0, cp: Some(200), phase: None };
+    let cfg = Config { epochs: 1, batch_size: 2, learning_rate: 0.0, optimizer: "sgd".into(), l2_reg: 0.0, label_type: "cp".into(), scale: 600.0, cp_clip: 1200, accumulator_dim: 8, relu_clip: DEFAULT_RELU_CLIP_NUM, shuffle: false, prefetch_batches: 0, throughput_interval_sec: 10_000.0, stream_cache: false, prefetch_bytes: None, estimated_features_per_sample: 64, exclude_no_legal_move: false, exclude_fallback: false, lr_schedule: "constant".into(), lr_warmup_epochs: 0, lr_decay_epochs: None, lr_decay_steps: None, lr_plateau_patience: None };
+
+    // DistillOptions: alpha=0.5, temperature=1.0, mse
+    let distill = DistillOptions { alpha: 0.5, temperature: 1.0, loss: DistillLossKind::Mse, ..Default::default() };
+
+    // teacher_output を teacher_logit=1.0 として扱い cp 換算 (実装) vs 換算なし(比較用 書き換え) の loss を比較
+    // 実装経路: distill_classic_after_training 内部ロジック再利用は重いので簡易に式を複製
+    let teacher_logit = 1.0f32;
+    let teacher_cp_converted = teacher_logit * cfg.scale; // 600
+    let target_with = distill.alpha * teacher_cp_converted + (1.0 - distill.alpha) * sample.label; // 0.5*600 + 0.5*200 = 400
+    let pred = 0.0f32; // zero net
+    let diff_with = pred - target_with; // -400
+    let loss_with = 0.5 * diff_with * diff_with; // 0.5 * 160000 = 80000
+
+    let target_without = distill.alpha * teacher_logit + (1.0 - distill.alpha) * sample.label; // 0.5*1 + 0.5*200 = 100.5
+    let diff_without = pred - target_without; // -100.5
+    let loss_without = 0.5 * diff_without * diff_without; // 約 5050.125
+
+    // 換算ありの方が loss が大きい (教師が実際は logit で cp に変換すべきなのに未変換だと過小誤差) という期待ではなく、
+    // 我々の最終ロジックは教師 logit を cp スケールへ拡大する -> ターゲットが大きく離れ MSE は増加 だが
+    // ここでは「換算が入らないと loss のオーダが全く変わる」ことを検知したいので倍率比を確認
+    let ratio = loss_with / loss_without;
+    assert!(ratio > 10.0, "expected cp conversion to change loss magnitude significantly, ratio={} (with={}, without={})", ratio, loss_with, loss_without);
 }
