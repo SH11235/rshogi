@@ -192,7 +192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("kd-loss-scale-temp2")
                 .long("kd-loss-scale-temp2")
-                .help("Scale distillation loss/gradient by (temperature)^2")
+                .help("Scale distillation teacher loss/gradient by (temperature)^2 (WDL distillation only)")
                 .action(ArgAction::SetTrue),
         )
         .arg(arg!(--shuffle "Shuffle training data"))
@@ -437,14 +437,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-    let distill_options = DistillOptions {
+    let mut distill_options = DistillOptions {
         teacher_path: distill_teacher.clone(),
         loss: distill_loss,
         temperature: distill_temperature,
         alpha: distill_alpha,
         scale_temp2: kd_scale_temp2,
+        seed: None,
         teacher_domain,
     };
+
+    let seed_u64_opt: Option<u64> =
+        app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
+    let distill_seed = seed_u64_opt.map(|s| s ^ 0xC1A5_51C0_5EED_u64);
+    distill_options.seed = distill_seed;
 
     if config.scale <= 0.0 {
         return Err("Invalid --scale: must be > 0".into());
@@ -699,8 +705,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Initialize RNG with seed if provided
-    let seed_u64_opt: Option<u64> =
-        app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
     let mut rng: StdRng = if let Some(seed) = seed_u64_opt {
         if human_to_stderr {
             eprintln!("Using random seed (u64): {}", seed);

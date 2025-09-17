@@ -11,6 +11,7 @@ use crate::types::{
 use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 const CLASSIC_RELU_CLIP: f32 = 127.0;
 const MAX_DISTILL_SAMPLES: usize = 50_000;
@@ -114,11 +115,16 @@ fn stable_logit(p: f32) -> f32 {
 }
 
 #[inline]
-fn maybe_scale_by_temperature(loss: &mut f64, grad: &mut f32, temperature: f32, enabled: bool) {
+fn scale_teacher_by_temperature(
+    loss_teacher: &mut f32,
+    grad_teacher: &mut f32,
+    temperature: f32,
+    enabled: bool,
+) {
     if enabled {
         let scale = temperature * temperature;
-        *loss *= scale as f64;
-        *grad *= scale;
+        *loss_teacher *= scale;
+        *grad_teacher *= scale;
     }
 }
 
@@ -364,7 +370,13 @@ pub fn distill_classic_after_training(
         return Err("No samples available for classic distillation".into());
     }
 
-    let mut rng = rand::rng();
+    let mut rng: StdRng = match distill.seed {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => {
+            let fallback: u64 = rand::rng().random();
+            StdRng::seed_from_u64(fallback)
+        }
+    };
     let mut classic = ClassicFloatNetwork::he_uniform_with_dims(
         SHOGI_BOARD_SIZE * FE_END,
         CLASSIC_ACC_DIM,
@@ -377,6 +389,8 @@ pub fn distill_classic_after_training(
     // 出力バイアスを教師ターゲットの平均で初期化して初期収束を安定化させる。
     let mut bias_num = 0.0f64;
     let mut bias_den = 0.0f64;
+    let mut bias_sq = 0.0f64;
+    let mut bias_samples = 0usize;
     for sample in &prepared {
         let weight = sample.weight as f64;
         if weight <= 0.0 {
@@ -407,16 +421,36 @@ pub fn distill_classic_after_training(
         } as f64;
         bias_num += target * weight;
         bias_den += weight;
+        bias_sq += target * target * weight;
+        bias_samples += 1;
     }
     if bias_den > 0.0 {
         classic.output_bias = (bias_num / bias_den) as f32;
     }
 
     if let Some(lg) = classic_cfg.structured {
+        let target_mean = if bias_den > 0.0 {
+            bias_num / bias_den
+        } else {
+            0.0
+        };
+        let variance = if bias_den > 0.0 {
+            (bias_sq / bias_den) - target_mean * target_mean
+        } else {
+            0.0
+        };
+        let target_std = variance.max(0.0).sqrt();
         let rec = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "phase": "distill_classic_init",
             "output_bias_init": classic.output_bias,
+            "target_mean": target_mean,
+            "target_std": target_std,
+            "alpha": distill.alpha,
+            "temperature": distill.temperature,
+            "label_type": config.label_type,
+            "teacher_domain": match distill.teacher_domain { TeacherValueDomain::Cp => "cp", TeacherValueDomain::WdlLogit => "wdl-logit" },
+            "samples": bias_samples,
         });
         lg.write_json(&rec);
     }
@@ -430,7 +464,7 @@ pub fn distill_classic_after_training(
         let mut epoch_weight = 0.0f64;
         for sample in &prepared {
             let prediction = forward(&classic, sample, &mut scratch);
-            let (mut loss_contrib, mut grad_output) = match config.label_type.as_str() {
+            let (loss_contrib, grad_output) = match config.label_type.as_str() {
                 "wdl" => {
                     // Teacher may be cp or wdl-logit; normalize to logit space before temperature
                     let teacher_logit = match distill.teacher_domain {
@@ -439,31 +473,71 @@ pub fn distill_classic_after_training(
                     };
                     let teacher_prob = sigmoid(teacher_logit / temperature);
                     let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
-                    let target_prob = (distill.alpha * teacher_prob
-                        + (1.0 - distill.alpha) * label_prob)
-                        .clamp(PROB_EPS, 1.0 - PROB_EPS);
+                    let alpha = distill.alpha;
+                    let beta = 1.0 - alpha;
+                    let weight = sample.weight;
                     match loss_kind {
                         DistillLossKind::Mse => {
-                            let target_logit = stable_logit(target_prob);
-                            let diff = prediction - target_logit;
-                            let loss = 0.5 * diff * diff * sample.weight;
-                            let grad = diff * sample.weight;
-                            (loss as f64, grad)
+                            let teacher_target = stable_logit(teacher_prob);
+                            let label_target = stable_logit(label_prob);
+                            let diff_teacher = prediction - teacher_target;
+                            let diff_label = prediction - label_target;
+                            let mut grad_teacher = diff_teacher * weight;
+                            let grad_label = diff_label * weight;
+                            let mut loss_teacher = 0.5 * diff_teacher * diff_teacher * weight;
+                            let loss_label = 0.5 * diff_label * diff_label * weight;
+                            scale_teacher_by_temperature(
+                                &mut loss_teacher,
+                                &mut grad_teacher,
+                                temperature,
+                                distill.scale_temp2,
+                            );
+                            let loss = (alpha * loss_teacher + beta * loss_label) as f64;
+                            let grad = alpha * grad_teacher + beta * grad_label;
+                            (loss, grad)
                         }
                         DistillLossKind::Bce => {
-                            let (loss, grad) = bce_with_logits_soft(prediction, target_prob);
-                            ((loss * sample.weight) as f64, grad * sample.weight)
+                            let (loss_teacher_raw, grad_teacher_raw) =
+                                bce_with_logits_soft(prediction, teacher_prob);
+                            let (loss_label_raw, grad_label_raw) =
+                                bce_with_logits_soft(prediction, label_prob);
+                            let mut loss_teacher = loss_teacher_raw * weight;
+                            let mut grad_teacher = grad_teacher_raw * weight;
+                            let loss_label = loss_label_raw * weight;
+                            let grad_label = grad_label_raw * weight;
+                            scale_teacher_by_temperature(
+                                &mut loss_teacher,
+                                &mut grad_teacher,
+                                temperature,
+                                distill.scale_temp2,
+                            );
+                            let loss = (alpha * loss_teacher + beta * loss_label) as f64;
+                            let grad = alpha * grad_teacher + beta * grad_label;
+                            (loss, grad)
                         }
                         DistillLossKind::Kl => {
                             // KL(p_t || p_s)
-                            let p_t = target_prob;
+                            let p_t = teacher_prob;
                             let p_s = sigmoid(prediction);
                             let p_t_c = p_t.clamp(PROB_EPS, 1.0 - PROB_EPS);
                             let p_s_c = p_s.clamp(PROB_EPS, 1.0 - PROB_EPS);
-                            let kl = p_t_c * (p_t_c / p_s_c).ln()
-                                + (1.0 - p_t_c) * ((1.0 - p_t_c) / (1.0 - p_s_c)).ln();
-                            let grad = (p_s - p_t_c) * sample.weight; // d/dz KL
-                            ((kl * sample.weight) as f64, grad)
+                            let mut loss_teacher = (p_t_c * (p_t_c / p_s_c).ln()
+                                + (1.0 - p_t_c) * ((1.0 - p_t_c) / (1.0 - p_s_c)).ln())
+                                * weight;
+                            let mut grad_teacher = (p_s - p_t_c) * weight; // d/dz KL
+                            scale_teacher_by_temperature(
+                                &mut loss_teacher,
+                                &mut grad_teacher,
+                                temperature,
+                                distill.scale_temp2,
+                            );
+                            let (loss_label_raw, grad_label_raw) =
+                                bce_with_logits_soft(prediction, label_prob);
+                            let loss_label = loss_label_raw * weight;
+                            let grad_label = grad_label_raw * weight;
+                            let loss = (alpha * loss_teacher + beta * loss_label) as f64;
+                            let grad = alpha * grad_teacher + beta * grad_label;
+                            (loss, grad)
                         }
                     }
                 }
@@ -483,13 +557,6 @@ pub fn distill_classic_after_training(
                 }
                 _ => unreachable!(),
             };
-
-            maybe_scale_by_temperature(
-                &mut loss_contrib,
-                &mut grad_output,
-                temperature,
-                distill.scale_temp2,
-            );
 
             epoch_loss += loss_contrib;
             epoch_weight += sample.weight as f64;
@@ -907,16 +974,16 @@ mod distill_training_tests {
     }
 
     #[test]
-    fn maybe_scale_by_temperature_applies_when_enabled() {
-        let mut loss = 0.5f64;
+    fn scale_teacher_by_temperature_applies_when_enabled() {
+        let mut loss = 0.5f32;
         let mut grad = 0.25f32;
-        maybe_scale_by_temperature(&mut loss, &mut grad, 2.0, true);
+        scale_teacher_by_temperature(&mut loss, &mut grad, 2.0, true);
         assert!((loss - 2.0).abs() < 1e-6);
         assert!((grad - 1.0).abs() < 1e-6);
 
-        let mut loss_no = 0.5f64;
+        let mut loss_no = 0.5f32;
         let mut grad_no = 0.25f32;
-        maybe_scale_by_temperature(&mut loss_no, &mut grad_no, 2.0, false);
+        scale_teacher_by_temperature(&mut loss_no, &mut grad_no, 2.0, false);
         assert!((loss_no - 0.5).abs() < 1e-6);
         assert!((grad_no - 0.25).abs() < 1e-6);
     }

@@ -701,13 +701,13 @@ impl ClassicFloatNetwork {
         acc_dim: usize,
         h1_dim: usize,
         h2_dim: usize,
-        estimated_active_features: usize,
+        fan_in_ft_estimate: usize,
         rng: &mut impl Rng,
     ) -> Self {
         let mut net = Self::zeros_with_dims(input_dim, acc_dim, h1_dim, h2_dim);
 
         // Feature transformer: fan_in ≒ サンプル当たりの活性特徴数（片側）。
-        let fan_in_ft = estimated_active_features.max(1) as f32;
+        let fan_in_ft = fan_in_ft_estimate.max(1) as f32;
         let a_ft = (6.0 / fan_in_ft).sqrt();
         for row in net.ft_weights.chunks_mut(acc_dim.max(1)) {
             for w in row {
