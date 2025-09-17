@@ -304,6 +304,53 @@ cargo build -p tools --features plots --release
 - `val_ece` は **CP 等幅ビンに基づく ECE（cp-binned ECE）** です（確率ビンECEではありません）。
 
 
+## Classic v1 蒸留・量子化
+
+Classic v1 形式（`nn.classic.nnue`）への書き出しは、Single アーキで学習したネットを教師として
+蒸留→量子化する二段ステップで行います。
+
+### CLI の使い方
+
+```bash
+cargo run --release -p tools --bin train_nnue -- \
+  --input runs/out.cache --arch classic --export-format classic-v1 \
+  --distill-from-single runs/single_best.fp32.bin \
+  --teacher-domain wdl-logit \
+  --kd-loss bce --kd-temperature 2.0 --kd-alpha 0.8 \
+  --out runs/classic_export
+```
+
+- `--arch classic --export-format classic-v1` を同時指定すると Classic 蒸留が有効になります。
+- 教師ネット（Single FP32）のパスは `--distill-from-single` で必須指定です。
+- `--teacher-domain cp|wdl-logit` で教師出力のスケール/意味空間を指定します。WDL ラベル + logit 教師の場合は `wdl-logit` を推奨。cp 評価を出す旧教師の場合は `cp` を指定してください（未指定時の自動推定: `label=cp` → `cp`, `label=wdl` → `wdl-logit`）。
+- `--quant-ft` と `--quant-out` は `per-tensor` 固定です。Hidden 層 (`--quant-h1/-h2`) は 
+  `per-tensor` / `per-channel` を切り替え可能です（既定: `per-channel`）。
+
+### 量子化と整数パイプライン
+
+- Feature Transformer (FT): i16 対称量子化 (per-tensor)。スケール `s_w0 = maxabs / 32767`。
+- FT 出力は右シフト `CLASSIC_FT_SHIFT = 6`（除算 64）で i8 に落とし、`[-127,127]` へ飽和します。
+- Hidden1 / Hidden2: 既定は per-channel i8 対称量子化（出力チャネル毎に maxabs を取得）。
+- Output: 既定は per-tensor i8。Classic v1では per-channel 量子化はサポートされません。
+- バイアスは `round_away_from_zero(b / (s_in * s_w))` で i32 化し、整数推論側と同一スケールになります。
+- 書き出されたバイナリのレイアウトは
+  `NNUE | version=1 | arch=HALFKP_256X2_32_32 | payload_len` のヘッダに続き、
+  FT(i16)→FT bias(i32)→Hidden1(i8/i32)→Hidden2(i8/i32)→Output(i8/i32) 順で並びます。
+
+### 蒸留ロスとハイパパラメータ
+
+- `--kd-loss` は `mse` / `bce` / `kl` を選択可能（WDL）。教師ロジットは `--kd-temperature` で温度調整し、
+  soft target を生成します。`--kd-alpha` は教師とデータラベルの線形合成比率です。
+- CP ラベル時は `--kd-loss=mse` のみ有効です（`bce`/`kl` 指定時はエラー）。
+- 損失値やスケール情報は構造化ログ (`phase: "distill_classic" / "classic_quantize"`) に JSON で出力します。
+- 教師値ドメインと変換ロジックの詳細は `docs/distillation/teacher_value_domain.md` を参照してください。
+
+### 注意事項
+
+- Classic 蒸留は in-memory サンプルが必要です。`--stream-cache` でのストリーミング時はスキップされます。
+- `--quant-ft=per-channel` は無効（エラー）です。FT の行列レイアウト上、per-tensor のみサポートします。
+
+
 ## バイナリ一覧（主要）
 
 - データ生成/学習/解析
