@@ -198,7 +198,7 @@ impl Agg {
             .unwrap_or("");
         // Case-insensitive checks for Exact and bound synonyms
         let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
-        let norm = |s: &str| s.to_ascii_lowercase().replace('_', "");
+        let norm = |s: &str| s.trim().to_ascii_lowercase().replace('_', "");
 
         if is_exact(b1) {
             self.top1_exact += 1;
@@ -529,7 +529,8 @@ fn median_f64(sorted: &[f64]) -> f64 {
 
 fn csv_escape(s: &str) -> String {
     let needs_quotes = s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r');
-    let mut safe = if matches!(s.chars().next(), Some('=' | '+' | '-' | '@')) {
+    let first_non_ws = s.chars().find(|c| !matches!(c, ' ' | '\t'));
+    let mut safe = if matches!(first_non_ws, Some('=' | '+' | '-' | '@')) {
         let mut prefixed = String::with_capacity(s.len() + 1);
         prefixed.push('\'');
         prefixed.push_str(s);
@@ -684,6 +685,10 @@ struct GateConfig {
     ambiguous_rate_30_max: Option<f64>,
     #[serde(default)]
     ambiguous_rate_20_max: Option<f64>,
+    #[serde(default)]
+    ambiguous_rate_30_covered_max: Option<f64>,
+    #[serde(default)]
+    ambiguous_rate_20_covered_max: Option<f64>,
     // invariants (counts)
     #[serde(default)]
     mpv_lt_expected_max: Option<usize>,
@@ -1213,7 +1218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("gap_distribution: no-data");
                     } else {
                         let v = &agg.gaps_all;
-                        let avg = v.iter().sum::<i64>() as f64 / v.len() as f64;
+                        let avg = mean_i64(v);
                         let min = *v.iter().min().unwrap();
                         let max = *v.iter().max().unwrap();
                         println!(
@@ -1792,6 +1797,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             0.0
         };
+        let amb20_cov = if let Some(s) = gaps_nm_stats {
+            if s.count > 0 {
+                let numerator = match qbackend {
+                    QuantilesBackend::Exact => {
+                        agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count()
+                    }
+                    _ => agg.amb_le20_cnt,
+                };
+                numerator as f64 / s.count as f64
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let amb30_cov = if let Some(s) = gaps_nm_stats {
+            if s.count > 0 {
+                let numerator = match qbackend {
+                    QuantilesBackend::Exact => {
+                        agg.gaps_no_mate.iter().filter(|&&g| g <= 30).count()
+                    }
+                    _ => agg.amb_le30_cnt,
+                };
+                numerator as f64 / s.count as f64
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
         // ambiguous rates (+ Wilson 95% CI)
         let k20 = if matches!(qbackend, QuantilesBackend::Exact) {
             agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count()
@@ -1868,50 +1903,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  seldef: median={} p90={} (delta={})", ss.p50, ss.p90, seldef_delta);
             }
             println!(
-                "  ambiguous: rate20={:.3} [ci95 {:.3}-{:.3}] rate30={:.3} [ci95 {:.3}-{:.3}]",
-                amb20, amb20_ci_low, amb20_ci_high, amb30, amb30_ci_low, amb30_ci_high
-            );
-            // Also print coverage-based ambiguous rates (divide by gap2_no_mate count)
-            let amb20_cov = if let Some(s) = gaps_nm_stats {
-                if s.count > 0 {
-                    if matches!(qbackend, QuantilesBackend::Exact) {
-                        agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count() as f64
-                            / s.count as f64
-                    } else {
-                        agg.amb_le20_cnt as f64 / s.count as f64
-                    }
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-            let amb30_cov = if let Some(s) = gaps_nm_stats {
-                if s.count > 0 {
-                    if matches!(qbackend, QuantilesBackend::Exact) {
-                        agg.gaps_no_mate.iter().filter(|&&g| g <= 30).count() as f64
-                            / s.count as f64
-                    } else {
-                        agg.amb_le30_cnt as f64 / s.count as f64
-                    }
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-            println!(
                 "  ambiguous_covered: rate20={:.3} rate30={:.3} (coverage={:.3})",
                 amb20_cov, amb30_cov, coverage
             );
             println!(
                 "  ambiguous_lines_ge2: rate20={:.3} [ci95 {:.3}-{:.3}] rate30={:.3} [ci95 {:.3}-{:.3}]",
-                amb20,
-                amb20_ci_low,
-                amb20_ci_high,
-                amb30,
-                amb30_ci_low,
-                amb30_ci_high
+                amb20, amb20_ci_low, amb20_ci_high, amb30, amb30_ci_low, amb30_ci_high
             );
             if agg.pv_changed_total > 0 {
                 let rate = agg.pv_changed_true as f64 / agg.pv_changed_total as f64;
@@ -2422,34 +2419,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             // Add ambiguous rates (coverage-based)
-            let amb20_cov = if let Some(s) = gaps_nm_stats {
-                if s.count > 0 {
-                    if matches!(qbackend, QuantilesBackend::Exact) {
-                        agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count() as f64
-                            / s.count as f64
-                    } else {
-                        agg.amb_le20_cnt as f64 / s.count as f64
-                    }
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-            let amb30_cov = if let Some(s) = gaps_nm_stats {
-                if s.count > 0 {
-                    if matches!(qbackend, QuantilesBackend::Exact) {
-                        agg.gaps_no_mate.iter().filter(|&&g| g <= 30).count() as f64
-                            / s.count as f64
-                    } else {
-                        agg.amb_le30_cnt as f64 / s.count as f64
-                    }
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
             obj.insert("ambiguous_rate_20_covered".into(), json!(amb20_cov));
             obj.insert("ambiguous_rate_30_covered".into(), json!(amb30_cov));
 
@@ -2945,11 +2914,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 failed |= !ok;
             }
+            if let Some(th) = g.ambiguous_rate_30_covered_max {
+                let ok = amb30_cov <= th;
+                println!(
+                    "GATE ambiguous_rate_30_covered_max {:.3} <= {:.3}: {}",
+                    amb30_cov,
+                    th,
+                    if ok { "PASS" } else { "FAIL" }
+                );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
+                failed |= !ok;
+            }
             if let Some(th) = g.ambiguous_rate_20_max {
                 let ok = amb20 <= th;
                 println!(
                     "GATE ambiguous_rate_20_max {:.3} <= {:.3}: {}",
                     amb20,
+                    th,
+                    if ok { "PASS" } else { "FAIL" }
+                );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
+                failed |= !ok;
+            }
+            if let Some(th) = g.ambiguous_rate_20_covered_max {
+                let ok = amb20_cov <= th;
+                println!(
+                    "GATE ambiguous_rate_20_covered_max {:.3} <= {:.3}: {}",
+                    amb20_cov,
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
