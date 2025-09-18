@@ -5,7 +5,7 @@ edition = "2021"
 
 # No library, only binaries
 [dependencies]
-engine-core = { path = "../engine-core", features = ["tt_metrics", "hashfull_filter", "nnue_telemetry"] }
+engine-core = { path = "../engine-core", features = ["tt_metrics", "hashfull_filter"] }
 anyhow = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
@@ -37,7 +37,7 @@ plots = ["dep:plotters"]
 # engine-core feature passthroughs for A/B
 fast-fma = ["engine-core/nnue_fast_fma"]
 diff-agg-hash = ["engine-core/diff_agg_hash"]
-nnue_telemetry = []
+nnue_telemetry = ["engine-core/nnue_telemetry"]
 
 [dev-dependencies]
 tempfile = "3.10"
