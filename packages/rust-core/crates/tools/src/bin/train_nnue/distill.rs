@@ -23,13 +23,14 @@ static WARNED_OOR_FWD: AtomicBool = AtomicBool::new(false);
 static WARNED_OOR_BWD: AtomicBool = AtomicBool::new(false);
 
 #[inline]
-fn warn_oor_once(flag: &AtomicBool, ctx: &str, feat: u32, len: usize) {
+fn warn_oor_once(flag: &AtomicBool, ctx: &str, feat: u32, input_dim: usize, acc_dim: usize) {
     if !flag.swap(true, Ordering::Relaxed) {
         log::warn!(
-            "{}: feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed",
+            "{}: feature index {} out of range (input_dim={}, acc_dim={}); subsequent warnings suppressed",
             ctx,
             feat,
-            len
+            input_dim,
+            acc_dim
         );
     }
 }
@@ -157,7 +158,7 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     for &feat in &sample.features_us {
         let idx = feat as usize * net.acc_dim;
         if idx + net.acc_dim > net.ft_weights.len() {
-            warn_oor_once(&WARNED_OOR_FWD, "forward(us)", feat, net.ft_weights.len());
+            warn_oor_once(&WARNED_OOR_FWD, "forward(us)", feat, net.input_dim, net.acc_dim);
             continue;
         }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
@@ -170,7 +171,7 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     for &feat in &sample.features_them {
         let idx = feat as usize * net.acc_dim;
         if idx + net.acc_dim > net.ft_weights.len() {
-            warn_oor_once(&WARNED_OOR_FWD, "forward(them)", feat, net.ft_weights.len());
+            warn_oor_once(&WARNED_OOR_FWD, "forward(them)", feat, net.input_dim, net.acc_dim);
             continue;
         }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
@@ -234,7 +235,7 @@ fn backward_update(
 
     // Gradient wrt output weights/bias
     for i in 0..h2_dim {
-        let grad_w = grad_output * scratch.a2[i];
+        let grad_w = grad_output * scratch.a2[i] + l2_reg * net.output_weights[i];
         net.output_weights[i] -= lr * grad_w;
     }
     net.output_bias -= lr * grad_output;
@@ -299,7 +300,7 @@ fn backward_update(
     for &feat in &sample.features_us {
         let base = feat as usize * acc_dim;
         if base + acc_dim > net.ft_weights.len() {
-            warn_oor_once(&WARNED_OOR_BWD, "backward(us)", feat, net.ft_weights.len());
+            warn_oor_once(&WARNED_OOR_BWD, "backward(us)", feat, net.input_dim, acc_dim);
             continue;
         }
         let row = &mut net.ft_weights[base..base + acc_dim];
@@ -311,7 +312,7 @@ fn backward_update(
     for &feat in &sample.features_them {
         let base = feat as usize * acc_dim;
         if base + acc_dim > net.ft_weights.len() {
-            warn_oor_once(&WARNED_OOR_BWD, "backward(them)", feat, net.ft_weights.len());
+            warn_oor_once(&WARNED_OOR_BWD, "backward(them)", feat, net.input_dim, acc_dim);
             continue;
         }
         let row = &mut net.ft_weights[base..base + acc_dim];
