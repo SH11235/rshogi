@@ -31,7 +31,7 @@ plotters = { version = "0.3", optional = true }
 once_cell = { workspace = true }
 
 [features]
-default = ["nnue_telemetry"]
+default = []
 zstd = ["dep:zstd"]
 plots = ["dep:plotters"]
 # engine-core feature passthroughs for A/B

@@ -27,6 +27,7 @@ env:
   GAUNTLET_GAMES: "200"
   GAUNTLET_TC: "0/1+0.1"
   GAUNTLET_SEED: "12345"
+  GAUNTLET_PV_MS: "300"
 
 jobs:
   gate:
@@ -66,7 +67,7 @@ jobs:
       - name: Build tools (release, locked)
         run: |
           set -Eeuo pipefail
-          cargo build -p tools --release --locked
+          cargo build -p tools --release --locked --features nnue_telemetry
 
       - name: Prepare weights directory
         run: mkdir -p runs/nnue_local
@@ -144,6 +145,7 @@ jobs:
             --json runs/gauntlet_gate/out.json \
             --report runs/gauntlet_gate/report.md \
             --seed "${GAUNTLET_SEED}" \
+            --pv-ms "${GAUNTLET_PV_MS}" \
             > runs/gauntlet_gate/structured.jsonl \
             2> runs/gauntlet_gate/console.err
 
