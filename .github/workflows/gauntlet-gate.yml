@@ -28,6 +28,7 @@ env:
   GAUNTLET_TC: "0/1+0.1"
   GAUNTLET_SEED: "12345"
   GAUNTLET_PV_MS: "300"
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
   gate:
@@ -40,7 +41,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: cli/cli@v2
+      - name: Check GitHub CLI
+        run: |
+          set -Eeuo pipefail
+          gh --version
+          gh auth status || true
 
       - name: Install mold/clang/jq
         run: |
@@ -131,6 +136,7 @@ jobs:
       - name: Run gauntlet gate
         env:
           RAYON_NUM_THREADS: "1"
+          RUST_BACKTRACE: "1"
         run: |
           set -Eeuo pipefail
           mkdir -p runs/gauntlet_gate
@@ -164,10 +170,17 @@ jobs:
             echo "::error::Gauntlet gate failed (gate=${GATE})"
             exit 1
           fi
-          if [ "${NPS}" -lt 50 ] || [ "${PV}" -lt 10 ]; then
+          if [ "${NPS}" -lt 50 ] || [ "${PV}" -lt 30 ]; then
             echo "::error::Insufficient samples (NPS=${NPS}, PV=${PV})"
             exit 1
           fi
+
+      - name: Validate gauntlet out.json against schema
+        run: |
+          set -Eeuo pipefail
+          target/release/validate_gauntlet_schema \
+            --schema docs/schemas/gauntlet_out.schema.json \
+            --input runs/gauntlet_gate/out.json
 
       - name: Copy report into docs tree
         if: always()
