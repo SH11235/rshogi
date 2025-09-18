@@ -15,7 +15,7 @@ pub(crate) mod types;
 
 use std::fs::{create_dir_all, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
 use chrono::Utc;
@@ -25,7 +25,7 @@ use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
 use model::{Network, SingleNetwork};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use tools::common::weighting as wcfg;
 
 use classic::{ClassicIntNetworkBundle, ClassicQuantizationScales};
@@ -790,7 +790,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         StdRng::seed_from_u64(seed)
     } else {
-        let seed_bytes: [u8; 32] = rand::rng().random();
+        let seed_bytes: [u8; 32] = rand::random();
         let seed_hex = seed_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
         let u64_proj = u64::from_le_bytes(seed_bytes[0..8].try_into().unwrap());
         if human_to_stderr {
@@ -875,7 +875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let teacher_path = distill_options.teacher_path.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, ERR_CLASSIC_NEEDS_TEACHER)
         })?;
-        let teacher = SingleNetwork::load(Path::new(teacher_path)).map_err(|e| {
+        let teacher = SingleNetwork::load(teacher_path.as_path()).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Failed to load teacher network '{}': {}", teacher_path.display(), e),
