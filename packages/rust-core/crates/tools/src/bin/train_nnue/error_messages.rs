@@ -11,7 +11,7 @@ pub const ERR_CLASSIC_NEEDS_TEACHER: &str = "Classic export requires --distill-f
 
 /// Error message when classic-v1 export with stream-cache would skip distillation
 pub const ERR_CLASSIC_STREAM_NEEDS_DISTILL: &str =
-    "classic-v1 へのエクスポートには蒸留が必要ですが、--stream-cache では蒸留が実行されません。--distill-only で蒸留を走らせるか、--stream-cache を外して学習してください";
+    "Classic v1 export requires distillation, but --stream-cache skips the distill pass. Run with --distill-only or disable --stream-cache.";
 
 /// Error message for Single architecture not supporting Classic v1 format
 pub const ERR_SINGLE_NO_CLASSIC_V1: &str =
