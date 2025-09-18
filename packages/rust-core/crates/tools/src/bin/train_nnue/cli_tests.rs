@@ -3,9 +3,32 @@
 use crate::error_messages::*;
 use assert_cmd::prelude::*;
 use predicates::str::contains;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::process::Command;
 use tempfile::tempdir;
+use tools::nnfc_v1::FEATURE_SET_ID_HALF;
+
+fn write_minimal_nnfc_cache(path: &std::path::Path) {
+    let mut f = File::create(path).unwrap();
+    let header_size: u32 = 48;
+    f.write_all(b"NNFC").unwrap();
+    f.write_all(&1u32.to_le_bytes()).unwrap();
+    f.write_all(&FEATURE_SET_ID_HALF.to_le_bytes()).unwrap();
+    f.write_all(&0u64.to_le_bytes()).unwrap();
+    f.write_all(&1024u32.to_le_bytes()).unwrap();
+    f.write_all(&header_size.to_le_bytes()).unwrap();
+    f.write_all(&[0]).unwrap(); // little-endian
+    f.write_all(&[0]).unwrap(); // raw payload
+    f.write_all(&[0u8; 2]).unwrap();
+    let payload_offset = 4u64 + header_size as u64;
+    f.write_all(&payload_offset.to_le_bytes()).unwrap();
+    f.write_all(&0u32.to_le_bytes()).unwrap(); // sample_flags_mask
+    if header_size as usize > 40 {
+        f.write_all(&vec![0u8; header_size as usize - 40]).unwrap();
+    }
+    f.flush().unwrap();
+}
 
 #[test]
 fn cli_errors_on_classic_out_per_channel() {
@@ -157,6 +180,40 @@ fn cli_errors_on_single_with_classic_v1_format() {
         .arg("1");
 
     cmd.assert().failure().stderr(contains(ERR_SINGLE_NO_CLASSIC_V1));
+}
+
+#[test]
+fn cli_errors_on_classic_v1_stream_cache_without_distill() {
+    let td = tempdir().unwrap();
+
+    let cache_path = td.path().join("stream.cache");
+    write_minimal_nnfc_cache(&cache_path);
+
+    let teacher = td.path().join("teacher.fp32.bin");
+    fs::write(&teacher, b"dummy").unwrap();
+
+    let out_dir = td.path().join("output");
+
+    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    cmd.arg("--input")
+        .arg(&cache_path)
+        .arg("--arch")
+        .arg("classic")
+        .arg("--export-format")
+        .arg("classic-v1")
+        .arg("--distill-from-single")
+        .arg(&teacher)
+        .arg("--stream-cache")
+        .arg("--epochs")
+        .arg("1")
+        .arg("--batch-size")
+        .arg("1")
+        .arg("--opt")
+        .arg("sgd")
+        .arg("--out")
+        .arg(&out_dir);
+
+    cmd.assert().failure().stderr(contains(ERR_CLASSIC_STREAM_NEEDS_DISTILL));
 }
 
 #[test]
