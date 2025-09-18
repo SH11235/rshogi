@@ -31,11 +31,13 @@ plotters = { version = "0.3", optional = true }
 once_cell = { workspace = true }
 
 [features]
+default = ["nnue_telemetry"]
 zstd = ["dep:zstd"]
 plots = ["dep:plotters"]
 # engine-core feature passthroughs for A/B
 fast-fma = ["engine-core/nnue_fast_fma"]
 diff-agg-hash = ["engine-core/diff_agg_hash"]
+nnue_telemetry = []
 
 [dev-dependencies]
 tempfile = "3.10"

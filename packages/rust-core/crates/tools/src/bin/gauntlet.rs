@@ -2,6 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use engine_core::engine::controller::{Engine, EngineType};
+#[cfg(feature = "nnue_telemetry")]
+use engine_core::evaluation::nnue::telemetry;
 use engine_core::search::limits::SearchLimitsBuilder;
 use engine_core::time_management::TimeControl;
 use engine_core::{search::types::RootLine, shogi::Position};
@@ -168,6 +170,16 @@ impl std::fmt::Display for GateDecision {
 }
 
 #[derive(Debug, Serialize, Clone)]
+struct TelemetryOut {
+    acc: u64,
+    fb_hash_mismatch: u64,
+    fb_acc_empty: u64,
+    fb_feature_off: u64,
+    apply_refresh_king: u64,
+    apply_refresh_other: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
 struct SummaryOut {
     winrate: f64,
     draw: f64,
@@ -188,6 +200,8 @@ struct SummaryOut {
     nps_samples: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pv_spread_samples: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nnue_telemetry: Option<TelemetryOut>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -369,6 +383,25 @@ fn build_markdown(out: &GauntletOut) -> String {
         seed_info,
         pv_info
     ));
+    if let Some(t) = &out.summary.nnue_telemetry {
+        md.push_str("\n## NNUE Telemetry\n");
+        let fallback_total = t.fb_hash_mismatch + t.fb_acc_empty + t.fb_feature_off;
+        let total = t.acc + fallback_total;
+        if total > 0 {
+            let acc_rate = (t.acc as f64) * 100.0 / total as f64;
+            md.push_str(&format!("- acc_path: {} ({:.1}% of eval calls)\n", t.acc, acc_rate));
+        } else {
+            md.push_str("- acc_path: 0\n");
+        }
+        md.push_str(&format!(
+            "- fallback(hash_mismatch={} acc_empty={} feature_off={})\n",
+            t.fb_hash_mismatch, t.fb_acc_empty, t.fb_feature_off
+        ));
+        md.push_str(&format!(
+            "- refresh_causes(king_move={} other={})\n",
+            t.apply_refresh_king, t.apply_refresh_other
+        ));
+    }
     md
 }
 
@@ -536,6 +569,12 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         EngineType::EnhancedNnue,
         args.multipv,
     )?;
+
+    #[cfg(feature = "nnue_telemetry")]
+    {
+        // Reset NNUE telemetry counters before measurements
+        let _ = telemetry::snapshot_and_reset();
+    }
 
     // NPS measurement (fixed positions, fixed time per position)
     let nps_sample_ms = time.inc_ms.max(100);
@@ -773,6 +812,22 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
         }
     }
 
+    #[cfg(feature = "nnue_telemetry")]
+    let telemetry_out = {
+        let snap = telemetry::snapshot_and_reset();
+        Some(TelemetryOut {
+            acc: snap.acc,
+            fb_hash_mismatch: snap.fb_hash_mismatch,
+            fb_acc_empty: snap.fb_acc_empty,
+            fb_feature_off: snap.fb_feature_off,
+            apply_refresh_king: snap.apply_refresh_king,
+            apply_refresh_other: snap.apply_refresh_other,
+        })
+    };
+
+    #[cfg(not(feature = "nnue_telemetry"))]
+    let telemetry_out: Option<TelemetryOut> = None;
+
     let out = GauntletOut {
         env: gather_env_info(),
         params: ParamsOut {
@@ -802,6 +857,7 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
             games: Some(args.games),
             nps_samples: Some(n_samples),
             pv_spread_samples: Some(pv_samples),
+            nnue_telemetry: telemetry_out,
         },
         training_config: None,
         series,
@@ -904,6 +960,7 @@ fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
             games: Some(args.games),
             nps_samples: Some(100.min(book.len())),
             pv_spread_samples: Some(100.min(book.len())),
+            nnue_telemetry: None,
         },
         training_config: None,
         series,
@@ -939,8 +996,21 @@ fn emit_structured_jsonl_to<W: Write>(mut w: W, games: usize, summary: &SummaryO
         nps_samples: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pv_spread_samples: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nnue_acc: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nnue_fb_hash_mismatch: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nnue_fb_acc_empty: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nnue_fb_feature_off: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nnue_refresh_king: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nnue_refresh_other: Option<u64>,
     }
     let ts_str = Utc::now().to_rfc3339();
+    let telemetry = summary.nnue_telemetry.as_ref();
     let line = Line {
         ts: &ts_str,
         phase: "gauntlet",
@@ -961,6 +1031,12 @@ fn emit_structured_jsonl_to<W: Write>(mut w: W, games: usize, summary: &SummaryO
         draws: summary.draws,
         nps_samples: summary.nps_samples,
         pv_spread_samples: summary.pv_spread_samples,
+        nnue_acc: telemetry.map(|t| t.acc),
+        nnue_fb_hash_mismatch: telemetry.map(|t| t.fb_hash_mismatch),
+        nnue_fb_acc_empty: telemetry.map(|t| t.fb_acc_empty),
+        nnue_fb_feature_off: telemetry.map(|t| t.fb_feature_off),
+        nnue_refresh_king: telemetry.map(|t| t.apply_refresh_king),
+        nnue_refresh_other: telemetry.map(|t| t.apply_refresh_other),
     };
     if let Ok(s) = serde_json::to_string(&line) {
         let _ = writeln!(w, "{}", s);

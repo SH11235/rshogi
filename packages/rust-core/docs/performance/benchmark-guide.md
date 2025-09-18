@@ -157,6 +157,17 @@ done | tee benchmark_results.txt
 2. 複数回実行して平均を取る
 3. より長い実行時間を設定
 
+## Gauntlet Gate CI（昇格判定）
+
+- ワークフロー: `.github/workflows/gauntlet-gate.yml`
+- 入力重み: `runs/nnue_local/baseline.nnue` と `runs/nnue_local/candidate.nnue`
+  - ローカルで配置するか、`GATE_BASELINE_TAG/GATE_BASELINE_ASSET` と `GATE_CANDIDATE_TAG/GATE_CANDIDATE_ASSET` に GitHub Release Asset を指定
+- 実行内容:
+  - `target/release/gauntlet` を 200局（代表100局面×往復）で実行
+  - Gate 条件: スコア率 55% 以上かつ NPS ±3% 以内
+  - 結果: `docs/reports/gauntlet/ci/<run_id>/` に JSON / Markdown / structured_v1 を保存し、Artifacts と Step Summary に出力
+- 失敗時: Gate 判定が未達成、サンプル欠落、重み未取得などでジョブがエラー終了。詳細は `runs/gauntlet_gate/console.err` と Step Summary を参照
+
 ## ベンチマーク実行例と期待される出力
 
 ### NNUE性能ベンチマーク（固定ライン対応）
