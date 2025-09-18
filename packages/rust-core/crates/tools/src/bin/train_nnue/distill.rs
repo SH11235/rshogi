@@ -25,12 +25,14 @@ static WARNED_OOR_BWD: AtomicBool = AtomicBool::new(false);
 #[inline]
 fn warn_oor_once(flag: &AtomicBool, ctx: &str, feat: u32, input_dim: usize, acc_dim: usize) {
     if !flag.swap(true, Ordering::Relaxed) {
+        let ft_len = input_dim.saturating_mul(acc_dim);
         log::warn!(
-            "{}: feature index {} out of range (input_dim={}, acc_dim={}); subsequent warnings suppressed",
+            "{}: feature index {} out of range (input_dim={}, acc_dim={}, ft_len={}); subsequent warnings suppressed",
             ctx,
             feat,
             input_dim,
-            acc_dim
+            acc_dim,
+            ft_len
         );
     }
 }
@@ -1091,6 +1093,30 @@ mod distill_training_tests {
         let mut scratch = ClassicScratch::new(2, 2, 2);
         let _ = forward(&net, &sample, &mut scratch);
         backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2, 0.0);
+    }
+
+    #[test]
+    fn backward_update_applies_l2_to_output_weights() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2024);
+        let mut net = ClassicFloatNetwork::he_uniform_with_dims(4, 2, 2, 2, 2, &mut rng);
+        let before = net.output_weights.clone();
+        let sample = DistillSample {
+            features_us: vec![],
+            features_them: vec![],
+            teacher_output: 0.0,
+            label: 0.0,
+            weight: 1.0,
+        };
+        let mut scratch = ClassicScratch::new(2, 2, 2);
+        let _ = forward(&net, &sample, &mut scratch);
+
+        backward_update(&mut net, &mut scratch, &sample, 0.0, 1e-2, 1e-3);
+
+        assert!(net
+            .output_weights
+            .iter()
+            .zip(before.iter())
+            .any(|(a, b)| (*a - *b).abs() > 1e-9));
     }
 }
 

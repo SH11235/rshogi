@@ -103,12 +103,10 @@ fn cli_accepts_classic_per_tensor() {
         .arg("--out")
         .arg(&out_dir);
 
-    // Note: This will succeed (exit code 0) but fail during distillation
-    // because dummy teacher file is invalid. The important thing is that
-    // it gets past the quantization checks.
-    cmd.assert()
-        .success()
-        .stdout(contains("Failed to load teacher network for classic distillation"));
+    // This should advance past quantization validation, then fail when
+    // attempting to load the dummy teacher network. Validate that the
+    // failure reason mentions the teacher load rather than quantization.
+    cmd.assert().failure().stderr(contains("Failed to load teacher network"));
 }
 
 #[test]

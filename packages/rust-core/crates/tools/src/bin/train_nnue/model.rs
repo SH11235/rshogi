@@ -2,7 +2,6 @@ use crate::classic::ClassicFloatNetwork;
 use crate::params::{
     ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON, CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM,
 };
-use crate::types::ArchKind;
 use engine_core::evaluation::nnue::features::{flip_us_them, FE_END};
 use engine_core::shogi::SHOGI_BOARD_SIZE;
 use rand::{
@@ -433,47 +432,12 @@ impl Network {
         }
     }
 
-    pub fn arch(&self) -> ArchKind {
-        match self {
-            Network::Single(_) => ArchKind::Single,
-            Network::Classic(_) => ArchKind::Classic,
-        }
-    }
-
     pub fn as_single(&self) -> Option<&SingleNetwork> {
         if let Network::Single(ref inner) = self {
             Some(inner)
         } else {
             None
         }
-    }
-
-    pub fn as_single_mut(&mut self) -> Option<&mut SingleNetwork> {
-        if let Network::Single(ref mut inner) = self {
-            Some(inner)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_classic(&self) -> Option<&ClassicNetwork> {
-        if let Network::Classic(ref inner) = self {
-            Some(inner)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_classic_mut(&mut self) -> Option<&mut ClassicNetwork> {
-        if let Network::Classic(ref mut inner) = self {
-            Some(inner)
-        } else {
-            None
-        }
-    }
-
-    pub fn load(path: &Path) -> std::io::Result<Self> {
-        SingleNetwork::load(path).map(Network::Single)
     }
 }
 

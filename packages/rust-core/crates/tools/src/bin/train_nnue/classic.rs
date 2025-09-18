@@ -658,7 +658,6 @@ pub struct ClassicFloatNetwork {
     pub h2_dim: usize,
 }
 
-#[allow(dead_code)]
 impl ClassicFloatNetwork {
     pub fn zero() -> Self {
         ClassicFloatNetwork {
@@ -778,6 +777,10 @@ impl ClassicFloatNetwork {
         };
         let (h1_weights_q, h1_scales) =
             quantize_symmetric_i8(&self.hidden1_weights, h1_per_channel, h1_channels)?;
+        // NOTE: FT 出力は engine-core 側で `(acc << CLASSIC_FT_SHIFT)` の固定シフトを掛ける。
+        // ここで bias を量子化する際も同じシフトを前提とするため、`CLASSIC_FT_SHIFT` を
+        // 変更する場合は bias 量子化と評価側 (evaluate_quantization_gap 等) の復元計算も
+        // あわせて更新すること。
         let s_in_1 = s_w0 * (1 << CLASSIC_FT_SHIFT) as f32;
         let hidden1_biases_q = quantize_bias_i32(&self.hidden1_biases, s_in_1, &h1_scales);
 
@@ -972,20 +975,23 @@ impl ClassicQuantizationScales {
     /// 呼び出し側（INT→float 復元部）の修正を局所化できる。
     #[inline]
     pub fn output_scale(&self) -> f32 {
-        if self.s_w3.len() != 1 {
-            debug_assert_eq!(
-                self.s_w3.len(),
-                1,
-                "Classic v1 supports only per-tensor output scale",
-            );
-            if self.s_w3.is_empty() {
+        let scale = match self.s_w3.len() {
+            0 => {
                 log::error!(
                     "classic quantization scales: missing output scale, falling back to 1.0"
                 );
-                return self.s_in_3;
+                1.0
             }
-        }
-        self.s_in_3 * self.s_w3[0]
+            1 => self.s_w3[0],
+            n => {
+                log::error!(
+                    "classic quantization scales: per-channel output scales (len={}) not supported, using mean",
+                    n
+                );
+                self.s_w3.iter().copied().sum::<f32>() / n as f32
+            }
+        };
+        self.s_in_3 * scale
     }
 }
 
@@ -1097,6 +1103,37 @@ mod tests {
 
         let err = quantize_symmetric_i16(&[1.0, 2.0], true, 3).unwrap_err();
         assert!(err.contains("not divisible"));
+    }
+
+    #[test]
+    fn output_scale_falls_back_when_missing() {
+        let scales = ClassicQuantizationScales {
+            s_w0: 1.0,
+            s_w1: vec![1.0],
+            s_w2: vec![1.0],
+            s_w3: vec![],
+            s_in_1: 1.0,
+            s_in_2: 1.0,
+            s_in_3: 2.5,
+        };
+
+        assert!((scales.output_scale() - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn output_scale_averages_per_channel_scales() {
+        let scales = ClassicQuantizationScales {
+            s_w0: 1.0,
+            s_w1: vec![1.0],
+            s_w2: vec![1.0],
+            s_w3: vec![2.0, 4.0],
+            s_in_1: 1.0,
+            s_in_2: 1.0,
+            s_in_3: 3.0,
+        };
+
+        // mean(s_w3)=3.0 → output_scale = 3.0 * 3.0 = 9.0
+        assert!((scales.output_scale() - 9.0).abs() < 1e-6);
     }
 
     #[test]
