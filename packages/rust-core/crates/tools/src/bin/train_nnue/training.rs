@@ -39,7 +39,9 @@ mod core {
     use super::*;
     use crate::export::save_single_network;
     use crate::logging::print_zero_weight_debug;
-    use crate::params::{CLASSIC_RELU_CLIP_F32, PERCENTAGE_DIVISOR};
+    use crate::params::{
+        ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON, CLASSIC_RELU_CLIP_F32, PERCENTAGE_DIVISOR,
+    };
     use crate::training::ctx::lr_base_for;
     use crate::training::ctx::{DashboardValKind, TrainContext};
     use crate::training::loaders::{AsyncBatchLoader, BatchLoader, StreamCacheLoader};

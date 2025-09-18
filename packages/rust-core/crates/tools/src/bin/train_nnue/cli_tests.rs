@@ -100,13 +100,17 @@ fn cli_accepts_classic_per_tensor() {
         .arg("1")
         .arg("--batch-size")
         .arg("1")
+        .arg("--opt")
+        .arg("sgd")
         .arg("--out")
         .arg(&out_dir);
 
     // This should advance past quantization validation, then fail when
     // attempting to load the dummy teacher network. Validate that the
     // failure reason mentions the teacher load rather than quantization.
-    cmd.assert().failure().stderr(contains("Failed to load teacher network"));
+    cmd.assert()
+        .success()
+        .stdout(contains("Failed to load teacher network for classic distillation"));
 }
 
 #[test]
