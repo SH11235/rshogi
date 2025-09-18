@@ -81,7 +81,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ env.GATE_BASELINE_TAG }}
           ASSET_NAME: ${{ env.GATE_BASELINE_ASSET }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           DEST="runs/nnue_local/baseline.nnue"
@@ -105,7 +104,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ env.GATE_CANDIDATE_TAG }}
           ASSET_NAME: ${{ env.GATE_CANDIDATE_ASSET }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           DEST="runs/nnue_local/candidate.nnue"

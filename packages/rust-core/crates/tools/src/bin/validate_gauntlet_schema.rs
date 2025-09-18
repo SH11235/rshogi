@@ -5,6 +5,16 @@ use clap::Parser;
 use jsonschema::{Draft, JSONSchema};
 use serde_json::Value;
 
+struct SchemaGuard(*mut Value);
+
+impl Drop for SchemaGuard {
+    fn drop(&mut self) {
+        unsafe {
+            drop(Box::from_raw(self.0));
+        }
+    }
+}
+
 /// Validate gauntlet out.json against the repository schema
 #[derive(Parser, Debug)]
 #[command(name = "validate_gauntlet_schema", version, about)]
@@ -34,15 +44,16 @@ fn run() -> Result<()> {
         File::open(&opt.schema)
             .with_context(|| format!("failed to open schema file: {}", opt.schema.display()))?,
     );
-    let leaked_schema: &'static Value = {
-        let schema: Value = serde_json::from_reader(schema_reader)
-            .with_context(|| format!("failed to parse schema JSON: {}", opt.schema.display()))?;
-        Box::leak(Box::new(schema))
-    };
+    let schema: Value = serde_json::from_reader(schema_reader)
+        .with_context(|| format!("failed to parse schema JSON: {}", opt.schema.display()))?;
+    let schema_box = Box::new(schema);
+    let schema_ptr = Box::into_raw(schema_box);
+    let _guard = SchemaGuard(schema_ptr);
+    let schema_ref: &'static Value = unsafe { &*_guard.0 };
 
     let compiled = JSONSchema::options()
         .with_draft(Draft::Draft202012)
-        .compile(leaked_schema)
+        .compile(schema_ref)
         .with_context(|| format!("failed to compile schema: {}", opt.schema.display()))?;
 
     let input_reader = BufReader::new(
@@ -53,9 +64,13 @@ fn run() -> Result<()> {
         .with_context(|| format!("failed to parse input JSON: {}", opt.input.display()))?;
 
     if let Err(errors) = compiled.validate(&data) {
+        let collected: Vec<_> = errors.collect();
         eprintln!("schema validation failed:");
-        for err in errors {
-            eprintln!("  -> {}", err);
+        for err in &collected {
+            eprintln!(
+                "  -> {} (instance path: {}, schema path: {})",
+                err, err.instance_path, err.schema_path
+            );
         }
         anyhow::bail!("validation errors detected")
     }
