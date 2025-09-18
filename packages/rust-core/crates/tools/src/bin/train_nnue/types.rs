@@ -141,6 +141,7 @@ pub struct ExportOptions {
     pub quant_h1: QuantScheme,
     pub quant_h2: QuantScheme,
     pub quant_out: QuantScheme,
+    pub emit_fp32_also: bool,
 }
 
 impl Default for ExportOptions {
@@ -152,6 +153,7 @@ impl Default for ExportOptions {
             quant_h1: QuantScheme::PerChannel,
             quant_h2: QuantScheme::PerChannel,
             quant_out: QuantScheme::PerChannel,
+            emit_fp32_also: false,
         }
     }
 }

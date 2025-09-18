@@ -1,4 +1,7 @@
-use crate::classic::{write_classic_v1_bundle, ClassicFloatNetwork, ClassicIntNetworkBundle};
+use crate::classic::{
+    write_classic_v1_bundle, ClassicFloatNetwork, ClassicIntNetworkBundle,
+    ClassicQuantizationScales,
+};
 use crate::model::{ClassicNetwork, Network, SingleNetwork};
 use crate::params::{
     CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, KB_TO_MB_DIVISOR, PERCENTAGE_DIVISOR,
@@ -6,8 +9,12 @@ use crate::params::{
 };
 use crate::types::{ArchKind, ExportFormat, ExportOptions};
 use bytemuck::cast_slice;
+use chrono::Utc;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
+use hex::encode as hex_encode;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -213,6 +220,7 @@ pub fn finalize_export(
     export: ExportOptions,
     emit_single_quant: bool,
     classic_bundle: Option<&ClassicIntNetworkBundle>,
+    classic_scales: Option<&ClassicQuantizationScales>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match export.format {
         ExportFormat::Fp32 => {
@@ -273,7 +281,93 @@ pub fn finalize_export(
                 );
             }
             write_classic_v1_bundle(&out_dir.join("nn.classic.nnue"), bundle)?;
+
+            if export.emit_fp32_also {
+                match network {
+                    Network::Classic(classic) => {
+                        save_classic_network(classic, &out_dir.join("nn.fp32.bin"))?;
+                    }
+                    Network::Single(_) => {
+                        log::warn!(
+                            "--emit-fp32-also specified but export arch {:?} is not Classic; skipping nn.fp32.bin emission",
+                            export.arch
+                        );
+                    }
+                }
+            }
+
+            if let Some(scales) = classic_scales {
+                if let Err(e) = write_classic_scales_json(out_dir, bundle, scales) {
+                    log::warn!("Failed to write nn.classic.scales.json: {}", e);
+                }
+            } else {
+                log::info!(
+                    "Classic export completed without quantization scales; nn.classic.scales.json was not emitted"
+                );
+            }
         }
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct ClassicScalesArtifact {
+    version: &'static str,
+    arch: &'static str,
+    generated_at_utc: String,
+    acc_dim: usize,
+    h1_dim: usize,
+    h2_dim: usize,
+    input_dim: usize,
+    s_w0: f32,
+    s_w1: Vec<f32>,
+    s_w2: Vec<f32>,
+    s_w3: Vec<f32>,
+    s_in_1: f32,
+    s_in_2: f32,
+    s_in_3: f32,
+    bundle_sha256: String,
+}
+
+fn write_classic_scales_json(
+    out_dir: &Path,
+    bundle: &ClassicIntNetworkBundle,
+    scales: &ClassicQuantizationScales,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let serialized = bundle.as_serialized();
+    let payload = ClassicScalesArtifact {
+        version: "classic-v1",
+        arch: "HALFKP_256X2_32_32",
+        generated_at_utc: Utc::now().to_rfc3339(),
+        acc_dim: serialized.acc_dim,
+        h1_dim: serialized.h1_dim,
+        h2_dim: serialized.h2_dim,
+        input_dim: serialized.input_dim,
+        s_w0: scales.s_w0,
+        s_w1: scales.s_w1.clone(),
+        s_w2: scales.s_w2.clone(),
+        s_w3: scales.s_w3.clone(),
+        s_in_1: scales.s_in_1,
+        s_in_2: scales.s_in_2,
+        s_in_3: scales.s_in_3,
+        bundle_sha256: bundle_sha256(bundle),
+    };
+
+    let path = out_dir.join("nn.classic.scales.json");
+    let file = File::create(path)?;
+    serde_json::to_writer_pretty(file, &payload)?;
+    Ok(())
+}
+
+fn bundle_sha256(bundle: &ClassicIntNetworkBundle) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(cast_slice::<i16, u8>(&bundle.transformer.weights));
+    hasher.update(cast_slice::<i32, u8>(&bundle.transformer.biases));
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden1_weights));
+    hasher.update(cast_slice::<i32, u8>(&bundle.network.hidden1_biases));
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden2_weights));
+    hasher.update(cast_slice::<i32, u8>(&bundle.network.hidden2_biases));
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.output_weights));
+    hasher.update(bundle.network.output_bias.to_le_bytes());
+    hex_encode(hasher.finalize())
 }

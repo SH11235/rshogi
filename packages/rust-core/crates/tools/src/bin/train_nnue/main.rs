@@ -169,6 +169,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .default_value("per-tensor"),
         )
         .arg(
+            arg!(--"emit-fp32-also" "Also export Classic FP32 weights when exporting classic-v1")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("distill-from-single")
                 .long("distill-from-single")
                 .help("Path to teacher Single FP32 weights for knowledge distillation")
@@ -333,7 +337,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             arg!(--"structured-log" <PATH> "Structured JSONL log path ('-' for STDOUT)")
         )
         .arg(arg!(--quantized "Save quantized (int8) version of the model"))
-        .arg(arg!(--seed <SEED> "Random seed for reproducibility"))
+        .arg(
+            arg!(--seed <SEED> "Random seed for reproducibility")
+                .visible_alias("rng-seed"),
+        )
         .arg(arg!(-o --out <DIR> "Output directory"))
         .get_matches();
 
@@ -454,6 +461,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant_h1,
         quant_h2,
         quant_out,
+        emit_fp32_also: app.get_flag("emit-fp32-also"),
     };
     // Teacher domain (cp or wdl-logit). Default depends on label type: if label_type is "cp" assume cp, else wdl-logit for classic case.
     let teacher_domain =
@@ -1157,6 +1165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         export_options,
         app.get_flag("quantized"),
         classic_bundle.as_ref(),
+        classic_scales.as_ref(),
     )?;
 
     // Save config
