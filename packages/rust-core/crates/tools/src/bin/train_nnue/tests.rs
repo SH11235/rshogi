@@ -559,6 +559,34 @@ fn finalize_export_emit_fp32_ignored_for_non_classic() {
 }
 
 #[test]
+fn finalize_export_fp32_quantized_ignored_for_classic() {
+    use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP};
+
+    let td = tempdir().unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+    let classic = ClassicNetwork::new(
+        CLASSIC_ACC_DIM,
+        CLASSIC_H1_DIM,
+        CLASSIC_H2_DIM,
+        CLASSIC_RELU_CLIP,
+        64,
+        &mut rng,
+    );
+
+    let export = ExportOptions {
+        arch: ArchKind::Classic,
+        format: ExportFormat::Fp32,
+        emit_fp32_also: false,
+        ..ExportOptions::default()
+    };
+
+    finalize_export(&Network::Classic(classic), td.path(), export, true, None, None).unwrap();
+
+    assert!(td.path().join("nn.fp32.bin").exists());
+    assert!(!td.path().join("nn.i8.bin").exists());
+}
+
+#[test]
 fn weight_consistency_jsonl_vs_cache() {
     // JSONL with both_exact, gap=50, depth=20, seldepth=30
     let td = tempdir().unwrap();

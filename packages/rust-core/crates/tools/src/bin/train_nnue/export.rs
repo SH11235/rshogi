@@ -226,7 +226,16 @@ pub fn finalize_export(
         ExportFormat::Fp32 => {
             save_network(network, &out_dir.join("nn.fp32.bin"))?;
             if emit_single_quant {
-                save_network_quantized(network, &out_dir.join("nn.i8.bin"))?;
+                match network {
+                    Network::Single(_) => {
+                        save_network_quantized(network, &out_dir.join("nn.i8.bin"))?;
+                    }
+                    Network::Classic(_) => {
+                        log::warn!(
+                            "--quantized is ignored when exporting fp32 for Classic architecture"
+                        );
+                    }
+                }
             }
         }
         ExportFormat::SingleI8 => {
@@ -247,7 +256,7 @@ pub fn finalize_export(
                         CLASSIC_H2_DIM,
                     )
                     .quantize_round()
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    .map_err(std::io::Error::other)?;
                     &fallback
                 }
                 (None, ArchKind::Single) => {
@@ -261,7 +270,7 @@ pub fn finalize_export(
                         CLASSIC_H2_DIM,
                     )
                     .quantize_round()
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    .map_err(std::io::Error::other)?;
                     &fallback
                 }
             };
@@ -312,8 +321,9 @@ pub fn finalize_export(
 
 #[derive(Serialize)]
 struct ClassicScalesArtifact {
-    version: &'static str,
-    arch: &'static str,
+    schema_version: u32,
+    format_version: &'static str,
+    arch: String,
     generated_at_utc: String,
     acc_dim: usize,
     h1_dim: usize,
@@ -353,9 +363,12 @@ fn write_classic_scales_json(
             SHOGI_BOARD_SIZE * FE_END
         );
     }
+    let arch_string =
+        format!("HALFKP_{}X2_{}_{}", serialized.acc_dim, serialized.h1_dim, serialized.h2_dim);
     let payload = ClassicScalesArtifact {
-        version: "classic-v1",
-        arch: "HALFKP_256X2_32_32",
+        schema_version: 1,
+        format_version: "classic-v1",
+        arch: arch_string,
         generated_at_utc: Utc::now().to_rfc3339(),
         acc_dim: serialized.acc_dim,
         h1_dim: serialized.h1_dim,
