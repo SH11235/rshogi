@@ -85,8 +85,6 @@ struct TrainingPosition {
     depth: Option<u8>,
     #[serde(default)]
     seldepth: Option<u8>,
-    #[serde(default)]
-    nodes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

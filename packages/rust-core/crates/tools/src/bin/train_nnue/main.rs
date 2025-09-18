@@ -1015,8 +1015,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 global_step: 0,
                 training_config_json: training_cfg_json,
                 plateau: plateau_state,
-                export: export_options.clone(),
-                distill: distill_options.clone(),
                 classic_bundle: &mut classic_bundle,
             };
             if is_cache && config.stream_cache {

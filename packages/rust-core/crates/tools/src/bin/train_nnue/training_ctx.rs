@@ -36,8 +36,6 @@ pub struct TrainContext<'a> {
     pub global_step: u64,
     pub training_config_json: Option<serde_json::Value>,
     pub plateau: Option<LrPlateauState>,
-    pub export: ExportOptions,
-    pub distill: DistillOptions,
     pub classic_bundle: &'a mut Option<ClassicIntNetworkBundle>,
 }
 
