@@ -13,6 +13,10 @@ use rand::{
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static BIAS_SCALE_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
+static FT_ACC_OOR_WARNED: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 pub fn round_away_from_zero(val: f32) -> i32 {
@@ -169,30 +173,60 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
     let mut out = Vec::with_capacity(bias.len());
     let per_tensor = weight_scales.len() == 1;
     let ws0 = if per_tensor { weight_scales[0] } else { 0.0 };
-    let mut warned_mismatch = false;
+    let fallback_scale = if per_tensor {
+        ws0
+    } else {
+        *weight_scales.last().unwrap_or(&1.0)
+    };
+    let mut mismatch_count = 0usize;
+    let mut mismatch_examples: Vec<(usize, f32, f32)> = Vec::new();
+    const MISMATCH_SAMPLE_LIMIT: usize = 4;
     for (i, &b) in bias.iter().enumerate() {
-        let ws = if per_tensor {
-            ws0
+        let (ws, mismatched) = if per_tensor {
+            (ws0, false)
         } else if i < weight_scales.len() {
-            weight_scales[i]
+            (weight_scales[i], false)
         } else {
-            // リリースビルドでは安全側に最後の値を再利用
-            if !warned_mismatch {
-                log::warn!(
-                    "quantize_bias_i32: weight_scales len {} < bias len {} (using last scale)",
-                    weight_scales.len(),
-                    bias.len()
-                );
-                warned_mismatch = true;
-            }
-            *weight_scales.last().unwrap()
+            (fallback_scale, true)
         };
+        if mismatched {
+            mismatch_count += 1;
+            if mismatch_examples.len() < MISMATCH_SAMPLE_LIMIT {
+                mismatch_examples.push((i, ws, b));
+            }
+        }
         let scale = input_scale * ws;
         out.push(if scale == 0.0 {
             0
         } else {
             round_away_from_zero(b / scale)
         });
+    }
+    if mismatch_count > 0
+        && BIAS_SCALE_MISMATCH_LOGGED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let sample_display = if mismatch_examples.is_empty() {
+            String::from("<none>")
+        } else {
+            mismatch_examples
+                .iter()
+                .map(|(idx, scale, bias)| {
+                    format!("#{idx} bias={:.6} reuse_scale={:.6}", bias, scale)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        log::warn!(
+            "quantize_bias_i32: weight_scales len {} < bias len {} (reusing last scale {:.6}) — mismatched entries {} (showing first {}: [{}]); further warnings suppressed",
+            weight_scales.len(),
+            bias.len(),
+            fallback_scale,
+            mismatch_count,
+            mismatch_examples.len(),
+            sample_display
+        );
     }
     out
 }
@@ -245,6 +279,16 @@ impl ClassicFeatureTransformerInt {
                 self.input_dim
             );
             if feat >= self.input_dim {
+                if FT_ACC_OOR_WARNED
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    log::warn!(
+                        "ClassicFeatureTransformerInt::accumulate_into_u32: feature index {} >= input_dim {} (dropping)",
+                        feat,
+                        self.input_dim
+                    );
+                }
                 continue;
             }
             let base = feat * self.acc_dim;
@@ -500,7 +544,9 @@ pub struct ClassicV1Serialized<'a> {
 }
 
 impl<'a> ClassicV1Serialized<'a> {
-    /// Canonical Classic v1 layout検証（テストでは input_dim を縮約するが本番は HALFKP サイズ固定）。
+    /// Canonical Classic v1 layout 検証。
+    /// テストでは `input_dim` を縮約しても良く、その場合は書き出し側で不足分をゼロパディングする
+    /// （本番構成は HALFKP 固定）。
     pub fn validate(&self) -> Result<(), String> {
         if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
             return Err("dimensions must be non-zero".into());
@@ -515,6 +561,7 @@ impl<'a> ClassicV1Serialized<'a> {
         if self.input_dim > canonical_input_dim {
             return Err("input_dim exceeds Classic v1 canonical spec".into());
         }
+        // 入力を縮約した場合は write_classic_v1_file() で canonical 長までゼロ埋めする想定。
         if self.ft_biases.len() != self.acc_dim {
             return Err("ft_biases length mismatch".into());
         }
@@ -748,7 +795,13 @@ impl ClassicFloatNetwork {
         net
     }
 
-    /// Classic アーキ用の対称量子化（per-tensor / per-channel 指定済み）
+    /// Classic アーキ用の対称量子化（per-tensor / per-channel 指定済み）。
+    ///
+    /// engine-core 側の `SimdDispatcher::transform_features()` は Feature Transformer 出力を
+    /// 固定右シフト (`CLASSIC_FT_SHIFT`) によって int8 `[−127, 127]` / `[0, 127]` へ丸めており、
+    /// ここで求める `s_in_*` も同じ規約を前提にしている。`CLASSIC_FT_SHIFT` や丸めルールを変更
+    /// する場合は、本関数と `quantize_bias_i32()`、および推論側の変換処理を同時に更新して整合性を
+    /// 保つこと。
     pub fn quantize_symmetric(
         &self,
         quant_ft: QuantScheme,
@@ -1069,6 +1122,25 @@ mod tests {
 
         let channel = quantize_bias_i32(&bias, 2.0, &[0.25, 0.5, 1.0]);
         assert_eq!(channel, vec![1, -1, 1]);
+
+        let tensor_scale = 2.0 * 0.25;
+        for (&b, &q) in bias.iter().zip(tensor.iter()) {
+            let restored = (q as f32) * tensor_scale;
+            assert!(
+                (b - restored).abs() <= tensor_scale / 2.0 + f32::EPSILON,
+                "per-tensor restoration drift: bias={b}, restored={restored}"
+            );
+        }
+
+        let channel_scales = [0.25f32, 0.5f32, 1.0f32];
+        for ((&b, &q), &ws) in bias.iter().zip(channel.iter()).zip(channel_scales.iter()) {
+            let scale = 2.0 * ws;
+            let restored = (q as f32) * scale;
+            assert!(
+                (b - restored).abs() <= scale / 2.0 + f32::EPSILON,
+                "per-channel restoration drift: bias={b}, restored={restored}, scale={scale}"
+            );
+        }
     }
 
     #[test]
@@ -1106,6 +1178,51 @@ mod tests {
     }
 
     #[test]
+    fn quantize_symmetric_empty_returns_empty() {
+        let (qi8, si8) = quantize_symmetric_i8(&[], false, 1).unwrap();
+        assert!(qi8.is_empty() && si8.is_empty());
+
+        let (qi16, si16) = quantize_symmetric_i16(&[], true, 0).unwrap();
+        assert!(qi16.is_empty() && si16.is_empty());
+    }
+
+    #[test]
+    fn quantize_symmetric_dequant_error_stays_within_half_scale() {
+        let weights = vec![-3.2, -1.0, -0.5, 0.0, 0.5, 1.75, 3.0];
+        let (qi8, si8) = quantize_symmetric_i8(&weights, false, 1).unwrap();
+        let scale8 = si8[0];
+        for (w, &q) in weights.iter().zip(qi8.iter()) {
+            let w = *w;
+            let restored = (q as f32) * scale8;
+            assert!(
+                (w - restored).abs() <= scale8 / 2.0 + f32::EPSILON,
+                "per-tensor i8: w={w}, restored={restored}, scale={scale8}"
+            );
+        }
+
+        let weights_ch = vec![
+            -2.4, -0.75, 0.3, 1.4, // ch0
+            -1.1, 0.0, 1.2, -2.8, // ch1
+        ];
+        let (qi16, si16) = quantize_symmetric_i16(&weights_ch, true, 2).unwrap();
+        let stride = weights_ch.len() / 2;
+        for ch in 0..2 {
+            let scale = si16[ch];
+            for (w, &q) in weights_ch[ch * stride..(ch + 1) * stride]
+                .iter()
+                .zip(qi16[ch * stride..(ch + 1) * stride].iter())
+            {
+                let w = *w;
+                let restored = (q as f32) * scale;
+                assert!(
+                    (w - restored).abs() <= scale / 2.0 + f32::EPSILON,
+                    "per-channel i16 ch={ch}: w={w}, restored={restored}, scale={scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn output_scale_falls_back_when_missing() {
         let scales = ClassicQuantizationScales {
             s_w0: 1.0,
@@ -1138,10 +1255,20 @@ mod tests {
 
     #[test]
     fn round_away_from_zero_handles_boundaries() {
-        assert_eq!(round_away_from_zero(0.49), 0);
-        assert_eq!(round_away_from_zero(0.5), 1);
-        assert_eq!(round_away_from_zero(-0.5), -1);
-        assert_eq!(round_away_from_zero(-0.49), 0);
-        assert_eq!(round_away_from_zero(1.5), 2);
+        let cases = [
+            (0.49, 0),
+            (0.5, 1),
+            (0.51, 1),
+            (-0.49, 0),
+            (-0.5, -1),
+            (-0.51, -1),
+            (1.49, 1),
+            (1.5, 2),
+            (-1.49, -1),
+            (-1.5, -2),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(round_away_from_zero(input), expected, "input={input}");
+        }
     }
 }
