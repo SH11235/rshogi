@@ -199,17 +199,6 @@ impl SingleNetwork {
     }
 }
 
-#[inline]
-#[allow(dead_code)]
-pub fn forward_into_single(
-    network: &SingleNetwork,
-    features: &[u32],
-    acc: &mut [f32],
-    act: &mut [f32],
-) -> f32 {
-    network.forward_into(features, acc, act)
-}
-
 pub struct SingleForwardScratch {
     acc: Vec<f32>,
     act: Vec<f32>,
@@ -232,18 +221,6 @@ impl SingleForwardScratch {
     pub fn activations(&self) -> &[f32] {
         &self.act
     }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn activations_mut(&mut self) -> &mut [f32] {
-        &mut self.act
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn accumulator(&self) -> &[f32] {
-        &self.acc
-    }
 }
 
 impl SingleNetwork {
@@ -263,7 +240,6 @@ pub struct ClassicNetwork {
     pub relu_clip: f32,
 }
 
-#[allow(dead_code)]
 impl ClassicNetwork {
     pub fn new(
         acc_dim: usize,
@@ -288,23 +264,6 @@ impl ClassicNetwork {
         }
     }
 
-    pub fn acc_dim(&self) -> usize {
-        self.fp32.acc_dim
-    }
-
-    pub fn input_dim(&self) -> usize {
-        self.fp32.input_dim
-    }
-
-    pub fn h1_dim(&self) -> usize {
-        self.fp32.h1_dim
-    }
-
-    pub fn h2_dim(&self) -> usize {
-        self.fp32.h2_dim
-    }
-
-    #[allow(dead_code)]
     pub fn forward_with_scratch(
         &self,
         features_us: &[u32],
@@ -314,7 +273,6 @@ impl ClassicNetwork {
     }
 }
 
-#[allow(dead_code)]
 pub struct ClassicForwardScratch {
     acc_us: Vec<f32>,
     acc_them: Vec<f32>,
@@ -326,7 +284,6 @@ pub struct ClassicForwardScratch {
     features_them: Vec<u32>,
 }
 
-#[allow(dead_code)]
 impl ClassicForwardScratch {
     pub fn new(acc_dim: usize, h1_dim: usize, h2_dim: usize) -> Self {
         Self {
@@ -410,14 +367,6 @@ impl ClassicForwardScratch {
         }
         out
     }
-
-    pub fn h2_activations(&self) -> &[f32] {
-        &self.h2_act
-    }
-
-    pub fn input(&self) -> &[f32] {
-        &self.input
-    }
 }
 
 #[derive(Clone)]
@@ -426,7 +375,6 @@ pub enum Network {
     Classic(ClassicNetwork),
 }
 
-#[allow(dead_code)]
 impl Network {
     pub fn new_single(acc_dim: usize, relu_clip: i32, rng: &mut impl Rng) -> Self {
         Network::Single(SingleNetwork::new(acc_dim, relu_clip, rng))
@@ -529,18 +477,6 @@ impl Network {
     }
 }
 
-#[inline]
-#[allow(dead_code)]
-pub fn forward_into(
-    network: &SingleNetwork,
-    features: &[u32],
-    acc: &mut [f32],
-    act: &mut [f32],
-) -> f32 {
-    forward_into_single(network, features, acc, act)
-}
-
-#[allow(dead_code)]
 pub enum ForwardScratch {
     Single(SingleForwardScratch),
     Classic(ClassicForwardScratch),

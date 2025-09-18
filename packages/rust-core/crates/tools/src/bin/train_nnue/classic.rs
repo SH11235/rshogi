@@ -301,7 +301,6 @@ impl From<ClassicQuantizedNetworkParams> for ClassicQuantizedNetwork {
     }
 }
 
-#[allow(dead_code)]
 impl ClassicQuantizedNetwork {
     pub fn new(p: ClassicQuantizedNetworkParams) -> Self {
         p.into()
@@ -485,7 +484,6 @@ impl ClassicIntScratch {
     }
 }
 
-#[allow(dead_code)]
 pub struct ClassicV1Serialized<'a> {
     pub acc_dim: usize,
     pub input_dim: usize,
@@ -636,7 +634,6 @@ pub fn write_classic_v1_file(
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn write_classic_v1_bundle(
     path: &Path,
     bundle: &ClassicIntNetworkBundle,
@@ -646,7 +643,6 @@ pub fn write_classic_v1_bundle(
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ClassicFloatNetwork {
     pub ft_weights: Vec<f32>,
     pub ft_biases: Vec<f32>,
@@ -793,6 +789,11 @@ impl ClassicFloatNetwork {
         };
         let (h2_weights_q, h2_scales) =
             quantize_symmetric_i8(&self.hidden2_weights, h2_per_channel, h2_channels)?;
+        // NOTE: Classic FP32 forwardは中間活性を常に CLASSIC_RELU_CLIP_F32 (==127.0)
+        // へクリップしており、量子化時もそのまま int8 の 0..127 を共有する。
+        // そのため hidden2/output への入力スケールは 1.0 で固定している。
+        // clip 値や中間層を別スケールにしたい場合は、quantize_bias_i32()
+        // および evaluate_quantization_gap() の復元計算を合わせて更新すること。
         let s_in_2 = 1.0f32;
         let hidden2_biases_q = quantize_bias_i32(&self.hidden2_biases, s_in_2, &h2_scales);
 
@@ -971,7 +972,19 @@ impl ClassicQuantizationScales {
     /// 呼び出し側（INT→float 復元部）の修正を局所化できる。
     #[inline]
     pub fn output_scale(&self) -> f32 {
-        debug_assert_eq!(self.s_w3.len(), 1, "Classic v1 supports only per-tensor output scale",);
+        if self.s_w3.len() != 1 {
+            debug_assert_eq!(
+                self.s_w3.len(),
+                1,
+                "Classic v1 supports only per-tensor output scale",
+            );
+            if self.s_w3.is_empty() {
+                log::error!(
+                    "classic quantization scales: missing output scale, falling back to 1.0"
+                );
+                return self.s_in_3;
+            }
+        }
         self.s_in_3 * self.s_w3[0]
     }
 }
