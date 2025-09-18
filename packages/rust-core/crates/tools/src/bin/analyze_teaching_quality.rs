@@ -13,10 +13,7 @@ use tools::common::io::open_reader;
 use tools::common::manifest::{resolve_manifest, AutoloadMode};
 use tools::stats::{compute_stats_exact, quantile_sorted, OnlineP2, OnlineTDigest};
 
-// Phase 1-1: 型定義とストリーミング基盤
-
 #[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)]
 struct LineRec {
     #[serde(default)]
     multipv: Option<u8>,
@@ -43,7 +40,6 @@ struct LineRec {
 }
 
 #[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)]
 struct Record {
     #[serde(default)]
     sfen: Option<String>,
