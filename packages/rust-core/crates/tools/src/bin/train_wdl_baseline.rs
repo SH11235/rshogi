@@ -19,7 +19,6 @@ use tools::stats::{
     binary_metrics, calibration_bins, ece_from_bins, regression_metrics, roc_auc_weighted,
 };
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
     sfen: String,
@@ -49,7 +48,6 @@ struct TrainingPosition {
     seldepth: Option<u8>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct LineInfo {
     #[serde(default)]
