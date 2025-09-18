@@ -97,9 +97,27 @@ struct Agg {
     gaps_all: Vec<i64>,
     gaps_no_mate: Vec<i64>,
     lines_ge2: usize,
+    line_total: usize,
+    line_move_present: usize,
+    line_depth_present: usize,
+    line_seldepth_present: usize,
+    multipv_present: usize,
+    multipv_missing: usize,
+    multipv_mismatch: usize,
+    pv_length_sum: usize,
+    pv_length_max: usize,
+    pv_length_count: usize,
+    score_internal_diff_abs_sum: f64,
+    score_internal_diff_count: usize,
+    score_internal_diff_max: i32,
     // time
     times_ms: Vec<i64>,
     nodes: Vec<i64>,
+    nodes_q_sum: f64,
+    nodes_q_count: usize,
+    nodes_q_ratio_sum: f64,
+    nodes_q_ratio_count: usize,
+    nodes_q_ratio_max: f64,
     // fallback
     fallback_record: usize,
     fallback_top1: usize,
@@ -126,6 +144,13 @@ struct Agg {
     lmr_per_node: Vec<f64>,
     // seldepth deficit
     seldef: Vec<i64>,
+    // eval consistency
+    eval_score_diff_abs_sum: f64,
+    eval_score_diff_count: usize,
+    eval_score_diff_max: i32,
+    // pv change tracking
+    pv_changed_true: usize,
+    pv_changed_total: usize,
     // non-exact reasons (hint)
     non_exact_total: usize,
     non_exact_budget: usize,
@@ -200,6 +225,40 @@ impl Agg {
             _ => self.b2_other += 1,
         }
 
+        if let Some(flag) = rec.pv_changed {
+            self.pv_changed_total += 1;
+            if flag {
+                self.pv_changed_true += 1;
+            }
+        }
+        if let Some(nodes_q) = rec.nodes_q {
+            let nodes_q_f = nodes_q as f64;
+            self.nodes_q_sum += nodes_q_f;
+            self.nodes_q_count += 1;
+            if let Some(nodes_total) = rec.nodes {
+                if nodes_total > 0 {
+                    let ratio = nodes_q_f / nodes_total as f64;
+                    self.nodes_q_ratio_sum += ratio;
+                    self.nodes_q_ratio_count += 1;
+                    if ratio > self.nodes_q_ratio_max {
+                        self.nodes_q_ratio_max = ratio;
+                    }
+                }
+            }
+        }
+        if let Some(eval_cp) = rec.eval {
+            if let Some(first_line) = rec.lines.first() {
+                if let Some(line_cp) = first_line.score_cp {
+                    let diff = (line_cp - eval_cp).abs();
+                    self.eval_score_diff_abs_sum += diff as f64;
+                    self.eval_score_diff_count += 1;
+                    if diff > self.eval_score_diff_max {
+                        self.eval_score_diff_max = diff;
+                    }
+                }
+            }
+        }
+
         if let Some(g) = rec.best2_gap_cp {
             let v = g as i64;
             match qbackend {
@@ -266,6 +325,42 @@ impl Agg {
         // fallback detection (record-level + line-level top1/top2)
         let mut rec_has_fallback = false;
         for (idx, l) in rec.lines.iter().enumerate() {
+            self.line_total += 1;
+            if l.r#move.is_some() {
+                self.line_move_present += 1;
+            }
+            if l.depth.is_some() {
+                self.line_depth_present += 1;
+            }
+            if l.seldepth.is_some() {
+                self.line_seldepth_present += 1;
+            }
+            if let Some(mp) = l.multipv {
+                self.multipv_present += 1;
+                if mp as usize != idx + 1 {
+                    self.multipv_mismatch += 1;
+                }
+            } else {
+                self.multipv_missing += 1;
+            }
+            if let (Some(cp), Some(internal)) = (l.score_cp, l.score_internal) {
+                let diff = (cp - internal).abs();
+                self.score_internal_diff_abs_sum += diff as f64;
+                self.score_internal_diff_count += 1;
+                if diff > self.score_internal_diff_max {
+                    self.score_internal_diff_max = diff;
+                }
+            }
+            if let Some(pv) = l.pv.as_ref() {
+                if !pv.is_empty() {
+                    let len = pv.len();
+                    self.pv_length_sum += len;
+                    self.pv_length_count += 1;
+                    if len > self.pv_length_max {
+                        self.pv_length_max = len;
+                    }
+                }
+            }
             if let Some(reason) = l.exhaust_reason.as_deref() {
                 let r = reason.to_ascii_lowercase();
                 if r == "fallback" || r == "post_fallback" {
@@ -1395,48 +1490,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("ambiguous: n={} rate20={:.3} ci95=[{:.3},{:.3}] rate30={:.3} ci95=[{:.3},{:.3}]", n_amb, r20, l20, h20, r30, l30, h30);
                 }
             }
-            ReportKind::NodesDistribution => match qbackend {
-                QuantilesBackend::Exact => {
-                    if agg.nodes.is_empty() {
-                        println!("nodes_distribution: no-data");
-                    } else {
-                        let mut v = agg.nodes.clone();
-                        v.sort_unstable();
-                        let mean = mean_i64(&v);
-                        let min = *v.first().unwrap();
-                        let max = *v.last().unwrap();
-                        let p50 = quantile_sorted(&v, 0.5);
-                        let p90 = quantile_sorted(&v, 0.9);
-                        let p99 = quantile_sorted(&v, 0.99);
-                        println!("nodes_distribution: count={} min={} max={} mean={:.1} median={} p90={} p99={}", v.len(), min, max, mean, p50, p90, p99);
+            ReportKind::NodesDistribution => {
+                match qbackend {
+                    QuantilesBackend::Exact => {
+                        if agg.nodes.is_empty() {
+                            println!("nodes_distribution: no-data");
+                        } else {
+                            let mut v = agg.nodes.clone();
+                            v.sort_unstable();
+                            let mean = mean_i64(&v);
+                            let min = *v.first().unwrap();
+                            let max = *v.last().unwrap();
+                            let p50 = quantile_sorted(&v, 0.5);
+                            let p90 = quantile_sorted(&v, 0.9);
+                            let p99 = quantile_sorted(&v, 0.99);
+                            println!("nodes_distribution: count={} min={} max={} mean={:.1} median={} p90={} p99={}", v.len(), min, max, mean, p50, p90, p99);
+                        }
                     }
-                }
-                QuantilesBackend::P2 => {
-                    if let Some(ref o) = agg.nodes_p2 {
-                        if let Some(s) = o.stats() {
-                            println!("nodes_distribution: count={} min={} max={} mean={:.1} median={} p90={} p99={}", s.count, s.min, s.max, s.mean, s.p50, s.p90, s.p99);
+                    QuantilesBackend::P2 => {
+                        if let Some(ref o) = agg.nodes_p2 {
+                            if let Some(s) = o.stats() {
+                                println!("nodes_distribution: count={} min={} max={} mean={:.1} median={} p90={} p99={}", s.count, s.min, s.max, s.mean, s.p50, s.p90, s.p99);
+                            } else {
+                                println!("nodes_distribution: no-data");
+                            }
                         } else {
                             println!("nodes_distribution: no-data");
                         }
-                    } else {
-                        println!("nodes_distribution: no-data");
+                    }
+                    QuantilesBackend::TDigest => {
+                        if let Some(ref mut td) = agg.nodes_td {
+                            let count = td.count;
+                            let min = td.min;
+                            let max = td.max;
+                            let mean = td.sum as f64 / (td.count as f64);
+                            let p50 = td.q(0.5);
+                            let p90 = td.q(0.9);
+                            let p99 = td.q(0.99);
+                            println!("nodes_distribution: count={} min={} max={} mean={:.1} median={} p90={} p99={}", count, min, max, mean, p50, p90, p99);
+                        } else {
+                            println!("nodes_distribution: no-data");
+                        }
                     }
                 }
-                QuantilesBackend::TDigest => {
-                    if let Some(ref mut td) = agg.nodes_td {
-                        let count = td.count;
-                        let min = td.min;
-                        let max = td.max;
-                        let mean = td.sum as f64 / (td.count as f64);
-                        let p50 = td.q(0.5);
-                        let p90 = td.q(0.9);
-                        let p99 = td.q(0.99);
-                        println!("nodes_distribution: count={} min={} max={} mean={:.1} median={} p90={} p99={}", count, min, max, mean, p50, p90, p99);
+                if agg.nodes_q_count > 0 {
+                    let mean_q = agg.nodes_q_sum / agg.nodes_q_count as f64;
+                    let ratio_mean = if agg.nodes_q_ratio_count > 0 {
+                        agg.nodes_q_ratio_sum / agg.nodes_q_ratio_count as f64
                     } else {
-                        println!("nodes_distribution: no-data");
-                    }
+                        0.0
+                    };
+                    let coverage = if agg.total > 0 {
+                        agg.nodes_q_count as f64 / agg.total as f64
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "nodes_q: records={} mean={:.0} ratio_mean={:.3} max_ratio={:.3} coverage={:.3}",
+                        agg.nodes_q_count,
+                        mean_q,
+                        ratio_mean,
+                        agg.nodes_q_ratio_max,
+                        coverage
+                    );
+                } else {
+                    println!("nodes_q: no-data");
                 }
-            },
+            }
             ReportKind::Fallback => {
                 let n = agg.total;
                 let r = if n > 0 {
@@ -1465,6 +1585,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agg.inv_mate_mixed_into_no_mate, r5,
                     agg.total, expected_mpv
                 );
+                if agg.pv_changed_total > 0 {
+                    let rate = agg.pv_changed_true as f64 / agg.pv_changed_total as f64;
+                    println!("pv_changed: total={} rate={:.3}", agg.pv_changed_total, rate);
+                } else {
+                    println!("pv_changed: no-data");
+                }
+                if agg.nodes_q_count > 0 {
+                    let mean_q = agg.nodes_q_sum / agg.nodes_q_count as f64;
+                    let ratio_mean = if agg.nodes_q_ratio_count > 0 {
+                        agg.nodes_q_ratio_sum / agg.nodes_q_ratio_count as f64
+                    } else {
+                        0.0
+                    };
+                    let coverage = if agg.total > 0 {
+                        agg.nodes_q_count as f64 / agg.total as f64
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "nodes_q: records={} mean={:.0} ratio_mean={:.3} max_ratio={:.3} coverage={:.3}",
+                        agg.nodes_q_count,
+                        mean_q,
+                        ratio_mean,
+                        agg.nodes_q_ratio_max,
+                        coverage
+                    );
+                } else {
+                    println!("nodes_q: no-data");
+                }
+                if agg.score_internal_diff_count > 0 {
+                    let mean_abs =
+                        agg.score_internal_diff_abs_sum / agg.score_internal_diff_count as f64;
+                    println!(
+                        "score_internal_drift: mean_abs={:.1}cp max_abs={}cp (n={})",
+                        mean_abs, agg.score_internal_diff_max, agg.score_internal_diff_count
+                    );
+                } else {
+                    println!("score_internal_drift: no-data");
+                }
+                if agg.eval_score_diff_count > 0 {
+                    let mean_abs = agg.eval_score_diff_abs_sum / agg.eval_score_diff_count as f64;
+                    println!(
+                        "eval_vs_top1: mean_abs={:.1}cp max_abs={}cp (n={})",
+                        mean_abs, agg.eval_score_diff_max, agg.eval_score_diff_count
+                    );
+                } else {
+                    println!("eval_vs_top1: no-data");
+                }
+                if agg.line_total > 0 {
+                    let total_f = agg.line_total as f64;
+                    let move_cov = agg.line_move_present as f64 / total_f;
+                    let depth_cov = agg.line_depth_present as f64 / total_f;
+                    let seldepth_cov = agg.line_seldepth_present as f64 / total_f;
+                    let multipv_cov = agg.multipv_present as f64 / total_f;
+                    println!(
+                        "line_meta: total={} move_cov={:.3} depth_cov={:.3} seldepth_cov={:.3} multipv_cov={:.3} multipv_mismatch={}",
+                        agg.line_total,
+                        move_cov,
+                        depth_cov,
+                        seldepth_cov,
+                        multipv_cov,
+                        agg.multipv_mismatch
+                    );
+                    if agg.pv_length_count > 0 {
+                        let pv_mean = agg.pv_length_sum as f64 / agg.pv_length_count as f64;
+                        let pv_cov = agg.pv_length_count as f64 / total_f;
+                        println!(
+                            "pv_length: mean={:.1} max={} coverage={:.3}",
+                            pv_mean, agg.pv_length_max, pv_cov
+                        );
+                    } else {
+                        println!("pv_length: no-data");
+                    }
+                } else {
+                    println!("line_meta: no-data");
+                }
             }
         }
     }
@@ -1634,6 +1830,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0.0
             };
             println!("  ambiguous_covered: rate20={:.3} rate30={:.3}", amb20_cov, amb30_cov);
+            if agg.pv_changed_total > 0 {
+                let rate = agg.pv_changed_true as f64 / agg.pv_changed_total as f64;
+                println!(
+                    "  pv_changed: {:.3} ({} / {})",
+                    rate, agg.pv_changed_true, agg.pv_changed_total
+                );
+            } else {
+                println!("  pv_changed: no-data");
+            }
+            if agg.nodes_q_count > 0 {
+                let mean_q = agg.nodes_q_sum / agg.nodes_q_count as f64;
+                let ratio_mean = if agg.nodes_q_ratio_count > 0 {
+                    agg.nodes_q_ratio_sum / agg.nodes_q_ratio_count as f64
+                } else {
+                    0.0
+                };
+                let coverage = if agg.total > 0 {
+                    agg.nodes_q_count as f64 / agg.total as f64
+                } else {
+                    0.0
+                };
+                println!(
+                    "  nodes_q: mean={:.0} ratio_mean={:.3} max_ratio={:.3} coverage={:.3}",
+                    mean_q, ratio_mean, agg.nodes_q_ratio_max, coverage
+                );
+            } else {
+                println!("  nodes_q: no-data");
+            }
+            if agg.score_internal_diff_count > 0 {
+                let mean_abs =
+                    agg.score_internal_diff_abs_sum / agg.score_internal_diff_count as f64;
+                println!(
+                    "  score_internal_drift: mean_abs={:.1}cp max_abs={}cp (n={})",
+                    mean_abs, agg.score_internal_diff_max, agg.score_internal_diff_count
+                );
+            } else {
+                println!("  score_internal_drift: no-data");
+            }
+            if agg.eval_score_diff_count > 0 {
+                let mean_abs = agg.eval_score_diff_abs_sum / agg.eval_score_diff_count as f64;
+                println!(
+                    "  eval_vs_top1: mean_abs={:.1}cp max_abs={}cp (n={})",
+                    mean_abs, agg.eval_score_diff_max, agg.eval_score_diff_count
+                );
+            } else {
+                println!("  eval_vs_top1: no-data");
+            }
+            if agg.line_total > 0 {
+                let total_f = agg.line_total as f64;
+                let move_cov = agg.line_move_present as f64 / total_f;
+                let depth_cov = agg.line_depth_present as f64 / total_f;
+                let seldepth_cov = agg.line_seldepth_present as f64 / total_f;
+                let multipv_cov = agg.multipv_present as f64 / total_f;
+                println!(
+                    "  line_meta: total={} move_cov={:.3} depth_cov={:.3} seldepth_cov={:.3} multipv_cov={:.3} multipv_mismatch={}",
+                    agg.line_total,
+                    move_cov,
+                    depth_cov,
+                    seldepth_cov,
+                    multipv_cov,
+                    agg.multipv_mismatch
+                );
+                if agg.pv_length_count > 0 {
+                    let pv_mean = agg.pv_length_sum as f64 / agg.pv_length_count as f64;
+                    let pv_cov = agg.pv_length_count as f64 / total_f;
+                    println!(
+                        "  pv_length: mean={:.1} max={} coverage={:.3}",
+                        pv_mean, agg.pv_length_max, pv_cov
+                    );
+                } else {
+                    println!("  pv_length: no-data");
+                }
+            } else {
+                println!("  line_meta: no-data");
+            }
             // compact bound/tt/null-lmr line
             let tt_mean = if agg.tt_rates.is_empty() {
                 None
@@ -2099,6 +2370,133 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             obj.insert("ambiguous_rate_20_covered".into(), json!(amb20_cov));
             obj.insert("ambiguous_rate_30_covered".into(), json!(amb30_cov));
 
+            let nodes_q_mean = if agg.nodes_q_count > 0 {
+                Some(agg.nodes_q_sum / agg.nodes_q_count as f64)
+            } else {
+                None
+            };
+            let nodes_q_ratio_mean = if agg.nodes_q_ratio_count > 0 {
+                Some(agg.nodes_q_ratio_sum / agg.nodes_q_ratio_count as f64)
+            } else {
+                None
+            };
+            let nodes_q_coverage = if agg.total > 0 {
+                Some(agg.nodes_q_count as f64 / agg.total as f64)
+            } else {
+                None
+            };
+            let score_internal_mean_abs = if agg.score_internal_diff_count > 0 {
+                Some(agg.score_internal_diff_abs_sum / agg.score_internal_diff_count as f64)
+            } else {
+                None
+            };
+            let eval_vs_top1_mean_abs = if agg.eval_score_diff_count > 0 {
+                Some(agg.eval_score_diff_abs_sum / agg.eval_score_diff_count as f64)
+            } else {
+                None
+            };
+            let (line_move_cov, line_depth_cov, line_seldepth_cov, multipv_cov, pv_length_cov) =
+                if agg.line_total > 0 {
+                    let t = agg.line_total as f64;
+                    (
+                        Some(agg.line_move_present as f64 / t),
+                        Some(agg.line_depth_present as f64 / t),
+                        Some(agg.line_seldepth_present as f64 / t),
+                        Some(agg.multipv_present as f64 / t),
+                        Some(agg.pv_length_count as f64 / t),
+                    )
+                } else {
+                    (None, None, None, None, None)
+                };
+            let pv_length_mean = if agg.pv_length_count > 0 {
+                Some(agg.pv_length_sum as f64 / agg.pv_length_count as f64)
+            } else {
+                None
+            };
+
+            obj.insert("pv_changed_true".into(), json!(agg.pv_changed_true));
+            obj.insert("pv_changed_total".into(), json!(agg.pv_changed_total));
+            obj.insert(
+                "pv_changed_rate".into(),
+                if agg.pv_changed_total > 0 {
+                    json!(agg.pv_changed_true as f64 / agg.pv_changed_total as f64)
+                } else {
+                    Value::Null
+                },
+            );
+            match nodes_q_mean {
+                Some(v) => {
+                    obj.insert("nodes_q_mean".into(), json!(v));
+                }
+                None => {
+                    obj.insert("nodes_q_mean".into(), Value::Null);
+                }
+            }
+            match nodes_q_ratio_mean {
+                Some(v) => {
+                    obj.insert("nodes_q_ratio_mean".into(), json!(v));
+                }
+                None => {
+                    obj.insert("nodes_q_ratio_mean".into(), Value::Null);
+                }
+            }
+            match nodes_q_coverage {
+                Some(v) => {
+                    obj.insert("nodes_q_coverage".into(), json!(v));
+                }
+                None => {
+                    obj.insert("nodes_q_coverage".into(), Value::Null);
+                }
+            }
+            obj.insert("nodes_q_ratio_max".into(), json!(agg.nodes_q_ratio_max));
+            match score_internal_mean_abs {
+                Some(v) => {
+                    obj.insert("score_internal_diff_mean_abs".into(), json!(v));
+                }
+                None => {
+                    obj.insert("score_internal_diff_mean_abs".into(), Value::Null);
+                }
+            }
+            obj.insert("score_internal_diff_max_abs".into(), json!(agg.score_internal_diff_max));
+            obj.insert("score_internal_diff_count".into(), json!(agg.score_internal_diff_count));
+            match eval_vs_top1_mean_abs {
+                Some(v) => {
+                    obj.insert("eval_vs_top1_mean_abs".into(), json!(v));
+                }
+                None => {
+                    obj.insert("eval_vs_top1_mean_abs".into(), Value::Null);
+                }
+            }
+            obj.insert("eval_vs_top1_max_abs".into(), json!(agg.eval_score_diff_max));
+            obj.insert("eval_vs_top1_count".into(), json!(agg.eval_score_diff_count));
+            obj.insert("line_total".into(), json!(agg.line_total));
+            match line_move_cov {
+                Some(v) => obj.insert("line_move_coverage".into(), json!(v)),
+                None => obj.insert("line_move_coverage".into(), Value::Null),
+            };
+            match line_depth_cov {
+                Some(v) => obj.insert("line_depth_coverage".into(), json!(v)),
+                None => obj.insert("line_depth_coverage".into(), Value::Null),
+            };
+            match line_seldepth_cov {
+                Some(v) => obj.insert("line_seldepth_coverage".into(), json!(v)),
+                None => obj.insert("line_seldepth_coverage".into(), Value::Null),
+            };
+            match multipv_cov {
+                Some(v) => obj.insert("multipv_coverage".into(), json!(v)),
+                None => obj.insert("multipv_coverage".into(), Value::Null),
+            };
+            obj.insert("multipv_mismatch".into(), json!(agg.multipv_mismatch));
+            match pv_length_mean {
+                Some(v) => obj.insert("pv_length_mean".into(), json!(v)),
+                None => obj.insert("pv_length_mean".into(), Value::Null),
+            };
+            obj.insert("pv_length_max".into(), json!(agg.pv_length_max));
+            match pv_length_cov {
+                Some(v) => obj.insert("pv_length_coverage".into(), json!(v)),
+                None => obj.insert("pv_length_coverage".into(), Value::Null),
+            };
+
             // Optional: add delta to JSON (use precomputed pair)
             if let Some(ref mut p) = pair {
                 let a1 = &mut p.a1;
@@ -2275,6 +2673,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "nodes_p90",
                     "nodes_p95",
                     "nodes_p99",
+                    "pv_changed_true",
+                    "pv_changed_total",
+                    "pv_changed_rate",
+                    "nodes_q_mean",
+                    "nodes_q_ratio_mean",
+                    "nodes_q_ratio_max",
+                    "nodes_q_coverage",
+                    "score_internal_diff_mean_abs",
+                    "score_internal_diff_max_abs",
+                    "score_internal_diff_count",
+                    "eval_vs_top1_mean_abs",
+                    "eval_vs_top1_max_abs",
+                    "eval_vs_top1_count",
+                    "line_total",
+                    "line_move_coverage",
+                    "line_depth_coverage",
+                    "line_seldepth_coverage",
+                    "multipv_coverage",
+                    "multipv_mismatch",
+                    "pv_length_mean",
+                    "pv_length_max",
+                    "pv_length_coverage",
                     "seldepth_deficit_median",
                     "seldepth_deficit_p90",
                     "seldepth_deficit_delta",
