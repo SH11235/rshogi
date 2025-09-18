@@ -2,9 +2,9 @@
 
 このドキュメントでは、将棋AIエンジンの各種ベンチマークコマンドとその用途を説明します。
 
-+> crate固有のベンチ（TT実装など）は各crateのドキュメントに詳細があります。
-+> engine-core の個別ベンチ一覧と実行条件は [crates/engine-core/docs/benchmarks.md](../../crates/engine-core/docs/benchmarks.md) を参照してください。
-+
+> crate固有のベンチ（TT実装など）は各crateのドキュメントに詳細があります。
+> engine-core の個別ベンチ一覧と実行条件は [crates/engine-core/docs/benchmarks.md](../../crates/engine-core/docs/benchmarks.md) を参照してください。
+
 ## ベンチマークの種類
 
 ### 1. 探索エンジンベンチマーク
@@ -161,7 +161,7 @@ done | tee benchmark_results.txt
 
 - ワークフロー: `.github/workflows/gauntlet-gate.yml`
 - 入力重み: `runs/nnue_local/baseline.nnue` と `runs/nnue_local/candidate.nnue`
-  - ローカルで配置するか、`GATE_BASELINE_TAG/GATE_BASELINE_ASSET` と `GATE_CANDIDATE_TAG/GATE_CANDIDATE_ASSET` に GitHub Release Asset を指定
+- Release asset: `GATE_BASELINE_TAG/GATE_BASELINE_ASSET` と `GATE_CANDIDATE_TAG/GATE_CANDIDATE_ASSET` で GitHub Release のアセット名を指定する（ワークフロー内で必ずダウンロードされる）
 - 実行内容:
   - `target/release/gauntlet` を 200局（代表100局面×往復）で実行
   - Gate 条件: スコア率 55% 以上かつ NPS ±3% 以内

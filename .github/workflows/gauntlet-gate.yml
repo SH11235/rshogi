@@ -10,6 +10,9 @@ on:
       - 'packages/rust-core/**'
       - '.github/workflows/gauntlet-gate.yml'
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -36,6 +39,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: cli/cli@v2
 
       - name: Install mold/clang/jq
         run: |
@@ -75,17 +79,17 @@ jobs:
         run: |
           set -Eeuo pipefail
           DEST="runs/nnue_local/baseline.nnue"
-          if [ -s "$DEST" ]; then
-            exit 0
+          rm -f "$DEST"
+          if [ -z "${RELEASE_TAG}" ] || [ -z "${ASSET_NAME}" ]; then
+            echo "::error::GATE_BASELINE_TAG / GATE_BASELINE_ASSET must be set"
+            exit 1
           fi
-          if [ -n "${RELEASE_TAG}" ] && [ -n "${ASSET_NAME}" ]; then
-            echo "Downloading baseline from ${RELEASE_TAG}/${ASSET_NAME}"
-            gh release download "${RELEASE_TAG}" \
-              -R "$GITHUB_REPOSITORY" \
-              -p "${ASSET_NAME}" \
-              -D runs/nnue_local \
-              -O baseline.nnue || true
-          fi
+          echo "Downloading baseline from ${RELEASE_TAG}/${ASSET_NAME}"
+          gh release download "${RELEASE_TAG}" \
+            -R "$GITHUB_REPOSITORY" \
+            -p "${ASSET_NAME}" \
+            -D runs/nnue_local \
+            -O baseline.nnue
           if [ ! -s "$DEST" ]; then
             echo "::error::Baseline weights not found. Provide runs/nnue_local/baseline.nnue or set GATE_BASELINE_TAG/GATE_BASELINE_ASSET to a valid release asset."
             exit 1
@@ -99,17 +103,17 @@ jobs:
         run: |
           set -Eeuo pipefail
           DEST="runs/nnue_local/candidate.nnue"
-          if [ -s "$DEST" ]; then
-            exit 0
+          rm -f "$DEST"
+          if [ -z "${RELEASE_TAG}" ] || [ -z "${ASSET_NAME}" ]; then
+            echo "::error::GATE_CANDIDATE_TAG / GATE_CANDIDATE_ASSET must be set"
+            exit 1
           fi
-          if [ -n "${RELEASE_TAG}" ] && [ -n "${ASSET_NAME}" ]; then
-            echo "Downloading candidate from ${RELEASE_TAG}/${ASSET_NAME}"
-            gh release download "${RELEASE_TAG}" \
-              -R "$GITHUB_REPOSITORY" \
-              -p "${ASSET_NAME}" \
-              -D runs/nnue_local \
-              -O candidate.nnue || true
-          fi
+          echo "Downloading candidate from ${RELEASE_TAG}/${ASSET_NAME}"
+          gh release download "${RELEASE_TAG}" \
+            -R "$GITHUB_REPOSITORY" \
+            -p "${ASSET_NAME}" \
+            -D runs/nnue_local \
+            -O candidate.nnue
           if [ ! -s "$DEST" ]; then
             echo "::error::Candidate weights not found. Provide runs/nnue_local/candidate.nnue or set GATE_CANDIDATE_TAG/GATE_CANDIDATE_ASSET to a valid release asset."
             exit 1
@@ -139,7 +143,29 @@ jobs:
             --book docs/reports/fixtures/opening/representative_100.epd \
             --json runs/gauntlet_gate/out.json \
             --report runs/gauntlet_gate/report.md \
-            --seed "${GAUNTLET_SEED}" 2> runs/gauntlet_gate/console.err
+            --seed "${GAUNTLET_SEED}" \
+            > runs/gauntlet_gate/structured.jsonl \
+            2> runs/gauntlet_gate/console.err
+
+      - name: Check gate decision
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f runs/gauntlet_gate/out.json ]; then
+            echo "::error::out.json not found"
+            exit 1
+          fi
+          GATE=$(jq -r '.summary.gate' runs/gauntlet_gate/out.json)
+          NPS=$(jq -r '.summary.nps_samples // 0' runs/gauntlet_gate/out.json)
+          PV=$(jq -r '.summary.pv_spread_samples // 0' runs/gauntlet_gate/out.json)
+          echo "Gate=${GATE}, NPS_samples=${NPS}, PV_samples=${PV}"
+          if [ "${GATE}" != "pass" ]; then
+            echo "::error::Gauntlet gate failed (gate=${GATE})"
+            exit 1
+          fi
+          if [ "${NPS}" -lt 50 ] || [ "${PV}" -lt 10 ]; then
+            echo "::error::Insufficient samples (NPS=${NPS}, PV=${PV})"
+            exit 1
+          fi
 
       - name: Copy report into docs tree
         if: always()
