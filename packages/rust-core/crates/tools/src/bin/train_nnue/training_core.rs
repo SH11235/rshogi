@@ -26,7 +26,9 @@ fn train_model_single(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let n_samples = train_samples.len();
     let n_batches = n_samples.div_ceil(config.batch_size);
-    let mut adam_state = if config.optimizer == "adam" {
+    let mut adam_state = if config.optimizer.eq_ignore_ascii_case("adam")
+        || config.optimizer.eq_ignore_ascii_case("adamw")
+    {
         Some(SingleAdamState::new(network))
     } else {
         None
@@ -478,18 +480,22 @@ fn train_model_single(
 }
 
 fn train_model_with_loader_classic(
-    _network: &mut ClassicNetwork,
-    _train_samples: Vec<Sample>,
-    _validation_samples: &Option<Vec<Sample>>,
-    _config: &Config,
-    _rng: &mut StdRng,
-    _ctx: &mut TrainContext,
+    network: &mut ClassicNetwork,
+    train_samples: Vec<Sample>,
+    validation_samples: &Option<Vec<Sample>>,
+    config: &Config,
+    rng: &mut StdRng,
+    ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "Classic アーキの学習ループは実装中です",
+    let mut owned = train_samples;
+    train_model_classic(
+        network,
+        owned.as_mut_slice(),
+        validation_samples,
+        config,
+        rng,
+        ctx,
     )
-    .into())
 }
 
 fn train_model_classic(
@@ -500,13 +506,8 @@ fn train_model_classic(
     rng: &mut StdRng,
     ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if config.optimizer != "sgd" {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Classic アーキの学習ループは optimizer=sgd のみサポートしています",
-        )
-        .into());
-    }
+    let mut optimizer_state = ClassicOptimizerState::new(&network.fp32, config)
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
 
     let n_samples = train_samples.len();
     let n_batches = n_samples.div_ceil(config.batch_size);
@@ -542,7 +543,15 @@ fn train_model_classic(
 
             let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
 
-            let (loss_sum, weight_sum) = train_batch_classic(network, batch, config, &mut scratch, lr_base);
+            let (loss_sum, weight_sum) = train_batch_classic(
+                network,
+                batch,
+                config,
+                &mut scratch,
+                lr_base,
+                &mut optimizer_state,
+                config.grad_clip,
+            );
             if weight_sum > 0.0 {
                 total_loss += loss_sum;
                 total_weight += weight_sum;
@@ -691,14 +700,17 @@ fn train_model_stream_cache_single(
     cache_path: &str,
     validation_samples: &Option<Vec<Sample>>,
     config: &Config,
-    _rng: &mut StdRng,
+    rng: &mut StdRng,
     ctx: &mut TrainContext,
     weighting: &wcfg::WeightingConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rng;
     // Use ctx fields directly in this function to avoid borrow confusion
     // If prefetch=0, run synchronous streaming in the training thread (no background worker)
     if config.prefetch_batches == 0 {
-        let mut adam_state = if config.optimizer == "adam" {
+        let mut adam_state = if config.optimizer.eq_ignore_ascii_case("adam")
+            || config.optimizer.eq_ignore_ascii_case("adamw")
+        {
             Some(SingleAdamState::new(network))
         } else {
             None
@@ -1544,19 +1556,360 @@ fn train_model_stream_cache_single(
 }
 
 fn train_model_stream_cache_classic(
-    _network: &mut ClassicNetwork,
-    _cache_path: &str,
-    _validation_samples: &Option<Vec<Sample>>,
-    _config: &Config,
-    _rng: &mut StdRng,
-    _ctx: &mut TrainContext,
-    _weighting: &wcfg::WeightingConfig,
+    network: &mut ClassicNetwork,
+    cache_path: &str,
+    validation_samples: &Option<Vec<Sample>>,
+    config: &Config,
+    rng: &mut StdRng,
+    ctx: &mut TrainContext,
+    weighting: &wcfg::WeightingConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "Classic アーキの学習ループは実装中です",
-    )
-    .into())
+    let mut optimizer_state = ClassicOptimizerState::new(&network.fp32, config)
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
+
+    if config.shuffle {
+        log::warn!(
+            "Classic stream-cache 学習では shuffle は無効です (--shuffle は無視されます)"
+        );
+    }
+
+    let mut scratch = ClassicTrainScratch::new(
+        network.fp32.acc_dim,
+        network.fp32.h1_dim,
+        network.fp32.h2_dim,
+    );
+
+    let _ = rng;
+
+    let mut effective_prefetch = config.prefetch_batches.max(1);
+    if let Some(bytes_cap) = config.prefetch_bytes.filter(|&b| b > 0) {
+        let est_sample_bytes =
+            32usize.saturating_add(4usize.saturating_mul(config.estimated_features_per_sample));
+        let est_batch_bytes = config.batch_size.saturating_mul(est_sample_bytes);
+        if est_batch_bytes > 0 {
+            let max_batches = (bytes_cap / est_batch_bytes).max(1);
+            if effective_prefetch > max_batches {
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
+                        "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                        effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
+                    );
+                } else {
+                    println!(
+                        "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                        effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
+                    );
+                }
+                effective_prefetch = max_batches;
+            }
+        }
+    }
+
+    let mut loader = StreamCacheLoader::new(
+        cache_path.to_string(),
+        config.batch_size,
+        effective_prefetch,
+        weighting.clone(),
+    );
+
+    for epoch in 0..config.epochs {
+        let epoch_start = Instant::now();
+        loader.start_epoch()?;
+
+        let mut total_loss = 0.0f32;
+        let mut total_weight = 0.0f32;
+        let mut batch_count = 0usize;
+        let mut total_samples_epoch = 0usize;
+        let mut zero_weight_batches = 0usize;
+
+        let mut last_report = Instant::now();
+        let mut samples_since = 0usize;
+        let mut batches_since = 0usize;
+        let mut wait_ns_since: u128 = 0;
+        let mut wait_ns_epoch: u128 = 0;
+        let mut last_loss_for_log: Option<f32> = None;
+        let mut last_lr_base = config.learning_rate;
+
+        loop {
+            let (maybe_batch, wait_dur) = loader.next_batch_with_wait();
+            let Some(batch_res) = maybe_batch else { break };
+            let batch = match batch_res {
+                Ok(b) => b,
+                Err(msg) => {
+                    loader.finish();
+                    return Err(msg.into());
+                }
+            };
+            let _ = last_loss_for_log;
+
+            let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
+            let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
+
+            if batch_weight > 0.0 {
+            let (loss_sum, weight_sum) = train_batch_classic(
+                network,
+                &batch,
+                config,
+                &mut scratch,
+                lr_base,
+                &mut optimizer_state,
+                config.grad_clip,
+            );
+                total_loss += loss_sum;
+                total_weight += weight_sum;
+                last_loss_for_log = Some(loss_sum / weight_sum);
+            } else {
+                zero_weight_batches += 1;
+                last_loss_for_log = None;
+            }
+            last_lr_base = lr_base;
+
+            ctx.global_step += 1;
+            batch_count += 1;
+            let batch_len = batch.len();
+            samples_since += batch_len;
+            batches_since += 1;
+            total_samples_epoch += batch_len;
+            wait_ns_since += wait_dur.as_nanos();
+            wait_ns_epoch += wait_dur.as_nanos();
+
+            if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
+                && batches_since > 0
+            {
+                let secs = last_report.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
+                let sps = samples_since as f32 / secs;
+                let bps = batches_since as f32 / secs;
+                let avg_bs = samples_since as f32 / batches_since as f32;
+                let loader_ratio = if secs > 0.0 {
+                    (wait_ns_since as f64 / NANOSECONDS_PER_SECOND) / secs as f64
+                } else {
+                    0.0
+                } * 100.0;
+
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
+                        "[throughput] mode=stream-classic epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs,
+                        loader_ratio
+                    );
+                } else {
+                    println!(
+                        "[throughput] mode=stream-classic epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs,
+                        loader_ratio
+                    );
+                }
+
+                if let Some(ref lg) = ctx.structured {
+                    let mut rec = serde_json::json!({
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "phase": "train",
+                        "global_step": ctx.global_step as i64,
+                        "epoch": (epoch + 1) as i64,
+                        "lr": lr_base as f64,
+                        "examples_sec": sps as f64,
+                        "loader_ratio": loader_ratio / 100.0,
+                        "wall_time": secs as f64,
+                    });
+                    if let Some(ls) = last_loss_for_log {
+                        rec.as_object_mut()
+                            .unwrap()
+                            .insert("train_loss".into(), serde_json::json!(ls as f64));
+                    }
+                    lg.write_json(&rec);
+                }
+
+                last_report = Instant::now();
+                samples_since = 0;
+                batches_since = 0;
+                wait_ns_since = 0;
+            }
+        }
+
+        loader.finish();
+
+        let avg_loss = if total_weight > 0.0 {
+            total_loss / total_weight
+        } else {
+            0.0
+        };
+
+        let mut val_loss = None;
+        let mut val_auc: Option<f64> = None;
+        let mut val_ece: Option<f64> = None;
+        let mut val_wsum: Option<f64> = None;
+        if let Some(val_samples) = validation_samples {
+            let vl = compute_validation_loss_classic(network, val_samples, config);
+            val_loss = Some(vl);
+            let (auc, ece) =
+                compute_val_auc_and_ece_classic(network, val_samples, config, &ctx.dash);
+            val_auc = auc;
+            val_ece = ece;
+            val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
+        }
+
+        if let Some(vl) = val_loss {
+            if vl < *ctx.trackers.best_val_loss {
+                *ctx.trackers.best_val_loss = vl;
+                *ctx.trackers.best_network = Some(Network::Classic(network.clone()));
+                *ctx.trackers.best_epoch = Some(epoch + 1);
+            }
+            *ctx.trackers.last_val_loss = Some(vl);
+            if let Some(ref mut p) = ctx.plateau {
+                if !vl.is_finite() {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Warning: val_loss is not finite; skipping plateau update");
+                    } else {
+                        println!("Warning: val_loss is not finite; skipping plateau update");
+                    }
+                } else if let Some(new_mult) = p.update(vl) {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    } else {
+                        println!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    }
+                }
+            }
+        }
+
+        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
+        let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
+        let loader_ratio_epoch = if epoch_secs > 0.0 {
+            ((wait_ns_epoch as f64 / NANOSECONDS_PER_SECOND) / epoch_secs as f64)
+                * PERCENTAGE_DIVISOR as f64
+        } else {
+            0.0
+        } as f32;
+
+        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+            eprintln!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss
+                    .map(|v| format!("{:.4}", v))
+                    .unwrap_or_else(|| "NA".into()),
+                batch_count,
+                epoch_secs,
+                epoch_sps,
+                loader_ratio_epoch
+            );
+        } else {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss
+                    .map(|v| format!("{:.4}", v))
+                    .unwrap_or_else(|| "NA".into()),
+                batch_count,
+                epoch_secs,
+                epoch_sps,
+                loader_ratio_epoch
+            );
+        }
+
+        if ctx.dash.emit {
+            let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(ctx.out_dir.join("metrics.csv"))?,
+            );
+            w.write_record([
+                (epoch + 1).to_string(),
+                format!("{:.6}", avg_loss),
+                val_loss.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                format!("{:.3}", epoch_secs),
+                format!("{:.3}", total_weight),
+                val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                if Some(epoch + 1) == *ctx.trackers.best_epoch {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            ])?;
+            w.flush()?;
+        }
+
+        if let Some(ref lg) = ctx.structured {
+            let mut rec_train = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "train",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "lr": last_lr_base as f64,
+                "train_loss": avg_loss as f64,
+                "examples_sec": epoch_sps as f64,
+                "loader_ratio": (loader_ratio_epoch as f64)/100.0,
+                "wall_time": epoch_secs as f64,
+            });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
+            lg.write_json(&rec_train);
+
+            let mut rec_val = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "val",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "wall_time": epoch_secs as f64,
+            });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
+            }
+            if let Some(vl) = val_loss {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+            }
+            if let Some(a) = val_auc {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_auc".to_string(), serde_json::json!(a));
+            }
+            if let Some(e) = val_ece {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_ece".to_string(), serde_json::json!(e));
+            }
+            lg.write_json(&rec_val);
+        }
+
+        print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
+    }
+
+    Ok(())
 }
 pub fn train_model_with_loader(
     network: &mut Network,
@@ -2602,6 +2955,8 @@ fn train_batch_classic(
     config: &Config,
     scratch: &mut ClassicTrainScratch,
     lr_base: f32,
+    optimizer: &mut ClassicOptimizerState,
+    grad_clip: f32,
 ) -> (f32, f32) {
     let fp32 = &mut network.fp32;
     let relu_clip = CLASSIC_RELU_CLIP_F32;
@@ -2707,49 +3062,58 @@ fn train_batch_classic(
     }
 
     let inv_sum = 1.0 / total_weight;
-    let lr = lr_base;
 
-    for (i, w) in fp32.output_weights.iter_mut().enumerate().take(h2_dim) {
-        let grad = grad_w3[i] * inv_sum + config.l2_reg * *w;
-        *w -= lr * grad;
+    grad_b3 *= inv_sum;
+    for g in grad_w3.iter_mut() {
+        *g *= inv_sum;
     }
-    fp32.output_bias -= lr * grad_b3 * inv_sum;
-
-    for (i, bias) in fp32.hidden2_biases.iter_mut().enumerate().take(h2_dim) {
-        let base = i * h1_dim;
-        let row = &mut fp32.hidden2_weights[base..base + h1_dim];
-        for j in 0..h1_dim {
-            let grad = grad_hidden2[base + j] * inv_sum + config.l2_reg * row[j];
-            row[j] -= lr * grad;
-        }
-        *bias -= lr * grad_hidden2_biases[i] * inv_sum;
+    for g in grad_hidden2.iter_mut() {
+        *g *= inv_sum;
     }
-
-    for (j, bias) in fp32.hidden1_biases.iter_mut().enumerate().take(h1_dim) {
-        let base = j * input_dim;
-        let row = &mut fp32.hidden1_weights[base..base + input_dim];
-        for k in 0..input_dim {
-            let grad = grad_hidden1[base + k] * inv_sum + config.l2_reg * row[k];
-            row[k] -= lr * grad;
-        }
-        *bias -= lr * grad_hidden1_biases[j] * inv_sum;
+    for g in grad_hidden2_biases.iter_mut() {
+        *g *= inv_sum;
     }
-
-    for (i, b) in fp32.ft_biases.iter_mut().enumerate().take(acc_dim) {
-        *b -= lr * grad_ft_biases[i] * inv_sum;
+    for g in grad_hidden1.iter_mut() {
+        *g *= inv_sum;
     }
-
-    for (feat_idx, grads) in grad_ft_rows {
-        if feat_idx >= fp32.input_dim {
-            continue;
-        }
-        let base = feat_idx * acc_dim;
-        let row = &mut fp32.ft_weights[base..base + acc_dim];
-        for j in 0..acc_dim {
-            let grad = grads[j] * inv_sum + config.l2_reg * row[j];
-            row[j] -= lr * grad;
+    for g in grad_hidden1_biases.iter_mut() {
+        *g *= inv_sum;
+    }
+    for g in grad_ft_biases.iter_mut() {
+        *g *= inv_sum;
+    }
+    for grads in grad_ft_rows.values_mut() {
+        for g in grads.iter_mut() {
+            *g *= inv_sum;
         }
     }
+
+    if grad_clip > 0.0 {
+        let grads_mut = ClassicGradMut {
+            b3: &mut grad_b3,
+            w3: &mut grad_w3,
+            hidden2: &mut grad_hidden2,
+            hidden2_biases: &mut grad_hidden2_biases,
+            hidden1: &mut grad_hidden1,
+            hidden1_biases: &mut grad_hidden1_biases,
+            ft_biases: &mut grad_ft_biases,
+            ft_rows: &mut grad_ft_rows,
+        };
+        maybe_clip_gradients(grad_clip, grads_mut);
+    }
+
+    let grad_refs = ClassicGrads {
+        w3: &grad_w3,
+        b3: grad_b3,
+        hidden2: &grad_hidden2,
+        hidden2_biases: &grad_hidden2_biases,
+        hidden1: &grad_hidden1,
+        hidden1_biases: &grad_hidden1_biases,
+        ft_biases: &grad_ft_biases,
+        ft_rows: &grad_ft_rows,
+    };
+    let opt_params = ClassicOptParams { lr: lr_base, l2_reg: config.l2_reg, decoupled_weight_decay: false };
+    optimizer.apply(fp32, grad_refs, opt_params);
 
     (total_loss, total_weight)
 }
@@ -3103,6 +3467,391 @@ fn warn_classic_oor(ctx: &str, feat: u32, input_dim: usize, acc_dim: usize) {
             acc_dim,
             ft_len
         );
+    }
+}
+
+enum ClassicOptimizerState {
+    Sgd,
+    Adam(ClassicAdamState),
+    AdamW(ClassicAdamState),
+}
+
+impl ClassicOptimizerState {
+    fn new(net: &ClassicFloatNetwork, config: &Config) -> Result<Self, String> {
+        let opt = config.optimizer.as_str();
+        if opt.eq_ignore_ascii_case("sgd") {
+            Ok(ClassicOptimizerState::Sgd)
+        } else if opt.eq_ignore_ascii_case("adam") {
+            Ok(ClassicOptimizerState::Adam(ClassicAdamState::new(net, 0.0)))
+        } else if opt.eq_ignore_ascii_case("adamw") {
+            Ok(ClassicOptimizerState::AdamW(ClassicAdamState::new(net, config.l2_reg)))
+        } else {
+            Err(format!(
+                "Unsupported optimizer '{}' for Classic architecture (supported: sgd, adam, adamw)",
+                opt
+            ))
+        }
+    }
+
+    fn apply(
+        &mut self,
+        net: &mut ClassicFloatNetwork,
+        grads: ClassicGrads<'_>,
+        mut params: ClassicOptParams,
+    ) {
+        match self {
+            ClassicOptimizerState::Sgd => apply_sgd(net, grads, params),
+            ClassicOptimizerState::Adam(state) => {
+                params.decoupled_weight_decay = false;
+                state.apply(net, grads, params)
+            }
+            ClassicOptimizerState::AdamW(state) => {
+                // In AdamW, decouple weight decay and do not apply L2 regularization term in the gradient
+                params.decoupled_weight_decay = true;
+                params.l2_reg = 0.0;
+                state.apply(net, grads, params)
+            }
+        }
+    }
+}
+
+struct ClassicAdamState {
+    beta1: f32,
+    beta2: f32,
+    epsilon: f32,
+    weight_decay: f32,
+    t: usize,
+    m_w3: Vec<f32>,
+    v_w3: Vec<f32>,
+    m_output_bias: f32,
+    v_output_bias: f32,
+    m_hidden2: Vec<f32>,
+    v_hidden2: Vec<f32>,
+    m_hidden2_biases: Vec<f32>,
+    v_hidden2_biases: Vec<f32>,
+    m_hidden1: Vec<f32>,
+    v_hidden1: Vec<f32>,
+    m_hidden1_biases: Vec<f32>,
+    v_hidden1_biases: Vec<f32>,
+    m_ft_biases: Vec<f32>,
+    v_ft_biases: Vec<f32>,
+    ft_rows: HashMap<usize, AdamFtRowState>,
+}
+
+impl ClassicAdamState {
+    fn new(net: &ClassicFloatNetwork, weight_decay: f32) -> Self {
+        ClassicAdamState {
+            beta1: ADAM_BETA1,
+            beta2: ADAM_BETA2,
+            epsilon: ADAM_EPSILON,
+            weight_decay,
+            t: 0,
+            m_w3: vec![0.0; net.output_weights.len()],
+            v_w3: vec![0.0; net.output_weights.len()],
+            m_output_bias: 0.0,
+            v_output_bias: 0.0,
+            m_hidden2: vec![0.0; net.hidden2_weights.len()],
+            v_hidden2: vec![0.0; net.hidden2_weights.len()],
+            m_hidden2_biases: vec![0.0; net.hidden2_biases.len()],
+            v_hidden2_biases: vec![0.0; net.hidden2_biases.len()],
+            m_hidden1: vec![0.0; net.hidden1_weights.len()],
+            v_hidden1: vec![0.0; net.hidden1_weights.len()],
+            m_hidden1_biases: vec![0.0; net.hidden1_biases.len()],
+            v_hidden1_biases: vec![0.0; net.hidden1_biases.len()],
+            m_ft_biases: vec![0.0; net.ft_biases.len()],
+            v_ft_biases: vec![0.0; net.ft_biases.len()],
+            ft_rows: HashMap::new(),
+        }
+    }
+
+    fn apply(
+        &mut self,
+        net: &mut ClassicFloatNetwork,
+        grads: ClassicGrads<'_>,
+        params: ClassicOptParams,
+    ) {
+        self.t += 1;
+        let t = self.t as f32;
+        let lr_t = params.lr * (1.0 - self.beta2.powf(t)).sqrt() / (1.0 - self.beta1.powf(t));
+        let weight_decay = if params.decoupled_weight_decay {
+            self.weight_decay
+        } else {
+            0.0
+        };
+        let l2_reg = if params.decoupled_weight_decay { 0.0 } else { params.l2_reg };
+
+        for (i, w) in net.output_weights.iter_mut().enumerate() {
+            let grad = grads.w3[i] + l2_reg * *w;
+            self.m_w3[i] = self.beta1 * self.m_w3[i] + (1.0 - self.beta1) * grad;
+            self.v_w3[i] = self.beta2 * self.v_w3[i] + (1.0 - self.beta2) * grad * grad;
+            *w -= lr_t * self.m_w3[i] / (self.v_w3[i].sqrt() + self.epsilon);
+            if weight_decay > 0.0 {
+                *w -= params.lr * weight_decay * *w;
+            }
+        }
+
+        self.m_output_bias =
+            self.beta1 * self.m_output_bias + (1.0 - self.beta1) * grads.b3;
+        self.v_output_bias =
+            self.beta2 * self.v_output_bias + (1.0 - self.beta2) * grads.b3 * grads.b3;
+        net.output_bias -= lr_t * self.m_output_bias / (self.v_output_bias.sqrt() + self.epsilon);
+
+        for (i, hb) in net
+            .hidden2_biases
+            .iter_mut()
+            .enumerate()
+            .take(net.h2_dim)
+        {
+            let base = i * net.h1_dim;
+            for j in 0..net.h1_dim {
+                let idx = base + j;
+                let grad = grads.hidden2[idx] + l2_reg * net.hidden2_weights[idx];
+                self.m_hidden2[idx] = self.beta1 * self.m_hidden2[idx] + (1.0 - self.beta1) * grad;
+                self.v_hidden2[idx] =
+                    self.beta2 * self.v_hidden2[idx] + (1.0 - self.beta2) * grad * grad;
+                net.hidden2_weights[idx] -=
+                    lr_t * self.m_hidden2[idx] / (self.v_hidden2[idx].sqrt() + self.epsilon);
+                if weight_decay > 0.0 {
+                    net.hidden2_weights[idx] -=
+                        params.lr * weight_decay * net.hidden2_weights[idx];
+                }
+            }
+            self.m_hidden2_biases[i] = self.beta1 * self.m_hidden2_biases[i]
+                + (1.0 - self.beta1) * grads.hidden2_biases[i];
+            self.v_hidden2_biases[i] = self.beta2 * self.v_hidden2_biases[i]
+                + (1.0 - self.beta2) * grads.hidden2_biases[i] * grads.hidden2_biases[i];
+            *hb -= lr_t * self.m_hidden2_biases[i]
+                / (self.v_hidden2_biases[i].sqrt() + self.epsilon);
+        }
+
+        let input_dim = net.acc_dim * 2;
+        for (j, hb) in net
+            .hidden1_biases
+            .iter_mut()
+            .enumerate()
+            .take(net.h1_dim)
+        {
+            let base = j * input_dim;
+            for k in 0..input_dim {
+                let idx = base + k;
+                let grad = grads.hidden1[idx] + l2_reg * net.hidden1_weights[idx];
+                self.m_hidden1[idx] = self.beta1 * self.m_hidden1[idx] + (1.0 - self.beta1) * grad;
+                self.v_hidden1[idx] =
+                    self.beta2 * self.v_hidden1[idx] + (1.0 - self.beta2) * grad * grad;
+                net.hidden1_weights[idx] -=
+                    lr_t * self.m_hidden1[idx] / (self.v_hidden1[idx].sqrt() + self.epsilon);
+                if weight_decay > 0.0 {
+                    net.hidden1_weights[idx] -=
+                        params.lr * weight_decay * net.hidden1_weights[idx];
+                }
+            }
+            self.m_hidden1_biases[j] = self.beta1 * self.m_hidden1_biases[j]
+                + (1.0 - self.beta1) * grads.hidden1_biases[j];
+            self.v_hidden1_biases[j] = self.beta2 * self.v_hidden1_biases[j]
+                + (1.0 - self.beta2) * grads.hidden1_biases[j] * grads.hidden1_biases[j];
+            *hb -= lr_t * self.m_hidden1_biases[j]
+                / (self.v_hidden1_biases[j].sqrt() + self.epsilon);
+        }
+
+        for (i, fb) in net
+            .ft_biases
+            .iter_mut()
+            .enumerate()
+            .take(net.acc_dim)
+        {
+            self.m_ft_biases[i] = self.beta1 * self.m_ft_biases[i]
+                + (1.0 - self.beta1) * grads.ft_biases[i];
+            self.v_ft_biases[i] = self.beta2 * self.v_ft_biases[i]
+                + (1.0 - self.beta2) * grads.ft_biases[i] * grads.ft_biases[i];
+            *fb -= lr_t * self.m_ft_biases[i]
+                / (self.v_ft_biases[i].sqrt() + self.epsilon);
+        }
+
+        for (&feat_idx, row_grads) in grads.ft_rows.iter() {
+            if feat_idx >= net.input_dim {
+                continue;
+            }
+            let base = feat_idx * net.acc_dim;
+            let row = &mut net.ft_weights[base..base + net.acc_dim];
+            let entry = self.ft_rows.entry(feat_idx).or_insert_with(|| AdamFtRowState::new(net.acc_dim));
+            for j in 0..net.acc_dim {
+                let grad = row_grads[j] + l2_reg * row[j];
+                entry.m[j] = self.beta1 * entry.m[j] + (1.0 - self.beta1) * grad;
+                entry.v[j] = self.beta2 * entry.v[j] + (1.0 - self.beta2) * grad * grad;
+                row[j] -= lr_t * entry.m[j] / (entry.v[j].sqrt() + self.epsilon);
+                if weight_decay > 0.0 {
+                    row[j] -= params.lr * weight_decay * row[j];
+                }
+            }
+        }
+    }
+}
+
+struct AdamFtRowState {
+    m: Vec<f32>,
+    v: Vec<f32>,
+}
+
+impl AdamFtRowState {
+    fn new(len: usize) -> Self {
+        Self {
+            m: vec![0.0; len],
+            v: vec![0.0; len],
+        }
+    }
+}
+
+fn apply_sgd(
+    net: &mut ClassicFloatNetwork,
+    grads: ClassicGrads<'_>,
+    params: ClassicOptParams,
+) {
+    for (i, w) in net.output_weights.iter_mut().enumerate() {
+        let grad = grads.w3[i] + params.l2_reg * *w;
+        *w -= params.lr * grad;
+    }
+    net.output_bias -= params.lr * grads.b3;
+
+    for (i, hb) in net
+        .hidden2_biases
+        .iter_mut()
+        .enumerate()
+        .take(net.h2_dim)
+    {
+        let base = i * net.h1_dim;
+        for j in 0..net.h1_dim {
+            let idx = base + j;
+            let grad = grads.hidden2[idx] + params.l2_reg * net.hidden2_weights[idx];
+            net.hidden2_weights[idx] -= params.lr * grad;
+        }
+        *hb -= params.lr * grads.hidden2_biases[i];
+    }
+
+    let input_dim = net.acc_dim * 2;
+    for (j, hb) in net
+        .hidden1_biases
+        .iter_mut()
+        .enumerate()
+        .take(net.h1_dim)
+    {
+        let base = j * input_dim;
+        for k in 0..input_dim {
+            let idx = base + k;
+            let grad = grads.hidden1[idx] + params.l2_reg * net.hidden1_weights[idx];
+            net.hidden1_weights[idx] -= params.lr * grad;
+        }
+        *hb -= params.lr * grads.hidden1_biases[j];
+    }
+
+    for (i, fb) in net
+        .ft_biases
+        .iter_mut()
+        .enumerate()
+        .take(net.acc_dim)
+    {
+        *fb -= params.lr * grads.ft_biases[i];
+    }
+
+    for (&feat_idx, row_grads) in grads.ft_rows.iter() {
+        if feat_idx >= net.input_dim {
+            continue;
+        }
+        let base = feat_idx * net.acc_dim;
+        let row = &mut net.ft_weights[base..base + net.acc_dim];
+        for j in 0..net.acc_dim {
+            let grad = row_grads[j] + params.l2_reg * row[j];
+            row[j] -= params.lr * grad;
+        }
+    }
+}
+
+struct ClassicGrads<'a> {
+    w3: &'a [f32],
+    b3: f32,
+    hidden2: &'a [f32],
+    hidden2_biases: &'a [f32],
+    hidden1: &'a [f32],
+    hidden1_biases: &'a [f32],
+    ft_biases: &'a [f32],
+    ft_rows: &'a HashMap<usize, Vec<f32>>,
+}
+
+#[derive(Clone, Copy)]
+struct ClassicOptParams {
+    lr: f32,
+    l2_reg: f32,
+    decoupled_weight_decay: bool,
+}
+
+struct ClassicGradMut<'a> {
+    b3: &'a mut f32,
+    w3: &'a mut [f32],
+    hidden2: &'a mut [f32],
+    hidden2_biases: &'a mut [f32],
+    hidden1: &'a mut [f32],
+    hidden1_biases: &'a mut [f32],
+    ft_biases: &'a mut [f32],
+    ft_rows: &'a mut HashMap<usize, Vec<f32>>,
+}
+
+fn maybe_clip_gradients(clip: f32, grads: ClassicGradMut<'_>) {
+    use std::cmp::Ordering;
+    if clip.partial_cmp(&0.0) != Some(Ordering::Greater) {
+        return;
+    }
+
+    let mut norm_sq = (*grads.b3 as f64) * (*grads.b3 as f64);
+    norm_sq += grads.w3.iter().map(|g| (*g as f64) * (*g as f64)).sum::<f64>();
+    norm_sq += grads.hidden2.iter().map(|g| (*g as f64) * (*g as f64)).sum::<f64>();
+    norm_sq += grads
+        .hidden2_biases
+        .iter()
+        .map(|g| (*g as f64) * (*g as f64))
+        .sum::<f64>();
+    norm_sq += grads.hidden1.iter().map(|g| (*g as f64) * (*g as f64)).sum::<f64>();
+    norm_sq += grads
+        .hidden1_biases
+        .iter()
+        .map(|g| (*g as f64) * (*g as f64))
+        .sum::<f64>();
+    norm_sq += grads.ft_biases.iter().map(|g| (*g as f64) * (*g as f64)).sum::<f64>();
+    for row in grads.ft_rows.values() {
+        norm_sq += row.iter().map(|g| (*g as f64) * (*g as f64)).sum::<f64>();
+    }
+
+    if !norm_sq.is_finite() {
+        return;
+    }
+
+    let norm = norm_sq.sqrt() as f32;
+    if norm <= clip || !norm.is_finite() {
+        return;
+    }
+    let scale = clip / norm;
+
+    *grads.b3 *= scale;
+    for g in grads.w3.iter_mut() {
+        *g *= scale;
+    }
+    for g in grads.hidden2.iter_mut() {
+        *g *= scale;
+    }
+    for g in grads.hidden2_biases.iter_mut() {
+        *g *= scale;
+    }
+    for g in grads.hidden1.iter_mut() {
+        *g *= scale;
+    }
+    for g in grads.hidden1_biases.iter_mut() {
+        *g *= scale;
+    }
+    for g in grads.ft_biases.iter_mut() {
+        *g *= scale;
+    }
+    for row in grads.ft_rows.values_mut() {
+        for g in row.iter_mut() {
+            *g *= scale;
+        }
     }
 }
 

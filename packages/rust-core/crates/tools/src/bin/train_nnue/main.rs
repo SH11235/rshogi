@@ -98,8 +98,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(arg!(-e --epochs <N> "Number of epochs").default_value("2"))
         .arg(arg!(-b --"batch-size" <N> "Batch size").default_value("8192"))
         .arg(arg!(--lr <RATE> "Learning rate").default_value("0.001"))
-        .arg(arg!(--opt <TYPE> "Optimizer: sgd, adam").default_value("adam"))
+        .arg(arg!(--opt <TYPE> "Optimizer: sgd, adam, adamw").default_value("adam"))
         .arg(arg!(--l2 <RATE> "L2 regularization").default_value("0.000001"))
+        .arg(
+            arg!(--"grad-clip" <N> "Global gradient norm clip (0 disables)")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.0"),
+        )
         .arg(
             arg!(-l --label <TYPE> "Label type: wdl, cp")
                 .value_parser(["wdl", "cp"]) // strict accepted values
@@ -202,6 +207,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("kd-soften-student")
                 .long("kd-soften-student")
                 .help("教師BCE/KLで生徒ロジットも温度Tで割る (WDL distillationのみ) ")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("distill-only")
+                .long("distill-only")
+                .help(
+                    "Classic distillationのみ実行 (学習をスキップ)。--arch classic --export-format classic-v1 および --distill-from-single が必要"
+                )
                 .action(ArgAction::SetTrue),
         )
         .arg(arg!(--shuffle "Shuffle training data"))
@@ -427,6 +440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lr_decay_epochs: app.get_one::<u32>("lr-decay-epochs").copied(),
         lr_decay_steps: app.get_one::<u64>("lr-decay-steps").copied(),
         lr_plateau_patience: app.get_one::<u32>("lr-plateau-patience").copied(),
+        grad_clip: *app.get_one::<f32>("grad-clip").unwrap(),
     };
 
     let export_options = ExportOptions {
@@ -505,12 +519,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(ERR_CLASSIC_OUT_PER_CHANNEL.into());
     }
 
-    let distill_only = arch == ArchKind::Classic
-        && export_format == ExportFormat::ClassicV1
-        && distill_options.teacher_path.is_some();
-    if arch == ArchKind::Classic && !distill_only {
-        return Err("Classic FP32 学習は未実装です。--arch classic を使う場合は --export-format classic-v1 と --distill-from-single を指定してください。".into());
-    }
+    let distill_only_flag = app.get_flag("distill-only");
+    let distill_only = if distill_only_flag {
+        if arch != ArchKind::Classic {
+            return Err("--distill-only を使用するには --arch classic を指定してください".into());
+        }
+        if export_format != ExportFormat::ClassicV1 {
+            return Err(
+                "--distill-only を使用するには --export-format classic-v1 を指定してください"
+                    .into(),
+            );
+        }
+        if distill_options.teacher_path.is_none() {
+            return Err(ERR_CLASSIC_NEEDS_TEACHER.into());
+        }
+        true
+    } else {
+        false
+    };
     if distill_options.temperature <= 0.0 {
         return Err("--kd-temperature must be > 0".into());
     }

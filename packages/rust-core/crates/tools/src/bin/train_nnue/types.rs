@@ -59,6 +59,7 @@ pub struct Config {
     pub lr_decay_epochs: Option<u32>,
     pub lr_decay_steps: Option<u64>,
     pub lr_plateau_patience: Option<u32>,
+    pub grad_clip: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

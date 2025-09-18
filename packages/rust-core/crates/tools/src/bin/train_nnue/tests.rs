@@ -483,6 +483,7 @@ fn weight_consistency_jsonl_vs_cache() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let json_samples =
         load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
@@ -624,6 +625,7 @@ fn auc_boundary_labels_skipped() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let network = Network::Single(single);
     let auc = super::compute_val_auc(&network, &samples, &cfg);
@@ -667,6 +669,7 @@ fn clamp_gap_and_depth_saturation() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let json_samples =
         load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
@@ -711,6 +714,7 @@ fn gap_zero_not_zero_weight() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let samples =
         load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
@@ -765,6 +769,7 @@ fn test_training_reproducibility_with_seed() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     // サンプルを読み込み（2局面→2サンプル/局面 = 計4サンプル）
@@ -966,6 +971,7 @@ fn stream_sync_vs_inmem_equivalence() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let cfg_stream = Config {
         stream_cache: true,
@@ -1144,6 +1150,7 @@ fn structured_training_config_present_in_inmem_async_loader() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let dash = DashboardOpts {
@@ -1248,6 +1255,7 @@ fn zero_weight_batches_do_not_update() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -1351,6 +1359,7 @@ fn stream_async_propagates_errors() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
@@ -1436,6 +1445,7 @@ fn train_one_batch_with_zero_feature_sample_smoke() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let td = tempfile::tempdir().unwrap();
@@ -1529,6 +1539,7 @@ fn classic_train_updates_weights() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let td = tempfile::tempdir().unwrap();
@@ -1580,7 +1591,7 @@ fn classic_train_updates_weights() {
 }
 
 #[test]
-fn classic_train_requires_sgd() {
+fn classic_train_invalid_optimizer_errors() {
     use rand::SeedableRng;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(555);
@@ -1598,7 +1609,7 @@ fn classic_train_requires_sgd() {
         epochs: 1,
         batch_size: 1,
         learning_rate: 0.01,
-        optimizer: "adam".to_string(),
+        optimizer: "rmsprop".to_string(),
         l2_reg: 0.0,
         label_type: "wdl".to_string(),
         scale: 600.0,
@@ -1618,6 +1629,7 @@ fn classic_train_requires_sgd() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let td = tempfile::tempdir().unwrap();
@@ -1656,7 +1668,7 @@ fn classic_train_requires_sgd() {
     let err =
         train_model(&mut network, &mut samples, &None, &cfg, &mut rng_train, &mut ctx).unwrap_err();
     let msg = format!("{}", err);
-    assert!(msg.contains("optimizer=sgd"));
+    assert!(msg.contains("Unsupported optimizer"));
 }
 
 // LrPlateauState の単体テスト
@@ -1933,6 +1945,7 @@ fn cp_distillation_unit_smoke_loss_ordering() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     // DistillOptions: alpha=0.5, temperature=1.0, mse
