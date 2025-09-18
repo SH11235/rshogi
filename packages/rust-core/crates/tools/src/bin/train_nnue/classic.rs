@@ -6,7 +6,10 @@ use engine_core::shogi::SHOGI_BOARD_SIZE;
 
 #[cfg(test)]
 const _: usize = SHOGI_BOARD_SIZE * FE_END;
-use rand::Rng;
+use rand::{
+    distr::{Distribution, Uniform},
+    Rng,
+};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -709,9 +712,10 @@ impl ClassicFloatNetwork {
         // Feature transformer: fan_in ≒ サンプル当たりの活性特徴数（片側）。
         let fan_in_ft = fan_in_ft_estimate.max(1) as f32;
         let a_ft = (6.0 / fan_in_ft).sqrt();
+        let dist_ft = Uniform::new(-a_ft, a_ft).unwrap();
         for row in net.ft_weights.chunks_mut(acc_dim.max(1)) {
             for w in row {
-                *w = rng.random_range(-a_ft..a_ft);
+                *w = dist_ft.sample(rng);
             }
         }
 
@@ -719,9 +723,10 @@ impl ClassicFloatNetwork {
         let input_dim_h1 = (2 * acc_dim).max(1);
         let fan_in_h1 = input_dim_h1 as f32;
         let a_h1 = (6.0 / fan_in_h1).sqrt();
+        let dist_h1 = Uniform::new(-a_h1, a_h1).unwrap();
         for row in net.hidden1_weights.chunks_mut(input_dim_h1) {
             for w in row {
-                *w = rng.random_range(-a_h1..a_h1);
+                *w = dist_h1.sample(rng);
             }
         }
 
@@ -729,9 +734,10 @@ impl ClassicFloatNetwork {
         let input_dim_h2 = h1_dim.max(1);
         let fan_in_h2 = input_dim_h2 as f32;
         let a_h2 = (6.0 / fan_in_h2).sqrt();
+        let dist_h2 = Uniform::new(-a_h2, a_h2).unwrap();
         for row in net.hidden2_weights.chunks_mut(input_dim_h2) {
             for w in row {
-                *w = rng.random_range(-a_h2..a_h2);
+                *w = dist_h2.sample(rng);
             }
         }
 
@@ -739,8 +745,9 @@ impl ClassicFloatNetwork {
         let fan_in_out = h2_dim.max(1) as f32;
         let fan_out_out = 1.0f32;
         let a_out = (6.0 / (fan_in_out + fan_out_out)).sqrt();
+        let dist_out = Uniform::new(-a_out, a_out).unwrap();
         for w in net.output_weights.iter_mut() {
-            *w = rng.random_range(-a_out..a_out);
+            *w = dist_out.sample(rng);
         }
 
         net

@@ -5,7 +5,10 @@ use crate::params::{
 use crate::types::ArchKind;
 use engine_core::evaluation::nnue::features::{flip_us_them, FE_END};
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-use rand::Rng;
+use rand::{
+    distr::{Distribution, Uniform},
+    Rng,
+};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -26,15 +29,17 @@ impl SingleNetwork {
         let input_dim = SHOGI_BOARD_SIZE * FE_END;
         let w0_size = input_dim * acc_dim;
         let mut w0 = vec![0.0f32; w0_size];
+        let dist_w0 = Uniform::new(-0.01f32, 0.01f32).unwrap();
         for w in w0.iter_mut() {
-            *w = rng.random_range(-0.01..0.01);
+            *w = dist_w0.sample(rng);
         }
 
         let b0 = vec![0.0f32; acc_dim];
 
         let mut w2 = vec![0.0f32; acc_dim];
+        let dist_w2 = Uniform::new(-0.01f32, 0.01f32).unwrap();
         for w in w2.iter_mut() {
-            *w = rng.random_range(-0.01..0.01);
+            *w = dist_w2.sample(rng);
         }
 
         SingleNetwork {

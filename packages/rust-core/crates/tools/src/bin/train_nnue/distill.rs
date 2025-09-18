@@ -12,7 +12,8 @@ use crate::types::{
 use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 const MAX_DISTILL_SAMPLES: usize = 50_000;
 const DISTILL_EPOCHS: usize = 2;
@@ -20,6 +21,18 @@ const DISTILL_LR: f32 = 1e-4;
 const PROB_EPS: f32 = 1e-6;
 static WARNED_OOR_FWD: AtomicBool = AtomicBool::new(false);
 static WARNED_OOR_BWD: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn warn_oor_once(flag: &AtomicBool, ctx: &str, feat: u32, len: usize) {
+    if !flag.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "{}: feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed",
+            ctx,
+            feat,
+            len
+        );
+    }
+}
 
 struct ClassicScratch {
     acc_us: Vec<f32>,
@@ -144,9 +157,7 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     for &feat in &sample.features_us {
         let idx = feat as usize * net.acc_dim;
         if idx + net.acc_dim > net.ft_weights.len() {
-            if !WARNED_OOR_FWD.swap(true, Ordering::Relaxed) {
-                log::warn!("feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed", feat, net.ft_weights.len());
-            }
+            warn_oor_once(&WARNED_OOR_FWD, "forward(us)", feat, net.ft_weights.len());
             continue;
         }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
@@ -159,11 +170,7 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     for &feat in &sample.features_them {
         let idx = feat as usize * net.acc_dim;
         if idx + net.acc_dim > net.ft_weights.len() {
-            log::warn!(
-                "feature index {} out of range (ft_weights.len={})",
-                feat,
-                net.ft_weights.len()
-            );
+            warn_oor_once(&WARNED_OOR_FWD, "forward(them)", feat, net.ft_weights.len());
             continue;
         }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
@@ -212,6 +219,7 @@ fn backward_update(
     sample: &DistillSample,
     grad_output: f32,
     lr: f32,
+    l2_reg: f32,
 ) {
     let h1_dim = net.h1_dim;
     let h2_dim = net.h2_dim;
@@ -261,7 +269,8 @@ fn backward_update(
         let delta = scratch.d_z2[i];
         let row = &mut net.hidden2_weights[i * h1_dim..(i + 1) * h1_dim];
         for (w, &a1) in row.iter_mut().zip(scratch.a1.iter()) {
-            *w -= lr * delta * a1;
+            let grad = delta * a1 + l2_reg * *w;
+            *w -= lr * grad;
         }
         net.hidden2_biases[i] -= lr * delta;
     }
@@ -271,7 +280,8 @@ fn backward_update(
         let delta = scratch.d_z1[j];
         let row = &mut net.hidden1_weights[j * input_dim..(j + 1) * input_dim];
         for (w, &inp) in row.iter_mut().zip(scratch.input.iter()) {
-            *w -= lr * delta * inp;
+            let grad = delta * inp + l2_reg * *w;
+            *w -= lr * grad;
         }
         net.hidden1_biases[j] -= lr * delta;
     }
@@ -289,28 +299,24 @@ fn backward_update(
     for &feat in &sample.features_us {
         let base = feat as usize * acc_dim;
         if base + acc_dim > net.ft_weights.len() {
-            if !WARNED_OOR_BWD.swap(true, Ordering::Relaxed) {
-                log::warn!("backward_update: feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed", feat, net.ft_weights.len());
-            }
+            warn_oor_once(&WARNED_OOR_BWD, "backward(us)", feat, net.ft_weights.len());
             continue;
         }
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_us.iter()) {
+            let grad = grad + l2_reg * *w;
             *w -= lr * grad;
         }
     }
     for &feat in &sample.features_them {
         let base = feat as usize * acc_dim;
         if base + acc_dim > net.ft_weights.len() {
-            log::warn!(
-                "backward_update: feature index {} out of range (ft_weights.len={})",
-                feat,
-                net.ft_weights.len()
-            );
+            warn_oor_once(&WARNED_OOR_BWD, "backward(them)", feat, net.ft_weights.len());
             continue;
         }
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_them.iter()) {
+            let grad = grad + l2_reg * *w;
             *w -= lr * grad;
         }
     }
@@ -401,7 +407,7 @@ pub fn distill_classic_after_training(
         return Err("No samples available for classic distillation".into());
     }
 
-    let distill_seed = distill.seed.unwrap_or_else(|| rand::rng().random::<u64>());
+    let distill_seed = distill.seed.unwrap_or_else(rand::random::<u64>);
     let mut rng: StdRng = StdRng::seed_from_u64(distill_seed);
     let mut classic = ClassicFloatNetwork::he_uniform_with_dims(
         SHOGI_BOARD_SIZE * FE_END,
@@ -611,7 +617,14 @@ pub fn distill_classic_after_training(
 
             epoch_loss += loss_contrib;
             epoch_weight += sample.weight as f64;
-            backward_update(&mut classic, &mut scratch, sample, grad_output, DISTILL_LR);
+            backward_update(
+                &mut classic,
+                &mut scratch,
+                sample,
+                grad_output,
+                DISTILL_LR,
+                config.l2_reg,
+            );
         }
         if let Some(lg) = classic_cfg.structured {
             let loss_avg = if epoch_weight > 0.0 {
@@ -1006,7 +1019,7 @@ mod distill_training_tests {
         let mut scratch = ClassicScratch::new(2, 2, 2);
 
         let _ = forward(&net, &sample, &mut scratch);
-        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2);
+        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2, 0.0);
 
         let delta_threshold: f32 = 1e-6;
         let changed_ft = net
@@ -1076,7 +1089,7 @@ mod distill_training_tests {
         };
         let mut scratch = ClassicScratch::new(2, 2, 2);
         let _ = forward(&net, &sample, &mut scratch);
-        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2);
+        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2, 0.0);
     }
 }
 
