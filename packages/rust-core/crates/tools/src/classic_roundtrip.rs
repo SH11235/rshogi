@@ -8,6 +8,7 @@ use serde::Deserialize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+const DEFAULT_FT_SHIFT: i32 = 6;
 const DEFAULT_FT_SCALE: f32 = 64.0;
 const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
 
@@ -30,9 +31,13 @@ pub struct ClassicFp32Network {
 
 #[derive(Debug, Clone)]
 pub struct LayerOutputs {
+    /// Feature transformer outputs (float domain) in accumulator order.
     pub ft: Vec<f32>,
+    /// Hidden layer 1 post-activation (ClippedReLU) values rescaled to float.
     pub h1: Vec<f32>,
+    /// Hidden layer 2 post-activation (ClippedReLU) values rescaled to float.
     pub h2: Vec<f32>,
+    /// Final network output (typically a logit before cp/WDL conversion).
     pub output: f32,
 }
 
@@ -247,6 +252,7 @@ pub struct ClassicIntNetwork {
     h2_dim: usize,
     scales: ClassicQuantizationScalesData,
     ft_scale: f32,
+    ft_shift: Option<i32>,
 }
 
 impl ClassicIntNetwork {
@@ -319,26 +325,9 @@ impl ClassicIntNetwork {
         let output_weights = read_i8_vec(&mut reader, h2_dim)?;
         let output_bias = read_i32(&mut reader)?;
 
-        let ft_scale = if scales.s_w0.abs() > f32::EPSILON {
-            let ratio = scales.s_in_1 / scales.s_w0;
-            if ratio <= 0.0 {
-                log::warn!("invalid s_in_1/s_w0 ratio {}; falling back to default", ratio);
-                DEFAULT_FT_SCALE
-            } else {
-                let nearest = 2f32.powf(ratio.log2().round());
-                if (nearest - ratio).abs() > 0.25 {
-                    log::warn!(
-                        "ft scale ratio {} not power-of-two; engine expects ~{:.3}",
-                        ratio,
-                        nearest
-                    );
-                }
-                ratio
-            }
-        } else {
-            log::warn!("s_w0 is zero; using default ft scale");
-            DEFAULT_FT_SCALE
-        };
+        validate_scale_lengths(&scales, h1_dim, h2_dim)?;
+
+        let (ft_scale, ft_shift) = compute_ft_scale(&scales);
 
         // Avoid retaining potential padding in biases/weights (not expected, but be safe)
         ft_weights.truncate(input_dim * acc_dim);
@@ -359,6 +348,7 @@ impl ClassicIntNetwork {
             h2_dim,
             scales,
             ft_scale,
+            ft_shift,
         })
     }
 
@@ -444,16 +434,82 @@ impl ClassicIntNetwork {
     }
 
     fn quantize_ft_value(&self, value: i16) -> i8 {
+        if let Some(shift) = self.ft_shift {
+            let shifted = (value as i32) >> shift;
+            return shifted.clamp(-127, 127) as i8;
+        }
+
         let scale = if self.ft_scale <= 0.0 {
             DEFAULT_FT_SCALE
         } else {
             self.ft_scale
-        }
-        .abs()
-        .max(f32::EPSILON);
-        let scaled = (value as f32 / scale).round();
+        } as f64;
+
+        let scaled = (value as f64 / scale).floor();
         scaled.clamp(-127.0, 127.0) as i8
     }
+}
+
+fn validate_scale_lengths(
+    scales: &ClassicQuantizationScalesData,
+    h1_dim: usize,
+    h2_dim: usize,
+) -> Result<()> {
+    fn check(name: &str, values: &[f32], expected: usize) -> Result<()> {
+        if values.is_empty() {
+            bail!("{name} scale vector is empty (expected length 1 or {expected})");
+        }
+        if values.len() == 1 || values.len() == expected {
+            Ok(())
+        } else {
+            bail!("{name} scale vector length {} must be 1 or {}", values.len(), expected);
+        }
+    }
+
+    check("s_w1", &scales.s_w1, h1_dim)?;
+    check("s_w2", &scales.s_w2, h2_dim)?;
+    check("s_w3", &scales.s_w3, 1)?;
+
+    Ok(())
+}
+
+fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>) {
+    if !scales.s_w0.is_finite() || scales.s_w0.abs() <= f32::EPSILON {
+        log::warn!("s_w0 is zero or non-finite; using default ft scale");
+        return (DEFAULT_FT_SCALE, Some(DEFAULT_FT_SHIFT));
+    }
+
+    let ratio = scales.s_in_1 / scales.s_w0;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        log::warn!("invalid s_in_1/s_w0 ratio {}; falling back to default", ratio);
+        return (DEFAULT_FT_SCALE, Some(DEFAULT_FT_SHIFT));
+    }
+
+    let log2_ratio = ratio.log2();
+    let rounded = log2_ratio.round();
+    let nearest_pow2 = 2f32.powf(rounded);
+    let rel_error = ((nearest_pow2 - ratio) / nearest_pow2).abs();
+
+    if rel_error <= 1e-4 {
+        if rounded >= 0.0 {
+            let shift = rounded as i32;
+            return (nearest_pow2, Some(shift));
+        }
+        log::warn!(
+            "ft scale ratio {} implies negative shift {:.3}; falling back to float path",
+            ratio,
+            rounded
+        );
+    }
+
+    log::warn!(
+        "ft scale ratio {} not power-of-two; engine expects ~{:.3} (rel err {:.3e})",
+        ratio,
+        nearest_pow2,
+        rel_error
+    );
+
+    (ratio, None)
 }
 
 pub fn extract_feature_indices(pos: &Position) -> Result<(Vec<usize>, Vec<usize>)> {
@@ -668,6 +724,42 @@ mod tests {
     }
 
     #[test]
+    fn ft_quantization_matches_shift_for_pow2_scale() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let net = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap();
+        assert_eq!(net.ft_shift, Some(DEFAULT_FT_SHIFT));
+
+        let cases = [-32768i16, -1025, -65, -64, -1, 0, 1, 63, 64, 127, 8191];
+
+        for &v in &cases {
+            let expected = ((v as i32) >> DEFAULT_FT_SHIFT).clamp(-127, 127) as i8;
+            assert_eq!(net.quantize_ft_value(v), expected, "value {v}");
+        }
+    }
+
+    #[test]
+    fn ft_quantization_floor_for_non_pow2_scale() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let mut net = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap();
+        net.ft_shift = None;
+        net.ft_scale = 60.0;
+
+        let cases = [-130i16, -65, -1, 0, 1, 63, 64, 130];
+        for &v in &cases {
+            let expected = ((v as f64 / 60.0).floor()).clamp(-127.0, 127.0) as i8;
+            assert_eq!(net.quantize_ft_value(v), expected, "value {v}");
+        }
+    }
+
+    #[test]
     fn int_forward_matches_manual() {
         let td = tempdir().unwrap();
         let nn_path = td.path().join("nn.classic.nnue");
@@ -682,6 +774,6 @@ mod tests {
         assert_eq!(outputs.h1.len(), 2);
         assert_eq!(outputs.h2.len(), 1);
         let actual = outputs.output;
-        assert!((actual - 1.485).abs() < 1e-3, "expected ~1.485, got {actual}");
+        assert!((actual - 0.985).abs() < 1e-3, "expected ~0.985, got {actual}");
     }
 }
