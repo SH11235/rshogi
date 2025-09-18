@@ -29,6 +29,11 @@ fn train_model_single(
     let mut adam_state = if config.optimizer.eq_ignore_ascii_case("adam")
         || config.optimizer.eq_ignore_ascii_case("adamw")
     {
+        if config.optimizer.eq_ignore_ascii_case("adamw") {
+            log::warn!(
+                "--opt adamw は --arch single では Adam として扱います（decoupled weight decay 未対応）"
+            );
+        }
         Some(SingleAdamState::new(network))
     } else {
         None
@@ -518,7 +523,12 @@ fn train_model_classic(
         network.fp32.h2_dim,
     );
 
+    let mut total_batches = 0usize;
+
     for epoch in 0..config.epochs {
+        let epoch_start = Instant::now();
+        let mut last_lr_base = config.learning_rate;
+
         if config.shuffle {
             train_samples.shuffle(rng);
         }
@@ -563,6 +573,21 @@ fn train_model_classic(
             ctx.global_step += 1;
             samples_since += batch.len();
             batches_since += 1;
+            total_batches += 1;
+            last_lr_base = lr_base;
+
+            if let Some(interval) = ctx.save_every {
+                if total_batches % interval == 0 {
+                    let checkpoint_path =
+                        ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
+                    save_network(&Network::Classic(network.clone()), &checkpoint_path)?;
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                    } else {
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
+                }
+            }
 
             if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                 && batches_since > 0
@@ -614,22 +639,24 @@ fn train_model_classic(
             }
         }
 
-        let _avg_loss = if total_weight > 0.0 {
+        let avg_loss = if total_weight > 0.0 {
             total_loss / total_weight
         } else {
             0.0
         };
 
         let mut val_loss = None;
-        let mut _val_auc: Option<f64> = None;
-        let mut _val_ece: Option<f64> = None;
+        let mut val_auc: Option<f64> = None;
+        let mut val_ece: Option<f64> = None;
+        let mut val_wsum: Option<f64> = None;
         if let Some(val_samples) = validation_samples {
             let vl = compute_validation_loss_classic(network, val_samples, config);
             val_loss = Some(vl);
             let (auc, ece) =
                 compute_val_auc_and_ece_classic(network, val_samples, config, &ctx.dash);
-            _val_auc = auc;
-            _val_ece = ece;
+            val_auc = auc;
+            val_ece = ece;
+            val_wsum = Some(val_samples.iter().map(|s| s.weight as f64).sum());
         }
 
         if let Some(vl) = val_loss {
@@ -668,6 +695,110 @@ fn train_model_classic(
                     }
                 }
             }
+        }
+
+        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
+        let epoch_sps = (n_samples as f32) / epoch_secs;
+
+        if ctx.dash.emit {
+            let mut w = csv::WriterBuilder::new().has_headers(false).from_writer(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(ctx.out_dir.join("metrics.csv"))?,
+            );
+            w.write_record([
+                (epoch + 1).to_string(),
+                format!("{:.6}", avg_loss),
+                val_loss.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_auc.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                val_ece.map(|v| format!("{:.6}", v)).unwrap_or_else(|| "".into()),
+                format!("{:.3}", epoch_secs),
+                format!("{:.3}", total_weight),
+                val_wsum.map(|v| format!("{:.3}", v)).unwrap_or_else(|| "".into()),
+                if Some(epoch + 1) == *ctx.trackers.best_epoch {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            ])?;
+            w.flush()?;
+        }
+
+        if let Some(ref lg) = ctx.structured {
+            let mut rec_train = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "train",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "lr": last_lr_base as f64,
+                "train_loss": avg_loss as f64,
+                "examples_sec": epoch_sps as f64,
+                "loader_ratio": 0.0f64,
+                "wall_time": epoch_secs as f64,
+            });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_train
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("training_config".into(), obj);
+            }
+            lg.write_json(&rec_train);
+
+            let mut rec_val = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "val",
+                "global_step": ctx.global_step as i64,
+                "epoch": (epoch + 1) as i64,
+                "wall_time": epoch_secs as f64,
+            });
+            if let Some(obj) = ctx.training_config_json.clone() {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("training_config".into(), obj);
+            }
+            if let Some(vl) = val_loss {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_loss".to_string(), serde_json::json!(vl as f64));
+            }
+            if let Some(a) = val_auc {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_auc".to_string(), serde_json::json!(a));
+            }
+            if let Some(e) = val_ece {
+                rec_val
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("val_ece".to_string(), serde_json::json!(e));
+            }
+            lg.write_json(&rec_val);
+        }
+
+        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+            eprintln!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                epoch_secs,
+                epoch_sps
+            );
+        } else {
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
+                epoch_secs,
+                epoch_sps
+            );
         }
 
         print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
@@ -711,6 +842,11 @@ fn train_model_stream_cache_single(
         let mut adam_state = if config.optimizer.eq_ignore_ascii_case("adam")
             || config.optimizer.eq_ignore_ascii_case("adamw")
         {
+            if config.optimizer.eq_ignore_ascii_case("adamw") {
+                log::warn!(
+                    "--opt adamw は --arch single では Adam として扱います（decoupled weight decay 未対応）"
+                );
+            }
             Some(SingleAdamState::new(network))
         } else {
             None
@@ -1116,13 +1252,20 @@ fn train_model_stream_cache_single(
         effective_prefetch,
         weighting.clone(),
     );
-    let mut adam_state = if config.optimizer == "adam" {
+
+    let mut total_batches = 0usize;
+    let mut adam_state = if config.optimizer.eq_ignore_ascii_case("adam")
+        || config.optimizer.eq_ignore_ascii_case("adamw")
+    {
+        if config.optimizer.eq_ignore_ascii_case("adamw") {
+            log::warn!(
+                "--opt adamw は --arch single では Adam として扱います（decoupled weight decay 未対応）"
+            );
+        }
         Some(SingleAdamState::new(network))
     } else {
         None
     };
-
-    let mut total_batches = 0usize;
 
     for epoch in 0..config.epochs {
         let epoch_start = Instant::now();
@@ -1612,6 +1755,8 @@ fn train_model_stream_cache_classic(
         weighting.clone(),
     );
 
+    let mut total_batches = 0usize;
+
     for epoch in 0..config.epochs {
         let epoch_start = Instant::now();
         loader.start_epoch()?;
@@ -1672,6 +1817,20 @@ fn train_model_stream_cache_classic(
             total_samples_epoch += batch_len;
             wait_ns_since += wait_dur.as_nanos();
             wait_ns_epoch += wait_dur.as_nanos();
+            total_batches += 1;
+
+            if let Some(interval) = ctx.save_every {
+                if total_batches % interval == 0 {
+                    let checkpoint_path =
+                        ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
+                    save_network(&Network::Classic(network.clone()), &checkpoint_path)?;
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Saved checkpoint: {}", checkpoint_path.display());
+                    } else {
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
+                }
+            }
 
             if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
                 && batches_since > 0

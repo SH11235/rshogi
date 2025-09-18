@@ -37,7 +37,7 @@ mod ctx {
 
 mod core {
     use super::*;
-    use crate::export::save_single_network;
+    use crate::export::{save_network, save_single_network};
     use crate::logging::print_zero_weight_debug;
     use crate::params::{
         ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON, CLASSIC_RELU_CLIP_F32, PERCENTAGE_DIVISOR,

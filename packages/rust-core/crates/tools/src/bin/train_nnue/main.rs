@@ -766,6 +766,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if !distill_only
+        && export_options.arch == ArchKind::Classic
+        && matches!(export_options.format, ExportFormat::ClassicV1)
+        && config.stream_cache
+        && is_cache
+    {
+        return Err(ERR_CLASSIC_STREAM_NEEDS_DISTILL.into());
+    }
+
     // Load validation data if provided
     let mut val_is_jsonl = false;
     let validation_samples = if let Some(val_path) = validation_path {
