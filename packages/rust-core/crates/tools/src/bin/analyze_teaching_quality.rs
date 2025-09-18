@@ -198,7 +198,7 @@ impl Agg {
             .unwrap_or("");
         // Case-insensitive checks for Exact and bound synonyms
         let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
-        let norm = |s: &str| s.to_ascii_lowercase();
+        let norm = |s: &str| s.to_ascii_lowercase().replace('_', "");
 
         if is_exact(b1) {
             self.top1_exact += 1;
@@ -506,19 +506,42 @@ fn wilson_ci(k: usize, n: usize, z: f64) -> (f64, f64) {
 
 fn mean_i64(v: &[i64]) -> f64 {
     if v.is_empty() {
-        0.0
+        return 0.0;
+    }
+    let mut sum = 0.0_f64;
+    for &x in v {
+        sum += x as f64;
+    }
+    sum / (v.len() as f64)
+}
+
+fn median_f64(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) * 0.5
     } else {
-        v.iter().sum::<i64>() as f64 / v.len() as f64
+        sorted[mid]
     }
 }
 
 fn csv_escape(s: &str) -> String {
     let needs_quotes = s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r');
-    if needs_quotes {
-        let escaped = s.replace('"', "\"\"");
-        format!("\"{}\"", escaped)
+    let mut safe = if matches!(s.chars().next(), Some('=' | '+' | '-' | '@')) {
+        let mut prefixed = String::with_capacity(s.len() + 1);
+        prefixed.push('\'');
+        prefixed.push_str(s);
+        prefixed
     } else {
         s.to_string()
+    };
+    if needs_quotes {
+        safe = safe.replace('"', "\"\"");
+        format!("\"{}\"", safe)
+    } else {
+        safe
     }
 }
 
@@ -1392,7 +1415,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mean = agg.tt_rates.iter().sum::<f64>() / agg.tt_rates.len() as f64;
                     let mut v = agg.tt_rates.clone();
                     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let med = v[v.len() / 2];
+                    let med = median_f64(&v);
                     println!("tt: mean={:.3} median={:.3} samples={}", mean, med, v.len());
                 }
             }
@@ -1475,6 +1498,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if n_amb == 0 {
                     println!("ambiguous: no-data");
                 } else {
+                    let gap2_count = match qbackend {
+                        QuantilesBackend::Exact => agg.gaps_no_mate.len(),
+                        QuantilesBackend::P2 => {
+                            agg.gaps_nm_p2.as_ref().map(|o| o.count).unwrap_or(0)
+                        }
+                        QuantilesBackend::TDigest => {
+                            agg.gaps_nm_td.as_ref().map(|o| o.count).unwrap_or(0)
+                        }
+                    };
                     let (k20, k30) = match qbackend {
                         QuantilesBackend::Exact => {
                             let k20 = agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count();
@@ -1487,7 +1519,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (l20, h20) = wilson_ci(k20, n_amb, 1.96);
                     let r30 = k30 as f64 / n_amb as f64;
                     let (l30, h30) = wilson_ci(k30, n_amb, 1.96);
-                    println!("ambiguous: n={} rate20={:.3} ci95=[{:.3},{:.3}] rate30={:.3} ci95=[{:.3},{:.3}]", n_amb, r20, l20, h20, r30, l30, h30);
+                    let rate20_cov = if gap2_count > 0 {
+                        (match qbackend {
+                            QuantilesBackend::Exact => {
+                                agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count()
+                            }
+                            _ => agg.amb_le20_cnt,
+                        }) as f64
+                            / gap2_count as f64
+                    } else {
+                        0.0
+                    };
+                    let rate30_cov = if gap2_count > 0 {
+                        (match qbackend {
+                            QuantilesBackend::Exact => {
+                                agg.gaps_no_mate.iter().filter(|&&g| g <= 30).count()
+                            }
+                            _ => agg.amb_le30_cnt,
+                        }) as f64
+                            / gap2_count as f64
+                    } else {
+                        0.0
+                    };
+                    let coverage = gap2_count as f64 / n_amb as f64;
+                    println!(
+                        "ambiguous (covered): gap2_count={} rate20={:.3} rate30={:.3} coverage={:.3}",
+                        gap2_count,
+                        rate20_cov,
+                        rate30_cov,
+                        coverage
+                    );
+                    println!(
+                        "ambiguous lines_ge2: n={} rate20={:.3} ci95=[{:.3},{:.3}] rate30={:.3} ci95=[{:.3},{:.3}]",
+                        n_amb,
+                        r20,
+                        l20,
+                        h20,
+                        r30,
+                        l30,
+                        h30
+                    );
                 }
             }
             ReportKind::NodesDistribution => {
@@ -1829,7 +1900,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 0.0
             };
-            println!("  ambiguous_covered: rate20={:.3} rate30={:.3}", amb20_cov, amb30_cov);
+            println!(
+                "  ambiguous_covered: rate20={:.3} rate30={:.3} (coverage={:.3})",
+                amb20_cov, amb30_cov, coverage
+            );
+            println!(
+                "  ambiguous_lines_ge2: rate20={:.3} [ci95 {:.3}-{:.3}] rate30={:.3} [ci95 {:.3}-{:.3}]",
+                amb20,
+                amb20_ci_low,
+                amb20_ci_high,
+                amb30,
+                amb30_ci_low,
+                amb30_ci_high
+            );
             if agg.pv_changed_total > 0 {
                 let rate = agg.pv_changed_true as f64 / agg.pv_changed_total as f64;
                 println!(
@@ -1916,7 +1999,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 let mut v = agg.tt_rates.clone();
                 v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                Some(v[v.len() / 2])
+                Some(median_f64(&v))
             };
             let null_rate = if agg.total > 0 {
                 Some(agg.used_null_sum as f64 / agg.total as f64)
@@ -2184,7 +2267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 let mut v = agg.tt_rates.clone();
                 v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                obj.insert("tt_hit_rate_median".into(), json!(v[v.len() / 2]));
+                obj.insert("tt_hit_rate_median".into(), json!(median_f64(&v)));
             }
             match t_stats {
                 Some(s) => {
