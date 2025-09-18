@@ -1,13 +1,14 @@
 use std::io::{BufRead, BufReader, Read};
 
 use anyhow::{anyhow, bail, Context, Result};
-use engine_core::evaluation::nnue::features::{self, flip_us_them};
+use engine_core::evaluation::nnue::features::{self, flip_us_them, FE_END};
+use engine_core::shogi::SHOGI_BOARD_SIZE;
 use engine_core::Position;
 use serde::Deserialize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-const CLASSIC_FT_SHIFT: i32 = 6;
+const DEFAULT_FT_SCALE: f32 = 64.0;
 const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
 
 #[derive(Debug, Clone)]
@@ -217,6 +218,17 @@ pub struct ClassicQuantizationScalesData {
     pub s_in_2: f32,
     pub s_in_3: f32,
     pub bundle_sha256: String,
+    #[serde(default)]
+    pub quant_scheme: Option<QuantSchemeReportData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct QuantSchemeReportData {
+    pub ft: Option<String>,
+    pub h1: Option<String>,
+    pub h2: Option<String>,
+    #[serde(rename = "out", default)]
+    pub out: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +246,7 @@ pub struct ClassicIntNetwork {
     h1_dim: usize,
     h2_dim: usize,
     scales: ClassicQuantizationScalesData,
+    ft_scale: f32,
 }
 
 impl ClassicIntNetwork {
@@ -285,6 +298,18 @@ impl ClassicIntNetwork {
         let h1_dim = scales.h1_dim;
         let h2_dim = scales.h2_dim;
 
+        // canonical dims (FT canonical size is SHOGI_BOARD_SIZE * FE_END)
+        if scales.input_dim != SHOGI_BOARD_SIZE * FE_END {
+            log::warn!(
+                "scales input_dim {} differs from canonical {}",
+                scales.input_dim,
+                SHOGI_BOARD_SIZE * FE_END
+            );
+        }
+        if scales.acc_dim != acc_dim {
+            log::warn!("scales acc_dim mismatch: {} vs {}", scales.acc_dim, acc_dim);
+        }
+
         let mut ft_weights = read_i16_vec(&mut reader, input_dim * acc_dim)?;
         let mut ft_biases = read_i32_vec(&mut reader, acc_dim)?;
         let hidden1_weights = read_i8_vec(&mut reader, acc_dim * 2 * h1_dim)?;
@@ -293,6 +318,27 @@ impl ClassicIntNetwork {
         let hidden2_biases = read_i32_vec(&mut reader, h2_dim)?;
         let output_weights = read_i8_vec(&mut reader, h2_dim)?;
         let output_bias = read_i32(&mut reader)?;
+
+        let ft_scale = if scales.s_w0.abs() > f32::EPSILON {
+            let ratio = scales.s_in_1 / scales.s_w0;
+            if ratio <= 0.0 {
+                log::warn!("invalid s_in_1/s_w0 ratio {}; falling back to default", ratio);
+                DEFAULT_FT_SCALE
+            } else {
+                let nearest = 2f32.powf(ratio.log2().round());
+                if (nearest - ratio).abs() > 0.25 {
+                    log::warn!(
+                        "ft scale ratio {} not power-of-two; engine expects ~{:.3}",
+                        ratio,
+                        nearest
+                    );
+                }
+                ratio
+            }
+        } else {
+            log::warn!("s_w0 is zero; using default ft scale");
+            DEFAULT_FT_SCALE
+        };
 
         // Avoid retaining potential padding in biases/weights (not expected, but be safe)
         ft_weights.truncate(input_dim * acc_dim);
@@ -312,6 +358,7 @@ impl ClassicIntNetwork {
             h1_dim,
             h2_dim,
             scales,
+            ft_scale,
         })
     }
 
@@ -321,14 +368,14 @@ impl ClassicIntNetwork {
 
         let mut input = Vec::with_capacity(self.acc_dim * 2);
         for &v in &acc_us_i16 {
-            input.push(((v as i32) >> CLASSIC_FT_SHIFT).clamp(-127, 127) as i8);
+            input.push(self.quantize_ft_value(v));
         }
         for &v in &acc_them_i16 {
-            input.push(((v as i32) >> CLASSIC_FT_SHIFT).clamp(-127, 127) as i8);
+            input.push(self.quantize_ft_value(v));
         }
 
-        let mut h1 = Vec::with_capacity(self.h1_dim);
-        let mut h1_act = Vec::with_capacity(self.h1_dim);
+        let mut h1_act_i8 = Vec::with_capacity(self.h1_dim);
+        let mut h1_act_f32 = Vec::with_capacity(self.h1_dim);
         let input_dim_h1 = self.acc_dim * 2;
         for i in 0..self.h1_dim {
             let mut sum = self.hidden1_biases[i];
@@ -336,33 +383,27 @@ impl ClassicIntNetwork {
             for (j, &w) in row.iter().enumerate() {
                 sum += input[j] as i32 * w as i32;
             }
-            let ws = scale_for_channel(&self.scales.s_w1, i);
-            let pre_float = sum as f32 * self.scales.s_in_1 * ws;
             let act_i8 = sum.clamp(0, 127) as i8;
-            let act_float = act_i8 as f32 * self.scales.s_in_2;
-            h1.push(pre_float);
-            h1_act.push(act_float);
+            h1_act_i8.push(act_i8);
+            h1_act_f32.push(act_i8 as f32 * self.scales.s_in_2);
         }
 
-        let mut h2 = Vec::with_capacity(self.h2_dim);
-        let mut h2_act = Vec::with_capacity(self.h2_dim);
+        let mut h2_act_i8 = Vec::with_capacity(self.h2_dim);
+        let mut h2_act_f32 = Vec::with_capacity(self.h2_dim);
         for i in 0..self.h2_dim {
             let mut sum = self.hidden2_biases[i];
             let row = &self.hidden2_weights[i * self.h1_dim..(i + 1) * self.h1_dim];
             for (j, &w) in row.iter().enumerate() {
-                sum += h1_act[j] as i32 * w as i32;
+                sum += h1_act_i8[j] as i32 * w as i32;
             }
-            let ws = scale_for_channel(&self.scales.s_w2, i);
-            let pre_float = sum as f32 * self.scales.s_in_2 * ws;
             let act_i8 = sum.clamp(0, 127) as i8;
-            let act_float = act_i8 as f32 * self.scales.s_in_3;
-            h2.push(pre_float);
-            h2_act.push(act_float);
+            h2_act_i8.push(act_i8);
+            h2_act_f32.push(act_i8 as f32 * self.scales.s_in_3);
         }
 
         let mut sum = self.output_bias;
-        for (w, x) in self.output_weights.iter().zip(h2_act.iter()) {
-            sum += *w as i32 * *x as i32;
+        for (w, act_i8) in self.output_weights.iter().zip(h2_act_i8.iter()) {
+            sum += *w as i32 * *act_i8 as i32;
         }
         let ws = scale_for_channel(&self.scales.s_w3, 0);
         let output_float = sum as f32 * self.scales.s_in_3 * ws;
@@ -373,8 +414,8 @@ impl ClassicIntNetwork {
 
         LayerOutputs {
             ft: ft_combined,
-            h1: h1_act,
-            h2: h2_act,
+            h1: h1_act_f32,
+            h2: h2_act_f32,
             output: output_float,
         }
     }
@@ -400,6 +441,18 @@ impl ClassicIntNetwork {
             acc_float.push(clamped as f32 * self.scales.s_w0);
         }
         (acc_i16, acc_float)
+    }
+
+    fn quantize_ft_value(&self, value: i16) -> i8 {
+        let scale = if self.ft_scale <= 0.0 {
+            DEFAULT_FT_SCALE
+        } else {
+            self.ft_scale
+        }
+        .abs()
+        .max(f32::EPSILON);
+        let scaled = (value as f32 / scale).round();
+        scaled.clamp(-127.0, 127.0) as i8
     }
 }
 
@@ -601,9 +654,15 @@ mod tests {
             "s_w2": [0.04],
             "s_w3": [0.02],
             "s_in_1": 1.0,
-            "s_in_2": 1.0,
-            "s_in_3": 1.0,
-            "bundle_sha256": "test"
+            "s_in_2": 0.5,
+            "s_in_3": 0.25,
+            "bundle_sha256": "test",
+            "quant_scheme": {
+                "ft": "per-tensor",
+                "h1": "per-channel",
+                "h2": "per-channel",
+                "out": "per-tensor"
+            }
         });
         serde_json::to_writer_pretty(File::create(scales_path).unwrap(), &scales).unwrap();
     }
@@ -622,6 +681,7 @@ mod tests {
 
         assert_eq!(outputs.h1.len(), 2);
         assert_eq!(outputs.h2.len(), 1);
-        assert!((outputs.output - 3.94).abs() < 1e-3);
+        let actual = outputs.output;
+        assert!((actual - 1.485).abs() < 1e-3, "expected ~1.485, got {actual}");
     }
 }
