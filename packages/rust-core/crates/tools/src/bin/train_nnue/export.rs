@@ -7,7 +7,7 @@ use crate::params::{
     CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, KB_TO_MB_DIVISOR, PERCENTAGE_DIVISOR,
     QUANTIZATION_MAX, QUANTIZATION_METADATA_SIZE, QUANTIZATION_MIN,
 };
-use crate::types::{ArchKind, ExportFormat, ExportOptions};
+use crate::types::{ArchKind, ExportFormat, ExportOptions, QuantScheme};
 use bytemuck::cast_slice;
 use chrono::Utc;
 use engine_core::evaluation::nnue::features::FE_END;
@@ -306,7 +306,7 @@ pub fn finalize_export(
             }
 
             if let Some(scales) = classic_scales {
-                if let Err(e) = write_classic_scales_json(out_dir, bundle, scales) {
+                if let Err(e) = write_classic_scales_json(out_dir, bundle, scales, &export) {
                     log::warn!("Failed to write nn.classic.scales.json: {}", e);
                 }
             } else {
@@ -337,12 +337,22 @@ struct ClassicScalesArtifact {
     s_in_2: f32,
     s_in_3: f32,
     bundle_sha256: String,
+    quant_scheme: QuantSchemeReport,
+}
+
+#[derive(Serialize)]
+struct QuantSchemeReport {
+    ft: &'static str,
+    h1: &'static str,
+    h2: &'static str,
+    out: &'static str,
 }
 
 fn write_classic_scales_json(
     out_dir: &Path,
     bundle: &ClassicIntNetworkBundle,
     scales: &ClassicQuantizationScales,
+    export: &ExportOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let serialized = bundle.as_serialized();
     if serialized.acc_dim != CLASSIC_ACC_DIM
@@ -373,7 +383,7 @@ fn write_classic_scales_json(
         acc_dim: serialized.acc_dim,
         h1_dim: serialized.h1_dim,
         h2_dim: serialized.h2_dim,
-        input_dim: serialized.input_dim,
+        input_dim: SHOGI_BOARD_SIZE * FE_END,
         s_w0: scales.s_w0,
         s_w1: scales.s_w1.clone(),
         s_w2: scales.s_w2.clone(),
@@ -382,12 +392,25 @@ fn write_classic_scales_json(
         s_in_2: scales.s_in_2,
         s_in_3: scales.s_in_3,
         bundle_sha256: bundle_sha256(bundle),
+        quant_scheme: QuantSchemeReport {
+            ft: quant_scheme_label(export.quant_ft),
+            h1: quant_scheme_label(export.quant_h1),
+            h2: quant_scheme_label(export.quant_h2),
+            out: quant_scheme_label(export.quant_out),
+        },
     };
 
     let path = out_dir.join("nn.classic.scales.json");
     let file = File::create(path)?;
     serde_json::to_writer_pretty(file, &payload)?;
     Ok(())
+}
+
+fn quant_scheme_label(q: QuantScheme) -> &'static str {
+    match q {
+        QuantScheme::PerTensor => "per-tensor",
+        QuantScheme::PerChannel => "per-channel",
+    }
 }
 
 fn bundle_sha256(bundle: &ClassicIntNetworkBundle) -> String {

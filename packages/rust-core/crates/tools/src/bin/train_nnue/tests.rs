@@ -456,6 +456,23 @@ struct TestScalesJson {
     h2_dim: usize,
     input_dim: usize,
     bundle_sha256: String,
+    #[serde(default)]
+    quant_scheme: Option<TestQuantScheme>,
+}
+
+#[derive(Deserialize, Default)]
+struct TestQuantScheme {
+    ft: String,
+    h1: String,
+    h2: String,
+    #[serde(rename = "out")]
+    out_field: String,
+}
+
+impl TestQuantScheme {
+    fn out(&self) -> &str {
+        &self.out_field
+    }
 }
 
 fn compute_bundle_sha256(bundle: &ClassicIntNetworkBundle) -> String {
@@ -539,6 +556,15 @@ fn finalize_export_emits_fp32_and_scales_for_classic() {
 
     let expected_sha = compute_bundle_sha256(&bundle);
     assert_eq!(scales_json.bundle_sha256, expected_sha);
+
+    if let Some(q) = scales_json.quant_scheme {
+        assert_eq!(q.ft, "per-tensor");
+        assert_eq!(q.h1, "per-channel");
+        assert_eq!(q.h2, "per-channel");
+        assert_eq!(q.out(), "per-tensor");
+    } else {
+        panic!("quant_scheme missing from scales json");
+    }
 }
 
 #[test]
