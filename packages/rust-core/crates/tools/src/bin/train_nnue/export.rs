@@ -1,5 +1,5 @@
 use crate::classic::{write_classic_v1_bundle, ClassicFloatNetwork, ClassicIntNetworkBundle};
-use crate::model::{Network, SingleNetwork};
+use crate::model::{ClassicNetwork, Network, SingleNetwork};
 use crate::params::{
     CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, KB_TO_MB_DIVISOR, PERCENTAGE_DIVISOR,
     QUANTIZATION_MAX, QUANTIZATION_METADATA_SIZE, QUANTIZATION_MIN,
@@ -148,8 +148,63 @@ pub(crate) fn save_single_network(
 }
 
 pub fn save_network(network: &Network, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let single = expect_single(network, "FP32 書き出し")?;
-    save_single_network(single, path)
+    match network {
+        Network::Single(single) => save_single_network(single, path),
+        Network::Classic(classic) => save_classic_network(classic, path),
+    }
+}
+
+pub(crate) fn save_classic_network(
+    classic: &ClassicNetwork,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::BufWriter;
+
+    let fp32 = &classic.fp32;
+
+    let mut file = BufWriter::new(File::create(path)?);
+
+    writeln!(file, "NNUE")?;
+    writeln!(file, "VERSION 1")?;
+    writeln!(file, "FEATURES HALFKP")?;
+    writeln!(file, "ARCHITECTURE CLASSIC")?;
+    writeln!(file, "ACC_DIM {}", fp32.acc_dim)?;
+    writeln!(file, "H1_DIM {}", fp32.h1_dim)?;
+    writeln!(file, "H2_DIM {}", fp32.h2_dim)?;
+    writeln!(file, "RELU_CLIP {}", classic.relu_clip)?;
+    writeln!(file, "FEATURE_DIM {}", fp32.input_dim)?;
+    writeln!(file, "END_HEADER")?;
+
+    file.write_all(&(fp32.input_dim as u32).to_le_bytes())?;
+    file.write_all(&(fp32.acc_dim as u32).to_le_bytes())?;
+    file.write_all(&(fp32.h1_dim as u32).to_le_bytes())?;
+    file.write_all(&(fp32.h2_dim as u32).to_le_bytes())?;
+
+    for &w in &fp32.ft_weights {
+        file.write_all(&w.to_le_bytes())?;
+    }
+    for &b in &fp32.ft_biases {
+        file.write_all(&b.to_le_bytes())?;
+    }
+    for &w in &fp32.hidden1_weights {
+        file.write_all(&w.to_le_bytes())?;
+    }
+    for &b in &fp32.hidden1_biases {
+        file.write_all(&b.to_le_bytes())?;
+    }
+    for &w in &fp32.hidden2_weights {
+        file.write_all(&w.to_le_bytes())?;
+    }
+    for &b in &fp32.hidden2_biases {
+        file.write_all(&b.to_le_bytes())?;
+    }
+    for &w in &fp32.output_weights {
+        file.write_all(&w.to_le_bytes())?;
+    }
+    file.write_all(&fp32.output_bias.to_le_bytes())?;
+
+    file.flush()?;
+    Ok(())
 }
 
 pub fn finalize_export(

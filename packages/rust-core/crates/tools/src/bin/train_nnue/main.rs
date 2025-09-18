@@ -53,6 +53,10 @@ use types::{
 use crate::types::TeacherValueDomain;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs()
+        .try_init();
+
     let app = Command::new("train_nnue")
         .about("Train NNUE model from JSONL data")
         .arg(arg!(-i --input <FILE> "Input JSONL file").required(true))

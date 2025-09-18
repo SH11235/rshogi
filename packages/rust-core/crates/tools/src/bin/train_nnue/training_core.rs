@@ -30,9 +30,7 @@ fn train_model_single(
         || config.optimizer.eq_ignore_ascii_case("adamw")
     {
         if config.optimizer.eq_ignore_ascii_case("adamw") {
-            log::warn!(
-                "--opt adamw は --arch single では Adam として扱います（decoupled weight decay 未対応）"
-            );
+            emit_single_adamw_warning();
         }
         Some(SingleAdamState::new(network))
     } else {
@@ -411,73 +409,22 @@ fn train_model_single(
             ])?;
             w.flush()?;
         }
-        // Structured per-epoch logs (train/val)
-        if let Some(ref lg) = ctx.structured {
-            let mut rec_train = serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "phase": "train",
-                "global_step": ctx.global_step as i64,
-                "epoch": (epoch + 1) as i64,
-                "lr": last_lr_base as f64,
-                "train_loss": avg_loss as f64,
-                "examples_sec": epoch_sps as f64,
-                "loader_ratio": 0.0f64,
-                "wall_time": epoch_secs as f64,
-            });
-            // Bake training_config (Spec#12)
-            if let Some(obj) = ctx.training_config_json.clone() {
-                rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
-            }
-            lg.write_json(&rec_train);
-            if let Some(vl) = val_loss {
-                let mut rec_val = serde_json::json!({
-                    "ts": chrono::Utc::now().to_rfc3339(),
-                    "phase": "val",
-                    "global_step": ctx.global_step as i64,
-                    "epoch": (epoch + 1) as i64,
-                    "val_loss": vl as f64,
-                    "wall_time": epoch_secs as f64,
-                });
-                if let Some(obj) = ctx.training_config_json.clone() {
-                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
-                }
-                if let Some(a) = val_auc {
-                    rec_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("val_auc".to_string(), serde_json::json!(a));
-                }
-                if let Some(e) = val_ece {
-                    rec_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("val_ece".to_string(), serde_json::json!(e));
-                }
-                lg.write_json(&rec_val);
-            }
-        }
-        // Console log summary
-        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
-            eprintln!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
-                epoch + 1,
-                config.epochs,
-                avg_loss,
-                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-                epoch_secs,
-                epoch_sps
-            );
-        } else {
-            println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
-                epoch + 1,
-                config.epochs,
-                avg_loss,
-                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-                epoch_secs,
-                epoch_sps
-            );
-        }
+        emit_epoch_logging(
+            ctx.structured.as_ref(),
+            ctx.training_config_json.as_ref(),
+            ctx.global_step,
+            epoch,
+            config.epochs,
+            avg_loss,
+            val_loss,
+            val_auc,
+            val_ece,
+            epoch_secs,
+            epoch_sps,
+            None,
+            None,
+            last_lr_base,
+        );
         print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
     }
 
@@ -580,7 +527,7 @@ fn train_model_classic(
                 if total_batches % interval == 0 {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
-                    save_network(&Network::Classic(network.clone()), &checkpoint_path)?;
+                    save_classic_network(network, &checkpoint_path)?;
                     if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                         eprintln!("Saved checkpoint: {}", checkpoint_path.display());
                     } else {
@@ -725,81 +672,22 @@ fn train_model_classic(
             w.flush()?;
         }
 
-        if let Some(ref lg) = ctx.structured {
-            let mut rec_train = serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "phase": "train",
-                "global_step": ctx.global_step as i64,
-                "epoch": (epoch + 1) as i64,
-                "lr": last_lr_base as f64,
-                "train_loss": avg_loss as f64,
-                "examples_sec": epoch_sps as f64,
-                "loader_ratio": 0.0f64,
-                "wall_time": epoch_secs as f64,
-            });
-            if let Some(obj) = ctx.training_config_json.clone() {
-                rec_train
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("training_config".into(), obj);
-            }
-            lg.write_json(&rec_train);
-
-            let mut rec_val = serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "phase": "val",
-                "global_step": ctx.global_step as i64,
-                "epoch": (epoch + 1) as i64,
-                "wall_time": epoch_secs as f64,
-            });
-            if let Some(obj) = ctx.training_config_json.clone() {
-                rec_val
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("training_config".into(), obj);
-            }
-            if let Some(vl) = val_loss {
-                rec_val
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("val_loss".to_string(), serde_json::json!(vl as f64));
-            }
-            if let Some(a) = val_auc {
-                rec_val
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("val_auc".to_string(), serde_json::json!(a));
-            }
-            if let Some(e) = val_ece {
-                rec_val
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("val_ece".to_string(), serde_json::json!(e));
-            }
-            lg.write_json(&rec_val);
-        }
-
-        if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
-            eprintln!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
-                epoch + 1,
-                config.epochs,
-                avg_loss,
-                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-                epoch_secs,
-                epoch_sps
-            );
-        } else {
-            println!(
-                "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
-                epoch + 1,
-                config.epochs,
-                avg_loss,
-                val_loss.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".into()),
-                epoch_secs,
-                epoch_sps
-            );
-        }
+        emit_epoch_logging(
+            ctx.structured.as_ref(),
+            ctx.training_config_json.as_ref(),
+            ctx.global_step,
+            epoch,
+            config.epochs,
+            avg_loss,
+            val_loss,
+            val_auc,
+            val_ece,
+            epoch_secs,
+            epoch_sps,
+            None,
+            None,
+            last_lr_base,
+        );
 
         print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
     }
@@ -843,9 +731,7 @@ fn train_model_stream_cache_single(
             || config.optimizer.eq_ignore_ascii_case("adamw")
         {
             if config.optimizer.eq_ignore_ascii_case("adamw") {
-                log::warn!(
-                    "--opt adamw は --arch single では Adam として扱います（decoupled weight decay 未対応）"
-                );
+                emit_single_adamw_warning();
             }
             Some(SingleAdamState::new(network))
         } else {
@@ -1084,6 +970,7 @@ fn train_model_stream_cache_single(
                 .clamp(0.0, 1.0)
                 * PERCENTAGE_DIVISOR as f64;
             let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
+            let val_loss_opt = if has_val { Some(val_loss) } else { None };
             // Update best trackers (only when validation is present)
             if has_val {
                 if val_loss < *ctx.trackers.best_val_loss {
@@ -1123,64 +1010,22 @@ fn train_model_stream_cache_single(
                     }
                 }
             }
-            if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
-                eprintln!(
-                    "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-                    epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-                );
-            } else {
-                println!(
-                    "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
-                    epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
-                );
-            }
-            // zero-weight debug: print once per epoch after summary (handled below)
-            if let Some(ref lg) = ctx.structured {
-                let mut rec_train = serde_json::json!({
-                    "ts": chrono::Utc::now().to_rfc3339(),
-                    "phase": "train",
-                    "global_step": ctx.global_step as i64,
-                    "epoch": (epoch + 1) as i64,
-                    "lr": last_lr_base as f64,
-                    "train_loss": avg_loss as f64,
-                    "examples_sec": epoch_sps as f64,
-                    "loader_ratio": (loader_ratio_epoch/100.0) ,
-                    "wall_time": epoch_secs as f64,
-                });
-                if let Some(obj) = ctx.training_config_json.clone() {
-                    rec_train.as_object_mut().unwrap().insert("training_config".into(), obj);
-                }
-                lg.write_json(&rec_train);
-                let mut rec_val = serde_json::json!({
-                    "ts": chrono::Utc::now().to_rfc3339(),
-                    "phase": "val",
-                    "global_step": ctx.global_step as i64,
-                    "epoch": (epoch + 1) as i64,
-                    "wall_time": epoch_secs as f64,
-                });
-                if let Some(obj) = ctx.training_config_json.clone() {
-                    rec_val.as_object_mut().unwrap().insert("training_config".into(), obj);
-                }
-                if has_val {
-                    rec_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("val_loss".to_string(), serde_json::json!(val_loss as f64));
-                }
-                if let Some(a) = val_auc {
-                    rec_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("val_auc".to_string(), serde_json::json!(a));
-                }
-                if let Some(e) = val_ece {
-                    rec_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("val_ece".to_string(), serde_json::json!(e));
-                }
-                lg.write_json(&rec_val);
-            }
+            emit_epoch_logging(
+                ctx.structured.as_ref(),
+                ctx.training_config_json.as_ref(),
+                ctx.global_step,
+                epoch,
+                config.epochs,
+                avg_loss,
+                val_loss_opt,
+                val_auc,
+                val_ece,
+                epoch_secs,
+                epoch_sps,
+                Some(loader_ratio_epoch),
+                Some(batch_count),
+                last_lr_base,
+            );
 
             // Emit metrics.csv (sync stream-cache path)
             if ctx.dash.emit {
@@ -1191,7 +1036,7 @@ fn train_model_stream_cache_single(
                         .open(ctx.out_dir.join("metrics.csv"))?,
                 );
                 let val_loss_str = if has_val {
-                    format!("{:.6}", val_loss)
+                    format!("{:.6}", val_loss_opt.unwrap())
                 } else {
                     String::new()
                 };
@@ -1258,9 +1103,7 @@ fn train_model_stream_cache_single(
         || config.optimizer.eq_ignore_ascii_case("adamw")
     {
         if config.optimizer.eq_ignore_ascii_case("adamw") {
-            log::warn!(
-                "--opt adamw は --arch single では Adam として扱います（decoupled weight decay 未対応）"
-            );
+            emit_single_adamw_warning();
         }
         Some(SingleAdamState::new(network))
     } else {
@@ -1823,7 +1666,7 @@ fn train_model_stream_cache_classic(
                 if total_batches % interval == 0 {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
-                    save_network(&Network::Classic(network.clone()), &checkpoint_path)?;
+                    save_classic_network(network, &checkpoint_path)?;
                     if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
                         eprintln!("Saved checkpoint: {}", checkpoint_path.display());
                     } else {
@@ -2115,7 +1958,12 @@ fn train_model_with_loader_single(
     let last_val_loss: &mut Option<f32> = ctx.trackers.last_val_loss;
     let best_epoch: &mut Option<usize> = ctx.trackers.best_epoch;
     let train_samples_arc = Arc::new(train_samples);
-    let mut adam_state = if config.optimizer == "adam" {
+    let mut adam_state = if config.optimizer.eq_ignore_ascii_case("adam")
+        || config.optimizer.eq_ignore_ascii_case("adamw")
+    {
+        if config.optimizer.eq_ignore_ascii_case("adamw") {
+            emit_single_adamw_warning();
+        }
         Some(SingleAdamState::new(network))
     } else {
         None
@@ -3124,14 +2972,15 @@ fn train_batch_classic(
     let h2_dim = fp32.h2_dim;
     let input_dim = acc_dim * 2;
 
-    let mut grad_w3 = vec![0.0f32; h2_dim];
+    scratch.begin_grad_batch();
+    let approx_rows = batch
+        .len()
+        .saturating_mul(config.estimated_features_per_sample);
+    if approx_rows > 0 {
+        scratch.reserve_ft_rows(approx_rows);
+    }
+
     let mut grad_b3 = 0.0f32;
-    let mut grad_hidden2 = vec![0.0f32; fp32.hidden2_weights.len()];
-    let mut grad_hidden2_biases = vec![0.0f32; fp32.hidden2_biases.len()];
-    let mut grad_hidden1 = vec![0.0f32; fp32.hidden1_weights.len()];
-    let mut grad_hidden1_biases = vec![0.0f32; fp32.hidden1_biases.len()];
-    let mut grad_ft_biases = vec![0.0f32; acc_dim];
-    let mut grad_ft_rows: HashMap<usize, Vec<f32>> = HashMap::new();
 
     let mut total_loss = 0.0f32;
     let mut total_weight = 0.0f32;
@@ -3160,58 +3009,73 @@ fn train_batch_classic(
 
         grad_b3 += grad_out;
         for i in 0..h2_dim {
-            grad_w3[i] += grad_out * scratch.a2[i];
+            scratch.grad_w3[i] += grad_out * scratch.a2[i];
             let delta = grad_out * fp32.output_weights[i] * relu_clip_grad(scratch.z2[i], relu_clip);
             scratch.d_z2[i] = delta;
             for j in 0..h1_dim {
                 let idx = i * h1_dim + j;
-                grad_hidden2[idx] += delta * scratch.a1[j];
+                scratch.grad_hidden2[idx] += delta * scratch.a1[j];
                 scratch.d_a1[j] += delta * fp32.hidden2_weights[idx];
             }
-            grad_hidden2_biases[i] += delta;
+            scratch.grad_hidden2_biases[i] += delta;
         }
 
-        for (j, bias) in grad_hidden1_biases.iter_mut().enumerate().take(h1_dim) {
+        for (j, bias) in scratch
+            .grad_hidden1_biases
+            .iter_mut()
+            .enumerate()
+            .take(h1_dim)
+        {
             let delta = scratch.d_a1[j] * relu_clip_grad(scratch.z1[j], relu_clip);
             scratch.d_z1[j] = delta;
             let base = j * input_dim;
             for k in 0..input_dim {
-                grad_hidden1[base + k] += delta * scratch.input[k];
+                let idx = base + k;
+                scratch.grad_hidden1[idx] += delta * scratch.input[k];
                 scratch.d_input[k] += delta * fp32.hidden1_weights[base + k];
             }
             *bias += delta;
         }
 
-        let (d_acc_us, d_acc_them) = scratch.d_input.split_at(acc_dim);
-        for i in 0..acc_dim {
-            grad_ft_biases[i] += d_acc_us[i] + d_acc_them[i];
+        {
+            let (d_acc_us_src, d_acc_them_src) = scratch.d_input.split_at(acc_dim);
+            scratch.d_acc_us_buf.copy_from_slice(d_acc_us_src);
+            scratch.d_acc_them_buf.copy_from_slice(d_acc_them_src);
         }
+        for i in 0..acc_dim {
+            scratch.grad_ft_biases[i] += scratch.d_acc_us_buf[i] + scratch.d_acc_them_buf[i];
+        }
+        let src_ptr_us = scratch.d_acc_us_buf.as_ptr();
+        let src_ptr_them = scratch.d_acc_them_buf.as_ptr();
 
+        // SAFETY: d_acc_*_buf are freshly copied from d_input and are not modified while we update rows.
         for &feat in &sample.features {
             let idx = feat as usize;
             if idx >= fp32.input_dim {
                 warn_classic_oor("backward(us)", feat, fp32.input_dim, fp32.acc_dim);
                 continue;
             }
-            let row = grad_ft_rows
-                .entry(idx)
-                .or_insert_with(|| vec![0.0f32; acc_dim]);
-            for (dst, &src) in row.iter_mut().zip(d_acc_us.iter()) {
-                *dst += src;
+            let row = scratch.grad_row_mut(idx, acc_dim);
+            for j in 0..acc_dim {
+                unsafe {
+                    *row.get_unchecked_mut(j) += *src_ptr_us.add(j);
+                }
             }
         }
 
-        for &feat in &scratch.features_them {
+        // SAFETY: mirrored buffer for them-side follows the same invariants as above.
+        for idx in 0..scratch.features_them.len() {
+            let feat = scratch.features_them[idx];
             let idx = feat as usize;
             if idx >= fp32.input_dim {
                 warn_classic_oor("backward(them)", feat, fp32.input_dim, fp32.acc_dim);
                 continue;
             }
-            let row = grad_ft_rows
-                .entry(idx)
-                .or_insert_with(|| vec![0.0f32; acc_dim]);
-            for (dst, &src) in row.iter_mut().zip(d_acc_them.iter()) {
-                *dst += src;
+            let row = scratch.grad_row_mut(idx, acc_dim);
+            for j in 0..acc_dim {
+                unsafe {
+                    *row.get_unchecked_mut(j) += *src_ptr_them.add(j);
+                }
             }
         }
     }
@@ -3223,53 +3087,58 @@ fn train_batch_classic(
     let inv_sum = 1.0 / total_weight;
 
     grad_b3 *= inv_sum;
-    for g in grad_w3.iter_mut() {
+    for g in scratch.grad_w3.iter_mut() {
         *g *= inv_sum;
     }
-    for g in grad_hidden2.iter_mut() {
+    for g in scratch.grad_hidden2.iter_mut() {
         *g *= inv_sum;
     }
-    for g in grad_hidden2_biases.iter_mut() {
+    for g in scratch.grad_hidden2_biases.iter_mut() {
         *g *= inv_sum;
     }
-    for g in grad_hidden1.iter_mut() {
+    for g in scratch.grad_hidden1.iter_mut() {
         *g *= inv_sum;
     }
-    for g in grad_hidden1_biases.iter_mut() {
+    for g in scratch.grad_hidden1_biases.iter_mut() {
         *g *= inv_sum;
     }
-    for g in grad_ft_biases.iter_mut() {
+    for g in scratch.grad_ft_biases.iter_mut() {
         *g *= inv_sum;
     }
-    for grads in grad_ft_rows.values_mut() {
-        for g in grads.iter_mut() {
-            *g *= inv_sum;
+    let stamp = scratch.current_grad_stamp();
+    for row in scratch.grad_ft_rows.values_mut() {
+        if row.last_stamp == stamp {
+            for g in row.values.iter_mut() {
+                *g *= inv_sum;
+            }
         }
     }
 
     if grad_clip > 0.0 {
         let grads_mut = ClassicGradMut {
             b3: &mut grad_b3,
-            w3: &mut grad_w3,
-            hidden2: &mut grad_hidden2,
-            hidden2_biases: &mut grad_hidden2_biases,
-            hidden1: &mut grad_hidden1,
-            hidden1_biases: &mut grad_hidden1_biases,
-            ft_biases: &mut grad_ft_biases,
-            ft_rows: &mut grad_ft_rows,
+            w3: &mut scratch.grad_w3,
+            hidden2: &mut scratch.grad_hidden2,
+            hidden2_biases: &mut scratch.grad_hidden2_biases,
+            hidden1: &mut scratch.grad_hidden1,
+            hidden1_biases: &mut scratch.grad_hidden1_biases,
+            ft_biases: &mut scratch.grad_ft_biases,
+            ft_rows: &mut scratch.grad_ft_rows,
+            ft_rows_stamp: stamp,
         };
         maybe_clip_gradients(grad_clip, grads_mut);
     }
 
     let grad_refs = ClassicGrads {
-        w3: &grad_w3,
+        w3: &scratch.grad_w3,
         b3: grad_b3,
-        hidden2: &grad_hidden2,
-        hidden2_biases: &grad_hidden2_biases,
-        hidden1: &grad_hidden1,
-        hidden1_biases: &grad_hidden1_biases,
-        ft_biases: &grad_ft_biases,
-        ft_rows: &grad_ft_rows,
+        hidden2: &scratch.grad_hidden2,
+        hidden2_biases: &scratch.grad_hidden2_biases,
+        hidden1: &scratch.grad_hidden1,
+        hidden1_biases: &scratch.grad_hidden1_biases,
+        ft_biases: &scratch.grad_ft_biases,
+        ft_rows: &scratch.grad_ft_rows,
+        ft_rows_stamp: stamp,
     };
     let opt_params = ClassicOptParams { lr: lr_base, l2_reg: config.l2_reg, decoupled_weight_decay: false };
     optimizer.apply(fp32, grad_refs, opt_params);
@@ -3503,6 +3372,27 @@ fn sigmoid(x: f32) -> f32 {
 }
 static WARNED_CLASSIC_OOR: AtomicBool = AtomicBool::new(false);
 
+struct FtGradRow {
+    values: Vec<f32>,
+    last_stamp: u64,
+}
+
+impl FtGradRow {
+    fn new(len: usize, stamp: u64) -> Self {
+        Self {
+            values: vec![0.0; len],
+            last_stamp: stamp,
+        }
+    }
+
+    fn ensure_stamp(&mut self, stamp: u64) {
+        if self.last_stamp != stamp {
+            self.values.fill(0.0);
+            self.last_stamp = stamp;
+        }
+    }
+}
+
 struct ClassicTrainScratch {
     acc_us: Vec<f32>,
     acc_them: Vec<f32>,
@@ -3516,6 +3406,16 @@ struct ClassicTrainScratch {
     d_z1: Vec<f32>,
     d_input: Vec<f32>,
     features_them: Vec<u32>,
+    d_acc_us_buf: Vec<f32>,
+    d_acc_them_buf: Vec<f32>,
+    grad_w3: Vec<f32>,
+    grad_hidden2: Vec<f32>,
+    grad_hidden2_biases: Vec<f32>,
+    grad_hidden1: Vec<f32>,
+    grad_hidden1_biases: Vec<f32>,
+    grad_ft_biases: Vec<f32>,
+    grad_ft_rows: HashMap<usize, FtGradRow>,
+    grad_batch_stamp: u64,
 }
 
 impl ClassicTrainScratch {
@@ -3533,7 +3433,48 @@ impl ClassicTrainScratch {
             d_z1: vec![0.0; h1_dim],
             d_input: vec![0.0; acc_dim * 2],
             features_them: Vec::new(),
+            d_acc_us_buf: vec![0.0; acc_dim],
+            d_acc_them_buf: vec![0.0; acc_dim],
+            grad_w3: vec![0.0; h2_dim],
+            grad_hidden2: vec![0.0; h1_dim * h2_dim],
+            grad_hidden2_biases: vec![0.0; h2_dim],
+            grad_hidden1: vec![0.0; (acc_dim * 2) * h1_dim],
+            grad_hidden1_biases: vec![0.0; h1_dim],
+            grad_ft_biases: vec![0.0; acc_dim],
+            grad_ft_rows: HashMap::new(),
+            grad_batch_stamp: 0,
         }
+    }
+
+    fn begin_grad_batch(&mut self) {
+        self.grad_batch_stamp = self.grad_batch_stamp.wrapping_add(1);
+        self.grad_w3.fill(0.0);
+        self.grad_hidden2.fill(0.0);
+        self.grad_hidden2_biases.fill(0.0);
+        self.grad_hidden1.fill(0.0);
+        self.grad_hidden1_biases.fill(0.0);
+        self.grad_ft_biases.fill(0.0);
+    }
+
+    fn reserve_ft_rows(&mut self, approx_keys: usize) {
+        if approx_keys > self.grad_ft_rows.capacity() {
+            self.grad_ft_rows
+                .reserve(approx_keys - self.grad_ft_rows.capacity());
+        }
+    }
+
+    fn grad_row_mut(&mut self, idx: usize, acc_dim: usize) -> &mut [f32] {
+        let stamp = self.grad_batch_stamp;
+        let entry = self
+            .grad_ft_rows
+            .entry(idx)
+            .or_insert_with(|| FtGradRow::new(acc_dim, stamp));
+        entry.ensure_stamp(stamp);
+        &mut entry.values
+    }
+
+    fn current_grad_stamp(&self) -> u64 {
+        self.grad_batch_stamp
     }
 
     fn forward(
@@ -3627,6 +3568,13 @@ fn warn_classic_oor(ctx: &str, feat: u32, input_dim: usize, acc_dim: usize) {
             ft_len
         );
     }
+}
+
+fn emit_single_adamw_warning() {
+    const MSG: &str =
+        "--opt adamw は --arch single では Adam として扱います（decoupled weight decay 未対応）";
+    log::warn!("{}", MSG);
+    eprintln!("{}", MSG);
 }
 
 enum ClassicOptimizerState {
@@ -3826,10 +3774,14 @@ impl ClassicAdamState {
                 / (self.v_ft_biases[i].sqrt() + self.epsilon);
         }
 
-        for (&feat_idx, row_grads) in grads.ft_rows.iter() {
+        for (&feat_idx, row) in grads.ft_rows.iter() {
+            if row.last_stamp != grads.ft_rows_stamp {
+                continue;
+            }
             if feat_idx >= net.input_dim {
                 continue;
             }
+            let row_grads = &row.values;
             let base = feat_idx * net.acc_dim;
             let row = &mut net.ft_weights[base..base + net.acc_dim];
             let entry = self.ft_rows.entry(feat_idx).or_insert_with(|| AdamFtRowState::new(net.acc_dim));
@@ -3911,7 +3863,11 @@ fn apply_sgd(
         *fb -= params.lr * grads.ft_biases[i];
     }
 
-    for (&feat_idx, row_grads) in grads.ft_rows.iter() {
+    for (&feat_idx, row) in grads.ft_rows.iter() {
+        if row.last_stamp != grads.ft_rows_stamp {
+            continue;
+        }
+        let row_grads = &row.values;
         if feat_idx >= net.input_dim {
             continue;
         }
@@ -3932,7 +3888,8 @@ struct ClassicGrads<'a> {
     hidden1: &'a [f32],
     hidden1_biases: &'a [f32],
     ft_biases: &'a [f32],
-    ft_rows: &'a HashMap<usize, Vec<f32>>,
+    ft_rows: &'a HashMap<usize, FtGradRow>,
+    ft_rows_stamp: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -3950,7 +3907,8 @@ struct ClassicGradMut<'a> {
     hidden1: &'a mut [f32],
     hidden1_biases: &'a mut [f32],
     ft_biases: &'a mut [f32],
-    ft_rows: &'a mut HashMap<usize, Vec<f32>>,
+    ft_rows: &'a mut HashMap<usize, FtGradRow>,
+    ft_rows_stamp: u64,
 }
 
 fn maybe_clip_gradients(clip: f32, grads: ClassicGradMut<'_>) {
@@ -3975,7 +3933,14 @@ fn maybe_clip_gradients(clip: f32, grads: ClassicGradMut<'_>) {
         .sum::<f64>();
     norm_sq += grads.ft_biases.iter().map(|g| (*g as f64) * (*g as f64)).sum::<f64>();
     for row in grads.ft_rows.values() {
-        norm_sq += row.iter().map(|g| (*g as f64) * (*g as f64)).sum::<f64>();
+        if row.last_stamp != grads.ft_rows_stamp {
+            continue;
+        }
+        norm_sq += row
+            .values
+            .iter()
+            .map(|g| (*g as f64) * (*g as f64))
+            .sum::<f64>();
     }
 
     if !norm_sq.is_finite() {
@@ -4008,9 +3973,145 @@ fn maybe_clip_gradients(clip: f32, grads: ClassicGradMut<'_>) {
         *g *= scale;
     }
     for row in grads.ft_rows.values_mut() {
-        for g in row.iter_mut() {
+        if row.last_stamp != grads.ft_rows_stamp {
+            continue;
+        }
+        for g in row.values.iter_mut() {
             *g *= scale;
         }
+    }
+}
+
+fn emit_epoch_logging(
+    structured: Option<&StructuredLogger>,
+    training_config: Option<&serde_json::Value>,
+    global_step: u64,
+    epoch_index: usize,
+    total_epochs: usize,
+    avg_loss: f32,
+    val_loss: Option<f32>,
+    val_auc: Option<f64>,
+    val_ece: Option<f64>,
+    epoch_secs: f32,
+    epoch_sps: f32,
+    loader_ratio_pct: Option<f64>,
+    batch_count: Option<usize>,
+    last_lr_base: f32,
+) {
+    let epoch_display = epoch_index + 1;
+    let val_loss_str = val_loss
+        .map(|v| format!("{:.4}", v))
+        .unwrap_or_else(|| "NA".into());
+    let message = match (batch_count, loader_ratio_pct) {
+        (Some(batches), Some(ratio)) => format!(
+            "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+            epoch_display,
+            total_epochs,
+            avg_loss,
+            val_loss_str,
+            batches,
+            epoch_secs,
+            epoch_sps,
+            ratio
+        ),
+        (Some(batches), None) => format!(
+            "Epoch {}/{}: train_loss={:.4} val_loss={} batches={} time={:.2}s sps={:.0}",
+            epoch_display,
+            total_epochs,
+            avg_loss,
+            val_loss_str,
+            batches,
+            epoch_secs,
+            epoch_sps
+        ),
+        (None, Some(ratio)) => format!(
+            "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+            epoch_display,
+            total_epochs,
+            avg_loss,
+            val_loss_str,
+            epoch_secs,
+            epoch_sps,
+            ratio
+        ),
+        (None, None) => format!(
+            "Epoch {}/{}: train_loss={:.4} val_loss={} time={:.2}s sps={:.0}",
+            epoch_display,
+            total_epochs,
+            avg_loss,
+            val_loss_str,
+            epoch_secs,
+            epoch_sps
+        ),
+    };
+
+    let human_to_stderr = structured.map(|lg| lg.to_stdout).unwrap_or(false);
+    if human_to_stderr {
+        eprintln!("{}", message);
+    } else {
+        println!("{}", message);
+    }
+
+    if let Some(lg) = structured {
+        // Structured logs consume loader_ratio as 0.0–1.0 fraction; human logs use percentage.
+        let loader_ratio_fraction = loader_ratio_pct.map(|pct| pct / 100.0).unwrap_or(0.0);
+        let mut rec_train = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "phase": "train",
+            "global_step": global_step as i64,
+            "epoch": epoch_display as i64,
+            "lr": last_lr_base as f64,
+            "train_loss": avg_loss as f64,
+            "examples_sec": epoch_sps as f64,
+            "loader_ratio": loader_ratio_fraction,
+            "wall_time": epoch_secs as f64,
+        });
+        if let Some(cfg) = training_config {
+            rec_train
+                .as_object_mut()
+                .unwrap()
+                .insert("training_config".into(), cfg.clone());
+        }
+        if let Some(batches) = batch_count {
+            rec_train
+                .as_object_mut()
+                .unwrap()
+                .insert("batches".into(), serde_json::json!(batches as i64));
+        }
+        lg.write_json(&rec_train);
+
+        let mut rec_val = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "phase": "val",
+            "global_step": global_step as i64,
+            "epoch": epoch_display as i64,
+            "wall_time": epoch_secs as f64,
+        });
+        if let Some(cfg) = training_config {
+            rec_val
+                .as_object_mut()
+                .unwrap()
+                .insert("training_config".into(), cfg.clone());
+        }
+        if let Some(vl) = val_loss {
+            rec_val
+                .as_object_mut()
+                .unwrap()
+                .insert("val_loss".into(), serde_json::json!(vl as f64));
+        }
+        if let Some(auc) = val_auc {
+            rec_val
+                .as_object_mut()
+                .unwrap()
+                .insert("val_auc".into(), serde_json::json!(auc));
+        }
+        if let Some(ece) = val_ece {
+            rec_val
+                .as_object_mut()
+                .unwrap()
+                .insert("val_ece".into(), serde_json::json!(ece));
+        }
+        lg.write_json(&rec_val);
     }
 }
 
