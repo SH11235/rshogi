@@ -165,8 +165,9 @@ done | tee benchmark_results.txt
 - 実行内容:
   - `target/release/gauntlet` を 200局（代表100局面×往復）で実行
   - Gate 条件: スコア率 55% 以上かつ NPS ±3% 以内
+  - 固定パラメータ: `--pv-ms ${GAUNTLET_PV_MS}`（既定 300ms）で MultiPV 計測時間を安定化
   - 結果: `docs/reports/gauntlet/ci/<run_id>/` に JSON / Markdown / structured_v1 を保存し、Artifacts と Step Summary に出力
-- 失敗時: Gate 判定が未達成、サンプル欠落、重み未取得などでジョブがエラー終了。詳細は `runs/gauntlet_gate/console.err` と Step Summary を参照
+- 失敗時: Gate 判定が未達成、サンプル欠落（NPS ≥ 50 / PV ≥ 30 を下回る）、重み未取得などでジョブがエラー終了。詳細は `runs/gauntlet_gate/console.err` と Step Summary を参照
 
 ## ベンチマーク実行例と期待される出力
 
