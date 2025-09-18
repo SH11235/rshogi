@@ -706,23 +706,6 @@ pub struct ClassicFloatNetwork {
 }
 
 impl ClassicFloatNetwork {
-    pub fn zero() -> Self {
-        ClassicFloatNetwork {
-            ft_weights: Vec::new(),
-            ft_biases: Vec::new(),
-            hidden1_weights: Vec::new(),
-            hidden1_biases: Vec::new(),
-            hidden2_weights: Vec::new(),
-            hidden2_biases: Vec::new(),
-            output_weights: Vec::new(),
-            output_bias: 0.0,
-            acc_dim: 0,
-            input_dim: 0,
-            h1_dim: 0,
-            h2_dim: 0,
-        }
-    }
-
     pub fn zeros_with_dims(input_dim: usize, acc_dim: usize, h1_dim: usize, h2_dim: usize) -> Self {
         ClassicFloatNetwork {
             ft_weights: vec![0.0; input_dim * acc_dim],
@@ -889,46 +872,6 @@ impl ClassicFloatNetwork {
         };
 
         Ok((ClassicIntNetworkBundle::new(transformer, network), scales))
-    }
-
-    pub fn accumulate_ft(&mut self, base: usize, values: &[f32]) {
-        debug_assert_eq!(values.len(), self.acc_dim);
-        for (dst, &src) in self.ft_weights[base..base + self.acc_dim].iter_mut().zip(values.iter())
-        {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_ft_bias(&mut self, delta: &[f32]) {
-        debug_assert_eq!(delta.len(), self.acc_dim);
-        for (dst, &src) in self.ft_biases.iter_mut().zip(delta.iter()) {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_hidden1(&mut self, delta_w: &[f32], delta_b: &[f32]) {
-        for (dst, &src) in self.hidden1_weights.iter_mut().zip(delta_w.iter()) {
-            *dst += src;
-        }
-        for (dst, &src) in self.hidden1_biases.iter_mut().zip(delta_b.iter()) {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_hidden2(&mut self, delta_w: &[f32], delta_b: &[f32]) {
-        for (dst, &src) in self.hidden2_weights.iter_mut().zip(delta_w.iter()) {
-            *dst += src;
-        }
-        for (dst, &src) in self.hidden2_biases.iter_mut().zip(delta_b.iter()) {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_output(&mut self, delta_w: &[f32], delta_b: f32) {
-        for (dst, &src) in self.output_weights.iter_mut().zip(delta_w.iter()) {
-            *dst += src;
-        }
-        self.output_bias += delta_b;
     }
 
     pub fn validate(&self) -> Result<(), String> {

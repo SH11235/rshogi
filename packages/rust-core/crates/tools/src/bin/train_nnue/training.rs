@@ -6,7 +6,7 @@ use crate::params::{
     BASELINE_MIN_EPS, GAP_WEIGHT_DIVISOR, MIN_ELAPSED_TIME, NANOSECONDS_PER_SECOND,
     NON_EXACT_BOUND_WEIGHT, SELECTIVE_DEPTH_MARGIN, SELECTIVE_DEPTH_WEIGHT,
 };
-use crate::types::{Config, DistillOptions, ExportOptions, Sample};
+use crate::types::{Config, Sample};
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::game_phase::GamePhase;
 use engine_core::shogi::SHOGI_BOARD_SIZE;

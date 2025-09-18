@@ -814,8 +814,6 @@ fn test_training_reproducibility_with_seed() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle1,
     };
     train_model(&mut network1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
@@ -844,8 +842,6 @@ fn test_training_reproducibility_with_seed() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle2,
     };
     train_model(&mut network2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
@@ -1019,8 +1015,6 @@ fn stream_sync_vs_inmem_equivalence() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_in,
     };
     train_model(&mut network_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
@@ -1051,8 +1045,6 @@ fn stream_sync_vs_inmem_equivalence() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_stream,
     };
     train_model_stream_cache(
@@ -1178,8 +1170,6 @@ fn structured_training_config_present_in_inmem_async_loader() {
         global_step: 0,
         training_config_json: Some(serde_json::json!({"exp_id": "unit"})),
         plateau: None,
-        export: ExportOptions::default(),
-        distill: DistillOptions::default(),
         classic_bundle: &mut classic_bundle_log,
     };
 
@@ -1290,8 +1280,6 @@ fn zero_weight_batches_do_not_update() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: ExportOptions::default(),
-        distill: DistillOptions::default(),
         classic_bundle: &mut classic_bundle_zero,
     };
 
@@ -1390,8 +1378,6 @@ fn stream_async_propagates_errors() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_err,
     };
     let err = train_model_stream_cache(
@@ -1478,8 +1464,6 @@ fn train_one_batch_with_zero_feature_sample_smoke() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_smoke,
     };
     train_model(&mut network, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
@@ -1569,8 +1553,6 @@ fn classic_train_updates_weights() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: ExportOptions::default(),
-        distill: DistillOptions::default(),
         classic_bundle: &mut classic_bundle,
     };
 
@@ -1659,8 +1641,6 @@ fn classic_train_invalid_optimizer_errors() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: ExportOptions::default(),
-        distill: DistillOptions::default(),
         classic_bundle: &mut classic_bundle,
     };
 
