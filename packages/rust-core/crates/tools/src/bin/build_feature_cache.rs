@@ -62,8 +62,6 @@ struct CacheConfig {
 }
 
 // No concrete header struct; header is written field-by-field for stability.
-
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
     sfen: String,
@@ -91,7 +89,6 @@ struct TrainingPosition {
     nodes: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct LineInfo {
     #[serde(default)]
