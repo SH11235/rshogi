@@ -220,7 +220,7 @@ cargo run --release --bin debug_position -- -s "SFEN" --moves
 cargo run --release --bin debug_position -- -s "SFEN" --perft 5
 ```
 
-See `/packages/rust-core/docs/debug-position-tool.md` for detailed usage.
+See `/packages/rust-core/docs/tools/debug-position-tool.md` for detailed usage.
 
 ### Build Configuration
 
