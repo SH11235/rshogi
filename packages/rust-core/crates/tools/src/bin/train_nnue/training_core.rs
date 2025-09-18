@@ -6,16 +6,24 @@ pub fn train_model(
     rng: &mut StdRng,
     ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let network = match network {
-        Network::Single(inner) => inner,
-        Network::Classic(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Classic アーキの学習ループは実装中です",
-            )
-            .into());
+    match network {
+        Network::Single(inner) => {
+            train_model_single(inner, train_samples, validation_samples, config, rng, ctx)
         }
-    };
+        Network::Classic(inner) => {
+            train_model_classic(inner, train_samples, validation_samples, config, rng, ctx)
+        }
+    }
+}
+
+fn train_model_single(
+    network: &mut SingleNetwork,
+    train_samples: &mut [Sample],
+    validation_samples: &Option<Vec<Sample>>,
+    config: &Config,
+    rng: &mut StdRng,
+    ctx: &mut TrainContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let n_samples = train_samples.len();
     let n_batches = n_samples.div_ceil(config.batch_size);
     let mut adam_state = if config.optimizer == "adam" {
@@ -469,8 +477,217 @@ pub fn train_model(
     Ok(())
 }
 
+fn train_model_with_loader_classic(
+    _network: &mut ClassicNetwork,
+    _train_samples: Vec<Sample>,
+    _validation_samples: &Option<Vec<Sample>>,
+    _config: &Config,
+    _rng: &mut StdRng,
+    _ctx: &mut TrainContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Classic アーキの学習ループは実装中です",
+    )
+    .into())
+}
+
+fn train_model_classic(
+    network: &mut ClassicNetwork,
+    train_samples: &mut [Sample],
+    validation_samples: &Option<Vec<Sample>>,
+    config: &Config,
+    rng: &mut StdRng,
+    ctx: &mut TrainContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if config.optimizer != "sgd" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Classic アーキの学習ループは optimizer=sgd のみサポートしています",
+        )
+        .into());
+    }
+
+    let n_samples = train_samples.len();
+    let n_batches = n_samples.div_ceil(config.batch_size);
+
+    let mut scratch = ClassicTrainScratch::new(
+        network.fp32.acc_dim,
+        network.fp32.h1_dim,
+        network.fp32.h2_dim,
+    );
+
+    for epoch in 0..config.epochs {
+        if config.shuffle {
+            train_samples.shuffle(rng);
+        }
+
+        let mut total_loss = 0.0f32;
+        let mut total_weight = 0.0f32;
+
+        let mut last_report = Instant::now();
+        let mut samples_since = 0usize;
+        let mut batches_since = 0usize;
+        let mut zero_weight_batches = 0usize;
+        let mut last_loss_for_log: Option<f32> = None;
+
+        for batch_idx in 0..n_batches {
+            let _ = last_loss_for_log;
+            let start = batch_idx * config.batch_size;
+            let end = (start + config.batch_size).min(n_samples);
+            let batch = &train_samples[start..end];
+            if batch.is_empty() {
+                continue;
+            }
+
+            let lr_base = lr_base_for(epoch, ctx.global_step, config, ctx.plateau.as_ref());
+
+            let (loss_sum, weight_sum) = train_batch_classic(network, batch, config, &mut scratch, lr_base);
+            if weight_sum > 0.0 {
+                total_loss += loss_sum;
+                total_weight += weight_sum;
+                last_loss_for_log = Some(loss_sum / weight_sum);
+            } else {
+                last_loss_for_log = None;
+                zero_weight_batches += 1;
+            }
+            ctx.global_step += 1;
+            samples_since += batch.len();
+            batches_since += 1;
+
+            if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
+                && batches_since > 0
+            {
+                let secs = last_report.elapsed().as_secs_f32().max(MIN_ELAPSED_TIME as f32);
+                let sps = samples_since as f32 / secs;
+                let bps = batches_since as f32 / secs;
+                let avg_bs = samples_since as f32 / batches_since as f32;
+                if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                    eprintln!(
+                        "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
+                        epoch + 1,
+                        batch_idx + 1,
+                        sps,
+                        bps,
+                        avg_bs
+                    );
+                } else {
+                    println!(
+                        "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
+                        epoch + 1,
+                        batch_idx + 1,
+                        sps,
+                        bps,
+                        avg_bs
+                    );
+                }
+                if let Some(ref lg) = ctx.structured {
+                    let mut rec = serde_json::json!({
+                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "phase": "train",
+                        "global_step": ctx.global_step as i64,
+                        "epoch": (epoch + 1) as i64,
+                        "lr": lr_base as f64,
+                        "examples_sec": sps as f64,
+                        "loader_ratio": 0.0f64,
+                        "wall_time": secs as f64,
+                    });
+                    if let Some(ls) = last_loss_for_log {
+                        rec.as_object_mut()
+                            .unwrap()
+                            .insert("train_loss".into(), serde_json::json!(ls as f64));
+                    }
+                    lg.write_json(&rec);
+                }
+                last_report = Instant::now();
+                samples_since = 0;
+                batches_since = 0;
+            }
+        }
+
+        let _avg_loss = if total_weight > 0.0 {
+            total_loss / total_weight
+        } else {
+            0.0
+        };
+
+        let mut val_loss = None;
+        let mut _val_auc: Option<f64> = None;
+        let mut _val_ece: Option<f64> = None;
+        if let Some(val_samples) = validation_samples {
+            let vl = compute_validation_loss_classic(network, val_samples, config);
+            val_loss = Some(vl);
+            let (auc, ece) =
+                compute_val_auc_and_ece_classic(network, val_samples, config, &ctx.dash);
+            _val_auc = auc;
+            _val_ece = ece;
+        }
+
+        if let Some(vl) = val_loss {
+            if vl < *ctx.trackers.best_val_loss {
+                *ctx.trackers.best_val_loss = vl;
+                *ctx.trackers.best_network = Some(Network::Classic(network.clone()));
+                *ctx.trackers.best_epoch = Some(epoch + 1);
+            }
+            *ctx.trackers.last_val_loss = Some(vl);
+            if let Some(ref mut p) = ctx.plateau {
+                if !vl.is_finite() {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!("Warning: val_loss is not finite; skipping plateau update");
+                    } else {
+                        println!("Warning: val_loss is not finite; skipping plateau update");
+                    }
+                } else if let Some(new_mult) = p.update(vl) {
+                    if ctx.structured.as_ref().map(|lg| lg.to_stdout).unwrap_or(false) {
+                        eprintln!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    } else {
+                        println!(
+                            "LR plateau: epoch {} → lr *= {:.3} (multiplier now {:.6}, best={:.6}, cur={:.6})",
+                            epoch + 1,
+                            p.gamma,
+                            new_mult,
+                            p.best,
+                            vl
+                        );
+                    }
+                }
+            }
+        }
+
+        print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
+    }
+
+    Ok(())
+}
+
 pub fn train_model_stream_cache(
     network: &mut Network,
+    cache_path: &str,
+    validation_samples: &Option<Vec<Sample>>,
+    config: &Config,
+    rng: &mut StdRng,
+    ctx: &mut TrainContext,
+    weighting: &wcfg::WeightingConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match network {
+        Network::Single(inner) => train_model_stream_cache_single(
+            inner, cache_path, validation_samples, config, rng, ctx, weighting,
+        ),
+        Network::Classic(inner) => train_model_stream_cache_classic(
+            inner, cache_path, validation_samples, config, rng, ctx, weighting,
+        ),
+    }
+}
+
+fn train_model_stream_cache_single(
+    network: &mut SingleNetwork,
     cache_path: &str,
     validation_samples: &Option<Vec<Sample>>,
     config: &Config,
@@ -478,16 +695,6 @@ pub fn train_model_stream_cache(
     ctx: &mut TrainContext,
     weighting: &wcfg::WeightingConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let network = match network {
-        Network::Single(inner) => inner,
-        Network::Classic(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Classic アーキの学習ループは実装中です",
-            )
-            .into());
-        }
-    };
     // Use ctx fields directly in this function to avoid borrow confusion
     // If prefetch=0, run synchronous streaming in the training thread (no background worker)
     if config.prefetch_batches == 0 {
@@ -1335,6 +1542,22 @@ pub fn train_model_stream_cache(
 
     Ok(())
 }
+
+fn train_model_stream_cache_classic(
+    _network: &mut ClassicNetwork,
+    _cache_path: &str,
+    _validation_samples: &Option<Vec<Sample>>,
+    _config: &Config,
+    _rng: &mut StdRng,
+    _ctx: &mut TrainContext,
+    _weighting: &wcfg::WeightingConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Classic アーキの学習ループは実装中です",
+    )
+    .into())
+}
 pub fn train_model_with_loader(
     network: &mut Network,
     train_samples: Vec<Sample>,
@@ -1343,16 +1566,34 @@ pub fn train_model_with_loader(
     rng: &mut StdRng,
     ctx: &mut TrainContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let network = match network {
-        Network::Single(inner) => inner,
-        Network::Classic(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Classic アーキの学習ループは実装中です",
-            )
-            .into());
-        }
-    };
+    match network {
+        Network::Single(inner) => train_model_with_loader_single(
+            inner,
+            train_samples,
+            validation_samples,
+            config,
+            rng,
+            ctx,
+        ),
+        Network::Classic(inner) => train_model_with_loader_classic(
+            inner,
+            train_samples,
+            validation_samples,
+            config,
+            rng,
+            ctx,
+        ),
+    }
+}
+
+fn train_model_with_loader_single(
+    network: &mut SingleNetwork,
+    train_samples: Vec<Sample>,
+    validation_samples: &Option<Vec<Sample>>,
+    config: &Config,
+    rng: &mut StdRng,
+    ctx: &mut TrainContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Local aliases to minimize code churn (avoid double references)
     let out_dir = ctx.out_dir;
     let dash = &ctx.dash;
@@ -2355,6 +2596,164 @@ fn bce_with_logits(logit: f32, target: f32) -> (f32, f32) {
     (loss, grad)
 }
 
+fn train_batch_classic(
+    network: &mut ClassicNetwork,
+    batch: &[Sample],
+    config: &Config,
+    scratch: &mut ClassicTrainScratch,
+    lr_base: f32,
+) -> (f32, f32) {
+    let fp32 = &mut network.fp32;
+    let relu_clip = CLASSIC_RELU_CLIP_F32;
+    let acc_dim = fp32.acc_dim;
+    let h1_dim = fp32.h1_dim;
+    let h2_dim = fp32.h2_dim;
+    let input_dim = acc_dim * 2;
+
+    let mut grad_w3 = vec![0.0f32; h2_dim];
+    let mut grad_b3 = 0.0f32;
+    let mut grad_hidden2 = vec![0.0f32; fp32.hidden2_weights.len()];
+    let mut grad_hidden2_biases = vec![0.0f32; fp32.hidden2_biases.len()];
+    let mut grad_hidden1 = vec![0.0f32; fp32.hidden1_weights.len()];
+    let mut grad_hidden1_biases = vec![0.0f32; fp32.hidden1_biases.len()];
+    let mut grad_ft_biases = vec![0.0f32; acc_dim];
+    let mut grad_ft_rows: HashMap<usize, Vec<f32>> = HashMap::new();
+
+    let mut total_loss = 0.0f32;
+    let mut total_weight = 0.0f32;
+
+    for sample in batch {
+        if sample.weight == 0.0 {
+            continue;
+        }
+
+        scratch.zero_grads();
+        let output = scratch.forward(fp32, relu_clip, &sample.features);
+
+        let (loss, grad_out) = match config.label_type.as_str() {
+            "wdl" => {
+                let (l, g) = bce_with_logits(output, sample.label);
+                (l * sample.weight, g * sample.weight)
+            }
+            "cp" => {
+                let error = output - sample.label;
+                (0.5 * error * error * sample.weight, error * sample.weight)
+            }
+            _ => unreachable!(),
+        };
+        total_loss += loss;
+        total_weight += sample.weight;
+
+        grad_b3 += grad_out;
+        for i in 0..h2_dim {
+            grad_w3[i] += grad_out * scratch.a2[i];
+            let delta = grad_out * fp32.output_weights[i] * relu_clip_grad(scratch.z2[i], relu_clip);
+            scratch.d_z2[i] = delta;
+            for j in 0..h1_dim {
+                let idx = i * h1_dim + j;
+                grad_hidden2[idx] += delta * scratch.a1[j];
+                scratch.d_a1[j] += delta * fp32.hidden2_weights[idx];
+            }
+            grad_hidden2_biases[i] += delta;
+        }
+
+        for (j, bias) in grad_hidden1_biases.iter_mut().enumerate().take(h1_dim) {
+            let delta = scratch.d_a1[j] * relu_clip_grad(scratch.z1[j], relu_clip);
+            scratch.d_z1[j] = delta;
+            let base = j * input_dim;
+            for k in 0..input_dim {
+                grad_hidden1[base + k] += delta * scratch.input[k];
+                scratch.d_input[k] += delta * fp32.hidden1_weights[base + k];
+            }
+            *bias += delta;
+        }
+
+        let (d_acc_us, d_acc_them) = scratch.d_input.split_at(acc_dim);
+        for i in 0..acc_dim {
+            grad_ft_biases[i] += d_acc_us[i] + d_acc_them[i];
+        }
+
+        for &feat in &sample.features {
+            let idx = feat as usize;
+            if idx >= fp32.input_dim {
+                warn_classic_oor("backward(us)", feat, fp32.input_dim, fp32.acc_dim);
+                continue;
+            }
+            let row = grad_ft_rows
+                .entry(idx)
+                .or_insert_with(|| vec![0.0f32; acc_dim]);
+            for (dst, &src) in row.iter_mut().zip(d_acc_us.iter()) {
+                *dst += src;
+            }
+        }
+
+        for &feat in &scratch.features_them {
+            let idx = feat as usize;
+            if idx >= fp32.input_dim {
+                warn_classic_oor("backward(them)", feat, fp32.input_dim, fp32.acc_dim);
+                continue;
+            }
+            let row = grad_ft_rows
+                .entry(idx)
+                .or_insert_with(|| vec![0.0f32; acc_dim]);
+            for (dst, &src) in row.iter_mut().zip(d_acc_them.iter()) {
+                *dst += src;
+            }
+        }
+    }
+
+    if total_weight <= 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let inv_sum = 1.0 / total_weight;
+    let lr = lr_base;
+
+    for (i, w) in fp32.output_weights.iter_mut().enumerate().take(h2_dim) {
+        let grad = grad_w3[i] * inv_sum + config.l2_reg * *w;
+        *w -= lr * grad;
+    }
+    fp32.output_bias -= lr * grad_b3 * inv_sum;
+
+    for (i, bias) in fp32.hidden2_biases.iter_mut().enumerate().take(h2_dim) {
+        let base = i * h1_dim;
+        let row = &mut fp32.hidden2_weights[base..base + h1_dim];
+        for j in 0..h1_dim {
+            let grad = grad_hidden2[base + j] * inv_sum + config.l2_reg * row[j];
+            row[j] -= lr * grad;
+        }
+        *bias -= lr * grad_hidden2_biases[i] * inv_sum;
+    }
+
+    for (j, bias) in fp32.hidden1_biases.iter_mut().enumerate().take(h1_dim) {
+        let base = j * input_dim;
+        let row = &mut fp32.hidden1_weights[base..base + input_dim];
+        for k in 0..input_dim {
+            let grad = grad_hidden1[base + k] * inv_sum + config.l2_reg * row[k];
+            row[k] -= lr * grad;
+        }
+        *bias -= lr * grad_hidden1_biases[j] * inv_sum;
+    }
+
+    for (i, b) in fp32.ft_biases.iter_mut().enumerate().take(acc_dim) {
+        *b -= lr * grad_ft_biases[i] * inv_sum;
+    }
+
+    for (feat_idx, grads) in grad_ft_rows {
+        if feat_idx >= fp32.input_dim {
+            continue;
+        }
+        let base = feat_idx * acc_dim;
+        let row = &mut fp32.ft_weights[base..base + acc_dim];
+        for j in 0..acc_dim {
+            let grad = grads[j] * inv_sum + config.l2_reg * row[j];
+            row[j] -= lr * grad;
+        }
+    }
+
+    (total_loss, total_weight)
+}
+
 pub(crate) fn compute_validation_loss_single(
     network: &SingleNetwork,
     samples: &[Sample],
@@ -2457,4 +2856,261 @@ pub(crate) fn compute_val_auc_and_ece_single(
     let bins = calibration_bins(&cps, &probs, &labels, &wts, config.cp_clip, dash_val.calib_bins());
     let ece = ece_from_bins(&bins);
     (auc, ece)
+}
+
+fn compute_validation_loss_classic(
+    network: &ClassicNetwork,
+    samples: &[Sample],
+    config: &Config,
+) -> f32 {
+    let mut total_loss = 0.0f32;
+    let mut total_weight = 0.0f32;
+    let mut scratch = ClassicForwardScratch::new(
+        network.fp32.acc_dim,
+        network.fp32.h1_dim,
+        network.fp32.h2_dim,
+    );
+
+    for sample in samples {
+        let output = network.forward_with_scratch(&sample.features, &mut scratch);
+        let loss = match config.label_type.as_str() {
+            "wdl" => {
+                let (l, _) = bce_with_logits(output, sample.label);
+                l
+            }
+            "cp" => {
+                let error = output - sample.label;
+                0.5 * error * error
+            }
+            _ => unreachable!(),
+        };
+        total_loss += loss * sample.weight;
+        total_weight += sample.weight;
+    }
+
+    if total_weight > 0.0 {
+        total_loss / total_weight
+    } else {
+        0.0
+    }
+}
+
+fn compute_val_auc_classic(
+    network: &ClassicNetwork,
+    samples: &[Sample],
+    config: &Config,
+) -> Option<f64> {
+    if config.label_type != "wdl" || samples.is_empty() {
+        return None;
+    }
+    let mut probs: Vec<f32> = Vec::with_capacity(samples.len());
+    let mut labels: Vec<f32> = Vec::with_capacity(samples.len());
+    let mut weights: Vec<f32> = Vec::with_capacity(samples.len());
+    let mut scratch = ClassicForwardScratch::new(
+        network.fp32.acc_dim,
+        network.fp32.h1_dim,
+        network.fp32.h2_dim,
+    );
+
+    for s in samples {
+        let out = network.forward_with_scratch(&s.features, &mut scratch);
+        let p = sigmoid(out);
+        if s.label > 0.5 {
+            probs.push(p);
+            labels.push(1.0);
+            weights.push(s.weight);
+        } else if s.label < 0.5 {
+            probs.push(p);
+            labels.push(0.0);
+            weights.push(s.weight);
+        }
+    }
+
+    if probs.is_empty() {
+        None
+    } else {
+        roc_auc_weighted(&probs, &labels, &weights)
+    }
+}
+
+fn compute_val_auc_and_ece_classic(
+    network: &ClassicNetwork,
+    samples: &[Sample],
+    config: &Config,
+    dash_val: &impl DashboardValKind,
+) -> (Option<f64>, Option<f64>) {
+    let auc = compute_val_auc_classic(network, samples, config);
+    if config.label_type != "wdl" || !dash_val.is_jsonl() {
+        return (auc, None);
+    }
+
+    let mut cps: Vec<i32> = Vec::new();
+    let mut probs: Vec<f32> = Vec::new();
+    let mut labels: Vec<f32> = Vec::new();
+    let mut wts: Vec<f32> = Vec::new();
+    let mut scratch = ClassicForwardScratch::new(
+        network.fp32.acc_dim,
+        network.fp32.h1_dim,
+        network.fp32.h2_dim,
+    );
+
+    for s in samples {
+        if let Some(cp) = s.cp {
+            let out = network.forward_with_scratch(&s.features, &mut scratch);
+            let p = sigmoid(out);
+            cps.push(cp);
+            probs.push(p);
+            labels.push(s.label);
+            wts.push(s.weight);
+        }
+    }
+
+    if cps.is_empty() {
+        return (auc, None);
+    }
+
+    let bins = calibration_bins(&cps, &probs, &labels, &wts, config.cp_clip, dash_val.calib_bins());
+    let ece = ece_from_bins(&bins);
+    (auc, ece)
+}
+
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+static WARNED_CLASSIC_OOR: AtomicBool = AtomicBool::new(false);
+
+struct ClassicTrainScratch {
+    acc_us: Vec<f32>,
+    acc_them: Vec<f32>,
+    input: Vec<f32>,
+    z1: Vec<f32>,
+    a1: Vec<f32>,
+    z2: Vec<f32>,
+    a2: Vec<f32>,
+    d_z2: Vec<f32>,
+    d_a1: Vec<f32>,
+    d_z1: Vec<f32>,
+    d_input: Vec<f32>,
+    features_them: Vec<u32>,
+}
+
+impl ClassicTrainScratch {
+    fn new(acc_dim: usize, h1_dim: usize, h2_dim: usize) -> Self {
+        Self {
+            acc_us: vec![0.0; acc_dim],
+            acc_them: vec![0.0; acc_dim],
+            input: vec![0.0; acc_dim * 2],
+            z1: vec![0.0; h1_dim],
+            a1: vec![0.0; h1_dim],
+            z2: vec![0.0; h2_dim],
+            a2: vec![0.0; h2_dim],
+            d_z2: vec![0.0; h2_dim],
+            d_a1: vec![0.0; h1_dim],
+            d_z1: vec![0.0; h1_dim],
+            d_input: vec![0.0; acc_dim * 2],
+            features_them: Vec::new(),
+        }
+    }
+
+    fn forward(
+        &mut self,
+        net: &ClassicFloatNetwork,
+        relu_clip: f32,
+        features_us: &[u32],
+    ) -> f32 {
+        let acc_dim = net.acc_dim;
+        self.acc_us.copy_from_slice(&net.ft_biases);
+        for &feat in features_us {
+            let idx = feat as usize;
+            if idx >= net.input_dim {
+                warn_classic_oor("forward(us)", feat, net.input_dim, net.acc_dim);
+                continue;
+            }
+            let base = idx * acc_dim;
+            let row = &net.ft_weights[base..base + acc_dim];
+            for (dst, &w) in self.acc_us.iter_mut().zip(row.iter()) {
+                *dst += w;
+            }
+        }
+
+        self.acc_them.copy_from_slice(&net.ft_biases);
+        self.features_them.clear();
+        self.features_them.reserve(features_us.len());
+        for &feat in features_us {
+            let flipped = flip_us_them(feat as usize) as u32;
+            self.features_them.push(flipped);
+            let idx = flipped as usize;
+            if idx >= net.input_dim {
+                warn_classic_oor("forward(them)", flipped, net.input_dim, net.acc_dim);
+                continue;
+            }
+            let base = idx * acc_dim;
+            let row = &net.ft_weights[base..base + acc_dim];
+            for (dst, &w) in self.acc_them.iter_mut().zip(row.iter()) {
+                *dst += w;
+            }
+        }
+
+        self.input[..acc_dim].copy_from_slice(&self.acc_us);
+        self.input[acc_dim..].copy_from_slice(&self.acc_them);
+
+        let input_dim = acc_dim * 2;
+        for i in 0..net.h1_dim {
+            let row = &net.hidden1_weights[i * input_dim..(i + 1) * input_dim];
+            let mut sum = net.hidden1_biases[i];
+            for (w, &x) in row.iter().zip(self.input.iter()) {
+                sum += w * x;
+            }
+            self.z1[i] = sum;
+            self.a1[i] = sum.max(0.0).min(relu_clip);
+        }
+
+        for i in 0..net.h2_dim {
+            let row = &net.hidden2_weights[i * net.h1_dim..(i + 1) * net.h1_dim];
+            let mut sum = net.hidden2_biases[i];
+            for (w, &x) in row.iter().zip(self.a1.iter()) {
+                sum += w * x;
+            }
+            self.z2[i] = sum;
+            self.a2[i] = sum.max(0.0).min(relu_clip);
+        }
+
+        let mut out = net.output_bias;
+        for (w, &x) in net.output_weights.iter().zip(self.a2.iter()) {
+            out += w * x;
+        }
+        out
+    }
+
+    fn zero_grads(&mut self) {
+        self.d_z2.fill(0.0);
+        self.d_a1.fill(0.0);
+        self.d_z1.fill(0.0);
+        self.d_input.fill(0.0);
+    }
+}
+
+#[inline]
+fn warn_classic_oor(ctx: &str, feat: u32, input_dim: usize, acc_dim: usize) {
+    if !WARNED_CLASSIC_OOR.swap(true, Ordering::Relaxed) {
+        let ft_len = input_dim.saturating_mul(acc_dim);
+        log::warn!(
+            "{}: feature index {} out of range (input_dim={}, acc_dim={}, ft_len={}); subsequent warnings suppressed",
+            ctx,
+            feat,
+            input_dim,
+            acc_dim,
+            ft_len
+        );
+    }
+}
+
+#[inline]
+fn relu_clip_grad(z: f32, clip: f32) -> f32 {
+    if z <= 0.0 || z >= clip {
+        0.0
+    } else {
+        1.0
+    }
 }

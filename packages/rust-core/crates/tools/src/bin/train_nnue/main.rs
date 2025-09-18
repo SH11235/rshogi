@@ -463,13 +463,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let distill_seed = seed_u64_opt.map(|s| s ^ 0xC1A5_51C0_5EED_u64);
     distill_options.seed = distill_seed;
 
-    let distill_only = arch == ArchKind::Classic
-        && export_format == ExportFormat::ClassicV1
-        && distill_options.teacher_path.is_some();
-    if arch == ArchKind::Classic && !distill_only {
-        return Err("Classic FP32 学習は未実装です。--arch classic を使う場合は --export-format classic-v1 と --distill-from-single を指定してください。".into());
-    }
-
     if arch == ArchKind::Classic && config.relu_clip != CLASSIC_RELU_CLIP {
         if human_to_stderr {
             eprintln!(
@@ -510,6 +503,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && export_options.quant_out == QuantScheme::PerChannel
     {
         return Err(ERR_CLASSIC_OUT_PER_CHANNEL.into());
+    }
+
+    let distill_only = arch == ArchKind::Classic
+        && export_format == ExportFormat::ClassicV1
+        && distill_options.teacher_path.is_some();
+    if arch == ArchKind::Classic && !distill_only {
+        return Err("Classic FP32 学習は未実装です。--arch classic を使う場合は --export-format classic-v1 と --distill-from-single を指定してください。".into());
     }
     if distill_options.temperature <= 0.0 {
         return Err("--kd-temperature must be > 0".into());

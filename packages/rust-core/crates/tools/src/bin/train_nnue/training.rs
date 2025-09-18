@@ -39,12 +39,17 @@ mod core {
     use super::*;
     use crate::export::save_single_network;
     use crate::logging::print_zero_weight_debug;
-    use crate::params::PERCENTAGE_DIVISOR;
+    use crate::params::{CLASSIC_RELU_CLIP_F32, PERCENTAGE_DIVISOR};
     use crate::training::ctx::lr_base_for;
     use crate::training::ctx::{DashboardValKind, TrainContext};
     use crate::training::loaders::{AsyncBatchLoader, BatchLoader, StreamCacheLoader};
 
+    use crate::classic::ClassicFloatNetwork;
+    use crate::model::{ClassicForwardScratch, ClassicNetwork};
+    use engine_core::evaluation::nnue::features::flip_us_them;
     use rand::Rng;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tools::nnfc_v1::flags as fc_flags;
 
     include!("training_core.rs");
