@@ -64,6 +64,8 @@ cargo run -p tools --bin train_nnue --release -- \
   --out runs/classic_inmem
 ```
 
+> 再現性を確保したい場合は `--rng-seed <u64>`（`--seed` も同義のエイリアス）を併用してください。Classic v1 をエクスポートしつつ FP32 重みと量子化スケール JSON を残したい場合は `--emit-fp32-also` を追加すると、同じ出力ディレクトリに `nn.fp32.bin` と `nn.classic.scales.json` が書き出されます。
+
 > 注意: `--opt adamw` は Classic で decoupled weight decay に対応しています。一方 Single では Adam として動き、警告が出力されます。
 
 ### 3.2 Classic stream-cache（大規模データ向け）
@@ -82,6 +84,8 @@ cargo run -p tools --bin train_nnue --release -- \
   --save-every 4000 \
   --out runs/classic_stream
 ```
+
+> `--rng-seed`（別名 `--seed`）でストリーム読み込み時の RNG を固定できます。Classic v1 export と同時に FP32/スケールを残す場合は `--emit-fp32-also` を指定してください。
 
 > `classic-v1` を stream-cache と組み合わせる場合は必ず蒸留を伴う必要があります（実装上、蒸留をスキップすると起動直後に明示的エラーで停止します）。蒸留を行わない学習では `--export-format` を `fp32` または未指定にしてください。
 
@@ -125,7 +129,7 @@ cargo run -p tools --bin train_nnue -- \
 ```
 
 生成物（Single/Classic 共通）
-- `runs/nnue_<ts>/nn.fp32.bin`（Classic の場合は `--export-format classic-v1` 指定で量子化済みバンドルも生成）
+- `runs/nnue_<ts>/nn.fp32.bin`（Classic の場合は `--export-format classic-v1` 指定で量子化済みバンドルも生成。Classic で `--emit-fp32-also` を付けると FP32 と `nn.classic.scales.json` が同時出力されます）
 - `nn_best.fp32.bin`、`config.json`、必要に応じて各種 CSV/PNG（`--metrics` 有効時）
 - 構造化ログ: `runs/logs/*.jsonl`
 

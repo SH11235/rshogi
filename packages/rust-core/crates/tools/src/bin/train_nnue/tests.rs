@@ -1,4 +1,5 @@
 use super::{classic, dataset, export, logging, model, params, training, types};
+use bytemuck::cast_slice;
 use classic::*;
 use dataset::*;
 use engine_core::{nnue::features::FE_END, shogi::SHOGI_BOARD_SIZE};
@@ -7,6 +8,8 @@ use logging::*;
 use model::*;
 use params::*;
 use rand::SeedableRng;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Seek, SeekFrom, Write},
@@ -444,6 +447,115 @@ fn finalize_export_writes_zero_when_bundle_missing() {
     };
     finalize_export(&network, td.path(), export, false, None, None).unwrap();
     assert!(td.path().join("nn.classic.nnue").exists());
+}
+
+#[derive(Deserialize)]
+struct TestScalesJson {
+    acc_dim: usize,
+    h1_dim: usize,
+    h2_dim: usize,
+    input_dim: usize,
+    bundle_sha256: String,
+}
+
+fn compute_bundle_sha256(bundle: &ClassicIntNetworkBundle) -> String {
+    let mut hasher = Sha256::new();
+    for &w in &bundle.transformer.weights {
+        hasher.update(w.to_le_bytes());
+    }
+    for &b in &bundle.transformer.biases {
+        hasher.update(b.to_le_bytes());
+    }
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden1_weights));
+    for &b in &bundle.network.hidden1_biases {
+        hasher.update(b.to_le_bytes());
+    }
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden2_weights));
+    for &b in &bundle.network.hidden2_biases {
+        hasher.update(b.to_le_bytes());
+    }
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.output_weights));
+    hasher.update(bundle.network.output_bias.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+#[test]
+fn finalize_export_emits_fp32_and_scales_for_classic() {
+    use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP};
+
+    let td = tempdir().unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let classic = ClassicNetwork::new(
+        CLASSIC_ACC_DIM,
+        CLASSIC_H1_DIM,
+        CLASSIC_H2_DIM,
+        CLASSIC_RELU_CLIP,
+        64,
+        &mut rng,
+    );
+
+    let (bundle, scales) = classic
+        .fp32
+        .quantize_symmetric(
+            QuantScheme::PerTensor,
+            QuantScheme::PerChannel,
+            QuantScheme::PerChannel,
+            QuantScheme::PerTensor,
+        )
+        .unwrap();
+
+    let export = ExportOptions {
+        arch: ArchKind::Classic,
+        format: ExportFormat::ClassicV1,
+        quant_ft: QuantScheme::PerTensor,
+        quant_h1: QuantScheme::PerChannel,
+        quant_h2: QuantScheme::PerChannel,
+        quant_out: QuantScheme::PerTensor,
+        emit_fp32_also: true,
+    };
+
+    finalize_export(
+        &Network::Classic(classic.clone()),
+        td.path(),
+        export,
+        false,
+        Some(&bundle),
+        Some(&scales),
+    )
+    .unwrap();
+
+    let fp32_path = td.path().join("nn.fp32.bin");
+    assert!(fp32_path.exists(), "nn.fp32.bin should exist");
+
+    let scales_path = td.path().join("nn.classic.scales.json");
+    assert!(scales_path.exists(), "nn.classic.scales.json should exist");
+
+    let scales_json: TestScalesJson =
+        serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
+    assert_eq!(scales_json.acc_dim, CLASSIC_ACC_DIM);
+    assert_eq!(scales_json.h1_dim, CLASSIC_H1_DIM);
+    assert_eq!(scales_json.h2_dim, CLASSIC_H2_DIM);
+    assert_eq!(scales_json.input_dim, SHOGI_BOARD_SIZE * FE_END);
+
+    let expected_sha = compute_bundle_sha256(&bundle);
+    assert_eq!(scales_json.bundle_sha256, expected_sha);
+}
+
+#[test]
+fn finalize_export_emit_fp32_ignored_for_non_classic() {
+    let td = tempdir().unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+    let network = Network::Single(SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng));
+
+    let export = ExportOptions {
+        arch: ArchKind::Single,
+        format: ExportFormat::ClassicV1,
+        emit_fp32_also: true,
+        ..ExportOptions::default()
+    };
+
+    finalize_export(&network, td.path(), export, false, None, None).unwrap();
+    assert!(!td.path().join("nn.fp32.bin").exists());
 }
 
 #[test]

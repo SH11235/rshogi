@@ -250,6 +250,8 @@ Machine learning tools for NNUE evaluation function:
   - Performance metrics: loader_ratio and examples/sec monitoring
   - Cache support for faster data loading
   - Minimal training dashboard: per-epoch metrics, phase metrics, calibration (CP-binned ECE)
+  - Deterministic runs: specify `--rng-seed <u64>` (`--seed` is kept as an alias)
+  - Classic export: combine `--export-format classic-v1` with `--emit-fp32-also` to emit `nn.classic.nnue`, `nn.fp32.bin`, and `nn.classic.scales.json`
 
 See tools README for usage, options, and outputs:
 - crates/tools/README.md (Minimal Training Dashboard: baseline and NNUE)

@@ -169,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .default_value("per-tensor"),
         )
         .arg(
-            arg!(--"emit-fp32-also" "Also export Classic FP32 weights when exporting classic-v1")
+            arg!(--"emit-fp32-also" "Also export Classic FP32 weights when exporting classic-v1 (ignored otherwise)")
                 .action(ArgAction::SetTrue),
         )
         .arg(
