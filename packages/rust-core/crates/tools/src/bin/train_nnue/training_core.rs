@@ -409,22 +409,22 @@ fn train_model_single(
             ])?;
             w.flush()?;
         }
-        emit_epoch_logging(
-            ctx.structured.as_ref(),
-            ctx.training_config_json.as_ref(),
-            ctx.global_step,
-            epoch,
-            config.epochs,
+        emit_epoch_logging(EpochLogParams {
+            structured: ctx.structured.as_ref(),
+            training_config: ctx.training_config_json.as_ref(),
+            global_step: ctx.global_step,
+            epoch_index: epoch,
+            total_epochs: config.epochs,
             avg_loss,
             val_loss,
             val_auc,
             val_ece,
             epoch_secs,
             epoch_sps,
-            None,
-            None,
+            loader_ratio_pct: None,
+            batch_count: None,
             last_lr_base,
-        );
+        });
         print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
     }
 
@@ -672,22 +672,22 @@ fn train_model_classic(
             w.flush()?;
         }
 
-        emit_epoch_logging(
-            ctx.structured.as_ref(),
-            ctx.training_config_json.as_ref(),
-            ctx.global_step,
-            epoch,
-            config.epochs,
+        emit_epoch_logging(EpochLogParams {
+            structured: ctx.structured.as_ref(),
+            training_config: ctx.training_config_json.as_ref(),
+            global_step: ctx.global_step,
+            epoch_index: epoch,
+            total_epochs: config.epochs,
             avg_loss,
             val_loss,
             val_auc,
             val_ece,
             epoch_secs,
             epoch_sps,
-            None,
-            None,
+            loader_ratio_pct: None,
+            batch_count: None,
             last_lr_base,
-        );
+        });
 
         print_zero_weight_debug(epoch, zero_weight_batches, &ctx.structured);
     }
@@ -1010,22 +1010,22 @@ fn train_model_stream_cache_single(
                     }
                 }
             }
-            emit_epoch_logging(
-                ctx.structured.as_ref(),
-                ctx.training_config_json.as_ref(),
-                ctx.global_step,
-                epoch,
-                config.epochs,
+            emit_epoch_logging(EpochLogParams {
+                structured: ctx.structured.as_ref(),
+                training_config: ctx.training_config_json.as_ref(),
+                global_step: ctx.global_step,
+                epoch_index: epoch,
+                total_epochs: config.epochs,
                 avg_loss,
-                val_loss_opt,
+                val_loss: val_loss_opt,
                 val_auc,
                 val_ece,
                 epoch_secs,
                 epoch_sps,
-                Some(loader_ratio_epoch),
-                Some(batch_count),
+                loader_ratio_pct: Some(loader_ratio_epoch),
+                batch_count: Some(batch_count),
                 last_lr_base,
-            );
+            });
 
             // Emit metrics.csv (sync stream-cache path)
             if ctx.dash.emit {
@@ -3982,9 +3982,10 @@ fn maybe_clip_gradients(clip: f32, grads: ClassicGradMut<'_>) {
     }
 }
 
-fn emit_epoch_logging(
-    structured: Option<&StructuredLogger>,
-    training_config: Option<&serde_json::Value>,
+#[derive(Clone, Copy)]
+struct EpochLogParams<'a> {
+    structured: Option<&'a StructuredLogger>,
+    training_config: Option<&'a serde_json::Value>,
     global_step: u64,
     epoch_index: usize,
     total_epochs: usize,
@@ -3997,7 +3998,25 @@ fn emit_epoch_logging(
     loader_ratio_pct: Option<f64>,
     batch_count: Option<usize>,
     last_lr_base: f32,
-) {
+}
+
+fn emit_epoch_logging(params: EpochLogParams) {
+    let EpochLogParams {
+        structured,
+        training_config,
+        global_step,
+        epoch_index,
+        total_epochs,
+        avg_loss,
+        val_loss,
+        val_auc,
+        val_ece,
+        epoch_secs,
+        epoch_sps,
+        loader_ratio_pct,
+        batch_count,
+        last_lr_base,
+    } = params;
     let epoch_display = epoch_index + 1;
     let val_loss_str = val_loss
         .map(|v| format!("{:.4}", v))

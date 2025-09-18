@@ -442,7 +442,7 @@ fn finalize_export_writes_zero_when_bundle_missing() {
         format: ExportFormat::ClassicV1,
         ..ExportOptions::default()
     };
-    finalize_export(&network, td.path(), export, false, None).unwrap();
+    finalize_export(&network, td.path(), export, false, None, None).unwrap();
     assert!(td.path().join("nn.classic.nnue").exists());
 }
 
