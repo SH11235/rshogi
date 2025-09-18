@@ -141,6 +141,7 @@ pub struct ExportOptions {
     pub quant_h1: QuantScheme,
     pub quant_h2: QuantScheme,
     pub quant_out: QuantScheme,
+    /// Classic v1 export時に FP32 版も同時に書き出すか（Classic 以外では無視）
     pub emit_fp32_also: bool,
 }
 

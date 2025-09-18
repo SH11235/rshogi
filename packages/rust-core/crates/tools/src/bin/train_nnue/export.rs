@@ -335,6 +335,24 @@ fn write_classic_scales_json(
     scales: &ClassicQuantizationScales,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let serialized = bundle.as_serialized();
+    if serialized.acc_dim != CLASSIC_ACC_DIM
+        || serialized.h1_dim != CLASSIC_H1_DIM
+        || serialized.h2_dim != CLASSIC_H2_DIM
+    {
+        log::warn!(
+            "Classic bundle dims mismatch (acc={}, h1={}, h2={})",
+            serialized.acc_dim,
+            serialized.h1_dim,
+            serialized.h2_dim
+        );
+    }
+    if serialized.input_dim != SHOGI_BOARD_SIZE * FE_END {
+        log::warn!(
+            "Classic bundle input_dim mismatch ({} != {})",
+            serialized.input_dim,
+            SHOGI_BOARD_SIZE * FE_END
+        );
+    }
     let payload = ClassicScalesArtifact {
         version: "classic-v1",
         arch: "HALFKP_256X2_32_32",
@@ -361,13 +379,23 @@ fn write_classic_scales_json(
 
 fn bundle_sha256(bundle: &ClassicIntNetworkBundle) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(cast_slice::<i16, u8>(&bundle.transformer.weights));
-    hasher.update(cast_slice::<i32, u8>(&bundle.transformer.biases));
+
+    for &w in &bundle.transformer.weights {
+        hasher.update(w.to_le_bytes());
+    }
+    for &b in &bundle.transformer.biases {
+        hasher.update(b.to_le_bytes());
+    }
     hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden1_weights));
-    hasher.update(cast_slice::<i32, u8>(&bundle.network.hidden1_biases));
+    for &b in &bundle.network.hidden1_biases {
+        hasher.update(b.to_le_bytes());
+    }
     hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden2_weights));
-    hasher.update(cast_slice::<i32, u8>(&bundle.network.hidden2_biases));
+    for &b in &bundle.network.hidden2_biases {
+        hasher.update(b.to_le_bytes());
+    }
     hasher.update(cast_slice::<i8, u8>(&bundle.network.output_weights));
     hasher.update(bundle.network.output_bias.to_le_bytes());
+
     hex_encode(hasher.finalize())
 }
