@@ -6,10 +6,17 @@ use engine_core::shogi::SHOGI_BOARD_SIZE;
 
 #[cfg(test)]
 const _: usize = SHOGI_BOARD_SIZE * FE_END;
-use rand::Rng;
+use rand::{
+    distr::{Distribution, Uniform},
+    Rng,
+};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static BIAS_SCALE_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
+static FT_ACC_OOR_WARNED: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 pub fn round_away_from_zero(val: f32) -> i32 {
@@ -52,7 +59,7 @@ pub fn quantize_symmetric_i8(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        if weights.len() % channels != 0 {
+        if !weights.len().is_multiple_of(channels) {
             return Err(format!(
                 "weights len {} not divisible by channels {} (stride {})",
                 weights.len(),
@@ -108,7 +115,7 @@ pub fn quantize_symmetric_i16(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        if weights.len() % channels != 0 {
+        if !weights.len().is_multiple_of(channels) {
             return Err(format!(
                 "weights len {} not divisible by channels {} (stride {})",
                 weights.len(),
@@ -166,30 +173,60 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
     let mut out = Vec::with_capacity(bias.len());
     let per_tensor = weight_scales.len() == 1;
     let ws0 = if per_tensor { weight_scales[0] } else { 0.0 };
-    let mut warned_mismatch = false;
+    let fallback_scale = if per_tensor {
+        ws0
+    } else {
+        *weight_scales.last().unwrap_or(&1.0)
+    };
+    let mut mismatch_count = 0usize;
+    let mut mismatch_examples: Vec<(usize, f32, f32)> = Vec::new();
+    const MISMATCH_SAMPLE_LIMIT: usize = 4;
     for (i, &b) in bias.iter().enumerate() {
-        let ws = if per_tensor {
-            ws0
+        let (ws, mismatched) = if per_tensor {
+            (ws0, false)
         } else if i < weight_scales.len() {
-            weight_scales[i]
+            (weight_scales[i], false)
         } else {
-            // リリースビルドでは安全側に最後の値を再利用
-            if !warned_mismatch {
-                log::warn!(
-                    "quantize_bias_i32: weight_scales len {} < bias len {} (using last scale)",
-                    weight_scales.len(),
-                    bias.len()
-                );
-                warned_mismatch = true;
-            }
-            *weight_scales.last().unwrap()
+            (fallback_scale, true)
         };
+        if mismatched {
+            mismatch_count += 1;
+            if mismatch_examples.len() < MISMATCH_SAMPLE_LIMIT {
+                mismatch_examples.push((i, ws, b));
+            }
+        }
         let scale = input_scale * ws;
         out.push(if scale == 0.0 {
             0
         } else {
             round_away_from_zero(b / scale)
         });
+    }
+    if mismatch_count > 0
+        && BIAS_SCALE_MISMATCH_LOGGED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let sample_display = if mismatch_examples.is_empty() {
+            String::from("<none>")
+        } else {
+            mismatch_examples
+                .iter()
+                .map(|(idx, scale, bias)| {
+                    format!("#{idx} bias={:.6} reuse_scale={:.6}", bias, scale)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        log::warn!(
+            "quantize_bias_i32: weight_scales len {} < bias len {} (reusing last scale {:.6}) — mismatched entries {} (showing first {}: [{}]); further warnings suppressed",
+            weight_scales.len(),
+            bias.len(),
+            fallback_scale,
+            mismatch_count,
+            mismatch_examples.len(),
+            sample_display
+        );
     }
     out
 }
@@ -206,7 +243,7 @@ pub struct ClassicFeatureTransformerInt {
 impl ClassicFeatureTransformerInt {
     pub fn new(weights: Vec<i16>, biases: Vec<i32>, acc_dim: usize) -> Self {
         debug_assert!(
-            acc_dim == 0 || weights.len() % acc_dim == 0,
+            acc_dim == 0 || weights.len().is_multiple_of(acc_dim),
             "ft_weights.len() must be multiple of acc_dim ({} % {} != 0)",
             weights.len(),
             acc_dim
@@ -242,6 +279,16 @@ impl ClassicFeatureTransformerInt {
                 self.input_dim
             );
             if feat >= self.input_dim {
+                if FT_ACC_OOR_WARNED
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    log::warn!(
+                        "ClassicFeatureTransformerInt::accumulate_into_u32: feature index {} >= input_dim {} (dropping)",
+                        feat,
+                        self.input_dim
+                    );
+                }
                 continue;
             }
             let base = feat * self.acc_dim;
@@ -298,7 +345,6 @@ impl From<ClassicQuantizedNetworkParams> for ClassicQuantizedNetwork {
     }
 }
 
-#[allow(dead_code)]
 impl ClassicQuantizedNetwork {
     pub fn new(p: ClassicQuantizedNetworkParams) -> Self {
         p.into()
@@ -482,7 +528,6 @@ impl ClassicIntScratch {
     }
 }
 
-#[allow(dead_code)]
 pub struct ClassicV1Serialized<'a> {
     pub acc_dim: usize,
     pub input_dim: usize,
@@ -499,7 +544,9 @@ pub struct ClassicV1Serialized<'a> {
 }
 
 impl<'a> ClassicV1Serialized<'a> {
-    /// Canonical Classic v1 layout検証（テストでは input_dim を縮約するが本番は HALFKP サイズ固定）。
+    /// Canonical Classic v1 layout 検証。
+    /// テストでは `input_dim` を縮約しても良く、その場合は書き出し側で不足分をゼロパディングする
+    /// （本番構成は HALFKP 固定）。
     pub fn validate(&self) -> Result<(), String> {
         if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
             return Err("dimensions must be non-zero".into());
@@ -514,6 +561,7 @@ impl<'a> ClassicV1Serialized<'a> {
         if self.input_dim > canonical_input_dim {
             return Err("input_dim exceeds Classic v1 canonical spec".into());
         }
+        // 入力を縮約した場合は write_classic_v1_file() で canonical 長までゼロ埋めする想定。
         if self.ft_biases.len() != self.acc_dim {
             return Err("ft_biases length mismatch".into());
         }
@@ -633,7 +681,6 @@ pub fn write_classic_v1_file(
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn write_classic_v1_bundle(
     path: &Path,
     bundle: &ClassicIntNetworkBundle,
@@ -643,7 +690,6 @@ pub fn write_classic_v1_bundle(
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ClassicFloatNetwork {
     pub ft_weights: Vec<f32>,
     pub ft_biases: Vec<f32>,
@@ -659,25 +705,7 @@ pub struct ClassicFloatNetwork {
     pub h2_dim: usize,
 }
 
-#[allow(dead_code)]
 impl ClassicFloatNetwork {
-    pub fn zero() -> Self {
-        ClassicFloatNetwork {
-            ft_weights: Vec::new(),
-            ft_biases: Vec::new(),
-            hidden1_weights: Vec::new(),
-            hidden1_biases: Vec::new(),
-            hidden2_weights: Vec::new(),
-            hidden2_biases: Vec::new(),
-            output_weights: Vec::new(),
-            output_bias: 0.0,
-            acc_dim: 0,
-            input_dim: 0,
-            h1_dim: 0,
-            h2_dim: 0,
-        }
-    }
-
     pub fn zeros_with_dims(input_dim: usize, acc_dim: usize, h1_dim: usize, h2_dim: usize) -> Self {
         ClassicFloatNetwork {
             ft_weights: vec![0.0; input_dim * acc_dim],
@@ -709,9 +737,10 @@ impl ClassicFloatNetwork {
         // Feature transformer: fan_in ≒ サンプル当たりの活性特徴数（片側）。
         let fan_in_ft = fan_in_ft_estimate.max(1) as f32;
         let a_ft = (6.0 / fan_in_ft).sqrt();
+        let dist_ft = Uniform::new(-a_ft, a_ft).unwrap();
         for row in net.ft_weights.chunks_mut(acc_dim.max(1)) {
             for w in row {
-                *w = rng.random_range(-a_ft..a_ft);
+                *w = dist_ft.sample(rng);
             }
         }
 
@@ -719,9 +748,10 @@ impl ClassicFloatNetwork {
         let input_dim_h1 = (2 * acc_dim).max(1);
         let fan_in_h1 = input_dim_h1 as f32;
         let a_h1 = (6.0 / fan_in_h1).sqrt();
+        let dist_h1 = Uniform::new(-a_h1, a_h1).unwrap();
         for row in net.hidden1_weights.chunks_mut(input_dim_h1) {
             for w in row {
-                *w = rng.random_range(-a_h1..a_h1);
+                *w = dist_h1.sample(rng);
             }
         }
 
@@ -729,9 +759,10 @@ impl ClassicFloatNetwork {
         let input_dim_h2 = h1_dim.max(1);
         let fan_in_h2 = input_dim_h2 as f32;
         let a_h2 = (6.0 / fan_in_h2).sqrt();
+        let dist_h2 = Uniform::new(-a_h2, a_h2).unwrap();
         for row in net.hidden2_weights.chunks_mut(input_dim_h2) {
             for w in row {
-                *w = rng.random_range(-a_h2..a_h2);
+                *w = dist_h2.sample(rng);
             }
         }
 
@@ -739,14 +770,21 @@ impl ClassicFloatNetwork {
         let fan_in_out = h2_dim.max(1) as f32;
         let fan_out_out = 1.0f32;
         let a_out = (6.0 / (fan_in_out + fan_out_out)).sqrt();
+        let dist_out = Uniform::new(-a_out, a_out).unwrap();
         for w in net.output_weights.iter_mut() {
-            *w = rng.random_range(-a_out..a_out);
+            *w = dist_out.sample(rng);
         }
 
         net
     }
 
-    /// Classic アーキ用の対称量子化（per-tensor / per-channel 指定済み）
+    /// Classic アーキ用の対称量子化（per-tensor / per-channel 指定済み）。
+    ///
+    /// engine-core 側の `SimdDispatcher::transform_features()` は Feature Transformer 出力を
+    /// 固定右シフト (`CLASSIC_FT_SHIFT`) によって int8 `[−127, 127]` / `[0, 127]` へ丸めており、
+    /// ここで求める `s_in_*` も同じ規約を前提にしている。`CLASSIC_FT_SHIFT` や丸めルールを変更
+    /// する場合は、本関数と `quantize_bias_i32()`、および推論側の変換処理を同時に更新して整合性を
+    /// 保つこと。
     pub fn quantize_symmetric(
         &self,
         quant_ft: QuantScheme,
@@ -775,6 +813,10 @@ impl ClassicFloatNetwork {
         };
         let (h1_weights_q, h1_scales) =
             quantize_symmetric_i8(&self.hidden1_weights, h1_per_channel, h1_channels)?;
+        // NOTE: FT 出力は engine-core 側で `(acc << CLASSIC_FT_SHIFT)` の固定シフトを掛ける。
+        // ここで bias を量子化する際も同じシフトを前提とするため、`CLASSIC_FT_SHIFT` を
+        // 変更する場合は bias 量子化と評価側 (evaluate_quantization_gap 等) の復元計算も
+        // あわせて更新すること。
         let s_in_1 = s_w0 * (1 << CLASSIC_FT_SHIFT) as f32;
         let hidden1_biases_q = quantize_bias_i32(&self.hidden1_biases, s_in_1, &h1_scales);
 
@@ -786,6 +828,11 @@ impl ClassicFloatNetwork {
         };
         let (h2_weights_q, h2_scales) =
             quantize_symmetric_i8(&self.hidden2_weights, h2_per_channel, h2_channels)?;
+        // NOTE: Classic FP32 forwardは中間活性を常に CLASSIC_RELU_CLIP_F32 (==127.0)
+        // へクリップしており、量子化時もそのまま int8 の 0..127 を共有する。
+        // そのため hidden2/output への入力スケールは 1.0 で固定している。
+        // clip 値や中間層を別スケールにしたい場合は、quantize_bias_i32()
+        // および evaluate_quantization_gap() の復元計算を合わせて更新すること。
         let s_in_2 = 1.0f32;
         let hidden2_biases_q = quantize_bias_i32(&self.hidden2_biases, s_in_2, &h2_scales);
 
@@ -825,46 +872,6 @@ impl ClassicFloatNetwork {
         };
 
         Ok((ClassicIntNetworkBundle::new(transformer, network), scales))
-    }
-
-    pub fn accumulate_ft(&mut self, base: usize, values: &[f32]) {
-        debug_assert_eq!(values.len(), self.acc_dim);
-        for (dst, &src) in self.ft_weights[base..base + self.acc_dim].iter_mut().zip(values.iter())
-        {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_ft_bias(&mut self, delta: &[f32]) {
-        debug_assert_eq!(delta.len(), self.acc_dim);
-        for (dst, &src) in self.ft_biases.iter_mut().zip(delta.iter()) {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_hidden1(&mut self, delta_w: &[f32], delta_b: &[f32]) {
-        for (dst, &src) in self.hidden1_weights.iter_mut().zip(delta_w.iter()) {
-            *dst += src;
-        }
-        for (dst, &src) in self.hidden1_biases.iter_mut().zip(delta_b.iter()) {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_hidden2(&mut self, delta_w: &[f32], delta_b: &[f32]) {
-        for (dst, &src) in self.hidden2_weights.iter_mut().zip(delta_w.iter()) {
-            *dst += src;
-        }
-        for (dst, &src) in self.hidden2_biases.iter_mut().zip(delta_b.iter()) {
-            *dst += src;
-        }
-    }
-
-    pub fn accumulate_output(&mut self, delta_w: &[f32], delta_b: f32) {
-        for (dst, &src) in self.output_weights.iter_mut().zip(delta_w.iter()) {
-            *dst += src;
-        }
-        self.output_bias += delta_b;
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -964,8 +971,23 @@ impl ClassicQuantizationScales {
     /// 呼び出し側（INT→float 復元部）の修正を局所化できる。
     #[inline]
     pub fn output_scale(&self) -> f32 {
-        debug_assert_eq!(self.s_w3.len(), 1, "Classic v1 supports only per-tensor output scale",);
-        self.s_in_3 * self.s_w3[0]
+        let scale = match self.s_w3.len() {
+            0 => {
+                log::error!(
+                    "classic quantization scales: missing output scale, falling back to 1.0"
+                );
+                1.0
+            }
+            1 => self.s_w3[0],
+            n => {
+                log::error!(
+                    "classic quantization scales: per-channel output scales (len={}) not supported, using mean",
+                    n
+                );
+                self.s_w3.iter().copied().sum::<f32>() / n as f32
+            }
+        };
+        self.s_in_3 * scale
     }
 }
 
@@ -1043,6 +1065,25 @@ mod tests {
 
         let channel = quantize_bias_i32(&bias, 2.0, &[0.25, 0.5, 1.0]);
         assert_eq!(channel, vec![1, -1, 1]);
+
+        let tensor_scale = 2.0 * 0.25;
+        for (&b, &q) in bias.iter().zip(tensor.iter()) {
+            let restored = (q as f32) * tensor_scale;
+            assert!(
+                (b - restored).abs() <= tensor_scale / 2.0 + f32::EPSILON,
+                "per-tensor restoration drift: bias={b}, restored={restored}"
+            );
+        }
+
+        let channel_scales = [0.25f32, 0.5f32, 1.0f32];
+        for ((&b, &q), &ws) in bias.iter().zip(channel.iter()).zip(channel_scales.iter()) {
+            let scale = 2.0 * ws;
+            let restored = (q as f32) * scale;
+            assert!(
+                (b - restored).abs() <= scale / 2.0 + f32::EPSILON,
+                "per-channel restoration drift: bias={b}, restored={restored}, scale={scale}"
+            );
+        }
     }
 
     #[test]
@@ -1080,11 +1121,97 @@ mod tests {
     }
 
     #[test]
+    fn quantize_symmetric_empty_returns_empty() {
+        let (qi8, si8) = quantize_symmetric_i8(&[], false, 1).unwrap();
+        assert!(qi8.is_empty() && si8.is_empty());
+
+        let (qi16, si16) = quantize_symmetric_i16(&[], true, 0).unwrap();
+        assert!(qi16.is_empty() && si16.is_empty());
+    }
+
+    #[test]
+    fn quantize_symmetric_dequant_error_stays_within_half_scale() {
+        let weights = vec![-3.2, -1.0, -0.5, 0.0, 0.5, 1.75, 3.0];
+        let (qi8, si8) = quantize_symmetric_i8(&weights, false, 1).unwrap();
+        let scale8 = si8[0];
+        for (w, &q) in weights.iter().zip(qi8.iter()) {
+            let w = *w;
+            let restored = (q as f32) * scale8;
+            assert!(
+                (w - restored).abs() <= scale8 / 2.0 + f32::EPSILON,
+                "per-tensor i8: w={w}, restored={restored}, scale={scale8}"
+            );
+        }
+
+        let weights_ch = vec![
+            -2.4, -0.75, 0.3, 1.4, // ch0
+            -1.1, 0.0, 1.2, -2.8, // ch1
+        ];
+        let (qi16, si16) = quantize_symmetric_i16(&weights_ch, true, 2).unwrap();
+        let stride = weights_ch.len() / 2;
+        for ch in 0..2 {
+            let scale = si16[ch];
+            for (w, &q) in weights_ch[ch * stride..(ch + 1) * stride]
+                .iter()
+                .zip(qi16[ch * stride..(ch + 1) * stride].iter())
+            {
+                let w = *w;
+                let restored = (q as f32) * scale;
+                assert!(
+                    (w - restored).abs() <= scale / 2.0 + f32::EPSILON,
+                    "per-channel i16 ch={ch}: w={w}, restored={restored}, scale={scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn output_scale_falls_back_when_missing() {
+        let scales = ClassicQuantizationScales {
+            s_w0: 1.0,
+            s_w1: vec![1.0],
+            s_w2: vec![1.0],
+            s_w3: vec![],
+            s_in_1: 1.0,
+            s_in_2: 1.0,
+            s_in_3: 2.5,
+        };
+
+        assert!((scales.output_scale() - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn output_scale_averages_per_channel_scales() {
+        let scales = ClassicQuantizationScales {
+            s_w0: 1.0,
+            s_w1: vec![1.0],
+            s_w2: vec![1.0],
+            s_w3: vec![2.0, 4.0],
+            s_in_1: 1.0,
+            s_in_2: 1.0,
+            s_in_3: 3.0,
+        };
+
+        // mean(s_w3)=3.0 → output_scale = 3.0 * 3.0 = 9.0
+        assert!((scales.output_scale() - 9.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn round_away_from_zero_handles_boundaries() {
-        assert_eq!(round_away_from_zero(0.49), 0);
-        assert_eq!(round_away_from_zero(0.5), 1);
-        assert_eq!(round_away_from_zero(-0.5), -1);
-        assert_eq!(round_away_from_zero(-0.49), 0);
-        assert_eq!(round_away_from_zero(1.5), 2);
+        let cases = [
+            (0.49, 0),
+            (0.5, 1),
+            (0.51, 1),
+            (-0.49, 0),
+            (-0.5, -1),
+            (-0.51, -1),
+            (1.49, 1),
+            (1.5, 2),
+            (-1.49, -1),
+            (-1.5, -2),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(round_away_from_zero(input), expected, "input={input}");
+        }
     }
 }

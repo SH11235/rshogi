@@ -9,6 +9,10 @@ pub const ERR_CLASSIC_FT_PER_CHANNEL: &str = "Classic v1: feature transformer do
 /// Error message for Classic export requiring distillation teacher
 pub const ERR_CLASSIC_NEEDS_TEACHER: &str = "Classic export requires --distill-from-single";
 
+/// Error message when classic-v1 export with stream-cache would skip distillation
+pub const ERR_CLASSIC_STREAM_NEEDS_DISTILL: &str =
+    "Classic v1 export requires distillation, but --stream-cache skips the distill pass. Run with --distill-only or disable --stream-cache.";
+
 /// Error message for Single architecture not supporting Classic v1 format
 pub const ERR_SINGLE_NO_CLASSIC_V1: &str =
     "--arch=single does not support --export-format classic-v1";

@@ -19,7 +19,6 @@ use tools::stats::{
     binary_metrics, calibration_bins, ece_from_bins, regression_metrics, roc_auc_weighted,
 };
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
     sfen: String,
@@ -31,10 +30,6 @@ struct TrainingPosition {
     bound1: Option<String>,
     #[serde(default)]
     bound2: Option<String>,
-    #[serde(default)]
-    nodes: Option<u64>,
-    #[serde(default)]
-    time_ms: Option<u64>,
     #[serde(default)]
     mate_boundary: Option<bool>,
     #[serde(default)]
@@ -49,19 +44,10 @@ struct TrainingPosition {
     seldepth: Option<u8>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct LineInfo {
     #[serde(default)]
-    idx: u8,
-    #[serde(default)]
     score_cp: Option<i32>,
-    #[serde(default)]
-    bound: Option<String>,
-    #[serde(default)]
-    depth: Option<u8>,
-    #[serde(default)]
-    seldepth: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize)]

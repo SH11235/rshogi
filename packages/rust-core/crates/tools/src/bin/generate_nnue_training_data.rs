@@ -2397,7 +2397,7 @@ fn process_position_with_engine(
     let position = match engine_core::usi::parse_sfen(sfen) {
         Ok(pos) => pos,
         Err(e) => {
-            if idx < 10 || (idx + 1) % 1000 == 0 {
+            if idx < 10 || (idx + 1).is_multiple_of(1000) {
                 eprintln!("Error parsing position {}: {}", idx + 1, e);
             }
             env.shared.error_count.fetch_add(1, Ordering::Relaxed);
@@ -2457,7 +2457,7 @@ fn process_position_with_engine(
 
     // If overrun the skip threshold, record and skip this position
     if overrun {
-        if idx < 10 || (idx + 1) % 100 == 0 {
+        if idx < 10 || (idx + 1).is_multiple_of(100) {
             let elapsed_s = (elapsed_stats_ms as f64) / 1000.0;
             eprintln!("Position {} took too long ({:.1}s), skipping", idx + 1, elapsed_s);
         }

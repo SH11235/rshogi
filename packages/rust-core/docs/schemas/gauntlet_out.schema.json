@@ -43,9 +43,30 @@
         "draws": {"type": "integer", "minimum": 0},
         "games": {"type": "integer", "minimum": 0},
         "nps_samples": {"type": ["integer", "null"], "minimum": 0},
-        "pv_spread_samples": {"type": ["integer", "null"], "minimum": 0}
+        "pv_spread_samples": {"type": ["integer", "null"], "minimum": 0},
+        "nnue_telemetry": {
+          "type": "object",
+          "properties": {
+            "acc": {"type": "integer", "minimum": 0},
+            "fb_hash_mismatch": {"type": "integer", "minimum": 0},
+            "fb_acc_empty": {"type": "integer", "minimum": 0},
+            "fb_feature_off": {"type": "integer", "minimum": 0},
+            "apply_refresh_king": {"type": "integer", "minimum": 0},
+            "apply_refresh_other": {"type": "integer", "minimum": 0}
+          },
+          "required": [
+            "acc",
+            "fb_hash_mismatch",
+            "fb_acc_empty",
+            "fb_feature_off",
+            "apply_refresh_king",
+            "apply_refresh_other"
+          ],
+          "additionalProperties": false
+        }
       },
-      "required": ["winrate", "draw", "nps_delta_pct", "pv_spread_p90_cp", "gate"]
+      "required": ["winrate", "draw", "nps_delta_pct", "pv_spread_p90_cp", "gate"],
+      "additionalProperties": false
     },
     "training_config": {
       "type": "object",

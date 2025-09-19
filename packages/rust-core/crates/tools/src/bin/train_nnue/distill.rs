@@ -4,23 +4,38 @@ use std::time::Instant;
 use crate::classic::ClassicScratchViews;
 use crate::classic::{ClassicFloatNetwork, ClassicIntNetworkBundle, ClassicQuantizationScales};
 use crate::logging::StructuredLogger;
-use crate::model::Network;
-use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM};
+use crate::model::SingleNetwork;
+use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP_F32};
 use crate::types::{
     Config, DistillLossKind, DistillOptions, QuantScheme, Sample, TeacherValueDomain,
 };
 use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
-const CLASSIC_RELU_CLIP: f32 = 127.0;
 const MAX_DISTILL_SAMPLES: usize = 50_000;
 const DISTILL_EPOCHS: usize = 2;
 const DISTILL_LR: f32 = 1e-4;
 const PROB_EPS: f32 = 1e-6;
 static WARNED_OOR_FWD: AtomicBool = AtomicBool::new(false);
 static WARNED_OOR_BWD: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn warn_oor_once(flag: &AtomicBool, ctx: &str, feat: u32, input_dim: usize, acc_dim: usize) {
+    if !flag.swap(true, Ordering::Relaxed) {
+        let ft_len = input_dim.saturating_mul(acc_dim);
+        log::warn!(
+            "{}: feature index {} out of range (input_dim={}, acc_dim={}, ft_len={}); subsequent warnings suppressed",
+            ctx,
+            feat,
+            input_dim,
+            acc_dim,
+            ft_len
+        );
+    }
+}
 
 struct ClassicScratch {
     acc_us: Vec<f32>,
@@ -96,10 +111,10 @@ pub struct QuantEvalMetrics {
 
 #[inline]
 fn relu_clip(x: f32) -> f32 {
-    x.clamp(0.0, CLASSIC_RELU_CLIP)
+    x.clamp(0.0, CLASSIC_RELU_CLIP_F32)
 }
 fn relu_clip_grad(z: f32) -> f32 {
-    if z > 0.0 && z < CLASSIC_RELU_CLIP {
+    if z > 0.0 && z < CLASSIC_RELU_CLIP_F32 {
         1.0
     } else {
         0.0
@@ -145,9 +160,7 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     for &feat in &sample.features_us {
         let idx = feat as usize * net.acc_dim;
         if idx + net.acc_dim > net.ft_weights.len() {
-            if !WARNED_OOR_FWD.swap(true, Ordering::Relaxed) {
-                log::warn!("feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed", feat, net.ft_weights.len());
-            }
+            warn_oor_once(&WARNED_OOR_FWD, "forward(us)", feat, net.input_dim, net.acc_dim);
             continue;
         }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
@@ -160,11 +173,7 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     for &feat in &sample.features_them {
         let idx = feat as usize * net.acc_dim;
         if idx + net.acc_dim > net.ft_weights.len() {
-            log::warn!(
-                "feature index {} out of range (ft_weights.len={})",
-                feat,
-                net.ft_weights.len()
-            );
+            warn_oor_once(&WARNED_OOR_FWD, "forward(them)", feat, net.input_dim, net.acc_dim);
             continue;
         }
         let row = &net.ft_weights[idx..idx + net.acc_dim];
@@ -213,6 +222,7 @@ fn backward_update(
     sample: &DistillSample,
     grad_output: f32,
     lr: f32,
+    l2_reg: f32,
 ) {
     let h1_dim = net.h1_dim;
     let h2_dim = net.h2_dim;
@@ -227,7 +237,7 @@ fn backward_update(
 
     // Gradient wrt output weights/bias
     for i in 0..h2_dim {
-        let grad_w = grad_output * scratch.a2[i];
+        let grad_w = grad_output * scratch.a2[i] + l2_reg * net.output_weights[i];
         net.output_weights[i] -= lr * grad_w;
     }
     net.output_bias -= lr * grad_output;
@@ -262,7 +272,8 @@ fn backward_update(
         let delta = scratch.d_z2[i];
         let row = &mut net.hidden2_weights[i * h1_dim..(i + 1) * h1_dim];
         for (w, &a1) in row.iter_mut().zip(scratch.a1.iter()) {
-            *w -= lr * delta * a1;
+            let grad = delta * a1 + l2_reg * *w;
+            *w -= lr * grad;
         }
         net.hidden2_biases[i] -= lr * delta;
     }
@@ -272,7 +283,8 @@ fn backward_update(
         let delta = scratch.d_z1[j];
         let row = &mut net.hidden1_weights[j * input_dim..(j + 1) * input_dim];
         for (w, &inp) in row.iter_mut().zip(scratch.input.iter()) {
-            *w -= lr * delta * inp;
+            let grad = delta * inp + l2_reg * *w;
+            *w -= lr * grad;
         }
         net.hidden1_biases[j] -= lr * delta;
     }
@@ -290,28 +302,24 @@ fn backward_update(
     for &feat in &sample.features_us {
         let base = feat as usize * acc_dim;
         if base + acc_dim > net.ft_weights.len() {
-            if !WARNED_OOR_BWD.swap(true, Ordering::Relaxed) {
-                log::warn!("backward_update: feature index {} out of range (ft_weights.len={}); subsequent warnings suppressed", feat, net.ft_weights.len());
-            }
+            warn_oor_once(&WARNED_OOR_BWD, "backward(us)", feat, net.input_dim, acc_dim);
             continue;
         }
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_us.iter()) {
+            let grad = grad + l2_reg * *w;
             *w -= lr * grad;
         }
     }
     for &feat in &sample.features_them {
         let base = feat as usize * acc_dim;
         if base + acc_dim > net.ft_weights.len() {
-            log::warn!(
-                "backward_update: feature index {} out of range (ft_weights.len={})",
-                feat,
-                net.ft_weights.len()
-            );
+            warn_oor_once(&WARNED_OOR_BWD, "backward(them)", feat, net.input_dim, acc_dim);
             continue;
         }
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_them.iter()) {
+            let grad = grad + l2_reg * *w;
             *w -= lr * grad;
         }
     }
@@ -319,7 +327,7 @@ fn backward_update(
 
 /// 教師 forward 結果と反転特徴を事前計算し、蒸留処理での再利用を容易にする。
 fn prepare_distill_samples(
-    teacher: &Network,
+    teacher: &SingleNetwork,
     samples: &[Sample],
     max_samples: usize,
 ) -> Vec<DistillSample> {
@@ -374,7 +382,7 @@ impl<'a> ClassicDistillConfig<'a> {
 }
 
 pub fn distill_classic_after_training(
-    teacher: &Network,
+    teacher: &SingleNetwork,
     samples: &[Sample],
     config: &Config,
     distill: &DistillOptions,
@@ -402,7 +410,7 @@ pub fn distill_classic_after_training(
         return Err("No samples available for classic distillation".into());
     }
 
-    let distill_seed = distill.seed.unwrap_or_else(|| rand::rng().random::<u64>());
+    let distill_seed = distill.seed.unwrap_or_else(rand::random::<u64>);
     let mut rng: StdRng = StdRng::seed_from_u64(distill_seed);
     let mut classic = ClassicFloatNetwork::he_uniform_with_dims(
         SHOGI_BOARD_SIZE * FE_END,
@@ -612,7 +620,14 @@ pub fn distill_classic_after_training(
 
             epoch_loss += loss_contrib;
             epoch_weight += sample.weight as f64;
-            backward_update(&mut classic, &mut scratch, sample, grad_output, DISTILL_LR);
+            backward_update(
+                &mut classic,
+                &mut scratch,
+                sample,
+                grad_output,
+                DISTILL_LR,
+                config.l2_reg,
+            );
         }
         if let Some(lg) = classic_cfg.structured {
             let loss_avg = if epoch_weight > 0.0 {
@@ -713,7 +728,7 @@ fn convert_logit_to_cp(logit: f32, config: &Config) -> f32 {
 }
 
 pub fn evaluate_distill(
-    teacher: &Network,
+    teacher: &SingleNetwork,
     classic_fp32: &ClassicFloatNetwork,
     samples: &[Sample],
     config: &Config,
@@ -1007,7 +1022,7 @@ mod distill_training_tests {
         let mut scratch = ClassicScratch::new(2, 2, 2);
 
         let _ = forward(&net, &sample, &mut scratch);
-        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2);
+        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2, 0.0);
 
         let delta_threshold: f32 = 1e-6;
         let changed_ft = net
@@ -1077,7 +1092,31 @@ mod distill_training_tests {
         };
         let mut scratch = ClassicScratch::new(2, 2, 2);
         let _ = forward(&net, &sample, &mut scratch);
-        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2);
+        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2, 0.0);
+    }
+
+    #[test]
+    fn backward_update_applies_l2_to_output_weights() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2024);
+        let mut net = ClassicFloatNetwork::he_uniform_with_dims(4, 2, 2, 2, 2, &mut rng);
+        let before = net.output_weights.clone();
+        let sample = DistillSample {
+            features_us: vec![],
+            features_them: vec![],
+            teacher_output: 0.0,
+            label: 0.0,
+            weight: 1.0,
+        };
+        let mut scratch = ClassicScratch::new(2, 2, 2);
+        let _ = forward(&net, &sample, &mut scratch);
+
+        backward_update(&mut net, &mut scratch, &sample, 0.0, 1e-2, 1e-3);
+
+        assert!(net
+            .output_weights
+            .iter()
+            .zip(before.iter())
+            .any(|(a, b)| (*a - *b).abs() > 1e-9));
     }
 }
 

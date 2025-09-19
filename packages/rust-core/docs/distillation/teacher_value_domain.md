@@ -125,6 +125,8 @@ cargo run -p tools --bin train_nnue -- \
   --teacher-domain cp --kd-alpha 0.7
 ```
 
+再現性を担保したい場合はどのモードでも `--rng-seed <u64>`（※`--seed` も同義のエイリアス）を追加してください。Classic v1 で蒸留結果をエクスポートする際に FP32 と量子化スケールを同時に保存したい場合は `--emit-fp32-also` を組み合わせると後段ツールでの往復比較が容易になります。
+
 ## ベストプラクティス
 
 1. ラベル種別 = wdl の場合は教師を `wdl-logit` で与え、`KL` か `BCE` を検証し精度/安定性で選択する。

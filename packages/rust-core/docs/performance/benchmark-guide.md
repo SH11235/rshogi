@@ -2,9 +2,9 @@
 
 このドキュメントでは、将棋AIエンジンの各種ベンチマークコマンドとその用途を説明します。
 
-+> crate固有のベンチ（TT実装など）は各crateのドキュメントに詳細があります。
-+> engine-core の個別ベンチ一覧と実行条件は [crates/engine-core/docs/benchmarks.md](../../crates/engine-core/docs/benchmarks.md) を参照してください。
-+
+> crate固有のベンチ（TT実装など）は各crateのドキュメントに詳細があります。
+> engine-core の個別ベンチ一覧と実行条件は [crates/engine-core/docs/benchmarks.md](../../crates/engine-core/docs/benchmarks.md) を参照してください。
+
 ## ベンチマークの種類
 
 ### 1. 探索エンジンベンチマーク
@@ -156,6 +156,18 @@ done | tee benchmark_results.txt
 1. バックグラウンドプロセスを停止
 2. 複数回実行して平均を取る
 3. より長い実行時間を設定
+
+## Gauntlet Gate CI（昇格判定）
+
+- ワークフロー: `.github/workflows/gauntlet-gate.yml`
+- 入力重み: `runs/nnue_local/baseline.nnue` と `runs/nnue_local/candidate.nnue`
+- Release asset: `GATE_BASELINE_TAG/GATE_BASELINE_ASSET` と `GATE_CANDIDATE_TAG/GATE_CANDIDATE_ASSET` で GitHub Release のアセット名を指定する（ワークフロー内で必ずダウンロードされる）
+- 実行内容:
+  - `target/release/gauntlet` を 200局（代表100局面×往復）で実行
+  - Gate 条件: スコア率 55% 以上かつ NPS ±3% 以内
+  - 固定パラメータ: `--pv-ms ${GAUNTLET_PV_MS}`（既定 300ms）で MultiPV 計測時間を安定化
+  - 結果: `docs/reports/gauntlet/ci/<run_id>/` に JSON / Markdown / structured_v1 を保存し、Artifacts と Step Summary に出力
+- 失敗時: Gate 判定が未達成、サンプル欠落（NPS ≥ 50 / PV ≥ 30 を下回る）、重み未取得などでジョブがエラー終了。詳細は `runs/gauntlet_gate/console.err` と Step Summary を参照
 
 ## ベンチマーク実行例と期待される出力
 

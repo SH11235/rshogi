@@ -1,4 +1,5 @@
 use super::{classic, dataset, export, logging, model, params, training, types};
+use bytemuck::cast_slice;
 use classic::*;
 use dataset::*;
 use engine_core::{nnue::features::FE_END, shogi::SHOGI_BOARD_SIZE};
@@ -7,6 +8,8 @@ use logging::*;
 use model::*;
 use params::*;
 use rand::SeedableRng;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Seek, SeekFrom, Write},
@@ -436,14 +439,177 @@ fn finalize_export_writes_zero_when_bundle_missing() {
 
     let td = tempdir().unwrap();
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-    let network = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let network = Network::Single(SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng));
     let export = ExportOptions {
         arch: ArchKind::Classic,
         format: ExportFormat::ClassicV1,
         ..ExportOptions::default()
     };
-    finalize_export(&network, td.path(), export, false, None).unwrap();
+    finalize_export(&network, td.path(), export, false, None, None).unwrap();
     assert!(td.path().join("nn.classic.nnue").exists());
+}
+
+#[derive(Deserialize)]
+struct TestScalesJson {
+    acc_dim: usize,
+    h1_dim: usize,
+    h2_dim: usize,
+    input_dim: usize,
+    bundle_sha256: String,
+    #[serde(default)]
+    quant_scheme: Option<TestQuantScheme>,
+}
+
+#[derive(Deserialize, Default)]
+struct TestQuantScheme {
+    ft: String,
+    h1: String,
+    h2: String,
+    #[serde(rename = "out")]
+    out_field: String,
+}
+
+impl TestQuantScheme {
+    fn out(&self) -> &str {
+        &self.out_field
+    }
+}
+
+fn compute_bundle_sha256(bundle: &ClassicIntNetworkBundle) -> String {
+    let mut hasher = Sha256::new();
+    for &w in &bundle.transformer.weights {
+        hasher.update(w.to_le_bytes());
+    }
+    for &b in &bundle.transformer.biases {
+        hasher.update(b.to_le_bytes());
+    }
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden1_weights));
+    for &b in &bundle.network.hidden1_biases {
+        hasher.update(b.to_le_bytes());
+    }
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.hidden2_weights));
+    for &b in &bundle.network.hidden2_biases {
+        hasher.update(b.to_le_bytes());
+    }
+    hasher.update(cast_slice::<i8, u8>(&bundle.network.output_weights));
+    hasher.update(bundle.network.output_bias.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+#[test]
+fn finalize_export_emits_fp32_and_scales_for_classic() {
+    use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP};
+
+    let td = tempdir().unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let classic = ClassicNetwork::new(
+        CLASSIC_ACC_DIM,
+        CLASSIC_H1_DIM,
+        CLASSIC_H2_DIM,
+        CLASSIC_RELU_CLIP,
+        64,
+        &mut rng,
+    );
+
+    let (bundle, scales) = classic
+        .fp32
+        .quantize_symmetric(
+            QuantScheme::PerTensor,
+            QuantScheme::PerChannel,
+            QuantScheme::PerChannel,
+            QuantScheme::PerTensor,
+        )
+        .unwrap();
+
+    let export = ExportOptions {
+        arch: ArchKind::Classic,
+        format: ExportFormat::ClassicV1,
+        quant_ft: QuantScheme::PerTensor,
+        quant_h1: QuantScheme::PerChannel,
+        quant_h2: QuantScheme::PerChannel,
+        quant_out: QuantScheme::PerTensor,
+        emit_fp32_also: true,
+    };
+
+    finalize_export(
+        &Network::Classic(classic.clone()),
+        td.path(),
+        export,
+        false,
+        Some(&bundle),
+        Some(&scales),
+    )
+    .unwrap();
+
+    let fp32_path = td.path().join("nn.fp32.bin");
+    assert!(fp32_path.exists(), "nn.fp32.bin should exist");
+
+    let scales_path = td.path().join("nn.classic.scales.json");
+    assert!(scales_path.exists(), "nn.classic.scales.json should exist");
+
+    let scales_json: TestScalesJson =
+        serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
+    assert_eq!(scales_json.acc_dim, CLASSIC_ACC_DIM);
+    assert_eq!(scales_json.h1_dim, CLASSIC_H1_DIM);
+    assert_eq!(scales_json.h2_dim, CLASSIC_H2_DIM);
+    assert_eq!(scales_json.input_dim, SHOGI_BOARD_SIZE * FE_END);
+
+    let expected_sha = compute_bundle_sha256(&bundle);
+    assert_eq!(scales_json.bundle_sha256, expected_sha);
+
+    if let Some(q) = scales_json.quant_scheme {
+        assert_eq!(q.ft, "per-tensor");
+        assert_eq!(q.h1, "per-channel");
+        assert_eq!(q.h2, "per-channel");
+        assert_eq!(q.out(), "per-tensor");
+    } else {
+        panic!("quant_scheme missing from scales json");
+    }
+}
+
+#[test]
+fn finalize_export_emit_fp32_ignored_for_non_classic() {
+    let td = tempdir().unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+    let network = Network::Single(SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng));
+
+    let export = ExportOptions {
+        arch: ArchKind::Single,
+        format: ExportFormat::ClassicV1,
+        emit_fp32_also: true,
+        ..ExportOptions::default()
+    };
+
+    finalize_export(&network, td.path(), export, false, None, None).unwrap();
+    assert!(!td.path().join("nn.fp32.bin").exists());
+}
+
+#[test]
+fn finalize_export_fp32_quantized_ignored_for_classic() {
+    use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP};
+
+    let td = tempdir().unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+    let classic = ClassicNetwork::new(
+        CLASSIC_ACC_DIM,
+        CLASSIC_H1_DIM,
+        CLASSIC_H2_DIM,
+        CLASSIC_RELU_CLIP,
+        64,
+        &mut rng,
+    );
+
+    let export = ExportOptions {
+        arch: ArchKind::Classic,
+        format: ExportFormat::Fp32,
+        emit_fp32_also: false,
+        ..ExportOptions::default()
+    };
+
+    finalize_export(&Network::Classic(classic), td.path(), export, true, None, None).unwrap();
+
+    assert!(td.path().join("nn.fp32.bin").exists());
+    assert!(!td.path().join("nn.i8.bin").exists());
 }
 
 #[test]
@@ -483,6 +649,7 @@ fn weight_consistency_jsonl_vs_cache() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let json_samples =
         load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
@@ -570,18 +737,18 @@ fn unknown_flags_warning_and_continue() {
 fn auc_boundary_labels_skipped() {
     // Network with zero weights outputs 0.0 logits -> p=0.5
     let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-    let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let mut single = SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     // Zero out all weights/biases to make output exactly 0
-    for w in net.w0.iter_mut() {
+    for w in single.w0.iter_mut() {
         *w = 0.0;
     }
-    for b in net.b0.iter_mut() {
+    for b in single.b0.iter_mut() {
         *b = 0.0;
     }
-    for w in net.w2.iter_mut() {
+    for w in single.w2.iter_mut() {
         *w = 0.0;
     }
-    net.b2 = 0.0;
+    single.b2 = 0.0;
 
     // Samples all with label==0.5 (boundary) should be skipped and yield None AUC
     let samples = vec![
@@ -624,8 +791,10 @@ fn auc_boundary_labels_skipped() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
-    let auc = super::compute_val_auc(&net, &samples, &cfg);
+    let network = Network::Single(single);
+    let auc = super::compute_val_auc(&network, &samples, &cfg);
     assert!(auc.is_none(), "AUC should be None when all labels are 0.5 boundary");
 }
 
@@ -666,6 +835,7 @@ fn clamp_gap_and_depth_saturation() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let json_samples =
         load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
@@ -710,6 +880,7 @@ fn gap_zero_not_zero_weight() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let samples =
         load_samples(json_path.to_str().unwrap(), &cfg, &wcfg::WeightingConfig::default()).unwrap();
@@ -764,6 +935,7 @@ fn test_training_reproducibility_with_seed() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     // サンプルを読み込み（2局面→2サンプル/局面 = 計4サンプル）
@@ -776,8 +948,8 @@ fn test_training_reproducibility_with_seed() {
     // 同じseedで2つのネットワークを初期化
     let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
     let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
-    let mut net1 = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng1);
-    let mut net2 = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng2);
+    let mut network1 = model::Network::new_single(cfg.accumulator_dim, cfg.relu_clip, &mut rng1);
+    let mut network2 = model::Network::new_single(cfg.accumulator_dim, cfg.relu_clip, &mut rng2);
 
     // 同じ条件・同じデータで学習
     let out_dir = td.path();
@@ -808,11 +980,9 @@ fn test_training_reproducibility_with_seed() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle1,
     };
-    train_model(&mut net1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
+    train_model(&mut network1, &mut samples1, &None, &cfg, &mut dummy_rng1, &mut ctx1).unwrap();
     let dash2 = super::DashboardOpts {
         emit: false,
         calib_bins_n: DEFAULT_CALIBRATION_BINS,
@@ -838,13 +1008,20 @@ fn test_training_reproducibility_with_seed() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle2,
     };
-    train_model(&mut net2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
+    train_model(&mut network2, &mut samples2, &None, &cfg, &mut dummy_rng2, &mut ctx2).unwrap();
 
     // 重みの一致を確認（厳密一致 or 十分小さい誤差）
+    let net1 = match &network1 {
+        model::Network::Single(inner) => inner,
+        _ => unreachable!(),
+    };
+    let net2 = match &network2 {
+        model::Network::Single(inner) => inner,
+        _ => unreachable!(),
+    };
+
     assert_eq!(net1.w0.len(), net2.w0.len());
     assert_eq!(net1.b0.len(), net2.b0.len());
     assert_eq!(net1.w2.len(), net2.w2.len());
@@ -956,6 +1133,7 @@ fn stream_sync_vs_inmem_equivalence() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
     let cfg_stream = Config {
         stream_cache: true,
@@ -969,8 +1147,10 @@ fn stream_sync_vs_inmem_equivalence() {
     // 同じseedで2つのネットを初期化
     let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
     let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
-    let mut net_inmem = Network::new(cfg_inmem.accumulator_dim, cfg_inmem.relu_clip, &mut rng1);
-    let mut net_stream = Network::new(cfg_stream.accumulator_dim, cfg_stream.relu_clip, &mut rng2);
+    let mut network_inmem =
+        model::Network::new_single(cfg_inmem.accumulator_dim, cfg_inmem.relu_clip, &mut rng1);
+    let mut network_stream =
+        model::Network::new_single(cfg_stream.accumulator_dim, cfg_stream.relu_clip, &mut rng2);
 
     let out_dir = td.path();
     let mut dummy_rng = rand::rngs::StdRng::seed_from_u64(123);
@@ -1001,11 +1181,9 @@ fn stream_sync_vs_inmem_equivalence() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_in,
     };
-    train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
+    train_model(&mut network_inmem, &mut samples, &None, &cfg_inmem, &mut dummy_rng, &mut ctx_in)
         .unwrap();
     // stream-sync 学習
     let dash_stream = super::DashboardOpts {
@@ -1033,12 +1211,10 @@ fn stream_sync_vs_inmem_equivalence() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_stream,
     };
     train_model_stream_cache(
-        &mut net_stream,
+        &mut network_stream,
         path.to_str().unwrap(),
         &None,
         &cfg_stream,
@@ -1047,6 +1223,15 @@ fn stream_sync_vs_inmem_equivalence() {
         &wcfg::WeightingConfig::default(),
     )
     .unwrap();
+
+    let net_inmem = match &network_inmem {
+        model::Network::Single(inner) => inner,
+        _ => unreachable!(),
+    };
+    let net_stream = match &network_stream {
+        model::Network::Single(inner) => inner,
+        _ => unreachable!(),
+    };
 
     // 重み一致（厳密一致 or 近傍）
     assert_eq!(net_inmem.w0.len(), net_stream.w0.len());
@@ -1098,7 +1283,7 @@ fn structured_training_config_present_in_inmem_async_loader() {
         .collect();
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-    let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let mut network = model::Network::new_single(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     let cfg = Config {
         epochs: 1,
         batch_size: 2,
@@ -1123,6 +1308,7 @@ fn structured_training_config_present_in_inmem_async_loader() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let dash = DashboardOpts {
@@ -1150,13 +1336,11 @@ fn structured_training_config_present_in_inmem_async_loader() {
         global_step: 0,
         training_config_json: Some(serde_json::json!({"exp_id": "unit"})),
         plateau: None,
-        export: ExportOptions::default(),
-        distill: DistillOptions::default(),
         classic_bundle: &mut classic_bundle_log,
     };
 
     train_model_with_loader(
-        &mut net,
+        &mut network,
         train_samples,
         &Some(val_samples),
         &cfg,
@@ -1227,11 +1411,15 @@ fn zero_weight_batches_do_not_update() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-    let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
-    let before = net.clone();
+    let mut network = model::Network::new_single(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+    let before = match &network {
+        model::Network::Single(inner) => inner.clone(),
+        _ => unreachable!(),
+    };
 
     let dash = DashboardOpts {
         emit: false,
@@ -1258,12 +1446,15 @@ fn zero_weight_batches_do_not_update() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: ExportOptions::default(),
-        distill: DistillOptions::default(),
         classic_bundle: &mut classic_bundle_zero,
     };
 
-    train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
+    train_model(&mut network, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
+
+    let net = match &network {
+        model::Network::Single(inner) => inner,
+        _ => unreachable!(),
+    };
 
     // 重みが全く変わっていないことを確認（ビット単位で比較して浮動小数比較Lintを回避）
     assert!(before.w0.iter().zip(net.w0.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
@@ -1322,10 +1513,11 @@ fn stream_async_propagates_errors() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-    let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+    let mut network = model::Network::new_single(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
     let out_dir = td.path();
     let dash = super::DashboardOpts {
         emit: false,
@@ -1352,12 +1544,10 @@ fn stream_async_propagates_errors() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_err,
     };
     let err = train_model_stream_cache(
-        &mut net,
+        &mut network,
         path.to_str().unwrap(),
         &None,
         &cfg,
@@ -1407,13 +1597,14 @@ fn train_one_batch_with_zero_feature_sample_smoke() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     let td = tempfile::tempdir().unwrap();
     let out_dir = td.path();
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-    let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+    let mut network = model::Network::new_single(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
     let dash = super::DashboardOpts {
         emit: false,
         calib_bins_n: DEFAULT_CALIBRATION_BINS,
@@ -1439,17 +1630,191 @@ fn train_one_batch_with_zero_feature_sample_smoke() {
         global_step: 0,
         training_config_json: None,
         plateau: None,
-        export: super::ExportOptions::default(),
-        distill: super::DistillOptions::default(),
         classic_bundle: &mut classic_bundle_smoke,
     };
-    train_model(&mut net, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
+    train_model(&mut network, &mut samples, &None, &cfg, &mut rng, &mut ctx).unwrap();
+
+    let net = match &network {
+        model::Network::Single(inner) => inner,
+        _ => unreachable!(),
+    };
 
     // NaN が混入していないこと
     assert!(net.w0.iter().all(|v| v.is_finite()));
     assert!(net.b0.iter().all(|v| v.is_finite()));
     assert!(net.w2.iter().all(|v| v.is_finite()));
     assert!(net.b2.is_finite());
+}
+
+#[test]
+fn classic_train_updates_weights() {
+    use rand::SeedableRng;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(123);
+    let mut network = model::Network::new_classic(DEFAULT_RELU_CLIP_NUM, 8, &mut rng);
+    let before = match &network {
+        model::Network::Classic(inner) => inner.clone(),
+        _ => unreachable!(),
+    };
+
+    let mut samples = vec![Sample {
+        features: vec![0, 1, 2],
+        label: 1.0,
+        weight: 1.0,
+        cp: None,
+        phase: None,
+    }];
+
+    let cfg = Config {
+        epochs: 1,
+        batch_size: 1,
+        learning_rate: 0.01,
+        optimizer: "sgd".to_string(),
+        l2_reg: 0.0,
+        label_type: "wdl".to_string(),
+        scale: 600.0,
+        cp_clip: 1200,
+        accumulator_dim: 512,
+        relu_clip: DEFAULT_RELU_CLIP_NUM,
+        shuffle: false,
+        prefetch_batches: 0,
+        throughput_interval_sec: 10_000.0,
+        stream_cache: false,
+        prefetch_bytes: None,
+        estimated_features_per_sample: 64,
+        exclude_no_legal_move: false,
+        exclude_fallback: false,
+        lr_schedule: "constant".to_string(),
+        lr_warmup_epochs: 0,
+        lr_decay_epochs: None,
+        lr_decay_steps: None,
+        lr_plateau_patience: None,
+        grad_clip: 0.0,
+    };
+
+    let td = tempfile::tempdir().unwrap();
+    let out_dir = td.path();
+    let dash = DashboardOpts {
+        emit: false,
+        calib_bins_n: DEFAULT_CALIBRATION_BINS,
+        do_plots: false,
+        val_is_jsonl: false,
+    };
+    let mut best_network: Option<Network> = None;
+    let mut best_val_loss = f32::INFINITY;
+    let mut last_val_loss: Option<f32> = None;
+    let mut best_epoch: Option<usize> = None;
+    let mut classic_bundle = None;
+    let mut ctx = TrainContext {
+        out_dir,
+        save_every: None,
+        dash,
+        trackers: TrainTrackers {
+            best_network: &mut best_network,
+            best_val_loss: &mut best_val_loss,
+            last_val_loss: &mut last_val_loss,
+            best_epoch: &mut best_epoch,
+        },
+        structured: None,
+        global_step: 0,
+        training_config_json: None,
+        plateau: None,
+        classic_bundle: &mut classic_bundle,
+    };
+
+    let mut rng_train = rand::rngs::StdRng::seed_from_u64(999);
+    train_model(&mut network, &mut samples, &None, &cfg, &mut rng_train, &mut ctx).unwrap();
+
+    let after = match &network {
+        model::Network::Classic(inner) => inner,
+        _ => unreachable!(),
+    };
+
+    assert!(after
+        .fp32
+        .output_weights
+        .iter()
+        .zip(before.fp32.output_weights.iter())
+        .any(|(a, b)| (*a - *b).abs() > 1e-6));
+}
+
+#[test]
+fn classic_train_invalid_optimizer_errors() {
+    use rand::SeedableRng;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(555);
+    let mut network = model::Network::new_classic(DEFAULT_RELU_CLIP_NUM, 8, &mut rng);
+
+    let mut samples = vec![Sample {
+        features: vec![0],
+        label: 0.0,
+        weight: 1.0,
+        cp: None,
+        phase: None,
+    }];
+
+    let cfg = Config {
+        epochs: 1,
+        batch_size: 1,
+        learning_rate: 0.01,
+        optimizer: "rmsprop".to_string(),
+        l2_reg: 0.0,
+        label_type: "wdl".to_string(),
+        scale: 600.0,
+        cp_clip: 1200,
+        accumulator_dim: 512,
+        relu_clip: DEFAULT_RELU_CLIP_NUM,
+        shuffle: false,
+        prefetch_batches: 0,
+        throughput_interval_sec: 10_000.0,
+        stream_cache: false,
+        prefetch_bytes: None,
+        estimated_features_per_sample: 64,
+        exclude_no_legal_move: false,
+        exclude_fallback: false,
+        lr_schedule: "constant".to_string(),
+        lr_warmup_epochs: 0,
+        lr_decay_epochs: None,
+        lr_decay_steps: None,
+        lr_plateau_patience: None,
+        grad_clip: 0.0,
+    };
+
+    let td = tempfile::tempdir().unwrap();
+    let out_dir = td.path();
+    let dash = DashboardOpts {
+        emit: false,
+        calib_bins_n: DEFAULT_CALIBRATION_BINS,
+        do_plots: false,
+        val_is_jsonl: false,
+    };
+    let mut best_network: Option<Network> = None;
+    let mut best_val_loss = f32::INFINITY;
+    let mut last_val_loss: Option<f32> = None;
+    let mut best_epoch: Option<usize> = None;
+    let mut classic_bundle = None;
+    let mut ctx = TrainContext {
+        out_dir,
+        save_every: None,
+        dash,
+        trackers: TrainTrackers {
+            best_network: &mut best_network,
+            best_val_loss: &mut best_val_loss,
+            last_val_loss: &mut last_val_loss,
+            best_epoch: &mut best_epoch,
+        },
+        structured: None,
+        global_step: 0,
+        training_config_json: None,
+        plateau: None,
+        classic_bundle: &mut classic_bundle,
+    };
+
+    let mut rng_train = rand::rngs::StdRng::seed_from_u64(321);
+    let err =
+        train_model(&mut network, &mut samples, &None, &cfg, &mut rng_train, &mut ctx).unwrap_err();
+    let msg = format!("{}", err);
+    assert!(msg.contains("Unsupported optimizer"));
 }
 
 // LrPlateauState の単体テスト
@@ -1681,7 +2046,7 @@ fn cp_distillation_unit_smoke_loss_ordering() {
 
     // 単純ネット (全0 初期バイアス) を構築
     let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-    let mut net = Network::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
+    let mut net = SingleNetwork::new(8, DEFAULT_RELU_CLIP_NUM, &mut rng);
     // ゼロ化して決定的
     for w in net.w0.iter_mut() {
         *w = 0.0;
@@ -1726,6 +2091,7 @@ fn cp_distillation_unit_smoke_loss_ordering() {
         lr_decay_epochs: None,
         lr_decay_steps: None,
         lr_plateau_patience: None,
+        grad_clip: 0.0,
     };
 
     // DistillOptions: alpha=0.5, temperature=1.0, mse

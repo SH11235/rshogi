@@ -176,7 +176,7 @@ where
         if matches!(
             &searcher.context.limits().time_control,
             crate::time_management::TimeControl::Ponder(_)
-        ) && searcher.stats.nodes % 10000 == 0
+        ) && searcher.stats.nodes.is_multiple_of(10000)
         {
             log::debug!(
                 "Ponder search: checking events at {} nodes (mask: {:#x})",

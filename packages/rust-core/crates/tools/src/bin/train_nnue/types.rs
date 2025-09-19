@@ -59,6 +59,7 @@ pub struct Config {
     pub lr_decay_epochs: Option<u32>,
     pub lr_decay_steps: Option<u64>,
     pub lr_plateau_patience: Option<u32>,
+    pub grad_clip: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -140,6 +141,8 @@ pub struct ExportOptions {
     pub quant_h1: QuantScheme,
     pub quant_h2: QuantScheme,
     pub quant_out: QuantScheme,
+    /// Classic v1 export時に FP32 版も同時に書き出すか（Classic 以外では無視）
+    pub emit_fp32_also: bool,
 }
 
 impl Default for ExportOptions {
@@ -151,6 +154,7 @@ impl Default for ExportOptions {
             quant_h1: QuantScheme::PerChannel,
             quant_h2: QuantScheme::PerChannel,
             quant_out: QuantScheme::PerChannel,
+            emit_fp32_also: false,
         }
     }
 }
