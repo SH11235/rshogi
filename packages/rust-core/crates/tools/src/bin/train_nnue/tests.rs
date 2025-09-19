@@ -1,4 +1,7 @@
-use super::{classic, dataset, export, logging, model, params, teacher, training, types};
+use super::{
+    classic, dataset, default_teacher_domain, export, logging, model, params, teacher, training,
+    types,
+};
 use bytemuck::cast_slice;
 use classic::*;
 use dataset::*;
@@ -2189,4 +2192,16 @@ fn classic_teacher_enforces_wdl_logit_domain() {
 
     let err = teacher.evaluate_batch(&batch, TeacherValueDomain::Cp, false).unwrap_err();
     assert!(matches!(err, TeacherError::UnsupportedDomain { .. }));
+}
+
+#[test]
+fn default_teacher_domain_uses_wdl_logit_for_all_current_teachers() {
+    assert!(matches!(
+        default_teacher_domain(TeacherKind::Single),
+        TeacherValueDomain::WdlLogit
+    ));
+    assert!(matches!(
+        default_teacher_domain(TeacherKind::ClassicFp32),
+        TeacherValueDomain::WdlLogit
+    ));
 }

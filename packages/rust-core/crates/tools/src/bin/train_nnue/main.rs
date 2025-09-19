@@ -537,12 +537,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant_out,
         emit_fp32_also: app.get_flag("emit-fp32-also"),
     };
-    // Teacher domain (cp or wdl-logit). Default depends on label type: if label_type is "cp" assume cp, else wdl-logit for classic case.
-    let default_teacher_domain = match (distill_teacher_kind, label_type_value.as_str()) {
-        (TeacherKind::ClassicFp32, _) => TeacherValueDomain::WdlLogit,
-        (_, "cp") => TeacherValueDomain::Cp,
-        _ => TeacherValueDomain::WdlLogit,
-    };
+    // Teacher domain (cp or wdl-logit)。教師種別に応じて既定値を選ぶ。
+    let default_teacher_domain = default_teacher_domain(distill_teacher_kind);
     let teacher_domain = app
         .get_one::<TeacherValueDomain>("teacher-domain")
         .copied()
@@ -1776,6 +1772,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn default_teacher_domain(kind: TeacherKind) -> TeacherValueDomain {
+    match kind {
+        TeacherKind::ClassicFp32 => TeacherValueDomain::WdlLogit,
+        TeacherKind::Single => TeacherValueDomain::WdlLogit,
+    }
 }
 
 #[cfg(test)]
