@@ -9,6 +9,20 @@ on:
     paths:
       - 'packages/rust-core/**'
       - '.github/workflows/gauntlet-gate.yml'
+  workflow_dispatch:
+    inputs:
+      baseline_tag:
+        description: 'Baseline release tag (default: nnue-gate)'
+        required: false
+        default: 'nnue-gate'
+      candidate_tag:
+        description: 'Candidate release tag (default: nnue-gate)'
+        required: false
+        default: 'nnue-gate'
+      games:
+        description: 'Number of games to play (default: 200)'
+        required: false
+        default: '200'
 
 permissions:
   contents: read
@@ -20,11 +34,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -C linker=clang -C link-arg=-fuse-ld=mold
-  GATE_BASELINE_TAG: nnue-gate
+  GATE_BASELINE_TAG: ${{ github.event.inputs.baseline_tag || 'nnue-gate' }}
   GATE_BASELINE_ASSET: baseline.nnue
-  GATE_CANDIDATE_TAG: nnue-gate
+  GATE_CANDIDATE_TAG: ${{ github.event.inputs.candidate_tag || 'nnue-gate' }}
   GATE_CANDIDATE_ASSET: candidate.nnue
-  GAUNTLET_GAMES: "200"
+  GAUNTLET_GAMES: ${{ github.event.inputs.games || '200' }}
   GAUNTLET_TC: "0/1+0.1"
   GAUNTLET_SEED: "12345"
   GAUNTLET_PV_MS: "300"
