@@ -326,6 +326,7 @@ impl ClassicIntNetwork {
         let output_bias = read_i32(&mut reader)?;
 
         validate_scale_lengths(&scales, h1_dim, h2_dim)?;
+        validate_scale_values(&scales)?;
 
         let (ft_scale, ft_shift) = compute_ft_scale(&scales);
 
@@ -433,6 +434,7 @@ impl ClassicIntNetwork {
         (acc_i16, acc_float)
     }
 
+    #[inline]
     fn quantize_ft_value(&self, value: i16) -> i8 {
         if let Some(shift) = self.ft_shift {
             let shifted = (value as i32) >> shift;
@@ -443,9 +445,9 @@ impl ClassicIntNetwork {
             DEFAULT_FT_SCALE
         } else {
             self.ft_scale
-        } as f64;
+        };
 
-        let scaled = (value as f64 / scale).floor();
+        let scaled = (value as f32 / scale).floor();
         scaled.clamp(-127.0, 127.0) as i8
     }
 }
@@ -473,6 +475,23 @@ fn validate_scale_lengths(
     Ok(())
 }
 
+fn validate_scale_values(sc: &ClassicQuantizationScalesData) -> Result<()> {
+    fn ensure_pos(name: &str, value: f32) -> Result<()> {
+        if !value.is_finite() || value <= 0.0 {
+            bail!("{name} must be finite and > 0 (got {value})");
+        }
+        Ok(())
+    }
+
+    ensure_pos("s_in_1", sc.s_in_1)?;
+    ensure_pos("s_in_2", sc.s_in_2)?;
+    ensure_pos("s_in_3", sc.s_in_3)?;
+    if !sc.s_w0.is_finite() || sc.s_w0 == 0.0 {
+        bail!("s_w0 must be finite and non-zero (got {})", sc.s_w0);
+    }
+    Ok(())
+}
+
 fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>) {
     if !scales.s_w0.is_finite() || scales.s_w0.abs() <= f32::EPSILON {
         log::warn!("s_w0 is zero or non-finite; using default ft scale");
@@ -495,6 +514,8 @@ fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>
             let shift = rounded as i32;
             return (nearest_pow2, Some(shift));
         }
+        // Classic engine は固定ビットシフト (右シフト) のみを想定しており、
+        // スケール < 1.0 となる負のシフトは対応外なので安全側でフォールバックする。
         log::warn!(
             "ft scale ratio {} implies negative shift {:.3}; falling back to float path",
             ratio,
@@ -775,5 +796,22 @@ mod tests {
         assert_eq!(outputs.h2.len(), 1);
         let actual = outputs.output;
         assert!((actual - 0.985).abs() < 1e-3, "expected ~0.985, got {actual}");
+    }
+
+    #[test]
+    fn load_fails_for_invalid_scale_values() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let mut scales: serde_json::Value =
+            serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
+        scales["s_in_2"] = serde_json::json!(-0.5);
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &scales).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("s_in_2 must be finite and > 0"), "unexpected err: {msg}");
     }
 }
