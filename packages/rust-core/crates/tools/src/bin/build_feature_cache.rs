@@ -312,7 +312,7 @@ where
         }
 
         processed += 1;
-        if processed % config.metrics_interval == 0 {
+        if processed.is_multiple_of(config.metrics_interval) {
             print!("\r[metrics] processed={}", processed);
             #[cfg(target_os = "linux")]
             if config.report_rss {
