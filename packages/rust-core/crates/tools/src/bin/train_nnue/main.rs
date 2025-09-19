@@ -10,6 +10,7 @@ pub(crate) mod export;
 pub(crate) mod logging;
 pub(crate) mod model;
 pub(crate) mod params;
+pub(crate) mod teacher;
 pub(crate) mod training;
 pub(crate) mod types;
 
@@ -23,7 +24,7 @@ use clap::parser::ValueSource;
 use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-use model::{ClassicNetwork, Network, SingleNetwork};
+use model::{ClassicNetwork, Network};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tools::common::weighting as wcfg;
@@ -41,13 +42,14 @@ use params::{
     CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP, CLASSIC_RELU_CLIP_F32,
     DEFAULT_ACC_DIM, DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES,
 };
+use teacher::load_teacher;
 use training::{
     compute_val_auc, compute_val_auc_and_ece, train_model, train_model_stream_cache,
     train_model_with_loader, DashboardOpts, LrPlateauState, TrainContext, TrainTrackers,
 };
 use types::{
     ArchKind, Config, DistillLossKind, DistillOptions, ExportFormat, ExportOptions, QuantScheme,
-    Sample,
+    Sample, TeacherKind,
 };
 
 use crate::types::TeacherValueDomain;
@@ -176,7 +178,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("distill-from-single")
                 .long("distill-from-single")
                 .help("Path to teacher Single FP32 weights for knowledge distillation")
-                .value_hint(ValueHint::FilePath),
+                .value_hint(ValueHint::FilePath)
+                .conflicts_with("distill-from-classic"),
+        )
+        .arg(
+            Arg::new("distill-from-classic")
+                .long("distill-from-classic")
+                .help("Path to teacher Classic FP32 network (nn.fp32.bin)")
+                .value_hint(ValueHint::FilePath)
+                .conflicts_with("distill-from-single"),
         )
         .arg(
             Arg::new("teacher-domain")
@@ -187,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("kd-loss")
                 .long("kd-loss")
-                .help("Knowledge distillation loss: mse|bce|kl")
+                .help("Knowledge distillation loss: mse|bce|kl|huber")
                 .value_parser(clap::value_parser!(DistillLossKind))
                 .default_value("mse"),
         )
@@ -216,6 +226,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("kd-soften-student")
                 .help("教師BCE/KLで生徒ロジットも温度Tで割る (WDL distillationのみ) ")
                 .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("kd-huber-delta")
+                .long("kd-huber-delta")
+                .help("Huber delta for --kd-loss=huber (SmoothL1)。cp/wdl 共用")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-ft")
+                .long("kd-layer-weight-ft")
+                .help("Feature transformer layer loss weight λ_ft")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-h1")
+                .long("kd-layer-weight-h1")
+                .help("Hidden1 layer loss weight λ_h1")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-h2")
+                .long("kd-layer-weight-h2")
+                .help("Hidden2 layer loss weight λ_h2")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-out")
+                .long("kd-layer-weight-out")
+                .help("Output layer loss weight λ_out (既定値=1.0)")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
+        .arg(
+            Arg::new("teacher-batch-size")
+                .long("teacher-batch-size")
+                .help("Teacher inference batch size for distillation")
+                .value_parser(clap::value_parser!(usize))
+                .default_value("256"),
+        )
+        .arg(
+            Arg::new("teacher-cache")
+                .long("teacher-cache")
+                .help("Persist teacher distillation cache to this path (bincode). In-memory cacheは常時 ON")
+                .value_hint(ValueHint::FilePath),
         )
         .arg(
             Arg::new("distill-only")
@@ -395,7 +453,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quant_h2 = *app.get_one::<QuantScheme>("quant-h2").unwrap_or(&QuantScheme::PerChannel);
     let quant_out = *app.get_one::<QuantScheme>("quant-out").unwrap_or(&QuantScheme::PerTensor);
     let label_type_value = app.get_one::<String>("label").unwrap().to_string();
-    let distill_teacher = app.get_one::<String>("distill-from-single").map(PathBuf::from);
+    let distill_teacher_single = app.get_one::<String>("distill-from-single").map(PathBuf::from);
+    let distill_teacher_classic = app.get_one::<String>("distill-from-classic").map(PathBuf::from);
+    if distill_teacher_single.is_some() && distill_teacher_classic.is_some() {
+        return Err("cannot specify both --distill-from-single and --distill-from-classic".into());
+    }
+    let (distill_teacher_path, distill_teacher_kind) = if let Some(path) = distill_teacher_single {
+        (Some(path), TeacherKind::Single)
+    } else if let Some(path) = distill_teacher_classic {
+        (Some(path), TeacherKind::ClassicFp32)
+    } else {
+        (None, TeacherKind::Single)
+    };
     let kd_loss_source = app.value_source("kd-loss");
     let kd_temp_source = app.value_source("kd-temperature");
     let kd_alpha_source = app.value_source("kd-alpha");
@@ -408,7 +477,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut distill_alpha = *app.get_one::<f32>("kd-alpha").unwrap();
 
     if arch == ArchKind::Classic && export_format == ExportFormat::ClassicV1 {
-        if distill_teacher.is_none() {
+        if distill_teacher_path.is_none() {
             return Err(ERR_CLASSIC_NEEDS_TEACHER.into());
         }
         if kd_loss_source == Some(ValueSource::DefaultValue) {
@@ -474,7 +543,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
     let mut distill_options = DistillOptions {
-        teacher_path: distill_teacher.clone(),
+        teacher_path: distill_teacher_path.clone(),
+        teacher_kind: distill_teacher_kind,
         loss: distill_loss,
         temperature: distill_temperature,
         alpha: distill_alpha,
@@ -482,12 +552,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         soften_student: kd_soften_student,
         seed: None,
         teacher_domain,
+        huber_delta: *app.get_one::<f32>("kd-huber-delta").unwrap_or(&1.0),
+        layer_weight_ft: *app.get_one::<f32>("kd-layer-weight-ft").unwrap_or(&0.0),
+        layer_weight_h1: *app.get_one::<f32>("kd-layer-weight-h1").unwrap_or(&0.0),
+        layer_weight_h2: *app.get_one::<f32>("kd-layer-weight-h2").unwrap_or(&0.0),
+        layer_weight_out: *app.get_one::<f32>("kd-layer-weight-out").unwrap_or(&1.0),
+        teacher_batch_size: *app.get_one::<usize>("teacher-batch-size").unwrap_or(&256usize),
+        teacher_cache: app.get_one::<String>("teacher-cache").map(PathBuf::from),
     };
 
     let seed_u64_opt: Option<u64> =
         app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
     let distill_seed = seed_u64_opt.map(|s| s ^ 0xC1A5_51C0_5EED_u64);
     distill_options.seed = distill_seed;
+
+    if matches!(distill_options.loss, DistillLossKind::Huber) && distill_options.huber_delta <= 0.0
+    {
+        return Err("--kd-huber-delta は 0 より大きい値を指定してください".into());
+    }
+    if matches!(distill_options.loss, DistillLossKind::Bce | DistillLossKind::Kl)
+        && distill_options.requires_teacher_layers()
+    {
+        return Err("--kd-loss=bce/kl とレイヤ別ロス(λ_ft/λ_h1/λ_h2)は同時に指定できません".into());
+    }
+    if distill_options.layer_weight_out < 0.0
+        || distill_options.layer_weight_ft < 0.0
+        || distill_options.layer_weight_h1 < 0.0
+        || distill_options.layer_weight_h2 < 0.0
+    {
+        return Err("レイヤ別ロス係数 λ_* は 0 以上を指定してください".into());
+    }
+    if distill_options.teacher_batch_size == 0 {
+        return Err("--teacher-batch-size は 1 以上を指定してください".into());
+    }
 
     if arch == ArchKind::Classic && config.relu_clip != CLASSIC_RELU_CLIP {
         if human_to_stderr {
@@ -638,8 +735,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if human_to_stderr {
         match &distill_options.teacher_path {
             Some(path) => eprintln!(
-                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
                 path,
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
@@ -648,7 +746,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 distill_options.soften_student
             ),
             None => eprintln!(
-                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
@@ -660,8 +759,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         match &distill_options.teacher_path {
             Some(path) => println!(
-                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
                 path,
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
@@ -670,7 +770,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 distill_options.soften_student
             ),
             None => println!(
-                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
@@ -922,15 +1023,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let teacher_path = distill_options.teacher_path.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, ERR_CLASSIC_NEEDS_TEACHER)
         })?;
-        let teacher = SingleNetwork::load(teacher_path.as_path()).map_err(|e| {
+        let teacher = load_teacher(teacher_path, distill_options.teacher_kind).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Failed to load teacher network '{}': {}", teacher_path.display(), e),
+                format!("Failed to load teacher network '{}': {e}", teacher_path.display()),
             )
         })?;
 
         let artifacts = distill_classic_after_training(
-            &teacher,
+            teacher.as_ref(),
             &train_samples,
             &config,
             &distill_options,
@@ -958,7 +1059,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if !eval_samples_slice.is_empty() {
             distill_metrics = Some(evaluate_distill(
-                &teacher,
+                teacher.as_ref(),
                 &classic_fp32,
                 eval_samples_slice,
                 &config,
@@ -1074,9 +1175,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                 } else if let Some(path) = &distill_options.teacher_path {
-                    match SingleNetwork::load(path) {
+                    match load_teacher(path, distill_options.teacher_kind) {
                         Ok(teacher) => match distill_classic_after_training(
-                            &teacher,
+                            teacher.as_ref(),
                             &train_samples,
                             &config,
                             &distill_options,
@@ -1108,7 +1209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 if !eval_samples_slice.is_empty() {
                                     let dm = evaluate_distill(
-                                        &teacher,
+                                        teacher.as_ref(),
                                         &classic_fp32,
                                         eval_samples_slice,
                                         &config,
@@ -1157,13 +1258,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else if human_to_stderr {
-                    eprintln!(
-                        "Classic distillation skipped: --distill-from-single was not provided."
-                    );
+                    eprintln!("Classic distillation skipped: teacher network was not provided.");
                 } else {
-                    println!(
-                        "Classic distillation skipped: --distill-from-single was not provided."
-                    );
+                    println!("Classic distillation skipped: teacher network was not provided.");
                 }
             }
 
