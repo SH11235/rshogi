@@ -99,7 +99,10 @@ impl Accumulator {
             .iter_mut()
             .zip(transformer.biases.iter())
             .take(dim)
-            .for_each(|(dst, &b)| *dst = b as i16);
+            .for_each(|(dst, &b)| {
+                let clamped = b.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                *dst = clamped;
+            });
 
         // Get active features
         let features = extract_features(pos, king_sq, perspective);
@@ -136,6 +139,12 @@ impl Accumulator {
             Color::White => (&mut self.white, &delta.removed_w, &delta.added_w),
         };
 
+        debug_assert_eq!(
+            accumulator.len(),
+            transformer.acc_dim(),
+            "accumulator length and transformer acc_dim must match"
+        );
+
         // Bridge u32 indices -> usize (SmallVec; typically no heap allocation)
         if !removed_src.is_empty() {
             let removed_us = bridge_u32_to_usize(removed_src);
@@ -162,7 +171,7 @@ impl Accumulator {
 
 #[inline]
 fn bridge_u32_to_usize(xs: &[u32]) -> SmallVec<[usize; 12]> {
-    let mut out: SmallVec<[usize; 12]> = SmallVec::with_capacity(xs.len().min(12));
+    let mut out: SmallVec<[usize; 12]> = SmallVec::with_capacity(xs.len());
     for &i in xs {
         let iu = i as usize;
         debug_assert_eq!(iu as u32, i);
@@ -383,7 +392,8 @@ pub fn calculate_update_into(
             }
 
             // Add to hand
-            let hand_type = captured.piece_type; // Already unpromoted by board logic
+            // `Piece` は基底種 (`piece_type`) と成りフラグを分離保持するため、ここでは基底種で扱える。
+            let hand_type = captured.piece_type;
 
             let hand_idx = piece_type_to_hand_index(hand_type)
                 .expect("Captured piece type must be valid hand piece");
@@ -577,7 +587,7 @@ mod tests {
     fn test_calculate_update_normal_move() {
         let pos = Position::startpos();
         let mv =
-            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap()); // 7g7f
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap()); // 3g3f
         let mut d = AccumulatorDelta {
             removed_b: SmallVec::new(),
             added_b: SmallVec::new(),

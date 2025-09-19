@@ -185,13 +185,10 @@ pub mod telemetry {
     }
 }
 
-/// Scale factor for converting network output to centipawns
+/// Scale factor for converting network output to centipawns.
 ///
-/// The NNUE network outputs values in a higher resolution internal scale.
-/// This factor is used to scale up the network output before final normalization.
-/// The value 16 is chosen to provide sufficient precision while avoiding overflow.
-// When propagate() returns a Q16 fixed-point like integer, we only need to
-// right-shift by 16 to convert to centipawns. Keep the numerator at 1.
+/// 現在のネットワークは Q16 固定小数点スケールで出力するため、追加の乗算は不要。
+/// `FV_SCALE` は意図を明確にするための定数で、現状は 1 を維持しつつ右シフトのみで cp に変換する。
 const FV_SCALE: i32 = 1;
 
 /// Output scaling shift: right shift by 16 bits to normalize the scaled output
