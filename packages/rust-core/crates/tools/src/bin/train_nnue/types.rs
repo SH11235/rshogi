@@ -117,6 +117,7 @@ pub struct DistillOptions {
     /// - Cp: 評価値(cp) 例: ±300, ±1200
     /// - WdlLogit: WDLロジット (シグモイド前の値)
     pub teacher_domain: TeacherValueDomain,
+    pub teacher_scale_fit: TeacherScaleFitKind,
     pub huber_delta: f32,
     pub layer_weight_ft: f32,
     pub layer_weight_h1: f32,
@@ -138,6 +139,7 @@ impl Default for DistillOptions {
             soften_student: false,
             seed: None,
             teacher_domain: TeacherValueDomain::Cp,
+            teacher_scale_fit: TeacherScaleFitKind::None,
             huber_delta: 1.0,
             layer_weight_ft: 0.0,
             layer_weight_h1: 0.0,
@@ -155,6 +157,14 @@ pub enum TeacherValueDomain {
     Cp,
     #[clap(name = "wdl-logit")]
     WdlLogit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum TeacherScaleFitKind {
+    #[clap(name = "none")]
+    None,
+    #[clap(name = "linear")]
+    Linear,
 }
 
 impl DistillOptions {

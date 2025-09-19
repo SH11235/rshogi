@@ -11,7 +11,8 @@ use crate::logging::StructuredLogger;
 use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP_F32};
 use crate::teacher::{TeacherBatchRequest, TeacherLayers, TeacherNetwork};
 use crate::types::{
-    Config, DistillLossKind, DistillOptions, QuantScheme, Sample, TeacherKind, TeacherValueDomain,
+    Config, DistillLossKind, DistillOptions, QuantScheme, Sample, TeacherKind, TeacherScaleFitKind,
+    TeacherValueDomain,
 };
 use bincode::{deserialize_from, serialize_into};
 use engine_core::evaluation::nnue::features::flip_us_them;
@@ -103,6 +104,7 @@ struct PreparedDistillSamples {
     samples: Vec<DistillSample>,
     cache_hits: usize,
     cache_misses: usize,
+    teacher_scale: Option<(f32, f32)>,
 }
 
 struct PendingSample {
@@ -545,6 +547,7 @@ fn prepare_distill_samples(
     teacher: &dyn TeacherNetwork,
     samples: &[Sample],
     max_samples: usize,
+    config: &Config,
     distill: &DistillOptions,
 ) -> Result<PreparedDistillSamples, String> {
     let domain = distill.teacher_domain;
@@ -627,10 +630,13 @@ fn prepare_distill_samples(
 
     result.truncate(max_samples);
 
+    let teacher_scale = compute_teacher_scale_fit(&result, config, distill);
+
     Ok(PreparedDistillSamples {
         samples: result,
         cache_hits,
         cache_misses,
+        teacher_scale,
     })
 }
 
@@ -689,6 +695,88 @@ fn flush_pending(
     }
 
     Ok(processed)
+}
+
+fn compute_teacher_scale_fit(
+    samples: &[DistillSample],
+    config: &Config,
+    distill: &DistillOptions,
+) -> Option<(f32, f32)> {
+    if samples.is_empty() {
+        return None;
+    }
+    if !matches!(distill.teacher_scale_fit, TeacherScaleFitKind::Linear) {
+        return None;
+    }
+
+    let mut sw = 0.0f64;
+    let mut sx = 0.0f64;
+    let mut sy = 0.0f64;
+    let mut sxx = 0.0f64;
+    let mut sxy = 0.0f64;
+    let mut count = 0usize;
+
+    for sample in samples {
+        let w = sample.weight as f64;
+        if w <= 0.0 {
+            continue;
+        }
+        let teacher_raw = sample.teacher.value as f64;
+        let (x, y) = match config.label_type.as_str() {
+            "wdl" => {
+                let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
+                let label_logit = stable_logit(label_prob) as f64;
+                let teacher_logit = match distill.teacher_domain {
+                    TeacherValueDomain::WdlLogit => teacher_raw,
+                    TeacherValueDomain::Cp => teacher_raw / config.scale as f64,
+                };
+                (teacher_logit, label_logit)
+            }
+            "cp" => {
+                let label_cp = sample.label as f64;
+                let teacher_cp = match distill.teacher_domain {
+                    TeacherValueDomain::WdlLogit => teacher_raw * config.scale as f64,
+                    TeacherValueDomain::Cp => teacher_raw,
+                };
+                (teacher_cp, label_cp)
+            }
+            _ => continue,
+        };
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        sw += w;
+        sx += w * x;
+        sy += w * y;
+        sxx += w * x * x;
+        sxy += w * x * y;
+        count += 1;
+    }
+
+    if count < 2 || sw <= f64::EPSILON {
+        return None;
+    }
+    let denom = sw * sxx - sx * sx;
+    if denom.abs() < 1e-9 {
+        return None;
+    }
+    let gain = (sw * sxy - sx * sy) / denom;
+    let bias = (sy - gain * sx) / sw;
+    let gain_f32 = gain as f32;
+    let bias_f32 = bias as f32;
+    if !gain_f32.is_finite() || !bias_f32.is_finite() {
+        return None;
+    }
+    Some((gain_f32, bias_f32))
+}
+
+#[inline]
+fn apply_teacher_scale(value: f32, scale: Option<(f32, f32)>) -> f32 {
+    if let Some((gain, bias)) = scale {
+        value * gain + bias
+    } else {
+        value
+    }
 }
 
 fn load_teacher_cache(
@@ -813,7 +901,7 @@ pub fn distill_classic_after_training(
     }
 
     let start = Instant::now();
-    let prepared = prepare_distill_samples(teacher, samples, MAX_DISTILL_SAMPLES, distill)?;
+    let prepared = prepare_distill_samples(teacher, samples, MAX_DISTILL_SAMPLES, config, distill)?;
     if prepared.samples.is_empty() {
         return Err("No samples available for classic distillation".into());
     }
@@ -843,6 +931,21 @@ pub fn distill_classic_after_training(
         lg.write_json(&rec);
     }
 
+    if let Some((gain, bias)) = prepared.teacher_scale {
+        log::info!("teacher scale fit (linear) applied: gain={:.6}, bias={:.6}", gain, bias);
+        if let Some(lg) = classic_cfg.structured {
+            let rec = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "phase": "teacher_scale_fit",
+                "kind": "linear",
+                "gain": gain,
+                "bias": bias,
+                "samples": prepared.samples.len(),
+            });
+            lg.write_json(&rec);
+        }
+    }
+
     let distill_seed = distill.seed.unwrap_or_else(rand::random::<u64>);
     let mut rng: StdRng = StdRng::seed_from_u64(distill_seed);
     let mut classic = ClassicFloatNetwork::he_uniform_with_dims(
@@ -853,6 +956,7 @@ pub fn distill_classic_after_training(
         config.estimated_features_per_sample,
         &mut rng,
     );
+    let teacher_scale = prepared.teacher_scale;
 
     // 出力バイアスを教師ターゲットの平均で初期化して初期収束を安定化させる。
     let mut bias_num = 0.0f64;
@@ -864,11 +968,12 @@ pub fn distill_classic_after_training(
         if weight <= 0.0 {
             continue;
         }
+        let teacher_scaled = apply_teacher_scale(sample.teacher.value, teacher_scale);
         let target = match config.label_type.as_str() {
             "wdl" => {
                 let teacher_logit = match distill.teacher_domain {
-                    TeacherValueDomain::WdlLogit => sample.teacher.value,
-                    TeacherValueDomain::Cp => sample.teacher.value / config.scale,
+                    TeacherValueDomain::WdlLogit => teacher_scaled,
+                    TeacherValueDomain::Cp => teacher_scaled / config.scale,
                 };
                 let teacher_prob = sigmoid(teacher_logit / distill.temperature);
                 let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
@@ -879,8 +984,8 @@ pub fn distill_classic_after_training(
             }
             "cp" => {
                 let teacher_cp = match distill.teacher_domain {
-                    TeacherValueDomain::Cp => sample.teacher.value,
-                    TeacherValueDomain::WdlLogit => sample.teacher.value * config.scale,
+                    TeacherValueDomain::Cp => teacher_scaled,
+                    TeacherValueDomain::WdlLogit => teacher_scaled * config.scale,
                 };
                 let blended = distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
                 blended.clamp(-(config.cp_clip as f32), config.cp_clip as f32)
@@ -944,12 +1049,13 @@ pub fn distill_classic_after_training(
         let mut epoch_weight = 0.0f64;
         for sample in &prepared.samples {
             let prediction = forward(&classic, sample, &mut scratch);
+            let teacher_scaled = apply_teacher_scale(sample.teacher.value, teacher_scale);
             let (mut loss_contrib, mut grad_output) = match config.label_type.as_str() {
                 "wdl" => {
                     // Teacher may be cp or wdl-logit; normalize to logit space before temperature
                     let teacher_logit = match distill.teacher_domain {
-                        TeacherValueDomain::WdlLogit => sample.teacher.value,
-                        TeacherValueDomain::Cp => sample.teacher.value / config.scale,
+                        TeacherValueDomain::WdlLogit => teacher_scaled,
+                        TeacherValueDomain::Cp => teacher_scaled / config.scale,
                     };
                     let teacher_prob = sigmoid(teacher_logit / temperature);
                     let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
@@ -1043,8 +1149,8 @@ pub fn distill_classic_after_training(
                 }
                 "cp" => {
                     let teacher_cp = match distill.teacher_domain {
-                        TeacherValueDomain::Cp => sample.teacher.value,
-                        TeacherValueDomain::WdlLogit => sample.teacher.value * config.scale,
+                        TeacherValueDomain::Cp => teacher_scaled,
+                        TeacherValueDomain::WdlLogit => teacher_scaled * config.scale,
                     };
                     let mut target =
                         distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;

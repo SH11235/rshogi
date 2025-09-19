@@ -49,7 +49,7 @@ use training::{
 };
 use types::{
     ArchKind, Config, DistillLossKind, DistillOptions, ExportFormat, ExportOptions, QuantScheme,
-    Sample, TeacherKind,
+    Sample, TeacherKind, TeacherScaleFitKind,
 };
 
 use crate::types::TeacherValueDomain;
@@ -193,6 +193,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("teacher-domain")
                 .help("Teacher output domain: cp|wdl-logit (default: Classic FP32 教師なら wdl-logit、それ以外は --label に応じて推定)")
                 .value_parser(clap::value_parser!(TeacherValueDomain)),
+        )
+        .arg(
+            Arg::new("teacher-scale-fit")
+                .long("teacher-scale-fit")
+                .help("Teacher scale fitting: none|linear (default: none)")
+                .value_parser(clap::value_parser!(TeacherScaleFitKind))
+                .default_value("none"),
         )
         .arg(
             Arg::new("kd-loss")
@@ -551,6 +558,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         soften_student: kd_soften_student,
         seed: None,
         teacher_domain,
+        teacher_scale_fit: *app
+            .get_one::<TeacherScaleFitKind>("teacher-scale-fit")
+            .unwrap_or(&TeacherScaleFitKind::None),
         huber_delta: *app.get_one::<f32>("kd-huber-delta").unwrap_or(&1.0),
         layer_weight_ft: *app.get_one::<f32>("kd-layer-weight-ft").unwrap_or(&0.0),
         layer_weight_h1: *app.get_one::<f32>("kd-layer-weight-h1").unwrap_or(&0.0),
@@ -734,7 +744,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if human_to_stderr {
         match &distill_options.teacher_path {
             Some(path) => eprintln!(
-                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
                 path,
                 distill_options.teacher_kind,
                 distill_options.teacher_domain,
@@ -742,23 +752,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
             None => eprintln!(
-                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
                 distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
         }
     } else {
         match &distill_options.teacher_path {
             Some(path) => println!(
-                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
                 path,
                 distill_options.teacher_kind,
                 distill_options.teacher_domain,
@@ -766,17 +778,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
             None => println!(
-                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
                 distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
         }
     }
