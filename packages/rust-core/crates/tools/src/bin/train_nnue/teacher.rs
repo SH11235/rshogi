@@ -75,17 +75,6 @@ pub trait TeacherNetwork: Send {
 
     fn supports_domain(&self, domain: TeacherValueDomain) -> bool;
 
-    fn evaluate(
-        &self,
-        features: &[u32],
-        domain: TeacherValueDomain,
-        capture_layers: bool,
-    ) -> Result<TeacherEval, TeacherError> {
-        let req = [TeacherBatchRequest { features }];
-        let mut res = self.evaluate_batch(&req, domain, capture_layers)?;
-        Ok(res.pop().expect("TeacherNetwork::evaluate expected one result"))
-    }
-
     fn evaluate_batch<'a>(
         &self,
         batch: &[TeacherBatchRequest<'a>],
@@ -130,7 +119,7 @@ impl TeacherNetwork for SingleTeacher {
     }
 
     fn supports_domain(&self, domain: TeacherValueDomain) -> bool {
-        matches!(domain, TeacherValueDomain::Cp)
+        matches!(domain, TeacherValueDomain::WdlLogit)
     }
 
     fn evaluate_batch<'a>(
