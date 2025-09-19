@@ -5,16 +5,6 @@ use clap::Parser;
 use jsonschema::{Draft, JSONSchema};
 use serde_json::Value;
 
-struct SchemaGuard(*mut Value);
-
-impl Drop for SchemaGuard {
-    fn drop(&mut self) {
-        unsafe {
-            drop(Box::from_raw(self.0));
-        }
-    }
-}
-
 /// Validate gauntlet out.json against the repository schema
 #[derive(Parser, Debug)]
 #[command(name = "validate_gauntlet_schema", version, about)]
@@ -46,10 +36,9 @@ fn run() -> Result<()> {
     );
     let schema: Value = serde_json::from_reader(schema_reader)
         .with_context(|| format!("failed to parse schema JSON: {}", opt.schema.display()))?;
-    let schema_box = Box::new(schema);
-    let schema_ptr = Box::into_raw(schema_box);
-    let _guard = SchemaGuard(schema_ptr);
-    let schema_ref: &'static Value = unsafe { &*_guard.0 };
+    // JSONSchema keeps references to the provided Value; leaking a boxed schema keeps it alive
+    // for the short lifetime of this CLI process.
+    let schema_ref: &'static Value = Box::leak(Box::new(schema));
 
     let compiled = JSONSchema::options()
         .with_draft(Draft::Draft202012)
