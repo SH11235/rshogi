@@ -2,6 +2,7 @@
 //!
 //! HalfKP uses the king position and all other pieces as features
 
+use super::CLASSIC_ACC_DIM;
 use crate::{
     shogi::{
         piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES, MAX_HAND_PIECES,
@@ -195,7 +196,7 @@ pub struct FeatureTransformer {
 
 impl FeatureTransformer {
     /// Default accumulator/output dimension
-    pub const DEFAULT_DIM: usize = 256;
+    pub const DEFAULT_DIM: usize = CLASSIC_ACC_DIM;
 
     /// Create zero-initialized feature transformer with default dimension (256)
     pub fn zero() -> Self {
@@ -349,6 +350,52 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
     }
 
     features
+}
+
+#[inline]
+fn orient_board_piece(perspective: Color, piece: Piece, square: Square) -> (Piece, Square) {
+    if perspective == Color::Black {
+        (piece, square)
+    } else {
+        (piece.flip_color(), square.flip())
+    }
+}
+
+#[inline]
+fn orient_hand_color(perspective: Color, owner: Color) -> Color {
+    if perspective == Color::Black {
+        owner
+    } else {
+        owner.flip()
+    }
+}
+
+/// 盤上駒を単一視点で HalfKP インデックスへ写像する。
+/// `king_sq` には視点ごとに整合した王座標（白視点は flip 済み）を渡す。
+#[inline]
+pub fn oriented_board_feature_index(
+    perspective: Color,
+    king_sq: Square,
+    piece: Piece,
+    square: Square,
+) -> Option<usize> {
+    let (piece_adj, square_adj) = orient_board_piece(perspective, piece, square);
+    BonaPiece::from_board(piece_adj, square_adj).map(|bp| halfkp_index(king_sq, bp))
+}
+
+/// 手駒を単一視点で HalfKP インデックスへ写像する。
+/// `owner` は実際の手駒所有者。視点に応じた色変換は内部で行う。
+#[inline]
+pub fn oriented_hand_feature_index(
+    perspective: Color,
+    king_sq: Square,
+    piece_type: PieceType,
+    owner: Color,
+    count: u8,
+) -> Result<usize, &'static str> {
+    let color_adj = orient_hand_color(perspective, owner);
+    let bona = BonaPiece::from_hand(piece_type, color_adj, count)?;
+    Ok(halfkp_index(king_sq, bona))
 }
 
 #[cfg(test)]

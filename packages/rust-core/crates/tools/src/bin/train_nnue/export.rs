@@ -41,8 +41,7 @@ impl QuantizationParams {
             };
         }
         let scale = (max_val - min_val) / 255.0;
-        let zero_point =
-            (-min_val / scale - 128.0).round().clamp(QUANTIZATION_MIN, QUANTIZATION_MAX) as i32;
+        let zero_point = (-min_val / scale - 128.0).round() as i32;
         Self { scale, zero_point }
     }
 }

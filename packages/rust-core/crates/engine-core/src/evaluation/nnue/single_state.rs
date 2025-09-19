@@ -1,6 +1,6 @@
 use super::single::SingleChannelNet;
 use crate::{
-    evaluation::nnue::features::{halfkp_index, BonaPiece},
+    evaluation::nnue::features::{oriented_board_feature_index, oriented_hand_feature_index},
     shogi::piece_type_to_hand_index,
     simd::add_row_scaled_f32,
     Color, Piece, PieceType, Position,
@@ -170,29 +170,45 @@ impl SingleAcc {
             let to = mv.to();
             let pt = mv.drop_piece_type();
             let piece = Piece::new(pt, pre_pos.side_to_move);
-            if let Some(b) = BonaPiece::from_board(piece, to) {
-                added_b.push(halfkp_index(bk, b));
+            if let Some(idx) = oriented_board_feature_index(Color::Black, bk, piece, to) {
+                added_b.push(idx);
             }
-            if let Some(w) = BonaPiece::from_board(piece.flip_color(), to.flip()) {
-                added_w.push(halfkp_index(wk_flip, w));
+            if let Some(idx) = oriented_board_feature_index(Color::White, wk_flip, piece, to) {
+                added_w.push(idx);
             }
 
             let color = pre_pos.side_to_move;
             let hand_idx = piece_type_to_hand_index(pt).expect("valid hand type");
             let count = pre_pos.hands[color as usize][hand_idx];
             if count > 0 {
-                if let Ok(bh) = BonaPiece::from_hand(pt, color, count) {
-                    removed_b.push(halfkp_index(bk, bh));
+                match oriented_hand_feature_index(Color::Black, bk, pt, color, count) {
+                    Ok(idx) => removed_b.push(idx),
+                    Err(_e) => {
+                        #[cfg(debug_assertions)]
+                        log::error!("[NNUE] Error creating BonaPiece from hand: {_e}");
+                    }
                 }
-                if let Ok(wh) = BonaPiece::from_hand(pt, color.flip(), count) {
-                    removed_w.push(halfkp_index(wk_flip, wh));
+                match oriented_hand_feature_index(Color::White, wk_flip, pt, color, count) {
+                    Ok(idx) => removed_w.push(idx),
+                    Err(_e) => {
+                        #[cfg(debug_assertions)]
+                        log::error!("[NNUE] Error creating BonaPiece from hand: {_e}");
+                    }
                 }
                 if count > 1 {
-                    if let Ok(bh2) = BonaPiece::from_hand(pt, color, count - 1) {
-                        added_b.push(halfkp_index(bk, bh2));
+                    match oriented_hand_feature_index(Color::Black, bk, pt, color, count - 1) {
+                        Ok(idx) => added_b.push(idx),
+                        Err(_e) => {
+                            #[cfg(debug_assertions)]
+                            log::warn!("[NNUE] Error creating BonaPiece from hand: {}", _e);
+                        }
                     }
-                    if let Ok(wh2) = BonaPiece::from_hand(pt, color.flip(), count - 1) {
-                        added_w.push(halfkp_index(wk_flip, wh2));
+                    match oriented_hand_feature_index(Color::White, wk_flip, pt, color, count - 1) {
+                        Ok(idx) => added_w.push(idx),
+                        Err(_e) => {
+                            #[cfg(debug_assertions)]
+                            log::warn!("[NNUE] Error creating BonaPiece from hand: {}", _e);
+                        }
                     }
                 }
             }
@@ -200,11 +216,13 @@ impl SingleAcc {
             let from = mv.from().expect("from exists");
             let to = mv.to();
             let moving_piece = pre_pos.piece_at(from).expect("piece at from");
-            if let Some(b) = BonaPiece::from_board(moving_piece, from) {
-                removed_b.push(halfkp_index(bk, b));
+            if let Some(idx) = oriented_board_feature_index(Color::Black, bk, moving_piece, from) {
+                removed_b.push(idx);
             }
-            if let Some(w) = BonaPiece::from_board(moving_piece.flip_color(), from.flip()) {
-                removed_w.push(halfkp_index(wk_flip, w));
+            if let Some(idx) =
+                oriented_board_feature_index(Color::White, wk_flip, moving_piece, from)
+            {
+                removed_w.push(idx);
             }
 
             let dest_piece = if mv.is_promote() {
@@ -212,19 +230,20 @@ impl SingleAcc {
             } else {
                 moving_piece
             };
-            if let Some(b) = BonaPiece::from_board(dest_piece, to) {
-                added_b.push(halfkp_index(bk, b));
+            if let Some(idx) = oriented_board_feature_index(Color::Black, bk, dest_piece, to) {
+                added_b.push(idx);
             }
-            if let Some(w) = BonaPiece::from_board(dest_piece.flip_color(), to.flip()) {
-                added_w.push(halfkp_index(wk_flip, w));
+            if let Some(idx) = oriented_board_feature_index(Color::White, wk_flip, dest_piece, to) {
+                added_w.push(idx);
             }
 
             if let Some(captured) = pre_pos.piece_at(to) {
-                if let Some(b) = BonaPiece::from_board(captured, to) {
-                    removed_b.push(halfkp_index(bk, b));
+                if let Some(idx) = oriented_board_feature_index(Color::Black, bk, captured, to) {
+                    removed_b.push(idx);
                 }
-                if let Some(w) = BonaPiece::from_board(captured.flip_color(), to.flip()) {
-                    removed_w.push(halfkp_index(wk_flip, w));
+                if let Some(idx) = oriented_board_feature_index(Color::White, wk_flip, captured, to)
+                {
+                    removed_w.push(idx);
                 }
 
                 let hand_type = captured.piece_type;
@@ -235,19 +254,52 @@ impl SingleAcc {
                 let hand_idx = piece_type_to_hand_index(hand_type).expect("hand type");
                 let color = pre_pos.side_to_move;
                 let new_count = pre_pos.hands[color as usize][hand_idx] + 1;
-                if let Ok(bh) = BonaPiece::from_hand(hand_type, color, new_count) {
-                    added_b.push(halfkp_index(bk, bh));
+                match oriented_hand_feature_index(Color::Black, bk, hand_type, color, new_count) {
+                    Ok(idx) => added_b.push(idx),
+                    Err(_e) => {
+                        #[cfg(debug_assertions)]
+                        log::warn!("[NNUE] Error creating BonaPiece from hand: {}", _e);
+                    }
                 }
-                if let Ok(wh) = BonaPiece::from_hand(hand_type, color.flip(), new_count) {
-                    added_w.push(halfkp_index(wk_flip, wh));
+                match oriented_hand_feature_index(
+                    Color::White,
+                    wk_flip,
+                    hand_type,
+                    color,
+                    new_count,
+                ) {
+                    Ok(idx) => added_w.push(idx),
+                    Err(_e) => {
+                        #[cfg(debug_assertions)]
+                        log::warn!("[NNUE] Error creating BonaPiece from hand: {}", _e);
+                    }
                 }
                 if new_count > 1 {
-                    if let Ok(bh_old) = BonaPiece::from_hand(hand_type, color, new_count - 1) {
-                        removed_b.push(halfkp_index(bk, bh_old));
+                    match oriented_hand_feature_index(
+                        Color::Black,
+                        bk,
+                        hand_type,
+                        color,
+                        new_count - 1,
+                    ) {
+                        Ok(idx) => removed_b.push(idx),
+                        Err(_e) => {
+                            #[cfg(debug_assertions)]
+                            log::warn!("[NNUE] Error creating BonaPiece from hand: {}", _e);
+                        }
                     }
-                    if let Ok(wh_old) = BonaPiece::from_hand(hand_type, color.flip(), new_count - 1)
-                    {
-                        removed_w.push(halfkp_index(wk_flip, wh_old));
+                    match oriented_hand_feature_index(
+                        Color::White,
+                        wk_flip,
+                        hand_type,
+                        color,
+                        new_count - 1,
+                    ) {
+                        Ok(idx) => removed_w.push(idx),
+                        Err(_e) => {
+                            #[cfg(debug_assertions)]
+                            log::warn!("[NNUE] Error creating BonaPiece from hand: {}", _e);
+                        }
                     }
                 }
             }
