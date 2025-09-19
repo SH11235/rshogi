@@ -59,7 +59,7 @@ pub fn quantize_symmetric_i8(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        if weights.len() % channels != 0 {
+        if !weights.len().is_multiple_of(channels) {
             return Err(format!(
                 "weights len {} not divisible by channels {} (stride {})",
                 weights.len(),
@@ -115,7 +115,7 @@ pub fn quantize_symmetric_i16(
     };
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
-        if weights.len() % channels != 0 {
+        if !weights.len().is_multiple_of(channels) {
             return Err(format!(
                 "weights len {} not divisible by channels {} (stride {})",
                 weights.len(),
@@ -243,7 +243,7 @@ pub struct ClassicFeatureTransformerInt {
 impl ClassicFeatureTransformerInt {
     pub fn new(weights: Vec<i16>, biases: Vec<i32>, acc_dim: usize) -> Self {
         debug_assert!(
-            acc_dim == 0 || weights.len() % acc_dim == 0,
+            acc_dim == 0 || weights.len().is_multiple_of(acc_dim),
             "ft_weights.len() must be multiple of acc_dim ({} % {} != 0)",
             weights.len(),
             acc_dim

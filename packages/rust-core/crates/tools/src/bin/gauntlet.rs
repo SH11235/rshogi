@@ -101,7 +101,7 @@ fn validate_args(a: &RunArgs) -> Result<()> {
             "--multipv must be 1 for games (PV spread is measured with MultiPV=3 internally)"
         ));
     }
-    if a.games % 2 != 0 {
+    if !a.games.is_multiple_of(2) {
         return Err(anyhow!("--games must be even for fair pairing"));
     }
     if a.threads != 1 {

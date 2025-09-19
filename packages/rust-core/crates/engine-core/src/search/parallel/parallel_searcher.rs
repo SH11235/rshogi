@@ -497,7 +497,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Small random-like variation based on helper_id and iteration
         // This creates more diversity in search depths across iterations
-        let random_offset = if (helper_id + iteration) % 4 == 0 {
+        let random_offset = if (helper_id + iteration).is_multiple_of(4) {
             1
         } else {
             0

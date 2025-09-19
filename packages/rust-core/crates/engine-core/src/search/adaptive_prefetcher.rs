@@ -66,7 +66,7 @@ impl AdaptivePrefetcher {
         let count = self.stat_counter.fetch_add(1, Ordering::Relaxed);
 
         // Check if we should adjust strategy
-        if (count + 1) % Self::STAT_WINDOW == 0 {
+        if (count + 1).is_multiple_of(Self::STAT_WINDOW) {
             self.adjust_distance();
         }
     }

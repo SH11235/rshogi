@@ -524,7 +524,7 @@ fn train_model_classic(
             last_lr_base = lr_base;
 
             if let Some(interval) = ctx.save_every {
-                if total_batches % interval == 0 {
+                if total_batches.is_multiple_of(interval) {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
                     save_classic_network(network, &checkpoint_path)?;
@@ -1228,7 +1228,7 @@ fn train_model_stream_cache_single(
             }
 
             if let Some(interval) = ctx.save_every {
-                if total_batches % interval == 0 {
+                if total_batches.is_multiple_of(interval) {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
                     save_single_network(network, &checkpoint_path)?;
@@ -1663,7 +1663,7 @@ fn train_model_stream_cache_classic(
             total_batches += 1;
 
             if let Some(interval) = ctx.save_every {
-                if total_batches % interval == 0 {
+                if total_batches.is_multiple_of(interval) {
                     let checkpoint_path =
                         ctx.out_dir.join(format!("checkpoint_batch_{}.fp32.bin", total_batches));
                     save_classic_network(network, &checkpoint_path)?;
