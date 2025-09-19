@@ -270,7 +270,7 @@ impl ClassicIntNetwork {
 
         let scales_file = File::open(&scales_path)
             .with_context(|| format!("failed to open scales JSON: {}", scales_path.display()))?;
-        let scales: ClassicQuantizationScalesData = serde_json::from_reader(scales_file)
+        let mut scales: ClassicQuantizationScalesData = serde_json::from_reader(scales_file)
             .with_context(|| format!("failed to parse scales JSON: {}", scales_path.display()))?;
         if scales.schema_version != 1 {
             bail!("unsupported scales schema_version {} (expected 1)", scales.schema_version);
@@ -326,6 +326,7 @@ impl ClassicIntNetwork {
         let output_bias = read_i32(&mut reader)?;
 
         validate_scale_lengths(&scales, h1_dim, h2_dim)?;
+        sanitize_scale_values(&mut scales);
         validate_scale_values(&scales)?;
 
         let (ft_scale, ft_shift) = compute_ft_scale(&scales);
@@ -503,6 +504,44 @@ fn validate_scale_values(sc: &ClassicQuantizationScalesData) -> Result<()> {
         ensure_pos(&format!("s_w3[{idx}]"), value)?;
     }
     Ok(())
+}
+
+fn sanitize_scale_values(scales: &mut ClassicQuantizationScalesData) {
+    const MIN_VALUE: f32 = 1e-6;
+
+    fn sanitize_scalar(name: &str, value: &mut f32) {
+        if !value.is_finite() {
+            log::warn!("{name} is {} (invalid); falling back to {:.6}", *value, MIN_VALUE);
+            *value = MIN_VALUE;
+        } else if *value > 0.0 && *value < MIN_VALUE {
+            log::warn!("{name} is {:.6} (too small); clamping to {:.6}", *value, MIN_VALUE);
+            *value = MIN_VALUE;
+        }
+    }
+
+    fn sanitize_vec(name: &str, values: &mut [f32]) {
+        for (idx, val) in values.iter_mut().enumerate() {
+            if !val.is_finite() {
+                log::warn!("{name}[{idx}] is {} (invalid); falling back to {:.6}", *val, MIN_VALUE);
+                *val = MIN_VALUE;
+            } else if *val > 0.0 && *val < MIN_VALUE {
+                log::warn!(
+                    "{name}[{idx}] is {:.6} (too small); clamping to {:.6}",
+                    *val,
+                    MIN_VALUE
+                );
+                *val = MIN_VALUE;
+            }
+        }
+    }
+
+    sanitize_scalar("s_w0", &mut scales.s_w0);
+    sanitize_scalar("s_in_1", &mut scales.s_in_1);
+    sanitize_scalar("s_in_2", &mut scales.s_in_2);
+    sanitize_scalar("s_in_3", &mut scales.s_in_3);
+    sanitize_vec("s_w1", &mut scales.s_w1);
+    sanitize_vec("s_w2", &mut scales.s_w2);
+    sanitize_vec("s_w3", &mut scales.s_w3);
 }
 
 fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>) {
