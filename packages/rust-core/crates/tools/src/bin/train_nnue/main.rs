@@ -191,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("teacher-domain")
                 .long("teacher-domain")
-                .help("Teacher output domain: cp|wdl-logit (default: inferred from --label)")
+                .help("Teacher output domain: cp|wdl-logit (default: Classic FP32 教師なら wdl-logit、それ以外は --label に応じて推定)")
                 .value_parser(clap::value_parser!(TeacherValueDomain)),
         )
         .arg(
@@ -278,9 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("distill-only")
                 .long("distill-only")
-                .help(
-                    "Classic distillationのみ実行 (学習をスキップ)。--arch classic --export-format classic-v1 および --distill-from-single が必要"
-                )
+                .help("Classic distillation のみ実行 (学習をスキップ)。--arch classic --export-format classic-v1 および --distill-from-<single|classic> のいずれかが必要")
                 .action(ArgAction::SetTrue),
         )
         .arg(arg!(--shuffle "Shuffle training data"))
@@ -533,14 +531,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit_fp32_also: app.get_flag("emit-fp32-also"),
     };
     // Teacher domain (cp or wdl-logit). Default depends on label type: if label_type is "cp" assume cp, else wdl-logit for classic case.
-    let teacher_domain =
-        app.get_one::<TeacherValueDomain>("teacher-domain").copied().unwrap_or_else(|| {
-            if label_type_value == "cp" {
-                TeacherValueDomain::Cp
-            } else {
-                TeacherValueDomain::WdlLogit
-            }
-        });
+    let default_teacher_domain = match (distill_teacher_kind, label_type_value.as_str()) {
+        (TeacherKind::ClassicFp32, _) => TeacherValueDomain::WdlLogit,
+        (_, "cp") => TeacherValueDomain::Cp,
+        _ => TeacherValueDomain::WdlLogit,
+    };
+    let teacher_domain = app
+        .get_one::<TeacherValueDomain>("teacher-domain")
+        .copied()
+        .unwrap_or(default_teacher_domain);
 
     let mut distill_options = DistillOptions {
         teacher_path: distill_teacher_path.clone(),

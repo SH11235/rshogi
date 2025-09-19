@@ -22,6 +22,7 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 
 const MAX_DISTILL_SAMPLES: usize = 50_000;
+const TEACHER_EVAL_BATCH: usize = 512;
 const DISTILL_EPOCHS: usize = 2;
 const DISTILL_LR: f32 = 1e-4;
 const PROB_EPS: f32 = 1e-6;
@@ -134,7 +135,17 @@ struct TeacherCacheEntry {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TeacherCacheFile {
+    #[serde(default = "TeacherCacheFile::default_version")]
+    version: u32,
     entries: Vec<(Vec<u32>, TeacherCacheEntry)>,
+}
+
+impl TeacherCacheFile {
+    const VERSION: u32 = 1;
+
+    fn default_version() -> u32 {
+        0
+    }
 }
 
 impl From<&TeacherPrepared> for TeacherCacheEntry {
@@ -692,6 +703,14 @@ fn load_teacher_cache(
         .map_err(|e| format!("failed to open teacher cache {}: {e}", path.display()))?;
     let cache_file: TeacherCacheFile = deserialize_from(file)
         .map_err(|e| format!("failed to deserialize teacher cache {}: {e}", path.display()))?;
+    if cache_file.version != 0 && cache_file.version != TeacherCacheFile::VERSION {
+        log::warn!(
+            "teacher cache {} version {} is incompatible with expected {}; entries will be re-generated",
+            path.display(),
+            cache_file.version,
+            TeacherCacheFile::VERSION
+        );
+    }
     let mut map = HashMap::with_capacity(cache_file.entries.len());
     for (features, entry) in cache_file.entries {
         if entry.domain != domain {
@@ -717,7 +736,10 @@ fn save_teacher_cache(
     for (features, prepared) in cache {
         entries.push((features.clone(), TeacherCacheEntry::from(prepared.as_ref())));
     }
-    let cache_file = TeacherCacheFile { entries };
+    let cache_file = TeacherCacheFile {
+        version: TeacherCacheFile::VERSION,
+        entries,
+    };
     let mut file = File::create(path)
         .map_err(|e| format!("failed to create teacher cache {}: {e}", path.display()))?;
     serialize_into(&mut file, &cache_file)
@@ -1190,69 +1212,121 @@ pub fn evaluate_distill(
     let mut max_cp = 0.0f32;
     let mut max_logit = 0.0f32;
 
-    for sample in samples.iter().filter(|s| s.weight > 0.0).take(MAX_DISTILL_SAMPLES) {
-        let weight = sample.weight as f64;
-        let teacher_eval = match teacher.evaluate(&sample.features, teacher_domain, false) {
-            Ok(value) => value,
+    let mut processed = 0usize;
+    let mut batch_requests: Vec<TeacherBatchRequest<'_>> = Vec::with_capacity(TEACHER_EVAL_BATCH);
+    let mut batch_samples: Vec<&Sample> = Vec::with_capacity(TEACHER_EVAL_BATCH);
+
+    let mut flush_batch = |batch_requests: &mut Vec<TeacherBatchRequest<'_>>,
+                           batch_samples: &mut Vec<&Sample>| {
+        if batch_requests.is_empty() {
+            return 0usize;
+        }
+        let evals = match teacher.evaluate_batch(batch_requests, teacher_domain, false) {
+            Ok(e) => e,
             Err(e) => {
-                log::warn!("failed to evaluate teacher {:?} during metrics: {}", teacher.kind(), e);
+                log::warn!(
+                    "failed to evaluate teacher {:?} during metrics batch: {}",
+                    teacher.kind(),
+                    e
+                );
+                batch_requests.clear();
+                batch_samples.clear();
+                return 0;
+            }
+        };
+        if evals.len() != batch_samples.len() {
+            log::warn!(
+                "teacher {:?} returned {} evals for {} samples; truncating to minimum",
+                teacher.kind(),
+                evals.len(),
+                batch_samples.len()
+            );
+        }
+        let take = evals.len().min(batch_samples.len());
+        for (sample, eval) in batch_samples.iter().take(take).zip(evals.into_iter()) {
+            let weight = sample.weight as f64;
+            if weight <= 0.0 {
                 continue;
             }
-        };
-        let teacher_raw = teacher_eval.value;
-        // Normalize teacher to logit domain (for wdl metrics) and cp domain (for cp metrics)
-        let teacher_logit = match (config.label_type.as_str(), teacher_domain) {
-            ("wdl", TeacherValueDomain::WdlLogit) => teacher_raw,
-            ("wdl", TeacherValueDomain::Cp) => teacher_raw / config.scale,
-            ("cp", TeacherValueDomain::WdlLogit) => teacher_raw, // raw already logit
-            ("cp", TeacherValueDomain::Cp) => teacher_raw / config.scale, // to reuse logit metrics if needed
-            _ => teacher_raw,
-        };
+            let teacher_raw = eval.value;
+            let teacher_logit = match (config.label_type.as_str(), teacher_domain) {
+                ("wdl", TeacherValueDomain::WdlLogit) => teacher_raw,
+                ("wdl", TeacherValueDomain::Cp) => teacher_raw / config.scale,
+                ("cp", TeacherValueDomain::WdlLogit) => teacher_raw,
+                ("cp", TeacherValueDomain::Cp) => teacher_raw / config.scale,
+                _ => teacher_raw,
+            };
 
-        let features_them = to_features_them(&sample.features);
-        let ds = DistillSample {
-            features_us: sample.features.clone(),
-            features_them,
-            teacher: dummy_teacher.clone(),
-            label: 0.0,
-            weight: 0.0,
-        };
-        // student_raw: label_type が wdl の場合は logit、cp の場合は cp ドメインの値
-        let student_raw = forward(classic_fp32, &ds, &mut scratch);
+            let features_them = to_features_them(&sample.features);
+            let ds = DistillSample {
+                features_us: sample.features.clone(),
+                features_them,
+                teacher: dummy_teacher.clone(),
+                label: 0.0,
+                weight: 0.0,
+            };
+            let student_raw = forward(classic_fp32, &ds, &mut scratch);
 
-        metrics.n += 1;
-        weight_sum += weight;
+            metrics.n += 1;
+            weight_sum += weight;
 
-        if config.label_type == "wdl" {
-            let diff_logit = (student_raw - teacher_logit).abs();
-            mae_logit_num += diff_logit as f64 * weight;
-            logit_abs_diffs.push(diff_logit);
-            logit_weights.push(weight as f32);
-            if diff_logit > max_logit {
-                max_logit = diff_logit;
+            if config.label_type == "wdl" {
+                let diff_logit = (student_raw - teacher_logit).abs();
+                mae_logit_num += diff_logit as f64 * weight;
+                logit_abs_diffs.push(diff_logit);
+                logit_weights.push(weight as f32);
+                if diff_logit > max_logit {
+                    max_logit = diff_logit;
+                }
+            }
+
+            let (teacher_cp, student_cp) = map_teacher_student_to_cp(
+                config.label_type.as_str(),
+                teacher_domain,
+                teacher_raw,
+                teacher_logit,
+                student_raw,
+                config,
+            );
+
+            let diff_cp = (student_cp - teacher_cp).abs();
+            mae_cp_num += diff_cp as f64 * weight;
+            cp_abs_diffs.push(diff_cp);
+            cp_weights.push(weight as f32);
+            if diff_cp > max_cp {
+                max_cp = diff_cp;
+            }
+
+            teacher_cp_weighted_sum += teacher_cp as f64 * weight;
+            teacher_cp_values.push((teacher_cp as f64, weight));
+            student_cp_values.push(student_cp as f64);
+        }
+        batch_requests.clear();
+        batch_samples.clear();
+        take
+    };
+
+    for sample in samples.iter().filter(|s| s.weight > 0.0) {
+        if processed >= MAX_DISTILL_SAMPLES {
+            break;
+        }
+        if processed + batch_requests.len() >= MAX_DISTILL_SAMPLES {
+            processed += flush_batch(&mut batch_requests, &mut batch_samples);
+            if processed >= MAX_DISTILL_SAMPLES {
+                break;
             }
         }
-
-        let (teacher_cp, student_cp) = map_teacher_student_to_cp(
-            config.label_type.as_str(),
-            teacher_domain,
-            teacher_raw,
-            teacher_logit,
-            student_raw,
-            config,
-        );
-
-        let diff_cp = (student_cp - teacher_cp).abs();
-        mae_cp_num += diff_cp as f64 * weight;
-        cp_abs_diffs.push(diff_cp);
-        cp_weights.push(weight as f32);
-        if diff_cp > max_cp {
-            max_cp = diff_cp;
+        batch_requests.push(TeacherBatchRequest {
+            features: &sample.features,
+        });
+        batch_samples.push(sample);
+        if batch_requests.len() == TEACHER_EVAL_BATCH {
+            processed += flush_batch(&mut batch_requests, &mut batch_samples);
         }
+    }
 
-        teacher_cp_weighted_sum += teacher_cp as f64 * weight;
-        teacher_cp_values.push((teacher_cp as f64, weight));
-        student_cp_values.push(student_cp as f64);
+    if processed < MAX_DISTILL_SAMPLES {
+        let _ = flush_batch(&mut batch_requests, &mut batch_samples);
     }
 
     if metrics.n == 0 || weight_sum == 0.0 {
