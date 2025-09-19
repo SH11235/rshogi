@@ -109,7 +109,7 @@ pub fn enabled_features_str() -> String {
     format!("engine-core:{}", v.join(","))
 }
 
-/// Classic NNUE (HalfKP 2562-32-1) 既定の accumulator 次元。
+/// Classic NNUE (HalfKP 256x2-32-32-1) 既定の accumulator 次元。
 ///
 /// v1 フォーマットおよび後方互換を担保するコードではこの値を使用し、
 /// v2 (可変次元) では重みヘッダに記載された値で上書きされる。
