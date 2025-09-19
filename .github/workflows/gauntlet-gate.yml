@@ -93,8 +93,7 @@ jobs:
           gh release download "${RELEASE_TAG}" \
             -R "$GITHUB_REPOSITORY" \
             -p "${ASSET_NAME}" \
-            -D runs/nnue_local \
-            -O baseline.nnue
+            -O runs/nnue_local/baseline.nnue
           if [ ! -s "$DEST" ]; then
             echo "::error::Baseline weights not found. Provide runs/nnue_local/baseline.nnue or set GATE_BASELINE_TAG/GATE_BASELINE_ASSET to a valid release asset."
             exit 1
@@ -116,8 +115,7 @@ jobs:
           gh release download "${RELEASE_TAG}" \
             -R "$GITHUB_REPOSITORY" \
             -p "${ASSET_NAME}" \
-            -D runs/nnue_local \
-            -O candidate.nnue
+            -O runs/nnue_local/candidate.nnue
           if [ ! -s "$DEST" ]; then
             echo "::error::Candidate weights not found. Provide runs/nnue_local/candidate.nnue or set GATE_CANDIDATE_TAG/GATE_CANDIDATE_ASSET to a valid release asset."
             exit 1
