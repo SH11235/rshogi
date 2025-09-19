@@ -486,9 +486,7 @@ fn validate_scale_values(sc: &ClassicQuantizationScalesData) -> Result<()> {
     ensure_pos("s_in_1", sc.s_in_1)?;
     ensure_pos("s_in_2", sc.s_in_2)?;
     ensure_pos("s_in_3", sc.s_in_3)?;
-    if !sc.s_w0.is_finite() || sc.s_w0 == 0.0 {
-        bail!("s_w0 must be finite and non-zero (got {})", sc.s_w0);
-    }
+    ensure_pos("s_w0", sc.s_w0)?;
     Ok(())
 }
 
@@ -775,7 +773,7 @@ mod tests {
 
         let cases = [-130i16, -65, -1, 0, 1, 63, 64, 130];
         for &v in &cases {
-            let expected = ((v as f64 / 60.0).floor()).clamp(-127.0, 127.0) as i8;
+            let expected = ((v as f32 / 60.0).floor()).clamp(-127.0, 127.0) as i8;
             assert_eq!(net.quantize_ft_value(v), expected, "value {v}");
         }
     }
@@ -805,13 +803,29 @@ mod tests {
         let scales_path = td.path().join("nn.classic.scales.json");
         write_int_fixture(&nn_path, &scales_path);
 
-        let mut scales: serde_json::Value =
+        let original: serde_json::Value =
             serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
-        scales["s_in_2"] = serde_json::json!(-0.5);
-        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &scales).unwrap();
+
+        let mut broken = original.clone();
+        broken["s_in_2"] = serde_json::json!(-0.5);
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("s_in_2 must be finite and > 0"), "unexpected err: {msg}");
+
+        let mut broken = original.clone();
+        broken["s_w0"] = serde_json::json!(-0.125);
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
 
         let err = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("s_in_2 must be finite and > 0"), "unexpected err: {msg}");
+        assert!(msg.contains("s_w0 must be finite and > 0"), "unexpected err: {msg}");
+    }
+
+    #[test]
+    fn default_shift_matches_scale() {
+        let diff = 2f32.powi(DEFAULT_FT_SHIFT) - DEFAULT_FT_SCALE;
+        assert!(diff.abs() < 1e-6);
     }
 }
