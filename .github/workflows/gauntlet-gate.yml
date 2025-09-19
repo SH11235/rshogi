@@ -61,7 +61,19 @@ jobs:
           gh --version
           gh auth status || true
 
+      # Cacheシステムツール
+      - name: Cache system tools
+        id: cache-apt
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/bin/mold
+            /usr/bin/clang*
+            /usr/bin/jq
+          key: ${{ runner.os }}-apt-tools-v1
+
       - name: Install mold/clang/jq
+        if: steps.cache-apt.outputs.cache-hit != 'true'
         run: |
           set -Eeuo pipefail
           sudo apt-get update
@@ -83,15 +95,36 @@ jobs:
           workspaces: "packages/rust-core -> target"
           cache-on-failure: true
 
+      # ビルド済みバイナリをキャッシュ
+      - name: Cache built tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/rust-core/target/release/gauntlet
+            packages/rust-core/target/release/validate_gauntlet_schema
+          key: ${{ runner.os }}-tools-${{ hashFiles('packages/rust-core/Cargo.lock', 'packages/rust-core/crates/tools/**/*.rs', 'packages/rust-core/crates/engine-core/**/*.rs') }}-nnue-telemetry
+
       - name: Build tools (release, locked)
+        if: steps.cache-tools.outputs.cache-hit != 'true'
         run: |
           set -Eeuo pipefail
           cargo build -p tools --release --locked --features nnue_telemetry
+
+      # NNUEファイルをキャッシュ（リリースから取得する負荷を軽減）
+      - name: Cache NNUE weights
+        id: cache-weights
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/rust-core/runs/nnue_local/*.nnue
+          key: ${{ runner.os }}-nnue-${{ env.GATE_BASELINE_TAG }}-${{ env.GATE_CANDIDATE_TAG }}
 
       - name: Prepare weights directory
         run: mkdir -p runs/nnue_local
 
       - name: Fetch baseline weights
+        if: steps.cache-weights.outputs.cache-hit != 'true'
         env:
           RELEASE_TAG: ${{ env.GATE_BASELINE_TAG }}
           ASSET_NAME: ${{ env.GATE_BASELINE_ASSET }}
@@ -114,6 +147,7 @@ jobs:
           fi
 
       - name: Fetch candidate weights
+        if: steps.cache-weights.outputs.cache-hit != 'true'
         env:
           RELEASE_TAG: ${{ env.GATE_CANDIDATE_TAG }}
           ASSET_NAME: ${{ env.GATE_CANDIDATE_ASSET }}
