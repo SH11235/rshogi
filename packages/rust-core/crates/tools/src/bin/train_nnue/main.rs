@@ -23,7 +23,7 @@ use clap::parser::ValueSource;
 use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-use model::{Network, SingleNetwork};
+use model::{ClassicNetwork, Network, SingleNetwork};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tools::common::weighting as wcfg;
@@ -38,8 +38,8 @@ use error_messages::*;
 use export::{finalize_export, save_network};
 use logging::StructuredLogger;
 use params::{
-    CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP, DEFAULT_ACC_DIM,
-    DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES,
+    CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP, CLASSIC_RELU_CLIP_F32,
+    DEFAULT_ACC_DIM, DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES,
 };
 use training::{
     compute_val_auc, compute_val_auc_and_ece, train_model, train_model_stream_cache,
@@ -944,6 +944,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(std::io::Error::other)?;
 
+        let distill::DistillArtifacts {
+            classic_fp32,
+            bundle_int,
+            scales,
+        } = artifacts;
+
         let eval_samples_slice: &[Sample] = validation_samples
             .as_ref()
             .filter(|v| !v.is_empty())
@@ -953,22 +959,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !eval_samples_slice.is_empty() {
             distill_metrics = Some(evaluate_distill(
                 &teacher,
-                &artifacts.classic_fp32,
+                &classic_fp32,
                 eval_samples_slice,
                 &config,
                 distill_options.teacher_domain,
             ));
             quant_metrics = Some(evaluate_quantization_gap(
-                &artifacts.classic_fp32,
-                &artifacts.bundle_int,
-                &artifacts.scales,
+                &classic_fp32,
+                &bundle_int,
+                &scales,
                 eval_samples_slice,
                 &config,
             ));
         }
 
-        classic_scales = Some(artifacts.scales.clone());
-        classic_bundle = Some(artifacts.bundle_int);
+        classic_scales = Some(scales);
+        classic_bundle = Some(bundle_int);
+
+        let relu_clip = match &network {
+            Network::Classic(existing) => existing.relu_clip,
+            _ => CLASSIC_RELU_CLIP_F32,
+        };
+        network = Network::Classic(ClassicNetwork {
+            fp32: classic_fp32,
+            relu_clip,
+        });
     } else {
         // Training mode dispatch (scope to release borrows when done)
         {
