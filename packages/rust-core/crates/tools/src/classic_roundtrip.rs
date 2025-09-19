@@ -185,6 +185,10 @@ impl ClassicFp32Network {
             output,
         }
     }
+
+    pub fn relu_clip(&self) -> f32 {
+        self.relu_clip
+    }
 }
 
 fn accumulate_fp32(
@@ -445,6 +449,10 @@ impl ClassicIntNetwork {
 
         let scaled = (value as f32 / scale).floor();
         scaled.clamp(QUANT_MIN_F32, QUANT_MAX_F32) as i8
+    }
+
+    pub fn scales(&self) -> &ClassicQuantizationScalesData {
+        &self.scales
     }
 }
 

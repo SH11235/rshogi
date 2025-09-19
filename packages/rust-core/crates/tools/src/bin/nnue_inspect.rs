@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use hex::encode as hex_encode;
 use once_cell::sync::Lazy;
@@ -193,11 +193,18 @@ fn main() -> Result<()> {
 
     fill_shape_defaults(&mut shape, format_info.architecture);
 
-    let weights = parse_weights(&data, format_info.payload_offset, &shape)?;
+    let (scales_data, mut scale_read_notes) = read_scales_data(&cli)?;
 
-    let (scales_report, scale_note) = load_scales(&cli, &shape)?;
+    let weights = parse_weights(&data, format_info.payload_offset, &shape, scales_data.as_ref())?;
+
+    let (scales_report, mut scale_notes) =
+        build_scales_report(scales_data.as_ref(), &shape, &weights.dim);
 
     let mut dimension_notes = weights.notes;
+    if let Some(note) = scale_read_notes.take() {
+        dimension_notes.push(note);
+    }
+    dimension_notes.append(&mut scale_notes);
 
     if let Some(meta_input) = shape.metadata_input_dim {
         if meta_input != weights.dim.input_dim {
@@ -207,10 +214,6 @@ fn main() -> Result<()> {
             ));
         }
     }
-    if let Some(note) = scale_note {
-        dimension_notes.push(note);
-    }
-
     let sha256 = {
         let mut hasher = Sha256::new();
         hasher.update(&data);
@@ -308,7 +311,7 @@ fn read_format_info(data: &[u8]) -> Result<FormatInfo> {
             kind: FormatKindInfo::Standard,
             architecture,
             version_u32: Some(version),
-            version_as_f32: Some(version as f32),
+            version_as_f32: None,
             declared_size: Some(declared_size),
             metadata,
             payload_offset,
@@ -374,7 +377,7 @@ fn parse_metadata(text: &str, shape: &mut NetworkShape) -> Option<Result<ParsedM
 
     if !parsed.hidden_layers.is_empty() {
         shape.metadata_hidden = parsed.hidden_layers.clone();
-        shape.hidden1_dim = parsed.hidden_layers.get(0).copied().unwrap_or(0);
+        shape.hidden1_dim = parsed.hidden_layers.first().copied().unwrap_or(0);
         shape.hidden2_dim = parsed.hidden_layers.get(1).copied().unwrap_or(parsed.hidden_layers[0]);
     }
 
@@ -435,6 +438,7 @@ struct WeightParseResult {
     notes: Vec<String>,
 }
 
+#[derive(Clone)]
 struct WeightDims {
     input_dim: usize,
     acc_dim: usize,
@@ -447,6 +451,7 @@ fn parse_weights(
     data: &[u8],
     payload_offset: usize,
     shape: &NetworkShape,
+    scales: Option<&ClassicQuantizationScalesData>,
 ) -> Result<WeightParseResult> {
     if payload_offset > data.len() {
         bail!("payload offset {} beyond file size {}", payload_offset, data.len());
@@ -459,18 +464,19 @@ fn parse_weights(
     let h1_dim = shape.hidden1_dim;
     let h2_dim = shape.hidden2_dim;
     let output_dim = shape.output_dim;
+    let sides = shape.sides;
 
-    if acc_dim == 0 || h1_dim == 0 || h2_dim == 0 || output_dim == 0 {
+    if acc_dim == 0 || h1_dim == 0 || h2_dim == 0 || output_dim == 0 || sides == 0 {
         bail!("insufficient shape information to parse weights");
     }
 
     let remaining = data.len() - offset;
     let tail_bytes = acc_dim * 4
-        + (acc_dim * 2 * h1_dim)
+        + (acc_dim.checked_mul(sides).ok_or_else(|| anyhow!("acc_dim * sides overflow"))? * h1_dim)
         + (h1_dim * 4)
         + (h1_dim * h2_dim)
         + (h2_dim * 4)
-        + h2_dim
+        + (h2_dim * output_dim)
         + (output_dim * 4);
     if remaining < tail_bytes {
         bail!(
@@ -481,20 +487,22 @@ fn parse_weights(
     }
 
     let mut ft_weights_bytes = remaining - tail_bytes;
-    if ft_weights_bytes % 2 != 0 {
+    if !ft_weights_bytes.is_multiple_of(2) {
         bail!(
             "feature transformer section has odd byte length {}; expected even",
             ft_weights_bytes
         );
     }
     let mut ft_weight_count = ft_weights_bytes / 2;
-    if ft_weight_count % acc_dim != 0 {
+    let ft_divisor = acc_dim;
+    if !ft_weight_count.is_multiple_of(ft_divisor) {
         if ft_weights_bytes >= 8 {
             let prelude = &data[offset..offset + 8];
             let reduced_bytes = ft_weights_bytes - 8;
-            if reduced_bytes % 2 == 0 {
+            if reduced_bytes.is_multiple_of(2) {
                 let reduced_count = reduced_bytes / 2;
-                if reduced_count % acc_dim == 0 {
+                if reduced_count.is_multiple_of(ft_divisor) {
+                    let tentative_input_dim = reduced_count / ft_divisor;
                     let word0 =
                         u32::from_le_bytes([prelude[0], prelude[1], prelude[2], prelude[3]]);
                     let word1 =
@@ -502,14 +510,20 @@ fn parse_weights(
                     notes.push(format!(
                         "skipped 8-byte FT header words: 0x{word0:08X}, 0x{word1:08X}"
                     ));
+                    if !input_dim_matches_hints(tentative_input_dim, shape, scales) {
+                        notes.push(format!(
+                            "derived input_dim {} differs from metadata/scales hints",
+                            tentative_input_dim
+                        ));
+                    }
                     offset += 8;
                     ft_weights_bytes = reduced_bytes;
                     ft_weight_count = reduced_count;
                 } else {
                     bail!(
                         "feature transformer weight count {} not divisible by acc_dim {}; corrupted network?",
-                        ft_weight_count,
-                        acc_dim
+                        reduced_count,
+                        ft_divisor
                     );
                 }
             } else {
@@ -521,11 +535,11 @@ fn parse_weights(
             bail!(
                 "feature transformer weight count {} not divisible by acc_dim {}; corrupted network?",
                 ft_weight_count,
-                acc_dim
+                ft_divisor
             );
         }
     }
-    let input_dim = ft_weight_count / acc_dim;
+    let input_dim = ft_weight_count / ft_divisor;
 
     let ft_range = summarize_i16(&data[offset..offset + ft_weights_bytes]);
     offset += ft_weights_bytes;
@@ -533,8 +547,10 @@ fn parse_weights(
     let ft_bias_range = summarize_i32(&data[offset..offset + acc_dim * 4]);
     offset += acc_dim * 4;
 
-    let h1_weight_range = summarize_i8(&data[offset..offset + acc_dim * 2 * h1_dim]);
-    offset += acc_dim * 2 * h1_dim;
+    let h1_weight_len =
+        acc_dim.checked_mul(sides).ok_or_else(|| anyhow!("acc_dim * sides overflow"))? * h1_dim;
+    let h1_weight_range = summarize_i8(&data[offset..offset + h1_weight_len]);
+    offset += h1_weight_len;
 
     let h1_bias_range = summarize_i32(&data[offset..offset + h1_dim * 4]);
     offset += h1_dim * 4;
@@ -545,14 +561,14 @@ fn parse_weights(
     let h2_bias_range = summarize_i32(&data[offset..offset + h2_dim * 4]);
     offset += h2_dim * 4;
 
-    let out_weight_range = summarize_i8(&data[offset..offset + h2_dim]);
-    offset += h2_dim;
+    let out_weight_range = summarize_i8(&data[offset..offset + h2_dim * output_dim]);
+    offset += h2_dim * output_dim;
 
     let out_bias_range = summarize_i32(&data[offset..offset + output_dim * 4]);
     offset += output_dim * 4;
 
     if offset != data.len() {
-        log::warn!(
+        bail!(
             "parsed {} bytes but file size is {}; leftover {} bytes",
             offset,
             data.len(),
@@ -584,6 +600,27 @@ fn parse_weights(
         summary,
         notes,
     })
+}
+
+fn input_dim_matches_hints(
+    input_dim: usize,
+    shape: &NetworkShape,
+    scales: Option<&ClassicQuantizationScalesData>,
+) -> bool {
+    if shape.metadata_input_dim.is_none() && scales.is_none() {
+        return true;
+    }
+    if let Some(meta) = shape.metadata_input_dim {
+        if meta == input_dim {
+            return true;
+        }
+    }
+    if let Some(scales) = scales {
+        if scales.input_dim == input_dim {
+            return true;
+        }
+    }
+    false
 }
 
 fn summarize_i16(data: &[u8]) -> RangeSummary<i16> {
@@ -631,7 +668,7 @@ fn summarize_i8(data: &[u8]) -> RangeSummary<i8> {
     RangeSummary { min, max }
 }
 
-fn load_scales(cli: &Cli, shape: &NetworkShape) -> Result<(Option<ScalesReport>, Option<String>)> {
+fn read_scales_data(cli: &Cli) -> Result<(Option<ClassicQuantizationScalesData>, Option<String>)> {
     let path = if let Some(p) = &cli.scales {
         p.clone()
     } else {
@@ -649,6 +686,18 @@ fn load_scales(cli: &Cli, shape: &NetworkShape) -> Result<(Option<ScalesReport>,
         .with_context(|| format!("failed to open scales file at {}", path.display()))?;
     let scales: ClassicQuantizationScalesData = serde_json::from_reader(file)
         .with_context(|| format!("failed to parse scales JSON at {}", path.display()))?;
+
+    Ok((Some(scales), None))
+}
+
+fn build_scales_report(
+    scales: Option<&ClassicQuantizationScalesData>,
+    shape: &NetworkShape,
+    dims: &WeightDims,
+) -> (Option<ScalesReport>, Vec<String>) {
+    let Some(scales) = scales else {
+        return (None, Vec::new());
+    };
 
     let quant_scheme = scales.quant_scheme.as_ref().map(|qs| QuantSchemeSummary {
         ft: qs.ft.clone(),
@@ -676,17 +725,41 @@ fn load_scales(cli: &Cli, shape: &NetworkShape) -> Result<(Option<ScalesReport>,
         s_in_3: scales.s_in_3,
     };
 
-    let mut notes = None;
+    let mut notes = Vec::new();
     if let Some(meta_input) = shape.metadata_input_dim {
         if meta_input != scales.input_dim {
-            notes = Some(format!(
+            notes.push(format!(
                 "metadata input_dim {} differs from scales input_dim {}",
                 meta_input, scales.input_dim
             ));
         }
     }
+    if dims.input_dim != scales.input_dim {
+        notes.push(format!(
+            "parsed input_dim {} differs from scales input_dim {}",
+            dims.input_dim, scales.input_dim
+        ));
+    }
+    if dims.acc_dim != scales.acc_dim {
+        notes.push(format!(
+            "parsed acc_dim {} differs from scales acc_dim {}",
+            dims.acc_dim, scales.acc_dim
+        ));
+    }
+    if dims.h1_dim != scales.h1_dim {
+        notes.push(format!(
+            "parsed h1_dim {} differs from scales h1_dim {}",
+            dims.h1_dim, scales.h1_dim
+        ));
+    }
+    if dims.h2_dim != scales.h2_dim {
+        notes.push(format!(
+            "parsed h2_dim {} differs from scales h2_dim {}",
+            dims.h2_dim, scales.h2_dim
+        ));
+    }
 
-    Ok((Some(report), notes))
+    (Some(report), notes)
 }
 
 fn summarize_f32_vec(values: &[f32]) -> F32RangeSummary {

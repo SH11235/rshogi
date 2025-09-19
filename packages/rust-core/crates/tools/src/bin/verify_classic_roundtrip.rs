@@ -8,6 +8,7 @@ use clap::{Parser, ValueEnum};
 use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::usi::parse_sfen;
 use engine_core::Position;
+use log::warn;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::Serialize;
@@ -177,6 +178,7 @@ struct WorstEntry {
 struct RoundTripReport {
     n: usize,
     mode: String,
+    layer_domain: String,
     metric: String,
     threshold: ThresholdReport,
     actual: LayerStats,
@@ -215,6 +217,11 @@ fn main() -> Result<()> {
 
     let fp32_net = ClassicFp32Network::load(&cli.fp32)?;
     let int_net = ClassicIntNetwork::load(&cli.int, cli.scales.clone())?;
+
+    let relu_clip = fp32_net.relu_clip();
+    let int_scales = int_net.scales();
+    let h1_scale = int_scales.s_in_2;
+    let h2_scale = int_scales.s_in_3;
 
     const DEFAULT_SYNTHETIC_SEED: u64 = 0xC0FF_EE12_D15C_A11C;
     const SYNTHETIC_COMBOS: [usize; 4] = [0, 1, 2, 4];
@@ -284,8 +291,22 @@ fn main() -> Result<()> {
         }
 
         ft_stats.extend(fp32_layers.ft.iter().zip(int_layers.ft.iter()).map(|(a, b)| a - b));
-        h1_stats.extend(fp32_layers.h1.iter().zip(int_layers.h1.iter()).map(|(a, b)| a - b));
-        h2_stats.extend(fp32_layers.h2.iter().zip(int_layers.h2.iter()).map(|(a, b)| a - b));
+
+        for (idx, (&fp, &int_val)) in fp32_layers.h1.iter().zip(int_layers.h1.iter()).enumerate() {
+            let diff = quantized_residual(fp, int_val, h1_scale, relu_clip);
+            if diff.is_nan() {
+                warn!("h1 diff became NaN at {} index {}", case.label, idx);
+            }
+            h1_stats.push(diff);
+        }
+
+        for (idx, (&fp, &int_val)) in fp32_layers.h2.iter().zip(int_layers.h2.iter()).enumerate() {
+            let diff = quantized_residual(fp, int_val, h2_scale, relu_clip);
+            if diff.is_nan() {
+                warn!("h2 diff became NaN at {} index {}", case.label, idx);
+            }
+            h2_stats.push(diff);
+        }
 
         worst.push(SampleDiff {
             label: case.label.clone(),
@@ -341,7 +362,11 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut env_features = vec![format!("metric={:?}", cli.metric), format!("mode={mode}")];
+    let mut env_features = vec![
+        format!("metric={:?}", cli.metric),
+        format!("mode={mode}"),
+        String::from("layer_diff=quantized"),
+    ];
     if let Some(synth) = &synthetic_report {
         env_features.push(format!("probe_per_combo={}", synth.per_combo));
         env_features.push(format!("probe_seed=0x{:016X}", synth.seed));
@@ -356,6 +381,7 @@ fn main() -> Result<()> {
     let report = RoundTripReport {
         n: cases.len(),
         mode: mode.to_string(),
+        layer_domain: String::from("quantized-dequantized"),
         metric: cli.metric.to_string(),
         threshold: threshold.clone(),
         actual: actual_layer,
@@ -440,6 +466,26 @@ fn load_positions(path: &PathBuf) -> Result<Vec<(String, Position)>> {
         out.push((trimmed.to_string(), pos));
     }
     Ok(out)
+}
+
+const MAX_I8_F: f32 = 127.0;
+
+fn quantized_residual(fp: f32, int_val: f32, scale: f32, clip: f32) -> f32 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return fp - int_val;
+    }
+    let fp_q = quantize_to_i8(fp, scale, clip);
+    let int_q = quantize_to_i8(int_val, scale, clip);
+    ((fp_q as f32) - (int_q as f32)) * scale
+}
+
+fn quantize_to_i8(value: f32, scale: f32, clip: f32) -> i8 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return 0;
+    }
+    let clipped = value.clamp(0.0, clip.max(0.0));
+    let quant = (clipped / scale).round().clamp(0.0, MAX_I8_F);
+    quant as i8
 }
 
 fn build_synthetic_cases(
