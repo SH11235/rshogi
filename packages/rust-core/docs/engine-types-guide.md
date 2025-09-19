@@ -122,7 +122,7 @@ setoption name Threads value 1
 
 2. **NNUE重みファイル**: Nnue/EnhancedNnueを使用する場合は重みファイルが必要です
    ```
-   setoption name NNUEWeightFile value path/to/weights.nnue
+   setoption name EvalFile value path/to/weights.nnue
    ```
 
 3. **メモリ使用量**: EnhancedタイプはTransposition Tableのため追加メモリを使用します

@@ -3,21 +3,21 @@
 //! Manages transformed features for both perspectives with differential updates
 
 use super::error::{NNUEError, NNUEResult};
-use super::features::{extract_features, halfkp_index, BonaPiece, FeatureTransformer};
+use super::features::{
+    extract_features, oriented_board_feature_index, oriented_hand_feature_index, FeatureTransformer,
+};
 use super::simd::SimdDispatcher;
+use super::CLASSIC_ACC_DIM;
 use crate::shogi::{piece_type_to_hand_index, Move};
 use crate::{Color, Piece, PieceType, Position, Square};
 use smallvec::SmallVec;
 
-#[cfg(debug_assertions)]
-use log::error;
-
 /// Accumulator for storing transformed features
 #[derive(Clone)]
 pub struct Accumulator {
-    /// Black perspective features \[256\]
+    /// Black perspective features \[acc_dim\]
     pub black: Vec<i16>,
-    /// White perspective features \[256\]
+    /// White perspective features \[acc_dim\]
     pub white: Vec<i16>,
     /// Whether black features are computed
     pub computed_black: bool,
@@ -34,7 +34,7 @@ impl Default for Accumulator {
 impl Accumulator {
     /// Create new empty accumulator
     pub fn new() -> Self {
-        Self::new_with_dim(256)
+        Self::new_with_dim(CLASSIC_ACC_DIM)
     }
 
     /// Create new empty accumulator with specified dimension
@@ -234,17 +234,14 @@ pub fn calculate_update_into(
 
         // Add new piece for both perspectives
         // Black perspective
-        if let Some(bona_black) = BonaPiece::from_board(piece, to) {
-            let idx = halfkp_index(black_king, bona_black);
+        if let Some(idx) = oriented_board_feature_index(Color::Black, black_king, piece, to) {
             debug_assert!(idx <= u32::MAX as usize);
             out.added_b.push(idx as u32);
         }
 
         // White perspective
-        let piece_white = piece.flip_color();
-        let to_white = to.flip();
-        if let Some(bona_white) = BonaPiece::from_board(piece_white, to_white) {
-            let idx = halfkp_index(white_king_flipped, bona_white);
+        if let Some(idx) = oriented_board_feature_index(Color::White, white_king_flipped, piece, to)
+        {
             debug_assert!(idx <= u32::MAX as usize);
             out.added_w.push(idx as u32);
         }
@@ -256,36 +253,44 @@ pub fn calculate_update_into(
         let count = pos.hands[color as usize][hand_idx];
 
         // Remove old hand count
-        match BonaPiece::from_hand(piece_type, color, count) {
-            Ok(bona_hand_black) => {
-                let idx = halfkp_index(black_king, bona_hand_black);
+        match oriented_hand_feature_index(Color::Black, black_king, piece_type, color, count) {
+            Ok(idx) => {
                 debug_assert!(idx <= u32::MAX as usize);
                 out.removed_b.push(idx as u32)
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]
-                error!("[NNUE] Error creating BonaPiece from hand: {_e}");
+                log::error!("[NNUE] Error creating BonaPiece from hand: {_e}");
             }
         }
 
-        let color_white = color.flip();
-        match BonaPiece::from_hand(piece_type, color_white, count) {
-            Ok(bona_hand_white) => {
-                let idx = halfkp_index(white_king_flipped, bona_hand_white);
+        match oriented_hand_feature_index(
+            Color::White,
+            white_king_flipped,
+            piece_type,
+            color,
+            count,
+        ) {
+            Ok(idx) => {
                 debug_assert!(idx <= u32::MAX as usize);
                 out.removed_w.push(idx as u32)
             }
             Err(_e) => {
                 #[cfg(debug_assertions)]
-                error!("[NNUE] Error creating BonaPiece from hand: {_e}");
+                log::error!("[NNUE] Error creating BonaPiece from hand: {_e}");
             }
         }
 
         // Add new hand count (if not zero)
         if count > 1 {
-            match BonaPiece::from_hand(piece_type, color, count - 1) {
-                Ok(bona_hand_black_new) => {
-                    let idx = halfkp_index(black_king, bona_hand_black_new);
+            match oriented_hand_feature_index(
+                Color::Black,
+                black_king,
+                piece_type,
+                color,
+                count - 1,
+            ) {
+                Ok(idx) => {
                     debug_assert!(idx <= u32::MAX as usize);
                     out.added_b.push(idx as u32)
                 }
@@ -295,9 +300,14 @@ pub fn calculate_update_into(
                 }
             }
 
-            match BonaPiece::from_hand(piece_type, color_white, count - 1) {
-                Ok(bona_hand_white_new) => {
-                    let idx = halfkp_index(white_king_flipped, bona_hand_white_new);
+            match oriented_hand_feature_index(
+                Color::White,
+                white_king_flipped,
+                piece_type,
+                color,
+                count - 1,
+            ) {
+                Ok(idx) => {
                     debug_assert!(idx <= u32::MAX as usize);
                     out.added_w.push(idx as u32)
                 }
@@ -323,16 +333,16 @@ pub fn calculate_update_into(
         }
 
         // Remove piece from source
-        if let Some(bona_from_black) = BonaPiece::from_board(moving_piece, from) {
-            let idx = halfkp_index(black_king, bona_from_black);
+        if let Some(idx) =
+            oriented_board_feature_index(Color::Black, black_king, moving_piece, from)
+        {
             debug_assert!(idx <= u32::MAX as usize);
             out.removed_b.push(idx as u32);
         }
 
-        let moving_piece_white = moving_piece.flip_color();
-        let from_white = from.flip();
-        if let Some(bona_from_white) = BonaPiece::from_board(moving_piece_white, from_white) {
-            let idx = halfkp_index(white_king_flipped, bona_from_white);
+        if let Some(idx) =
+            oriented_board_feature_index(Color::White, white_king_flipped, moving_piece, from)
+        {
             debug_assert!(idx <= u32::MAX as usize);
             out.removed_w.push(idx as u32);
         }
@@ -344,16 +354,14 @@ pub fn calculate_update_into(
             moving_piece
         };
 
-        if let Some(bona_to_black) = BonaPiece::from_board(dest_piece, to) {
-            let idx = halfkp_index(black_king, bona_to_black);
+        if let Some(idx) = oriented_board_feature_index(Color::Black, black_king, dest_piece, to) {
             debug_assert!(idx <= u32::MAX as usize);
             out.added_b.push(idx as u32);
         }
 
-        let dest_piece_white = dest_piece.flip_color();
-        let to_white = to.flip();
-        if let Some(bona_to_white) = BonaPiece::from_board(dest_piece_white, to_white) {
-            let idx = halfkp_index(white_king_flipped, bona_to_white);
+        if let Some(idx) =
+            oriented_board_feature_index(Color::White, white_king_flipped, dest_piece, to)
+        {
             debug_assert!(idx <= u32::MAX as usize);
             out.added_w.push(idx as u32);
         }
@@ -361,15 +369,15 @@ pub fn calculate_update_into(
         // Handle capture
         if let Some(captured) = pos.piece_at(to) {
             // Remove captured piece
-            if let Some(bona_cap_black) = BonaPiece::from_board(captured, to) {
-                let idx = halfkp_index(black_king, bona_cap_black);
+            if let Some(idx) = oriented_board_feature_index(Color::Black, black_king, captured, to)
+            {
                 debug_assert!(idx <= u32::MAX as usize);
                 out.removed_b.push(idx as u32);
             }
 
-            let captured_white = captured.flip_color();
-            if let Some(bona_cap_white) = BonaPiece::from_board(captured_white, to_white) {
-                let idx = halfkp_index(white_king_flipped, bona_cap_white);
+            if let Some(idx) =
+                oriented_board_feature_index(Color::White, white_king_flipped, captured, to)
+            {
                 debug_assert!(idx <= u32::MAX as usize);
                 out.removed_w.push(idx as u32);
             }
@@ -383,9 +391,14 @@ pub fn calculate_update_into(
             let hand_color = pos.side_to_move;
             let new_count = pos.hands[hand_color as usize][hand_idx] + 1;
 
-            match BonaPiece::from_hand(hand_type, hand_color, new_count) {
-                Ok(bona_hand_black) => {
-                    let idx = halfkp_index(black_king, bona_hand_black);
+            match oriented_hand_feature_index(
+                Color::Black,
+                black_king,
+                hand_type,
+                hand_color,
+                new_count,
+            ) {
+                Ok(idx) => {
                     debug_assert!(idx <= u32::MAX as usize);
                     out.added_b.push(idx as u32)
                 }
@@ -395,10 +408,14 @@ pub fn calculate_update_into(
                 }
             }
 
-            let hand_color_white = hand_color.flip();
-            match BonaPiece::from_hand(hand_type, hand_color_white, new_count) {
-                Ok(bona_hand_white) => {
-                    let idx = halfkp_index(white_king_flipped, bona_hand_white);
+            match oriented_hand_feature_index(
+                Color::White,
+                white_king_flipped,
+                hand_type,
+                hand_color,
+                new_count,
+            ) {
+                Ok(idx) => {
                     debug_assert!(idx <= u32::MAX as usize);
                     out.added_w.push(idx as u32)
                 }
@@ -410,9 +427,14 @@ pub fn calculate_update_into(
 
             // Remove old hand count if it existed
             if new_count > 1 {
-                match BonaPiece::from_hand(hand_type, hand_color, new_count - 1) {
-                    Ok(bona_hand_old_black) => {
-                        let idx = halfkp_index(black_king, bona_hand_old_black);
+                match oriented_hand_feature_index(
+                    Color::Black,
+                    black_king,
+                    hand_type,
+                    hand_color,
+                    new_count - 1,
+                ) {
+                    Ok(idx) => {
                         debug_assert!(idx <= u32::MAX as usize);
                         out.removed_b.push(idx as u32)
                     }
@@ -422,9 +444,14 @@ pub fn calculate_update_into(
                     }
                 }
 
-                match BonaPiece::from_hand(hand_type, hand_color_white, new_count - 1) {
-                    Ok(bona_hand_old_white) => {
-                        let idx = halfkp_index(white_king_flipped, bona_hand_old_white);
+                match oriented_hand_feature_index(
+                    Color::White,
+                    white_king_flipped,
+                    hand_type,
+                    hand_color,
+                    new_count - 1,
+                ) {
+                    Ok(idx) => {
                         debug_assert!(idx <= u32::MAX as usize);
                         out.removed_w.push(idx as u32)
                     }
@@ -524,8 +551,8 @@ mod tests {
         let acc = Accumulator::new();
         assert!(!acc.computed_black);
         assert!(!acc.computed_white);
-        assert_eq!(acc.black.len(), 256);
-        assert_eq!(acc.white.len(), 256);
+        assert_eq!(acc.black.len(), CLASSIC_ACC_DIM);
+        assert_eq!(acc.white.len(), CLASSIC_ACC_DIM);
     }
 
     #[test]
@@ -540,7 +567,7 @@ mod tests {
         assert!(acc.computed_white);
 
         // With zero transformer, should have zero values
-        for i in 0..256 {
+        for i in 0..CLASSIC_ACC_DIM {
             assert_eq!(acc.black[i], 0);
             assert_eq!(acc.white[i], 0);
         }
@@ -664,6 +691,12 @@ mod tests {
         for &f in delta.added_b.iter() {
             fill_row(&mut transformer, f as usize, 3);
         }
+        for &f in delta.removed_w.iter() {
+            fill_row(&mut transformer, f as usize, 4);
+        }
+        for &f in delta.added_w.iter() {
+            fill_row(&mut transformer, f as usize, 5);
+        }
 
         let mut acc0 = Accumulator::new();
         acc0.refresh(&pos, &transformer);
@@ -712,9 +745,9 @@ mod tests {
         let mut acc_pre = Accumulator::new();
         acc_pre.refresh(&pos, &transformer);
 
-        // Apply delta on Black perspective (focus this test on Black only)
         let mut acc_inc = acc_pre.clone();
         acc_inc.update(&delta, Color::Black, &transformer);
+        acc_inc.update(&delta, Color::White, &transformer);
 
         // Move position and full refresh
         let _u = pos.do_move(mv);
@@ -722,6 +755,7 @@ mod tests {
         acc_full.refresh(&pos, &transformer);
 
         assert_eq!(acc_inc.black, acc_full.black, "black acc must match full refresh");
+        assert_eq!(acc_inc.white, acc_full.white, "white acc must match full refresh");
     }
 
     #[test]
@@ -764,16 +798,24 @@ mod tests {
         for &f in delta.added_b.iter() {
             fill_row(&mut transformer, f as usize, 1);
         }
+        for &f in delta.removed_w.iter() {
+            fill_row(&mut transformer, f as usize, 2);
+        }
+        for &f in delta.added_w.iter() {
+            fill_row(&mut transformer, f as usize, 2);
+        }
         // Apply delta then compare to full refresh after making the move
         let mut acc_pre = Accumulator::new();
         // Refresh after assigning black rows so removed features exist in acc
         acc_pre.refresh(&pos, &transformer);
         let mut acc_inc = acc_pre.clone();
         acc_inc.update(&delta, Color::Black, &transformer);
+        acc_inc.update(&delta, Color::White, &transformer);
 
         let _u = pos.do_move(mv);
         let mut acc_full = Accumulator::new();
         acc_full.refresh(&pos, &transformer);
         assert_eq!(acc_inc.black, acc_full.black);
+        assert_eq!(acc_inc.white, acc_full.white);
     }
 }

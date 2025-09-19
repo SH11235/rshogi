@@ -109,6 +109,12 @@ pub fn enabled_features_str() -> String {
     format!("engine-core:{}", v.join(","))
 }
 
+/// Classic NNUE (HalfKP 2562-32-1) 既定の accumulator 次元。
+///
+/// v1 フォーマットおよび後方互換を担保するコードではこの値を使用し、
+/// v2 (可変次元) では重みヘッダに記載された値で上書きされる。
+pub const CLASSIC_ACC_DIM: usize = 256;
+
 // --- Lightweight telemetry counters (optional) ---
 // feature = "nnue_telemetry" で有効化。探索中の acc 経路/フォールバック割合などを集計する。
 #[cfg(feature = "nnue_telemetry")]
