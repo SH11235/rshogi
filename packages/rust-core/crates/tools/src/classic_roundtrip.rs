@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_FT_SHIFT: i32 = 6;
 const DEFAULT_FT_SCALE: f32 = 64.0;
+const QUANT_MIN_I32: i32 = -127;
+const QUANT_MAX_I32: i32 = 127;
+const QUANT_MIN_F32: f32 = QUANT_MIN_I32 as f32;
+const QUANT_MAX_F32: f32 = QUANT_MAX_I32 as f32;
 const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
 
 #[derive(Debug, Clone)]
@@ -142,7 +146,6 @@ impl ClassicFp32Network {
         input.extend(acc_us.iter().copied());
         input.extend(acc_them.iter().copied());
 
-        let mut h1 = Vec::with_capacity(self.h1_dim);
         let mut h1_act = Vec::with_capacity(self.h1_dim);
         let input_dim_h1 = self.acc_dim * 2;
         for i in 0..self.h1_dim {
@@ -152,11 +155,9 @@ impl ClassicFp32Network {
                 sum += x * w;
             }
             let activated = sum.max(0.0).min(self.relu_clip);
-            h1.push(sum);
             h1_act.push(activated);
         }
 
-        let mut h2 = Vec::with_capacity(self.h2_dim);
         let mut h2_act = Vec::with_capacity(self.h2_dim);
         for i in 0..self.h2_dim {
             let mut sum = self.hidden2_biases[i];
@@ -165,7 +166,6 @@ impl ClassicFp32Network {
                 sum += x * w;
             }
             let activated = sum.max(0.0).min(self.relu_clip);
-            h2.push(sum);
             h2_act.push(activated);
         }
 
@@ -374,7 +374,7 @@ impl ClassicIntNetwork {
             for (j, &w) in row.iter().enumerate() {
                 sum += input[j] as i32 * w as i32;
             }
-            let act_i8 = sum.clamp(0, 127) as i8;
+            let act_i8 = sum.clamp(0, QUANT_MAX_I32) as i8;
             h1_act_i8.push(act_i8);
             h1_act_f32.push(act_i8 as f32 * self.scales.s_in_2);
         }
@@ -387,7 +387,7 @@ impl ClassicIntNetwork {
             for (j, &w) in row.iter().enumerate() {
                 sum += h1_act_i8[j] as i32 * w as i32;
             }
-            let act_i8 = sum.clamp(0, 127) as i8;
+            let act_i8 = sum.clamp(0, QUANT_MAX_I32) as i8;
             h2_act_i8.push(act_i8);
             h2_act_f32.push(act_i8 as f32 * self.scales.s_in_3);
         }
@@ -438,7 +438,7 @@ impl ClassicIntNetwork {
     fn quantize_ft_value(&self, value: i16) -> i8 {
         if let Some(shift) = self.ft_shift {
             let shifted = (value as i32) >> shift;
-            return shifted.clamp(-127, 127) as i8;
+            return shifted.clamp(QUANT_MIN_I32, QUANT_MAX_I32) as i8;
         }
 
         let scale = if self.ft_scale <= 0.0 {
@@ -448,7 +448,7 @@ impl ClassicIntNetwork {
         };
 
         let scaled = (value as f32 / scale).floor();
-        scaled.clamp(-127.0, 127.0) as i8
+        scaled.clamp(QUANT_MIN_F32, QUANT_MAX_F32) as i8
     }
 }
 
@@ -459,10 +459,12 @@ fn validate_scale_lengths(
 ) -> Result<()> {
     fn check(name: &str, values: &[f32], expected: usize) -> Result<()> {
         if values.is_empty() {
-            bail!("{name} scale vector is empty (expected length 1 or {expected})");
+            bail!("{name} scale vector is empty (expected length {expected})");
         }
         if values.len() == 1 || values.len() == expected {
             Ok(())
+        } else if expected == 1 {
+            bail!("{name} scale vector length {} must be 1", values.len());
         } else {
             bail!("{name} scale vector length {} must be 1 or {}", values.len(), expected);
         }
@@ -500,6 +502,7 @@ fn validate_scale_values(sc: &ClassicQuantizationScalesData) -> Result<()> {
 }
 
 fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>) {
+    // validate_scale_values() 側で s_w0 の異常は弾く想定であり通常到達しないが、他経路からの利用や将来の回帰に備えて冗長チェックする。
     if !scales.s_w0.is_finite() || scales.s_w0.abs() <= f32::EPSILON {
         log::warn!("s_w0 is zero or non-finite; using default ft scale");
         return (DEFAULT_FT_SCALE, Some(DEFAULT_FT_SHIFT));
@@ -519,13 +522,9 @@ fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>
     if rel_error <= 1e-4 {
         if rounded >= 0.0 {
             let raw_shift = rounded as i32;
-            let shift = raw_shift.clamp(0, 30);
+            let shift = raw_shift.clamp(0, 30); // 31bit 以上の右シフトは未定義なので安全側に 30 で頭打ち。Clamped to 30 to avoid implementation-defined wide shifts.
             if raw_shift != shift {
-                log::warn!(
-                    "ft shift {} out of range; clamped to {}",
-                    raw_shift,
-                    shift
-                );
+                log::warn!("ft shift {} out of range; clamped to {}", raw_shift, shift);
             }
             log::info!("ft scale uses pow2 shift = {}", shift);
             return (2f32.powi(shift), Some(shift));
@@ -617,13 +616,16 @@ fn read_i8_vec<R: Read>(reader: &mut R, len: usize) -> Result<Vec<i8>> {
 }
 
 fn scale_for_channel(scales: &[f32], idx: usize) -> f32 {
-    if scales.is_empty() {
-        1.0
-    } else if scales.len() == 1 {
+    debug_assert!(
+        !scales.is_empty(),
+        "scale vectors should be validated before calling scale_for_channel"
+    );
+    if scales.len() == 1 {
         scales[0]
     } else if idx < scales.len() {
         scales[idx]
     } else {
+        debug_assert!(idx < scales.len(), "validated scale lookup should not overflow");
         *scales.last().unwrap()
     }
 }
@@ -762,6 +764,27 @@ mod tests {
         serde_json::to_writer_pretty(File::create(scales_path).unwrap(), &scales).unwrap();
     }
 
+    fn sample_scales() -> ClassicQuantizationScalesData {
+        ClassicQuantizationScalesData {
+            schema_version: 1,
+            format_version: "classic-v1".to_string(),
+            arch: "HALFKP_2X2_2_1".to_string(),
+            acc_dim: 2,
+            h1_dim: 2,
+            h2_dim: 1,
+            input_dim: 4,
+            s_w0: 0.015625,
+            s_w1: vec![0.05, 0.05],
+            s_w2: vec![0.04],
+            s_w3: vec![0.02],
+            s_in_1: 1.0,
+            s_in_2: 0.5,
+            s_in_3: 0.25,
+            bundle_sha256: "test".to_string(),
+            quant_scheme: None,
+        }
+    }
+
     #[test]
     fn ft_quantization_matches_shift_for_pow2_scale() {
         let td = tempdir().unwrap();
@@ -775,7 +798,8 @@ mod tests {
         let cases = [-32768i16, -1025, -65, -64, -1, 0, 1, 63, 64, 127, 8191];
 
         for &v in &cases {
-            let expected = ((v as i32) >> DEFAULT_FT_SHIFT).clamp(-127, 127) as i8;
+            let expected =
+                ((v as i32) >> DEFAULT_FT_SHIFT).clamp(QUANT_MIN_I32, QUANT_MAX_I32) as i8;
             assert_eq!(net.quantize_ft_value(v), expected, "value {v}");
         }
     }
@@ -793,7 +817,7 @@ mod tests {
 
         let cases = [-130i16, -65, -1, 0, 1, 63, 64, 130];
         for &v in &cases {
-            let expected = ((v as f32 / 60.0).floor()).clamp(-127.0, 127.0) as i8;
+            let expected = ((v as f32 / 60.0).floor()).clamp(QUANT_MIN_F32, QUANT_MAX_F32) as i8;
             assert_eq!(net.quantize_ft_value(v), expected, "value {v}");
         }
     }
@@ -857,6 +881,42 @@ mod tests {
         let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("s_w2[0] must be finite and > 0"), "unexpected err: {msg}");
+
+        let mut broken = original.clone();
+        broken["s_w3"][0] = serde_json::json!(0.0);
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("s_w3[0] must be finite and > 0"), "unexpected err: {msg}");
+    }
+
+    #[test]
+    fn compute_ft_scale_falls_back_for_ratio_below_unity() {
+        let mut scales = sample_scales();
+        scales.s_w0 = 1.0;
+        scales.s_in_1 = 0.5;
+
+        let (scale, shift) = compute_ft_scale(&scales);
+        assert!(shift.is_none());
+        assert!((scale - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_ft_scale_respects_relative_error_threshold() {
+        let mut scales = sample_scales();
+        scales.s_w0 = 1.0;
+
+        scales.s_in_1 = 2.0 * (1.0 + 9e-5);
+        let (pow2_scale, pow2_shift) = compute_ft_scale(&scales);
+        assert_eq!(pow2_shift, Some(1));
+        assert!((pow2_scale - 2.0).abs() < 1e-6);
+
+        scales.s_in_1 = 2.0 * (1.0 + 1.2e-4);
+        let (float_scale, float_shift) = compute_ft_scale(&scales);
+        assert!(float_shift.is_none());
+        let expected = scales.s_in_1 / scales.s_w0;
+        assert!((float_scale - expected).abs() < 1e-6);
     }
 
     #[test]
