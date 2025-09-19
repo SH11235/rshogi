@@ -828,4 +828,25 @@ mod tests {
         assert_eq!(acc_inc.black, acc_full.black);
         assert_eq!(acc_inc.white, acc_full.white);
     }
+
+    #[test]
+    fn test_bias_clamp_to_i16() {
+        let mut ft = FeatureTransformer::zero_with_dim(4);
+        // 32767 を超える値を入れてみる
+        ft.biases = vec![i32::MAX, 40000, -40000, 123];
+
+        let pos = Position::startpos();
+        let mut acc = Accumulator::new_with_dim(4);
+        acc.refresh(&pos, &ft);
+
+        assert_eq!(acc.black[0], i16::MAX);
+        assert_eq!(acc.black[1], i16::MAX);
+        assert_eq!(acc.black[2], i16::MIN);
+        assert_eq!(acc.black[3], 123);
+        // white も同じ
+        assert_eq!(acc.white[0], i16::MAX);
+        assert_eq!(acc.white[1], i16::MAX);
+        assert_eq!(acc.white[2], i16::MIN);
+        assert_eq!(acc.white[3], 123);
+    }
 }
