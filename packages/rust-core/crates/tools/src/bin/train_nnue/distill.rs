@@ -1,19 +1,25 @@
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::classic::ClassicScratchViews;
 use crate::classic::{ClassicFloatNetwork, ClassicIntNetworkBundle, ClassicQuantizationScales};
 use crate::logging::StructuredLogger;
-use crate::model::SingleNetwork;
 use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP_F32};
+use crate::teacher::{TeacherBatchRequest, TeacherLayers, TeacherNetwork};
 use crate::types::{
-    Config, DistillLossKind, DistillOptions, QuantScheme, Sample, TeacherValueDomain,
+    Config, DistillLossKind, DistillOptions, QuantScheme, Sample, TeacherKind, TeacherValueDomain,
 };
+use bincode::{deserialize_from, serialize_into};
 use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 
 const MAX_DISTILL_SAMPLES: usize = 50_000;
 const DISTILL_EPOCHS: usize = 2;
@@ -74,9 +80,95 @@ impl ClassicScratch {
 struct DistillSample {
     features_us: Vec<u32>,
     features_them: Vec<u32>,
-    teacher_output: f32,
+    teacher: Arc<TeacherPrepared>,
     label: f32,
     weight: f32,
+}
+
+#[derive(Clone)]
+struct TeacherPrepared {
+    value: f32,
+    domain: TeacherValueDomain,
+    layers: Option<Arc<TeacherLayers>>, // None when未要求
+}
+
+impl TeacherPrepared {
+    fn requires_layers(&self) -> bool {
+        self.layers.is_some()
+    }
+}
+
+struct PreparedDistillSamples {
+    samples: Vec<DistillSample>,
+    cache_hits: usize,
+    cache_misses: usize,
+}
+
+struct PendingSample {
+    features_us: Vec<u32>,
+    features_them: Vec<u32>,
+    label: f32,
+    weight: f32,
+}
+
+struct LayerLossWeights {
+    ft: f32,
+    h1: f32,
+    h2: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeacherCacheLayers {
+    ft: Vec<f32>,
+    h1: Vec<f32>,
+    h2: Vec<f32>,
+    out: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeacherCacheEntry {
+    domain: TeacherValueDomain,
+    value: f32,
+    layers: Option<TeacherCacheLayers>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TeacherCacheFile {
+    entries: Vec<(Vec<u32>, TeacherCacheEntry)>,
+}
+
+impl From<&TeacherPrepared> for TeacherCacheEntry {
+    fn from(value: &TeacherPrepared) -> Self {
+        let layers = value.layers.as_ref().map(|layers_arc| TeacherCacheLayers {
+            ft: layers_arc.ft.clone(),
+            h1: layers_arc.h1.clone(),
+            h2: layers_arc.h2.clone(),
+            out: layers_arc.out,
+        });
+        TeacherCacheEntry {
+            domain: value.domain,
+            value: value.value,
+            layers,
+        }
+    }
+}
+
+impl TeacherCacheEntry {
+    fn into_prepared(self) -> TeacherPrepared {
+        let layers = self.layers.map(|l| {
+            Arc::new(TeacherLayers {
+                ft: l.ft,
+                h1: l.h1,
+                h2: l.h2,
+                out: l.out,
+            })
+        });
+        TeacherPrepared {
+            value: self.value,
+            domain: self.domain,
+            layers,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +247,38 @@ fn bce_with_logits_soft(logit: f32, target: f32) -> (f32, f32) {
     (loss, grad)
 }
 
+#[inline]
+fn mse_loss_grad(diff: f32, weight: f32) -> (f32, f32) {
+    let grad = diff * weight;
+    let loss = 0.5 * diff * diff * weight;
+    (loss, grad)
+}
+
+#[inline]
+fn huber_loss_grad(diff: f32, weight: f32, delta: f32) -> (f32, f32) {
+    let abs = diff.abs();
+    if abs <= delta {
+        mse_loss_grad(diff, weight)
+    } else {
+        let grad = delta * diff.signum() * weight;
+        let loss = delta * (abs - 0.5 * delta) * weight;
+        (loss, grad)
+    }
+}
+
+#[inline]
+fn element_loss_grad(
+    diff: f32,
+    weight: f32,
+    loss_kind: DistillLossKind,
+    huber_delta: f32,
+) -> (f32, f32) {
+    match loss_kind {
+        DistillLossKind::Huber => huber_loss_grad(diff, weight, huber_delta),
+        _ => mse_loss_grad(diff, weight),
+    }
+}
+
 fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut ClassicScratch) -> f32 {
     scratch.acc_us.copy_from_slice(&net.ft_biases);
     for &feat in &sample.features_us {
@@ -216,31 +340,83 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
     out
 }
 
+struct BackwardUpdateParams<'a> {
+    grad_output: f32,
+    layer_weights: &'a LayerLossWeights,
+    teacher_layers: Option<&'a TeacherLayers>,
+    loss_kind: DistillLossKind,
+    huber_delta: f32,
+    learning_rate: f32,
+    l2_reg: f32,
+}
+
 fn backward_update(
     net: &mut ClassicFloatNetwork,
     scratch: &mut ClassicScratch,
     sample: &DistillSample,
-    grad_output: f32,
-    lr: f32,
-    l2_reg: f32,
-) {
+    params: BackwardUpdateParams<'_>,
+) -> f64 {
+    let BackwardUpdateParams {
+        grad_output,
+        layer_weights,
+        teacher_layers,
+        loss_kind,
+        huber_delta,
+        learning_rate,
+        l2_reg,
+    } = params;
     let h1_dim = net.h1_dim;
     let h2_dim = net.h2_dim;
     let acc_dim = net.acc_dim;
     let input_dim = acc_dim * 2;
+    let sample_weight = sample.weight;
+
+    let (teacher_ft, teacher_h1, teacher_h2) = if let Some(layers) = teacher_layers {
+        (
+            if layers.ft.len() == input_dim {
+                Some(&layers.ft[..])
+            } else {
+                None
+            },
+            if layers.h1.len() == h1_dim {
+                Some(&layers.h1[..])
+            } else {
+                None
+            },
+            if layers.h2.len() == h2_dim {
+                Some(&layers.h2[..])
+            } else {
+                None
+            },
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let mut extra_loss = 0.0f64;
 
     // Output layer gradients
     for (i, grad_a2) in scratch.d_a2.iter_mut().enumerate().take(h2_dim) {
-        *grad_a2 = grad_output * net.output_weights[i];
-        scratch.d_z2[i] = *grad_a2 * relu_clip_grad(scratch.z2[i]);
+        let mut total_grad = grad_output * net.output_weights[i];
+        if layer_weights.h2 > 0.0 {
+            if let Some(t_h2) = teacher_h2 {
+                let diff = scratch.a2[i] - t_h2[i];
+                let weight = sample_weight * layer_weights.h2;
+                let (loss, grad) = element_loss_grad(diff, weight, loss_kind, huber_delta);
+                extra_loss += loss as f64;
+                total_grad += grad;
+            }
+        }
+        *grad_a2 = total_grad;
+        scratch.d_z2[i] = total_grad * relu_clip_grad(scratch.z2[i]);
     }
 
     // Gradient wrt output weights/bias
     for i in 0..h2_dim {
         let grad_w = grad_output * scratch.a2[i] + l2_reg * net.output_weights[i];
-        net.output_weights[i] -= lr * grad_w;
+        net.output_weights[i] -= learning_rate * grad_w;
     }
-    net.output_bias -= lr * grad_output;
+    net.output_bias -= learning_rate * grad_output;
 
     // Propagate to hidden1 (using current weights before update)
     scratch.d_a1.fill(0.0);
@@ -248,6 +424,20 @@ fn backward_update(
         let delta = scratch.d_z2[i];
         for (da1, &w) in scratch.d_a1.iter_mut().zip(row.iter()) {
             *da1 += delta * w;
+        }
+    }
+
+    if layer_weights.h1 > 0.0 {
+        if let Some(t_h1) = teacher_h1 {
+            for ((da1, &a1), &teacher_a1) in
+                scratch.d_a1.iter_mut().zip(scratch.a1.iter()).zip(t_h1.iter()).take(h1_dim)
+            {
+                let diff = a1 - teacher_a1;
+                let weight = sample_weight * layer_weights.h1;
+                let (loss, grad) = element_loss_grad(diff, weight, loss_kind, huber_delta);
+                extra_loss += loss as f64;
+                *da1 += grad;
+            }
         }
     }
 
@@ -267,15 +457,27 @@ fn backward_update(
         }
     }
 
+    if layer_weights.ft > 0.0 {
+        if let Some(t_ft) = teacher_ft {
+            for (idx, din) in scratch.d_input.iter_mut().enumerate().take(input_dim) {
+                let diff = scratch.input[idx] - t_ft[idx];
+                let weight = sample_weight * layer_weights.ft;
+                let (loss, grad) = element_loss_grad(diff, weight, loss_kind, huber_delta);
+                extra_loss += loss as f64;
+                *din += grad;
+            }
+        }
+    }
+
     // Update hidden2 weights/biases
     for i in 0..h2_dim {
         let delta = scratch.d_z2[i];
         let row = &mut net.hidden2_weights[i * h1_dim..(i + 1) * h1_dim];
         for (w, &a1) in row.iter_mut().zip(scratch.a1.iter()) {
             let grad = delta * a1 + l2_reg * *w;
-            *w -= lr * grad;
+            *w -= learning_rate * grad;
         }
-        net.hidden2_biases[i] -= lr * delta;
+        net.hidden2_biases[i] -= learning_rate * delta;
     }
 
     // Update hidden1 weights/biases
@@ -284,9 +486,9 @@ fn backward_update(
         let row = &mut net.hidden1_weights[j * input_dim..(j + 1) * input_dim];
         for (w, &inp) in row.iter_mut().zip(scratch.input.iter()) {
             let grad = delta * inp + l2_reg * *w;
-            *w -= lr * grad;
+            *w -= learning_rate * grad;
         }
-        net.hidden1_biases[j] -= lr * delta;
+        net.hidden1_biases[j] -= learning_rate * delta;
     }
 
     // Split input gradients for accumulator channels
@@ -295,7 +497,7 @@ fn backward_update(
     // Update FT biases (shared)
     for i in 0..acc_dim {
         let grad = d_acc_us[i] + d_acc_them[i];
-        net.ft_biases[i] -= lr * grad;
+        net.ft_biases[i] -= learning_rate * grad;
     }
 
     // Update FT weights for active features
@@ -308,7 +510,7 @@ fn backward_update(
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_us.iter()) {
             let grad = grad + l2_reg * *w;
-            *w -= lr * grad;
+            *w -= learning_rate * grad;
         }
     }
     for &feat in &sample.features_them {
@@ -320,39 +522,207 @@ fn backward_update(
         let row = &mut net.ft_weights[base..base + acc_dim];
         for (w, &grad) in row.iter_mut().zip(d_acc_them.iter()) {
             let grad = grad + l2_reg * *w;
-            *w -= lr * grad;
+            *w -= learning_rate * grad;
         }
     }
+
+    extra_loss
 }
 
 /// 教師 forward 結果と反転特徴を事前計算し、蒸留処理での再利用を容易にする。
 fn prepare_distill_samples(
-    teacher: &SingleNetwork,
+    teacher: &dyn TeacherNetwork,
     samples: &[Sample],
     max_samples: usize,
-) -> Vec<DistillSample> {
+    distill: &DistillOptions,
+) -> Result<PreparedDistillSamples, String> {
+    let domain = distill.teacher_domain;
+    let require_layers = distill.requires_teacher_layers();
+    let batch_size = distill.teacher_batch_size.max(1);
+
+    let mut cache: HashMap<Vec<u32>, Arc<TeacherPrepared>> = match distill.teacher_cache.as_ref() {
+        Some(path) => load_teacher_cache(Path::new(path), require_layers, domain)?,
+        None => HashMap::new(),
+    };
+    let mut cache_dirty = false;
+    let mut cache_hits = 0usize;
+    let mut cache_misses = 0usize;
+
     let mut result = Vec::new();
-    let mut acc_buf = vec![0.0f32; teacher.acc_dim];
-    let mut act_buf = vec![0.0f32; teacher.acc_dim];
+    let mut pending: Vec<PendingSample> = Vec::new();
 
     for sample in samples.iter().filter(|s| s.weight > 0.0) {
-        if result.len() >= max_samples {
+        if result.len() + pending.len() >= max_samples {
             break;
         }
-        let teacher_out =
-            teacher.forward_with_buffers(&sample.features, &mut acc_buf, &mut act_buf);
+
+        let features_us = sample.features.clone();
+
+        if let Some(prepared) = cache.get(&features_us) {
+            if prepared.domain == domain && (!require_layers || prepared.requires_layers()) {
+                cache_hits += 1;
+                let features_them: Vec<u32> =
+                    features_us.iter().map(|&f| flip_us_them(f as usize) as u32).collect();
+                result.push(DistillSample {
+                    features_us,
+                    features_them,
+                    teacher: prepared.clone(),
+                    label: sample.label,
+                    weight: sample.weight,
+                });
+                continue;
+            }
+        }
+
         let features_them: Vec<u32> =
-            sample.features.iter().map(|&f| flip_us_them(f as usize) as u32).collect();
-        result.push(DistillSample {
-            features_us: sample.features.clone(),
+            features_us.iter().map(|&f| flip_us_them(f as usize) as u32).collect();
+        pending.push(PendingSample {
+            features_us,
             features_them,
-            teacher_output: teacher_out,
             label: sample.label,
             weight: sample.weight,
         });
+
+        if pending.len() >= batch_size {
+            let processed = flush_pending(
+                teacher,
+                &mut pending,
+                &mut cache,
+                &mut result,
+                domain,
+                require_layers,
+            )?;
+            cache_misses += processed;
+            if processed > 0 && distill.teacher_cache.is_some() {
+                cache_dirty = true;
+            }
+        }
     }
 
-    result
+    if !pending.is_empty() {
+        let processed =
+            flush_pending(teacher, &mut pending, &mut cache, &mut result, domain, require_layers)?;
+        cache_misses += processed;
+        if processed > 0 && distill.teacher_cache.is_some() {
+            cache_dirty = true;
+        }
+    }
+
+    if let Some(path) = distill.teacher_cache.as_ref() {
+        if cache_dirty {
+            save_teacher_cache(Path::new(path), &cache)?;
+        }
+    }
+
+    result.truncate(max_samples);
+
+    Ok(PreparedDistillSamples {
+        samples: result,
+        cache_hits,
+        cache_misses,
+    })
+}
+
+fn flush_pending(
+    teacher: &dyn TeacherNetwork,
+    pending: &mut Vec<PendingSample>,
+    cache: &mut HashMap<Vec<u32>, Arc<TeacherPrepared>>,
+    out: &mut Vec<DistillSample>,
+    domain: TeacherValueDomain,
+    require_layers: bool,
+) -> Result<usize, String> {
+    if pending.is_empty() {
+        return Ok(0);
+    }
+
+    let requests: Vec<_> = pending
+        .iter()
+        .map(|p| TeacherBatchRequest {
+            features: &p.features_us,
+        })
+        .collect();
+
+    let evals = teacher
+        .evaluate_batch(&requests, domain, require_layers)
+        .map_err(|e| format!("failed to evaluate teacher {:?}: {e}", teacher.kind()))?;
+
+    if evals.len() != pending.len() {
+        return Err(format!(
+            "teacher returned mismatched batch size: expected {}, got {}",
+            pending.len(),
+            evals.len()
+        ));
+    }
+
+    let processed = evals.len();
+
+    for (pending_sample, eval) in pending.drain(..).zip(evals.into_iter()) {
+        let layers = eval.layers.map(Arc::new);
+        if require_layers && layers.is_none() {
+            return Err("teacher did not return layer outputs despite λ_ft/λ_h1/λ_h2 > 0".into());
+        }
+        let prepared = Arc::new(TeacherPrepared {
+            value: eval.value,
+            domain: eval.domain,
+            layers,
+        });
+        let cache_key = pending_sample.features_us.clone();
+        cache.insert(cache_key, prepared.clone());
+        out.push(DistillSample {
+            features_us: pending_sample.features_us,
+            features_them: pending_sample.features_them,
+            teacher: prepared,
+            label: pending_sample.label,
+            weight: pending_sample.weight,
+        });
+    }
+
+    Ok(processed)
+}
+
+fn load_teacher_cache(
+    path: &Path,
+    require_layers: bool,
+    domain: TeacherValueDomain,
+) -> Result<HashMap<Vec<u32>, Arc<TeacherPrepared>>, String> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let file = File::open(path)
+        .map_err(|e| format!("failed to open teacher cache {}: {e}", path.display()))?;
+    let cache_file: TeacherCacheFile = deserialize_from(file)
+        .map_err(|e| format!("failed to deserialize teacher cache {}: {e}", path.display()))?;
+    let mut map = HashMap::with_capacity(cache_file.entries.len());
+    for (features, entry) in cache_file.entries {
+        if entry.domain != domain {
+            continue;
+        }
+        if require_layers && entry.layers.is_none() {
+            continue;
+        }
+        map.insert(features, Arc::new(entry.into_prepared()));
+    }
+    Ok(map)
+}
+
+fn save_teacher_cache(
+    path: &Path,
+    cache: &HashMap<Vec<u32>, Arc<TeacherPrepared>>,
+) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("failed to create cache directory {}: {e}", dir.display()))?;
+    }
+    let mut entries = Vec::with_capacity(cache.len());
+    for (features, prepared) in cache {
+        entries.push((features.clone(), TeacherCacheEntry::from(prepared.as_ref())));
+    }
+    let cache_file = TeacherCacheFile { entries };
+    let mut file = File::create(path)
+        .map_err(|e| format!("failed to create teacher cache {}: {e}", path.display()))?;
+    serialize_into(&mut file, &cache_file)
+        .map_err(|e| format!("failed to serialize teacher cache {}: {e}", path.display()))?;
+    Ok(())
 }
 
 pub struct ClassicDistillConfig<'a> {
@@ -382,7 +752,7 @@ impl<'a> ClassicDistillConfig<'a> {
 }
 
 pub fn distill_classic_after_training(
-    teacher: &SingleNetwork,
+    teacher: &dyn TeacherNetwork,
     samples: &[Sample],
     config: &Config,
     distill: &DistillOptions,
@@ -400,14 +770,55 @@ pub fn distill_classic_after_training(
     if distill.temperature <= 0.0 {
         return Err("--kd-temperature must be > 0".into());
     }
-    if config.label_type == "cp" && distill.loss != DistillLossKind::Mse {
-        return Err("Classic distillation with cp labels supports --kd-loss=mse only".into());
+    if config.label_type == "cp"
+        && !matches!(distill.loss, DistillLossKind::Mse | DistillLossKind::Huber)
+    {
+        return Err("Classic distillation with cp labels supports --kd-loss=mse|huber only".into());
+    }
+
+    if !teacher.supports_domain(distill.teacher_domain) {
+        return Err(format!(
+            "teacher {:?} does not support domain {:?}",
+            teacher.kind(),
+            distill.teacher_domain
+        ));
+    }
+    if distill.requires_teacher_layers() {
+        // 現時点では Classic FP32 教師のみが中間層を提供する。
+        if !matches!(teacher.kind(), TeacherKind::ClassicFp32) {
+            return Err("Layer distillation weights require classic FP32 teacher".into());
+        }
     }
 
     let start = Instant::now();
-    let prepared = prepare_distill_samples(teacher, samples, MAX_DISTILL_SAMPLES);
-    if prepared.is_empty() {
+    let prepared = prepare_distill_samples(teacher, samples, MAX_DISTILL_SAMPLES, distill)?;
+    if prepared.samples.is_empty() {
         return Err("No samples available for classic distillation".into());
+    }
+
+    log::info!(
+        "distillation prepared {} samples (teacher cache hits={}, misses={})",
+        prepared.samples.len(),
+        prepared.cache_hits,
+        prepared.cache_misses
+    );
+
+    if let Some(lg) = classic_cfg.structured {
+        let cache_target = distill
+            .teacher_cache
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<memory>".to_string());
+        let rec = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "phase": "distill_prepare",
+            "samples": prepared.samples.len(),
+            "cache_hits": prepared.cache_hits,
+            "cache_misses": prepared.cache_misses,
+            "teacher_cache": cache_target,
+            "require_layers": distill.requires_teacher_layers(),
+        });
+        lg.write_json(&rec);
     }
 
     let distill_seed = distill.seed.unwrap_or_else(rand::random::<u64>);
@@ -426,7 +837,7 @@ pub fn distill_classic_after_training(
     let mut bias_den = 0.0f64;
     let mut bias_sq = 0.0f64;
     let mut bias_samples = 0usize;
-    for sample in &prepared {
+    for sample in &prepared.samples {
         let weight = sample.weight as f64;
         if weight <= 0.0 {
             continue;
@@ -434,8 +845,8 @@ pub fn distill_classic_after_training(
         let target = match config.label_type.as_str() {
             "wdl" => {
                 let teacher_logit = match distill.teacher_domain {
-                    TeacherValueDomain::WdlLogit => sample.teacher_output,
-                    TeacherValueDomain::Cp => sample.teacher_output / config.scale,
+                    TeacherValueDomain::WdlLogit => sample.teacher.value,
+                    TeacherValueDomain::Cp => sample.teacher.value / config.scale,
                 };
                 let teacher_prob = sigmoid(teacher_logit / distill.temperature);
                 let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
@@ -446,8 +857,8 @@ pub fn distill_classic_after_training(
             }
             "cp" => {
                 let teacher_cp = match distill.teacher_domain {
-                    TeacherValueDomain::Cp => sample.teacher_output,
-                    TeacherValueDomain::WdlLogit => sample.teacher_output * config.scale,
+                    TeacherValueDomain::Cp => sample.teacher.value,
+                    TeacherValueDomain::WdlLogit => sample.teacher.value * config.scale,
                 };
                 let blended = distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
                 blended.clamp(-(config.cp_clip as f32), config.cp_clip as f32)
@@ -496,20 +907,27 @@ pub fn distill_classic_after_training(
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
     let temperature = distill.temperature;
     let loss_kind = distill.loss;
-    let mut warn_soften_mse_once =
-        distill.soften_student && matches!(loss_kind, DistillLossKind::Mse);
+    let layer_weights = LayerLossWeights {
+        ft: distill.layer_weight_ft,
+        h1: distill.layer_weight_h1,
+        h2: distill.layer_weight_h2,
+    };
+    let mut warn_soften_mse_once = distill.soften_student
+        && matches!(loss_kind, DistillLossKind::Mse | DistillLossKind::Huber);
+    let lambda_out = distill.layer_weight_out;
+    let huber_delta = distill.huber_delta;
 
     for epoch in 0..DISTILL_EPOCHS {
         let mut epoch_loss = 0.0f64;
         let mut epoch_weight = 0.0f64;
-        for sample in &prepared {
+        for sample in &prepared.samples {
             let prediction = forward(&classic, sample, &mut scratch);
-            let (loss_contrib, grad_output) = match config.label_type.as_str() {
+            let (mut loss_contrib, mut grad_output) = match config.label_type.as_str() {
                 "wdl" => {
                     // Teacher may be cp or wdl-logit; normalize to logit space before temperature
                     let teacher_logit = match distill.teacher_domain {
-                        TeacherValueDomain::WdlLogit => sample.teacher_output,
-                        TeacherValueDomain::Cp => sample.teacher_output / config.scale,
+                        TeacherValueDomain::WdlLogit => sample.teacher.value,
+                        TeacherValueDomain::Cp => sample.teacher.value / config.scale,
                     };
                     let teacher_prob = sigmoid(teacher_logit / temperature);
                     let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
@@ -517,7 +935,7 @@ pub fn distill_classic_after_training(
                     let beta = 1.0 - alpha;
                     let weight = sample.weight;
                     match loss_kind {
-                        DistillLossKind::Mse => {
+                        DistillLossKind::Mse | DistillLossKind::Huber => {
                             if warn_soften_mse_once {
                                 log::warn!("--kd-soften-student は --kd-loss=mse では効果がありません (epoch={})", epoch + 1);
                                 warn_soften_mse_once = false;
@@ -526,10 +944,10 @@ pub fn distill_classic_after_training(
                             let label_target = stable_logit(label_prob);
                             let diff_teacher = prediction - teacher_target;
                             let diff_label = prediction - label_target;
-                            let mut grad_teacher = diff_teacher * weight;
-                            let grad_label = diff_label * weight;
-                            let mut loss_teacher = 0.5 * diff_teacher * diff_teacher * weight;
-                            let loss_label = 0.5 * diff_label * diff_label * weight;
+                            let (mut loss_teacher, mut grad_teacher) =
+                                element_loss_grad(diff_teacher, weight, loss_kind, huber_delta);
+                            let (loss_label, grad_label) =
+                                element_loss_grad(diff_label, weight, loss_kind, huber_delta);
                             scale_teacher_by_temperature(
                                 &mut loss_teacher,
                                 &mut grad_teacher,
@@ -603,31 +1021,40 @@ pub fn distill_classic_after_training(
                 }
                 "cp" => {
                     let teacher_cp = match distill.teacher_domain {
-                        TeacherValueDomain::Cp => sample.teacher_output,
-                        TeacherValueDomain::WdlLogit => sample.teacher_output * config.scale,
+                        TeacherValueDomain::Cp => sample.teacher.value,
+                        TeacherValueDomain::WdlLogit => sample.teacher.value * config.scale,
                     };
                     let mut target =
                         distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
                     // Clip target for stability
                     target = target.clamp(-(config.cp_clip as f32), config.cp_clip as f32);
                     let diff = prediction - target;
-                    let loss = 0.5 * diff * diff * sample.weight;
-                    let grad = diff * sample.weight;
+                    let weight = sample.weight;
+                    let (loss, grad) = element_loss_grad(diff, weight, loss_kind, huber_delta);
                     (loss as f64, grad)
                 }
                 _ => unreachable!(),
             };
+            loss_contrib *= lambda_out as f64;
+            grad_output *= lambda_out;
 
             epoch_loss += loss_contrib;
             epoch_weight += sample.weight as f64;
-            backward_update(
+            let layer_loss = backward_update(
                 &mut classic,
                 &mut scratch,
                 sample,
-                grad_output,
-                DISTILL_LR,
-                config.l2_reg,
+                BackwardUpdateParams {
+                    grad_output,
+                    layer_weights: &layer_weights,
+                    teacher_layers: sample.teacher.layers.as_deref(),
+                    loss_kind,
+                    huber_delta,
+                    learning_rate: DISTILL_LR,
+                    l2_reg: config.l2_reg,
+                },
             );
+            epoch_loss += layer_loss;
         }
         if let Some(lg) = classic_cfg.structured {
             let loss_avg = if epoch_weight > 0.0 {
@@ -640,17 +1067,23 @@ pub fn distill_classic_after_training(
                 "phase": "distill_classic",
                 "epoch": (epoch + 1) as i64,
                 "loss": loss_avg,
-                "samples": prepared.len(),
+                "samples": prepared.samples.len(),
                 "loss_kind": match loss_kind {
                     DistillLossKind::Mse => "mse",
                     DistillLossKind::Bce => "bce",
                     DistillLossKind::Kl => "kl",
+                    DistillLossKind::Huber => "huber",
                 },
                 "alpha": distill.alpha,
                 "temperature": temperature,
                 "scale_temp2": distill.scale_temp2,
                 "soften_student": distill.soften_student,
                 "seed": distill_seed,
+                "layer_weight_ft": distill.layer_weight_ft,
+                "layer_weight_h1": distill.layer_weight_h1,
+                "layer_weight_h2": distill.layer_weight_h2,
+                "layer_weight_out": distill.layer_weight_out,
+                "huber_delta": huber_delta,
                 "teacher_domain": match distill.teacher_domain { crate::types::TeacherValueDomain::Cp => "cp", crate::types::TeacherValueDomain::WdlLogit => "wdl-logit" },
             });
             lg.write_json(&rec);
@@ -728,16 +1161,19 @@ fn convert_logit_to_cp(logit: f32, config: &Config) -> f32 {
 }
 
 pub fn evaluate_distill(
-    teacher: &SingleNetwork,
+    teacher: &dyn TeacherNetwork,
     classic_fp32: &ClassicFloatNetwork,
     samples: &[Sample],
     config: &Config,
     teacher_domain: TeacherValueDomain,
 ) -> DistillEvalMetrics {
     let mut metrics = DistillEvalMetrics::default();
-    let mut acc_buf = vec![0.0f32; teacher.acc_dim];
-    let mut act_buf = vec![0.0f32; teacher.acc_dim];
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+    let dummy_teacher = Arc::new(TeacherPrepared {
+        value: 0.0,
+        domain: teacher_domain,
+        layers: None,
+    });
 
     let mut cp_abs_diffs = Vec::new();
     let mut cp_weights = Vec::new();
@@ -756,8 +1192,14 @@ pub fn evaluate_distill(
 
     for sample in samples.iter().filter(|s| s.weight > 0.0).take(MAX_DISTILL_SAMPLES) {
         let weight = sample.weight as f64;
-        let teacher_raw =
-            teacher.forward_with_buffers(&sample.features, &mut acc_buf, &mut act_buf);
+        let teacher_eval = match teacher.evaluate(&sample.features, teacher_domain, false) {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!("failed to evaluate teacher {:?} during metrics: {}", teacher.kind(), e);
+                continue;
+            }
+        };
+        let teacher_raw = teacher_eval.value;
         // Normalize teacher to logit domain (for wdl metrics) and cp domain (for cp metrics)
         let teacher_logit = match (config.label_type.as_str(), teacher_domain) {
             ("wdl", TeacherValueDomain::WdlLogit) => teacher_raw,
@@ -771,7 +1213,7 @@ pub fn evaluate_distill(
         let ds = DistillSample {
             features_us: sample.features.clone(),
             features_them,
-            teacher_output: 0.0,
+            teacher: dummy_teacher.clone(),
             label: 0.0,
             weight: 0.0,
         };
@@ -885,6 +1327,11 @@ pub fn evaluate_quantization_gap(
 ) -> QuantEvalMetrics {
     let mut metrics = QuantEvalMetrics::default();
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+    let dummy_teacher = Arc::new(TeacherPrepared {
+        value: 0.0,
+        domain: TeacherValueDomain::Cp,
+        layers: None,
+    });
 
     // --- Scratch buffers (INT path) to avoid per-sample allocations ---
     let acc_dim = bundle.transformer.acc_dim;
@@ -910,7 +1357,7 @@ pub fn evaluate_quantization_gap(
         let ds = DistillSample {
             features_us: sample.features.clone(),
             features_them: features_them.clone(),
-            teacher_output: 0.0,
+            teacher: dummy_teacher.clone(),
             label: 0.0,
             weight: 0.0,
         };
@@ -1015,14 +1462,36 @@ mod distill_training_tests {
         let sample = DistillSample {
             features_us: vec![0],
             features_them: vec![1],
-            teacher_output: 0.0,
+            teacher: Arc::new(TeacherPrepared {
+                value: 0.0,
+                domain: TeacherValueDomain::Cp,
+                layers: None,
+            }),
             label: 0.0,
             weight: 1.0,
         };
         let mut scratch = ClassicScratch::new(2, 2, 2);
 
         let _ = forward(&net, &sample, &mut scratch);
-        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2, 0.0);
+        let layer_weights = LayerLossWeights {
+            ft: 0.0,
+            h1: 0.0,
+            h2: 0.0,
+        };
+        let _ = backward_update(
+            &mut net,
+            &mut scratch,
+            &sample,
+            BackwardUpdateParams {
+                grad_output: 1.0,
+                layer_weights: &layer_weights,
+                teacher_layers: None,
+                loss_kind: DistillLossKind::Mse,
+                huber_delta: 1.0,
+                learning_rate: 1e-2,
+                l2_reg: 0.0,
+            },
+        );
 
         let delta_threshold: f32 = 1e-6;
         let changed_ft = net
@@ -1070,7 +1539,11 @@ mod distill_training_tests {
         let sample = DistillSample {
             features_us: vec![10_000], // clearly越境
             features_them: vec![20_000],
-            teacher_output: 0.0,
+            teacher: Arc::new(TeacherPrepared {
+                value: 0.0,
+                domain: TeacherValueDomain::Cp,
+                layers: None,
+            }),
             label: 0.0,
             weight: 1.0,
         };
@@ -1086,13 +1559,35 @@ mod distill_training_tests {
         let sample = DistillSample {
             features_us: vec![10_000],
             features_them: vec![20_000],
-            teacher_output: 0.0,
+            teacher: Arc::new(TeacherPrepared {
+                value: 0.0,
+                domain: TeacherValueDomain::Cp,
+                layers: None,
+            }),
             label: 0.0,
             weight: 1.0,
         };
         let mut scratch = ClassicScratch::new(2, 2, 2);
         let _ = forward(&net, &sample, &mut scratch);
-        backward_update(&mut net, &mut scratch, &sample, 1.0, 1e-2, 0.0);
+        let layer_weights = LayerLossWeights {
+            ft: 0.0,
+            h1: 0.0,
+            h2: 0.0,
+        };
+        let _ = backward_update(
+            &mut net,
+            &mut scratch,
+            &sample,
+            BackwardUpdateParams {
+                grad_output: 1.0,
+                layer_weights: &layer_weights,
+                teacher_layers: None,
+                loss_kind: DistillLossKind::Mse,
+                huber_delta: 1.0,
+                learning_rate: 1e-2,
+                l2_reg: 0.0,
+            },
+        );
     }
 
     #[test]
@@ -1103,14 +1598,36 @@ mod distill_training_tests {
         let sample = DistillSample {
             features_us: vec![],
             features_them: vec![],
-            teacher_output: 0.0,
+            teacher: Arc::new(TeacherPrepared {
+                value: 0.0,
+                domain: TeacherValueDomain::Cp,
+                layers: None,
+            }),
             label: 0.0,
             weight: 1.0,
         };
         let mut scratch = ClassicScratch::new(2, 2, 2);
         let _ = forward(&net, &sample, &mut scratch);
 
-        backward_update(&mut net, &mut scratch, &sample, 0.0, 1e-2, 1e-3);
+        let layer_weights = LayerLossWeights {
+            ft: 0.0,
+            h1: 0.0,
+            h2: 0.0,
+        };
+        let _ = backward_update(
+            &mut net,
+            &mut scratch,
+            &sample,
+            BackwardUpdateParams {
+                grad_output: 0.0,
+                layer_weights: &layer_weights,
+                teacher_layers: None,
+                loss_kind: DistillLossKind::Mse,
+                huber_delta: 1.0,
+                learning_rate: 1e-2,
+                l2_reg: 1e-3,
+            },
+        );
 
         assert!(net
             .output_weights

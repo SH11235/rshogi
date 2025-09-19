@@ -93,11 +93,20 @@ pub enum DistillLossKind {
     Bce,
     #[clap(name = "kl")]
     Kl,
+    #[clap(name = "huber", alias = "smoothl1")]
+    Huber,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TeacherKind {
+    Single,
+    ClassicFp32,
 }
 
 #[derive(Clone, Debug)]
 pub struct DistillOptions {
     pub teacher_path: Option<PathBuf>,
+    pub teacher_kind: TeacherKind,
     pub loss: DistillLossKind,
     pub temperature: f32,
     pub alpha: f32,
@@ -108,12 +117,20 @@ pub struct DistillOptions {
     /// - Cp: 評価値(cp) 例: ±300, ±1200
     /// - WdlLogit: WDLロジット (シグモイド前の値)
     pub teacher_domain: TeacherValueDomain,
+    pub huber_delta: f32,
+    pub layer_weight_ft: f32,
+    pub layer_weight_h1: f32,
+    pub layer_weight_h2: f32,
+    pub layer_weight_out: f32,
+    pub teacher_batch_size: usize,
+    pub teacher_cache: Option<PathBuf>,
 }
 
 impl Default for DistillOptions {
     fn default() -> Self {
         Self {
             teacher_path: None,
+            teacher_kind: TeacherKind::Single,
             loss: DistillLossKind::Mse,
             temperature: 1.0,
             alpha: 1.0,
@@ -121,16 +138,29 @@ impl Default for DistillOptions {
             soften_student: false,
             seed: None,
             teacher_domain: TeacherValueDomain::Cp,
+            huber_delta: 1.0,
+            layer_weight_ft: 0.0,
+            layer_weight_h1: 0.0,
+            layer_weight_h2: 0.0,
+            layer_weight_out: 1.0,
+            teacher_batch_size: 256,
+            teacher_cache: None,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum TeacherValueDomain {
     #[clap(name = "cp")]
     Cp,
     #[clap(name = "wdl-logit")]
     WdlLogit,
+}
+
+impl DistillOptions {
+    pub fn requires_teacher_layers(&self) -> bool {
+        self.layer_weight_ft > 0.0 || self.layer_weight_h1 > 0.0 || self.layer_weight_h2 > 0.0
+    }
 }
 
 #[derive(Clone, Debug)]

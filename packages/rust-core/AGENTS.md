@@ -21,6 +21,7 @@
 - Formatting: rustfmt (see `rustfmt.toml`), max width 100, 4-space tabs, edition 2021.
 - Linting: clippy (see `clippy.toml`); treat warnings as errors in CI/dev.
 - Naming: snake_case for modules/functions, CamelCase for types/traits, SCREAMING_SNAKE_CASE for consts.
+- Iterator 記法: `0..len` のループでスライスを添字アクセスする代わりに、`iter()` / `iter_mut()` と `enumerate` や `zip` を組み合わせて要素へアクセスし、必要なら `.take(len)` で上限を揃える。
 - Features: use kebab/snake (e.g., `tt_metrics`, `ybwc`, `nightly`). Enable with `--features`.
 
 ## Testing Guidelines
