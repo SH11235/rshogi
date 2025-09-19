@@ -716,29 +716,27 @@ fn compute_teacher_scale_fit(
     let mut sxy = 0.0f64;
     let mut count = 0usize;
 
+    let label_type = config.label_type.as_str();
     for sample in samples {
         let w = sample.weight as f64;
         if w <= 0.0 {
             continue;
         }
-        let teacher_raw = sample.teacher.value as f64;
-        let (x, y) = match config.label_type.as_str() {
+        let teacher_label_space = teacher_value_in_label_space(
+            sample.teacher.value,
+            distill.teacher_domain,
+            label_type,
+            config.scale,
+        ) as f64;
+        let (x, y) = match label_type {
             "wdl" => {
                 let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
                 let label_logit = stable_logit(label_prob) as f64;
-                let teacher_logit = match distill.teacher_domain {
-                    TeacherValueDomain::WdlLogit => teacher_raw,
-                    TeacherValueDomain::Cp => teacher_raw / config.scale as f64,
-                };
-                (teacher_logit, label_logit)
+                (teacher_label_space, label_logit)
             }
             "cp" => {
                 let label_cp = sample.label as f64;
-                let teacher_cp = match distill.teacher_domain {
-                    TeacherValueDomain::WdlLogit => teacher_raw * config.scale as f64,
-                    TeacherValueDomain::Cp => teacher_raw,
-                };
-                (teacher_cp, label_cp)
+                (teacher_label_space, label_cp)
             }
             _ => continue,
         };
@@ -776,6 +774,26 @@ fn apply_teacher_scale(value: f32, scale: Option<(f32, f32)>) -> f32 {
         value * gain + bias
     } else {
         value
+    }
+}
+
+#[inline]
+fn teacher_value_in_label_space(
+    value: f32,
+    teacher_domain: TeacherValueDomain,
+    label_type: &str,
+    scale: f32,
+) -> f32 {
+    match label_type {
+        "wdl" => match teacher_domain {
+            TeacherValueDomain::WdlLogit => value,
+            TeacherValueDomain::Cp => value / scale,
+        },
+        "cp" => match teacher_domain {
+            TeacherValueDomain::WdlLogit => value * scale,
+            TeacherValueDomain::Cp => value,
+        },
+        _ => value,
     }
 }
 
@@ -941,6 +959,11 @@ pub fn distill_classic_after_training(
                 "gain": gain,
                 "bias": bias,
                 "samples": prepared.samples.len(),
+                "space": match config.label_type.as_str() {
+                    "wdl" => "wdl-logit",
+                    "cp" => "cp",
+                    other => other,
+                },
             });
             lg.write_json(&rec);
         }
@@ -963,18 +986,22 @@ pub fn distill_classic_after_training(
     let mut bias_den = 0.0f64;
     let mut bias_sq = 0.0f64;
     let mut bias_samples = 0usize;
+    let label_type = config.label_type.as_str();
     for sample in &prepared.samples {
         let weight = sample.weight as f64;
         if weight <= 0.0 {
             continue;
         }
-        let teacher_scaled = apply_teacher_scale(sample.teacher.value, teacher_scale);
-        let target = match config.label_type.as_str() {
+        let teacher_label_space = teacher_value_in_label_space(
+            sample.teacher.value,
+            distill.teacher_domain,
+            label_type,
+            config.scale,
+        );
+        let teacher_adjusted = apply_teacher_scale(teacher_label_space, teacher_scale);
+        let target = match label_type {
             "wdl" => {
-                let teacher_logit = match distill.teacher_domain {
-                    TeacherValueDomain::WdlLogit => teacher_scaled,
-                    TeacherValueDomain::Cp => teacher_scaled / config.scale,
-                };
+                let teacher_logit = teacher_adjusted;
                 let teacher_prob = sigmoid(teacher_logit / distill.temperature);
                 let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
                 let target_prob = (distill.alpha * teacher_prob
@@ -983,10 +1010,7 @@ pub fn distill_classic_after_training(
                 stable_logit(target_prob)
             }
             "cp" => {
-                let teacher_cp = match distill.teacher_domain {
-                    TeacherValueDomain::Cp => teacher_scaled,
-                    TeacherValueDomain::WdlLogit => teacher_scaled * config.scale,
-                };
+                let teacher_cp = teacher_adjusted;
                 let blended = distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
                 blended.clamp(-(config.cp_clip as f32), config.cp_clip as f32)
             }
@@ -1043,20 +1067,24 @@ pub fn distill_classic_after_training(
         && matches!(loss_kind, DistillLossKind::Mse | DistillLossKind::Huber);
     let lambda_out = distill.layer_weight_out;
     let huber_delta = distill.huber_delta;
+    let label_type = config.label_type.as_str();
 
     for epoch in 0..DISTILL_EPOCHS {
         let mut epoch_loss = 0.0f64;
         let mut epoch_weight = 0.0f64;
         for sample in &prepared.samples {
             let prediction = forward(&classic, sample, &mut scratch);
-            let teacher_scaled = apply_teacher_scale(sample.teacher.value, teacher_scale);
-            let (mut loss_contrib, mut grad_output) = match config.label_type.as_str() {
+            let teacher_label_space = teacher_value_in_label_space(
+                sample.teacher.value,
+                distill.teacher_domain,
+                label_type,
+                config.scale,
+            );
+            let teacher_adjusted = apply_teacher_scale(teacher_label_space, teacher_scale);
+            let (mut loss_contrib, mut grad_output) = match label_type {
                 "wdl" => {
                     // Teacher may be cp or wdl-logit; normalize to logit space before temperature
-                    let teacher_logit = match distill.teacher_domain {
-                        TeacherValueDomain::WdlLogit => teacher_scaled,
-                        TeacherValueDomain::Cp => teacher_scaled / config.scale,
-                    };
+                    let teacher_logit = teacher_adjusted;
                     let teacher_prob = sigmoid(teacher_logit / temperature);
                     let label_prob = sample.label.clamp(PROB_EPS, 1.0 - PROB_EPS);
                     let alpha = distill.alpha;
@@ -1148,12 +1176,8 @@ pub fn distill_classic_after_training(
                     }
                 }
                 "cp" => {
-                    let teacher_cp = match distill.teacher_domain {
-                        TeacherValueDomain::Cp => teacher_scaled,
-                        TeacherValueDomain::WdlLogit => teacher_scaled * config.scale,
-                    };
                     let mut target =
-                        distill.alpha * teacher_cp + (1.0 - distill.alpha) * sample.label;
+                        distill.alpha * teacher_adjusted + (1.0 - distill.alpha) * sample.label;
                     // Clip target for stability
                     target = target.clamp(-(config.cp_clip as f32), config.cp_clip as f32);
                     let diff = prediction - target;
@@ -1814,6 +1838,44 @@ mod distill_training_tests {
             .iter()
             .zip(before.iter())
             .any(|(a, b)| (*a - *b).abs() > 1e-9));
+    }
+
+    #[test]
+    fn teacher_scale_fit_applies_in_label_space_for_cp_teacher_wdl_labels() {
+        let scale = 600.0f32;
+        let teacher_domain = TeacherValueDomain::Cp;
+        let label_type = "wdl";
+        let teacher_raw = 600.0f32; // cp domain raw
+        let fitted = Some((2.0f32, 1.0f32));
+
+        let normalized =
+            teacher_value_in_label_space(teacher_raw, teacher_domain, label_type, scale);
+        assert!((normalized - 1.0).abs() < 1e-6);
+
+        let adjusted = apply_teacher_scale(normalized, fitted);
+        assert!((adjusted - 3.0).abs() < 1e-6);
+
+        let legacy = apply_teacher_scale(teacher_raw, fitted) / scale;
+        assert!((adjusted - legacy).abs() > 1e-3);
+    }
+
+    #[test]
+    fn teacher_scale_fit_applies_in_label_space_for_wdl_teacher_cp_labels() {
+        let scale = 600.0f32;
+        let teacher_domain = TeacherValueDomain::WdlLogit;
+        let label_type = "cp";
+        let teacher_raw = 1.0f32; // logit domain raw
+        let fitted = Some((0.5f32, -30.0f32));
+
+        let normalized =
+            teacher_value_in_label_space(teacher_raw, teacher_domain, label_type, scale);
+        assert!((normalized - 600.0).abs() < 1e-6);
+
+        let adjusted = apply_teacher_scale(normalized, fitted);
+        assert!((adjusted - 270.0).abs() < 1e-6);
+
+        let legacy = apply_teacher_scale(teacher_raw, fitted) * scale;
+        assert!((adjusted - legacy).abs() > 1e-3);
     }
 }
 

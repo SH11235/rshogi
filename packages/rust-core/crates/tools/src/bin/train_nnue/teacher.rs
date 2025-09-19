@@ -204,9 +204,11 @@ impl TeacherNetwork for ClassicFp32Teacher {
             scratch.features_us.clear();
             scratch.features_us.extend(req.features.iter().map(|&f| f as usize));
             scratch.features_them.clear();
-            let flipped: Vec<usize> =
-                scratch.features_us.iter().copied().map(flip_us_them).collect();
-            scratch.features_them.extend(flipped);
+            let flipped_source = scratch.features_us.clone();
+            scratch.features_them.reserve(flipped_source.len());
+            for feature in flipped_source {
+                scratch.features_them.push(flip_us_them(feature));
+            }
 
             let LayerOutputs { ft, h1, h2, output } =
                 self.net.forward(&scratch.features_us, &scratch.features_them);
