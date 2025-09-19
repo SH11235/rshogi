@@ -1,4 +1,4 @@
-use super::{classic, dataset, export, logging, model, params, training, types};
+use super::{classic, dataset, export, logging, model, params, teacher, training, types};
 use bytemuck::cast_slice;
 use classic::*;
 use dataset::*;
@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Seek, SeekFrom, Write},
+    path::Path,
 };
+use teacher::{load_teacher, TeacherBatchRequest, TeacherError};
 use tempfile::tempdir;
 use tools::{common::weighting as wcfg, nnfc_v1::FEATURE_SET_ID_HALF};
 use training::*;
@@ -65,6 +67,52 @@ fn write_v1_header(f: &mut File, h: HeaderV1) -> u64 {
         f.write_all(&vec![0u8; pad]).unwrap();
     }
     payload_offset
+}
+
+fn write_classic_fp32_fixture(path: &Path) {
+    let mut file = File::create(path).unwrap();
+    writeln!(file, "NNUE").unwrap();
+    writeln!(file, "VERSION 1").unwrap();
+    writeln!(file, "FEATURES HALFKP").unwrap();
+    writeln!(file, "ARCHITECTURE CLASSIC").unwrap();
+    writeln!(file, "ACC_DIM 2").unwrap();
+    writeln!(file, "H1_DIM 2").unwrap();
+    writeln!(file, "H2_DIM 1").unwrap();
+    writeln!(file, "RELU_CLIP 127").unwrap();
+    writeln!(file, "FEATURE_DIM 4").unwrap();
+    writeln!(file, "END_HEADER").unwrap();
+
+    file.write_all(&(4u32.to_le_bytes())).unwrap();
+    file.write_all(&(2u32.to_le_bytes())).unwrap();
+    file.write_all(&(2u32.to_le_bytes())).unwrap();
+    file.write_all(&(1u32.to_le_bytes())).unwrap();
+
+    let ft_weights = [0.2f32, -0.1, 0.05, 0.15, -0.2, 0.3, 0.4, -0.25];
+    for v in ft_weights.iter() {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let ft_biases = [0.01f32, -0.02];
+    for v in ft_biases.iter() {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let hidden1_weights = [0.3f32, -0.1, 0.05, 0.2, -0.2, 0.25, -0.15, 0.1];
+    for v in hidden1_weights.iter() {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let hidden1_biases = [0.05f32, -0.03];
+    for v in hidden1_biases.iter() {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let hidden2_weights = [0.4f32, -0.35];
+    for v in hidden2_weights.iter() {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let hidden2_biases = [0.02f32];
+    file.write_all(&hidden2_biases[0].to_le_bytes()).unwrap();
+    let output_weights = [0.5f32];
+    file.write_all(&output_weights[0].to_le_bytes()).unwrap();
+    let output_bias = 0.01f32;
+    file.write_all(&output_bias.to_le_bytes()).unwrap();
 }
 
 #[test]
@@ -2120,4 +2168,25 @@ fn cp_distillation_unit_smoke_loss_ordering() {
     // ここでは「換算が入らないと loss のオーダが全く変わる」ことを検知したいので倍率比を確認
     let ratio = loss_with / loss_without;
     assert!(ratio > 10.0, "expected cp conversion to change loss magnitude significantly, ratio={} (with={}, without={})", ratio, loss_with, loss_without);
+}
+
+#[test]
+fn classic_teacher_enforces_wdl_logit_domain() {
+    let td = tempdir().unwrap();
+    let path = td.path().join("teacher.fp32");
+    write_classic_fp32_fixture(&path);
+
+    let teacher = load_teacher(&path, TeacherKind::ClassicFp32).unwrap();
+    assert!(teacher.supports_domain(TeacherValueDomain::WdlLogit));
+    assert!(!teacher.supports_domain(TeacherValueDomain::Cp));
+
+    let features = vec![0u32, 1u32];
+    let batch = vec![TeacherBatchRequest {
+        features: &features,
+    }];
+    let evals = teacher.evaluate_batch(&batch, TeacherValueDomain::WdlLogit, false).unwrap();
+    assert_eq!(evals.len(), 1);
+
+    let err = teacher.evaluate_batch(&batch, TeacherValueDomain::Cp, false).unwrap_err();
+    assert!(matches!(err, TeacherError::UnsupportedDomain { .. }));
 }

@@ -181,7 +181,7 @@ impl TeacherNetwork for ClassicFp32Teacher {
     }
 
     fn supports_domain(&self, domain: TeacherValueDomain) -> bool {
-        matches!(domain, TeacherValueDomain::Cp)
+        matches!(domain, TeacherValueDomain::WdlLogit)
     }
 
     fn evaluate_batch<'a>(
@@ -203,17 +203,13 @@ impl TeacherNetwork for ClassicFp32Teacher {
         for req in batch {
             scratch.features_us.clear();
             scratch.features_us.extend(req.features.iter().map(|&f| f as usize));
-            let them_values: Vec<usize> =
-                scratch.features_us.iter().copied().map(flip_us_them).collect();
             scratch.features_them.clear();
-            scratch.features_them.extend(them_values);
+            let flipped: Vec<usize> =
+                scratch.features_us.iter().copied().map(flip_us_them).collect();
+            scratch.features_them.extend(flipped);
 
-            let outputs = self.net.forward(&scratch.features_us, &scratch.features_them);
-            let LayerOutputs { ft, h1, h2, output } = outputs;
-            let value = match domain {
-                TeacherValueDomain::Cp => output,
-                TeacherValueDomain::WdlLogit => output,
-            };
+            let LayerOutputs { ft, h1, h2, output } =
+                self.net.forward(&scratch.features_us, &scratch.features_them);
             let layers = if capture_layers {
                 Some(TeacherLayers {
                     ft,
@@ -225,9 +221,9 @@ impl TeacherNetwork for ClassicFp32Teacher {
                 None
             };
             let eval = TeacherEval {
-                value,
+                value: output,
                 layers,
-                domain,
+                domain: TeacherValueDomain::WdlLogit,
             };
             results.push(eval);
         }
