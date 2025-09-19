@@ -24,6 +24,10 @@ struct Cli {
     /// Emit JSON instead of human-readable text
     #[arg(long)]
     json: bool,
+
+    /// Allow skipping legacy FT prelude even if metadata/scales do not agree
+    #[arg(long)]
+    allow_ft_prelude: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +150,7 @@ struct NetworkShape {
     metadata_hidden: Vec<usize>,
 }
 
+#[derive(Clone, Copy)]
 enum FormatKindInfo {
     Standard,
     Legacy,
@@ -173,6 +178,19 @@ fn main() -> Result<()> {
 
     let format_info = read_format_info(&data)?;
 
+    if matches!(format_info.kind, FormatKindInfo::Standard) {
+        if let Some(declared) = format_info.declared_size {
+            let actual = data.len() as u32;
+            if declared != actual {
+                log::warn!(
+                    "declared size {} differs from actual {} bytes; proceeding anyway",
+                    declared,
+                    actual
+                );
+            }
+        }
+    }
+
     let architecture_label = architecture_label(format_info.architecture).map(ToString::to_string);
 
     let mut shape = NetworkShape {
@@ -195,7 +213,13 @@ fn main() -> Result<()> {
 
     let (scales_data, mut scale_read_notes) = read_scales_data(&cli)?;
 
-    let weights = parse_weights(&data, format_info.payload_offset, &shape, scales_data.as_ref())?;
+    let weights = parse_weights(
+        &data,
+        format_info.payload_offset,
+        &shape,
+        scales_data.as_ref(),
+        cli.allow_ft_prelude,
+    )?;
 
     let (scales_report, mut scale_notes) =
         build_scales_report(scales_data.as_ref(), &shape, &weights.dim);
@@ -452,6 +476,7 @@ fn parse_weights(
     payload_offset: usize,
     shape: &NetworkShape,
     scales: Option<&ClassicQuantizationScalesData>,
+    allow_prelude: bool,
 ) -> Result<WeightParseResult> {
     if payload_offset > data.len() {
         bail!("payload offset {} beyond file size {}", payload_offset, data.len());
@@ -480,9 +505,14 @@ fn parse_weights(
         + (output_dim * 4);
     if remaining < tail_bytes {
         bail!(
-            "payload too small: remaining {} bytes, fixed tail requires {} bytes",
+            "payload too small: remaining {} bytes, fixed tail requires {} bytes (acc_dim={}, sides={}, h1_dim={}, h2_dim={}, output_dim={})",
             remaining,
-            tail_bytes
+            tail_bytes,
+            acc_dim,
+            sides,
+            h1_dim,
+            h2_dim,
+            output_dim
         );
     }
 
@@ -503,6 +533,20 @@ fn parse_weights(
                 let reduced_count = reduced_bytes / 2;
                 if reduced_count.is_multiple_of(ft_divisor) {
                     let tentative_input_dim = reduced_count / ft_divisor;
+                    if tentative_input_dim == 0 {
+                        bail!(
+                            "feature transformer header detected but derived input_dim is zero (count={}, acc_dim={})",
+                            reduced_count,
+                            ft_divisor
+                        );
+                    }
+                    let matches_hint = input_dim_matches_hints(tentative_input_dim, shape, scales);
+                    if !matches_hint && !allow_prelude {
+                        bail!(
+                            "feature transformer header detected but derived input_dim {} mismatches metadata/scales hints",
+                            tentative_input_dim
+                        );
+                    }
                     let word0 =
                         u32::from_le_bytes([prelude[0], prelude[1], prelude[2], prelude[3]]);
                     let word1 =
@@ -510,9 +554,9 @@ fn parse_weights(
                     notes.push(format!(
                         "skipped 8-byte FT header words: 0x{word0:08X}, 0x{word1:08X}"
                     ));
-                    if !input_dim_matches_hints(tentative_input_dim, shape, scales) {
+                    if !matches_hint {
                         notes.push(format!(
-                            "derived input_dim {} differs from metadata/scales hints",
+                            "derived input_dim {} differs from metadata/scales hints (override: --allow-ft-prelude)",
                             tentative_input_dim
                         ));
                     }
@@ -521,20 +565,23 @@ fn parse_weights(
                     ft_weight_count = reduced_count;
                 } else {
                     bail!(
-                        "feature transformer weight count {} not divisible by acc_dim {}; corrupted network?",
+                        "feature transformer weight count {} (bytes={}) not divisible by acc_dim {}",
                         reduced_count,
+                        reduced_bytes,
                         ft_divisor
                     );
                 }
             } else {
                 bail!(
-                    "feature transformer weight section misaligned after potential header adjustment"
+                    "feature transformer weight section misaligned after potential header adjustment (bytes_before={}, attempted_skip=8)",
+                    ft_weights_bytes
                 );
             }
         } else {
             bail!(
-                "feature transformer weight count {} not divisible by acc_dim {}; corrupted network?",
+                "feature transformer weight count {} (bytes={}) not divisible by acc_dim {}",
                 ft_weight_count,
+                ft_weights_bytes,
                 ft_divisor
             );
         }
@@ -885,9 +932,17 @@ fn print_report(report: &InspectReport) {
     );
 
     if let Some(scales) = &report.scales {
-        println!("Scales ({}):", scales.as_tuple());
+        println!("Scales:");
         println!(
-            "  s_w0: {:.6} | s_in_1: {:.6} | s_in_2: {:.6} | s_in_3: {:.6}",
+            "  schema={} format={} arch={} bundle={}",
+            scales.schema_version, scales.format_version, scales.arch, scales.bundle_sha256
+        );
+        println!(
+            "  dims: acc={} h1={} h2={} input={}",
+            scales.acc_dim, scales.h1_dim, scales.h2_dim, scales.input_dim
+        );
+        println!(
+            "  scales: s_w0={:.6} s_in1={:.6} s_in2={:.6} s_in3={:.6}",
             scales.s_w0, scales.s_in_1, scales.s_in_2, scales.s_in_3
         );
         println!(
@@ -948,23 +1003,4 @@ fn wrap_metadata(text: &str) -> Vec<String> {
         out.push(current);
     }
     out
-}
-
-trait ScalePretty {
-    fn as_tuple(&self) -> String;
-}
-
-impl ScalePretty for ScalesReport {
-    fn as_tuple(&self) -> String {
-        format!(
-            "schema={} format={} acc={} h1={} h2={} input={} bundle_sha256={}",
-            self.schema_version,
-            self.format_version,
-            self.acc_dim,
-            self.h1_dim,
-            self.h2_dim,
-            self.input_dim,
-            self.bundle_sha256
-        )
-    }
 }

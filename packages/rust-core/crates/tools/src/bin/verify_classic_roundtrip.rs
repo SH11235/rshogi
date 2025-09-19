@@ -206,6 +206,7 @@ struct SampleDiff {
 }
 
 fn main() -> Result<()> {
+    let _ = env_logger::builder().is_test(false).try_init();
     let cli = Cli::parse();
 
     if !cli.synthetic_probe && cli.positions.is_none() {
@@ -341,10 +342,23 @@ fn main() -> Result<()> {
         _ => false,
     };
 
-    worst.sort_by(|a, b| b.diff.abs().partial_cmp(&a.diff.abs()).unwrap());
-    worst.truncate(cli.worst_count);
+    let worst_count = cli.worst_count.min(worst.len());
+    if worst_count > 0 && worst_count < worst.len() {
+        let nth = worst_count - 1;
+        worst.select_nth_unstable_by(nth, |a, b| {
+            b.diff.abs().partial_cmp(&a.diff.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        worst[..worst_count].sort_by(|a, b| {
+            b.diff.abs().partial_cmp(&a.diff.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    } else if worst_count == worst.len() {
+        worst.sort_by(|a, b| {
+            b.diff.abs().partial_cmp(&a.diff.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
     let worst_serialized: Vec<WorstEntry> = worst
         .iter()
+        .take(worst_count)
         .map(|entry| WorstEntry {
             label: entry.label.clone(),
             abs_cp: entry.diff.abs(),
@@ -446,8 +460,17 @@ fn percentile(sorted: &[f32], q: f32) -> Option<f32> {
     if sorted.is_empty() {
         return None;
     }
-    let rank = ((sorted.len() - 1) as f32 * q).round() as usize;
-    Some(sorted[rank.min(sorted.len() - 1)])
+    let clamped_q = q.clamp(0.0, 1.0);
+    let n = sorted.len();
+    let h = clamped_q * (n as f32 - 1.0);
+    let i = h.floor() as usize;
+    let j = h.ceil() as usize;
+    if i == j {
+        Some(sorted[i])
+    } else {
+        let weight = h - i as f32;
+        Some(sorted[i] * (1.0 - weight) + sorted[j] * weight)
+    }
 }
 
 fn load_positions(path: &PathBuf) -> Result<Vec<(String, Position)>> {
