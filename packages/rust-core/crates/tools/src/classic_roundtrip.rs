@@ -487,6 +487,15 @@ fn validate_scale_values(sc: &ClassicQuantizationScalesData) -> Result<()> {
     ensure_pos("s_in_2", sc.s_in_2)?;
     ensure_pos("s_in_3", sc.s_in_3)?;
     ensure_pos("s_w0", sc.s_w0)?;
+    for (idx, &value) in sc.s_w1.iter().enumerate() {
+        ensure_pos(&format!("s_w1[{idx}]"), value)?;
+    }
+    for (idx, &value) in sc.s_w2.iter().enumerate() {
+        ensure_pos(&format!("s_w2[{idx}]"), value)?;
+    }
+    for (idx, &value) in sc.s_w3.iter().enumerate() {
+        ensure_pos(&format!("s_w3[{idx}]"), value)?;
+    }
     Ok(())
 }
 
@@ -504,13 +513,22 @@ fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>
 
     let log2_ratio = ratio.log2();
     let rounded = log2_ratio.round();
-    let nearest_pow2 = 2f32.powf(rounded);
+    let nearest_pow2 = 2f32.powi(rounded as i32);
     let rel_error = ((nearest_pow2 - ratio) / nearest_pow2).abs();
 
     if rel_error <= 1e-4 {
         if rounded >= 0.0 {
-            let shift = rounded as i32;
-            return (nearest_pow2, Some(shift));
+            let raw_shift = rounded as i32;
+            let shift = raw_shift.clamp(0, 30);
+            if raw_shift != shift {
+                log::warn!(
+                    "ft shift {} out of range; clamped to {}",
+                    raw_shift,
+                    shift
+                );
+            }
+            log::info!("ft scale uses pow2 shift = {}", shift);
+            return (2f32.powi(shift), Some(shift));
         }
         // Classic engine は固定ビットシフト (右シフト) のみを想定しており、
         // スケール < 1.0 となる負のシフトは対応外なので安全側でフォールバックする。
@@ -527,6 +545,8 @@ fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>
         nearest_pow2,
         rel_error
     );
+
+    log::info!("ft scale uses floating path scale = {:.6}", ratio);
 
     (ratio, None)
 }
@@ -818,9 +838,25 @@ mod tests {
         broken["s_w0"] = serde_json::json!(-0.125);
         serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
 
-        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap_err();
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("s_w0 must be finite and > 0"), "unexpected err: {msg}");
+
+        let mut broken = original.clone();
+        broken["s_w1"][0] = serde_json::json!(0.0);
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("s_w1[0] must be finite and > 0"), "unexpected err: {msg}");
+
+        let mut broken = original.clone();
+        broken["s_w2"][0] = serde_json::json!(-0.25);
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("s_w2[0] must be finite and > 0"), "unexpected err: {msg}");
     }
 
     #[test]
