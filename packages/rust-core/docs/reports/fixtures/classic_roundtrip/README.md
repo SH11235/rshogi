@@ -20,7 +20,7 @@ CARGO_PROFILE=debug ./docs/reports/fixtures/classic_roundtrip/run_smoke.sh
 
 ## ベースライン計測
 
-より厳密なラウンドトリップ統計を取得したい場合は、同ディレクトリの `measure_roundtrip.py` を実行してください。既定では教師シード 2025 / Classic シード 42〜46 の 5 回分を計測し、結果を `target/classic_roundtrip_measure/baseline_roundtrip.json` および `docs/reports/fixtures/classic_roundtrip/baseline_roundtrip.json` に保存します。
+より厳密なラウンドトリップ統計を取得したい場合は、同ディレクトリの `measure_classic_roundtrip` を実行してください。既定では教師シード 2025 / Classic シード 42〜46 の 5 回分を計測し、結果を `target/classic_roundtrip_measure/baseline_roundtrip.json` および `docs/reports/fixtures/classic_roundtrip/baseline_roundtrip.json` に保存します。
 
 ```bash
 cargo run -p tools --bin measure_classic_roundtrip -- --profile release
