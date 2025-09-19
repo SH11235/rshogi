@@ -62,8 +62,6 @@ struct CacheConfig {
 }
 
 // No concrete header struct; header is written field-by-field for stability.
-
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
     sfen: String,
@@ -87,11 +85,8 @@ struct TrainingPosition {
     depth: Option<u8>,
     #[serde(default)]
     seldepth: Option<u8>,
-    #[serde(default)]
-    nodes: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct LineInfo {
     #[serde(default)]
@@ -317,7 +312,7 @@ where
         }
 
         processed += 1;
-        if processed % config.metrics_interval == 0 {
+        if processed.is_multiple_of(config.metrics_interval) {
             print!("\r[metrics] processed={}", processed);
             #[cfg(target_os = "linux")]
             if config.report_rss {

@@ -688,7 +688,7 @@ impl TranspositionTable {
 
         // Update node counter and check if we need to update hashfull estimate
         let node_count = self.node_counter.fetch_add(1, Ordering::Relaxed);
-        if node_count % 256 == 0 {
+        if node_count.is_multiple_of(256) {
             self.update_hashfull_estimate();
 
             // Check GC trigger conditions

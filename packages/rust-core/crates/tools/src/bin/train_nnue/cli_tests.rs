@@ -1,11 +1,86 @@
 //! CLI integration tests for train_nnue
 
 use crate::error_messages::*;
-use assert_cmd::prelude::*;
+use assert_cmd::{cargo::cargo_bin, prelude::*};
 use predicates::str::contains;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
 use std::process::Command;
+use std::sync::OnceLock;
 use tempfile::tempdir;
+use tools::nnfc_v1::{
+    flags as fc_flags, PayloadEncoding, CACHE_VERSION_V1, FEATURE_SET_ID_HALF, HEADER_SIZE_V1,
+};
+
+fn write_minimal_nnfc_cache(path: &std::path::Path) {
+    let mut f = File::create(path).unwrap();
+    let header_size: u32 = 48;
+    f.write_all(b"NNFC").unwrap();
+    f.write_all(&1u32.to_le_bytes()).unwrap();
+    f.write_all(&FEATURE_SET_ID_HALF.to_le_bytes()).unwrap();
+    f.write_all(&0u64.to_le_bytes()).unwrap();
+    f.write_all(&1024u32.to_le_bytes()).unwrap();
+    f.write_all(&header_size.to_le_bytes()).unwrap();
+    f.write_all(&[0]).unwrap(); // little-endian
+    f.write_all(&[0]).unwrap(); // raw payload
+    f.write_all(&[0u8; 2]).unwrap();
+    let payload_offset = 4u64 + header_size as u64;
+    f.write_all(&payload_offset.to_le_bytes()).unwrap();
+    f.write_all(&0u32.to_le_bytes()).unwrap(); // sample_flags_mask
+    if header_size as usize > 40 {
+        f.write_all(&vec![0u8; header_size as usize - 40]).unwrap();
+    }
+    f.flush().unwrap();
+}
+
+fn write_tiny_cache_with_samples(path: &std::path::Path, num_samples: u32) {
+    let mut f = File::create(path).unwrap();
+    let header_size: u32 = HEADER_SIZE_V1;
+    f.write_all(b"NNFC").unwrap();
+    f.write_all(&CACHE_VERSION_V1.to_le_bytes()).unwrap();
+    f.write_all(&FEATURE_SET_ID_HALF.to_le_bytes()).unwrap();
+    f.write_all(&(num_samples as u64).to_le_bytes()).unwrap();
+    f.write_all(&1024u32.to_le_bytes()).unwrap();
+    f.write_all(&header_size.to_le_bytes()).unwrap();
+    f.write_all(&[0]).unwrap(); // little-endian
+    f.write_all(&[PayloadEncoding::None.code()]).unwrap();
+    f.write_all(&[0u8; 2]).unwrap();
+    let payload_offset = 4u64 + header_size as u64;
+    f.write_all(&payload_offset.to_le_bytes()).unwrap();
+    let flags_mask = (fc_flags::BOTH_EXACT) as u32;
+    f.write_all(&flags_mask.to_le_bytes()).unwrap();
+    let pad_len = header_size as usize - 40;
+    if pad_len > 0 {
+        f.write_all(&vec![0u8; pad_len]).unwrap();
+    }
+    f.seek(SeekFrom::Start(payload_offset)).unwrap();
+    for _ in 0..num_samples {
+        f.write_all(&0u32.to_le_bytes()).unwrap();
+        f.write_all(&0.0f32.to_le_bytes()).unwrap();
+        f.write_all(&(50u16).to_le_bytes()).unwrap();
+        f.write_all(&[10u8]).unwrap();
+        f.write_all(&[12u8]).unwrap();
+        f.write_all(&[fc_flags::BOTH_EXACT]).unwrap();
+    }
+    f.flush().unwrap();
+}
+
+fn train_nnue_command() -> Command {
+    Command::new(train_nnue_path())
+}
+
+fn train_nnue_path() -> &'static std::path::Path {
+    static BIN: OnceLock<std::path::PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let status = Command::new("cargo")
+            .args(["build", "--bin", "train_nnue"])
+            .status()
+            .expect("failed to build train_nnue binary");
+        assert!(status.success());
+        cargo_bin("train_nnue")
+    })
+    .as_path()
+}
 
 #[test]
 fn cli_errors_on_classic_out_per_channel() {
@@ -19,7 +94,7 @@ fn cli_errors_on_classic_out_per_channel() {
     let teacher = td.path().join("teacher.fp32.bin");
     fs::write(&teacher, b"dummy").unwrap();
 
-    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    let mut cmd = train_nnue_command();
     cmd.arg("--input")
         .arg(&input)
         .arg("--arch")
@@ -50,7 +125,7 @@ fn cli_errors_on_classic_ft_per_channel() {
     let teacher = td.path().join("teacher.fp32.bin");
     fs::write(&teacher, b"dummy").unwrap();
 
-    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    let mut cmd = train_nnue_command();
     cmd.arg("--input")
         .arg(&input)
         .arg("--arch")
@@ -83,7 +158,7 @@ fn cli_accepts_classic_per_tensor() {
 
     let out_dir = td.path().join("output");
 
-    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    let mut cmd = train_nnue_command();
     cmd.arg("--input")
         .arg(&input)
         .arg("--arch")
@@ -100,12 +175,14 @@ fn cli_accepts_classic_per_tensor() {
         .arg("1")
         .arg("--batch-size")
         .arg("1")
+        .arg("--opt")
+        .arg("sgd")
         .arg("--out")
         .arg(&out_dir);
 
-    // Note: This will succeed (exit code 0) but fail during distillation
-    // because dummy teacher file is invalid. The important thing is that
-    // it gets past the quantization checks.
+    // This should advance past quantization validation, then fail when
+    // attempting to load the dummy teacher network. Validate that the
+    // failure reason mentions the teacher load rather than quantization.
     cmd.assert()
         .success()
         .stdout(contains("Failed to load teacher network for classic distillation"));
@@ -119,7 +196,7 @@ fn cli_errors_on_classic_without_teacher() {
     let input = td.path().join("one.jsonl");
     fs::write(&input, r#"{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":10,"seldepth":10,"bound1":"Exact"}"#).unwrap();
 
-    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    let mut cmd = train_nnue_command();
     cmd.arg("--input")
         .arg(&input)
         .arg("--arch")
@@ -142,7 +219,7 @@ fn cli_errors_on_single_with_classic_v1_format() {
     let input = td.path().join("one.jsonl");
     fs::write(&input, r#"{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":10,"seldepth":10,"bound1":"Exact"}"#).unwrap();
 
-    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    let mut cmd = train_nnue_command();
     cmd.arg("--input")
         .arg(&input)
         .arg("--arch")
@@ -158,6 +235,152 @@ fn cli_errors_on_single_with_classic_v1_format() {
 }
 
 #[test]
+fn cli_errors_on_classic_v1_stream_cache_without_distill() {
+    let td = tempdir().unwrap();
+
+    let cache_path = td.path().join("stream.cache");
+    write_minimal_nnfc_cache(&cache_path);
+
+    let teacher = td.path().join("teacher.fp32.bin");
+    fs::write(&teacher, b"dummy").unwrap();
+
+    let out_dir = td.path().join("output");
+
+    let mut cmd = train_nnue_command();
+    cmd.arg("--input")
+        .arg(&cache_path)
+        .arg("--arch")
+        .arg("classic")
+        .arg("--export-format")
+        .arg("classic-v1")
+        .arg("--distill-from-single")
+        .arg(&teacher)
+        .arg("--stream-cache")
+        .arg("--epochs")
+        .arg("1")
+        .arg("--batch-size")
+        .arg("1")
+        .arg("--opt")
+        .arg("sgd")
+        .arg("--out")
+        .arg(&out_dir);
+
+    cmd.assert().failure().stderr(contains(ERR_CLASSIC_STREAM_NEEDS_DISTILL));
+}
+
+#[test]
+fn cli_classic_metrics_emits_files() {
+    let td = tempdir().unwrap();
+
+    let input = td.path().join("train.jsonl");
+    fs::write(
+        &input,
+        r#"{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":10,"seldepth":10,"bound1":"Exact"}"#,
+    )
+    .unwrap();
+
+    let out_dir = td.path().join("output");
+
+    let mut cmd = train_nnue_command();
+    cmd.env("RUST_LOG", "warn")
+        .arg("--input")
+        .arg(&input)
+        .arg("--arch")
+        .arg("classic")
+        .arg("--epochs")
+        .arg("1")
+        .arg("--batch-size")
+        .arg("1")
+        .arg("--opt")
+        .arg("sgd")
+        .arg("--metrics")
+        .arg("--save-every")
+        .arg("1")
+        .arg("--out")
+        .arg(&out_dir);
+
+    cmd.assert().success();
+
+    let metrics = fs::read_to_string(out_dir.join("metrics.csv")).unwrap();
+    assert!(metrics.lines().count() >= 2, "metrics.csv should have header + data");
+    assert!(out_dir.join("checkpoint_batch_1.fp32.bin").exists(), "checkpoint file missing");
+}
+
+#[test]
+fn cli_warns_on_adamw_inmemory() {
+    let td = tempdir().unwrap();
+
+    let input = td.path().join("train.jsonl");
+    fs::write(
+        &input,
+        r#"{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":0,"depth":10,"seldepth":10,"bound1":"Exact"}"#,
+    )
+    .unwrap();
+
+    let out_dir = td.path().join("output");
+
+    let mut cmd = train_nnue_command();
+    cmd.env("RUST_LOG", "warn")
+        .arg("--input")
+        .arg(&input)
+        .arg("--arch")
+        .arg("single")
+        .arg("--epochs")
+        .arg("1")
+        .arg("--batch-size")
+        .arg("1")
+        .arg("--opt")
+        .arg("adamw")
+        .arg("--out")
+        .arg(&out_dir);
+
+    cmd.assert()
+        .success()
+        .stderr(contains("--opt adamw は --arch single では Adam として扱います"));
+}
+
+#[test]
+fn cli_warns_on_adamw_loader_and_stream() {
+    let td = tempdir().unwrap();
+
+    let cache_path = td.path().join("tiny.cache");
+    write_tiny_cache_with_samples(&cache_path, 1);
+
+    let run_cmd = |stream: bool| {
+        let out_dir = if stream {
+            td.path().join("out_stream")
+        } else {
+            td.path().join("out_loader")
+        };
+        let mut cmd = train_nnue_command();
+        cmd.env("RUST_LOG", "warn")
+            .arg("--input")
+            .arg(&cache_path)
+            .arg("--arch")
+            .arg("single")
+            .arg("--epochs")
+            .arg("1")
+            .arg("--batch-size")
+            .arg("1")
+            .arg("--opt")
+            .arg("adamw")
+            .arg("--out")
+            .arg(&out_dir)
+            .arg("--prefetch-batches")
+            .arg(if stream { "0" } else { "1" });
+        if stream {
+            cmd.arg("--stream-cache");
+        }
+        cmd.assert()
+            .success()
+            .stderr(contains("--opt adamw は --arch single では Adam として扱います"));
+    };
+
+    run_cmd(false);
+    run_cmd(true);
+}
+
+#[test]
 fn cli_errors_on_classic_with_single_i8_format() {
     let td = tempdir().unwrap();
 
@@ -169,7 +392,7 @@ fn cli_errors_on_classic_with_single_i8_format() {
     let teacher = td.path().join("teacher.fp32.bin");
     fs::write(&teacher, b"dummy").unwrap();
 
-    let mut cmd = Command::cargo_bin("train_nnue").unwrap();
+    let mut cmd = train_nnue_command();
     cmd.arg("--input")
         .arg(&input)
         .arg("--arch")
