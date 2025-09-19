@@ -312,10 +312,6 @@ impl ClassicIntNetwork {
                 SHOGI_BOARD_SIZE * FE_END
             );
         }
-        if scales.acc_dim != acc_dim {
-            log::warn!("scales acc_dim mismatch: {} vs {}", scales.acc_dim, acc_dim);
-        }
-
         let mut ft_weights = read_i16_vec(&mut reader, input_dim * acc_dim)?;
         let mut ft_biases = read_i32_vec(&mut reader, acc_dim)?;
         let hidden1_weights = read_i8_vec(&mut reader, acc_dim * 2 * h1_dim)?;
@@ -626,6 +622,7 @@ fn scale_for_channel(scales: &[f32], idx: usize) -> f32 {
         scales[idx]
     } else {
         debug_assert!(idx < scales.len(), "validated scale lookup should not overflow");
+        // In release builds we still fall back to the last element to stay robust, but hitting this path means validation failed upstream.
         *scales.last().unwrap()
     }
 }
@@ -917,6 +914,17 @@ mod tests {
         assert!(float_shift.is_none());
         let expected = scales.s_in_1 / scales.s_w0;
         assert!((float_scale - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_ft_scale_clamps_large_shift_to_30() {
+        let mut scales = sample_scales();
+        scales.s_w0 = 1.0;
+        scales.s_in_1 = 2f32.powi(40);
+
+        let (scale, shift) = compute_ft_scale(&scales);
+        assert_eq!(shift, Some(30));
+        assert!((scale - 2f32.powi(30)).abs() < 1e-3);
     }
 
     #[test]
