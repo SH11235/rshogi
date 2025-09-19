@@ -59,3 +59,5 @@ packages/core/ai-benchmark-*.json
 packages/web/public/data/*.binz
 packages/web/public/data/*.bin.binz
 packages/rust-core/docs/reports/fixtures/classic_roundtrip/baseline_roundtrip.json
+packages/rust-core/sample_data/train.jsonl
+packages/rust-core/sample_data/val.jsonl
