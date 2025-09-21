@@ -91,11 +91,11 @@ struct DistillSample {
 struct TeacherPrepared {
     value: f32,
     domain: TeacherValueDomain,
-    layers: Option<Arc<TeacherLayers>>, // None when未要求
+    layers: Option<Arc<TeacherLayers>>, // None when intermediate layers were not captured
 }
 
 impl TeacherPrepared {
-    fn requires_layers(&self) -> bool {
+    fn has_layers(&self) -> bool {
         self.layers.is_some()
     }
 }
@@ -573,7 +573,7 @@ fn prepare_distill_samples(
         let features_us = sample.features.clone();
 
         if let Some(prepared) = cache.get(&features_us) {
-            if prepared.domain == domain && (!require_layers || prepared.requires_layers()) {
+            if prepared.domain == domain && (!require_layers || prepared.has_layers()) {
                 cache_hits += 1;
                 let features_them: Vec<u32> =
                     features_us.iter().map(|&f| flip_us_them(f as usize) as u32).collect();
@@ -1070,7 +1070,8 @@ pub fn distill_classic_after_training(
     let label_type = config.label_type.as_str();
 
     for epoch in 0..DISTILL_EPOCHS {
-        let mut epoch_loss = 0.0f64;
+        let mut out_loss_sum = 0.0f64;
+        let mut layer_loss_sum = 0.0f64;
         let mut epoch_weight = 0.0f64;
         for sample in &prepared.samples {
             let prediction = forward(&classic, sample, &mut scratch);
@@ -1190,7 +1191,7 @@ pub fn distill_classic_after_training(
             loss_contrib *= lambda_out as f64;
             grad_output *= lambda_out;
 
-            epoch_loss += loss_contrib;
+            out_loss_sum += loss_contrib;
             epoch_weight += sample.weight as f64;
             let layer_loss = backward_update(
                 &mut classic,
@@ -1206,19 +1207,22 @@ pub fn distill_classic_after_training(
                     l2_reg: config.l2_reg,
                 },
             );
-            epoch_loss += layer_loss;
+            layer_loss_sum += layer_loss;
         }
         if let Some(lg) = classic_cfg.structured {
-            let loss_avg = if epoch_weight > 0.0 {
-                epoch_loss / epoch_weight
+            let (loss_out_avg, loss_layers_avg) = if epoch_weight > 0.0 {
+                (out_loss_sum / epoch_weight, layer_loss_sum / epoch_weight)
             } else {
-                0.0
+                (0.0, 0.0)
             };
+            let loss_total_avg = loss_out_avg + loss_layers_avg;
             let rec = serde_json::json!({
                 "ts": chrono::Utc::now().to_rfc3339(),
                 "phase": "distill_classic",
                 "epoch": (epoch + 1) as i64,
-                "loss": loss_avg,
+                "loss": loss_total_avg,
+                "loss_out": loss_out_avg,
+                "loss_layers": loss_layers_avg,
                 "samples": prepared.samples.len(),
                 "loss_kind": match loss_kind {
                     DistillLossKind::Mse => "mse",
@@ -1319,6 +1323,7 @@ pub fn evaluate_distill(
     config: &Config,
     teacher_domain: TeacherValueDomain,
 ) -> DistillEvalMetrics {
+    debug_assert!(teacher.supports_domain(teacher_domain));
     let mut metrics = DistillEvalMetrics::default();
     let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
     let dummy_teacher = Arc::new(TeacherPrepared {
