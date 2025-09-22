@@ -229,6 +229,8 @@ pub struct ClassicQuantizationScalesData {
     pub bundle_sha256: String,
     #[serde(default)]
     pub quant_scheme: Option<QuantSchemeReportData>,
+    #[serde(default)]
+    pub activation: Option<ClassicActivationSummaryData>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -238,6 +240,13 @@ pub struct QuantSchemeReportData {
     pub h2: Option<String>,
     #[serde(rename = "out", default)]
     pub out: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClassicActivationSummaryData {
+    pub ft_max_abs: f32,
+    pub h1_max_abs: f32,
+    pub h2_max_abs: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -803,6 +812,11 @@ mod tests {
                 "h1": "per-channel",
                 "h2": "per-channel",
                 "out": "per-tensor"
+            },
+            "activation": {
+                "ft_max_abs": 2.5,
+                "h1_max_abs": 1.5,
+                "h2_max_abs": 0.75
             }
         });
         serde_json::to_writer_pretty(File::create(scales_path).unwrap(), &scales).unwrap();
@@ -826,6 +840,11 @@ mod tests {
             s_in_3: 0.25,
             bundle_sha256: "test".to_string(),
             quant_scheme: None,
+            activation: Some(ClassicActivationSummaryData {
+                ft_max_abs: 2.5,
+                h1_max_abs: 1.5,
+                h2_max_abs: 0.75,
+            }),
         }
     }
 

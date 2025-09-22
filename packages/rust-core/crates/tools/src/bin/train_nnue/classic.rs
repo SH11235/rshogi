@@ -791,6 +791,7 @@ impl ClassicFloatNetwork {
         quant_h1: QuantScheme,
         quant_h2: QuantScheme,
         quant_out: QuantScheme,
+        activation: Option<ClassicActivationSummary>,
     ) -> Result<(ClassicIntNetworkBundle, ClassicQuantizationScales), String> {
         self.validate()?;
 
@@ -869,6 +870,7 @@ impl ClassicFloatNetwork {
             s_in_1,
             s_in_2,
             s_in_3,
+            activation,
         };
 
         Ok((ClassicIntNetworkBundle::new(transformer, network), scales))
@@ -958,6 +960,7 @@ pub struct ClassicQuantizationScales {
     pub s_in_1: f32,
     pub s_in_2: f32,
     pub s_in_3: f32,
+    pub activation: Option<ClassicActivationSummary>,
 }
 
 impl ClassicQuantizationScales {
@@ -989,6 +992,13 @@ impl ClassicQuantizationScales {
         };
         self.s_in_3 * scale
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClassicActivationSummary {
+    pub ft_max_abs: f32,
+    pub h1_max_abs: f32,
+    pub h2_max_abs: f32,
 }
 
 #[cfg(test)]
@@ -1034,6 +1044,7 @@ mod tests {
                 QuantScheme::PerChannel,
                 QuantScheme::PerChannel,
                 QuantScheme::PerTensor,
+                None,
             )
             .expect("quantize symmetric");
 
@@ -1175,6 +1186,7 @@ mod tests {
             s_in_1: 1.0,
             s_in_2: 1.0,
             s_in_3: 2.5,
+            activation: None,
         };
 
         assert!((scales.output_scale() - 2.5).abs() < 1e-6);
@@ -1190,6 +1202,7 @@ mod tests {
             s_in_1: 1.0,
             s_in_2: 1.0,
             s_in_3: 3.0,
+            activation: None,
         };
 
         // mean(s_w3)=3.0 → output_scale = 3.0 * 3.0 = 9.0

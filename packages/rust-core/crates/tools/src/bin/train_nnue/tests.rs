@@ -569,6 +569,7 @@ fn finalize_export_emits_fp32_and_scales_for_classic() {
             QuantScheme::PerChannel,
             QuantScheme::PerChannel,
             QuantScheme::PerTensor,
+            None,
         )
         .unwrap();
 

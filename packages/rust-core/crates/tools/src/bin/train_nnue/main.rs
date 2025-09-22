@@ -191,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("teacher-domain")
                 .long("teacher-domain")
-                .help("Teacher output domain: cp|wdl-logit (default: いずれの教師種別も wdl-logit)")
+                .help("Teacher output domain: cp|wdl-logit (default: wdl-logit for all current teachers)")
                 .value_parser(clap::value_parser!(TeacherValueDomain)),
         )
         .arg(

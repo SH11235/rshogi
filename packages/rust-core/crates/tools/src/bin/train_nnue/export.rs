@@ -337,6 +337,7 @@ struct ClassicScalesArtifact {
     s_in_3: f32,
     bundle_sha256: String,
     quant_scheme: QuantSchemeReport,
+    activation: Option<ClassicActivationSummaryArtifact>,
 }
 
 #[derive(Serialize)]
@@ -345,6 +346,13 @@ struct QuantSchemeReport {
     h1: &'static str,
     h2: &'static str,
     out: &'static str,
+}
+
+#[derive(Serialize)]
+struct ClassicActivationSummaryArtifact {
+    ft_max_abs: f32,
+    h1_max_abs: f32,
+    h2_max_abs: f32,
 }
 
 fn write_classic_scales_json(
@@ -397,6 +405,11 @@ fn write_classic_scales_json(
             h2: quant_scheme_label(export.quant_h2),
             out: quant_scheme_label(export.quant_out),
         },
+        activation: scales.activation.map(|summary| ClassicActivationSummaryArtifact {
+            ft_max_abs: summary.ft_max_abs,
+            h1_max_abs: summary.h1_max_abs,
+            h2_max_abs: summary.h2_max_abs,
+        }),
     };
 
     let path = out_dir.join("nn.classic.scales.json");
