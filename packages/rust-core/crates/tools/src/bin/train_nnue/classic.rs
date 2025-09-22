@@ -3,9 +3,6 @@ use crate::params::{CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX};
 use crate::types::QuantScheme;
 use engine_core::evaluation::nnue::{features::FE_END, simd::SimdDispatcher};
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-
-#[cfg(test)]
-const _: usize = SHOGI_BOARD_SIZE * FE_END;
 use rand::{
     distr::{Distribution, Uniform},
     Rng,

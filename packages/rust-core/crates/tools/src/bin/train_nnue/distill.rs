@@ -1271,7 +1271,7 @@ pub fn distill_classic_after_training(
         lg.write_json(&rec);
     }
 
-    let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+    let mut scratch = ClassicScratch::new(classic.acc_dim, classic.h1_dim, classic.h2_dim);
     let temperature = distill.temperature;
     let loss_kind = distill.loss;
     let layer_weights = LayerLossWeights {
@@ -1666,7 +1666,8 @@ pub fn evaluate_distill(
 ) -> DistillEvalMetrics {
     debug_assert!(teacher.supports_domain(teacher_domain));
     let mut metrics = DistillEvalMetrics::default();
-    let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+    let mut scratch =
+        ClassicScratch::new(classic_fp32.acc_dim, classic_fp32.h1_dim, classic_fp32.h2_dim);
     let dummy_teacher = Arc::new(TeacherPrepared {
         value: 0.0,
         domain: teacher_domain,
@@ -1876,7 +1877,8 @@ pub fn evaluate_quantization_gap(
     config: &Config,
 ) -> QuantEvalMetrics {
     let mut metrics = QuantEvalMetrics::default();
-    let mut scratch = ClassicScratch::new(CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM);
+    let mut scratch =
+        ClassicScratch::new(classic_fp32.acc_dim, classic_fp32.h1_dim, classic_fp32.h2_dim);
     let dummy_teacher = Arc::new(TeacherPrepared {
         value: 0.0,
         domain: TeacherValueDomain::Cp,
@@ -2230,7 +2232,7 @@ mod distill_training_tests {
         let net = ClassicFloatNetwork::he_uniform_with_dims(4, 2, 2, 2, 2, &mut rng);
 
         let samples = vec![Sample {
-            features: vec![0, 1],
+            features: Vec::new(),
             label: 0.0,
             weight: 1.0,
             cp: Some(0),
