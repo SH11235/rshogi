@@ -384,7 +384,7 @@ cargo run --release -p tools --bin train_nnue -- \
 `train_nnue --quantized` で保存される `nn.i8.bin` は以下の構造です。
 
 - テキストヘッダ（行単位）
-  - `NNUE` / `VERSION 3` / `FEATURES HALFKP` / `ACC_DIM <N>` / `RELU_CLIP <M>` / `FORMAT QUANTIZED_I8` / `END_HEADER`
+  - `NNUE` / `VERSION 3` / `FEATURES HALFKP` / `ACC_DIM <N>` / `RELU_CLIP <M>` / `FORMAT QUANTIZED_I8` / `QUANT_SCHEME SINGLE_I8_ASYM` / `END_HEADER`
 - バイナリ本体（リトルエンディアン）
   1) `w0` の量子化パラメータ: `scale: f32` → `zero_point: i32`
   2) `w0` 本体: `i8` の配列（`input_dim * acc_dim` 要素）

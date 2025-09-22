@@ -83,6 +83,7 @@ pub fn save_network_quantized(
     writeln!(file, "ACC_DIM {}", single.acc_dim)?;
     writeln!(file, "RELU_CLIP {}", single.relu_clip)?;
     writeln!(file, "FORMAT QUANTIZED_I8")?;
+    writeln!(file, "QUANT_SCHEME SINGLE_I8_ASYM")?;
     writeln!(file, "END_HEADER")?;
 
     let params_w0 = QuantizationParams::from_weights(&single.w0);
