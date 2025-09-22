@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::classic::ClassicScratchViews;
-use crate::classic::{ClassicFloatNetwork, ClassicIntNetworkBundle, ClassicQuantizationScales};
+use crate::classic::{
+    ClassicActivationSummary, ClassicFloatNetwork, ClassicIntNetworkBundle,
+    ClassicQuantizationScales,
+};
 use crate::logging::StructuredLogger;
 use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP_F32};
 use crate::teacher::{TeacherBatchRequest, TeacherLayers, TeacherNetwork};
@@ -24,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 const MAX_DISTILL_SAMPLES: usize = 50_000;
 const TEACHER_EVAL_BATCH: usize = 512;
+const ACTIVATION_CALIBRATION_LIMIT: usize = 32_768;
 const DISTILL_EPOCHS: usize = 2;
 const DISTILL_LR: f32 = 1e-4;
 const PROB_EPS: f32 = 1e-6;
@@ -91,10 +95,11 @@ struct DistillSample {
 struct TeacherPrepared {
     value: f32,
     domain: TeacherValueDomain,
-    layers: Option<Arc<TeacherLayers>>, // None when intermediate layers were not captured
+    layers: Option<Arc<TeacherLayers>>, // None if intermediate layers were not captured
 }
 
 impl TeacherPrepared {
+    /// Returns true if this prepared entry includes intermediate layer outputs.
     fn has_layers(&self) -> bool {
         self.layers.is_some()
     }
@@ -351,6 +356,37 @@ fn forward(net: &ClassicFloatNetwork, sample: &DistillSample, scratch: &mut Clas
         out += w * x;
     }
     out
+}
+
+fn compute_activation_summary(
+    net: &ClassicFloatNetwork,
+    samples: &[DistillSample],
+    limit: usize,
+) -> ClassicActivationSummary {
+    let mut summary = ClassicActivationSummary::default();
+    if samples.is_empty() {
+        return summary;
+    }
+
+    let mut scratch = ClassicScratch::new(net.acc_dim, net.h1_dim, net.h2_dim);
+    for sample in samples.iter().take(limit) {
+        let _ = forward(net, sample, &mut scratch);
+
+        for &value in &scratch.acc_us {
+            summary.ft_max_abs = summary.ft_max_abs.max(value.abs());
+        }
+        for &value in &scratch.acc_them {
+            summary.ft_max_abs = summary.ft_max_abs.max(value.abs());
+        }
+        for &value in &scratch.a1 {
+            summary.h1_max_abs = summary.h1_max_abs.max(value.abs());
+        }
+        for &value in &scratch.a2 {
+            summary.h2_max_abs = summary.h2_max_abs.max(value.abs());
+        }
+    }
+
+    summary
 }
 
 struct BackwardUpdateParams<'a> {
@@ -1248,12 +1284,37 @@ pub fn distill_classic_after_training(
 
     let classic_fp32 = classic.clone();
 
+    let activation_summary =
+        compute_activation_summary(&classic, &prepared.samples, ACTIVATION_CALIBRATION_LIMIT);
+
+    log::info!(
+        "classic activation summary: ft_max={:.3}, h1_max={:.3}, h2_max={:.3} (limit {} samples)",
+        activation_summary.ft_max_abs,
+        activation_summary.h1_max_abs,
+        activation_summary.h2_max_abs,
+        ACTIVATION_CALIBRATION_LIMIT.min(prepared.samples.len())
+    );
+
+    if let Some(lg) = classic_cfg.structured {
+        let rec = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "phase": "classic_activation_summary",
+            "ft_max_abs": activation_summary.ft_max_abs,
+            "h1_max_abs": activation_summary.h1_max_abs,
+            "h2_max_abs": activation_summary.h2_max_abs,
+            "sample_limit": ACTIVATION_CALIBRATION_LIMIT,
+            "samples_used": prepared.samples.len().min(ACTIVATION_CALIBRATION_LIMIT),
+        });
+        lg.write_json(&rec);
+    }
+
     let (bundle, scales) = classic
         .quantize_symmetric(
             classic_cfg.quant_ft,
             classic_cfg.quant_h1,
             classic_cfg.quant_h2,
             classic_cfg.quant_out,
+            Some(activation_summary),
         )
         .map_err(|e| format!("quantize_symmetric failed: {e}"))?;
 
