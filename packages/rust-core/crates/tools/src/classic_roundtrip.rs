@@ -334,7 +334,27 @@ impl ClassicIntNetwork {
                 SHOGI_BOARD_SIZE * FE_END
             );
         }
+        let canonical_input_dim = SHOGI_BOARD_SIZE * FE_END;
         let mut ft_weights = read_i16_vec(&mut reader, input_dim * acc_dim)?;
+        let padding_ft_bytes = canonical_input_dim
+            .saturating_sub(input_dim)
+            .saturating_mul(acc_dim)
+            .saturating_mul(std::mem::size_of::<i16>());
+        if padding_ft_bytes > 0 {
+            let mut remaining = padding_ft_bytes;
+            while remaining > 0 {
+                let buf = reader.fill_buf()?;
+                if buf.is_empty() {
+                    break;
+                }
+                let take = remaining.min(buf.len());
+                if buf[..take].iter().any(|&b| b != 0) {
+                    break;
+                }
+                reader.consume(take);
+                remaining -= take;
+            }
+        }
         let mut ft_biases = read_i32_vec(&mut reader, acc_dim)?;
         let hidden1_weights = read_i8_vec(&mut reader, acc_dim * 2 * h1_dim)?;
         let hidden1_biases = read_i32_vec(&mut reader, h1_dim)?;
@@ -457,6 +477,9 @@ impl ClassicIntNetwork {
     #[inline]
     fn quantize_ft_value(&self, value: i16) -> i8 {
         if let Some(shift) = self.ft_shift {
+            if shift <= 0 {
+                return (value as i32).clamp(QUANT_MIN_I32, QUANT_MAX_I32) as i8;
+            }
             let shifted = (value as i32) >> shift;
             return shifted.clamp(QUANT_MIN_I32, QUANT_MAX_I32) as i8;
         }
@@ -569,20 +592,20 @@ fn verify_quant_scheme(
     h2_dim: usize,
 ) -> Result<()> {
     let derived_ft = "per-tensor";
-    let derived_h1 = if scales.s_w1.len() == 1 {
-        "per-tensor"
-    } else {
+    let derived_h1 = if scales.s_w1.len() == h1_dim && h1_dim > 0 {
         "per-channel"
+    } else {
+        "per-tensor"
     };
-    let derived_h2 = if scales.s_w2.len() == 1 {
-        "per-tensor"
-    } else {
+    let derived_h2 = if scales.s_w2.len() == h2_dim && h2_dim > 0 {
         "per-channel"
+    } else {
+        "per-tensor"
     };
-    let derived_out = if scales.s_w3.len() == 1 {
-        "per-tensor"
-    } else {
+    let derived_out = if scales.s_w3.len() > 1 {
         "per-channel"
+    } else {
+        "per-tensor"
     };
 
     if let Some(report) = scales.quant_scheme.as_ref() {
