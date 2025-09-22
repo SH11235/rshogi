@@ -370,13 +370,8 @@ impl ClassicIntNetwork {
                     break;
                 }
                 let take = remaining.min(buf.len());
-                if let Some(idx) = buf[..take].iter().position(|&b| b != 0) {
-                    if idx > 0 {
-                        reader.consume(idx);
-                        remaining -= idx;
-                    }
+                if !saw_non_zero && buf[..take].iter().any(|&b| b != 0) {
                     saw_non_zero = true;
-                    break;
                 }
                 reader.consume(take);
                 remaining -= take;
@@ -1049,6 +1044,70 @@ mod tests {
         assert_eq!(outputs.h2.len(), 1);
         let actual = outputs.output;
         assert!((actual - 0.985).abs() < 1e-3, "expected ~0.985, got {actual}");
+    }
+
+    #[test]
+    fn int_load_skips_nonzero_padding_without_offset() {
+        use std::fs::File;
+        use std::io::Write;
+
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let ft_weights: [i16; 8] = [32, 16, 20, 8, 12, 24, 10, 6];
+        let ft_biases: [i32; 2] = [64, 32];
+        let hidden1_weights: [i8; 8] = [3, -2, 1, 4, 2, 1, -3, 1];
+        let hidden1_biases: [i32; 2] = [5, -4];
+        let hidden2_weights: [i8; 2] = [4, -2];
+        let hidden2_biases: [i32; 1] = [3];
+        let output_weights: [i8; 1] = [5];
+        let output_bias: i32 = 2;
+
+        let mut payload = Vec::new();
+        for v in ft_weights.iter() {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        let canonical_input_dim = SHOGI_BOARD_SIZE * FE_END;
+        let pad_elements = canonical_input_dim
+            .saturating_sub(4)
+            .saturating_mul(2) // acc_dim
+            .saturating_mul(std::mem::size_of::<i16>());
+        let mut pad = vec![0u8; pad_elements];
+        if !pad.is_empty() {
+            let mid = pad.len() / 2;
+            pad[mid] = 0xAA;
+        }
+        payload.extend_from_slice(&pad);
+        for v in ft_biases.iter() {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        payload.extend(hidden1_weights.iter().map(|v| *v as u8));
+        for v in hidden1_biases.iter() {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        payload.extend(hidden2_weights.iter().map(|v| *v as u8));
+        payload.extend_from_slice(&hidden2_biases[0].to_le_bytes());
+        payload.extend_from_slice(&(output_weights[0] as u8).to_le_bytes());
+        payload.extend_from_slice(&output_bias.to_le_bytes());
+
+        let total_size = 16 + payload.len();
+        let mut file = File::create(&nn_path).unwrap();
+        file.write_all(b"NNUE").unwrap();
+        file.write_all(&1u32.to_le_bytes()).unwrap();
+        file.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes()).unwrap();
+        file.write_all(&(total_size as u32).to_le_bytes()).unwrap();
+        file.write_all(&payload).unwrap();
+
+        drop(file);
+
+        let net = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap();
+
+        assert_eq!(net.transformer_biases, vec![64, 32]);
+        assert_eq!(net.hidden1_biases, vec![5, -4]);
+        assert_eq!(net.hidden2_biases, vec![3]);
+        assert_eq!(net.output_bias, 2);
     }
 
     #[test]

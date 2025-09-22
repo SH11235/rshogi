@@ -999,12 +999,7 @@ impl ClassicQuantizationScales {
     #[inline]
     pub fn output_scale(&self) -> f32 {
         let scale = match self.s_w3.len() {
-            0 => {
-                log::error!(
-                    "classic quantization scales: missing output scale, falling back to 1.0"
-                );
-                1.0
-            }
+            0 => panic!("classic quantization scales: missing output scale"),
             1 => self.s_w3[0],
             n => panic!(
                 "classic quantization scales: per-channel output scales (len={}) are not supported",
@@ -1198,7 +1193,8 @@ mod tests {
     }
 
     #[test]
-    fn output_scale_falls_back_when_missing() {
+    #[should_panic(expected = "missing output scale")]
+    fn output_scale_panics_when_missing() {
         let scales = ClassicQuantizationScales {
             s_w0: 1.0,
             s_w1: vec![1.0],
@@ -1211,7 +1207,7 @@ mod tests {
             scheme: ClassicLayerQuantScheme::default(),
         };
 
-        assert!((scales.output_scale() - 2.5).abs() < 1e-6);
+        let _ = scales.output_scale();
     }
 
     #[test]
