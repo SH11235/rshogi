@@ -359,7 +359,7 @@ fn write_classic_scales_json(
     out_dir: &Path,
     bundle: &ClassicIntNetworkBundle,
     scales: &ClassicQuantizationScales,
-    export: &ExportOptions,
+    _export: &ExportOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let serialized = bundle.as_serialized();
     if serialized.acc_dim != CLASSIC_ACC_DIM
@@ -400,10 +400,10 @@ fn write_classic_scales_json(
         s_in_3: scales.s_in_3,
         bundle_sha256: bundle_sha256(bundle),
         quant_scheme: QuantSchemeReport {
-            ft: quant_scheme_label(export.quant_ft),
-            h1: quant_scheme_label(export.quant_h1),
-            h2: quant_scheme_label(export.quant_h2),
-            out: quant_scheme_label(export.quant_out),
+            ft: quant_scheme_label(scales.scheme.ft),
+            h1: quant_scheme_label(scales.scheme.h1),
+            h2: quant_scheme_label(scales.scheme.h2),
+            out: quant_scheme_label(scales.scheme.out),
         },
         activation: scales.activation.map(|summary| ClassicActivationSummaryArtifact {
             ft_max_abs: summary.ft_max_abs,
