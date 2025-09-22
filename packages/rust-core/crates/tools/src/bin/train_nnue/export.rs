@@ -364,7 +364,7 @@ struct ClassicScalesArtifact {
     #[serde(skip_serializing_if = "Option::is_none")]
     calibration_metrics: Option<QuantMetricsArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    eval_metrics: Option<QuantMetricsArtifact>,
+    quant_metrics: Option<QuantMetricsArtifact>,
 }
 
 #[derive(Serialize)]
@@ -405,7 +405,7 @@ fn write_classic_scales_json(
     scales: &ClassicQuantizationScales,
     _export: &ExportOptions,
     calibration_metrics: Option<&QuantEvalMetrics>,
-    eval_metrics: Option<&QuantEvalMetrics>,
+    quant_metrics: Option<&QuantEvalMetrics>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let serialized = bundle.as_serialized();
     if serialized.acc_dim != CLASSIC_ACC_DIM
@@ -457,7 +457,7 @@ fn write_classic_scales_json(
             h2_max_abs: summary.h2_max_abs,
         }),
         calibration_metrics: calibration_metrics.and_then(make_metrics_artifact),
-        eval_metrics: eval_metrics.and_then(make_metrics_artifact),
+        quant_metrics: quant_metrics.and_then(make_metrics_artifact),
     };
 
     let path = out_dir.join("nn.classic.scales.json");
