@@ -194,6 +194,7 @@ pub struct DistillArtifacts {
     pub classic_fp32: ClassicFloatNetwork,
     pub bundle_int: ClassicIntNetworkBundle,
     pub scales: ClassicQuantizationScales,
+    pub calibration_metrics: Option<QuantEvalMetrics>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -943,6 +944,7 @@ struct QuantSelectionReport {
 struct QuantSelectionResult {
     bundle: ClassicIntNetworkBundle,
     scales: ClassicQuantizationScales,
+    best_metrics: Option<QuantEvalMetrics>,
     report: Option<QuantSelectionReport>,
 }
 
@@ -1076,6 +1078,8 @@ fn select_quantization_config(
     let bundle = best_bundle.expect("at least one quantization candidate must exist");
     let scales = best_scales.expect("selected quantization scales missing");
 
+    let best_metrics = reports.get(best_index).and_then(|c| c.metrics.clone());
+
     let report = if !reports.is_empty() {
         Some(QuantSelectionReport {
             candidates: reports,
@@ -1091,6 +1095,7 @@ fn select_quantization_config(
     Ok(QuantSelectionResult {
         bundle,
         scales,
+        best_metrics,
         report,
     })
 }
@@ -1502,10 +1507,10 @@ pub fn distill_classic_after_training(
         fallback_samples: samples,
         config,
     })?;
-
     let QuantSelectionResult {
         bundle,
         scales,
+        best_metrics,
         report: quant_report,
     } = quant_selection;
 
@@ -1618,6 +1623,7 @@ pub fn distill_classic_after_training(
         classic_fp32,
         bundle_int: bundle,
         scales,
+        calibration_metrics: best_metrics,
     })
 }
 

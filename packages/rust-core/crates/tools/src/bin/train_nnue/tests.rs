@@ -496,7 +496,17 @@ fn finalize_export_writes_zero_when_bundle_missing() {
         format: ExportFormat::ClassicV1,
         ..ExportOptions::default()
     };
-    finalize_export(&network, td.path(), export, false, None, None).unwrap();
+    finalize_export(FinalizeExportParams {
+        network: &network,
+        out_dir: td.path(),
+        export,
+        emit_single_quant: false,
+        classic_bundle: None,
+        classic_scales: None,
+        calibration_metrics: None,
+        quant_metrics: None,
+    })
+    .unwrap();
     assert!(td.path().join("nn.classic.nnue").exists());
 }
 
@@ -583,14 +593,16 @@ fn finalize_export_emits_fp32_and_scales_for_classic() {
         emit_fp32_also: true,
     };
 
-    finalize_export(
-        &Network::Classic(classic.clone()),
-        td.path(),
+    finalize_export(FinalizeExportParams {
+        network: &Network::Classic(classic.clone()),
+        out_dir: td.path(),
         export,
-        false,
-        Some(&bundle),
-        Some(&scales),
-    )
+        emit_single_quant: false,
+        classic_bundle: Some(&bundle),
+        classic_scales: Some(&scales),
+        calibration_metrics: None,
+        quant_metrics: None,
+    })
     .unwrap();
 
     let fp32_path = td.path().join("nn.fp32.bin");
@@ -632,7 +644,17 @@ fn finalize_export_emit_fp32_ignored_for_non_classic() {
         ..ExportOptions::default()
     };
 
-    finalize_export(&network, td.path(), export, false, None, None).unwrap();
+    finalize_export(FinalizeExportParams {
+        network: &network,
+        out_dir: td.path(),
+        export,
+        emit_single_quant: false,
+        classic_bundle: None,
+        classic_scales: None,
+        calibration_metrics: None,
+        quant_metrics: None,
+    })
+    .unwrap();
     assert!(!td.path().join("nn.fp32.bin").exists());
 }
 
@@ -658,7 +680,17 @@ fn finalize_export_fp32_quantized_ignored_for_classic() {
         ..ExportOptions::default()
     };
 
-    finalize_export(&Network::Classic(classic), td.path(), export, true, None, None).unwrap();
+    finalize_export(FinalizeExportParams {
+        network: &Network::Classic(classic),
+        out_dir: td.path(),
+        export,
+        emit_single_quant: true,
+        classic_bundle: None,
+        classic_scales: None,
+        calibration_metrics: None,
+        quant_metrics: None,
+    })
+    .unwrap();
 
     assert!(td.path().join("nn.fp32.bin").exists());
     assert!(!td.path().join("nn.i8.bin").exists());

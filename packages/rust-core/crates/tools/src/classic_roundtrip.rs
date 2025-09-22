@@ -231,6 +231,10 @@ pub struct ClassicQuantizationScalesData {
     pub quant_scheme: Option<QuantSchemeReportData>,
     #[serde(default)]
     pub activation: Option<ClassicActivationSummaryData>,
+    #[serde(default)]
+    pub calibration_metrics: Option<ClassicQuantMetricsData>,
+    #[serde(default)]
+    pub eval_metrics: Option<ClassicQuantMetricsData>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -256,6 +260,23 @@ pub struct ClassicActivationSummaryData {
     pub ft_max_abs: f32,
     pub h1_max_abs: f32,
     pub h2_max_abs: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ClassicQuantMetricsData {
+    pub n: usize,
+    #[serde(default)]
+    pub mae_cp: Option<f32>,
+    #[serde(default)]
+    pub p95_cp: Option<f32>,
+    #[serde(default)]
+    pub max_cp: Option<f32>,
+    #[serde(default)]
+    pub mae_logit: Option<f32>,
+    #[serde(default)]
+    pub p95_logit: Option<f32>,
+    #[serde(default)]
+    pub max_logit: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,17 +363,32 @@ impl ClassicIntNetwork {
             .saturating_mul(std::mem::size_of::<i16>());
         if padding_ft_bytes > 0 {
             let mut remaining = padding_ft_bytes;
+            let mut saw_non_zero = false;
             while remaining > 0 {
                 let buf = reader.fill_buf()?;
                 if buf.is_empty() {
                     break;
                 }
                 let take = remaining.min(buf.len());
-                if buf[..take].iter().any(|&b| b != 0) {
+                if let Some(idx) = buf[..take].iter().position(|&b| b != 0) {
+                    if idx > 0 {
+                        reader.consume(idx);
+                        remaining -= idx;
+                    }
+                    saw_non_zero = true;
                     break;
                 }
                 reader.consume(take);
                 remaining -= take;
+            }
+            if remaining > 0 {
+                log::debug!(
+                    "ft padding: file ended {} bytes before canonical size; treating missing bytes as zero",
+                    remaining
+                );
+            }
+            if saw_non_zero {
+                log::warn!("non-zero bytes found in FT padding region; ignoring extra payload");
             }
         }
         let mut ft_biases = read_i32_vec(&mut reader, acc_dim)?;
@@ -490,6 +526,8 @@ impl ClassicIntNetwork {
             self.ft_scale
         };
 
+        // NOTE: 非 2 冪スケール時は算術右シフトと同じ丸め（負側はより負方向への切り捨て）を再現し、
+        // SIMD 実装と整合させる。
         let scaled = (value as f32 / scale).floor();
         scaled.clamp(QUANT_MIN_F32, QUANT_MAX_F32) as i8
     }
@@ -953,6 +991,8 @@ mod tests {
                 h1_max_abs: 1.5,
                 h2_max_abs: 0.75,
             }),
+            calibration_metrics: None,
+            eval_metrics: None,
         }
     }
 
