@@ -186,7 +186,7 @@ impl ClassicFp32Network {
         }
     }
 
-    pub fn relu_clip(&self) -> f32 {
+    pub fn relu_clip_value(&self) -> f32 {
         self.relu_clip
     }
 }
@@ -362,28 +362,63 @@ impl ClassicIntNetwork {
             .saturating_mul(acc_dim)
             .saturating_mul(std::mem::size_of::<i16>());
         if padding_ft_bytes > 0 {
-            let mut remaining = padding_ft_bytes;
-            let mut saw_non_zero = false;
-            while remaining > 0 {
-                let buf = reader.fill_buf()?;
-                if buf.is_empty() {
-                    break;
+            let rest_bytes = {
+                let mut total = 0usize;
+                total = total
+                    .checked_add(acc_dim * std::mem::size_of::<i32>())
+                    .context("ft_biases payload overflow")?;
+                total = total
+                    .checked_add(acc_dim * 2 * h1_dim)
+                    .context("hidden1 weights payload overflow")?;
+                total = total
+                    .checked_add(h1_dim * std::mem::size_of::<i32>())
+                    .context("hidden1 biases payload overflow")?;
+                total = total
+                    .checked_add(h1_dim * h2_dim)
+                    .context("hidden2 weights payload overflow")?;
+                total = total
+                    .checked_add(h2_dim * std::mem::size_of::<i32>())
+                    .context("hidden2 biases payload overflow")?;
+                total = total.checked_add(h2_dim).context("output weights payload overflow")?;
+                total = total
+                    .checked_add(std::mem::size_of::<i32>())
+                    .context("output bias payload overflow")?;
+                total
+            };
+
+            let header_bytes = 16usize;
+            let ft_section_bytes = input_dim
+                .checked_mul(acc_dim)
+                .and_then(|v| v.checked_mul(std::mem::size_of::<i16>()))
+                .context("ft section size overflow")?;
+            let metadata_size =
+                usize::try_from(metadata_size).context("nn.classic.nnue size exceeds usize")?;
+            let consumed_so_far =
+                header_bytes.checked_add(ft_section_bytes).context("consumed size overflow")?;
+            let available_padding = metadata_size.saturating_sub(consumed_so_far + rest_bytes);
+
+            let pad_to_read = available_padding.min(padding_ft_bytes);
+            if pad_to_read > 0 {
+                let mut buf = vec![0u8; pad_to_read];
+                reader.read_exact(&mut buf)?;
+                if buf.iter().any(|&b| b != 0) {
+                    log::warn!("non-zero bytes found in FT padding region; ignoring extra payload");
                 }
-                let take = remaining.min(buf.len());
-                if !saw_non_zero && buf[..take].iter().any(|&b| b != 0) {
-                    saw_non_zero = true;
+            }
+            if available_padding > pad_to_read {
+                let extra = available_padding - pad_to_read;
+                let mut buf = vec![0u8; extra];
+                reader.read_exact(&mut buf)?;
+                log::warn!("extra {} bytes beyond expected FT padding; discarding", extra);
+            }
+            if padding_ft_bytes > pad_to_read {
+                let missing = padding_ft_bytes - pad_to_read;
+                if missing > 0 {
+                    log::debug!(
+                        "ft padding missing {} bytes; treating absent padding as zero",
+                        missing
+                    );
                 }
-                reader.consume(take);
-                remaining -= take;
-            }
-            if remaining > 0 {
-                log::debug!(
-                    "ft padding: file ended {} bytes before canonical size; treating missing bytes as zero",
-                    remaining
-                );
-            }
-            if saw_non_zero {
-                log::warn!("non-zero bytes found in FT padding region; ignoring extra payload");
             }
         }
         let mut ft_biases = read_i32_vec(&mut reader, acc_dim)?;
@@ -1047,6 +1082,109 @@ mod tests {
     }
 
     #[test]
+    fn classic_v1_write_read_roundtrip() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+
+        let ft_weights: Vec<i16> = vec![32, 16, 20, 8, 12, 24, 10, 6];
+        let ft_biases: Vec<i32> = vec![64, 32];
+        let hidden1_weights: Vec<i8> = vec![3, -2, 1, 4, 2, 1, -3, 1];
+        let hidden1_biases: Vec<i32> = vec![5, -4];
+        let hidden2_weights: Vec<i8> = vec![4, -2];
+        let hidden2_biases: Vec<i32> = vec![3];
+        let output_weights: Vec<i8> = vec![5];
+        let output_bias: i32 = 2;
+
+        {
+            use std::io::Write;
+            let mut file = File::create(&nn_path).unwrap();
+            let total_size = 16
+                + ft_weights.len() * std::mem::size_of::<i16>()
+                + ft_biases.len() * std::mem::size_of::<i32>()
+                + hidden1_weights.len()
+                + hidden1_biases.len() * std::mem::size_of::<i32>()
+                + hidden2_weights.len()
+                + hidden2_biases.len() * std::mem::size_of::<i32>()
+                + output_weights.len()
+                + std::mem::size_of::<i32>();
+            file.write_all(b"NNUE").unwrap();
+            file.write_all(&1u32.to_le_bytes()).unwrap();
+            file.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes()).unwrap();
+            file.write_all(&(total_size as u32).to_le_bytes()).unwrap();
+
+            for &w in &ft_weights {
+                file.write_all(&w.to_le_bytes()).unwrap();
+            }
+            for &b in &ft_biases {
+                file.write_all(&b.to_le_bytes()).unwrap();
+            }
+            file.write_all(&hidden1_weights.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+                .unwrap();
+            for &b in &hidden1_biases {
+                file.write_all(&b.to_le_bytes()).unwrap();
+            }
+            file.write_all(&hidden2_weights.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+                .unwrap();
+            for &b in &hidden2_biases {
+                file.write_all(&b.to_le_bytes()).unwrap();
+            }
+            file.write_all(&output_weights.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+                .unwrap();
+            file.write_all(&output_bias.to_le_bytes()).unwrap();
+            file.flush().unwrap();
+        }
+
+        let mut scales_value = serde_json::json!({
+            "schema_version": 1,
+            "format_version": "classic-v1",
+            "arch": "HALFKP_2X2_2_1",
+            "generated_at_utc": "2025-01-01T00:00:00Z",
+            "acc_dim": 2,
+            "h1_dim": 2,
+            "h2_dim": 1,
+            "input_dim": 4,
+            "s_w0": 0.015625,
+            "s_w1": [0.05, 0.05],
+            "s_w2": [0.04],
+            "s_w3": [0.02],
+            "s_in_1": 1.0,
+            "s_in_2": 0.5,
+            "s_in_3": 0.25,
+            "bundle_sha256": "test",
+            "quant_scheme": {
+                "ft": "per-tensor",
+                "h1": "per-channel",
+                "h2": "per-channel",
+                "out": "per-tensor"
+            }
+        });
+        scales_value["activation"] = serde_json::json!({
+            "ft_max_abs": 2.5,
+            "h1_max_abs": 1.5,
+            "h2_max_abs": 0.75
+        });
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &scales_value).unwrap();
+
+        let loaded = ClassicIntNetwork::load(&nn_path, Some(scales_path)).expect("load roundtrip");
+
+        assert_eq!(loaded.transformer_weights, ft_weights);
+        assert_eq!(loaded.transformer_biases, ft_biases);
+        assert_eq!(loaded.hidden1_weights, hidden1_weights);
+        assert_eq!(loaded.hidden1_biases, hidden1_biases);
+        assert_eq!(loaded.hidden2_weights, hidden2_weights);
+        assert_eq!(loaded.hidden2_biases, hidden2_biases);
+        assert_eq!(loaded.output_weights, output_weights);
+        assert_eq!(loaded.output_bias, output_bias);
+
+        let features_us: Vec<usize> = vec![0, 1];
+        let features_them: Vec<usize> =
+            features_us.iter().map(|&f| flip_us_them(f) as usize).collect();
+        let outputs_loaded = loaded.forward(&features_us, &features_them);
+        assert!(outputs_loaded.output.is_finite());
+    }
+
+    #[test]
     fn int_load_skips_nonzero_padding_without_offset() {
         use std::fs::File;
         use std::io::Write;
@@ -1159,6 +1297,43 @@ mod tests {
         let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("s_w3[0] must be finite and > 0"), "unexpected err: {msg}");
+    }
+
+    #[test]
+    fn load_accepts_unknown_scale_fields() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
+        value["future_field"] = serde_json::json!({"foo": "bar", "version": 42});
+        value["quant_scheme"]["experimental"] = serde_json::json!("per-block");
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &value).unwrap();
+
+        let net = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap();
+        assert_eq!(net.scales.bundle_sha256, "test");
+    }
+
+    #[test]
+    fn load_fails_when_required_scale_field_missing() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("s_w0");
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &value).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("s_w0") || msg.contains("failed to parse scales JSON"),
+            "unexpected message: {msg}"
+        );
     }
 
     #[test]

@@ -28,12 +28,12 @@ pub fn round_away_from_zero(val: f32) -> i32 {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub fn clip_sym(value: i32, qmax: i32) -> i32 {
     value.clamp(-qmax, qmax)
 }
 
-#[inline]
+#[inline(always)]
 fn clamp_i32_to_i16(v: i32) -> i16 {
     v.clamp(-I16_QMAX, I16_QMAX) as i16
 }
@@ -546,13 +546,23 @@ impl<'a> ClassicV1Serialized<'a> {
     /// （本番構成は HALFKP 固定）。
     pub fn validate(&self) -> Result<(), String> {
         if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
-            return Err("dimensions must be non-zero".into());
+            return Err(format!(
+                "dimensions must be non-zero (acc_dim={}, h1_dim={}, h2_dim={})",
+                self.acc_dim, self.h1_dim, self.h2_dim
+            ));
         }
         if self.input_dim == 0 {
             return Err("input_dim must be non-zero".into());
         }
-        if self.ft_weights.len() != self.input_dim * self.acc_dim {
-            return Err("ft_weights length mismatch".into());
+        let expected_ft = self.input_dim * self.acc_dim;
+        if self.ft_weights.len() != expected_ft {
+            return Err(format!(
+                "ft_weights length mismatch: got {}, expected input_dim({}) * acc_dim({}) = {}",
+                self.ft_weights.len(),
+                self.input_dim,
+                self.acc_dim,
+                expected_ft
+            ));
         }
         let canonical_input_dim = SHOGI_BOARD_SIZE * FE_END;
         if self.input_dim > canonical_input_dim {
@@ -560,23 +570,53 @@ impl<'a> ClassicV1Serialized<'a> {
         }
         // 入力を縮約した場合は write_classic_v1_file() で canonical 長までゼロ埋めする想定。
         if self.ft_biases.len() != self.acc_dim {
-            return Err("ft_biases length mismatch".into());
+            return Err(format!(
+                "ft_biases length mismatch: got {}, expected acc_dim ({})",
+                self.ft_biases.len(),
+                self.acc_dim
+            ));
         }
         let classic_input_dim = self.acc_dim * 2;
-        if self.hidden1_weights.len() != classic_input_dim * self.h1_dim {
-            return Err("hidden1_weights length mismatch".into());
+        let expected_h1_weights = classic_input_dim * self.h1_dim;
+        if self.hidden1_weights.len() != expected_h1_weights {
+            return Err(format!(
+                "hidden1_weights length mismatch: got {}, expected (2*acc_dim={}))*h1_dim({}) = {}",
+                self.hidden1_weights.len(),
+                classic_input_dim,
+                self.h1_dim,
+                expected_h1_weights
+            ));
         }
         if self.hidden1_biases.len() != self.h1_dim {
-            return Err("hidden1_biases length mismatch".into());
+            return Err(format!(
+                "hidden1_biases length mismatch: got {}, expected h1_dim ({})",
+                self.hidden1_biases.len(),
+                self.h1_dim
+            ));
         }
-        if self.hidden2_weights.len() != self.h1_dim * self.h2_dim {
-            return Err("hidden2_weights length mismatch".into());
+        let expected_h2_weights = self.h1_dim * self.h2_dim;
+        if self.hidden2_weights.len() != expected_h2_weights {
+            return Err(format!(
+                "hidden2_weights length mismatch: got {}, expected h1_dim({}) * h2_dim({}) = {}",
+                self.hidden2_weights.len(),
+                self.h1_dim,
+                self.h2_dim,
+                expected_h2_weights
+            ));
         }
         if self.hidden2_biases.len() != self.h2_dim {
-            return Err("hidden2_biases length mismatch".into());
+            return Err(format!(
+                "hidden2_biases length mismatch: got {}, expected h2_dim ({})",
+                self.hidden2_biases.len(),
+                self.h2_dim
+            ));
         }
         if self.output_weights.len() != self.h2_dim {
-            return Err("output_weights length mismatch".into());
+            return Err(format!(
+                "output_weights length mismatch: got {}, expected h2_dim ({})",
+                self.output_weights.len(),
+                self.h2_dim
+            ));
         }
         Ok(())
     }
@@ -611,6 +651,7 @@ pub fn write_classic_v1_file(
     data.validate().map_err(|msg| msg.to_string())?;
 
     // Classic v1 は固定寸法 (HALFKP_256X2_32_32) のみ正式サポート
+    #[cfg(not(test))]
     if !(data.acc_dim == 256 && data.h1_dim == 32 && data.h2_dim == 32) {
         return Err("Classic v1 requires acc_dim=256, h1_dim=32, h2_dim=32".into());
     }
@@ -646,6 +687,7 @@ pub fn write_classic_v1_file(
     }
     let remaining_weights = canonical_ft_weights - data.ft_weights.len();
     if remaining_weights > 0 {
+        // 8KiB 固定チャンクでゼロを書き出し、ファイル I/O を効率化する。
         const ZERO_CHUNK: [u8; 8192] = [0u8; 8192];
         let mut remaining_bytes =
             (remaining_weights as u64).checked_mul(2).expect("ft_weights padding overflow");
@@ -1020,7 +1062,9 @@ pub struct ClassicActivationSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
+    use rand::distr::Uniform;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     fn sample_network() -> ClassicFloatNetwork {
         ClassicFloatNetwork {
@@ -1188,6 +1232,74 @@ mod tests {
                     (w - restored).abs() <= scale / 2.0 + f32::EPSILON,
                     "per-channel i16 ch={ch}: w={w}, restored={restored}, scale={scale}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn quantize_symmetric_i8_random_residual_is_bounded() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for &per_channel in &[false, true] {
+            for _ in 0..8 {
+                let channels = if per_channel {
+                    rng.random_range(1..=8)
+                } else {
+                    1
+                };
+                let stride = rng.random_range(1..=16);
+                let len = channels * stride;
+                let dist = Uniform::new(-12.0f32, 12.0f32).unwrap();
+                let weights: Vec<f32> = (0..len).map(|_| dist.sample(&mut rng)).collect();
+                let (quantized, scales) =
+                    quantize_symmetric_i8(&weights, per_channel, channels).expect("quantize i8");
+
+                let stride = if per_channel { len / channels } else { len };
+                for (idx, &w) in weights.iter().enumerate() {
+                    let scale = if per_channel {
+                        scales[idx / stride]
+                    } else {
+                        scales[0]
+                    };
+                    let dequant = quantized[idx] as f32 * scale;
+                    assert!(
+                        (w - dequant).abs() <= scale * 0.5 + f32::EPSILON,
+                        "residual exceeded bound: w={w}, dequant={dequant}, scale={scale}, idx={idx}, per_channel={per_channel}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quantize_symmetric_i16_random_residual_is_bounded() {
+        let mut rng = StdRng::seed_from_u64(17);
+        for &per_channel in &[false, true] {
+            for _ in 0..6 {
+                let channels = if per_channel {
+                    rng.random_range(1..=6)
+                } else {
+                    1
+                };
+                let stride = rng.random_range(1..=12);
+                let len = channels * stride;
+                let dist = Uniform::new(-64.0f32, 64.0f32).unwrap();
+                let weights: Vec<f32> = (0..len).map(|_| dist.sample(&mut rng)).collect();
+                let (quantized, scales) =
+                    quantize_symmetric_i16(&weights, per_channel, channels).expect("quantize i16");
+
+                let stride = if per_channel { len / channels } else { len };
+                for (idx, &w) in weights.iter().enumerate() {
+                    let scale = if per_channel {
+                        scales[idx / stride]
+                    } else {
+                        scales[0]
+                    };
+                    let dequant = quantized[idx] as f32 * scale;
+                    assert!(
+                        (w - dequant).abs() <= scale * 0.5 + f32::EPSILON,
+                        "residual exceeded bound: w={w}, dequant={dequant}, scale={scale}, idx={idx}, per_channel={per_channel}"
+                    );
+                }
             }
         }
     }

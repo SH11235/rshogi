@@ -219,7 +219,7 @@ fn main() -> Result<()> {
     let fp32_net = ClassicFp32Network::load(&cli.fp32)?;
     let int_net = ClassicIntNetwork::load(&cli.int, cli.scales.clone())?;
 
-    let relu_clip = fp32_net.relu_clip();
+    let relu_clip = fp32_net.relu_clip_value();
     let int_scales = int_net.scales();
     let h1_scale = int_scales.s_in_2;
     let h2_scale = int_scales.s_in_3;

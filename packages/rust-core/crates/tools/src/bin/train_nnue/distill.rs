@@ -1160,6 +1160,7 @@ pub fn distill_classic_after_training(
             .unwrap_or_else(|| "<memory>".to_string());
         let rec = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
+            "component": "distill",
             "phase": "distill_prepare",
             "samples": prepared.samples.len(),
             "cache_hits": prepared.cache_hits,
@@ -1175,6 +1176,7 @@ pub fn distill_classic_after_training(
         if let Some(lg) = classic_cfg.structured {
             let rec = serde_json::json!({
                 "ts": chrono::Utc::now().to_rfc3339(),
+                "component": "distill",
                 "phase": "teacher_scale_fit",
                 "kind": "linear",
                 "gain": gain,
@@ -1260,6 +1262,7 @@ pub fn distill_classic_after_training(
         let target_std = variance.max(0.0).sqrt();
         let rec = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
+            "component": "distill",
             "phase": "distill_classic_init",
             "output_bias_init": classic.output_bias,
             "target_mean": target_mean,
@@ -1439,6 +1442,7 @@ pub fn distill_classic_after_training(
             let loss_total_avg = loss_out_avg + loss_layers_avg;
             let rec = serde_json::json!({
                 "ts": chrono::Utc::now().to_rfc3339(),
+                "component": "distill",
                 "phase": "distill_classic",
                 "epoch": (epoch + 1) as i64,
                 "loss": loss_total_avg,
@@ -1483,6 +1487,7 @@ pub fn distill_classic_after_training(
     if let Some(lg) = classic_cfg.structured {
         let rec = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
+            "component": "distill",
             "phase": "classic_activation_summary",
             "ft_max_abs": activation_summary.ft_max_abs,
             "h1_max_abs": activation_summary.h1_max_abs,
@@ -1544,6 +1549,7 @@ pub fn distill_classic_after_training(
             for (idx, candidate) in report.candidates.iter().enumerate() {
                 let mut rec = serde_json::json!({
                     "ts": chrono::Utc::now().to_rfc3339(),
+                    "component": "quantization",
                     "phase": "classic_quant_search",
                     "candidate_index": idx as i64,
                     "selected": idx == report.selected_index,
@@ -1579,6 +1585,7 @@ pub fn distill_classic_after_training(
     if let Some(lg) = classic_cfg.structured {
         let mut rec = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
+            "component": "quantization",
             "phase": "classic_quantize",
             "s_w0": scales.s_w0,
             "s_w1": scales.s_w1,
