@@ -2,6 +2,7 @@ use crate::classic::{
     write_classic_v1_bundle, ClassicFloatNetwork, ClassicIntNetworkBundle,
     ClassicQuantizationScales,
 };
+use crate::distill::QuantEvalMetrics;
 use crate::model::{ClassicNetwork, Network, SingleNetwork};
 use crate::params::{
     CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, KB_TO_MB_DIVISOR, PERCENTAGE_DIVISOR,
@@ -213,14 +214,29 @@ pub(crate) fn save_classic_network(
     Ok(())
 }
 
-pub fn finalize_export(
-    network: &Network,
-    out_dir: &Path,
-    export: ExportOptions,
-    emit_single_quant: bool,
-    classic_bundle: Option<&ClassicIntNetworkBundle>,
-    classic_scales: Option<&ClassicQuantizationScales>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub struct FinalizeExportParams<'a> {
+    pub network: &'a Network,
+    pub out_dir: &'a Path,
+    pub export: ExportOptions,
+    pub emit_single_quant: bool,
+    pub classic_bundle: Option<&'a ClassicIntNetworkBundle>,
+    pub classic_scales: Option<&'a ClassicQuantizationScales>,
+    pub calibration_metrics: Option<&'a QuantEvalMetrics>,
+    pub quant_metrics: Option<&'a QuantEvalMetrics>,
+}
+
+pub fn finalize_export(params: FinalizeExportParams<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let FinalizeExportParams {
+        network,
+        out_dir,
+        export,
+        emit_single_quant,
+        classic_bundle,
+        classic_scales,
+        calibration_metrics,
+        quant_metrics,
+    } = params;
+
     match export.format {
         ExportFormat::Fp32 => {
             save_network(network, &out_dir.join("nn.fp32.bin"))?;
@@ -305,7 +321,14 @@ pub fn finalize_export(
             }
 
             if let Some(scales) = classic_scales {
-                if let Err(e) = write_classic_scales_json(out_dir, bundle, scales, &export) {
+                if let Err(e) = write_classic_scales_json(
+                    out_dir,
+                    bundle,
+                    scales,
+                    &export,
+                    calibration_metrics,
+                    quant_metrics,
+                ) {
                     log::warn!("Failed to write nn.classic.scales.json: {}", e);
                 }
             } else {
@@ -338,6 +361,10 @@ struct ClassicScalesArtifact {
     bundle_sha256: String,
     quant_scheme: QuantSchemeReport,
     activation: Option<ClassicActivationSummaryArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calibration_metrics: Option<QuantMetricsArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eval_metrics: Option<QuantMetricsArtifact>,
 }
 
 #[derive(Serialize)]
@@ -355,11 +382,30 @@ struct ClassicActivationSummaryArtifact {
     h2_max_abs: f32,
 }
 
+#[derive(Serialize)]
+struct QuantMetricsArtifact {
+    n: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mae_cp: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p95_cp: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_cp: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mae_logit: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p95_logit: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_logit: Option<f32>,
+}
+
 fn write_classic_scales_json(
     out_dir: &Path,
     bundle: &ClassicIntNetworkBundle,
     scales: &ClassicQuantizationScales,
     _export: &ExportOptions,
+    calibration_metrics: Option<&QuantEvalMetrics>,
+    eval_metrics: Option<&QuantEvalMetrics>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let serialized = bundle.as_serialized();
     if serialized.acc_dim != CLASSIC_ACC_DIM
@@ -410,12 +456,29 @@ fn write_classic_scales_json(
             h1_max_abs: summary.h1_max_abs,
             h2_max_abs: summary.h2_max_abs,
         }),
+        calibration_metrics: calibration_metrics.and_then(make_metrics_artifact),
+        eval_metrics: eval_metrics.and_then(make_metrics_artifact),
     };
 
     let path = out_dir.join("nn.classic.scales.json");
     let file = File::create(path)?;
     serde_json::to_writer_pretty(file, &payload)?;
     Ok(())
+}
+
+fn make_metrics_artifact(metrics: &QuantEvalMetrics) -> Option<QuantMetricsArtifact> {
+    if metrics.n == 0 {
+        return None;
+    }
+    Some(QuantMetricsArtifact {
+        n: metrics.n,
+        mae_cp: metrics.mae_cp,
+        p95_cp: metrics.p95_cp,
+        max_cp: metrics.max_cp,
+        mae_logit: metrics.mae_logit,
+        p95_logit: metrics.p95_logit,
+        max_logit: metrics.max_logit,
+    })
 }
 
 fn quant_scheme_label(q: QuantScheme) -> &'static str {

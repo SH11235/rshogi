@@ -36,7 +36,7 @@ use distill::{
     DistillEvalMetrics, QuantCalibration, QuantEvalMetrics,
 };
 use error_messages::*;
-use export::{finalize_export, save_network};
+use export::{finalize_export, save_network, FinalizeExportParams};
 use logging::StructuredLogger;
 use params::{
     CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP, CLASSIC_RELU_CLIP_F32,
@@ -1147,6 +1147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut classic_scales: Option<ClassicQuantizationScales> = None;
     let mut distill_metrics: Option<DistillEvalMetrics> = None;
     let mut quant_metrics: Option<QuantEvalMetrics> = None;
+    let mut calibration_metrics: Option<QuantEvalMetrics> = None;
 
     if distill_only {
         let teacher_path = distill_options.teacher_path.as_ref().ok_or_else(|| {
@@ -1184,7 +1185,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             classic_fp32,
             bundle_int,
             scales,
+            calibration_metrics: cal_metrics,
         } = artifacts;
+        calibration_metrics = cal_metrics.clone();
 
         export_options.quant_ft = scales.scheme.ft;
         export_options.quant_h1 = scales.scheme.h1;
@@ -1340,7 +1343,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     classic_fp32,
                                     bundle_int,
                                     scales,
+                                    calibration_metrics: cal_metrics,
                                 } = artifacts;
+                                calibration_metrics = cal_metrics.clone();
 
                                 let eval_samples_slice: &[Sample] =
                                     if let Some(val) = validation_samples.as_ref() {
@@ -1419,14 +1424,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Resolve export format
-    finalize_export(
-        &network,
-        &out_dir,
-        export_options,
-        app.get_flag("quantized"),
-        classic_bundle.as_ref(),
-        classic_scales.as_ref(),
-    )?;
+    finalize_export(FinalizeExportParams {
+        network: &network,
+        out_dir: &out_dir,
+        export: export_options,
+        emit_single_quant: app.get_flag("quantized"),
+        classic_bundle: classic_bundle.as_ref(),
+        classic_scales: classic_scales.as_ref(),
+        calibration_metrics: calibration_metrics.as_ref(),
+        quant_metrics: quant_metrics.as_ref(),
+    })?;
 
     // Save config
     let mut config_file = File::create(out_dir.join("config.json"))?;
@@ -1437,6 +1444,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_opt = |v: Option<f32>| -> String {
         v.map(|x| format!("{:.4}", x)).unwrap_or_else(|| "NA".to_string())
     };
+
+    if let Some(metrics) = calibration_metrics.as_ref() {
+        if metrics.n == 0 {
+            let msg = "Calibration quant metrics: SKIP (no samples)";
+            if human_to_stderr {
+                eprintln!("{}", msg);
+            } else {
+                println!("{}", msg);
+            }
+        } else {
+            let summary = format!(
+                "Calibration quant metrics: n={} cp_mae={} cp_p95={} cp_max={} logit_mae={} logit_p95={} logit_max={}",
+                metrics.n,
+                fmt_opt(metrics.mae_cp),
+                fmt_opt(metrics.p95_cp),
+                fmt_opt(metrics.max_cp),
+                fmt_opt(metrics.mae_logit),
+                fmt_opt(metrics.p95_logit),
+                fmt_opt(metrics.max_logit),
+            );
+            if human_to_stderr {
+                eprintln!("{}", summary);
+            } else {
+                println!("{}", summary);
+            }
+        }
+    }
 
     if let Some(metrics) = distill_metrics.as_ref() {
         if metrics.n == 0 {

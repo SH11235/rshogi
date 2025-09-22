@@ -1006,13 +1006,10 @@ impl ClassicQuantizationScales {
                 1.0
             }
             1 => self.s_w3[0],
-            n => {
-                log::error!(
-                    "classic quantization scales: per-channel output scales (len={}) not supported, using mean",
-                    n
-                );
-                self.s_w3.iter().copied().sum::<f32>() / n as f32
-            }
+            n => panic!(
+                "classic quantization scales: per-channel output scales (len={}) are not supported",
+                n
+            ),
         };
         self.s_in_3 * scale
     }
@@ -1218,7 +1215,8 @@ mod tests {
     }
 
     #[test]
-    fn output_scale_averages_per_channel_scales() {
+    #[should_panic(expected = "per-channel output scales")]
+    fn output_scale_rejects_per_channel_scales() {
         let scales = ClassicQuantizationScales {
             s_w0: 1.0,
             s_w1: vec![1.0],
@@ -1230,9 +1228,7 @@ mod tests {
             activation: None,
             scheme: ClassicLayerQuantScheme::default(),
         };
-
-        // mean(s_w3)=3.0 → output_scale = 3.0 * 3.0 = 9.0
-        assert!((scales.output_scale() - 9.0).abs() < 1e-6);
+        let _ = scales.output_scale();
     }
 
     #[test]
