@@ -33,7 +33,7 @@ use classic::{ClassicIntNetworkBundle, ClassicQuantizationScales};
 use dataset::{load_samples, load_samples_from_cache};
 use distill::{
     distill_classic_after_training, evaluate_distill, evaluate_quantization_gap,
-    DistillEvalMetrics, QuantEvalMetrics,
+    DistillEvalMetrics, QuantCalibration, QuantEvalMetrics,
 };
 use error_messages::*;
 use export::{finalize_export, save_network};
@@ -53,6 +53,32 @@ use types::{
 };
 
 use crate::types::TeacherValueDomain;
+
+fn resolve_quant_calibration<'a>(
+    file_samples: Option<&'a [Sample]>,
+    train_samples: &'a [Sample],
+    limit: usize,
+    quant_search: bool,
+) -> Option<QuantCalibration<'a>> {
+    if let Some(samples) = file_samples {
+        if !samples.is_empty() {
+            return Some(QuantCalibration {
+                samples,
+                limit,
+                auto_search: quant_search,
+            });
+        }
+    }
+    if quant_search && !train_samples.is_empty() {
+        Some(QuantCalibration {
+            samples: train_samples,
+            limit,
+            auto_search: true,
+        })
+    } else {
+        None
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -169,6 +195,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Quantization scheme for output layer weights (Classic v1: per-tensor only)")
                 .value_parser(clap::value_parser!(QuantScheme))
                 .default_value("per-tensor"),
+        )
+        .arg(
+            Arg::new("quant-calibration")
+                .long("quant-calibration")
+                .help("Classic 量子化校正に使用するサンプルファイル (JSONL または cache)。複数指定可")
+                .value_hint(ValueHint::FilePath)
+                .num_args(1..)
+                .action(ArgAction::Append),
+        )
+        .arg(
+            Arg::new("quant-calibration-limit")
+                .long("quant-calibration-limit")
+                .help("量子化校正に使用する最大サンプル数")
+                .value_parser(clap::value_parser!(usize))
+                .default_value("40960"),
+        )
+        .arg(
+            Arg::new("quant-search")
+                .long("quant-search")
+                .help("Classic 量子化で per-tensor / per-channel の組み合わせを校正セットで自動探索")
+                .action(ArgAction::SetTrue),
         )
         .arg(
             arg!(--"emit-fp32-also" "Also export Classic FP32 weights when exporting classic-v1 (ignored otherwise)")
@@ -457,6 +504,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quant_h1 = *app.get_one::<QuantScheme>("quant-h1").unwrap_or(&QuantScheme::PerChannel);
     let quant_h2 = *app.get_one::<QuantScheme>("quant-h2").unwrap_or(&QuantScheme::PerChannel);
     let quant_out = *app.get_one::<QuantScheme>("quant-out").unwrap_or(&QuantScheme::PerTensor);
+    let quant_calibration_paths: Vec<String> = app
+        .get_many::<String>("quant-calibration")
+        .map(|vals| vals.map(|s| s.to_owned()).collect())
+        .unwrap_or_default();
+    let quant_calibration_limit =
+        *app.get_one::<usize>("quant-calibration-limit").unwrap_or(&40960usize);
+    let quant_search = app.get_flag("quant-search");
     let label_type_value = app.get_one::<String>("label").unwrap().to_string();
     let distill_teacher_single = app.get_one::<String>("distill-from-single").map(PathBuf::from);
     let distill_teacher_classic = app.get_one::<String>("distill-from-classic").map(PathBuf::from);
@@ -528,7 +582,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         grad_clip: *app.get_one::<f32>("grad-clip").unwrap(),
     };
 
-    let export_options = ExportOptions {
+    let mut export_options = ExportOptions {
         arch,
         format: export_format,
         quant_ft,
@@ -938,6 +992,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let mut quant_calibration_samples: Option<Vec<Sample>> = None;
+    if !quant_calibration_paths.is_empty() {
+        let mut collected: Vec<Sample> = Vec::new();
+        for path in &quant_calibration_paths {
+            if collected.len() >= quant_calibration_limit {
+                break;
+            }
+            let remaining = quant_calibration_limit - collected.len();
+            let is_calib_cache = dataset::is_cache_file(path);
+            let mut chunk = if is_calib_cache {
+                if human_to_stderr {
+                    eprintln!("Loading quant calibration from cache: {}", path);
+                } else {
+                    println!("Loading quant calibration from cache: {}", path);
+                }
+                load_samples_from_cache(path, &weighting_cfg)?
+            } else {
+                load_samples(path, &config, &weighting_cfg)?
+            };
+            if chunk.len() > remaining {
+                chunk.truncate(remaining);
+            }
+            collected.extend(chunk);
+        }
+        if collected.is_empty() {
+            if human_to_stderr {
+                eprintln!(
+                    "Warning: --quant-calibration で指定したファイルから校正サンプルを取得できませんでした"
+                );
+            } else {
+                println!(
+                    "Warning: --quant-calibration で指定したファイルから校正サンプルを取得できませんでした"
+                );
+            }
+        } else {
+            if human_to_stderr {
+                eprintln!(
+                    "Loaded {} quant calibration samples (limit {}): {:?}",
+                    collected.len(),
+                    quant_calibration_limit,
+                    quant_calibration_paths
+                );
+            } else {
+                println!(
+                    "Loaded {} quant calibration samples (limit {}): {:?}",
+                    collected.len(),
+                    quant_calibration_limit,
+                    quant_calibration_paths
+                );
+            }
+            quant_calibration_samples = Some(collected);
+        }
+    } else if quant_search {
+        if human_to_stderr {
+            eprintln!(
+                "Warning: --quant-search を指定しましたが --quant-calibration が未指定です。訓練サンプルで校正します"
+            );
+        } else {
+            println!(
+                "Warning: --quant-search を指定しましたが --quant-calibration が未指定です。訓練サンプルで校正します"
+            );
+        }
+    }
+
+    let quant_calibration_slice = quant_calibration_samples.as_deref();
+
     // Initialize RNG with seed if provided
     let mut rng: StdRng = if let Some(seed) = seed_u64_opt {
         if human_to_stderr {
@@ -1049,6 +1169,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 export_options.quant_h1,
                 export_options.quant_h2,
                 export_options.quant_out,
+                resolve_quant_calibration(
+                    quant_calibration_slice,
+                    train_samples.as_slice(),
+                    quant_calibration_limit,
+                    quant_search,
+                ),
                 structured_logger.as_ref(),
             ),
         )
@@ -1059,6 +1185,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bundle_int,
             scales,
         } = artifacts;
+
+        export_options.quant_ft = scales.scheme.ft;
+        export_options.quant_h1 = scales.scheme.h1;
+        export_options.quant_h2 = scales.scheme.h2;
+        export_options.quant_out = scales.scheme.out;
 
         let eval_samples_slice: &[Sample] = validation_samples
             .as_ref()
@@ -1195,6 +1326,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 export_options.quant_h1,
                                 export_options.quant_h2,
                                 export_options.quant_out,
+                                resolve_quant_calibration(
+                                    quant_calibration_slice,
+                                    train_samples.as_slice(),
+                                    quant_calibration_limit,
+                                    quant_search,
+                                ),
                                 ctx.structured.as_ref(),
                             ),
                         ) {
@@ -1236,6 +1373,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
 
                                 classic_scales = Some(scales.clone());
+                                export_options.quant_ft = scales.scheme.ft;
+                                export_options.quant_h1 = scales.scheme.h1;
+                                export_options.quant_h2 = scales.scheme.h2;
+                                export_options.quant_out = scales.scheme.out;
                                 *ctx.classic_bundle = Some(bundle_int);
                             }
                             Err(e) => {

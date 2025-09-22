@@ -8,7 +8,7 @@ use std::time::Instant;
 use crate::classic::ClassicScratchViews;
 use crate::classic::{
     ClassicActivationSummary, ClassicFloatNetwork, ClassicIntNetworkBundle,
-    ClassicQuantizationScales,
+    ClassicLayerQuantScheme, ClassicQuantizationScales,
 };
 use crate::logging::StructuredLogger;
 use crate::params::{CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP_F32};
@@ -894,6 +894,7 @@ pub struct ClassicDistillConfig<'a> {
     pub quant_h1: QuantScheme,
     pub quant_h2: QuantScheme,
     pub quant_out: QuantScheme,
+    pub quant_calibration: Option<QuantCalibration<'a>>,
     pub structured: Option<&'a StructuredLogger>,
 }
 
@@ -903,6 +904,7 @@ impl<'a> ClassicDistillConfig<'a> {
         quant_h1: QuantScheme,
         quant_h2: QuantScheme,
         quant_out: QuantScheme,
+        quant_calibration: Option<QuantCalibration<'a>>,
         structured: Option<&'a StructuredLogger>,
     ) -> Self {
         Self {
@@ -910,9 +912,187 @@ impl<'a> ClassicDistillConfig<'a> {
             quant_h1,
             quant_h2,
             quant_out,
+            quant_calibration,
             structured,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QuantCalibration<'a> {
+    pub samples: &'a [Sample],
+    pub limit: usize,
+    pub auto_search: bool,
+}
+
+#[derive(Clone, Debug)]
+struct QuantCandidateReport {
+    scheme: ClassicLayerQuantScheme,
+    metrics: Option<QuantEvalMetrics>,
+}
+
+#[derive(Clone, Debug)]
+struct QuantSelectionReport {
+    candidates: Vec<QuantCandidateReport>,
+    selected_index: usize,
+    sample_source: &'static str,
+    sample_count: usize,
+    auto_search: bool,
+}
+
+struct QuantSelectionResult {
+    bundle: ClassicIntNetworkBundle,
+    scales: ClassicQuantizationScales,
+    report: Option<QuantSelectionReport>,
+}
+
+struct QuantSelectionParams<'a> {
+    net: &'a ClassicFloatNetwork,
+    base_scheme: ClassicLayerQuantScheme,
+    activation: Option<ClassicActivationSummary>,
+    calibration: Option<QuantCalibration<'a>>,
+    fallback_samples: &'a [Sample],
+    config: &'a Config,
+}
+
+#[inline]
+fn quant_scheme_label(q: QuantScheme) -> &'static str {
+    match q {
+        QuantScheme::PerTensor => "per-tensor",
+        QuantScheme::PerChannel => "per-channel",
+    }
+}
+
+fn quant_metric_value(value: Option<f32>) -> f32 {
+    match value {
+        Some(v) if v.is_finite() => v,
+        _ => f32::MAX,
+    }
+}
+
+fn quant_metrics_score(metrics: &QuantEvalMetrics) -> (f32, f32, f32, f32, f32, usize) {
+    (
+        quant_metric_value(metrics.mae_cp),
+        quant_metric_value(metrics.p95_cp),
+        quant_metric_value(metrics.max_cp),
+        quant_metric_value(metrics.mae_logit),
+        quant_metric_value(metrics.p95_logit),
+        usize::MAX - metrics.n,
+    )
+}
+
+fn select_quantization_config(
+    params: QuantSelectionParams<'_>,
+) -> Result<QuantSelectionResult, String> {
+    let QuantSelectionParams {
+        net,
+        base_scheme,
+        activation,
+        calibration,
+        fallback_samples,
+        config,
+    } = params;
+    let mut auto_search = false;
+    let (eval_samples, sample_source) = match calibration {
+        Some(cal) if !cal.samples.is_empty() && cal.limit > 0 => {
+            let limit = cal.limit.min(cal.samples.len());
+            let slice = &cal.samples[..limit];
+            auto_search = cal.auto_search;
+            if !slice.is_empty() {
+                (slice, "quant-calibration")
+            } else {
+                let fallback_limit = cal.limit.min(fallback_samples.len());
+                (&fallback_samples[..fallback_limit], "training-fallback")
+            }
+        }
+        Some(cal) => {
+            auto_search = cal.auto_search;
+            let fallback_limit = cal.limit.min(fallback_samples.len());
+            (&fallback_samples[..fallback_limit], "training-fallback")
+        }
+        None => {
+            let fallback_limit = fallback_samples.len().min(MAX_DISTILL_SAMPLES);
+            (&fallback_samples[..fallback_limit], "training")
+        }
+    };
+
+    let mut candidates = Vec::new();
+    candidates.push(base_scheme);
+    if auto_search {
+        let ft_scheme = base_scheme.ft;
+        let out_scheme = base_scheme.out;
+        for &h1 in &[QuantScheme::PerTensor, QuantScheme::PerChannel] {
+            for &h2 in &[QuantScheme::PerTensor, QuantScheme::PerChannel] {
+                let scheme = ClassicLayerQuantScheme::new(ft_scheme, h1, h2, out_scheme);
+                if !candidates.contains(&scheme) {
+                    candidates.push(scheme);
+                }
+            }
+        }
+    }
+
+    let mut reports: Vec<QuantCandidateReport> = Vec::with_capacity(candidates.len());
+    let mut best_index = 0usize;
+    let mut best_score: Option<(f32, f32, f32, f32, f32, usize)> = None;
+    let mut best_bundle: Option<ClassicIntNetworkBundle> = None;
+    let mut best_scales: Option<ClassicQuantizationScales> = None;
+
+    for (idx, scheme) in candidates.iter().enumerate() {
+        let (bundle, scales) = net
+            .quantize_symmetric(scheme.ft, scheme.h1, scheme.h2, scheme.out, activation)
+            .map_err(|e| format!("quantize_symmetric failed for candidate {}: {}", idx, e))?;
+
+        let metrics = if eval_samples.is_empty() {
+            None
+        } else {
+            Some(evaluate_quantization_gap(net, &bundle, &scales, eval_samples, config))
+        };
+
+        let candidate_score = metrics.as_ref().map(quant_metrics_score);
+        let is_better = match (candidate_score, best_score) {
+            (Some(score), Some(best)) => score < best,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => idx == 0,
+        };
+
+        if is_better {
+            best_index = idx;
+            best_score = candidate_score;
+            best_bundle = Some(bundle);
+            best_scales = Some(scales.clone());
+        }
+
+        reports.push(QuantCandidateReport {
+            scheme: *scheme,
+            metrics,
+        });
+
+        if !is_better {
+            // bundle and scales drop here for non-best candidates
+        }
+    }
+
+    let bundle = best_bundle.expect("at least one quantization candidate must exist");
+    let scales = best_scales.expect("selected quantization scales missing");
+
+    let report = if !reports.is_empty() {
+        Some(QuantSelectionReport {
+            candidates: reports,
+            selected_index: best_index,
+            sample_source,
+            sample_count: eval_samples.len(),
+            auto_search,
+        })
+    } else {
+        None
+    };
+
+    Ok(QuantSelectionResult {
+        bundle,
+        scales,
+        report,
+    })
 }
 
 pub fn distill_classic_after_training(
@@ -1308,18 +1488,91 @@ pub fn distill_classic_after_training(
         lg.write_json(&rec);
     }
 
-    let (bundle, scales) = classic
-        .quantize_symmetric(
-            classic_cfg.quant_ft,
-            classic_cfg.quant_h1,
-            classic_cfg.quant_h2,
-            classic_cfg.quant_out,
-            Some(activation_summary),
-        )
-        .map_err(|e| format!("quantize_symmetric failed: {e}"))?;
+    let base_scheme = ClassicLayerQuantScheme::new(
+        classic_cfg.quant_ft,
+        classic_cfg.quant_h1,
+        classic_cfg.quant_h2,
+        classic_cfg.quant_out,
+    );
+    let quant_selection = select_quantization_config(QuantSelectionParams {
+        net: &classic,
+        base_scheme,
+        activation: Some(activation_summary),
+        calibration: classic_cfg.quant_calibration,
+        fallback_samples: samples,
+        config,
+    })?;
+
+    let QuantSelectionResult {
+        bundle,
+        scales,
+        report: quant_report,
+    } = quant_selection;
+
+    if let Some(report) = quant_report.as_ref() {
+        if !report.candidates.is_empty() {
+            let best = &report.candidates[report.selected_index];
+            if let Some(metrics) = best.metrics.as_ref() {
+                log::info!(
+                    "classic quant selection: best h1={:?}, h2={:?} | auto_search={} | source={} | samples={} | mae_cp={:?} | p95_cp={:?}",
+                    best.scheme.h1,
+                    best.scheme.h2,
+                    report.auto_search,
+                    report.sample_source,
+                    report.sample_count,
+                    metrics.mae_cp,
+                    metrics.p95_cp
+                );
+            } else {
+                log::info!(
+                    "classic quant selection: best h1={:?}, h2={:?} | auto_search={} | source={} | samples={} | metrics-unavailable",
+                    best.scheme.h1,
+                    best.scheme.h2,
+                    report.auto_search,
+                    report.sample_source,
+                    report.sample_count
+                );
+            }
+        }
+
+        if let Some(lg) = classic_cfg.structured {
+            for (idx, candidate) in report.candidates.iter().enumerate() {
+                let mut rec = serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "phase": "classic_quant_search",
+                    "candidate_index": idx as i64,
+                    "selected": idx == report.selected_index,
+                    "auto_search": report.auto_search,
+                    "sample_source": report.sample_source,
+                    "sample_count": report.sample_count as i64,
+                    "scheme": {
+                        "ft": quant_scheme_label(candidate.scheme.ft),
+                        "h1": quant_scheme_label(candidate.scheme.h1),
+                        "h2": quant_scheme_label(candidate.scheme.h2),
+                        "out": quant_scheme_label(candidate.scheme.out),
+                    },
+                });
+                if let Some(metrics) = candidate.metrics.as_ref() {
+                    rec.as_object_mut().unwrap().insert(
+                        "metrics".to_string(),
+                        serde_json::json!({
+                            "n": metrics.n,
+                            "mae_cp": metrics.mae_cp,
+                            "p95_cp": metrics.p95_cp,
+                            "max_cp": metrics.max_cp,
+                            "mae_logit": metrics.mae_logit,
+                            "p95_logit": metrics.p95_logit,
+                            "max_logit": metrics.max_logit,
+                        }),
+                    );
+                }
+                lg.write_json(&rec);
+            }
+        }
+    }
 
     if let Some(lg) = classic_cfg.structured {
-        let rec = serde_json::json!({
+        let mut rec = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "phase": "classic_quantize",
             "s_w0": scales.s_w0,
@@ -1329,8 +1582,35 @@ pub fn distill_classic_after_training(
             "s_in_1": scales.s_in_1,
             "s_in_2": scales.s_in_2,
             "s_in_3": scales.s_in_3,
+            "quant_scheme": {
+                "ft": quant_scheme_label(scales.scheme.ft),
+                "h1": quant_scheme_label(scales.scheme.h1),
+                "h2": quant_scheme_label(scales.scheme.h2),
+                "out": quant_scheme_label(scales.scheme.out),
+            },
             "elapsed_sec": start.elapsed().as_secs_f64(),
         });
+        if let Some(report) = quant_report.as_ref() {
+            if let Some(best) =
+                report.candidates.get(report.selected_index).and_then(|c| c.metrics.as_ref())
+            {
+                rec.as_object_mut().unwrap().insert(
+                    "best_metrics".to_string(),
+                    serde_json::json!({
+                        "n": best.n,
+                        "mae_cp": best.mae_cp,
+                        "p95_cp": best.p95_cp,
+                        "max_cp": best.max_cp,
+                        "mae_logit": best.mae_logit,
+                        "p95_logit": best.p95_logit,
+                        "max_logit": best.max_logit,
+                        "sample_source": report.sample_source,
+                        "sample_count": report.sample_count as i64,
+                        "auto_search": report.auto_search,
+                    }),
+                );
+            }
+        }
         lg.write_json(&rec);
     }
 
@@ -1942,6 +2222,74 @@ mod distill_training_tests {
 
         let legacy = apply_teacher_scale(teacher_raw, fitted) * scale;
         assert!((adjusted - legacy).abs() > 1e-3);
+    }
+
+    #[test]
+    fn quant_search_generates_candidate_report_with_calibration() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(123);
+        let net = ClassicFloatNetwork::he_uniform_with_dims(4, 2, 2, 2, 2, &mut rng);
+
+        let samples = vec![Sample {
+            features: vec![0, 1],
+            label: 0.0,
+            weight: 1.0,
+            cp: Some(0),
+            phase: None,
+        }];
+
+        let config = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.01,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 2,
+            relu_clip: 127,
+            shuffle: false,
+            prefetch_batches: 1,
+            throughput_interval_sec: 1.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 2,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            lr_schedule: "constant".to_string(),
+            lr_warmup_epochs: 0,
+            lr_decay_epochs: None,
+            lr_decay_steps: None,
+            lr_plateau_patience: None,
+            grad_clip: 0.0,
+        };
+
+        let calibration = QuantCalibration {
+            samples: samples.as_slice(),
+            limit: samples.len(),
+            auto_search: true,
+        };
+
+        let selection = select_quantization_config(QuantSelectionParams {
+            net: &net,
+            base_scheme: ClassicLayerQuantScheme::new(
+                QuantScheme::PerTensor,
+                QuantScheme::PerTensor,
+                QuantScheme::PerTensor,
+                QuantScheme::PerTensor,
+            ),
+            activation: Some(ClassicActivationSummary::default()),
+            calibration: Some(calibration),
+            fallback_samples: &samples,
+            config: &config,
+        })
+        .expect("quant search selection");
+
+        let report = selection.report.expect("report present");
+        assert!(report.auto_search);
+        assert_eq!(report.sample_source, "quant-calibration");
+        assert_eq!(report.sample_count, samples.len());
+        assert!(report.candidates.len() >= 2);
     }
 }
 

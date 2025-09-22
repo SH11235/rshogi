@@ -864,13 +864,14 @@ impl ClassicFloatNetwork {
 
         let scales = ClassicQuantizationScales {
             s_w0,
-            s_w1: h1_scales.clone(),
-            s_w2: h2_scales.clone(),
-            s_w3: out_scales.clone(),
+            s_w1: h1_scales,
+            s_w2: h2_scales,
+            s_w3: out_scales,
             s_in_1,
             s_in_2,
             s_in_3,
             activation,
+            scheme: ClassicLayerQuantScheme::new(quant_ft, quant_h1, quant_h2, quant_out),
         };
 
         Ok((ClassicIntNetworkBundle::new(transformer, network), scales))
@@ -949,6 +950,31 @@ impl ClassicFloatNetwork {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicLayerQuantScheme {
+    pub ft: QuantScheme,
+    pub h1: QuantScheme,
+    pub h2: QuantScheme,
+    pub out: QuantScheme,
+}
+
+impl ClassicLayerQuantScheme {
+    pub const fn new(ft: QuantScheme, h1: QuantScheme, h2: QuantScheme, out: QuantScheme) -> Self {
+        Self { ft, h1, h2, out }
+    }
+}
+
+impl Default for ClassicLayerQuantScheme {
+    fn default() -> Self {
+        Self {
+            ft: QuantScheme::PerTensor,
+            h1: QuantScheme::PerChannel,
+            h2: QuantScheme::PerChannel,
+            out: QuantScheme::PerTensor,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 /// Classic v1 の量子化スケールセット。`s_w*` は各層の重みスケール、`s_in_*` は層入力の追加スケール。
 /// 現状は hidden1 入力のみ FT 変換シフトと組み合わせたスケールを持ち、hidden2/output は 1.0 固定。
@@ -961,6 +987,7 @@ pub struct ClassicQuantizationScales {
     pub s_in_2: f32,
     pub s_in_3: f32,
     pub activation: Option<ClassicActivationSummary>,
+    pub scheme: ClassicLayerQuantScheme,
 }
 
 impl ClassicQuantizationScales {
@@ -1187,6 +1214,7 @@ mod tests {
             s_in_2: 1.0,
             s_in_3: 2.5,
             activation: None,
+            scheme: ClassicLayerQuantScheme::default(),
         };
 
         assert!((scales.output_scale() - 2.5).abs() < 1e-6);
@@ -1203,6 +1231,7 @@ mod tests {
             s_in_2: 1.0,
             s_in_3: 3.0,
             activation: None,
+            scheme: ClassicLayerQuantScheme::default(),
         };
 
         // mean(s_w3)=3.0 → output_scale = 3.0 * 3.0 = 9.0

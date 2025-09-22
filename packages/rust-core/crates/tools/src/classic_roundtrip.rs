@@ -242,6 +242,15 @@ pub struct QuantSchemeReportData {
     pub out: Option<String>,
 }
 
+fn normalize_quant_label(label: &str) -> Option<&'static str> {
+    let normalized = label.trim().replace('_', "-");
+    match normalized.to_ascii_lowercase().as_str() {
+        "per-tensor" => Some("per-tensor"),
+        "per-channel" => Some("per-channel"),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClassicActivationSummaryData {
     pub ft_max_abs: f32,
@@ -337,6 +346,7 @@ impl ClassicIntNetwork {
         validate_scale_lengths(&scales, h1_dim, h2_dim)?;
         sanitize_scale_values(&mut scales);
         validate_scale_values(&scales)?;
+        verify_quant_scheme(&scales, h1_dim, h2_dim)?;
 
         let (ft_scale, ft_shift) = compute_ft_scale(&scales);
 
@@ -551,6 +561,81 @@ fn sanitize_scale_values(scales: &mut ClassicQuantizationScalesData) {
     sanitize_vec("s_w1", &mut scales.s_w1);
     sanitize_vec("s_w2", &mut scales.s_w2);
     sanitize_vec("s_w3", &mut scales.s_w3);
+}
+
+fn verify_quant_scheme(
+    scales: &ClassicQuantizationScalesData,
+    h1_dim: usize,
+    h2_dim: usize,
+) -> Result<()> {
+    let derived_ft = "per-tensor";
+    let derived_h1 = if scales.s_w1.len() == 1 {
+        "per-tensor"
+    } else {
+        "per-channel"
+    };
+    let derived_h2 = if scales.s_w2.len() == 1 {
+        "per-tensor"
+    } else {
+        "per-channel"
+    };
+    let derived_out = if scales.s_w3.len() == 1 {
+        "per-tensor"
+    } else {
+        "per-channel"
+    };
+
+    if let Some(report) = scales.quant_scheme.as_ref() {
+        if let Some(raw) = report.ft.as_deref() {
+            let ft = normalize_quant_label(raw)
+                .ok_or_else(|| anyhow!("quant_scheme.ft='{raw}' is not recognized"))?;
+            if ft != derived_ft {
+                bail!("quant_scheme.ft='{ft}' but payload implies '{derived_ft}'");
+            }
+        }
+        if let Some(raw) = report.h1.as_deref() {
+            let h1 = normalize_quant_label(raw)
+                .ok_or_else(|| anyhow!("quant_scheme.h1='{raw}' is not recognized"))?;
+            if h1 != derived_h1 {
+                bail!(
+                    "quant_scheme.h1='{h1}' but payload implies '{derived_h1}' (s_w1 len {})",
+                    scales.s_w1.len()
+                );
+            }
+        } else if scales.s_w1.len() == h1_dim {
+            // No report but payload indicates per-channel; accept.
+        }
+        if let Some(raw) = report.h2.as_deref() {
+            let h2 = normalize_quant_label(raw)
+                .ok_or_else(|| anyhow!("quant_scheme.h2='{raw}' is not recognized"))?;
+            if h2 != derived_h2 {
+                bail!(
+                    "quant_scheme.h2='{h2}' but payload implies '{derived_h2}' (s_w2 len {})",
+                    scales.s_w2.len()
+                );
+            }
+        }
+        if let Some(raw) = report.out.as_deref() {
+            let out = normalize_quant_label(raw)
+                .ok_or_else(|| anyhow!("quant_scheme.out='{raw}' is not recognized"))?;
+            if out != derived_out {
+                bail!(
+                    "quant_scheme.out='{out}' but payload implies '{derived_out}' (s_w3 len {})",
+                    scales.s_w3.len()
+                );
+            }
+        }
+    }
+
+    // Additional sanity: derived per-channel vectors must match dims exactly
+    if scales.s_w1.len() != 1 && scales.s_w1.len() != h1_dim {
+        bail!("s_w1 length {} inconsistent with h1_dim {}", scales.s_w1.len(), h1_dim);
+    }
+    if scales.s_w2.len() != 1 && scales.s_w2.len() != h2_dim {
+        bail!("s_w2 length {} inconsistent with h2_dim {}", scales.s_w2.len(), h2_dim);
+    }
+
+    Ok(())
 }
 
 fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>) {
@@ -952,6 +1037,41 @@ mod tests {
         let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("s_w3[0] must be finite and > 0"), "unexpected err: {msg}");
+    }
+
+    #[test]
+    fn load_fails_for_mismatched_quant_scheme() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let original: serde_json::Value =
+            serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
+
+        let mut broken = original.clone();
+        broken["quant_scheme"]["h1"] = serde_json::json!("per-tensor");
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("quant_scheme.h1"), "unexpected err: {msg}");
+
+        let mut broken = original.clone();
+        broken["quant_scheme"]["out"] = serde_json::json!("per-channel");
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path.clone())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("quant_scheme.out"), "unexpected err: {msg}");
+
+        let mut broken = original.clone();
+        broken["quant_scheme"]["h2"] = serde_json::json!("unknown");
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &broken).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("quant_scheme.h2='unknown'"), "unexpected err: {msg}");
     }
 
     #[test]
