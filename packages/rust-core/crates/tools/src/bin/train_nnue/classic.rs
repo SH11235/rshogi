@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static BIAS_SCALE_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 static FT_ACC_OOR_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Classic 推論と同じ「四捨五入（0.5 away from zero）」を再現する。
+/// 事前条件: `val` は適切な量子化スケールで正規化済みであり、
+/// `|val| <= qmax + 0.5` の範囲に収まっていることを想定している。
 #[inline]
 pub fn round_away_from_zero(val: f32) -> i32 {
     debug_assert!(val.is_finite(), "round_away_from_zero expects finite input, got {val}",);
@@ -57,11 +60,14 @@ pub fn quantize_symmetric_i8(
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
         if !weights.len().is_multiple_of(channels) {
+            let stride = weights.len() / channels;
+            let rem = weights.len() % channels;
             return Err(format!(
-                "weights len {} not divisible by channels {} (stride {})",
+                "weights len {} not divisible by channels {} (stride {}, remainder {})",
                 weights.len(),
                 channels,
-                weights.len() / channels
+                stride,
+                rem
             ));
         }
         let stride = weights.len() / channels;
@@ -113,11 +119,14 @@ pub fn quantize_symmetric_i16(
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
         if !weights.len().is_multiple_of(channels) {
+            let stride = weights.len() / channels;
+            let rem = weights.len() % channels;
             return Err(format!(
-                "weights len {} not divisible by channels {} (stride {})",
+                "weights len {} not divisible by channels {} (stride {}, remainder {})",
                 weights.len(),
                 channels,
-                weights.len() / channels
+                stride,
+                rem
             ));
         }
         let stride = weights.len() / channels;
@@ -261,7 +270,7 @@ impl ClassicFeatureTransformerInt {
     /// 再利用バッファを使う高速版。`tmp_i32` は acc_dim 長の i32、一時蓄積領域。
     /// `out_i16` は acc_dim 長の出力。内部でバイアスを copy して加算・最後に i16 飽和。
     /// 安全性: 呼び出し側で長さを保証すること。
-    pub fn accumulate_into_u32(&self, features: &[u32], tmp_i32: &mut [i32], out_i16: &mut [i16]) {
+    pub fn accumulate_into_i32(&self, features: &[u32], tmp_i32: &mut [i32], out_i16: &mut [i16]) {
         debug_assert_eq!(tmp_i32.len(), self.acc_dim);
         debug_assert_eq!(out_i16.len(), self.acc_dim);
         debug_assert_eq!(self.biases.len(), self.acc_dim);
@@ -281,7 +290,7 @@ impl ClassicFeatureTransformerInt {
                     .is_ok()
                 {
                     log::warn!(
-                        "ClassicFeatureTransformerInt::accumulate_into_u32: feature index {} >= input_dim {} (dropping)",
+                        "ClassicFeatureTransformerInt::accumulate_into_i32: feature index {} >= input_dim {} (dropping)",
                         feat,
                         self.input_dim
                     );
@@ -471,8 +480,8 @@ impl ClassicIntNetworkBundle {
         views: &mut ClassicScratchViews,
     ) -> i32 {
         self.transformer
-            .accumulate_into_u32(features_us, &mut views.tmp_us, &mut views.acc_us);
-        self.transformer.accumulate_into_u32(
+            .accumulate_into_i32(features_us, &mut views.tmp_us, &mut views.acc_us);
+        self.transformer.accumulate_into_i32(
             features_them,
             &mut views.tmp_them,
             &mut views.acc_them,
@@ -628,17 +637,25 @@ impl<'a> ClassicV1Serialized<'a> {
         let h2_dim = self.h2_dim as u64;
         let canonical_input_dim = (SHOGI_BOARD_SIZE * FE_END) as u64;
         let mut payload = 0u64;
+        // FT weights: i16 * canonical_input_dim * acc_dim
         payload += canonical_input_dim
             .checked_mul(acc_dim)
             .and_then(|v| v.checked_mul(2))
             .expect("ft_weights payload overflow");
+        // FT bias: i32 * acc_dim
         payload += acc_dim.checked_mul(4).expect("ft_bias payload overflow");
         let classic_input_dim = acc_dim.checked_mul(2).expect("classic input dim overflow");
+        // Hidden1 weights: i8 * (2*acc_dim) * h1_dim
         payload += classic_input_dim.checked_mul(h1_dim).expect("hidden1 weight payload overflow");
+        // Hidden1 bias: i32 * h1_dim
         payload += h1_dim.checked_mul(4).expect("hidden1 bias payload overflow");
+        // Hidden2 weights: i8 * h1_dim * h2_dim
         payload += h1_dim.checked_mul(h2_dim).expect("hidden2 weight payload overflow");
+        // Hidden2 bias: i32 * h2_dim
         payload += h2_dim.checked_mul(4).expect("hidden2 bias payload overflow");
+        // Output weights: i8 * h2_dim
         payload += h2_dim;
+        // Output bias: i32
         payload += 4;
         payload
     }

@@ -312,10 +312,10 @@ fn classic_transformer_accumulates_and_clamps() {
     let biases = vec![10i32, -20i32];
     let transformer = ClassicFeatureTransformerInt::new(weights, biases, acc_dim);
 
-    // 新 API: accumulate_into_u32 を利用し再利用バッファを明示
+    // 新 API: accumulate_into_i32 を利用し再利用バッファを明示
     let mut tmp = vec![0i32; acc_dim];
     let mut acc = vec![0i16; acc_dim];
-    transformer.accumulate_into_u32(&[0, 1, 2], &mut tmp, &mut acc);
+    transformer.accumulate_into_i32(&[0, 1, 2], &mut tmp, &mut acc);
 
     assert_eq!(acc, vec![4738i16, -5564i16]);
 }
