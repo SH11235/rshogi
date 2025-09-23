@@ -26,12 +26,25 @@ pub struct TrainingPosition {
     pub depth: Option<u8>,
     #[serde(default)]
     pub seldepth: Option<u8>,
+    #[serde(default)]
+    pub teacher_cp: Option<i32>,
+    #[serde(default)]
+    pub teacher_score: Option<TeacherScore>,
+    #[serde(default)]
+    pub teacher_weight: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LineInfo {
     #[serde(default)]
     pub score_cp: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TeacherScore {
+    #[serde(rename = "type")]
+    pub kind: Option<String>, // "cp" | "mate"
+    pub value: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
