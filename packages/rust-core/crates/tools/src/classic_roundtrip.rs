@@ -45,6 +45,27 @@ pub struct LayerOutputs {
     pub output: f32,
 }
 
+/// Scratch buffers for `ClassicFp32Network::forward_with_scratch` to avoid repeated allocations.
+pub struct ClassicFp32Scratch {
+    acc_us: Vec<f32>,
+    acc_them: Vec<f32>,
+    input: Vec<f32>,
+    h1: Vec<f32>,
+    h2: Vec<f32>,
+}
+
+impl ClassicFp32Scratch {
+    pub fn new(acc_dim: usize, h1_dim: usize, h2_dim: usize) -> Self {
+        Self {
+            acc_us: vec![0.0; acc_dim],
+            acc_them: vec![0.0; acc_dim],
+            input: vec![0.0; acc_dim * 2],
+            h1: vec![0.0; h1_dim],
+            h2: vec![0.0; h2_dim],
+        }
+    }
+}
+
 impl ClassicFp32Network {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -130,58 +151,72 @@ impl ClassicFp32Network {
     }
 
     pub fn forward(&self, features_us: &[usize], features_them: &[usize]) -> LayerOutputs {
-        let mut acc_us = self.ft_biases.clone();
-        accumulate_fp32(&mut acc_us, features_us, self.acc_dim, self.input_dim, &self.ft_weights);
+        let mut scratch = ClassicFp32Scratch::new(self.acc_dim, self.h1_dim, self.h2_dim);
+        self.forward_with_scratch(features_us, features_them, &mut scratch)
+    }
 
-        let mut acc_them = self.ft_biases.clone();
+    pub fn forward_with_scratch(
+        &self,
+        features_us: &[usize],
+        features_them: &[usize],
+        scratch: &mut ClassicFp32Scratch,
+    ) -> LayerOutputs {
+        scratch.acc_us.copy_from_slice(&self.ft_biases);
         accumulate_fp32(
-            &mut acc_them,
+            &mut scratch.acc_us,
+            features_us,
+            self.acc_dim,
+            self.input_dim,
+            &self.ft_weights,
+        );
+
+        scratch.acc_them.copy_from_slice(&self.ft_biases);
+        accumulate_fp32(
+            &mut scratch.acc_them,
             features_them,
             self.acc_dim,
             self.input_dim,
             &self.ft_weights,
         );
 
-        let mut input = Vec::with_capacity(self.acc_dim * 2);
-        input.extend(acc_us.iter().copied());
-        input.extend(acc_them.iter().copied());
+        scratch.input.resize(self.acc_dim * 2, 0.0);
+        scratch.input[..self.acc_dim].copy_from_slice(&scratch.acc_us);
+        scratch.input[self.acc_dim..].copy_from_slice(&scratch.acc_them);
 
-        let mut h1_act = Vec::with_capacity(self.h1_dim);
         let input_dim_h1 = self.acc_dim * 2;
+        scratch.h1.resize(self.h1_dim, 0.0);
         for i in 0..self.h1_dim {
             let mut sum = self.hidden1_biases[i];
             let weights = &self.hidden1_weights[i * input_dim_h1..(i + 1) * input_dim_h1];
-            for (x, w) in input.iter().zip(weights.iter()) {
+            for (x, w) in scratch.input.iter().zip(weights.iter()) {
                 sum += x * w;
             }
-            let activated = sum.max(0.0).min(self.relu_clip);
-            h1_act.push(activated);
+            scratch.h1[i] = sum.max(0.0).min(self.relu_clip);
         }
 
-        let mut h2_act = Vec::with_capacity(self.h2_dim);
+        scratch.h2.resize(self.h2_dim, 0.0);
         for i in 0..self.h2_dim {
             let mut sum = self.hidden2_biases[i];
             let weights = &self.hidden2_weights[i * self.h1_dim..(i + 1) * self.h1_dim];
-            for (x, w) in h1_act.iter().zip(weights.iter()) {
+            for (x, w) in scratch.h1.iter().zip(weights.iter()) {
                 sum += x * w;
             }
-            let activated = sum.max(0.0).min(self.relu_clip);
-            h2_act.push(activated);
+            scratch.h2[i] = sum.max(0.0).min(self.relu_clip);
         }
 
         let mut output = self.output_bias;
-        for (w, x) in self.output_weights.iter().zip(h2_act.iter()) {
+        for (w, x) in self.output_weights.iter().zip(scratch.h2.iter()) {
             output += w * x;
         }
 
         let mut ft_combined = Vec::with_capacity(self.acc_dim * 2);
-        ft_combined.extend(acc_us);
-        ft_combined.extend(acc_them);
+        ft_combined.extend_from_slice(&scratch.acc_us);
+        ft_combined.extend_from_slice(&scratch.acc_them);
 
         LayerOutputs {
             ft: ft_combined,
-            h1: h1_act,
-            h2: h2_act,
+            h1: scratch.h1.clone(),
+            h2: scratch.h2.clone(),
             output,
         }
     }
@@ -348,6 +383,13 @@ impl ClassicIntNetwork {
         let h2_dim = scales.h2_dim;
 
         // canonical dims (FT canonical size is SHOGI_BOARD_SIZE * FE_END)
+        if scales.input_dim > SHOGI_BOARD_SIZE * FE_END {
+            bail!(
+                "scales input_dim {} exceeds canonical {}",
+                scales.input_dim,
+                SHOGI_BOARD_SIZE * FE_END
+            );
+        }
         if scales.input_dim != SHOGI_BOARD_SIZE * FE_END {
             log::warn!(
                 "scales input_dim {} differs from canonical {}",
@@ -1099,15 +1141,15 @@ mod tests {
         {
             use std::io::Write;
             let mut file = File::create(&nn_path).unwrap();
-            let total_size = 16
-                + ft_weights.len() * std::mem::size_of::<i16>()
-                + ft_biases.len() * std::mem::size_of::<i32>()
+            let payload = ft_weights.len() * 2
+                + ft_biases.len() * 4
                 + hidden1_weights.len()
-                + hidden1_biases.len() * std::mem::size_of::<i32>()
+                + hidden1_biases.len() * 4
                 + hidden2_weights.len()
-                + hidden2_biases.len() * std::mem::size_of::<i32>()
+                + hidden2_biases.len() * 4
                 + output_weights.len()
-                + std::mem::size_of::<i32>();
+                + 4; // output bias
+            let total_size = 16 + payload;
             file.write_all(b"NNUE").unwrap();
             file.write_all(&1u32.to_le_bytes()).unwrap();
             file.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes()).unwrap();
@@ -1132,7 +1174,6 @@ mod tests {
             file.write_all(&output_weights.iter().map(|&v| v as u8).collect::<Vec<u8>>())
                 .unwrap();
             file.write_all(&output_bias.to_le_bytes()).unwrap();
-            file.flush().unwrap();
         }
 
         let mut scales_value = serde_json::json!({
@@ -1182,6 +1223,70 @@ mod tests {
             features_us.iter().map(|&f| flip_us_them(f) as usize).collect();
         let outputs_loaded = loaded.forward(&features_us, &features_them);
         assert!(outputs_loaded.output.is_finite());
+    }
+
+    #[test]
+    fn classic_v1_payload_size_matches_expectation() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+
+        let ft_weights = vec![0i16; 8];
+        let ft_biases = vec![0i32; 2];
+        let hidden1_weights = vec![0i8; 8];
+        let hidden1_biases = vec![0i32; 2];
+        let hidden2_weights = vec![0i8; 2];
+        let hidden2_biases = vec![0i32; 1];
+        let output_weights = vec![0i8; 1];
+        let output_bias = 0i32;
+
+        {
+            use std::io::Write;
+            let mut file = File::create(&nn_path).unwrap();
+            let payload = ft_weights.len() * 2
+                + ft_biases.len() * 4
+                + hidden1_weights.len()
+                + hidden1_biases.len() * 4
+                + hidden2_weights.len()
+                + hidden2_biases.len() * 4
+                + output_weights.len()
+                + 4;
+            let total_size = 16 + payload;
+            file.write_all(b"NNUE").unwrap();
+            file.write_all(&1u32.to_le_bytes()).unwrap();
+            file.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes()).unwrap();
+            file.write_all(&(total_size as u32).to_le_bytes()).unwrap();
+
+            for &w in &ft_weights {
+                file.write_all(&w.to_le_bytes()).unwrap();
+            }
+            for &b in &ft_biases {
+                file.write_all(&b.to_le_bytes()).unwrap();
+            }
+            file.write_all(&hidden1_weights.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+                .unwrap();
+            for &b in &hidden1_biases {
+                file.write_all(&b.to_le_bytes()).unwrap();
+            }
+            file.write_all(&hidden2_weights.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+                .unwrap();
+            for &b in &hidden2_biases {
+                file.write_all(&b.to_le_bytes()).unwrap();
+            }
+            file.write_all(&output_weights.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+                .unwrap();
+            file.write_all(&output_bias.to_le_bytes()).unwrap();
+        }
+
+        let file_size = std::fs::metadata(&nn_path).unwrap().len();
+        let expected_payload = ft_weights.len() * 2
+            + ft_biases.len() * 4
+            + hidden1_weights.len()
+            + hidden1_biases.len() * 4
+            + hidden2_weights.len()
+            + hidden2_biases.len() * 4
+            + output_weights.len()
+            + 4;
+        assert_eq!(file_size, (expected_payload + 16) as u64);
     }
 
     #[test]
@@ -1334,6 +1439,23 @@ mod tests {
             msg.contains("s_w0") || msg.contains("failed to parse scales JSON"),
             "unexpected message: {msg}"
         );
+    }
+
+    #[test]
+    fn load_fails_when_input_dim_exceeds_canonical() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let mut value: serde_json::Value =
+            serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
+        let canonical = (SHOGI_BOARD_SIZE * FE_END + 1) as usize;
+        value["input_dim"] = serde_json::json!(canonical);
+        serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &value).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap_err();
+        assert!(err.to_string().contains("exceeds canonical"));
     }
 
     #[test]
