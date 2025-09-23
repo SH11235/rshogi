@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{ArgAction, Parser, ValueEnum};
-use serde_json::Value as JsonValue;
 use serde_json::json;
-use std::collections::{HashSet};
+use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::File;
+use std::fs::File as StdFile;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -50,14 +52,11 @@ struct EngineInit {
 
 #[derive(Clone, Debug)]
 struct JobSpec {
-    index: u64,
-    sfen: String,
     raw_json: String,
 }
 
 #[derive(Clone, Debug)]
 struct JobResult {
-    index: u64,
     output_jsonl: String,
     log_jsonl: Option<String>,
 }
@@ -68,7 +67,7 @@ struct QueryResult {
     method: String,
     score_kind: Option<String>, // "cp" | "mate"
     score_value: Option<i32>,
-    bound: Option<String>,      // exact|upper|lower
+    bound: Option<String>, // exact|upper|lower
     depth: Option<i32>,
     seldepth: Option<i32>,
     nodes: Option<u64>,
@@ -77,7 +76,7 @@ struct QueryResult {
     pv_head: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct InfoSnapshot {
     score_kind: Option<String>,
     score_value: Option<i32>,
@@ -88,22 +87,6 @@ struct InfoSnapshot {
     time_ms: Option<u64>,
     nps: Option<u64>,
     pv_head: Option<String>,
-}
-
-impl Default for InfoSnapshot {
-    fn default() -> Self {
-        Self {
-            score_kind: None,
-            score_value: None,
-            bound: None,
-            depth: None,
-            seldepth: None,
-            nodes: None,
-            time_ms: None,
-            nps: None,
-            pv_head: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -124,8 +107,8 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     engine: PathBuf,
 
-    /// Additional args for USI engine
-    #[arg(long, num_args = 1.., value_delimiter = ' ')]
+    /// Additional args for USI engine (pass multiple values)
+    #[arg(long, num_args = 1..)]
     engine_args: Option<Vec<String>>,
 
     /// Optional NN weights path (engine-specific). Will be set via option autodetect or --nn-option
@@ -255,9 +238,7 @@ fn parse_weight(s: &str, enabled: bool) -> WeightParams {
 }
 
 fn physical_cores() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
 fn open_maybe_compressed_writer(path: &str) -> Result<Box<dyn Write>> {
@@ -284,11 +265,29 @@ fn open_maybe_compressed_writer(path: &str) -> Result<Box<dyn Write>> {
     }
 }
 
+fn compute_sha256(path: &PathBuf) -> Result<String> {
+    let mut f =
+        StdFile::open(path).with_context(|| format!("compute_sha256: open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 struct UsiProc {
     child: Child,
     stdin: io::BufWriter<ChildStdin>,
     rx: Receiver<String>,
     opt_names: HashSet<String>,
+    id_name: Option<String>,
+    id_author: Option<String>,
+    nn_sha256: Option<String>,
 }
 
 impl UsiProc {
@@ -297,9 +296,10 @@ impl UsiProc {
         if !init.engine_args.is_empty() {
             cmd.args(&init.engine_args);
         }
-        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().with_context(|| {
-            format!("failed to spawn engine at {}", init.engine_path.display())
-        })?;
+        let mut child =
+            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().with_context(|| {
+                format!("failed to spawn engine at {}", init.engine_path.display())
+            })?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
 
@@ -322,12 +322,19 @@ impl UsiProc {
             stdin: io::BufWriter::new(stdin),
             rx,
             opt_names: HashSet::new(),
+            id_name: None,
+            id_author: None,
+            nn_sha256: init.nn_path.as_ref().and_then(|p| compute_sha256(p).ok()),
         };
         p.write_line("usi")?;
-        // collect options until usiok
+        // collect id/option until usiok
         loop {
             let l = p.read_line_timeout(Duration::from_secs(10))?;
-            if l.starts_with("option ") {
+            if let Some(rest) = l.strip_prefix("id name ") {
+                p.id_name = Some(rest.to_string());
+            } else if let Some(rest) = l.strip_prefix("id author ") {
+                p.id_author = Some(rest.to_string());
+            } else if l.starts_with("option ") {
                 if let Some(name) = parse_option_name(&l) {
                     p.opt_names.insert(name);
                 }
@@ -369,14 +376,13 @@ impl UsiProc {
             }
         }
 
-        p.write_line("isready")?;
-        loop {
-            let l = p.read_line_timeout(Duration::from_secs(10))?;
-            if l == "readyok" {
-                break;
-            }
-        }
+        p.sync_ready()?;
         p.write_line("usinewgame")?;
+        // warmup 1 query (Nice to Have, cheap)
+        let _ = p.write_line("position startpos");
+        let _ = p.write_line("go nodes 1");
+        let _ = p.drain_until_bestmove(Duration::from_millis(200));
+        let _ = p.sync_ready();
         Ok(p)
     }
 
@@ -388,9 +394,7 @@ impl UsiProc {
     }
 
     fn read_line_timeout(&self, dur: Duration) -> Result<String> {
-        self.rx
-            .recv_timeout(dur)
-            .map_err(|_| anyhow!("engine read timeout"))
+        self.rx.recv_timeout(dur).map_err(|_| anyhow!("engine read timeout"))
     }
 
     fn set_option_if_available(&mut self, name: &str, value: &str) -> Result<()> {
@@ -398,6 +402,33 @@ impl UsiProc {
             self.write_line(&format!("setoption name {} value {}", name, value))?;
         }
         Ok(())
+    }
+
+    fn sync_ready(&mut self) -> Result<()> {
+        self.write_line("isready")?;
+        loop {
+            let l = self.read_line_timeout(Duration::from_secs(10))?;
+            if l == "readyok" {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn drain_until_bestmove(&self, max: Duration) -> bool {
+        let deadline = Instant::now() + max;
+        while Instant::now() < deadline {
+            let remain = deadline.saturating_duration_since(Instant::now());
+            match self.rx.recv_timeout(remain) {
+                Ok(l) => {
+                    if l.starts_with("bestmove ") {
+                        return true;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        false
     }
 
     fn query(&mut self, sfen: &str, order: &[MethodKind], timeout_ms: u64) -> QueryResult {
@@ -434,7 +465,7 @@ impl UsiProc {
 
             if saw_bestmove {
                 return QueryResult {
-                    valid: last.score_kind.is_some(),
+                    valid: last.score_kind.is_some() || last.depth.is_some(),
                     method: method_name.to_string(),
                     score_kind: last.score_kind.clone(),
                     score_value: last.score_value,
@@ -447,8 +478,10 @@ impl UsiProc {
                     pv_head: last.pv_head.clone(),
                 };
             } else {
-                // attempt to stop to unblock engine
+                // stop → drain bestmove → sync
                 let _ = self.write_line("stop");
+                let _ = self.drain_until_bestmove(Duration::from_millis(timeout_ms.min(100)));
+                let _ = self.sync_ready();
             }
         }
         QueryResult {
@@ -467,17 +500,47 @@ impl UsiProc {
     }
 }
 
+impl Drop for UsiProc {
+    fn drop(&mut self) {
+        // best-effort graceful shutdown
+        let _ = self.write_line("quit");
+        // give it a short time to exit
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 fn parse_option_name(line: &str) -> Option<String> {
-    // example: option name Threads type spin default 1 min 1 max 256
-    let mut toks = line.split_whitespace();
-    if toks.next()? != "option" {
+    // example: option name Threads type spin ...
+    // supports multi-word names: collect tokens between 'name' and 'type'
+    if !line.starts_with("option ") {
         return None;
     }
-    if toks.next()? != "name" {
-        return None;
+    let mut it = line.split_whitespace().peekable();
+    while let Some(tok) = it.next() {
+        if tok == "name" {
+            let mut buf: Vec<String> = Vec::new();
+            while let Some(&t) = it.peek() {
+                if t == "type" {
+                    break;
+                }
+                buf.push(it.next().unwrap().to_string());
+            }
+            if !buf.is_empty() {
+                return Some(buf.join(" "));
+            }
+        }
     }
-    let name = toks.next()?;
-    Some(name.to_string())
+    None
 }
 
 fn parse_info_line(line: &str, out: &mut InfoSnapshot) {
@@ -538,10 +601,12 @@ fn parse_info_line(line: &str, out: &mut InfoSnapshot) {
                 out.bound = Some("upper".into());
             }
             "pv" => {
-                if let Some(mv) = it.next() {
-                    out.pv_head = Some(mv.to_string());
+                if out.pv_head.is_none() {
+                    if let Some(mv) = it.next() {
+                        out.pv_head = Some(mv.to_string());
+                    }
                 }
-                // do not consume the rest
+                // do not consume the rest (we only log head move)
                 break;
             }
             _ => {}
@@ -593,10 +658,7 @@ fn merge_teacher_fields(
                 }
                 _ => {}
             }
-            obj.insert(
-                "teacher_cp".into(),
-                cpv.map(JsonValue::from).unwrap_or(JsonValue::Null),
-            );
+            obj.insert("teacher_cp".into(), cpv.map(JsonValue::from).unwrap_or(JsonValue::Null));
         }
         WriteMode::Eval => {
             if let (Some("cp"), Some(v)) = (res.score_kind.as_deref(), res.score_value) {
@@ -638,17 +700,14 @@ fn build_engine_init(cli: &Cli) -> EngineInit {
         engine_path: cli.engine.clone(),
         engine_args: cli.engine_args.clone().unwrap_or_default(),
         nn_path: cli.nn.clone(),
-        nn_option_name: cli
-            .nn_option
-            .as_ref()
-            .and_then(|s| {
-                let t = s.trim();
-                if t.eq_ignore_ascii_case("auto") || t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            }),
+        nn_option_name: cli.nn_option.as_ref().and_then(|s| {
+            let t = s.trim();
+            if t.eq_ignore_ascii_case("auto") || t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
         usi_init: cli.usi_init.clone(),
         resources: ResourceParams {
             threads: cli.threads,
@@ -663,6 +722,9 @@ fn build_log_entry(
     res: &QueryResult,
     elapsed_ms: u128,
     engine_init: &EngineInit,
+    id_name: Option<&str>,
+    id_author: Option<&str>,
+    nn_sha256: Option<&str>,
 ) -> JsonValue {
     let mut eng_opts = serde_json::Map::new();
     eng_opts.insert("threads".into(), JsonValue::from(engine_init.resources.threads));
@@ -671,8 +733,11 @@ fn build_log_entry(
     let mut eng = serde_json::Map::new();
     eng.insert(
         "name".into(),
-        JsonValue::from(engine_init.engine_path.to_string_lossy().to_string()),
+        JsonValue::from(id_name.unwrap_or(&engine_init.engine_path.to_string_lossy())),
     );
+    if let Some(a) = id_author {
+        eng.insert("author".into(), JsonValue::from(a));
+    }
     eng.insert(
         "nn_path".into(),
         engine_init
@@ -682,6 +747,9 @@ fn build_log_entry(
             .unwrap_or(JsonValue::Null),
     );
     eng.insert("options".into(), JsonValue::Object(eng_opts));
+    if let Some(h) = nn_sha256 {
+        eng.insert("fingerprint".into(), JsonValue::from(format!("sha256:{}", h)));
+    }
 
     let mut m = serde_json::Map::new();
     m.insert("sfen".into(), JsonValue::from(sfen.to_string()));
@@ -745,12 +813,13 @@ fn main() -> Result<()> {
 
     // concurrency
     let phys = physical_cores();
-    let default_jobs = phys.saturating_div(2).max(1).min(8);
+    let default_jobs = phys.saturating_div(2).clamp(1, 8);
     let jobs = cli.jobs.unwrap_or(default_jobs).min(phys).max(1);
     log::info!("workers: {} (physical cores: {})", jobs, phys);
 
     // Build workers
-    let (job_tx, job_rx_raw): (Sender<Option<JobSpec>>, Receiver<Option<JobSpec>>) = mpsc::channel();
+    let (job_tx, job_rx_raw): (Sender<Option<JobSpec>>, Receiver<Option<JobSpec>>) =
+        mpsc::channel();
     let job_rx = Arc::new(Mutex::new(job_rx_raw));
     let (res_tx, res_rx): (Sender<JobResult>, Receiver<JobResult>) = mpsc::channel();
     let method_order_arc = Arc::new(method_order);
@@ -777,22 +846,44 @@ fn main() -> Result<()> {
             };
             loop {
                 let msg = { rx.lock().unwrap().recv() };
-                let job_opt = match msg { Ok(v) => v, Err(_) => None };
+                let job_opt: Option<JobSpec> = msg.unwrap_or_default();
                 let Some(job) = job_opt else { break };
-                // parse JSON line
+                // parse JSON line (1:1出力保証)
                 let mut obj: JsonValue = match serde_json::from_str(&job.raw_json) {
                     Ok(v) => v,
                     Err(_) => {
-                        // skip malformed line silently
+                        let mut m = serde_json::Map::new();
+                        m.insert("teacher_valid".into(), JsonValue::Bool(false));
+                        m.insert("teacher_error".into(), JsonValue::from("malformed_json"));
+                        let out_line = serde_json::to_string(&JsonValue::Object(m)).unwrap() + "\n";
+                        let _ = tx.send(JobResult {
+                            output_jsonl: out_line,
+                            log_jsonl: None,
+                        });
                         continue;
                     }
                 };
                 let Some(map) = obj.as_object_mut() else {
+                    let mut m = serde_json::Map::new();
+                    m.insert("teacher_valid".into(), JsonValue::Bool(false));
+                    m.insert("teacher_error".into(), JsonValue::from("non_object_json"));
+                    let out_line = serde_json::to_string(&JsonValue::Object(m)).unwrap() + "\n";
+                    let _ = tx.send(JobResult {
+                        output_jsonl: out_line,
+                        log_jsonl: None,
+                    });
                     continue;
                 };
                 let sfen_val = map.get(&sfen_field).cloned().unwrap_or(JsonValue::Null);
                 let sfen = sfen_val.as_str().unwrap_or("").to_string();
                 if sfen.is_empty() {
+                    map.insert("teacher_valid".into(), JsonValue::Bool(false));
+                    map.insert("teacher_error".into(), JsonValue::from("missing_sfen"));
+                    let out_line = serde_json::to_string(&obj).unwrap() + "\n";
+                    let _ = tx.send(JobResult {
+                        output_jsonl: out_line,
+                        log_jsonl: None,
+                    });
                     continue;
                 }
                 let mut attempt = 0u32;
@@ -829,11 +920,21 @@ fn main() -> Result<()> {
                 // compute weight
                 let wt = compute_weight(final_res.depth, final_res.bound.as_deref(), &weightp);
                 // merge
-                let merged = merge_teacher_fields(map.clone(), write_mode, &final_res, wt, mate_cp_clip);
-                let out_line = serde_json::to_string(&merged).unwrap_or_else(|_| job.raw_json.clone());
-                let log_line = serde_json::to_string(&build_log_entry(&sfen, &final_res, elapsed, &einit)).ok();
+                let merged =
+                    merge_teacher_fields(map.clone(), write_mode, &final_res, wt, mate_cp_clip);
+                let out_line =
+                    serde_json::to_string(&merged).unwrap_or_else(|_| job.raw_json.clone());
+                let log_line = serde_json::to_string(&build_log_entry(
+                    &sfen,
+                    &final_res,
+                    elapsed,
+                    &einit,
+                    engine.id_name.as_deref(),
+                    engine.id_author.as_deref(),
+                    engine.nn_sha256.as_deref(),
+                ))
+                .ok();
                 let _ = tx.send(JobResult {
-                    index: job.index,
                     output_jsonl: out_line + "\n",
                     log_jsonl: log_line.map(|s| s + "\n"),
                 });
@@ -844,8 +945,8 @@ fn main() -> Result<()> {
     // Producer: read input files and feed jobs
     let mut total: u64 = 0;
     for path in &cli.inputs {
-        let mut reader = open_maybe_compressed_reader(path, 4 * 1024 * 1024)
-            .map_err(|e| anyhow!("{}", e))?; // map non-Send error into anyhow
+        let mut reader =
+            open_maybe_compressed_reader(path, 4 * 1024 * 1024).map_err(|e| anyhow!("{}", e))?; // map non-Send error into anyhow
         let mut buf = String::new();
         loop {
             buf.clear();
@@ -858,12 +959,9 @@ fn main() -> Result<()> {
             }
             // fast check for sfen key existence; if not present, still enqueue and let worker decide
             // assign an index
-            let idx = total;
             total += 1;
             job_tx
                 .send(Some(JobSpec {
-                    index: idx,
-                    sfen: String::new(),
                     raw_json: buf.clone(),
                 }))
                 .unwrap();
