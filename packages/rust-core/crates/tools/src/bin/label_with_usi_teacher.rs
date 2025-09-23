@@ -48,6 +48,7 @@ struct EngineInit {
     nn_option_name: Option<String>, // None => auto
     usi_init: Option<PathBuf>,
     resources: ResourceParams,
+    nn_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -186,6 +187,10 @@ struct Cli {
     /// CP clip value for mapping mate to cp (only when producing teacher_cp via --write)
     #[arg(long, default_value_t = 3000i32)]
     mate_cp_clip: i32,
+
+    /// Disable adding engine_fingerprint to each output row
+    #[arg(long, action = ArgAction::SetTrue)]
+    no_engine_fingerprint: bool,
 }
 
 fn parse_method_order(s: &str) -> Vec<MethodKind> {
@@ -261,7 +266,7 @@ fn open_maybe_compressed_writer(path: &str) -> Result<Box<dyn Write>> {
         }
     } else {
         let f = File::create(path).with_context(|| format!("create {}", path))?;
-        Ok(Box::new(f))
+        Ok(Box::new(std::io::BufWriter::new(f)))
     }
 }
 
@@ -324,7 +329,7 @@ impl UsiProc {
             opt_names: HashSet::new(),
             id_name: None,
             id_author: None,
-            nn_sha256: init.nn_path.as_ref().and_then(|p| compute_sha256(p).ok()),
+            nn_sha256: init.nn_sha256.clone(),
         };
         p.write_line("usi")?;
         // collect id/option until usiok
@@ -480,7 +485,7 @@ impl UsiProc {
             } else {
                 // stop → drain bestmove → sync
                 let _ = self.write_line("stop");
-                let _ = self.drain_until_bestmove(Duration::from_millis(timeout_ms.min(100)));
+                let _ = self.drain_until_bestmove(Duration::from_millis(timeout_ms.min(200)));
                 let _ = self.sync_ready();
             }
         }
@@ -633,6 +638,8 @@ fn merge_teacher_fields(
     res: &QueryResult,
     weight: f32,
     mate_cp_clip: i32,
+    fingerprint: Option<&str>,
+    emit_fingerprint: bool,
 ) -> JsonValue {
     // validity
     obj.insert("teacher_valid".into(), JsonValue::Bool(res.valid));
@@ -692,10 +699,21 @@ fn merge_teacher_fields(
     obj.insert("teacher_method".into(), JsonValue::from(res.method.clone()));
     obj.insert("teacher_weight".into(), JsonValue::from(weight));
 
+    if !res.valid && res.method == "timeout" {
+        obj.insert("teacher_error".into(), JsonValue::from("timeout"));
+    }
+
+    if emit_fingerprint {
+        if let Some(fp) = fingerprint {
+            obj.insert("engine_fingerprint".into(), JsonValue::from(fp.to_string()));
+        }
+    }
+
     JsonValue::Object(obj)
 }
 
 fn build_engine_init(cli: &Cli) -> EngineInit {
+    let nn_sha256 = cli.nn.as_ref().and_then(|p| compute_sha256(p).ok());
     EngineInit {
         engine_path: cli.engine.clone(),
         engine_args: cli.engine_args.clone().unwrap_or_default(),
@@ -714,6 +732,7 @@ fn build_engine_init(cli: &Cli) -> EngineInit {
             hash_mb: cli.hash_mb,
             multipv: cli.multipv,
         },
+        nn_sha256,
     }
 }
 
@@ -731,10 +750,8 @@ fn build_log_entry(
     eng_opts.insert("hash_mb".into(), JsonValue::from(engine_init.resources.hash_mb));
     eng_opts.insert("multipv".into(), JsonValue::from(engine_init.resources.multipv));
     let mut eng = serde_json::Map::new();
-    eng.insert(
-        "name".into(),
-        JsonValue::from(id_name.unwrap_or(&engine_init.engine_path.to_string_lossy())),
-    );
+    let name_fallback = engine_init.engine_path.to_string_lossy();
+    eng.insert("name".into(), JsonValue::from(id_name.unwrap_or(name_fallback.as_ref())));
     if let Some(a) = id_author {
         eng.insert("author".into(), JsonValue::from(a));
     }
@@ -836,6 +853,7 @@ fn main() -> Result<()> {
         let timeout_ms = cli.timeout_ms;
         let retry = cli.retry;
         let mate_cp_clip = cli.mate_cp_clip;
+        let emit_fp = !cli.no_engine_fingerprint;
         thread::spawn(move || {
             let mut engine = match UsiProc::spawn(&einit) {
                 Ok(p) => p,
@@ -920,8 +938,26 @@ fn main() -> Result<()> {
                 // compute weight
                 let wt = compute_weight(final_res.depth, final_res.bound.as_deref(), &weightp);
                 // merge
-                let merged =
-                    merge_teacher_fields(map.clone(), write_mode, &final_res, wt, mate_cp_clip);
+                let fp_str = {
+                    let name = engine
+                        .id_name
+                        .clone()
+                        .unwrap_or_else(|| einit.engine_path.to_string_lossy().to_string());
+                    if let Some(h) = engine.nn_sha256.as_ref() {
+                        format!("{}|sha256:{}", name, h)
+                    } else {
+                        name
+                    }
+                };
+                let merged = merge_teacher_fields(
+                    map.clone(),
+                    write_mode,
+                    &final_res,
+                    wt,
+                    mate_cp_clip,
+                    Some(fp_str.as_str()),
+                    emit_fp,
+                );
                 let out_line =
                     serde_json::to_string(&merged).unwrap_or_else(|_| job.raw_json.clone());
                 let log_line = serde_json::to_string(&build_log_entry(
@@ -974,16 +1010,28 @@ fn main() -> Result<()> {
 
     // Collect and write outputs as they come
     let mut written: u64 = 0;
-    while let Ok(res) = res_rx.recv_timeout(Duration::from_secs(1)) {
-        out_writer.write_all(res.output_jsonl.as_bytes())?;
-        if let Some(l) = res.log_jsonl.as_ref() {
-            if let Some(w) = log_writer.as_mut() {
-                w.write_all(l.as_bytes())?;
+    while written < total {
+        match res_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(res) => {
+                out_writer.write_all(res.output_jsonl.as_bytes())?;
+                if let Some(l) = res.log_jsonl.as_ref() {
+                    if let Some(w) = log_writer.as_mut() {
+                        w.write_all(l.as_bytes())?;
+                    }
+                }
+                written += 1;
             }
-        }
-        written += 1;
-        if written >= total {
-            break;
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // continue waiting
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!(
+                    "worker channel disconnected: wrote {}/{} lines",
+                    written,
+                    total
+                ));
+            }
         }
     }
     // flush writers

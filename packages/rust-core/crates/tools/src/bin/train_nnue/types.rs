@@ -55,6 +55,7 @@ pub struct Config {
     pub optimizer: String,
     pub l2_reg: f32,
     pub label_type: String,
+    pub mu: f32,
     pub scale: f32,
     pub cp_clip: i32,
     pub accumulator_dim: usize,
