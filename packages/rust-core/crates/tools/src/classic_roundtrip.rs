@@ -14,6 +14,7 @@ const QUANT_MIN_I32: i32 = -127;
 const QUANT_MAX_I32: i32 = 127;
 const QUANT_MIN_F32: f32 = QUANT_MIN_I32 as f32;
 const QUANT_MAX_F32: f32 = QUANT_MAX_I32 as f32;
+const I16_SYMMETRIC_QMAX: i32 = 32_767;
 pub const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
 const FT_PADDING_READ_CHUNK: usize = 8 * 1024;
 
@@ -38,9 +39,9 @@ pub struct ClassicFp32Network {
 pub struct LayerOutputs {
     /// Feature transformer outputs (float domain) in accumulator order.
     pub ft: Vec<f32>,
-    /// Hidden layer 1 post-activation (ClippedReLU) values rescaled to float.
+    /// Hidden layer 1 post-activation (ClippedReLU) values scaled back to float using activation scales only (weight scales not re-applied).
     pub h1: Vec<f32>,
-    /// Hidden layer 2 post-activation (ClippedReLU) values rescaled to float.
+    /// Hidden layer 2 post-activation (ClippedReLU) values scaled back to float using activation scales only (weight scales not re-applied).
     pub h2: Vec<f32>,
     /// Final network output (typically a logit before cp/WDL conversion).
     pub output: f32,
@@ -586,7 +587,8 @@ impl ClassicIntNetwork {
         let mut acc_i16 = Vec::with_capacity(self.acc_dim);
         let mut acc_float = Vec::with_capacity(self.acc_dim);
         for sum in acc.into_iter() {
-            let clamped = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            // Mirror Classic trainer's clamp_i32_to_i16: enforce symmetric ±32767 bound.
+            let clamped = sum.clamp(-I16_SYMMETRIC_QMAX, I16_SYMMETRIC_QMAX) as i16;
             acc_i16.push(clamped);
             acc_float.push(clamped as f32 * self.scales.s_w0);
         }
@@ -800,6 +802,8 @@ fn compute_ft_scale(scales: &ClassicQuantizationScalesData) -> (f32, Option<i32>
     let nearest_pow2 = 2f32.powi(rounded as i32);
     let rel_error = ((nearest_pow2 - ratio) / nearest_pow2).abs();
 
+    // Tolerate relative error up to 1e-4 to absorb JSON serialization noise (~1e-6) while
+    // preserving power-of-two shifts for canonical exporters.
     if rel_error <= 1e-4 {
         if rounded >= 0.0 {
             let raw_shift = rounded as i32;
@@ -908,6 +912,11 @@ fn scale_for_channel(scales: &[f32], idx: usize) -> f32 {
     } else {
         debug_assert!(idx < scales.len(), "validated scale lookup should not overflow");
         // In release builds we still fall back to the last element to stay robust, but hitting this path means validation failed upstream.
+        log::warn!(
+            "scale_for_channel: index {} >= scale len {}; reusing last element",
+            idx,
+            scales.len()
+        );
         *scales.last().unwrap()
     }
 }
@@ -1362,6 +1371,24 @@ mod tests {
         assert_eq!(net.hidden1_biases, vec![5, -4]);
         assert_eq!(net.hidden2_biases, vec![3]);
         assert_eq!(net.output_bias, 2);
+    }
+
+    #[test]
+    fn accumulate_ft_respects_symmetric_i16_limit() {
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let mut net = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap();
+        net.transformer_biases = vec![-40_000; net.acc_dim];
+
+        let (acc_i16, _) = net.accumulate_ft(&[]);
+        let expected = (-I16_SYMMETRIC_QMAX) as i16;
+        assert!(
+            acc_i16.iter().all(|&v| v == expected),
+            "expected symmetric clamp to -{I16_SYMMETRIC_QMAX}"
+        );
     }
 
     #[test]
