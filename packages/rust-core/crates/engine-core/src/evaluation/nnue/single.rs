@@ -6,8 +6,8 @@ use crate::{evaluation::nnue::features::extract_features, Color, Position};
 /// - Note: `scale` は学習時のメタ情報。推論では w2/b2 が cp スケールに整合している前提で未使用。
 #[derive(Clone)]
 pub struct SingleChannelNet {
-    pub n_feat: usize,        // e.g., SHOGI_BOARD_SIZE * FE_END
-    pub acc_dim: usize,       // 256
+    pub n_feat: usize, // e.g., SHOGI_BOARD_SIZE * FE_END
+    pub acc_dim: usize,
     pub scale: f32,           // typically 600.0
     pub w0: Vec<f32>,         // [n_feat * acc_dim]
     pub b0: Option<Vec<f32>>, // [acc_dim]
@@ -43,8 +43,7 @@ impl SingleChannelNet {
     #[inline]
     fn infer_with_active_indices(&self, active: &[usize], _stm: Color) -> i32 {
         let d = self.acc_dim;
-        debug_assert!(d <= 256);
-        let mut acc = [0f32; 256];
+        let mut acc = vec![0f32; d];
 
         // Accumulate embedding rows
         for &fid in active {
@@ -54,31 +53,31 @@ impl SingleChannelNet {
             }
             let base = fid * d;
             let row = &self.w0[base..base + d];
-            for (a, r) in acc[..d].iter_mut().zip(row.iter()) {
+            for (a, r) in acc.iter_mut().zip(row.iter()) {
                 *a += *r;
             }
         }
 
         // Bias0 if present
         if let Some(ref b0) = self.b0 {
-            for (a, b) in acc[..d].iter_mut().zip(b0.iter()) {
+            for (a, b) in acc.iter_mut().zip(b0.iter()) {
                 *a += *b;
             }
         }
 
         // ReLU (branchless)
-        for v in &mut acc[..d] {
+        for v in &mut acc {
             *v = (*v).max(0.0);
         }
 
         // Output（FMA オプトインで acc 経路と丸めを揃える）
         let mut cp = self.b2;
         #[cfg(feature = "nnue_fast_fma")]
-        for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
+        for (w, a) in self.w2[..d].iter().zip(acc.iter()) {
             cp = w.mul_add(*a, cp);
         }
         #[cfg(not(feature = "nnue_fast_fma"))]
-        for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
+        for (w, a) in self.w2[..d].iter().zip(acc.iter()) {
             cp += (*w) * (*a);
         }
 

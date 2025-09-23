@@ -43,3 +43,13 @@ runs/*
 
 # Avoid re-introducing accidentally generated manifest in tools crate root
 crates/tools/manifest.json
+
+sample_data/train.jsonl
+sample_data/val.jsonl
+docs/reports/fixtures/classic_roundtrip/baseline_roundtrip.json
+docs/reports/fixtures/classic_roundtrip/roundtrip_refresh_worst.jsonl
+docs/reports/fixtures/classic_roundtrip/roundtrip_refresh.json
+docs/reports/fixtures/classic_roundtrip/synthetic_probe_refresh_worst.jsonl
+docs/reports/fixtures/classic_roundtrip/synthetic_probe_refresh.json
+docs/reports/fixtures/classic_roundtrip/synthetic_probe_report.json
+docs/reports/fixtures/classic_roundtrip/synthetic_probe_worst.jsonl

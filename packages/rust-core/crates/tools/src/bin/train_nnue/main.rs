@@ -10,6 +10,7 @@ pub(crate) mod export;
 pub(crate) mod logging;
 pub(crate) mod model;
 pub(crate) mod params;
+pub(crate) mod teacher;
 pub(crate) mod training;
 pub(crate) mod types;
 
@@ -23,7 +24,7 @@ use clap::parser::ValueSource;
 use clap::{arg, value_parser, Arg, ArgAction, Command, ValueHint};
 use engine_core::evaluation::nnue::features::FE_END;
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-use model::{ClassicNetwork, Network, SingleNetwork};
+use model::{ClassicNetwork, Network};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tools::common::weighting as wcfg;
@@ -32,25 +33,52 @@ use classic::{ClassicIntNetworkBundle, ClassicQuantizationScales};
 use dataset::{load_samples, load_samples_from_cache};
 use distill::{
     distill_classic_after_training, evaluate_distill, evaluate_quantization_gap,
-    DistillEvalMetrics, QuantEvalMetrics,
+    DistillEvalMetrics, QuantCalibration, QuantEvalMetrics,
 };
 use error_messages::*;
-use export::{finalize_export, save_network};
+use export::{finalize_export, save_network, FinalizeExportParams};
 use logging::StructuredLogger;
 use params::{
     CLASSIC_ACC_DIM, CLASSIC_H1_DIM, CLASSIC_H2_DIM, CLASSIC_RELU_CLIP, CLASSIC_RELU_CLIP_F32,
     DEFAULT_ACC_DIM, DEFAULT_RELU_CLIP, MAX_PREFETCH_BATCHES,
 };
+use teacher::load_teacher;
 use training::{
     compute_val_auc, compute_val_auc_and_ece, train_model, train_model_stream_cache,
     train_model_with_loader, DashboardOpts, LrPlateauState, TrainContext, TrainTrackers,
 };
 use types::{
     ArchKind, Config, DistillLossKind, DistillOptions, ExportFormat, ExportOptions, QuantScheme,
-    Sample,
+    Sample, TeacherKind, TeacherScaleFitKind,
 };
 
 use crate::types::TeacherValueDomain;
+
+fn resolve_quant_calibration<'a>(
+    file_samples: Option<&'a [Sample]>,
+    train_samples: &'a [Sample],
+    limit: usize,
+    quant_search: bool,
+) -> Option<QuantCalibration<'a>> {
+    if let Some(samples) = file_samples {
+        if !samples.is_empty() {
+            return Some(QuantCalibration {
+                samples,
+                limit,
+                auto_search: quant_search,
+            });
+        }
+    }
+    if quant_search && !train_samples.is_empty() {
+        Some(QuantCalibration {
+            samples: train_samples,
+            limit,
+            auto_search: true,
+        })
+    } else {
+        None
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -169,6 +197,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .default_value("per-tensor"),
         )
         .arg(
+            Arg::new("quant-calibration")
+                .long("quant-calibration")
+                .help("Classic 量子化校正に使用するサンプルファイル (JSONL または cache)。複数指定可")
+                .value_hint(ValueHint::FilePath)
+                .num_args(1..)
+                .action(ArgAction::Append),
+        )
+        .arg(
+            Arg::new("quant-calibration-limit")
+                .long("quant-calibration-limit")
+                .help("量子化校正に使用する最大サンプル数")
+                .value_parser(clap::value_parser!(usize))
+                .default_value("40960"),
+        )
+        .arg(
+            Arg::new("quant-search")
+                .long("quant-search")
+                .help("Classic 量子化で per-tensor / per-channel の組み合わせを校正セットで自動探索")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             arg!(--"emit-fp32-also" "Also export Classic FP32 weights when exporting classic-v1 (ignored otherwise)")
                 .action(ArgAction::SetTrue),
         )
@@ -176,18 +225,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("distill-from-single")
                 .long("distill-from-single")
                 .help("Path to teacher Single FP32 weights for knowledge distillation")
-                .value_hint(ValueHint::FilePath),
+                .value_hint(ValueHint::FilePath)
+                .conflicts_with("distill-from-classic"),
+        )
+        .arg(
+            Arg::new("distill-from-classic")
+                .long("distill-from-classic")
+                .help("Path to teacher Classic FP32 network (nn.fp32.bin)")
+                .value_hint(ValueHint::FilePath)
+                .conflicts_with("distill-from-single"),
         )
         .arg(
             Arg::new("teacher-domain")
                 .long("teacher-domain")
-                .help("Teacher output domain: cp|wdl-logit (default: inferred from --label)")
+                .help("Teacher output domain: cp|wdl-logit (default: wdl-logit for all current teachers)")
                 .value_parser(clap::value_parser!(TeacherValueDomain)),
+        )
+        .arg(
+            Arg::new("teacher-scale-fit")
+                .long("teacher-scale-fit")
+                .help("Teacher scale fitting: none|linear (default: none)")
+                .value_parser(clap::value_parser!(TeacherScaleFitKind))
+                .default_value("none"),
         )
         .arg(
             Arg::new("kd-loss")
                 .long("kd-loss")
-                .help("Knowledge distillation loss: mse|bce|kl")
+                .help("Knowledge distillation loss: mse|bce|kl|huber")
                 .value_parser(clap::value_parser!(DistillLossKind))
                 .default_value("mse"),
         )
@@ -218,11 +282,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("kd-huber-delta")
+                .long("kd-huber-delta")
+                .help("Huber delta for --kd-loss=huber (SmoothL1)。cp/wdl 共用")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-ft")
+                .long("kd-layer-weight-ft")
+                .help("Feature transformer layer loss weight λ_ft")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-h1")
+                .long("kd-layer-weight-h1")
+                .help("Hidden1 layer loss weight λ_h1")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-h2")
+                .long("kd-layer-weight-h2")
+                .help("Hidden2 layer loss weight λ_h2")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0.0"),
+        )
+        .arg(
+            Arg::new("kd-layer-weight-out")
+                .long("kd-layer-weight-out")
+                .help("Output layer loss weight λ_out (既定値=1.0)")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
+        .arg(
+            Arg::new("teacher-batch-size")
+                .long("teacher-batch-size")
+                .help("Teacher inference batch size for distillation")
+                .value_parser(clap::value_parser!(usize))
+                .default_value("256"),
+        )
+        .arg(
+            Arg::new("teacher-cache")
+                .long("teacher-cache")
+                .help("Persist teacher distillation cache to this path (bincode). In-memory cacheは常時 ON")
+                .value_hint(ValueHint::FilePath),
+        )
+        .arg(
             Arg::new("distill-only")
                 .long("distill-only")
-                .help(
-                    "Classic distillationのみ実行 (学習をスキップ)。--arch classic --export-format classic-v1 および --distill-from-single が必要"
-                )
+                .help("Classic distillation のみ実行 (学習をスキップ)。--arch classic --export-format classic-v1 および --distill-from-<single|classic> のいずれかが必要")
                 .action(ArgAction::SetTrue),
         )
         .arg(arg!(--shuffle "Shuffle training data"))
@@ -394,8 +504,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quant_h1 = *app.get_one::<QuantScheme>("quant-h1").unwrap_or(&QuantScheme::PerChannel);
     let quant_h2 = *app.get_one::<QuantScheme>("quant-h2").unwrap_or(&QuantScheme::PerChannel);
     let quant_out = *app.get_one::<QuantScheme>("quant-out").unwrap_or(&QuantScheme::PerTensor);
+    let quant_calibration_paths: Vec<String> = app
+        .get_many::<String>("quant-calibration")
+        .map(|vals| vals.map(|s| s.to_owned()).collect())
+        .unwrap_or_default();
+    let quant_calibration_limit =
+        *app.get_one::<usize>("quant-calibration-limit").unwrap_or(&40960usize);
+    let quant_search = app.get_flag("quant-search");
     let label_type_value = app.get_one::<String>("label").unwrap().to_string();
-    let distill_teacher = app.get_one::<String>("distill-from-single").map(PathBuf::from);
+    let distill_teacher_single = app.get_one::<String>("distill-from-single").map(PathBuf::from);
+    let distill_teacher_classic = app.get_one::<String>("distill-from-classic").map(PathBuf::from);
+    if distill_teacher_single.is_some() && distill_teacher_classic.is_some() {
+        return Err("cannot specify both --distill-from-single and --distill-from-classic".into());
+    }
+    let (distill_teacher_path, distill_teacher_kind) = if let Some(path) = distill_teacher_single {
+        (Some(path), TeacherKind::Single)
+    } else if let Some(path) = distill_teacher_classic {
+        (Some(path), TeacherKind::ClassicFp32)
+    } else {
+        (None, TeacherKind::Single)
+    };
     let kd_loss_source = app.value_source("kd-loss");
     let kd_temp_source = app.value_source("kd-temperature");
     let kd_alpha_source = app.value_source("kd-alpha");
@@ -408,7 +536,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut distill_alpha = *app.get_one::<f32>("kd-alpha").unwrap();
 
     if arch == ArchKind::Classic && export_format == ExportFormat::ClassicV1 {
-        if distill_teacher.is_none() {
+        if distill_teacher_path.is_none() {
             return Err(ERR_CLASSIC_NEEDS_TEACHER.into());
         }
         if kd_loss_source == Some(ValueSource::DefaultValue) {
@@ -454,7 +582,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         grad_clip: *app.get_one::<f32>("grad-clip").unwrap(),
     };
 
-    let export_options = ExportOptions {
+    let mut export_options = ExportOptions {
         arch,
         format: export_format,
         quant_ft,
@@ -463,18 +591,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant_out,
         emit_fp32_also: app.get_flag("emit-fp32-also"),
     };
-    // Teacher domain (cp or wdl-logit). Default depends on label type: if label_type is "cp" assume cp, else wdl-logit for classic case.
-    let teacher_domain =
-        app.get_one::<TeacherValueDomain>("teacher-domain").copied().unwrap_or_else(|| {
-            if label_type_value == "cp" {
-                TeacherValueDomain::Cp
-            } else {
-                TeacherValueDomain::WdlLogit
-            }
-        });
+    // Teacher domain (cp or wdl-logit)。教師種別に応じて既定値を選ぶ。
+    let default_teacher_domain = default_teacher_domain(distill_teacher_kind);
+    let teacher_domain = app
+        .get_one::<TeacherValueDomain>("teacher-domain")
+        .copied()
+        .unwrap_or(default_teacher_domain);
 
     let mut distill_options = DistillOptions {
-        teacher_path: distill_teacher.clone(),
+        teacher_path: distill_teacher_path.clone(),
+        teacher_kind: distill_teacher_kind,
         loss: distill_loss,
         temperature: distill_temperature,
         alpha: distill_alpha,
@@ -482,12 +608,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         soften_student: kd_soften_student,
         seed: None,
         teacher_domain,
+        teacher_scale_fit: *app
+            .get_one::<TeacherScaleFitKind>("teacher-scale-fit")
+            .unwrap_or(&TeacherScaleFitKind::None),
+        huber_delta: *app.get_one::<f32>("kd-huber-delta").unwrap_or(&1.0),
+        layer_weight_ft: *app.get_one::<f32>("kd-layer-weight-ft").unwrap_or(&0.0),
+        layer_weight_h1: *app.get_one::<f32>("kd-layer-weight-h1").unwrap_or(&0.0),
+        layer_weight_h2: *app.get_one::<f32>("kd-layer-weight-h2").unwrap_or(&0.0),
+        layer_weight_out: *app.get_one::<f32>("kd-layer-weight-out").unwrap_or(&1.0),
+        teacher_batch_size: *app.get_one::<usize>("teacher-batch-size").unwrap_or(&256usize),
+        teacher_cache: app.get_one::<String>("teacher-cache").map(PathBuf::from),
     };
 
     let seed_u64_opt: Option<u64> =
         app.get_one::<String>("seed").and_then(|s| s.parse::<u64>().ok());
     let distill_seed = seed_u64_opt.map(|s| s ^ 0xC1A5_51C0_5EED_u64);
     distill_options.seed = distill_seed;
+
+    if matches!(distill_options.loss, DistillLossKind::Huber) && distill_options.huber_delta <= 0.0
+    {
+        return Err("--kd-huber-delta は 0 より大きい値を指定してください".into());
+    }
+    if matches!(distill_options.loss, DistillLossKind::Bce | DistillLossKind::Kl)
+        && distill_options.requires_teacher_layers()
+    {
+        return Err("--kd-loss=bce/kl とレイヤ別ロス(λ_ft/λ_h1/λ_h2)は同時に指定できません".into());
+    }
+    if distill_options.layer_weight_out < 0.0
+        || distill_options.layer_weight_ft < 0.0
+        || distill_options.layer_weight_h1 < 0.0
+        || distill_options.layer_weight_h2 < 0.0
+    {
+        return Err("レイヤ別ロス係数 λ_* は 0 以上を指定してください".into());
+    }
+    if distill_options.teacher_batch_size == 0 {
+        return Err("--teacher-batch-size は 1 以上を指定してください".into());
+    }
 
     if arch == ArchKind::Classic && config.relu_clip != CLASSIC_RELU_CLIP {
         if human_to_stderr {
@@ -638,45 +794,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if human_to_stderr {
         match &distill_options.teacher_path {
             Some(path) => eprintln!(
-                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
                 path,
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
             None => eprintln!(
-                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
         }
     } else {
         match &distill_options.teacher_path {
             Some(path) => println!(
-                "  Distill: teacher={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher={:?}, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
                 path,
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
             None => println!(
-                "  Distill: teacher=None, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}",
+                "  Distill: teacher=None, kind={:?}, domain={:?}, loss={:?}, temp={}, alpha={}, scale_temp2={}, soften_student={}, scale_fit={:?}",
+                distill_options.teacher_kind,
                 distill_options.teacher_domain,
                 distill_options.loss,
                 distill_options.temperature,
                 distill_options.alpha,
                 distill_options.scale_temp2,
-                distill_options.soften_student
+                distill_options.soften_student,
+                distill_options.teacher_scale_fit
             ),
         }
     }
@@ -828,6 +992,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let mut quant_calibration_samples: Option<Vec<Sample>> = None;
+    if !quant_calibration_paths.is_empty() {
+        let mut collected: Vec<Sample> = Vec::new();
+        for path in &quant_calibration_paths {
+            if collected.len() >= quant_calibration_limit {
+                break;
+            }
+            let remaining = quant_calibration_limit - collected.len();
+            let is_calib_cache = dataset::is_cache_file(path);
+            let mut chunk = if is_calib_cache {
+                if human_to_stderr {
+                    eprintln!("Loading quant calibration from cache: {}", path);
+                } else {
+                    println!("Loading quant calibration from cache: {}", path);
+                }
+                load_samples_from_cache(path, &weighting_cfg)?
+            } else {
+                load_samples(path, &config, &weighting_cfg)?
+            };
+            if chunk.len() > remaining {
+                chunk.truncate(remaining);
+            }
+            collected.extend(chunk);
+        }
+        if collected.is_empty() {
+            if human_to_stderr {
+                eprintln!(
+                    "Warning: --quant-calibration で指定したファイルから校正サンプルを取得できませんでした"
+                );
+            } else {
+                println!(
+                    "Warning: --quant-calibration で指定したファイルから校正サンプルを取得できませんでした"
+                );
+            }
+        } else {
+            if human_to_stderr {
+                eprintln!(
+                    "Loaded {} quant calibration samples (limit {}): {:?}",
+                    collected.len(),
+                    quant_calibration_limit,
+                    quant_calibration_paths
+                );
+            } else {
+                println!(
+                    "Loaded {} quant calibration samples (limit {}): {:?}",
+                    collected.len(),
+                    quant_calibration_limit,
+                    quant_calibration_paths
+                );
+            }
+            quant_calibration_samples = Some(collected);
+        }
+    } else if quant_search {
+        if human_to_stderr {
+            eprintln!(
+                "Warning: --quant-search を指定しましたが --quant-calibration が未指定です。訓練サンプルで校正します"
+            );
+        } else {
+            println!(
+                "Warning: --quant-search を指定しましたが --quant-calibration が未指定です。訓練サンプルで校正します"
+            );
+        }
+    }
+
+    let quant_calibration_slice = quant_calibration_samples.as_deref();
+
     // Initialize RNG with seed if provided
     let mut rng: StdRng = if let Some(seed) = seed_u64_opt {
         if human_to_stderr {
@@ -917,20 +1147,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut classic_scales: Option<ClassicQuantizationScales> = None;
     let mut distill_metrics: Option<DistillEvalMetrics> = None;
     let mut quant_metrics: Option<QuantEvalMetrics> = None;
+    let mut calibration_metrics: Option<QuantEvalMetrics> = None;
 
     if distill_only {
         let teacher_path = distill_options.teacher_path.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, ERR_CLASSIC_NEEDS_TEACHER)
         })?;
-        let teacher = SingleNetwork::load(teacher_path.as_path()).map_err(|e| {
+        let teacher = load_teacher(teacher_path, distill_options.teacher_kind).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Failed to load teacher network '{}': {}", teacher_path.display(), e),
+                format!("Failed to load teacher network '{}': {e}", teacher_path.display()),
             )
         })?;
 
         let artifacts = distill_classic_after_training(
-            &teacher,
+            teacher.as_ref(),
             &train_samples,
             &config,
             &distill_options,
@@ -939,6 +1170,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 export_options.quant_h1,
                 export_options.quant_h2,
                 export_options.quant_out,
+                resolve_quant_calibration(
+                    quant_calibration_slice,
+                    train_samples.as_slice(),
+                    quant_calibration_limit,
+                    quant_search,
+                ),
                 structured_logger.as_ref(),
             ),
         )
@@ -948,7 +1185,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             classic_fp32,
             bundle_int,
             scales,
+            calibration_metrics: cal_metrics,
         } = artifacts;
+        calibration_metrics = cal_metrics.clone();
+
+        export_options.quant_ft = scales.scheme.ft;
+        export_options.quant_h1 = scales.scheme.h1;
+        export_options.quant_h2 = scales.scheme.h2;
+        export_options.quant_out = scales.scheme.out;
 
         let eval_samples_slice: &[Sample] = validation_samples
             .as_ref()
@@ -958,7 +1202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if !eval_samples_slice.is_empty() {
             distill_metrics = Some(evaluate_distill(
-                &teacher,
+                teacher.as_ref(),
                 &classic_fp32,
                 eval_samples_slice,
                 &config,
@@ -1074,9 +1318,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                 } else if let Some(path) = &distill_options.teacher_path {
-                    match SingleNetwork::load(path) {
+                    match load_teacher(path, distill_options.teacher_kind) {
                         Ok(teacher) => match distill_classic_after_training(
-                            &teacher,
+                            teacher.as_ref(),
                             &train_samples,
                             &config,
                             &distill_options,
@@ -1085,6 +1329,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 export_options.quant_h1,
                                 export_options.quant_h2,
                                 export_options.quant_out,
+                                resolve_quant_calibration(
+                                    quant_calibration_slice,
+                                    train_samples.as_slice(),
+                                    quant_calibration_limit,
+                                    quant_search,
+                                ),
                                 ctx.structured.as_ref(),
                             ),
                         ) {
@@ -1093,7 +1343,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     classic_fp32,
                                     bundle_int,
                                     scales,
+                                    calibration_metrics: cal_metrics,
                                 } = artifacts;
+                                calibration_metrics = cal_metrics.clone();
 
                                 let eval_samples_slice: &[Sample] =
                                     if let Some(val) = validation_samples.as_ref() {
@@ -1108,7 +1360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 if !eval_samples_slice.is_empty() {
                                     let dm = evaluate_distill(
-                                        &teacher,
+                                        teacher.as_ref(),
                                         &classic_fp32,
                                         eval_samples_slice,
                                         &config,
@@ -1126,6 +1378,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
 
                                 classic_scales = Some(scales.clone());
+                                export_options.quant_ft = scales.scheme.ft;
+                                export_options.quant_h1 = scales.scheme.h1;
+                                export_options.quant_h2 = scales.scheme.h2;
+                                export_options.quant_out = scales.scheme.out;
                                 *ctx.classic_bundle = Some(bundle_int);
                             }
                             Err(e) => {
@@ -1157,13 +1413,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else if human_to_stderr {
-                    eprintln!(
-                        "Classic distillation skipped: --distill-from-single was not provided."
-                    );
+                    eprintln!("Classic distillation skipped: teacher network was not provided.");
                 } else {
-                    println!(
-                        "Classic distillation skipped: --distill-from-single was not provided."
-                    );
+                    println!("Classic distillation skipped: teacher network was not provided.");
                 }
             }
 
@@ -1172,14 +1424,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Resolve export format
-    finalize_export(
-        &network,
-        &out_dir,
-        export_options,
-        app.get_flag("quantized"),
-        classic_bundle.as_ref(),
-        classic_scales.as_ref(),
-    )?;
+    finalize_export(FinalizeExportParams {
+        network: &network,
+        out_dir: &out_dir,
+        export: export_options,
+        emit_single_quant: app.get_flag("quantized"),
+        classic_bundle: classic_bundle.as_ref(),
+        classic_scales: classic_scales.as_ref(),
+        calibration_metrics: calibration_metrics.as_ref(),
+        quant_metrics: quant_metrics.as_ref(),
+    })?;
 
     // Save config
     let mut config_file = File::create(out_dir.join("config.json"))?;
@@ -1190,6 +1444,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_opt = |v: Option<f32>| -> String {
         v.map(|x| format!("{:.4}", x)).unwrap_or_else(|| "NA".to_string())
     };
+
+    if let Some(metrics) = calibration_metrics.as_ref() {
+        if metrics.n == 0 {
+            let msg = "Calibration quant metrics: SKIP (no samples)";
+            if human_to_stderr {
+                eprintln!("{}", msg);
+            } else {
+                println!("{}", msg);
+            }
+        } else {
+            let summary = format!(
+                "Calibration quant metrics: n={} cp_mae={} cp_p95={} cp_max={} logit_mae={} logit_p95={} logit_max={}",
+                metrics.n,
+                fmt_opt(metrics.mae_cp),
+                fmt_opt(metrics.p95_cp),
+                fmt_opt(metrics.max_cp),
+                fmt_opt(metrics.mae_logit),
+                fmt_opt(metrics.p95_logit),
+                fmt_opt(metrics.max_logit),
+            );
+            if human_to_stderr {
+                eprintln!("{}", summary);
+            } else {
+                println!("{}", summary);
+            }
+        }
+    }
 
     if let Some(metrics) = distill_metrics.as_ref() {
         if metrics.n == 0 {
@@ -1666,6 +1947,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn default_teacher_domain(kind: TeacherKind) -> TeacherValueDomain {
+    match kind {
+        TeacherKind::ClassicFp32 => TeacherValueDomain::WdlLogit,
+        TeacherKind::Single => TeacherValueDomain::WdlLogit,
+    }
 }
 
 #[cfg(test)]
