@@ -13,11 +13,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static BIAS_SCALE_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
+static BIAS_INVALID_SCALE_LOGGED: AtomicBool = AtomicBool::new(false);
+static BIAS_QUANT_OVERFLOW_LOGGED: AtomicBool = AtomicBool::new(false);
 static FT_ACC_OOR_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Classic 推論と同じ「四捨五入（0.5 away from zero）」を再現する。
 /// 事前条件: `val` は適切な量子化スケールで正規化済みであり、
 /// `|val| <= qmax + 0.5` の範囲に収まっていることを想定している。
+/// NaN/Inf が入力された場合は安全側で 0 を返す（ログ済み経路からのフェイルセーフ）。
 #[inline]
 pub fn round_away_from_zero(val: f32) -> i32 {
     debug_assert!(val.is_finite(), "round_away_from_zero expects finite input, got {val}",);
@@ -48,6 +51,9 @@ pub fn quantize_symmetric_i8(
 ) -> Result<(Vec<i8>, Vec<f32>), String> {
     if weights.is_empty() {
         return Ok((Vec::new(), Vec::new()));
+    }
+    if let Some((idx, value)) = weights.iter().enumerate().find(|(_, &w)| !w.is_finite()) {
+        return Err(format!("quantize_symmetric_i8: weight[{idx}] is non-finite ({value})"));
     }
     if per_channel && channels == 0 {
         return Err("per-channel quantization requires channels > 0".into());
@@ -107,6 +113,9 @@ pub fn quantize_symmetric_i16(
 ) -> Result<(Vec<i16>, Vec<f32>), String> {
     if weights.is_empty() {
         return Ok((Vec::new(), Vec::new()));
+    }
+    if let Some((idx, value)) = weights.iter().enumerate().find(|(_, &w)| !w.is_finite()) {
+        return Err(format!("quantize_symmetric_i16: weight[{idx}] is non-finite ({value})"));
     }
     if per_channel && channels == 0 {
         return Err("per-channel quantization requires channels > 0".into());
@@ -176,6 +185,31 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
         return vec![0; bias.len()];
     }
 
+    if !input_scale.is_finite() || input_scale <= 0.0 {
+        if BIAS_INVALID_SCALE_LOGGED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            log::warn!(
+                "quantize_bias_i32: invalid input_scale {} (must be finite and > 0); returning zeros",
+                input_scale
+            );
+        }
+        return vec![0; bias.len()];
+    }
+
+    let warn_invalid_scale = |context: &str, idx: usize, value: f32| {
+        if BIAS_INVALID_SCALE_LOGGED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            log::warn!(
+                "quantize_bias_i32: {context} scale invalid at index {idx} (value {}); falling back to 1.0",
+                value
+            );
+        }
+    };
+
     let mut out = Vec::with_capacity(bias.len());
     let per_tensor = weight_scales.len() == 1;
     let ws0 = if per_tensor { weight_scales[0] } else { 0.0 };
@@ -201,12 +235,37 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
                 mismatch_examples.push((i, ws, b));
             }
         }
-        let scale = input_scale * ws;
-        out.push(if scale == 0.0 {
-            0
-        } else {
-            round_away_from_zero(b / scale)
-        });
+        let mut effective_ws = ws;
+        if !effective_ws.is_finite() || effective_ws <= 0.0 {
+            warn_invalid_scale("weight", i, effective_ws);
+            effective_ws = 1.0;
+        }
+        let scale = input_scale * effective_ws;
+        if scale.is_subnormal()
+            && BIAS_INVALID_SCALE_LOGGED
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            log::warn!(
+                "quantize_bias_i32: extremely small effective scale at index {} (scale {:.3e}); proceeding (may saturate)",
+                i,
+                scale
+            );
+        }
+        let quantized = round_away_from_zero(b / scale);
+        if (quantized == i32::MAX || quantized == i32::MIN)
+            && BIAS_QUANT_OVERFLOW_LOGGED
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            log::warn!(
+                "quantize_bias_i32: bias value {} saturated to {} with scale {:.6}",
+                b,
+                quantized,
+                scale
+            );
+        }
+        out.push(quantized);
     }
     if mismatch_count > 0
         && BIAS_SCALE_MISMATCH_LOGGED
@@ -404,6 +463,7 @@ impl ClassicQuantizedNetwork {
         output
     }
 
+    #[inline(always)]
     fn affine_layer(
         &self,
         input: &[i8],
@@ -428,9 +488,11 @@ impl ClassicQuantizedNetwork {
         }
     }
 
+    #[inline(always)]
     fn apply_clipped_relu(input: &[i32], output: &mut [i8]) {
         debug_assert_eq!(input.len(), output.len());
-        // Classic 推論は常に int8 の 0..=127 クリップを前提とする
+        // Classic 推論は engine-core 側の ClippedReLU と同じ 0..=I8_QMAX (=127) 飽和が仕様。
+        // I8_QMAX は量子化・推論で共有されるため、値変更時は両経路の整合を必ず確認すること。
         for (dst, &src) in output.iter_mut().zip(input.iter()) {
             let clipped = src.clamp(0, I8_QMAX);
             *dst = clipped as i8;
@@ -589,7 +651,7 @@ impl<'a> ClassicV1Serialized<'a> {
         let expected_h1_weights = classic_input_dim * self.h1_dim;
         if self.hidden1_weights.len() != expected_h1_weights {
             return Err(format!(
-                "hidden1_weights length mismatch: got {}, expected (2*acc_dim={}))*h1_dim({}) = {}",
+                "hidden1_weights length mismatch: got {}, expected (2*acc_dim({}))*h1_dim({}) = {}",
                 self.hidden1_weights.len(),
                 classic_input_dim,
                 self.h1_dim,
@@ -1209,6 +1271,26 @@ mod tests {
     }
 
     #[test]
+    fn quantize_symmetric_rejects_non_finite_weights() {
+        let err_i8 = quantize_symmetric_i8(&[1.0, f32::NAN], false, 1).unwrap_err();
+        assert!(err_i8.contains("non-finite"));
+
+        let err_i16 = quantize_symmetric_i16(&[f32::INFINITY, -2.0], false, 1).unwrap_err();
+        assert!(err_i16.contains("non-finite"));
+    }
+
+    #[test]
+    fn quantize_bias_handles_invalid_scales() {
+        let bias = vec![1.0f32, -2.0];
+
+        let zeros = quantize_bias_i32(&bias, f32::NAN, &[1.0]);
+        assert_eq!(zeros, vec![0, 0]);
+
+        let sanitized = quantize_bias_i32(&bias, 2.0, &[f32::INFINITY]);
+        assert_eq!(sanitized, vec![1, -1]);
+    }
+
+    #[test]
     fn quantize_symmetric_empty_returns_empty() {
         let (qi8, si8) = quantize_symmetric_i8(&[], false, 1).unwrap();
         assert!(qi8.is_empty() && si8.is_empty());
@@ -1373,5 +1455,24 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(round_away_from_zero(input), expected, "input={input}");
         }
+    }
+
+    #[test]
+    fn quantize_bias_saturates_on_tiny_scale() {
+        let bias = vec![1.0e9f32]; // 大きいバイアス
+        let input_scale = 1e-12f32; // とても小さいスケール
+        let q = quantize_bias_i32(&bias, input_scale, &[1.0]);
+        assert_eq!(q[0], i32::MAX); // saturating cast の到達確認
+    }
+
+    #[test]
+    fn quantize_bias_saturates_negative_on_tiny_scale() {
+        let q = quantize_bias_i32(&[-1.0e9], 1e-12, &[1.0]);
+        assert_eq!(q[0], i32::MIN);
+    }
+    #[test]
+    fn quantize_bias_zero_bias_stays_zero_even_with_tiny_scale() {
+        let q = quantize_bias_i32(&[0.0], 1e-40, &[1.0]);
+        assert_eq!(q[0], 0);
     }
 }
