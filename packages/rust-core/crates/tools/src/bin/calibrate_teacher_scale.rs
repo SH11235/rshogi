@@ -101,6 +101,23 @@ fn median(vals: &mut [f32]) -> f32 {
     }
 }
 
+fn weighted_mse(pairs: &[(f32, f32, f32)], mu: f32, scale: f32) -> f32 {
+    let mut sse = 0.0f64;
+    let mut w_sum = 0.0f64;
+    for &(cp, y, w) in pairs {
+        let p = logistic(cp, mu, scale) as f64;
+        let d = p - y as f64;
+        let ww = w as f64;
+        sse += ww * d * d;
+        w_sum += ww;
+    }
+    if w_sum > 0.0 {
+        (sse / w_sum) as f32
+    } else {
+        sse as f32
+    }
+}
+
 fn open_writer(path: &str) -> Result<Box<dyn Write>> {
     if path.ends_with(".gz") {
         let f = File::create(path).with_context(|| format!("create {}", path))?;
@@ -133,7 +150,10 @@ fn main() -> Result<()> {
     }
 
     let mut pairs: Vec<(f32, f32, f32)> = Vec::new(); // (cp, label, weight)
+                                                      // 有効（valid && bound_ok）なすべての cp（フォールバックの中央値計算用）
     let mut cp_all: Vec<f32> = Vec::new();
+    // 有効だがラベル無しの cp（max_samples の上限判定に使用）
+    let mut cp_only: Vec<f32> = Vec::new();
     let mut used_labels = false;
 
     let mut weight_used_any = false;
@@ -168,13 +188,12 @@ fn main() -> Result<()> {
                 Some(_) => false,
             };
 
-            if valid {
-                cp_all.push(cp_f);
-            }
-
             if !valid || !bound_ok {
                 continue;
             }
+
+            // ここまで来たら「有効」
+            cp_all.push(cp_f);
 
             if let Some(y) = extract_label(&v, &cli.label_field) {
                 if y.is_finite() {
@@ -195,13 +214,17 @@ fn main() -> Result<()> {
                     }
                     pairs.push((cp_f, y, weight));
                 }
+            } else {
+                // ラベル無しの有効サンプル
+                cp_only.push(cp_f);
             }
 
-            if pairs.len() + cp_all.len() >= cli.max_samples {
+            // 上限判定は「ラベル付き + ラベル無し有効」の合計で行う
+            if pairs.len() + cp_only.len() >= cli.max_samples {
                 break;
             }
         }
-        if pairs.len() + cp_all.len() >= cli.max_samples {
+        if pairs.len() + cp_only.len() >= cli.max_samples {
             break;
         }
     }
@@ -220,23 +243,6 @@ fn main() -> Result<()> {
         let mu_min = med - 300.0;
         let mu_max = med + 300.0;
         let mut best = (f32::INFINITY, 0.0, 0.0);
-        let mut try_pair = |mu_c: f32, s_c: f32| {
-            let mut sse = 0.0f64;
-            let mut w_sum = 0.0f64;
-            for &(cp, y, w) in &pairs {
-                let p = logistic(cp, mu_c, s_c) as f64;
-                let d = p - y as f64;
-                let ww = w as f64;
-                sse += ww * d * d;
-                w_sum += ww;
-            }
-            if w_sum > 0.0 {
-                sse /= w_sum;
-            }
-            if sse < best.0 as f64 {
-                best = (sse as f32, mu_c, s_c);
-            }
-        };
         let mu_step = 20.0;
         let s_min = 300.0f32;
         let s_max = 1000.0f32;
@@ -246,7 +252,10 @@ fn main() -> Result<()> {
             let mut s = s_min;
             while s <= s_max {
                 if s > 1.0 {
-                    try_pair(m, s);
+                    let sse = weighted_mse(&pairs, m, s);
+                    if sse < best.0 {
+                        best = (sse, m, s);
+                    }
                 }
                 s += s_step;
             }
@@ -263,20 +272,9 @@ fn main() -> Result<()> {
             let mut s = s_lo;
             while s <= s_hi {
                 if s > 1.0 {
-                    let mut sse = 0.0f64;
-                    let mut w_sum = 0.0f64;
-                    for &(cp, y, w) in &pairs {
-                        let p = logistic(cp, m, s) as f64;
-                        let d = p - y as f64;
-                        let ww = w as f64;
-                        sse += ww * d * d;
-                        w_sum += ww;
-                    }
-                    if w_sum > 0.0 {
-                        sse /= w_sum;
-                    }
-                    if sse < fine_best.0 as f64 {
-                        fine_best = (sse as f32, m, s);
+                    let sse = weighted_mse(&pairs, m, s);
+                    if sse < fine_best.0 {
+                        fine_best = (sse, m, s);
                     }
                 }
                 s += 5.0;
@@ -284,6 +282,49 @@ fn main() -> Result<()> {
             m += 5.0;
         }
         best = fine_best;
+
+        // もし粗探索の最良 s がレンジ端に張り付いていたら、s の範囲を自動拡張して再探索
+        let at_edge =
+            (best.2 - s_min).abs() <= s_step + 1e-3 || (s_max - best.2).abs() <= s_step + 1e-3;
+        if at_edge {
+            let s2_min = (best.2 - 200.0).max(10.0);
+            let s2_max = best.2 + 200.0;
+            let mut m3 = mu_min;
+            while m3 <= mu_max {
+                let mut s3 = s2_min;
+                while s3 <= s2_max {
+                    if s3 > 1.0 {
+                        let sse = weighted_mse(&pairs, m3, s3);
+                        if sse < best.0 {
+                            best = (sse, m3, s3);
+                        }
+                    }
+                    s3 += s_step;
+                }
+                m3 += mu_step;
+            }
+            // 近傍で再度ファインサーチ
+            let mut fine_best2 = best;
+            let mu_lo2 = best.1 - 40.0;
+            let mu_hi2 = best.1 + 40.0;
+            let s_lo2 = (best.2 - 80.0).max(10.0);
+            let s_hi2 = best.2 + 80.0;
+            let mut m2 = mu_lo2;
+            while m2 <= mu_hi2 {
+                let mut s2 = s_lo2;
+                while s2 <= s_hi2 {
+                    if s2 > 1.0 {
+                        let sse = weighted_mse(&pairs, m2, s2);
+                        if sse < fine_best2.0 {
+                            fine_best2 = (sse, m2, s2);
+                        }
+                    }
+                    s2 += 5.0;
+                }
+                m2 += 5.0;
+            }
+            best = fine_best2;
+        }
         mu = best.1;
         scale = best.2;
     } else {
@@ -302,6 +343,7 @@ fn main() -> Result<()> {
         "scale": scale,
         "objective": format!("{:?}", cli.objective).to_lowercase(),
         "samples": pairs.len(),
+        // 注: samples は「ラベル付きでフィットに使用した件数」を指します
         "used_labels": used_labels,
         "min_labeled": cli.min_labeled,
         "weights_used": weight_used_any && !cli.no_weight && !cli.weight_field.is_empty(),
