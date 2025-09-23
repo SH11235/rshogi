@@ -9,12 +9,6 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**デバッグポジションツール**](debug-position-tool.md) - 特定局面の調査・デバッグツール
 - [**生成→学習→ログ→ガントレット（ハンズオン）**](guides/pipeline_walkthrough.md) - 最短で一周回すための手順書
 
-### 📜 Charter & Plans
-- [**00_charter**](00_charter.md) - 測定条件・昇格Gate・データ/ログの横断契約
-- [**10_pipeline（運用改善）**](10_pipeline.md) - P2/P3 の残タスク計画（ガントレット/Gate 連携）
-- [**20_engine（棋力向上）**](20_engine.md) - B/C 以降の残タスク（Phase 1: Classic NNUE）
-- [**ガントレット後フォローアップ計画**](plans/gauntlet_followup.md) - 直近結果を踏まえた次のアクション（モデル改善の本筋）
-
 ### 📑 Specs & Schemas
 - Specs: [011 LRスケジュール](specs/011_lr_schedule.md) / [012 重み付け](specs/012_weighting.md) / [013 ガントレット](specs/013_gauntlet.md) / [017 生成ストリーミング](specs/017_generate_streaming.md)
 - Schemas: [structured_v1](schemas/structured_v1.schema.json) / [gauntlet_out](schemas/gauntlet_out.schema.json) / [manifest_v2](schemas/manifest_v2.schema.json)
@@ -53,7 +47,7 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**Opening Book ツール**](tools/opening-book-tools-guide.md) - 定跡データ変換・検証ツール
 - [**NNUE 教師データ生成**](tools/nnue-training-data-guide.md) - generate_nnue_training_data の運用ガイド（構造化ログ/manifest v2）
 - [**曖昧掘りオーケストレーション**](tools/ambiguous-mining-orchestrator.md) - 抽出→再注釈→マージを1コマンドで実行（系譜/整合性を記録）
- - [**PSV→JSONL 直変換（psv2jsonl）**](tools/psv2jsonl.md) - YaneuraOu PSV(yo_v1) を学習用 JSONL にストリーム変換
+- [**PSV→JSONL 直変換（psv2jsonl）**](tools/psv2jsonl.md) - YaneuraOu PSV(yo_v1) を学習用 JSONL にストリーム変換
 
 ### 📝 Implementation Notes
 - [**Rustプリプロセッシング計画**](implementation/rust-preprocessing-scripts-plan.md) - Rust実装の計画文書

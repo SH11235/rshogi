@@ -118,6 +118,15 @@ cargo run -p tools --bin train_nnue -- \
   --distill-from-single runs/legacy_cp.fp32.bin \
   --teacher-domain cp --kd-loss bce --kd-temperature 2.0 --kd-alpha 0.8
 
+# Classic FP32 教師からの蒸留
+cargo run -p tools --bin train_nnue -- \
+  -i runs/data.cache.gz -e 1 -b 32768 \
+  --arch classic --export-format classic-v1 \
+  --distill-from-classic runs/teachers/suisho5/nn.bin \
+  --teacher-domain wdl-logit --kd-loss huber --kd-huber-delta 2.0 \
+  --teacher-scale-fit linear --teacher-cache runs/cache/suisho5_teacher.lmdb \
+  --kd-layer-weight-ft 0.1 --kd-layer-weight-h1 0.1 --kd-layer-weight-h2 0.05 
+
 # cp ラベルデータ (教師指定必須 / loss=mse 固定)
 cargo run -p tools --bin train_nnue -- \
   -i runs/cp_labels.cache.gz -e 1 -b 32768 \
