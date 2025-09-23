@@ -241,12 +241,7 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
             effective_ws = 1.0;
         }
         let scale = input_scale * effective_ws;
-        let quantized = if scale <= f32::EPSILON {
-            warn_invalid_scale("effective", i, scale);
-            0
-        } else {
-            round_away_from_zero(b / scale)
-        };
+        let quantized = round_away_from_zero(b / scale);
         if (quantized == i32::MAX || quantized == i32::MIN)
             && BIAS_QUANT_OVERFLOW_LOGGED
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -645,7 +640,7 @@ impl<'a> ClassicV1Serialized<'a> {
         let expected_h1_weights = classic_input_dim * self.h1_dim;
         if self.hidden1_weights.len() != expected_h1_weights {
             return Err(format!(
-                "hidden1_weights length mismatch: got {}, expected (2*acc_dim={}))*h1_dim({}) = {}",
+                "hidden1_weights length mismatch: got {}, expected (2*acc_dim({}))*h1_dim({}) = {}",
                 self.hidden1_weights.len(),
                 classic_input_dim,
                 self.h1_dim,
@@ -1449,5 +1444,13 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(round_away_from_zero(input), expected, "input={input}");
         }
+    }
+
+    #[test]
+    fn quantize_bias_saturates_on_tiny_scale() {
+        let bias = vec![1.0e9f32]; // 大きいバイアス
+        let input_scale = 1e-12f32; // とても小さいスケール
+        let q = quantize_bias_i32(&bias, input_scale, &[1.0]);
+        assert_eq!(q[0], i32::MAX); // saturating cast の到達確認
     }
 }
