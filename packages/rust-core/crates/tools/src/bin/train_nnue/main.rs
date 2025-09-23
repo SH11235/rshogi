@@ -148,6 +148,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .default_value("600"),
         )
         .arg(
+            arg!(--mu <N> "Offset mu for cp->wdl conversion")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("0"),
+        )
+        .arg(
             arg!(--"cp-clip" <N> "Clip CP values to this range")
                 .value_parser(clap::value_parser!(i32).range(0..))
                 .default_value("1200"),
@@ -557,6 +562,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         optimizer: app.get_one::<String>("opt").unwrap().to_string(),
         l2_reg: app.get_one::<String>("l2").unwrap().parse()?,
         label_type: label_type_value.clone(),
+        mu: *app.get_one::<f32>("mu").unwrap_or(&0.0),
         scale: *app.get_one::<f32>("scale").unwrap(),
         cp_clip: *app.get_one::<i32>("cp-clip").unwrap(),
         accumulator_dim: app.get_one::<String>("acc-dim").unwrap().parse()?,

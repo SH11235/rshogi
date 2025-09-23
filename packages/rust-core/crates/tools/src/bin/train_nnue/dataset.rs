@@ -126,7 +126,7 @@ pub fn load_samples(
             let feats = extract_features(&position, black_king, Color::Black);
             let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
             let label = match config.label_type.as_str() {
-                "wdl" => cp_to_wdl(cp_black, config.scale),
+                "wdl" => cp_to_wdl_mu(cp_black, config.mu, config.scale),
                 "cp" => {
                     (cp_black.clamp(-config.cp_clip, config.cp_clip) as f32) / CP_TO_FLOAT_DIVISOR
                 }
@@ -145,7 +145,7 @@ pub fn load_samples(
             let feats = extract_features(&position, white_king, Color::White);
             let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
             let label = match config.label_type.as_str() {
-                "wdl" => cp_to_wdl(cp_white, config.scale),
+                "wdl" => cp_to_wdl_mu(cp_white, config.mu, config.scale),
                 "cp" => {
                     (cp_white.clamp(-config.cp_clip, config.cp_clip) as f32) / CP_TO_FLOAT_DIVISOR
                 }
@@ -299,8 +299,8 @@ pub fn is_cache_file(path: &str) -> bool {
     }
 }
 
-fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
-    let x = (cp as f32 / scale).clamp(-CP_CLAMP_LIMIT, CP_CLAMP_LIMIT);
+fn cp_to_wdl_mu(cp: i32, mu: f32, scale: f32) -> f32 {
+    let x = ((cp as f32 - mu) / scale).clamp(-CP_CLAMP_LIMIT, CP_CLAMP_LIMIT);
     1.0 / (1.0 + (-x).exp())
 }
 
