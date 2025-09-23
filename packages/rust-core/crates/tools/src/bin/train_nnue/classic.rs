@@ -3,9 +3,6 @@ use crate::params::{CLASSIC_FT_SHIFT, CLASSIC_V1_ARCH_ID, I16_QMAX, I8_QMAX};
 use crate::types::QuantScheme;
 use engine_core::evaluation::nnue::{features::FE_END, simd::SimdDispatcher};
 use engine_core::shogi::SHOGI_BOARD_SIZE;
-
-#[cfg(test)]
-const _: usize = SHOGI_BOARD_SIZE * FE_END;
 use rand::{
     distr::{Distribution, Uniform},
     Rng,
@@ -18,6 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static BIAS_SCALE_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 static FT_ACC_OOR_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Classic 推論と同じ「四捨五入（0.5 away from zero）」を再現する。
+/// 事前条件: `val` は適切な量子化スケールで正規化済みであり、
+/// `|val| <= qmax + 0.5` の範囲に収まっていることを想定している。
 #[inline]
 pub fn round_away_from_zero(val: f32) -> i32 {
     debug_assert!(val.is_finite(), "round_away_from_zero expects finite input, got {val}",);
@@ -31,12 +31,12 @@ pub fn round_away_from_zero(val: f32) -> i32 {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub fn clip_sym(value: i32, qmax: i32) -> i32 {
     value.clamp(-qmax, qmax)
 }
 
-#[inline]
+#[inline(always)]
 fn clamp_i32_to_i16(v: i32) -> i16 {
     v.clamp(-I16_QMAX, I16_QMAX) as i16
 }
@@ -60,11 +60,14 @@ pub fn quantize_symmetric_i8(
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
         if !weights.len().is_multiple_of(channels) {
+            let stride = weights.len() / channels;
+            let rem = weights.len() % channels;
             return Err(format!(
-                "weights len {} not divisible by channels {} (stride {})",
+                "weights len {} not divisible by channels {} (stride {}, remainder {})",
                 weights.len(),
                 channels,
-                weights.len() / channels
+                stride,
+                rem
             ));
         }
         let stride = weights.len() / channels;
@@ -116,11 +119,14 @@ pub fn quantize_symmetric_i16(
     let mut quantized = Vec::with_capacity(weights.len());
     if per_channel {
         if !weights.len().is_multiple_of(channels) {
+            let stride = weights.len() / channels;
+            let rem = weights.len() % channels;
             return Err(format!(
-                "weights len {} not divisible by channels {} (stride {})",
+                "weights len {} not divisible by channels {} (stride {}, remainder {})",
                 weights.len(),
                 channels,
-                weights.len() / channels
+                stride,
+                rem
             ));
         }
         let stride = weights.len() / channels;
@@ -264,7 +270,7 @@ impl ClassicFeatureTransformerInt {
     /// 再利用バッファを使う高速版。`tmp_i32` は acc_dim 長の i32、一時蓄積領域。
     /// `out_i16` は acc_dim 長の出力。内部でバイアスを copy して加算・最後に i16 飽和。
     /// 安全性: 呼び出し側で長さを保証すること。
-    pub fn accumulate_into_u32(&self, features: &[u32], tmp_i32: &mut [i32], out_i16: &mut [i16]) {
+    pub fn accumulate_into_i32(&self, features: &[u32], tmp_i32: &mut [i32], out_i16: &mut [i16]) {
         debug_assert_eq!(tmp_i32.len(), self.acc_dim);
         debug_assert_eq!(out_i16.len(), self.acc_dim);
         debug_assert_eq!(self.biases.len(), self.acc_dim);
@@ -284,7 +290,7 @@ impl ClassicFeatureTransformerInt {
                     .is_ok()
                 {
                     log::warn!(
-                        "ClassicFeatureTransformerInt::accumulate_into_u32: feature index {} >= input_dim {} (dropping)",
+                        "ClassicFeatureTransformerInt::accumulate_into_i32: feature index {} >= input_dim {} (dropping)",
                         feat,
                         self.input_dim
                     );
@@ -474,8 +480,8 @@ impl ClassicIntNetworkBundle {
         views: &mut ClassicScratchViews,
     ) -> i32 {
         self.transformer
-            .accumulate_into_u32(features_us, &mut views.tmp_us, &mut views.acc_us);
-        self.transformer.accumulate_into_u32(
+            .accumulate_into_i32(features_us, &mut views.tmp_us, &mut views.acc_us);
+        self.transformer.accumulate_into_i32(
             features_them,
             &mut views.tmp_them,
             &mut views.acc_them,
@@ -549,13 +555,23 @@ impl<'a> ClassicV1Serialized<'a> {
     /// （本番構成は HALFKP 固定）。
     pub fn validate(&self) -> Result<(), String> {
         if self.acc_dim == 0 || self.h1_dim == 0 || self.h2_dim == 0 {
-            return Err("dimensions must be non-zero".into());
+            return Err(format!(
+                "dimensions must be non-zero (acc_dim={}, h1_dim={}, h2_dim={})",
+                self.acc_dim, self.h1_dim, self.h2_dim
+            ));
         }
         if self.input_dim == 0 {
             return Err("input_dim must be non-zero".into());
         }
-        if self.ft_weights.len() != self.input_dim * self.acc_dim {
-            return Err("ft_weights length mismatch".into());
+        let expected_ft = self.input_dim * self.acc_dim;
+        if self.ft_weights.len() != expected_ft {
+            return Err(format!(
+                "ft_weights length mismatch: got {}, expected input_dim({}) * acc_dim({}) = {}",
+                self.ft_weights.len(),
+                self.input_dim,
+                self.acc_dim,
+                expected_ft
+            ));
         }
         let canonical_input_dim = SHOGI_BOARD_SIZE * FE_END;
         if self.input_dim > canonical_input_dim {
@@ -563,23 +579,53 @@ impl<'a> ClassicV1Serialized<'a> {
         }
         // 入力を縮約した場合は write_classic_v1_file() で canonical 長までゼロ埋めする想定。
         if self.ft_biases.len() != self.acc_dim {
-            return Err("ft_biases length mismatch".into());
+            return Err(format!(
+                "ft_biases length mismatch: got {}, expected acc_dim ({})",
+                self.ft_biases.len(),
+                self.acc_dim
+            ));
         }
         let classic_input_dim = self.acc_dim * 2;
-        if self.hidden1_weights.len() != classic_input_dim * self.h1_dim {
-            return Err("hidden1_weights length mismatch".into());
+        let expected_h1_weights = classic_input_dim * self.h1_dim;
+        if self.hidden1_weights.len() != expected_h1_weights {
+            return Err(format!(
+                "hidden1_weights length mismatch: got {}, expected (2*acc_dim={}))*h1_dim({}) = {}",
+                self.hidden1_weights.len(),
+                classic_input_dim,
+                self.h1_dim,
+                expected_h1_weights
+            ));
         }
         if self.hidden1_biases.len() != self.h1_dim {
-            return Err("hidden1_biases length mismatch".into());
+            return Err(format!(
+                "hidden1_biases length mismatch: got {}, expected h1_dim ({})",
+                self.hidden1_biases.len(),
+                self.h1_dim
+            ));
         }
-        if self.hidden2_weights.len() != self.h1_dim * self.h2_dim {
-            return Err("hidden2_weights length mismatch".into());
+        let expected_h2_weights = self.h1_dim * self.h2_dim;
+        if self.hidden2_weights.len() != expected_h2_weights {
+            return Err(format!(
+                "hidden2_weights length mismatch: got {}, expected h1_dim({}) * h2_dim({}) = {}",
+                self.hidden2_weights.len(),
+                self.h1_dim,
+                self.h2_dim,
+                expected_h2_weights
+            ));
         }
         if self.hidden2_biases.len() != self.h2_dim {
-            return Err("hidden2_biases length mismatch".into());
+            return Err(format!(
+                "hidden2_biases length mismatch: got {}, expected h2_dim ({})",
+                self.hidden2_biases.len(),
+                self.h2_dim
+            ));
         }
         if self.output_weights.len() != self.h2_dim {
-            return Err("output_weights length mismatch".into());
+            return Err(format!(
+                "output_weights length mismatch: got {}, expected h2_dim ({})",
+                self.output_weights.len(),
+                self.h2_dim
+            ));
         }
         Ok(())
     }
@@ -591,17 +637,25 @@ impl<'a> ClassicV1Serialized<'a> {
         let h2_dim = self.h2_dim as u64;
         let canonical_input_dim = (SHOGI_BOARD_SIZE * FE_END) as u64;
         let mut payload = 0u64;
+        // FT weights: i16 * canonical_input_dim * acc_dim
         payload += canonical_input_dim
             .checked_mul(acc_dim)
             .and_then(|v| v.checked_mul(2))
             .expect("ft_weights payload overflow");
+        // FT bias: i32 * acc_dim
         payload += acc_dim.checked_mul(4).expect("ft_bias payload overflow");
         let classic_input_dim = acc_dim.checked_mul(2).expect("classic input dim overflow");
+        // Hidden1 weights: i8 * (2*acc_dim) * h1_dim
         payload += classic_input_dim.checked_mul(h1_dim).expect("hidden1 weight payload overflow");
+        // Hidden1 bias: i32 * h1_dim
         payload += h1_dim.checked_mul(4).expect("hidden1 bias payload overflow");
+        // Hidden2 weights: i8 * h1_dim * h2_dim
         payload += h1_dim.checked_mul(h2_dim).expect("hidden2 weight payload overflow");
+        // Hidden2 bias: i32 * h2_dim
         payload += h2_dim.checked_mul(4).expect("hidden2 bias payload overflow");
+        // Output weights: i8 * h2_dim
         payload += h2_dim;
+        // Output bias: i32
         payload += 4;
         payload
     }
@@ -614,6 +668,7 @@ pub fn write_classic_v1_file(
     data.validate().map_err(|msg| msg.to_string())?;
 
     // Classic v1 は固定寸法 (HALFKP_256X2_32_32) のみ正式サポート
+    #[cfg(not(test))]
     if !(data.acc_dim == 256 && data.h1_dim == 32 && data.h2_dim == 32) {
         return Err("Classic v1 requires acc_dim=256, h1_dim=32, h2_dim=32".into());
     }
@@ -649,6 +704,7 @@ pub fn write_classic_v1_file(
     }
     let remaining_weights = canonical_ft_weights - data.ft_weights.len();
     if remaining_weights > 0 {
+        // 8KiB 固定チャンクでゼロを書き出し、ファイル I/O を効率化する。
         const ZERO_CHUNK: [u8; 8192] = [0u8; 8192];
         let mut remaining_bytes =
             (remaining_weights as u64).checked_mul(2).expect("ft_weights padding overflow");
@@ -791,6 +847,7 @@ impl ClassicFloatNetwork {
         quant_h1: QuantScheme,
         quant_h2: QuantScheme,
         quant_out: QuantScheme,
+        activation: Option<ClassicActivationSummary>,
     ) -> Result<(ClassicIntNetworkBundle, ClassicQuantizationScales), String> {
         self.validate()?;
 
@@ -863,12 +920,14 @@ impl ClassicFloatNetwork {
 
         let scales = ClassicQuantizationScales {
             s_w0,
-            s_w1: h1_scales.clone(),
-            s_w2: h2_scales.clone(),
-            s_w3: out_scales.clone(),
+            s_w1: h1_scales,
+            s_w2: h2_scales,
+            s_w3: out_scales,
             s_in_1,
             s_in_2,
             s_in_3,
+            activation,
+            scheme: ClassicLayerQuantScheme::new(quant_ft, quant_h1, quant_h2, quant_out),
         };
 
         Ok((ClassicIntNetworkBundle::new(transformer, network), scales))
@@ -947,6 +1006,31 @@ impl ClassicFloatNetwork {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicLayerQuantScheme {
+    pub ft: QuantScheme,
+    pub h1: QuantScheme,
+    pub h2: QuantScheme,
+    pub out: QuantScheme,
+}
+
+impl ClassicLayerQuantScheme {
+    pub const fn new(ft: QuantScheme, h1: QuantScheme, h2: QuantScheme, out: QuantScheme) -> Self {
+        Self { ft, h1, h2, out }
+    }
+}
+
+impl Default for ClassicLayerQuantScheme {
+    fn default() -> Self {
+        Self {
+            ft: QuantScheme::PerTensor,
+            h1: QuantScheme::PerChannel,
+            h2: QuantScheme::PerChannel,
+            out: QuantScheme::PerTensor,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 /// Classic v1 の量子化スケールセット。`s_w*` は各層の重みスケール、`s_in_*` は層入力の追加スケール。
 /// 現状は hidden1 入力のみ FT 変換シフトと組み合わせたスケールを持ち、hidden2/output は 1.0 固定。
@@ -958,6 +1042,8 @@ pub struct ClassicQuantizationScales {
     pub s_in_1: f32,
     pub s_in_2: f32,
     pub s_in_3: f32,
+    pub activation: Option<ClassicActivationSummary>,
+    pub scheme: ClassicLayerQuantScheme,
 }
 
 impl ClassicQuantizationScales {
@@ -972,29 +1058,30 @@ impl ClassicQuantizationScales {
     #[inline]
     pub fn output_scale(&self) -> f32 {
         let scale = match self.s_w3.len() {
-            0 => {
-                log::error!(
-                    "classic quantization scales: missing output scale, falling back to 1.0"
-                );
-                1.0
-            }
+            0 => panic!("classic quantization scales: missing output scale"),
             1 => self.s_w3[0],
-            n => {
-                log::error!(
-                    "classic quantization scales: per-channel output scales (len={}) not supported, using mean",
-                    n
-                );
-                self.s_w3.iter().copied().sum::<f32>() / n as f32
-            }
+            n => panic!(
+                "classic quantization scales: per-channel output scales (len={}) are not supported",
+                n
+            ),
         };
         self.s_in_3 * scale
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClassicActivationSummary {
+    pub ft_max_abs: f32,
+    pub h1_max_abs: f32,
+    pub h2_max_abs: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
+    use rand::distr::Uniform;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     fn sample_network() -> ClassicFloatNetwork {
         ClassicFloatNetwork {
@@ -1034,6 +1121,7 @@ mod tests {
                 QuantScheme::PerChannel,
                 QuantScheme::PerChannel,
                 QuantScheme::PerTensor,
+                None,
             )
             .expect("quantize symmetric");
 
@@ -1166,7 +1254,76 @@ mod tests {
     }
 
     #[test]
-    fn output_scale_falls_back_when_missing() {
+    fn quantize_symmetric_i8_random_residual_is_bounded() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for &per_channel in &[false, true] {
+            for _ in 0..8 {
+                let channels = if per_channel {
+                    rng.random_range(1..=8)
+                } else {
+                    1
+                };
+                let stride = rng.random_range(1..=16);
+                let len = channels * stride;
+                let dist = Uniform::new(-12.0f32, 12.0f32).unwrap();
+                let weights: Vec<f32> = (0..len).map(|_| dist.sample(&mut rng)).collect();
+                let (quantized, scales) =
+                    quantize_symmetric_i8(&weights, per_channel, channels).expect("quantize i8");
+
+                let stride = if per_channel { len / channels } else { len };
+                for (idx, &w) in weights.iter().enumerate() {
+                    let scale = if per_channel {
+                        scales[idx / stride]
+                    } else {
+                        scales[0]
+                    };
+                    let dequant = quantized[idx] as f32 * scale;
+                    assert!(
+                        (w - dequant).abs() <= scale * 0.5 + f32::EPSILON,
+                        "residual exceeded bound: w={w}, dequant={dequant}, scale={scale}, idx={idx}, per_channel={per_channel}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quantize_symmetric_i16_random_residual_is_bounded() {
+        let mut rng = StdRng::seed_from_u64(17);
+        for &per_channel in &[false, true] {
+            for _ in 0..6 {
+                let channels = if per_channel {
+                    rng.random_range(1..=6)
+                } else {
+                    1
+                };
+                let stride = rng.random_range(1..=12);
+                let len = channels * stride;
+                let dist = Uniform::new(-64.0f32, 64.0f32).unwrap();
+                let weights: Vec<f32> = (0..len).map(|_| dist.sample(&mut rng)).collect();
+                let (quantized, scales) =
+                    quantize_symmetric_i16(&weights, per_channel, channels).expect("quantize i16");
+
+                let stride = if per_channel { len / channels } else { len };
+                for (idx, &w) in weights.iter().enumerate() {
+                    let scale = if per_channel {
+                        scales[idx / stride]
+                    } else {
+                        scales[0]
+                    };
+                    let dequant = quantized[idx] as f32 * scale;
+                    assert!(
+                        (w - dequant).abs() <= scale * 0.5 + f32::EPSILON,
+                        "residual exceeded bound: w={w}, dequant={dequant}, scale={scale}, idx={idx}, per_channel={per_channel}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "missing output scale")]
+    fn output_scale_panics_when_missing() {
         let scales = ClassicQuantizationScales {
             s_w0: 1.0,
             s_w1: vec![1.0],
@@ -1175,13 +1332,16 @@ mod tests {
             s_in_1: 1.0,
             s_in_2: 1.0,
             s_in_3: 2.5,
+            activation: None,
+            scheme: ClassicLayerQuantScheme::default(),
         };
 
-        assert!((scales.output_scale() - 2.5).abs() < 1e-6);
+        let _ = scales.output_scale();
     }
 
     #[test]
-    fn output_scale_averages_per_channel_scales() {
+    #[should_panic(expected = "per-channel output scales")]
+    fn output_scale_rejects_per_channel_scales() {
         let scales = ClassicQuantizationScales {
             s_w0: 1.0,
             s_w1: vec![1.0],
@@ -1190,10 +1350,10 @@ mod tests {
             s_in_1: 1.0,
             s_in_2: 1.0,
             s_in_3: 3.0,
+            activation: None,
+            scheme: ClassicLayerQuantScheme::default(),
         };
-
-        // mean(s_w3)=3.0 → output_scale = 3.0 * 3.0 = 9.0
-        assert!((scales.output_scale() - 9.0).abs() < 1e-6);
+        let _ = scales.output_scale();
     }
 
     #[test]

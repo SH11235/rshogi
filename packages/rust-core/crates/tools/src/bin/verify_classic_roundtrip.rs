@@ -1,11 +1,16 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, ValueEnum};
+use engine_core::evaluation::nnue::features::flip_us_them;
 use engine_core::usi::parse_sfen;
 use engine_core::Position;
+use log::warn;
+use rand::{Rng, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::Serialize;
 use tools::classic_roundtrip::{extract_feature_indices, ClassicFp32Network, ClassicIntNetwork};
 
@@ -30,7 +35,19 @@ struct Cli {
 
     /// SFEN list (one per line)
     #[arg(long)]
-    positions: PathBuf,
+    positions: Option<PathBuf>,
+
+    /// Enable synthetic probe mode (generates synthetic feature activations)
+    #[arg(long)]
+    synthetic_probe: bool,
+
+    /// Number of synthetic samples generated per activation pattern (only with --synthetic-probe)
+    #[arg(long, default_value_t = 128)]
+    probe_count: usize,
+
+    /// RNG seed for synthetic probe generation (0 => deterministic default)
+    #[arg(long, default_value_t = 0)]
+    probe_seed: u64,
 
     /// Metric namespace (currently informational)
     #[arg(long, value_enum, default_value_t = MetricKind::Cp)]
@@ -65,6 +82,12 @@ struct Cli {
 enum MetricKind {
     Cp,
     Logit,
+}
+
+struct ProbeCase {
+    label: String,
+    features_us: Vec<usize>,
+    features_them: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -144,7 +167,8 @@ struct EnvReport {
 
 #[derive(Debug, Clone, Serialize)]
 struct WorstEntry {
-    sfen: String,
+    #[serde(rename = "sfen")]
+    label: String,
     abs_cp: f32,
     fp32: f32,
     int: f32,
@@ -153,6 +177,8 @@ struct WorstEntry {
 #[derive(Debug, Clone, Serialize)]
 struct RoundTripReport {
     n: usize,
+    mode: String,
+    layer_domain: String,
     metric: String,
     threshold: ThresholdReport,
     actual: LayerStats,
@@ -161,25 +187,89 @@ struct RoundTripReport {
     env: EnvReport,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     worst: Vec<WorstEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    synthetic: Option<SyntheticProbeReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SyntheticProbeReport {
+    per_combo: usize,
+    seed: u64,
+    combos: Vec<usize>,
 }
 
 struct SampleDiff {
-    sfen: String,
+    label: String,
     diff: f32,
     fp32: f32,
     int: f32,
 }
 
 fn main() -> Result<()> {
+    let _ = env_logger::builder().is_test(false).try_init();
     let cli = Cli::parse();
+
+    if !cli.synthetic_probe && cli.positions.is_none() {
+        bail!("--positions is required unless --synthetic-probe is set");
+    }
+    if cli.synthetic_probe && cli.positions.is_some() {
+        bail!("--positions cannot be combined with --synthetic-probe");
+    }
 
     let fp32_net = ClassicFp32Network::load(&cli.fp32)?;
     let int_net = ClassicIntNetwork::load(&cli.int, cli.scales.clone())?;
 
-    let positions = load_positions(&cli.positions)?;
-    if positions.is_empty() {
-        bail!("no SFEN entries found in {}", cli.positions.display());
-    }
+    let relu_clip = fp32_net.relu_clip_value();
+    let int_scales = int_net.scales();
+    let h1_scale = int_scales.s_in_2;
+    let h2_scale = int_scales.s_in_3;
+
+    const DEFAULT_SYNTHETIC_SEED: u64 = 0xC0FF_EE12_D15C_A11C;
+    const SYNTHETIC_COMBOS: [usize; 4] = [0, 1, 2, 4];
+
+    let (cases, synthetic_report) = if cli.synthetic_probe {
+        let seed = if cli.probe_seed == 0 {
+            DEFAULT_SYNTHETIC_SEED
+        } else {
+            cli.probe_seed
+        };
+        let cases =
+            build_synthetic_cases(fp32_net.input_dim, &SYNTHETIC_COMBOS, cli.probe_count, seed)?;
+        if cases.is_empty() {
+            bail!("synthetic probe generated no probes (input_dim={})", fp32_net.input_dim);
+        }
+        (
+            cases,
+            Some(SyntheticProbeReport {
+                per_combo: cli.probe_count,
+                seed,
+                combos: SYNTHETIC_COMBOS.to_vec(),
+            }),
+        )
+    } else {
+        let path = cli.positions.as_ref().expect("positions path validated");
+        let positions = load_positions(path)?;
+        if positions.is_empty() {
+            bail!("no SFEN entries found in {}", path.display());
+        }
+        let mut cases = Vec::with_capacity(positions.len());
+        for (sfen, pos) in positions {
+            let (features_us, features_them) = extract_feature_indices(&pos)
+                .with_context(|| format!("extracting features for SFEN {sfen}"))?;
+            cases.push(ProbeCase {
+                label: sfen,
+                features_us,
+                features_them,
+            });
+        }
+        (cases, None)
+    };
+
+    let mode = if cli.synthetic_probe {
+        "synthetic"
+    } else {
+        "positions"
+    };
 
     let mut output_stats = StatCollector::default();
     let mut ft_stats = StatCollector::default();
@@ -188,11 +278,9 @@ fn main() -> Result<()> {
     let mut worst: Vec<SampleDiff> = Vec::new();
     let mut exceeds_count = 0usize;
 
-    for (sfen, pos) in &positions {
-        let (features_us, features_them) = extract_feature_indices(pos)
-            .with_context(|| format!("extracting features for SFEN {sfen}"))?;
-        let fp32_layers = fp32_net.forward(&features_us, &features_them);
-        let int_layers = int_net.forward(&features_us, &features_them);
+    for case in &cases {
+        let fp32_layers = fp32_net.forward(&case.features_us, &case.features_them);
+        let int_layers = int_net.forward(&case.features_us, &case.features_them);
 
         let diff = fp32_layers.output - int_layers.output;
         output_stats.push(diff);
@@ -204,11 +292,25 @@ fn main() -> Result<()> {
         }
 
         ft_stats.extend(fp32_layers.ft.iter().zip(int_layers.ft.iter()).map(|(a, b)| a - b));
-        h1_stats.extend(fp32_layers.h1.iter().zip(int_layers.h1.iter()).map(|(a, b)| a - b));
-        h2_stats.extend(fp32_layers.h2.iter().zip(int_layers.h2.iter()).map(|(a, b)| a - b));
+
+        for (idx, (&fp, &int_val)) in fp32_layers.h1.iter().zip(int_layers.h1.iter()).enumerate() {
+            let diff = quantized_residual(fp, int_val, h1_scale, relu_clip);
+            if diff.is_nan() {
+                warn!("h1 diff became NaN at {} index {}", case.label, idx);
+            }
+            h1_stats.push(diff);
+        }
+
+        for (idx, (&fp, &int_val)) in fp32_layers.h2.iter().zip(int_layers.h2.iter()).enumerate() {
+            let diff = quantized_residual(fp, int_val, h2_scale, relu_clip);
+            if diff.is_nan() {
+                warn!("h2 diff became NaN at {} index {}", case.label, idx);
+            }
+            h2_stats.push(diff);
+        }
 
         worst.push(SampleDiff {
-            sfen: sfen.clone(),
+            label: case.label.clone(),
             diff,
             fp32: fp32_layers.output,
             int: int_layers.output,
@@ -240,12 +342,25 @@ fn main() -> Result<()> {
         _ => false,
     };
 
-    worst.sort_by(|a, b| b.diff.abs().partial_cmp(&a.diff.abs()).unwrap());
-    worst.truncate(cli.worst_count);
+    let worst_count = cli.worst_count.min(worst.len());
+    if worst_count > 0 && worst_count < worst.len() {
+        let nth = worst_count - 1;
+        worst.select_nth_unstable_by(nth, |a, b| {
+            b.diff.abs().partial_cmp(&a.diff.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        worst[..worst_count].sort_by(|a, b| {
+            b.diff.abs().partial_cmp(&a.diff.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    } else if worst_count == worst.len() {
+        worst.sort_by(|a, b| {
+            b.diff.abs().partial_cmp(&a.diff.abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
     let worst_serialized: Vec<WorstEntry> = worst
         .iter()
+        .take(worst_count)
         .map(|entry| WorstEntry {
-            sfen: entry.sfen.clone(),
+            label: entry.label.clone(),
             abs_cp: entry.diff.abs(),
             fp32: entry.fp32,
             int: entry.int,
@@ -261,14 +376,26 @@ fn main() -> Result<()> {
         }
     }
 
+    let mut env_features = vec![
+        format!("metric={:?}", cli.metric),
+        format!("mode={mode}"),
+        String::from("layer_diff=quantized"),
+    ];
+    if let Some(synth) = &synthetic_report {
+        env_features.push(format!("probe_per_combo={}", synth.per_combo));
+        env_features.push(format!("probe_seed=0x{:016X}", synth.seed));
+    }
+
     let env = EnvReport {
         git: detect_git_rev(),
         cpu: detect_cpu_brand(),
-        features: vec![format!("metric={:?}", cli.metric)],
+        features: env_features,
     };
 
     let report = RoundTripReport {
-        n: positions.len(),
+        n: cases.len(),
+        mode: mode.to_string(),
+        layer_domain: String::from("quantized-dequantized"),
         metric: cli.metric.to_string(),
         threshold: threshold.clone(),
         actual: actual_layer,
@@ -276,6 +403,7 @@ fn main() -> Result<()> {
         layers,
         env,
         worst: worst_serialized.clone(),
+        synthetic: synthetic_report.clone(),
     };
 
     if let Some(path) = &cli.out {
@@ -284,9 +412,15 @@ fn main() -> Result<()> {
         serde_json::to_writer_pretty(file, &report)?;
     }
 
+    let label = if cli.synthetic_probe {
+        "probes"
+    } else {
+        "positions"
+    };
     println!(
-        "positions: {} | max_abs: {:.4} | mean_abs: {:.4} | p95_abs: {:.4?} | exceeds: {}",
-        positions.len(),
+        "{}: {} | max_abs: {:.4} | mean_abs: {:.4} | p95_abs: {:.4?} | exceeds: {}",
+        label,
+        cases.len(),
         actual_stats.max_abs,
         actual_stats.mean_abs,
         actual_stats.p95_abs,
@@ -304,7 +438,7 @@ fn main() -> Result<()> {
         eprintln!("p95_abs {:?} exceeded threshold {:?}", actual_stats.p95_abs, cli.p95_abs);
     }
     if cli.max_abs.is_some() && exceeds_count > 0 {
-        eprintln!("{} positions exceeded max_abs threshold {:?}", exceeds_count, cli.max_abs);
+        eprintln!("{} {} exceeded max_abs threshold {:?}", exceeds_count, label, cli.max_abs);
     }
 
     if should_fail {
@@ -326,8 +460,17 @@ fn percentile(sorted: &[f32], q: f32) -> Option<f32> {
     if sorted.is_empty() {
         return None;
     }
-    let rank = ((sorted.len() - 1) as f32 * q).round() as usize;
-    Some(sorted[rank.min(sorted.len() - 1)])
+    let clamped_q = q.clamp(0.0, 1.0);
+    let n = sorted.len();
+    let h = clamped_q * (n as f32 - 1.0);
+    let i = h.floor() as usize;
+    let j = h.ceil() as usize;
+    if i == j {
+        Some(sorted[i])
+    } else {
+        let weight = h - i as f32;
+        Some(sorted[i] * (1.0 - weight) + sorted[j] * weight)
+    }
 }
 
 fn load_positions(path: &PathBuf) -> Result<Vec<(String, Position)>> {
@@ -346,6 +489,122 @@ fn load_positions(path: &PathBuf) -> Result<Vec<(String, Position)>> {
         out.push((trimmed.to_string(), pos));
     }
     Ok(out)
+}
+
+const MAX_I8_F: f32 = 127.0;
+
+fn quantized_residual(fp: f32, int_val: f32, scale: f32, clip: f32) -> f32 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return fp - int_val;
+    }
+    let fp_q = quantize_to_i8(fp, scale, clip);
+    let int_q = quantize_to_i8(int_val, scale, clip);
+    ((fp_q as f32) - (int_q as f32)) * scale
+}
+
+fn quantize_to_i8(value: f32, scale: f32, clip: f32) -> i8 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return 0;
+    }
+    let clipped = value.clamp(0.0, clip.max(0.0));
+    let quant = (clipped / scale).round().clamp(0.0, MAX_I8_F);
+    quant as i8
+}
+
+fn build_synthetic_cases(
+    input_dim: usize,
+    combos: &[usize],
+    per_combo: usize,
+    seed: u64,
+) -> Result<Vec<ProbeCase>> {
+    if input_dim == 0 {
+        bail!("input_dim is zero; cannot build synthetic probes");
+    }
+
+    let mut cases = Vec::new();
+    let mut counter: usize = 0;
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+
+    for &k in combos {
+        if k == 0 {
+            cases.push(ProbeCase {
+                label: format!("probe#{:05}_0hot", counter),
+                features_us: Vec::new(),
+                features_them: Vec::new(),
+            });
+            counter += 1;
+            continue;
+        }
+
+        if k > input_dim {
+            continue;
+        }
+
+        if k == 1 {
+            let limit = per_combo.min(input_dim);
+            for idx in 0..limit {
+                let features_us = vec![idx];
+                let features_them = vec![flip_us_them(idx)];
+                cases.push(ProbeCase {
+                    label: format_probe_label(counter, &features_us),
+                    features_us,
+                    features_them,
+                });
+                counter += 1;
+            }
+            if per_combo > 0 && input_dim > limit {
+                for _ in 0..per_combo {
+                    let idx = rng.random_range(0..input_dim);
+                    let features_us = vec![idx];
+                    let features_them = vec![flip_us_them(idx)];
+                    cases.push(ProbeCase {
+                        label: format_probe_label(counter, &features_us),
+                        features_us,
+                        features_them,
+                    });
+                    counter += 1;
+                }
+            }
+            continue;
+        }
+
+        if per_combo == 0 {
+            continue;
+        }
+
+        for _ in 0..per_combo {
+            let mut set = BTreeSet::new();
+            while set.len() < k {
+                set.insert(rng.random_range(0..input_dim));
+            }
+            let features_us: Vec<usize> = set.into_iter().collect();
+            let mut features_them: Vec<usize> =
+                features_us.iter().map(|&f| flip_us_them(f)).collect();
+            features_them.sort_unstable();
+            features_them.dedup();
+            cases.push(ProbeCase {
+                label: format_probe_label(counter, &features_us),
+                features_us,
+                features_them,
+            });
+            counter += 1;
+        }
+    }
+
+    Ok(cases)
+}
+
+fn format_probe_label(index: usize, features: &[usize]) -> String {
+    if features.is_empty() {
+        return format!("probe#{:05}_0hot", index);
+    }
+    let kind = features.len();
+    let summary = if features.len() <= 4 {
+        features.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("-")
+    } else {
+        format!("{}indices", features.len())
+    };
+    format!("probe#{:05}_{}hot_{}", index, kind, summary)
 }
 
 fn detect_git_rev() -> Option<String> {
