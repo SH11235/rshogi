@@ -50,6 +50,7 @@ src/                         # Legacy WASM modules
 ## Documentation
 
 - [Engine Types Guide](docs/engine-types-guide.md) - エンジンタイプの選択ガイド（推奨: EnhancedNnue）
+- [NNUE Evaluation Guide](docs/nnue-evaluation-guide.md) - NNUEモデルの性能評価方法
 - [Performance Documentation](docs/performance/) - ベンチマーク、プロファイリング、性能分析
 - [Development Guide](docs/development/) - TDD開発ガイド、テスト戦略
 - [Implementation Docs](docs/implementation/) - 実装詳細
