@@ -430,7 +430,8 @@ impl ClassicQuantizedNetwork {
 
     fn apply_clipped_relu(input: &[i32], output: &mut [i8]) {
         debug_assert_eq!(input.len(), output.len());
-        // Classic 推論は常に int8 の 0..=127 クリップを前提とする
+        // Classic 推論は engine-core 側の ClippedReLU と同じ 0..=I8_QMAX (=127) 飽和が仕様。
+        // I8_QMAX は量子化・推論で共有されるため、値変更時は両経路の整合を必ず確認すること。
         for (dst, &src) in output.iter_mut().zip(input.iter()) {
             let clipped = src.clamp(0, I8_QMAX);
             *dst = clipped as i8;

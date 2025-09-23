@@ -14,7 +14,8 @@ const QUANT_MIN_I32: i32 = -127;
 const QUANT_MAX_I32: i32 = 127;
 const QUANT_MIN_F32: f32 = QUANT_MIN_I32 as f32;
 const QUANT_MAX_F32: f32 = QUANT_MAX_I32 as f32;
-const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
+pub const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
+const FT_PADDING_READ_CHUNK: usize = 8 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ClassicFp32Network {
@@ -441,17 +442,27 @@ impl ClassicIntNetwork {
 
             let pad_to_read = available_padding.min(padding_ft_bytes);
             if pad_to_read > 0 {
-                let mut buf = vec![0u8; pad_to_read];
-                reader.read_exact(&mut buf)?;
-                if buf.iter().any(|&b| b != 0) {
+                let mut remaining = pad_to_read;
+                let mut buf = [0u8; FT_PADDING_READ_CHUNK];
+                let mut nonzero_found = false;
+                while remaining > 0 {
+                    let to_read = remaining.min(buf.len());
+                    reader.read_exact(&mut buf[..to_read])?;
+                    if !nonzero_found && buf[..to_read].iter().any(|&b| b != 0) {
+                        nonzero_found = true;
+                    }
+                    remaining -= to_read;
+                }
+                if nonzero_found {
                     log::warn!("non-zero bytes found in FT padding region; ignoring extra payload");
                 }
             }
-            if available_padding > pad_to_read {
-                let extra = available_padding - pad_to_read;
-                let mut buf = vec![0u8; extra];
-                reader.read_exact(&mut buf)?;
-                log::warn!("extra {} bytes beyond expected FT padding; discarding", extra);
+            if available_padding > padding_ft_bytes {
+                bail!(
+                    "invalid Classic v1: FT padding mismatch (expected {} bytes, found {} bytes)",
+                    padding_ft_bytes,
+                    available_padding
+                );
             }
             if padding_ft_bytes > pad_to_read {
                 let missing = padding_ft_bytes - pad_to_read;
@@ -1351,6 +1362,63 @@ mod tests {
         assert_eq!(net.hidden1_biases, vec![5, -4]);
         assert_eq!(net.hidden2_biases, vec![3]);
         assert_eq!(net.output_bias, 2);
+    }
+
+    #[test]
+    fn int_load_errors_on_excess_ft_padding() {
+        use std::fs::File;
+        use std::io::Write;
+
+        let td = tempdir().unwrap();
+        let nn_path = td.path().join("nn.classic.nnue");
+        let scales_path = td.path().join("nn.classic.scales.json");
+        write_int_fixture(&nn_path, &scales_path);
+
+        let ft_weights: [i16; 8] = [32, 16, 20, 8, 12, 24, 10, 6];
+        let ft_biases: [i32; 2] = [64, 32];
+        let hidden1_weights: [i8; 8] = [3, -2, 1, 4, 2, 1, -3, 1];
+        let hidden1_biases: [i32; 2] = [5, -4];
+        let hidden2_weights: [i8; 2] = [4, -2];
+        let hidden2_biases: [i32; 1] = [3];
+        let output_weights: [i8; 1] = [5];
+        let output_bias: i32 = 2;
+
+        let mut payload = Vec::new();
+        for v in ft_weights.iter() {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let canonical_input_dim = SHOGI_BOARD_SIZE * FE_END;
+        let padding_ft_bytes = canonical_input_dim
+            .saturating_sub(4)
+            .saturating_mul(2)
+            .saturating_mul(std::mem::size_of::<i16>());
+        let pad = vec![0u8; padding_ft_bytes + 8];
+        payload.extend_from_slice(&pad);
+
+        for v in ft_biases.iter() {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        payload.extend(hidden1_weights.iter().map(|v| *v as u8));
+        for v in hidden1_biases.iter() {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        payload.extend(hidden2_weights.iter().map(|v| *v as u8));
+        payload.extend_from_slice(&hidden2_biases[0].to_le_bytes());
+        payload.extend_from_slice(&(output_weights[0] as u8).to_le_bytes());
+        payload.extend_from_slice(&output_bias.to_le_bytes());
+
+        let total_size = 16 + payload.len();
+        let mut file = File::create(&nn_path).unwrap();
+        file.write_all(b"NNUE").unwrap();
+        file.write_all(&1u32.to_le_bytes()).unwrap();
+        file.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes()).unwrap();
+        file.write_all(&(total_size as u32).to_le_bytes()).unwrap();
+        file.write_all(&payload).unwrap();
+
+        let err = ClassicIntNetwork::load(&nn_path, Some(scales_path)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("FT padding mismatch"), "unexpected error: {msg}");
     }
 
     #[test]

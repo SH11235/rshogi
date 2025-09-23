@@ -1,3 +1,5 @@
+pub use tools::classic_roundtrip::CLASSIC_V1_ARCH_ID;
+
 pub const DEFAULT_ACC_DIM: &str = "256";
 pub const DEFAULT_RELU_CLIP: &str = "127";
 pub const MAX_PREFETCH_BATCHES: usize = 1024;
@@ -26,7 +28,6 @@ pub const MIN_ELAPSED_TIME: f64 = 1e-6;
 pub const QUANTIZATION_MIN: f32 = -128.0;
 pub const QUANTIZATION_MAX: f32 = 127.0;
 pub const QUANTIZATION_METADATA_SIZE: usize = 3 * 8 + 4;
-pub const CLASSIC_V1_ARCH_ID: u32 = 0x7AF3_2F16;
 pub const I8_QMAX: i32 = 127;
 pub const I16_QMAX: i32 = 32767;
 pub const CLASSIC_ACC_DIM: usize = 256;
