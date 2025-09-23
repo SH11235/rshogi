@@ -61,7 +61,20 @@ pub fn load_samples(
             continue;
         }
 
-        let cp = if let Some(eval) = pos_data.eval {
+        // Prefer teacher-provided labels if available
+        let cp = if let Some(ref ts) = pos_data.teacher_score {
+            match (ts.kind.as_deref(), ts.value) {
+                (Some("cp"), Some(v)) => v,
+                // For mate labels, we do not map to cp here; fallback below
+                _ => pos_data
+                    .teacher_cp
+                    .or(pos_data.eval)
+                    .or_else(|| pos_data.lines.first().and_then(|l| l.score_cp))
+                    .unwrap_or(0),
+            }
+        } else if let Some(v) = pos_data.teacher_cp {
+            v
+        } else if let Some(eval) = pos_data.eval {
             eval
         } else if let Some(line) = pos_data.lines.first() {
             line.score_cp.unwrap_or(0)
@@ -95,7 +108,7 @@ pub fn load_samples(
         let base_weight = calculate_weight(&pos_data);
         let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
         let mate_ring = pos_data.mate_boundary.unwrap_or(false);
-        let weight = wcfg::apply_weighting(
+        let mut weight = wcfg::apply_weighting(
             base_weight,
             weighting,
             Some(both_exact),
@@ -103,6 +116,11 @@ pub fn load_samples(
             Some(to_phase_kind(phase)),
             Some(mate_ring),
         );
+        if let Some(tw) = pos_data.teacher_weight {
+            if tw.is_finite() && tw > 0.0 {
+                weight *= tw.min(1.0);
+            }
+        }
 
         {
             let feats = extract_features(&position, black_king, Color::Black);
