@@ -241,6 +241,17 @@ pub fn quantize_bias_i32(bias: &[f32], input_scale: f32, weight_scales: &[f32]) 
             effective_ws = 1.0;
         }
         let scale = input_scale * effective_ws;
+        if scale.is_subnormal()
+            && BIAS_INVALID_SCALE_LOGGED
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            log::warn!(
+                "quantize_bias_i32: extremely small effective scale at index {} (scale {:.3e}); proceeding (may saturate)",
+                i,
+                scale
+            );
+        }
         let quantized = round_away_from_zero(b / scale);
         if (quantized == i32::MAX || quantized == i32::MIN)
             && BIAS_QUANT_OVERFLOW_LOGGED
@@ -1452,5 +1463,16 @@ mod tests {
         let input_scale = 1e-12f32; // とても小さいスケール
         let q = quantize_bias_i32(&bias, input_scale, &[1.0]);
         assert_eq!(q[0], i32::MAX); // saturating cast の到達確認
+    }
+
+    #[test]
+    fn quantize_bias_saturates_negative_on_tiny_scale() {
+        let q = quantize_bias_i32(&[-1.0e9], 1e-12, &[1.0]);
+        assert_eq!(q[0], i32::MIN);
+    }
+    #[test]
+    fn quantize_bias_zero_bias_stays_zero_even_with_tiny_scale() {
+        let q = quantize_bias_i32(&[0.0], 1e-40, &[1.0]);
+        assert_eq!(q[0], 0);
     }
 }
