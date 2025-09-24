@@ -218,6 +218,12 @@ impl TranspositionTable {
         self.metrics = Some(DetailedTTMetrics::new());
     }
 
+    /// Build TT metrics summary string (if metrics enabled)
+    #[cfg(feature = "tt_metrics")]
+    pub fn metrics_summary_string(&self) -> Option<String> {
+        self.metrics.as_ref().map(|m| m.to_summary_string())
+    }
+
     /// Get bucket index from hash
     #[inline(always)]
     fn bucket_index(&self, hash: u64) -> usize {

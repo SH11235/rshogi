@@ -94,7 +94,18 @@ where
 
         // Create or use shared TT
         let tt = if USE_TT {
-            Some(self.tt.unwrap_or_else(|| Arc::new(TranspositionTable::new(self.tt_size_mb))))
+            if let Some(existing) = self.tt {
+                // 既存共有TTが渡された場合はそのまま使用（計測有効化は呼び出し側責務）
+                Some(existing)
+            } else {
+                // 自前で作成する場合は、tt_metricsが有効なら計測を有効化してからArc化
+                let mut tt = TranspositionTable::new(self.tt_size_mb);
+                #[cfg(feature = "tt_metrics")]
+                {
+                    tt.enable_metrics();
+                }
+                Some(Arc::new(tt))
+            }
         } else {
             None
         };

@@ -118,6 +118,75 @@ impl DetailedTTMetrics {
             log::info!("  Effective updates: {}", self.effective_updates.load(Relaxed));
         }
     }
+
+    /// Build a human-readable summary string (multiline) without logging
+    #[cfg(feature = "tt_metrics")]
+    pub fn to_summary_string(&self) -> String {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let mut out = String::new();
+        let total_updates = self.update_existing.load(Relaxed)
+            + self.replace_empty.load(Relaxed)
+            + self.replace_worst.load(Relaxed);
+
+        out.push_str("TT metrics: update_patterns\n");
+        if total_updates > 0 {
+            let ex = self.update_existing.load(Relaxed) as f64 / total_updates as f64 * 100.0;
+            let em = self.replace_empty.load(Relaxed) as f64 / total_updates as f64 * 100.0;
+            let wr = self.replace_worst.load(Relaxed) as f64 / total_updates as f64 * 100.0;
+            out.push_str(&format!(
+                "  existing={} ({:.1}%)\n  empty={} ({:.1}%)\n  worst={} ({:.1}%)\n",
+                self.update_existing.load(Relaxed),
+                ex,
+                self.replace_empty.load(Relaxed),
+                em,
+                self.replace_worst.load(Relaxed),
+                wr,
+            ));
+        } else {
+            out.push_str("  (no updates recorded)\n");
+        }
+
+        out.push_str("atomic_ops\n");
+        out.push_str(&format!(
+            "  loads={} stores={}\n",
+            self.atomic_loads.load(Relaxed),
+            self.atomic_stores.load(Relaxed)
+        ));
+
+        let cas_attempts = self.cas_attempts.load(Relaxed);
+        if cas_attempts > 0 {
+            let cas_failures = self.cas_failures.load(Relaxed);
+            let key_match = self.cas_key_match.load(Relaxed);
+            let key_match_rate = if cas_failures > 0 {
+                key_match as f64 / cas_failures as f64 * 100.0
+            } else {
+                0.0
+            };
+            out.push_str("cas\n");
+            out.push_str(&format!(
+                "  attempts={} success={} failure={} key_match={:.1}%\n",
+                cas_attempts,
+                self.cas_successes.load(Relaxed),
+                cas_failures,
+                key_match_rate
+            ));
+        }
+
+        let depth_filtered = self.depth_filtered.load(Relaxed);
+        let hashfull_filtered = self.hashfull_filtered.load(Relaxed);
+        if depth_filtered > 0 || hashfull_filtered > 0 {
+            out.push_str("filters\n");
+            out.push_str(&format!(
+                "  depth_filtered={} hashfull_filtered={} effective_updates={}\n",
+                depth_filtered,
+                hashfull_filtered,
+                self.effective_updates.load(Relaxed)
+            ));
+        }
+
+        out
+    }
 }
 
 /// Metrics update types

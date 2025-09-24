@@ -392,22 +392,22 @@ fn finalize_and_send(
         hard_ms
     ));
 
-    // Emit MultiPV info lines (if available and not stale)
+    // Emit MultiPV info lines (if available and not stale). If absent, synthesize SinglePV line.
     if let Some(res) = result {
         if !stale {
+            // Obtain hashfull once (permille) and compute aggregate nps
+            let hf_permille = {
+                let eng = state.engine.lock().unwrap();
+                eng.tt_hashfull_permille()
+            };
+            let nps_agg: u128 = if res.stats.elapsed.as_millis() > 0 {
+                (res.stats.nodes as u128).saturating_mul(1000) / res.stats.elapsed.as_millis()
+            } else {
+                0
+            };
+
             if let Some(ref lines) = res.lines {
                 if !lines.is_empty() {
-                    // Obtain hashfull once (permille) and compute aggregate nps
-                    let hf_permille = {
-                        let eng = state.engine.lock().unwrap();
-                        eng.tt_hashfull_permille()
-                    };
-                    let nps_agg: u128 = if res.stats.elapsed.as_millis() > 0 {
-                        (res.stats.nodes as u128).saturating_mul(1000)
-                            / res.stats.elapsed.as_millis()
-                    } else {
-                        0
-                    };
                     for (i, ln) in lines.iter().enumerate() {
                         // info multipv N depth D time T nodes N score (cp|mate) X [lowerbound|upperbound] pv ...
                         let mut s = String::from("info");
@@ -434,7 +434,75 @@ fn finalize_and_send(
                         }
                         usi_println(&s);
                     }
+                } else {
+                    // linesが空の場合のフォールバック: SinglePV相当の行を1本出力
+                    let mut s = String::from("info");
+                    s.push_str(" multipv 1");
+                    s.push_str(&format!(" depth {}", res.stats.depth));
+                    if let Some(sd) = res.stats.seldepth {
+                        s.push_str(&format!(" seldepth {}", sd));
+                    }
+                    s.push_str(&format!(" time {}", res.stats.elapsed.as_millis()));
+                    s.push_str(&format!(" nodes {}", res.stats.nodes));
+                    s.push_str(&format!(" nps {}", nps_agg));
+                    s.push_str(&format!(" hashfull {}", hf_permille));
+                    let view = score_view_from_internal(res.score);
+                    append_usi_score_and_bound(&mut s, view, res.node_type);
+                    let pv_ref: &[_] = if !final_best.pv.is_empty() {
+                        &final_best.pv
+                    } else {
+                        &res.stats.pv
+                    };
+                    if !pv_ref.is_empty() {
+                        s.push_str(" pv");
+                        for m in pv_ref.iter() {
+                            s.push(' ');
+                            s.push_str(&move_to_usi(m));
+                        }
+                    }
+                    usi_println(&s);
                 }
+            } else {
+                // SinglePV: 合成して必ず1本出す
+                let mut s = String::from("info");
+                s.push_str(" multipv 1");
+                s.push_str(&format!(" depth {}", res.stats.depth));
+                if let Some(sd) = res.stats.seldepth {
+                    s.push_str(&format!(" seldepth {}", sd));
+                }
+                s.push_str(&format!(" time {}", res.stats.elapsed.as_millis()));
+                s.push_str(&format!(" nodes {}", res.stats.nodes));
+                s.push_str(&format!(" nps {}", nps_agg));
+                s.push_str(&format!(" hashfull {}", hf_permille));
+                let view = score_view_from_internal(res.score);
+                append_usi_score_and_bound(&mut s, view, res.node_type);
+                let pv_ref: &[_] = if !final_best.pv.is_empty() {
+                    &final_best.pv
+                } else {
+                    &res.stats.pv
+                };
+                if !pv_ref.is_empty() {
+                    s.push_str(" pv");
+                    for m in pv_ref.iter() {
+                        s.push(' ');
+                        s.push_str(&move_to_usi(m));
+                    }
+                }
+                usi_println(&s);
+            }
+        }
+    }
+
+    // Emit TT metrics summary (feature: tt-metrics)
+    #[cfg(feature = "tt-metrics")]
+    {
+        let summary_opt = {
+            let eng = state.engine.lock().unwrap();
+            eng.tt_metrics_summary()
+        };
+        if let Some(sum) = summary_opt {
+            for line in sum.lines() {
+                usi_println(&format!("info string tt_metrics {}", line));
             }
         }
     }
@@ -697,6 +765,7 @@ fn run_search_thread(
     search_id: u64,
 ) {
     // Optional info callback
+    let eng_for_info = Arc::clone(&engine);
     let info_callback: engine_core::search::types::InfoCallback =
         Arc::new(move |depth, score, nodes, elapsed, pv, node_type| {
             if !info_enabled {
@@ -712,6 +781,12 @@ fn run_search_thread(
                 let nps = (nodes as u128).saturating_mul(1000) / ems;
                 line.push_str(&format!(" nps {}", nps));
             }
+            // Add hashfull
+            let hf = {
+                let eng = eng_for_info.lock().unwrap();
+                eng.tt_hashfull_permille()
+            };
+            line.push_str(&format!(" hashfull {}", hf));
             // score: normalize to mate or cp with proper bound tag placement
             let view = score_view_from_internal(score);
             append_usi_score_and_bound(&mut line, view, node_type);
