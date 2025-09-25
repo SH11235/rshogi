@@ -80,7 +80,21 @@ macro_rules! debug_exec {
 #[macro_export]
 macro_rules! pv_debug {
     ($($arg:tt)*) => {
-        $crate::debug_log!(SHOGI_DEBUG_PV, $($arg)*);
+        #[cfg(feature = "pv_debug_logs")]
+        {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+/// Execute a block only when PV debug logs are enabled (compile-time)
+#[macro_export]
+macro_rules! pv_debug_exec {
+    ($block:block) => {
+        #[cfg(feature = "pv_debug_logs")]
+        {
+            $block
+        }
     };
 }
 
