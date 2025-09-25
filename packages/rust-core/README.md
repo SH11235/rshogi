@@ -87,6 +87,15 @@ quit
     - `diff-agg-hash`: 差分集計をHashMap実装でA/B（大N向け）
     - `nnue-telemetry`: 軽量テレメトリ（探索中の経路割合など）
     - `tt-metrics`, `ybwc`, `nightly`: 必要に応じて
+    - `diagnostics`（メタ）: 下記の診断系を一括ON
+      - `engine-core/tt_metrics`（TT詳細メトリクス）
+      - `engine-core/nnue_telemetry`（NNUE経路テレメトリ）
+      - `engine-core/pv_debug_logs`（PVデバッグ出力: stderr; 実行時環境変数は不要）
+
+例: 診断系を一括ON（配布バイナリで挙動固定）
+```bash
+cargo run -p engine-usi --release --features diagnostics
+```
 
 例: 差分NNUE + FMA 有効
 ```bash
@@ -97,6 +106,12 @@ cargo run -p engine-usi --release --features fast-fma
 注: fp32 行加算用 SIMD は Dispatcher に統合済みで常時ON（実行時 CPU 検出: AVX/FMA/SSE2/NEON/Scalar）。`simd` フィーチャは不要です。
 
 起動時に `info string core_features=engine-core:...` を出力します（再現性・ログ用途）。
+
+### USI出力（診断強化）
+- 探索中の`info`行に`hashfull <permille>`を常時付与します。
+- 終局時（finalize/stop）に、MultiPV未使用でも`info multipv 1 ... hashfull ... pv ...`を必ず1本出力します（SinglePVの可視化）。
+- `tt-metrics`有効時は、終局直前にTTメトリクスの要約を`info string tt_metrics ...`（複数行）で出力します。
+- `pv_debug_logs`はビルド時のfeatureで固定され、PVデバッグ出力（stderr）は配布物ごとにON/OFFが決まります（従来の`SHOGI_DEBUG_PV`環境変数は不要）。
 
 ### Engine Types
 - **EnhancedNnue** (推奨): 最強 - 高度な探索 + NNUE評価

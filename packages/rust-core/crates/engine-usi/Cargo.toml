@@ -21,3 +21,15 @@ diff-agg-hash = ["engine-core/diff_agg_hash"]
 tt-metrics = ["engine-core/tt_metrics"]
 ybwc = ["engine-core/ybwc"]
 nightly = ["engine-core/nightly"]
+
+# メタフィーチャー: 診断系を一括ON
+diagnostics = [
+    "engine-core/tt_metrics",
+    "engine-core/nnue_telemetry",
+    "engine-core/pv_debug_logs",
+]
+
+# メタフィーチャー（任意）: 実験系を一括ON
+experiments = [
+    "engine-core/diff_agg_hash",
+]

@@ -76,19 +76,10 @@ impl PVTable {
     #[inline]
     pub fn clear_len_at(&mut self, ply: usize) {
         if ply < MAX_PLY {
-            #[cfg(debug_assertions)]
-            let old_len = self.len[ply];
-
-            self.len[ply] = 0;
-            self.owner[ply] = 0;
-            // Mark this row as updated in current epoch
-            self.mark_written(ply);
-            // Setting length to 0 is sufficient for safety as readers always check len[ply]
-            // Full array clearing is only done in debug mode for visibility
-
-            #[cfg(debug_assertions)]
-            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                // Check for suspicious moves before clearing (debug only)
+            // Debug (before clear): inspect existing PV content
+            #[cfg(all(debug_assertions, feature = "pv_debug_logs"))]
+            {
+                let old_len = self.len[ply];
                 if ply <= 10 && old_len > 0 {
                     for i in 0..old_len.min(MAX_PLY) {
                         let mv = self.mv[ply][i];
@@ -103,8 +94,18 @@ impl PVTable {
                         }
                     }
                 }
+            }
 
-                // Clear all moves for debugging visibility (performance impact acceptable in debug)
+            // Clear length/owner and mark epoch
+            self.len[ply] = 0;
+            self.owner[ply] = 0;
+            self.mark_written(ply);
+            // Setting length to 0 is sufficient for safety as readers always check len[ply]
+            // Full array clearing is only done in debug mode for visibility
+
+            // Debug (after clear): optionally blank moves for visibility
+            #[cfg(all(debug_assertions, feature = "pv_debug_logs"))]
+            {
                 for i in 0..MAX_PLY {
                     self.mv[ply][i] = NULL_MOVE;
                 }
@@ -134,9 +135,7 @@ impl PVTable {
         // Skip null moves in PV
         if head == Move::NULL {
             #[cfg(debug_assertions)]
-            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                eprintln!("[WARNING] Attempted to add NULL move to PV at ply {ply}");
-            }
+            crate::pv_debug!("[WARNING] Attempted to add NULL move to PV at ply {ply}");
             return;
         }
 
@@ -232,15 +231,13 @@ impl PVTable {
         // Skip null moves
         if best_move == Move::NULL {
             #[cfg(debug_assertions)]
-            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                eprintln!("[WARNING] Attempted to add NULL move to PV at ply {ply}");
-            }
+            crate::pv_debug!("[WARNING] Attempted to add NULL move to PV at ply {ply}");
             return;
         }
 
         // Debug logging for PV updates in problematic positions
         #[cfg(debug_assertions)]
-        if std::env::var("SHOGI_DEBUG_PV").is_ok() && ply <= 10 {
+        if cfg!(feature = "pv_debug_logs") && ply <= 10 {
             eprintln!(
                 "[PV UPDATE] ply={ply}, best_move={}, child_ply={child_ply}, child_len={}",
                 crate::usi::move_to_usi(&best_move),

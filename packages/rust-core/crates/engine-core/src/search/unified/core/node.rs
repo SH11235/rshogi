@@ -517,21 +517,21 @@ where
                         }
                     } else {
                         #[cfg(debug_assertions)]
-                        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                        crate::pv_debug_exec!({
                             eprintln!(
                                 "[ERROR] Move passed pseudo_legal but source square is empty!"
                             );
                             eprintln!("  Ply: {ply}, Move: {}", crate::usi::move_to_usi(&mv));
                             eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
-                        }
+                        });
                     }
                 } else {
                     #[cfg(debug_assertions)]
-                    if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                    crate::pv_debug_exec!({
                         eprintln!("[WARNING] Skipping invalid move in PV update at ply {ply}");
                         eprintln!("  Move: {}", crate::usi::move_to_usi(&mv));
                         eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
-                    }
+                    });
                 }
 
                 // Validate PV immediately in debug builds
