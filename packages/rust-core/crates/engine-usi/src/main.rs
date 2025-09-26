@@ -452,6 +452,43 @@ fn finalize_and_send(
             res.stats.elapsed.as_millis(),
             stop_reason
         ));
+
+        // Optional: compact diagnostics (feature-gated)
+        // Use existing feature `diagnostics` (engine-usi) which enables several core diagnostics too.
+        #[cfg(feature = "diagnostics")]
+        {
+            // Ratios (guard division by zero)
+            let nodes = res.stats.nodes.max(1);
+            let qnodes = res.stats.qnodes;
+            let qratio = (qnodes as f64) / (nodes as f64);
+            let tt_hits = res.stats.tt_hits.unwrap_or(0);
+            let tt_hit_rate = (tt_hits as f64) / (nodes as f64);
+            let asp_fail = res.stats.aspiration_failures.unwrap_or(0);
+            let asp_hit = res.stats.aspiration_hits.unwrap_or(0);
+            let rese = res.stats.re_searches.unwrap_or(0);
+            let pvchg = res.stats.pv_changed.unwrap_or(0);
+            let sel = res.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+            let dup = res
+                .stats
+                .duplication_percentage
+                .map(|d| format!("{:.1}", d))
+                .unwrap_or_else(|| "-".to_string());
+            let rfhi = res.stats.root_fail_high_count.unwrap_or(0);
+
+            info_string(format!(
+                "finalize_diag seldepth={} qratio={:.3} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={}",
+                sel,
+                qratio,
+                tt_hit_rate,
+                tt_hits,
+                asp_fail,
+                asp_hit,
+                rese,
+                pvchg,
+                dup,
+                rfhi
+            ));
+        }
     }
 
     // Log selection
