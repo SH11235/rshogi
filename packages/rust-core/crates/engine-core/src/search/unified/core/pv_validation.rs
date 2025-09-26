@@ -29,10 +29,10 @@ pub(crate) fn assert_pv_legal(pos: &Position, pv: &[Move]) {
 pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
     let mut p = pos.clone();
 
-    for (mut _i, &mv) in pv.iter().enumerate() {
+    for &mv in pv.iter() {
         // Skip null moves
         if mv == Move::NULL {
-            crate::pv_debug!("[BUG] NULL move in PV at ply {i}");
+            crate::pv_debug!("[BUG] NULL move in PV at ply {_i}");
             return;
         }
 
@@ -57,7 +57,7 @@ pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             // For normal moves: check piece exists at from square
             if let Some(from) = mv.from() {
                 if p.piece_at(from).is_none() {
-                crate::pv_debug!("[BUG] No piece at from square at ply {_i}: {_usi}");
+                    crate::pv_debug!("[BUG] No piece at from square at ply {_i}: {_usi}");
                     crate::pv_debug!("  Position: {}", crate::usi::position_to_sfen(&p));
                     crate::pv_debug!("  From square {from:?} is empty");
                     return;

@@ -1,12 +1,19 @@
 //! Debug macros for unified search
 //!
-//! Provides macros for conditional debug logging based on compile-time and runtime flags
+//! Provides macros for conditional debug logging based on compile-time and runtime flags.
+//!
+//! Policy:
+//! - PV-related debug logs are controlled at compile time via the `pv_debug_logs` feature.
+//!   Enable with: `cargo build --features engine-core/pv_debug_logs` (transitively via
+//!   `engine-usi --features diagnostics`). When disabled, PV logs are not compiled in.
+//! - Other ad-hoc debug logs may still use environment-variable guards (e.g., `SHOGI_DEBUG_SEARCH`)
+//!   through the generic `debug_log!`/`debug_exec!` helpers below.
 
 /// Macro for debug logging that checks both compile-time and runtime conditions
 ///
 /// This macro reduces code duplication by centralizing the checks for:
 /// - `#[cfg(debug_assertions)]`
-/// - Environment variable checks (e.g., SHOGI_DEBUG_PV, SHOGI_DEBUG_SEARCH)
+/// - Environment variable checks (e.g., SHOGI_DEBUG_SEARCH)
 ///
 /// # Examples
 ///
@@ -74,6 +81,8 @@ macro_rules! debug_exec {
 /// # fn main() {
 /// # let move_str = "7g7f";
 /// # let depth = 10;
+/// // PV-related logs are compile-time gated by `pv_debug_logs`:
+/// //   cargo build -p engine-usi --features diagnostics
 /// pv_debug!("Invalid move {} in PV at depth {}", move_str, depth);
 /// # }
 /// ```

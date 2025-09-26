@@ -125,7 +125,7 @@ where
         let _child_hash = pos.zobrist_hash;
 
         // Prefetch TT entry for the new position (root moves are always important)
-        if USE_TT && !searcher.disable_prefetch {
+        if USE_TT && !searcher.is_prefetch_disabled() {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
 
@@ -391,7 +391,7 @@ where
         let undo = pos.do_move(mv);
 
         // Optional prefetch
-        if USE_TT && !searcher.disable_prefetch {
+        if USE_TT && !searcher.is_prefetch_disabled() {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
 

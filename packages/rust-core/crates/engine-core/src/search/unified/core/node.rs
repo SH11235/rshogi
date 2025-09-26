@@ -62,8 +62,6 @@ where
     let mut moves_searched = 0;
     let mut quiet_moves_tried: TriedMoves = TriedMoves::new();
     let mut captures_tried: TriedMoves = TriedMoves::new();
-    #[allow(unused_assignments)]
-    let mut best_move_is_capture = false;
 
     // Check if in check and update search stack
     let in_check = pos.is_in_check();
@@ -480,7 +478,7 @@ where
         if score > best_score {
             best_score = score;
             best_move = Some(mv);
-            best_move_is_capture = is_capture;
+            // note: capture classification is handled inline via `is_capture`
 
             if score > alpha {
                 alpha = score;
@@ -574,7 +572,7 @@ where
                                 }
 
                                 // Update capture history if the cutoff move is a capture
-                                if best_move_is_capture {
+                                if is_capture {
                                     // Try metadata first, fall back to board lookup
                                     let attacker = mv.piece_type();
                                     let victim = mv
