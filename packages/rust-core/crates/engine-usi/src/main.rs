@@ -50,6 +50,8 @@ struct UsiOptions {
     multipv: u8,
     // Policy: gameover時にもbestmoveを送るか
     gameover_sends_bestmove: bool,
+    // Fail-safe guard (parallel) を有効化するか
+    fail_safe_guard: bool,
 }
 
 impl Default for UsiOptions {
@@ -79,6 +81,7 @@ impl Default for UsiOptions {
             stop_wait_ms: 0,
             multipv: 1,
             gameover_sends_bestmove: false,
+            fail_safe_guard: false,
         }
     }
 }
@@ -311,6 +314,15 @@ fn print_time_policy_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name GameoverSendsBestmove type check default {}",
         if opts.gameover_sends_bestmove {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    // Fail-safe guard toggle
+    usi_println(&format!(
+        "option name FailSafeGuard type check default {}",
+        if opts.fail_safe_guard {
             "true"
         } else {
             "false"
@@ -796,6 +808,7 @@ fn limits_from_go(
         .apply_if(gp.ponder && ponder_flag.is_some(), |b| {
             b.ponder_hit_flag(ponder_flag.clone().unwrap())
         })
+        .apply_if(true, |b| b.enable_fail_safe(opts.fail_safe_guard))
         .build()
 }
 
@@ -1258,6 +1271,13 @@ fn main() -> Result<()> {
                             if let Some(v) = value {
                                 let v = v.to_lowercase();
                                 state.opts.gameover_sends_bestmove =
+                                    matches!(v.as_str(), "true" | "1" | "on");
+                            }
+                        }
+                        "FailSafeGuard" => {
+                            if let Some(v) = value {
+                                let v = v.to_lowercase();
+                                state.opts.fail_safe_guard =
                                     matches!(v.as_str(), "true" | "1" | "on");
                             }
                         }

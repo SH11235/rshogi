@@ -141,7 +141,7 @@ pub fn start_fail_safe_guard(
             debug!("Fail-safe guard started with hard timeout: {hard_timeout_ms}ms");
         }
 
-        // Check periodically
+        // Check periodically (fail-safe is optional and should be conservative)
         loop {
             thread::sleep(Duration::from_millis(100));
 
@@ -198,23 +198,38 @@ pub fn start_fail_safe_guard(
             // Check if hard timeout exceeded
             let elapsed = search_start.elapsed();
             if elapsed.as_millis() > hard_timeout_ms as u128 {
-                log::error!(
-                    "FAIL-SAFE: Search exceeded hard timeout of {}ms (elapsed: {}ms)",
+                log::warn!(
+                    "FAIL-SAFE: Hard timeout {}ms exceeded (elapsed: {}ms). Attempting graceful stop...",
                     hard_timeout_ms,
                     elapsed.as_millis()
                 );
 
-                // Try to stop gracefully first
+                // Step 1: graceful stop signal
                 shared_state.set_stop();
+                thread::sleep(Duration::from_millis(1000)); // grace 1000ms
 
-                // Give 500ms for graceful shutdown
-                thread::sleep(Duration::from_millis(500));
+                if shared_state.should_stop() {
+                    break;
+                }
 
-                // If still not stopped, abort
-                if !shared_state.should_stop() {
-                    log::error!("FAIL-SAFE: Forced abort due to unresponsive search!");
+                // Step 2: repeat stop signal and escalate log
+                log::warn!("FAIL-SAFE: Stop not observed after 1000ms. Retrying stop signal...");
+                shared_state.set_stop();
+                thread::sleep(Duration::from_millis(1000));
+
+                if shared_state.should_stop() {
+                    break;
+                }
+
+                // Step 3: final warning. Abort only when explicitly enabled at build time.
+                log::error!("FAIL-SAFE: Search still running after additional 1000ms");
+                #[cfg(feature = "fail-safe-abort")]
+                {
+                    log::error!("FAIL-SAFE: Forced abort due to unresponsive search (feature fail-safe-abort)");
                     std::process::abort();
                 }
+                // Without abort feature, exit the guard loop to avoid busy spinning
+                break;
             }
         }
 
