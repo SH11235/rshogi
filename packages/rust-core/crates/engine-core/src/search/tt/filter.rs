@@ -14,9 +14,9 @@ pub fn should_skip_tt_store(depth: u8, is_pv: bool) -> bool {
         return false;
     }
 
-    // Skip very shallow entries (depth < 2) for non-PV nodes
+    // Skip only depth 0 entries for non-PV nodes（d=1 も保存許可して再利用性を上げる）
     // These are unlikely to be reused and add overhead
-    if depth < 2 {
+    if depth < 1 {
         return true;
     }
 

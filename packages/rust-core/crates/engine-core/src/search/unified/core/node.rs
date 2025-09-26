@@ -309,7 +309,7 @@ where
 
         // Skip aggressive prefetching - it has shown negative performance impact
 
-        // Validate move is pseudo-legal before execution
+        // Validate move is pseudo-legal before any heavy checks
         if !pos.is_pseudo_legal(mv) {
             #[cfg(debug_assertions)]
             {
@@ -320,6 +320,20 @@ where
                 eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
             }
             continue;
+        }
+
+        // SEE-based pruning for obviously bad captures at shallow depth
+        // - Skip for drops, promotions, in-check, and likely checking moves (see helper)
+        // - Apply only when using pruning, shallow depth, and capture moves
+        if USE_PRUNING
+            && depth <= 4
+            && is_capture
+            && !crate::search::unified::pruning::should_skip_see_pruning(pos, mv)
+        {
+            // Keep captures with SEE >= 0, prune otherwise
+            if !pos.see_ge(mv, 0) {
+                continue;
+            }
         }
 
         // Clone BEFORE do_move for old check method comparison
