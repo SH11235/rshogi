@@ -23,7 +23,6 @@
 /// # let depth = 5;
 /// # let ply = 3;
 /// # let score = 100;
-/// debug_log!(SHOGI_DEBUG_PV, "PV validation failed at depth {depth}");
 /// debug_log!(SHOGI_DEBUG_SEARCH, "Search node at ply {}: score={}", ply, score);
 /// # }
 /// ```
@@ -50,7 +49,7 @@ macro_rules! debug_log {
 /// # #[macro_use] extern crate engine_core;
 /// # fn main() {
 /// # let items = vec!["item1", "item2", "item3"];
-/// debug_exec!(SHOGI_DEBUG_PV, {
+/// debug_exec!(SHOGI_DEBUG_SEARCH, {
 ///     eprintln!("Complex debug output:");
 ///     for item in &items {
 ///         eprintln!("  - {}", item);
@@ -72,7 +71,7 @@ macro_rules! debug_exec {
 
 /// Macro for PV (Principal Variation) specific debug logging
 ///
-/// Convenience wrapper around `debug_log!` for PV-related debugging.
+/// Convenience macro for PV-related debug logging, compile‑time gated by the pv_debug_logs feature.
 ///
 /// # Examples
 ///
