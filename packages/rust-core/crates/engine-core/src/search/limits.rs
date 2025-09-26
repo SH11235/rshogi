@@ -34,6 +34,8 @@ pub struct SearchLimits {
     /// Number of principal variations to search (MultiPV)
     /// 1 = single PV (default), higher values enable multi-PV search
     pub multipv: u8,
+    /// Enable fail-safe guard (parallel searchのみ). 既定: false
+    pub enable_fail_safe: bool,
 }
 
 impl Default for SearchLimits {
@@ -52,6 +54,7 @@ impl Default for SearchLimits {
             qnodes_counter: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
+            enable_fail_safe: false,
         }
     }
 }
@@ -119,6 +122,7 @@ pub struct SearchLimitsBuilder {
     ponder_hit_flag: Option<Arc<AtomicBool>>,
     immediate_eval_at_depth_zero: bool,
     multipv: u8,
+    enable_fail_safe: bool,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -136,6 +140,7 @@ impl Default for SearchLimitsBuilder {
             ponder_hit_flag: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
+            enable_fail_safe: false,
         }
     }
 }
@@ -304,6 +309,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Enable/disable fail-safe guard (parallel search only)
+    pub fn enable_fail_safe(mut self, enable: bool) -> Self {
+        self.enable_fail_safe = enable;
+        self
+    }
+
     /// Build SearchLimits
     ///
     /// Validates the configuration and builds the SearchLimits.
@@ -339,6 +350,7 @@ impl SearchLimitsBuilder {
             qnodes_counter: None,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
+            enable_fail_safe: self.enable_fail_safe,
         }
     }
 }
@@ -367,6 +379,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             qnodes_counter: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
+            enable_fail_safe: false,
         }
     }
 }
@@ -414,6 +427,7 @@ impl Clone for SearchLimits {
             qnodes_counter: self.qnodes_counter.clone(),
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
+            enable_fail_safe: self.enable_fail_safe,
         }
     }
 }
@@ -438,6 +452,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("qnodes_counter", &self.qnodes_counter.is_some())
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .field("multipv", &self.multipv)
+            .field("enable_fail_safe", &self.enable_fail_safe)
             .finish()
     }
 }

@@ -14,6 +14,8 @@ nightly = []
 tt_metrics = []
 # Feature to enable PV debug logs (compile-time; replaces SHOGI_DEBUG_PV env toggle)
 pv_debug_logs = []
+# Optional: enable process abort in fail-safe guard (default OFF)
+fail-safe-abort = []
 # Feature to enable hashfull-based filtering
 hashfull_filter = []
 # Feature to enable YBWC (Young Brothers Wait Concept) parallel search
