@@ -147,6 +147,7 @@ fn test_qnodes_token_return_on_stop() {
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
         multipv: 1,
+        enable_fail_safe: false,
     });
 
     // Create position
@@ -202,6 +203,7 @@ fn test_qnodes_token_return_on_limit_exceeded() {
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
         multipv: 1,
+        enable_fail_safe: false,
     });
 
     // Create position with captures available
