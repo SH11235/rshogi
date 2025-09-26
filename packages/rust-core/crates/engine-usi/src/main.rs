@@ -122,6 +122,8 @@ struct EngineState {
     // Session root hash for stale-result guard
     current_root_hash: Option<u64>,
     current_search_id: u64,
+    // Ensure we emit at most one bestmove per go-session
+    bestmove_emitted: bool,
     // Current (inner) time control for stop/gameover policy decisions
     current_time_control: Option<TimeControl>,
     // Reaper: background joiner for detached worker threads
@@ -158,6 +160,7 @@ impl EngineState {
             last_go_params: None,
             current_root_hash: None,
             current_search_id: 0,
+            bestmove_emitted: false,
             reaper_tx: None,
             reaper_handle: None,
             reaper_queue_len: Arc::new(AtomicUsize::new(0)),
@@ -360,6 +363,7 @@ fn finalize_and_send(
     if stale {
         info_string(format!("{label}_stale resign=1"));
         usi_println("bestmove resign");
+        state.bestmove_emitted = true;
         state.current_root_hash = None;
         return;
     }
@@ -543,6 +547,7 @@ fn finalize_and_send(
     } else {
         usi_println(&format!("bestmove {}", final_usi));
     }
+    state.bestmove_emitted = true;
     state.current_root_hash = None;
 }
 
@@ -551,14 +556,7 @@ fn finalize_and_send(
 /// Use this in timeout/immediate-finalize paths where the worker thread may still
 /// be holding the Engine mutex. It selects a legal move directly from the current
 /// position without consulting TT/committed PV, ensuring an immediate bestmove.
-fn finalize_and_send_fast(state: &mut EngineState, label: &str, stale: bool) {
-    if stale {
-        info_string(format!("{label}_stale resign=1"));
-        usi_println("bestmove resign");
-        state.current_root_hash = None;
-        return;
-    }
-
+fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     // Generate legal moves without touching the Engine lock
     let mg = engine_core::movegen::MoveGenerator::new();
     match mg.generate_all(&state.position) {
@@ -570,6 +568,7 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str, stale: bool) {
                     label
                 ));
                 usi_println("bestmove resign");
+                state.bestmove_emitted = true;
             } else {
                 let mv_usi = move_to_usi(&slice[0]);
                 info_string(format!(
@@ -577,12 +576,14 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str, stale: bool) {
                     label, mv_usi
                 ));
                 usi_println(&format!("bestmove {}", mv_usi));
+                state.bestmove_emitted = true;
             }
         }
         Err(_) => {
             // In unexpected failure, be conservative
             info_string(format!("{}_fast_select_error resign_fallback=1", label));
             usi_println("bestmove resign");
+            state.bestmove_emitted = true;
         }
     }
     state.current_root_hash = None;
@@ -1348,9 +1349,11 @@ fn main() -> Result<()> {
                         let slice = list.as_slice();
                         if slice.is_empty() {
                             usi_println("bestmove resign");
+                            state.bestmove_emitted = true;
                             continue;
                         } else if slice.len() == 1 {
                             usi_println(&format!("bestmove {}", move_to_usi(&slice[0])));
+                            state.bestmove_emitted = true;
                             continue;
                         }
                     }
@@ -1389,6 +1392,7 @@ fn main() -> Result<()> {
                 state.current_is_stochastic_ponder = current_is_stochastic_ponder;
                 state.current_is_ponder = gp.ponder;
                 state.current_root_hash = Some(search_position.zobrist_hash());
+                state.bestmove_emitted = false;
                 // Diagnostics: mark search start and show hashes
                 info_string(format!(
                     "search_started root={} gui={} ponder={} stoch={}",
@@ -1483,6 +1487,41 @@ fn main() -> Result<()> {
                             }
                         }
                         if !finalized {
+                            // One-shot try_recv to avoid dropping an already-ready result
+                            match rx.try_recv() {
+                                Ok((sid, result)) => {
+                                    if sid == state.current_search_id {
+                                        if let Some(h) = state.worker.take() {
+                                            let _ = h.join();
+                                        }
+                                        state.searching = false;
+                                        state.stop_flag = None;
+                                        state.ponder_hit_flag = None;
+
+                                        let stale = state
+                                            .current_root_hash
+                                            .map(|h| h != state.position.zobrist_hash())
+                                            .unwrap_or(false);
+                                        finalize_and_send(
+                                            &mut state,
+                                            "stop_finalize",
+                                            Some(&result),
+                                            stale,
+                                        );
+                                        state.current_is_ponder = false;
+                                        state.current_root_hash = None;
+                                        state.current_time_control = None;
+                                        continue;
+                                    } else {
+                                        info_string(format!(
+                                            "ignore_result stale_sid={} current_sid={}",
+                                            sid, state.current_search_id
+                                        ));
+                                        // fall through to detach
+                                    }
+                                }
+                                Err(_) => { /* fall through to detach */ }
+                            }
                             // Timeout waiting for result; detach worker and finalize immediately
                             if let Some(h) = state.worker.take() {
                                 if let Some(tx) = &state.reaper_tx {
@@ -1502,12 +1541,7 @@ fn main() -> Result<()> {
                             state.stop_flag = None;
                             state.ponder_hit_flag = None;
 
-                            // Emit bestmove even if this was a ponder search, to avoid GUI timeouts after stop.
-                            let stale = state
-                                .current_root_hash
-                                .map(|h| h != state.position.zobrist_hash())
-                                .unwrap_or(false);
-                            finalize_and_send_fast(&mut state, "stop_timeout_finalize", stale);
+                            finalize_and_send_fast(&mut state, "stop_timeout_finalize");
                             // Reset ponder state after explicit stop
                             state.current_is_ponder = false;
                             state.current_root_hash = None;
@@ -1543,6 +1577,20 @@ fn main() -> Result<()> {
 
             if cmd.starts_with("gameover ") {
                 if state.opts.gameover_sends_bestmove {
+                    // Duplicate guard: if we already emitted bestmove for this go and are not searching, skip
+                    if !state.searching && state.bestmove_emitted {
+                        if let Some(flag) = &state.stop_flag {
+                            flag.store(true, Ordering::SeqCst);
+                        }
+                        if let Some(h) = state.worker.take() {
+                            let _ = h.join();
+                        }
+                        state.searching = false;
+                        state.stop_flag = None;
+                        state.ponder_hit_flag = None;
+                        state.current_time_control = None;
+                        continue;
+                    }
                     // stopと同等に扱い、bestmoveを送る
                     if let Some(flag) = &state.stop_flag {
                         flag.store(true, Ordering::SeqCst);
@@ -1621,6 +1669,40 @@ fn main() -> Result<()> {
                                 }
                             }
                             if !finalized {
+                                // One-shot try_recv to avoid dropping an already-ready result
+                                match rx.try_recv() {
+                                    Ok((sid, result)) => {
+                                        if sid == state.current_search_id {
+                                            if let Some(h) = state.worker.take() {
+                                                let _ = h.join();
+                                            }
+                                            state.searching = false;
+                                            state.stop_flag = None;
+                                            state.ponder_hit_flag = None;
+                                            let stale = state
+                                                .current_root_hash
+                                                .map(|h| h != state.position.zobrist_hash())
+                                                .unwrap_or(false);
+                                            finalize_and_send(
+                                                &mut state,
+                                                "gameover_finalize",
+                                                Some(&result),
+                                                stale,
+                                            );
+                                            state.current_is_ponder = false;
+                                            state.current_root_hash = None;
+                                            state.current_time_control = None;
+                                            continue;
+                                        } else {
+                                            info_string(format!(
+                                                "ignore_result stale_sid={} current_sid={}",
+                                                sid, state.current_search_id
+                                            ));
+                                            // fall through to detach
+                                        }
+                                    }
+                                    Err(_) => { /* fall through to detach */ }
+                                }
                                 if let Some(h) = state.worker.take() {
                                     if let Some(tx) = &state.reaper_tx {
                                         let q =
@@ -1638,15 +1720,7 @@ fn main() -> Result<()> {
                                 state.searching = false;
                                 state.stop_flag = None;
                                 state.ponder_hit_flag = None;
-                                let stale = state
-                                    .current_root_hash
-                                    .map(|h| h != state.position.zobrist_hash())
-                                    .unwrap_or(false);
-                                finalize_and_send_fast(
-                                    &mut state,
-                                    "gameover_timeout_finalize",
-                                    stale,
-                                );
+                                finalize_and_send_fast(&mut state, "gameover_timeout_finalize");
                                 state.current_is_ponder = false;
                                 state.current_root_hash = None;
                                 state.current_time_control = None;
@@ -1656,15 +1730,7 @@ fn main() -> Result<()> {
                             state.searching = false;
                             state.stop_flag = None;
                             state.ponder_hit_flag = None;
-                            let stale = state
-                                .current_root_hash
-                                .map(|h| h != state.position.zobrist_hash())
-                                .unwrap_or(false);
-                            finalize_and_send_fast(
-                                &mut state,
-                                "gameover_immediate_finalize",
-                                stale,
-                            );
+                            finalize_and_send_fast(&mut state, "gameover_immediate_finalize");
                             state.current_is_ponder = false;
                             state.current_root_hash = None;
                             state.current_time_control = None;
@@ -1674,11 +1740,7 @@ fn main() -> Result<()> {
                         state.searching = false;
                         state.stop_flag = None;
                         state.ponder_hit_flag = None;
-                        let stale = state
-                            .current_root_hash
-                            .map(|h| h != state.position.zobrist_hash())
-                            .unwrap_or(false);
-                        finalize_and_send_fast(&mut state, "gameover_immediate_finalize", stale);
+                        finalize_and_send_fast(&mut state, "gameover_immediate_finalize");
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
                         state.current_time_control = None;
