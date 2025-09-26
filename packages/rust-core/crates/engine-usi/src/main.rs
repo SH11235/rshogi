@@ -836,7 +836,8 @@ fn run_search_thread(
     search_id: u64,
 ) {
     // Optional info callback
-    let eng_for_info = Arc::clone(&engine);
+    // IMPORTANT: The info callback must not lock the Engine mutex, because the
+    // search runs while holding that lock. Locking here would deadlock.
     let info_callback: engine_core::search::types::InfoCallback =
         Arc::new(move |depth, score, nodes, elapsed, pv, node_type| {
             if !info_enabled {
@@ -852,12 +853,8 @@ fn run_search_thread(
                 let nps = (nodes as u128).saturating_mul(1000) / ems;
                 line.push_str(&format!(" nps {}", nps));
             }
-            // Add hashfull
-            let hf = {
-                let eng = eng_for_info.lock().unwrap();
-                eng.tt_hashfull_permille()
-            };
-            line.push_str(&format!(" hashfull {}", hf));
+            // NOTE: Do not query hashfull here to avoid locking Engine during search.
+            // If needed, it will be emitted at finalize timing.
             // score: normalize to mate or cp with proper bound tag placement
             let view = score_view_from_internal(score);
             append_usi_score_and_bound(&mut line, view, node_type);
