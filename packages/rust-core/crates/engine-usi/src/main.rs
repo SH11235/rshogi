@@ -52,6 +52,8 @@ struct UsiOptions {
     gameover_sends_bestmove: bool,
     // Fail-safe guard (parallel) を有効化するか
     fail_safe_guard: bool,
+    // SIMD clamp (runtime). None = Auto
+    simd_max_level: Option<String>,
 }
 
 impl Default for UsiOptions {
@@ -82,6 +84,7 @@ impl Default for UsiOptions {
             multipv: 1,
             gameover_sends_bestmove: false,
             fail_safe_guard: false,
+            simd_max_level: None,
         }
     }
 }
@@ -703,6 +706,8 @@ fn send_id_and_options(opts: &UsiOptions) {
     print_engine_type_options();
     usi_println("option name EvalFile type filename default ");
     usi_println("option name ClearHash type button");
+    // SIMD clamp control (optional)
+    usi_println("option name SIMDMaxLevel type combo default Auto var Auto var Scalar var SSE2 var AVX var AVX512F");
     // Legacy/GUI向け 時間ポリシー（内部にマッピング）
     print_time_policy_options(opts);
     // 旧CLI系スイッチ
@@ -980,6 +985,11 @@ fn main() -> Result<()> {
     // 起動時に core のビルド時 feature を一度だけ出力（デバッグ/再現に有用）
     let feat = engine_core::evaluation::nnue::enabled_features_str();
     info_string(format!("core_features={}", feat));
+    // 追加: 実効SIMDクランプの表示（環境変数ベース）
+    match std::env::var("SHOGI_SIMD_MAX") {
+        Ok(v) => info_string(format!("simd_clamp={}", v)),
+        Err(_) => info_string("simd_clamp=auto"),
+    }
 
     // Start background reaper thread to join detached workers
     let (reaper_tx, reaper_rx) = mpsc::channel::<thread::JoinHandle<()>>();
@@ -1180,6 +1190,29 @@ fn main() -> Result<()> {
 
                 if let Some(n) = name {
                     match n.as_str() {
+                        "SIMDMaxLevel" => {
+                            if let Some(v) = value {
+                                let vnorm = v.trim().to_ascii_lowercase();
+                                let env_val = match vnorm.as_str() {
+                                    "auto" => None,
+                                    "scalar" => Some("scalar"),
+                                    "sse2" => Some("sse2"),
+                                    "avx" => Some("avx"),
+                                    "avx512" | "avx512f" => Some("avx512f"),
+                                    _ => None,
+                                };
+                                state.opts.simd_max_level = env_val.map(|s| s.to_string());
+                                if let Some(ref e) = state.opts.simd_max_level {
+                                    std::env::set_var("SHOGI_SIMD_MAX", e);
+                                    info_string(format!("simd_clamp={}", e));
+                                } else {
+                                    std::env::remove_var("SHOGI_SIMD_MAX");
+                                    info_string("simd_clamp=auto");
+                                }
+                                // 注意: 既にSIMDカーネルが初期化済みの場合は反映されない
+                                info_string("simd_clamp_note=may_not_apply_after_init");
+                            }
+                        }
                         "USI_Hash" => {
                             if let Some(v) = value {
                                 if let Ok(mb) = v.parse::<usize>() {

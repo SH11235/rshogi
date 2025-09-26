@@ -227,6 +227,9 @@ pub(super) fn add_row_scaled_f32_scalar(dst: &mut [f32], row: &[f32], k: f32) {
 pub fn add_row_scaled_f32(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
     debug_assert_no_alias(dst, row);
+    if row.is_empty() {
+        return;
+    }
 
     // wasm32: simd128 が有効なら常時ON、無効ならスカラ
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -315,6 +318,31 @@ mod tests {
         assert_eq!(utils::align_up(15, 16), 16);
         assert_eq!(utils::align_up(16, 16), 16);
         assert_eq!(utils::align_up(17, 16), 32);
+    }
+
+    #[test]
+    fn test_add_row_scaled_small_lengths_bits() {
+        // 特にAVX-512のテイル（マスク）を意識して 0..=63 を重点確認
+        for len in 0usize..=63 {
+            let mut row = vec![0.0f32; len];
+            for i in 0..len {
+                row[i] = ((i as f32 + 0.125) * 0.07).sin();
+            }
+            // 検証セット: k = ±1, ±2
+            for &k in &[1.0f32, -1.0, 2.0, -2.0] {
+                let mut a = vec![0.0f32; len];
+                let mut b = vec![0.0f32; len];
+                // 参照（スカラ）
+                for (d, r) in a.iter_mut().zip(row.iter()) {
+                    *d += k * *r;
+                }
+                // 被検（ディスパッチ）
+                add_row_scaled_f32(&mut b, &row, k);
+                for i in 0..len {
+                    assert!(same_bits(a[i], b[i]), "len={len} i={i} k={k} a={} b={}", a[i], b[i]);
+                }
+            }
+        }
     }
 
     #[inline]
