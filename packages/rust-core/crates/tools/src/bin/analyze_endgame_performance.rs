@@ -132,12 +132,18 @@ fn main() -> Result<()> {
         let rd = BufReader::new(File::open(file)?);
         for line in rd.lines() {
             let mut s = line?;
-            if s.trim().is_empty() { continue; }
-            if let Some(idx) = s.find("sfen ") { s = s[idx+5..].to_string(); }
+            if s.trim().is_empty() {
+                continue;
+            }
+            if let Some(idx) = s.find("sfen ") {
+                s = s[idx + 5..].to_string();
+            }
             sfens.push(s);
         }
     }
-    if !args.sfen.is_empty() { sfens.push(args.sfen.clone()); }
+    if !args.sfen.is_empty() {
+        sfens.push(args.sfen.clone());
+    }
     if sfens.is_empty() {
         return Err(anyhow::anyhow!("no SFEN provided (use --sfen or --sfen-file)"));
     }
@@ -167,9 +173,7 @@ fn main() -> Result<()> {
                     args.weights.as_deref(),
                 ) {
                     Ok(stat) => {
-                        agg.entry(format!("{:?}", engine_type))
-                            .or_default()
-                            .push(stat);
+                        agg.entry(format!("{:?}", engine_type)).or_default().push(stat);
                     }
                     Err(e) => eprintln!("Error analyzing {:?}: {}", engine_type, e),
                 }
