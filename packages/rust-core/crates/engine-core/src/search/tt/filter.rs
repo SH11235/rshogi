@@ -70,9 +70,10 @@ mod tests {
         assert!(!should_skip_tt_store(0, true));
         assert!(!should_skip_tt_store(1, true));
 
-        // Non-PV shallow nodes should be skipped
+        // Non-PV very shallow nodes should be skipped
         assert!(should_skip_tt_store(0, false));
-        assert!(should_skip_tt_store(1, false));
+        // depth=1 is now stored to improve early-iteration TT reuse
+        assert!(!should_skip_tt_store(1, false));
 
         // Non-PV deeper nodes should be stored
         assert!(!should_skip_tt_store(2, false));
