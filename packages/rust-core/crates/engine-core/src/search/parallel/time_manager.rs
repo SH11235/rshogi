@@ -1,7 +1,7 @@
 //! Time management thread implementation
 
 use super::SharedSearchState;
-use crate::time_management::TimeManager;
+use crate::{search::types::TerminationReason, time_management::TimeManager};
 use log::{debug, info};
 use std::{
     sync::Arc,
@@ -35,12 +35,27 @@ pub fn start_time_manager(
             }
 
             let nodes = shared_state.get_nodes();
-            // Don't stop if we haven't done any real work yet
-            if nodes > 100 && time_manager.should_stop(nodes) {
-                info!("Time limit reached after {nodes} nodes, stopping search");
-                // TODO: Need to pass proper values for elapsed_ms, depth, hard_timeout
-                // For now, use set_stop() until we have proper context
-                shared_state.set_stop();
+            // Evaluate time-based stop unconditionally (no node-count guard)
+            if time_manager.should_stop(nodes) {
+                let elapsed_ms = time_manager.elapsed_ms();
+                let soft = time_manager.soft_limit_ms();
+                let hard = time_manager.hard_limit_ms();
+                let hard_timeout = hard != u64::MAX && elapsed_ms >= hard;
+                let depth = shared_state.get_best_depth();
+
+                info!(
+                    "Time limit reached: elapsed={}ms soft={}ms hard={}ms nodes={} depth={} hard_timeout={} (stopping)",
+                    elapsed_ms, soft, hard, nodes, depth, hard_timeout
+                );
+
+                // Record structured stop info and signal stop
+                shared_state.set_stop_with_reason(
+                    TerminationReason::TimeLimit,
+                    elapsed_ms,
+                    nodes,
+                    depth,
+                    hard_timeout,
+                );
                 break;
             }
         }
