@@ -642,16 +642,25 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         info_string(format!(
             "{}_fast_select source={} move={} stale=0 soft_ms=0 hard_ms=0",
             label,
-            match final_best.source {
-                FinalBestSource::Book => "book",
-                FinalBestSource::TT => "tt",
-                FinalBestSource::Committed => "committed",
-                FinalBestSource::LegalFallback => "legal",
-                FinalBestSource::Resign => "resign",
-            },
+            source_to_str(final_best.source),
             final_usi
         ));
-        usi_println(&format!("bestmove {}", final_usi));
+
+        // 可能なら ponder も付与（通常finalizeと同等のUX）
+        if state.opts.ponder {
+            let ponder_mv = final_best.pv.get(1).map(move_to_usi).or_else(|| {
+                final_best.best_move.and_then(|bm| {
+                    eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
+                })
+            });
+            if let Some(p) = ponder_mv {
+                usi_println(&format!("bestmove {} ponder {}", final_usi, p));
+            } else {
+                usi_println(&format!("bestmove {}", final_usi));
+            }
+        } else {
+            usi_println(&format!("bestmove {}", final_usi));
+        }
         state.bestmove_emitted = true;
         state.current_root_hash = None;
         return;

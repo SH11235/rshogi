@@ -141,15 +141,11 @@ impl MoveOrdering {
         // For other moves, use normal scoring but without SearchStack-specific features
         // (since we're at root and don't have a meaningful SearchStack context)
 
-        // King quiet moves: apply a modest penalty only when not in check and not tactical
-        if mv.piece_type() == Some(crate::PieceType::King)
+        // Quiet king penalty（加点式に寄せるため、ここではフラグのみ）
+        let quiet_king_penalty_root = mv.piece_type() == Some(crate::PieceType::King)
             && !pos.is_in_check()
             && !mv.is_capture_hint()
-            && !mv.is_promote()
-        {
-            // 軽い減点（将来のチューニング余地を残す）
-            return -3_000;
-        }
+            && !mv.is_promote();
 
         // Good captures
         if mv.is_capture_hint() {
@@ -198,7 +194,15 @@ impl MoveOrdering {
             }
         }
 
-        history_score + bonus
+        // ルートでも静かな玉手は控えめに減点。ただしSEE良しなら減点しない。
+        let mut score = history_score + bonus;
+        if quiet_king_penalty_root {
+            let see_good = Self::can_call_see(pos, mv) && pos.see_ge(mv, 0);
+            if !see_good {
+                score -= 3_000;
+            }
+        }
+        score
     }
 
     /// Score a single move using SearchStack
@@ -219,18 +223,16 @@ impl MoveOrdering {
             return 1_000_000;
         }
 
-        // King quiet moves: apply a modest, depth-aware penalty only when not in check
+        // Quiet king penalty（加点式に寄せる）
+        let mut quiet_king_penalty = 0;
         if mv.piece_type() == Some(crate::PieceType::King)
             && !pos.is_in_check()
             && !mv.is_capture_hint()
             && !mv.is_promote()
         {
-            // SEE良しの静かな玉手は重く抑制しない（SEEはcan_call_seeの条件でのみ呼ぶ）
             let see_good = Self::can_call_see(pos, mv) && pos.see_ge(mv, 0);
             if !see_good {
-                // 浅い手番だけ強め（−3000）、深くなるほど軽く（−1500）
-                let penalty = if ply <= 8 { -3_000 } else { -1_500 };
-                return penalty;
+                quiet_king_penalty = if ply <= 8 { 3_000 } else { 1_500 };
             }
         }
 
@@ -332,8 +334,8 @@ impl MoveOrdering {
             }
         };
 
-        // Base score with history
-        10_000 + history_score
+        // Base score with history and optional quiet-king penalty
+        10_000 + history_score - quiet_king_penalty
     }
 
     /// Get piece value for MVV-LVA
