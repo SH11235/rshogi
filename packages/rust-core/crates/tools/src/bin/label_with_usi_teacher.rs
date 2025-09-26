@@ -49,6 +49,9 @@ struct EngineInit {
     usi_init: Option<PathBuf>,
     resources: ResourceParams,
     nn_sha256: Option<String>,
+    go_depth: Option<u32>,
+    go_nodes: Option<u64>,
+    go_movetime: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +138,18 @@ struct Cli {
     /// Method order (comma-separated): depth0,nodes1,movetime1
     #[arg(long, default_value = "depth0,nodes1,movetime1")]
     method_order: String,
+
+    /// USI go depth for 'depth0' method (overrides 0 when set)
+    #[arg(long = "go-depth", value_name = "D")]
+    go_depth: Option<u32>,
+
+    /// USI go nodes for 'nodes1' method (overrides 1 when set)
+    #[arg(long = "nodes", value_name = "N")]
+    nodes: Option<u64>,
+
+    /// USI go movetime in milliseconds for 'movetime1' method (overrides 1 when set)
+    #[arg(long = "movetime", value_name = "MS")]
+    movetime: Option<u64>,
 
     /// Number of parallel engine workers
     #[arg(long)]
@@ -293,6 +308,9 @@ struct UsiProc {
     id_name: Option<String>,
     id_author: Option<String>,
     nn_sha256: Option<String>,
+    go_depth: Option<u32>,
+    go_nodes: Option<u64>,
+    go_movetime: Option<u64>,
 }
 
 impl UsiProc {
@@ -330,6 +348,9 @@ impl UsiProc {
             id_name: None,
             id_author: None,
             nn_sha256: init.nn_sha256.clone(),
+            go_depth: init.go_depth,
+            go_nodes: init.go_nodes,
+            go_movetime: init.go_movetime,
         };
         p.write_line("usi")?;
         // collect id/option until usiok
@@ -440,15 +461,24 @@ impl UsiProc {
         let mut last = InfoSnapshot::default();
         for method in order {
             let (go_cmd, method_name) = match method {
-                MethodKind::Depth0 => ("go depth 0", "depth0"),
-                MethodKind::Nodes1 => ("go nodes 1", "nodes1"),
-                MethodKind::Movetime1 => ("go movetime 1", "movetime1"),
+                MethodKind::Depth0 => {
+                    let d = self.go_depth.unwrap_or(0);
+                    (format!("go depth {}", d), "depth0")
+                }
+                MethodKind::Nodes1 => {
+                    let n = self.go_nodes.unwrap_or(1).max(1);
+                    (format!("go nodes {}", n), "nodes1")
+                }
+                MethodKind::Movetime1 => {
+                    let ms = self.go_movetime.unwrap_or(1).max(1);
+                    (format!("go movetime {}", ms), "movetime1")
+                }
             };
             // position + go
             if self.write_line(&format!("position sfen {}", sfen)).is_err() {
                 continue;
             }
-            if self.write_line(go_cmd).is_err() {
+            if self.write_line(&go_cmd).is_err() {
                 continue;
             }
 
@@ -733,6 +763,9 @@ fn build_engine_init(cli: &Cli) -> EngineInit {
             multipv: cli.multipv,
         },
         nn_sha256,
+        go_depth: cli.go_depth,
+        go_nodes: cli.nodes,
+        go_movetime: cli.movetime,
     }
 }
 
