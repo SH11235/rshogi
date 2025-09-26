@@ -379,14 +379,26 @@ fn finalize_and_send(
         state.current_root_hash = None;
         return;
     }
-    // Build committed when applicable
+    // Build committed when applicable（PVヘッドとbestの整合を強制）
     let committed = if let Some(res) = result {
         if !stale {
+            let mut committed_pv = res.stats.pv.clone();
+            if let Some(bm) = res.best_move {
+                if committed_pv.first().copied() != Some(bm) {
+                    info_string(format!(
+                        "pv_head_mismatch=1 pv0={} best={}",
+                        committed_pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string()),
+                        move_to_usi(&bm)
+                    ));
+                    committed_pv.clear();
+                    committed_pv.push(bm);
+                }
+            }
             Some(engine_core::search::CommittedIteration {
                 depth: res.stats.depth,
                 seldepth: res.stats.seldepth,
                 score: res.score,
-                pv: res.stats.pv.clone(),
+                pv: committed_pv,
                 node_type: res.node_type,
                 nodes: res.stats.nodes,
                 elapsed: res.stats.elapsed,
@@ -408,6 +420,29 @@ fn finalize_and_send(
         .and_then(|r| r.stop_info.as_ref())
         .map(|si| (si.soft_limit_ms, si.hard_limit_ms))
         .unwrap_or((0, 0));
+
+    // Snapshot (diagnostic): best, pv0, depth, nodes, elapsed, stop_reason
+    if let Some(res) = result {
+        let best_usi = {
+            // Will be replaced below by finalize selection, but snapshot current best too
+            res.best_move.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string())
+        };
+        let pv0_usi = res.stats.pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string());
+        let stop_reason = res
+            .stop_info
+            .as_ref()
+            .map(|si| format!("{:?}", si.reason))
+            .unwrap_or_else(|| "Unknown".to_string());
+        info_string(format!(
+            "finalize_snapshot best={} pv0={} depth={} nodes={} elapsed_ms={} stop_reason={}",
+            best_usi,
+            pv0_usi,
+            res.stats.depth,
+            res.stats.nodes,
+            res.stats.elapsed.as_millis(),
+            stop_reason
+        ));
+    }
 
     // Log selection
     info_string(format!(
@@ -453,7 +488,13 @@ fn finalize_and_send(
                         s.push_str(&format!(" hashfull {}", hf_permille));
 
                         // Prefer mate output when available; otherwise cp
-                        let view = score_view_from_internal(ln.score_internal);
+                        let mut view = score_view_from_internal(ln.score_internal);
+                        // Guard against sentinel exposure (-SEARCH_INF)
+                        if let engine_core::usi::ScoreView::Cp(cp) = view {
+                            if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
+                                view = engine_core::usi::ScoreView::Cp(-29_999);
+                            }
+                        }
                         append_usi_score_and_bound(&mut s, view, ln.bound);
 
                         if !ln.pv.is_empty() {
@@ -477,7 +518,12 @@ fn finalize_and_send(
                     s.push_str(&format!(" nodes {}", res.stats.nodes));
                     s.push_str(&format!(" nps {}", nps_agg));
                     s.push_str(&format!(" hashfull {}", hf_permille));
-                    let view = score_view_from_internal(res.score);
+                    let mut view = score_view_from_internal(res.score);
+                    if let engine_core::usi::ScoreView::Cp(cp) = view {
+                        if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
+                            view = engine_core::usi::ScoreView::Cp(-29_999);
+                        }
+                    }
                     append_usi_score_and_bound(&mut s, view, res.node_type);
                     let pv_ref: &[_] = if !final_best.pv.is_empty() {
                         &final_best.pv
@@ -505,7 +551,12 @@ fn finalize_and_send(
                 s.push_str(&format!(" nodes {}", res.stats.nodes));
                 s.push_str(&format!(" nps {}", nps_agg));
                 s.push_str(&format!(" hashfull {}", hf_permille));
-                let view = score_view_from_internal(res.score);
+                let mut view = score_view_from_internal(res.score);
+                if let engine_core::usi::ScoreView::Cp(cp) = view {
+                    if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
+                        view = engine_core::usi::ScoreView::Cp(-29_999);
+                    }
+                }
                 append_usi_score_and_bound(&mut s, view, res.node_type);
                 let pv_ref: &[_] = if !final_best.pv.is_empty() {
                     &final_best.pv
@@ -582,7 +633,33 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 usi_println("bestmove resign");
                 state.bestmove_emitted = true;
             } else {
-                let mv_usi = move_to_usi(&slice[0]);
+                // Prefer non-king moves on non-check positions; prioritize capture/drop/promotion
+                let in_check = state.position.is_in_check();
+                let is_king_move = |m: &engine_core::shogi::Move| {
+                    m.piece_type()
+                        .or_else(|| {
+                            m.from().and_then(|sq| {
+                                state.position.board.piece_on(sq).map(|p| p.piece_type)
+                            })
+                        })
+                        .map(|pt| matches!(pt, engine_core::shogi::PieceType::King))
+                        .unwrap_or(false)
+                };
+                let is_tactical = |m: &engine_core::shogi::Move| -> bool {
+                    m.is_drop() || m.is_capture_hint() || m.is_promote()
+                };
+
+                let chosen = if in_check {
+                    slice[0]
+                } else if let Some(&m) = slice.iter().find(|m| !is_king_move(m) && is_tactical(m)) {
+                    m
+                } else if let Some(&m) = slice.iter().find(|m| !is_king_move(m)) {
+                    m
+                } else {
+                    slice[0]
+                };
+
+                let mv_usi = move_to_usi(&chosen);
                 info_string(format!(
                     "{}_fast_select source=legal move={} stale=0 soft_ms=0 hard_ms=0",
                     label, mv_usi
@@ -856,7 +933,12 @@ fn run_search_thread(
             // NOTE: Do not query hashfull here to avoid locking Engine during search.
             // If needed, it will be emitted at finalize timing.
             // score: normalize to mate or cp with proper bound tag placement
-            let view = score_view_from_internal(score);
+            let mut view = score_view_from_internal(score);
+            if let engine_core::usi::ScoreView::Cp(cp) = view {
+                if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
+                    view = engine_core::usi::ScoreView::Cp(-29_999);
+                }
+            }
             append_usi_score_and_bound(&mut line, view, node_type);
             if !pv.is_empty() {
                 line.push_str(" pv");
@@ -874,11 +956,15 @@ fn run_search_thread(
         ..limits
     };
 
-    // Do the search
-    let result = {
+    // Do the search (ensure elapsed is set even on corner paths)
+    let start_ts = Instant::now();
+    let mut result = {
         let mut eng = engine.lock().unwrap();
         eng.search(&mut position, limits)
     };
+    if result.stats.elapsed.as_millis() == 0 {
+        result.stats.elapsed = start_ts.elapsed();
+    }
     let _ = tx.send((search_id, result));
 }
 
