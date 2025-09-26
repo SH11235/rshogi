@@ -141,22 +141,14 @@ impl MoveOrdering {
         // For other moves, use normal scoring but without SearchStack-specific features
         // (since we're at root and don't have a meaningful SearchStack context)
 
-        // Special handling for king moves
-        if mv.piece_type() == Some(crate::PieceType::King) && !pos.is_in_check() {
-            if mv.is_capture_hint() {
-                if let Some(victim) = mv.captured_piece_type() {
-                    use crate::PieceType;
-                    match victim {
-                        PieceType::Rook | PieceType::Bishop => {
-                            return 50_000 + Self::piece_value(Some(victim));
-                        }
-                        _ => {
-                            return -10_000 + Self::piece_value(Some(victim));
-                        }
-                    }
-                }
-            }
-            return -20_000;
+        // King quiet moves: apply a modest penalty only when not in check and not tactical
+        if mv.piece_type() == Some(crate::PieceType::King)
+            && !pos.is_in_check()
+            && !mv.is_capture_hint()
+            && !mv.is_promote()
+        {
+            // 軽い減点（将来のチューニング余地を残す）
+            return -3_000;
         }
 
         // Good captures
@@ -227,27 +219,19 @@ impl MoveOrdering {
             return 1_000_000;
         }
 
-        // Special handling for king moves - apply significant penalty
-        // unless we're in check (where king moves might be necessary)
-        if mv.piece_type() == Some(crate::PieceType::King) && !pos.is_in_check() {
-            // King moves should be considered last unless they're captures of major pieces
-            if mv.is_capture_hint() {
-                if let Some(victim) = mv.captured_piece_type() {
-                    use crate::PieceType;
-                    match victim {
-                        PieceType::Rook | PieceType::Bishop => {
-                            // Allow capturing major pieces with king but with penalty
-                            return 50_000 + Self::piece_value(Some(victim));
-                        }
-                        _ => {
-                            // Heavily penalize capturing minor pieces with king
-                            return -10_000 + Self::piece_value(Some(victim));
-                        }
-                    }
-                }
+        // King quiet moves: apply a modest, depth-aware penalty only when not in check
+        if mv.piece_type() == Some(crate::PieceType::King)
+            && !pos.is_in_check()
+            && !mv.is_capture_hint()
+            && !mv.is_promote()
+        {
+            // SEE良しの静かな玉手は重く抑制しない（SEEはcan_call_seeの条件でのみ呼ぶ）
+            let see_good = Self::can_call_see(pos, mv) && pos.see_ge(mv, 0);
+            if !see_good {
+                // 浅い手番だけ強め（−3000）、深くなるほど軽く（−1500）
+                let penalty = if ply <= 8 { -3_000 } else { -1_500 };
+                return penalty;
             }
-            // Non-capturing king moves get heavy penalty
-            return -20_000;
         }
 
         // Good captures

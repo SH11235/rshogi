@@ -624,13 +624,40 @@ fn finalize_and_send(
     state.current_root_hash = None;
 }
 
-/// Fast finalize that never takes the Engine lock.
+/// Fast finalize that avoids blocking on the Engine lock.
 ///
-/// Use this in timeout/immediate-finalize paths where the worker thread may still
-/// be holding the Engine mutex. It selects a legal move directly from the current
-/// position without consulting TT/committed PV, ensuring an immediate bestmove.
+/// 優先順位（最小追補の方針を実装）:
+///  1) `try_lock()` に成功した場合は Engine に委譲し、TT→（可能なら）PV→合法手最善を選ぶ。
+///  2) `try_lock()` に失敗した場合のみ、合法手から軽量規則で即時選択。
+///
+/// これにより detach/timeout 時でも、ロックが空いていれば常に TT 由来の指し手を優先できます。
 fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
-    // Generate legal moves without touching the Engine lock
+    // 1) 非ブロッキングで Engine を覗けるなら、正規の最終選択に委譲（TT優先）
+    if let Ok(eng) = state.engine.try_lock() {
+        let final_best = eng.choose_final_bestmove(&state.position, None);
+        let final_usi = final_best
+            .best_move
+            .map(|m| move_to_usi(&m))
+            .unwrap_or_else(|| "resign".to_string());
+        info_string(format!(
+            "{}_fast_select source={} move={} stale=0 soft_ms=0 hard_ms=0",
+            label,
+            match final_best.source {
+                FinalBestSource::Book => "book",
+                FinalBestSource::TT => "tt",
+                FinalBestSource::Committed => "committed",
+                FinalBestSource::LegalFallback => "legal",
+                FinalBestSource::Resign => "resign",
+            },
+            final_usi
+        ));
+        usi_println(&format!("bestmove {}", final_usi));
+        state.bestmove_emitted = true;
+        state.current_root_hash = None;
+        return;
+    }
+
+    // 2) Engine ロックを取れない場合のみ、合法手から即時選択
     let mg = engine_core::movegen::MoveGenerator::new();
     match mg.generate_all(&state.position) {
         Ok(list) => {
@@ -643,7 +670,6 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 usi_println("bestmove resign");
                 state.bestmove_emitted = true;
             } else {
-                // Prefer non-king moves on non-check positions; prioritize capture/drop/promotion
                 let in_check = state.position.is_in_check();
                 let is_king_move = |m: &engine_core::shogi::Move| {
                     m.piece_type()
@@ -658,7 +684,6 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 let is_tactical = |m: &engine_core::shogi::Move| -> bool {
                     m.is_drop() || m.is_capture_hint() || m.is_promote()
                 };
-
                 let chosen = if in_check {
                     slice[0]
                 } else if let Some(&m) = slice.iter().find(|m| !is_king_move(m) && is_tactical(m)) {
@@ -668,7 +693,6 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 } else {
                     slice[0]
                 };
-
                 let mv_usi = move_to_usi(&chosen);
                 info_string(format!(
                     "{}_fast_select source=legal move={} stale=0 soft_ms=0 hard_ms=0",
@@ -679,7 +703,6 @@ fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
             }
         }
         Err(_) => {
-            // In unexpected failure, be conservative
             info_string(format!("{}_fast_select_error resign_fallback=1", label));
             usi_println("bestmove resign");
             state.bestmove_emitted = true;
