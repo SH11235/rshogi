@@ -153,7 +153,7 @@ where
         }
     }
 
-    // Try TT move first if available
+    // Try TT move first if available（ABDADAのExact優先／PVガード強化）
     let tt_move = if USE_TT {
         let tt_entry = searcher.probe_tt(hash);
 
@@ -164,24 +164,33 @@ where
         if depth > 2 {
             if let Some(ref tt) = searcher.tt {
                 if tt.has_exact_cut(hash) {
-                    // Early return with the stored score if available and reliable
+                    let is_pv_node = beta > alpha + 1; // widen window indicates PV node
+                                                       // Early return with the stored score if available and reliable
                     if let Some(entry) = tt_entry {
                         // Only trust the early cutoff if:
                         // 1. Entry matches hash
                         // 2. Entry has sufficient depth
-                        // 3. Entry is a lower bound (cut node) and score >= beta
+                        // 3. PVノードではExactのみ信頼
+                        // 4. 非PVではLowerBoundも許容（score >= beta）
                         if entry.matches(hash) && entry.depth() >= depth.saturating_sub(1) {
                             let adjusted_score = crate::search::common::adjust_mate_score_from_tt(
                                 entry.score() as i32,
                                 ply as u8,
                             );
-                            // For lower bound entries, we can only use them if score >= beta
-                            if entry.node_type() == NodeType::LowerBound && adjusted_score >= beta {
-                                return adjusted_score;
-                            }
-                            // For exact entries, we can always use them
-                            if entry.node_type() == NodeType::Exact {
-                                return adjusted_score;
+                            if is_pv_node {
+                                if entry.node_type() == NodeType::Exact {
+                                    return adjusted_score;
+                                }
+                            } else {
+                                // 非PV: LowerBoundでのbetaカットを信頼
+                                if entry.node_type() == NodeType::LowerBound
+                                    && adjusted_score >= beta
+                                {
+                                    return adjusted_score;
+                                }
+                                if entry.node_type() == NodeType::Exact {
+                                    return adjusted_score;
+                                }
                             }
                         }
                     }
@@ -257,10 +266,10 @@ where
             }
         }
 
-        // Calculate capture status once using board state (more reliable than metadata)
+        // Capture classification（正準API + 盤面照合のORで堅牢化）
         let us = pos.side_to_move;
-        let is_capture =
-            !mv.is_drop() && pos.piece_at(mv.to()).is_some_and(|pc| pc.color == us.opposite());
+        let is_capture = mv.is_capture_hint()
+            || (!mv.is_drop() && pos.piece_at(mv.to()).is_some_and(|pc| pc.color == us.opposite()));
 
         // Futility pruning for quiet moves
         if USE_PRUNING
@@ -309,16 +318,11 @@ where
 
         // Skip aggressive prefetching - it has shown negative performance impact
 
-        // Validate move is pseudo-legal before any heavy checks
+        // Validate move is pseudo-legal before any heavy checks（debugのみ）
+        #[cfg(debug_assertions)]
         if !pos.is_pseudo_legal(mv) {
-            #[cfg(debug_assertions)]
-            {
-                eprintln!(
-                    "[WARNING] Skipping illegal move {} in search",
-                    crate::usi::move_to_usi(&mv)
-                );
-                eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
-            }
+            eprintln!("[WARNING] Skipping illegal move {} in search", crate::usi::move_to_usi(&mv));
+            eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
             continue;
         }
 
@@ -333,8 +337,11 @@ where
             && !mv.is_promote()
             && !crate::search::unified::pruning::should_skip_see_pruning(pos, mv)
         {
-            // Keep captures with SEE >= 0, prune otherwise
-            if !pos.see_ge(mv, 0) {
+            // Depth-aware SEE margin
+            let victim_pt =
+                mv.captured_piece_type().or_else(|| pos.piece_at(mv.to()).map(|p| p.piece_type));
+            let margin = crate::search::unified::pruning::see_margin_by_depth(depth, victim_pt);
+            if !pos.see_ge(mv, margin) {
                 continue;
             }
         }
@@ -436,7 +443,7 @@ where
             score = -super::alpha_beta(searcher, pos, next_depth, -beta, -alpha, ply + 1);
         } else {
             // Late move reduction using advanced pruning module
-            let reduction = if USE_PRUNING
+            let mut reduction = if USE_PRUNING
                 && crate::search::unified::pruning::can_do_lmr(
                     depth,
                     moves_searched,
@@ -452,6 +459,20 @@ where
             } else {
                 0
             };
+
+            // LMR 例外緩和: SEE良捕獲（深さ別マージン）と成りは削減を弱める
+            if is_capture {
+                let victim_pt = mv
+                    .captured_piece_type()
+                    .or_else(|| pos.piece_at(mv.to()).map(|p| p.piece_type));
+                let margin = crate::search::unified::pruning::see_margin_by_depth(depth, victim_pt);
+                if pos.see_ge(mv, margin) {
+                    reduction = reduction.saturating_sub(1);
+                }
+            }
+            if mv.is_promote() {
+                reduction = reduction.saturating_sub(1);
+            }
 
             // Null window search with safe depth calculation
             // Calculate reduced depth safely to avoid underflow
@@ -501,8 +522,9 @@ where
                 alpha = score;
 
                 // Update PV on the search stack without global table
-                // Validate that the move is still pseudo-legal before adding to PV
-                // This prevents TT pollution from causing invalid PVs
+                // Validate that the move is still pseudo-legal before adding to PV（debugのみ）
+                // This prevents TT pollution from causing invalid PVs during development
+                #[cfg(debug_assertions)]
                 if pos.is_pseudo_legal(mv) {
                     // Additional check: ensure the move's source square is not empty
                     let move_valid = if !mv.is_drop() {
@@ -672,8 +694,9 @@ where
         // A node is a PV node if the score improved alpha but didn't exceed beta
         let is_pv = best_score > original_alpha && best_score < beta;
 
-        // Simple optimization: skip shallow nodes
-        if !crate::search::tt::filter::should_skip_tt_store(depth, is_pv) {
+        // Simple optimization: skip shallow nodes（dynamic policy with hashfull）
+        let hf = searcher.tt.as_ref().map(|tt| tt.hashfull()).unwrap_or(0);
+        if !crate::search::tt::filter::should_skip_tt_store_dyn(depth, is_pv, node_type, hf) {
             let mut boosted_depth = crate::search::tt::filter::boost_tt_depth(depth, node_type);
             // Apply additional boost for PV nodes
             boosted_depth = crate::search::tt::filter::boost_pv_depth(boosted_depth, is_pv);

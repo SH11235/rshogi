@@ -373,6 +373,12 @@ impl TranspositionTable {
         self.hashfull_estimate()
     }
 
+    /// Alias for clarity: returns occupancy in permille (0..=1000)
+    #[inline]
+    pub fn hashfull_permille(&self) -> u16 {
+        self.hashfull_estimate()
+    }
+
     /// Get size in bytes
     pub fn size_bytes(&self) -> usize {
         if let Some(ref flexible_buckets) = self.flexible_buckets {

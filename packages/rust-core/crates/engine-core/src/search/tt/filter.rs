@@ -23,6 +23,28 @@ pub fn should_skip_tt_store(depth: u8, is_pv: bool) -> bool {
     false
 }
 
+/// Dynamic TT store filter that adapts to table occupancy (hashfull)
+#[inline(always)]
+pub fn should_skip_tt_store_dyn(
+    depth: u8,
+    is_pv: bool,
+    node_type: NodeType,
+    hashfull_permille: u16, // permille (0..=1000)
+) -> bool {
+    if is_pv {
+        return false;
+    }
+    // Keep legacy shallow filter
+    if depth < 1 {
+        return true;
+    }
+    // When table is very full, skip storing shallow non-Exact bounds for non-PV nodes
+    if hashfull_permille >= 900 && depth <= 2 && node_type != NodeType::Exact {
+        return true;
+    }
+    false
+}
+
 /// Simple optimization: Only prefetch at reasonable depths
 #[inline(always)]
 pub fn should_skip_prefetch(depth: u8, move_index: usize) -> bool {
