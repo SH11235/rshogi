@@ -259,6 +259,29 @@ pub fn delta_pruning_margin() -> i32 {
     DELTA_PRUNING_MARGIN
 }
 
+/// Depth-aware SEE margin for pruning captures in main search
+///
+/// Rationale:
+/// - At shallow depths, allow a small negative margin to avoid over-pruning
+///   tactical captures that recover later.
+/// - At deeper depths, tighten towards 0.
+/// - Capturing major pieces (Rook/Bishop) gets a small relaxation bonus.
+#[inline]
+pub fn see_margin_by_depth(depth: u8, victim_pt: Option<crate::PieceType>) -> i32 {
+    let base = match depth {
+        d if d >= 5 => 0,
+        4 => -60,
+        3 => -40,
+        2 => -20,
+        _ => -10,
+    };
+    let bonus = match victim_pt {
+        Some(crate::PieceType::Rook) | Some(crate::PieceType::Bishop) => 20,
+        _ => 0,
+    };
+    base + bonus
+}
+
 /// Check if static null move (reverse futility) pruning is applicable
 pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval: i32) -> bool {
     depth <= 7 // Extended from 6 to 7 for slightly more aggressive static null move

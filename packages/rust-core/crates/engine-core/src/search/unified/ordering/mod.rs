@@ -163,7 +163,17 @@ impl MoveOrdering {
             Err(_) => 0,
         };
 
-        history_score
+        // Global killer bonus at root（ply=0）
+        let mut bonus = 0;
+        let killers = self.killer_table.get(0);
+        for (slot, &k) in killers.iter().enumerate() {
+            if Some(mv) == k {
+                bonus = 600 - slot as i32; // smaller than capture scores
+                break;
+            }
+        }
+
+        history_score + bonus
     }
 
     /// Score a single move using SearchStack
