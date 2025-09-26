@@ -546,6 +546,48 @@ fn finalize_and_send(
     state.current_root_hash = None;
 }
 
+/// Fast finalize that never takes the Engine lock.
+///
+/// Use this in timeout/immediate-finalize paths where the worker thread may still
+/// be holding the Engine mutex. It selects a legal move directly from the current
+/// position without consulting TT/committed PV, ensuring an immediate bestmove.
+fn finalize_and_send_fast(state: &mut EngineState, label: &str, stale: bool) {
+    if stale {
+        info_string(format!("{label}_stale resign=1"));
+        usi_println("bestmove resign");
+        state.current_root_hash = None;
+        return;
+    }
+
+    // Generate legal moves without touching the Engine lock
+    let mg = engine_core::movegen::MoveGenerator::new();
+    match mg.generate_all(&state.position) {
+        Ok(list) => {
+            let slice = list.as_slice();
+            if slice.is_empty() {
+                info_string(format!(
+                    "{}_fast_select source=legal move=resign stale=0 soft_ms=0 hard_ms=0",
+                    label
+                ));
+                usi_println("bestmove resign");
+            } else {
+                let mv_usi = move_to_usi(&slice[0]);
+                info_string(format!(
+                    "{}_fast_select source=legal move={} stale=0 soft_ms=0 hard_ms=0",
+                    label, mv_usi
+                ));
+                usi_println(&format!("bestmove {}", mv_usi));
+            }
+        }
+        Err(_) => {
+            // In unexpected failure, be conservative
+            info_string(format!("{}_fast_select_error resign_fallback=1", label));
+            usi_println("bestmove resign");
+        }
+    }
+    state.current_root_hash = None;
+}
+
 fn send_id_and_options(opts: &UsiOptions) {
     usi_println("id name RustShogi USI (core)");
     usi_println("id author RustShogi Team");
@@ -1465,7 +1507,7 @@ fn main() -> Result<()> {
                                 .current_root_hash
                                 .map(|h| h != state.position.zobrist_hash())
                                 .unwrap_or(false);
-                            finalize_and_send(&mut state, "stop_timeout_finalize", None, stale);
+                            finalize_and_send_fast(&mut state, "stop_timeout_finalize", stale);
                             // Reset ponder state after explicit stop
                             state.current_is_ponder = false;
                             state.current_root_hash = None;
@@ -1600,10 +1642,9 @@ fn main() -> Result<()> {
                                     .current_root_hash
                                     .map(|h| h != state.position.zobrist_hash())
                                     .unwrap_or(false);
-                                finalize_and_send(
+                                finalize_and_send_fast(
                                     &mut state,
                                     "gameover_timeout_finalize",
-                                    None,
                                     stale,
                                 );
                                 state.current_is_ponder = false;
@@ -1619,10 +1660,9 @@ fn main() -> Result<()> {
                                 .current_root_hash
                                 .map(|h| h != state.position.zobrist_hash())
                                 .unwrap_or(false);
-                            finalize_and_send(
+                            finalize_and_send_fast(
                                 &mut state,
                                 "gameover_immediate_finalize",
-                                None,
                                 stale,
                             );
                             state.current_is_ponder = false;
@@ -1638,7 +1678,7 @@ fn main() -> Result<()> {
                             .current_root_hash
                             .map(|h| h != state.position.zobrist_hash())
                             .unwrap_or(false);
-                        finalize_and_send(&mut state, "gameover_immediate_finalize", None, stale);
+                        finalize_and_send_fast(&mut state, "gameover_immediate_finalize", stale);
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
                         state.current_time_control = None;
