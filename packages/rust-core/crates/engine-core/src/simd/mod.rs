@@ -80,44 +80,9 @@ pub mod dispatch {
     }
 
     impl SimdLevel {
-        /// Detect the best available SIMD level for current CPU with optional runtime clamp.
-        ///
-        /// You can clamp the maximum level by setting environment variable `SHOGI_SIMD_MAX` to
-        /// one of: `scalar`, `sse2`, `avx`, `avx512f`.
-        /// The effective level is `min(hw_detected, clamp)`.
+        /// Detect the effective SIMD level, including runtime clamp and self-test fallback.
         pub fn detect() -> Self {
-            // 1) Hardware detection
-            let hw = if has_avx512f() {
-                SimdLevel::Avx512f
-            } else if has_avx() {
-                // ランタイムでは AVX2/AVX をまとめて AVX として扱う
-                SimdLevel::Avx
-            } else if has_sse2() {
-                SimdLevel::Sse2
-            } else {
-                SimdLevel::Scalar
-            };
-
-            // 2) Optional runtime clamp via env var
-            let clamp = match std::env::var("SHOGI_SIMD_MAX") {
-                Ok(val) => match val.to_ascii_lowercase().as_str() {
-                    "scalar" => SimdLevel::Scalar,
-                    "sse2" => SimdLevel::Sse2,
-                    "avx" => SimdLevel::Avx,
-                    "avx512" | "avx512f" => SimdLevel::Avx512f,
-                    _ => hw,
-                },
-                Err(_) => hw,
-            };
-
-            // Return the minimum (Scalar < Sse2 < Avx < Avx512f)
-            use SimdLevel::*;
-            match (hw, clamp) {
-                (Scalar, _) | (_, Scalar) => Scalar,
-                (Sse2, _) | (_, Sse2) => Sse2,
-                (Avx, _) | (_, Avx) => Avx,
-                _ => Avx512f,
-            }
+            super::effective_level()
         }
     }
 }
@@ -154,6 +119,136 @@ fn debug_assert_no_alias(dst: &[f32], row: &[f32]) {
         let rend = rp.saturating_add(rn);
         debug_assert!(dend <= rp || rend <= dp, "add_row_scaled_f32: dst/row must not alias");
     }
+}
+
+// -------------------------------------------------------------------------------------
+// Global effective level + self-test for AVX-512
+// -------------------------------------------------------------------------------------
+
+use std::sync::OnceLock;
+
+static EFFECTIVE_LEVEL: OnceLock<dispatch::SimdLevel> = OnceLock::new();
+static SELFTEST_STATUS: OnceLock<&'static str> = OnceLock::new();
+
+#[inline]
+fn hw_detect_with_clamp() -> dispatch::SimdLevel {
+    use dispatch::SimdLevel::*;
+    // 1) Hardware detection
+    let hw = if dispatch::has_avx512f() {
+        Avx512f
+    } else if dispatch::has_avx() {
+        Avx
+    } else if dispatch::has_sse2() {
+        Sse2
+    } else {
+        Scalar
+    };
+
+    // 2) Optional runtime clamp via env var
+    let clamp = match std::env::var("SHOGI_SIMD_MAX") {
+        Ok(val) => match val.to_ascii_lowercase().as_str() {
+            "scalar" => Scalar,
+            "sse2" => Sse2,
+            "avx" => Avx,
+            "avx512" | "avx512f" => Avx512f,
+            _ => hw,
+        },
+        Err(_) => hw,
+    };
+
+    match (hw, clamp) {
+        (Scalar, _) | (_, Scalar) => Scalar,
+        (Sse2, _) | (_, Sse2) => Sse2,
+        (Avx, _) | (_, Avx) => Avx,
+        _ => Avx512f,
+    }
+}
+
+#[inline]
+pub fn effective_level() -> dispatch::SimdLevel {
+    *EFFECTIVE_LEVEL.get_or_init(|| {
+        let mut lvl = hw_detect_with_clamp();
+        // Default: no self-test performed
+        let st: &'static str;
+        // Only self-test when selecting AVX-512F
+        if matches!(lvl, dispatch::SimdLevel::Avx512f) {
+            if run_selftest_avx512f() {
+                st = "pass";
+            } else {
+                // Fallback to AVX
+                lvl = dispatch::SimdLevel::Avx;
+                st = "fail";
+            }
+        } else {
+            st = "skipped";
+        }
+        let _ = SELFTEST_STATUS.set(st);
+        lvl
+    })
+}
+
+#[inline]
+pub fn selftest_status() -> &'static str {
+    effective_level();
+    SELFTEST_STATUS.get().copied().unwrap_or("not_run")
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn run_selftest_avx512f() -> bool {
+    // If CPU doesn't actually have AVX-512F, treat as fail-fast (will fallback)
+    if !dispatch::has_avx512f() {
+        return false;
+    }
+    // Quick deterministic LCG
+    #[inline]
+    fn lcg_step(x: &mut u64) -> u32 {
+        *x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (*x >> 32) as u32
+    }
+    // Lengths to test: 0..=63 plus some larger
+    let mut lens: Vec<usize> = (0..=63).collect();
+    lens.extend_from_slice(&[64, 80, 96, 128]);
+    // k set
+    let ks: [f32; 5] = [1.0, -1.0, 2.0, -2.0, 0.75];
+
+    let mut seed: u64 = 0x9e3779b97f4a7c15;
+    for &n in &lens {
+        // 2 patterns per length
+        for _pat in 0..2 {
+            let mut row = vec![0.0f32; n];
+            let mut dst = vec![0.0f32; n];
+            let mut refdst = vec![0.0f32; n];
+            for v in row.iter_mut() {
+                let r = lcg_step(&mut seed) as f32 * (1.0 / 4294967296.0);
+                // Deterministic but 非整列な値
+                *v = (r * 2.0 - 1.0) * 0.999;
+            }
+            for &k in &ks {
+                // reference (scalar)
+                add_row_scaled_f32_scalar(&mut refdst, &row, k);
+                // test (avx512f kernel)
+                unsafe { x86::add_row_scaled_f32_avx512f(&mut dst, &row, k) };
+                // bitwise compare
+                if refdst.len() != dst.len() {
+                    return false;
+                }
+                for i in 0..n {
+                    if refdst[i].to_bits() != dst[i].to_bits() {
+                        return false;
+                    }
+                }
+                // reset dst for next k
+                dst.fill(0.0);
+                refdst.fill(0.0);
+            }
+        }
+    }
+    true
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn run_selftest_avx512f() -> bool {
+    false
 }
 
 // -------------------------------------------------------------------------------------
