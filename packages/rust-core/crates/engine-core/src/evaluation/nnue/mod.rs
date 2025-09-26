@@ -81,7 +81,7 @@ pub fn enabled_features_str() -> String {
     // acc_dim の軽い可視化（ランタイム決定: v1=256 / v2=dims）
     v.push("acc_dim=runtime");
 
-    // 補助ログ: x86/x86_64 の SIMD 検出結果
+    // 補助ログ: x86/x86_64 の SIMD 検出結果 + 自己診断と実効レベル
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         let level = crate::simd::dispatch::SimdLevel::detect();
@@ -90,6 +90,19 @@ pub fn enabled_features_str() -> String {
             crate::simd::dispatch::SimdLevel::Avx => "simd=avx",
             crate::simd::dispatch::SimdLevel::Sse2 => "simd=sse2",
             crate::simd::dispatch::SimdLevel::Scalar => "simd=scalar",
+        });
+        // self-test status and effective level for clarity
+        v.push(match crate::simd::selftest_status() {
+            "pass" => "simd_selftest=pass",
+            "fail" => "simd_selftest=fail",
+            "skipped" => "simd_selftest=skipped",
+            _ => "simd_selftest=not_run",
+        });
+        v.push(match crate::simd::effective_level() {
+            crate::simd::dispatch::SimdLevel::Avx512f => "simd_effective=avx512f",
+            crate::simd::dispatch::SimdLevel::Avx => "simd_effective=avx",
+            crate::simd::dispatch::SimdLevel::Sse2 => "simd_effective=sse2",
+            crate::simd::dispatch::SimdLevel::Scalar => "simd_effective=scalar",
         });
     }
     // 補助ログ: AArch64（NEON 常時ON）

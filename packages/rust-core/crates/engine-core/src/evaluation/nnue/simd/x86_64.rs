@@ -335,6 +335,22 @@ pub unsafe fn update_accumulator_avx2(
     add: bool,
     row_len: usize,
 ) {
+    if row_len == 0 || indices.is_empty() {
+        return;
+    }
+    // Non-alias contract: accumulator and weights must not overlap
+    debug_assert!(
+        {
+            let a = accumulator.as_ptr() as usize;
+            let alen = std::mem::size_of_val(accumulator);
+            let w = weights.as_ptr() as usize;
+            let wlen = std::mem::size_of_val(weights);
+            let aend = a.saturating_add(alen);
+            let wend = w.saturating_add(wlen);
+            aend <= w || wend <= a
+        },
+        "update_accumulator_avx2: accumulator and weights must not alias"
+    );
     // Debug assertions for boundary checks
     debug_assert!(accumulator.len() >= row_len, "Accumulator must have at least row_len elements");
     for &idx in indices {
@@ -673,6 +689,21 @@ pub unsafe fn update_accumulator_sse41(
     add: bool,
     row_len: usize,
 ) {
+    if row_len == 0 || indices.is_empty() {
+        return;
+    }
+    debug_assert!(
+        {
+            let a = accumulator.as_ptr() as usize;
+            let alen = std::mem::size_of_val(accumulator);
+            let w = weights.as_ptr() as usize;
+            let wlen = std::mem::size_of_val(weights);
+            let aend = a.saturating_add(alen);
+            let wend = w.saturating_add(wlen);
+            aend <= w || wend <= a
+        },
+        "update_accumulator_sse41: accumulator and weights must not alias"
+    );
     // Debug assertions for boundary checks
     debug_assert!(accumulator.len() >= row_len, "Accumulator must have at least row_len elements");
     for &idx in indices {

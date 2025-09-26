@@ -54,6 +54,8 @@ struct UsiOptions {
     fail_safe_guard: bool,
     // SIMD clamp (runtime). None = Auto
     simd_max_level: Option<String>,
+    // NNUE SIMD clamp (runtime). None = Auto
+    nnue_simd: Option<String>,
 }
 
 impl Default for UsiOptions {
@@ -85,6 +87,7 @@ impl Default for UsiOptions {
             gameover_sends_bestmove: false,
             fail_safe_guard: false,
             simd_max_level: None,
+            nnue_simd: None,
         }
     }
 }
@@ -708,6 +711,9 @@ fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name ClearHash type button");
     // SIMD clamp control (optional)
     usi_println("option name SIMDMaxLevel type combo default Auto var Auto var Scalar var SSE2 var AVX var AVX512F");
+    usi_println(
+        "option name NNUE_Simd type combo default Auto var Auto var Scalar var SSE41 var AVX2",
+    );
     // Legacy/GUI向け 時間ポリシー（内部にマッピング）
     print_time_policy_options(opts);
     // 旧CLI系スイッチ
@@ -990,6 +996,10 @@ fn main() -> Result<()> {
         Ok(v) => info_string(format!("simd_clamp={}", v)),
         Err(_) => info_string("simd_clamp=auto"),
     }
+    match std::env::var("SHOGI_NNUE_SIMD") {
+        Ok(v) => info_string(format!("nnue_simd_clamp={}", v)),
+        Err(_) => info_string("nnue_simd_clamp=auto"),
+    }
 
     // Start background reaper thread to join detached workers
     let (reaper_tx, reaper_rx) = mpsc::channel::<thread::JoinHandle<()>>();
@@ -1211,6 +1221,27 @@ fn main() -> Result<()> {
                                 }
                                 // 注意: 既にSIMDカーネルが初期化済みの場合は反映されない
                                 info_string("simd_clamp_note=may_not_apply_after_init");
+                            }
+                        }
+                        "NNUE_Simd" => {
+                            if let Some(v) = value {
+                                let vnorm = v.trim().to_ascii_lowercase();
+                                let env_val = match vnorm.as_str() {
+                                    "auto" => None,
+                                    "scalar" => Some("scalar"),
+                                    "sse41" | "sse4.1" => Some("sse41"),
+                                    "avx2" => Some("avx2"),
+                                    _ => None,
+                                };
+                                state.opts.nnue_simd = env_val.map(|s| s.to_string());
+                                if let Some(ref e) = state.opts.nnue_simd {
+                                    std::env::set_var("SHOGI_NNUE_SIMD", e);
+                                    info_string(format!("nnue_simd_clamp={}", e));
+                                } else {
+                                    std::env::remove_var("SHOGI_NNUE_SIMD");
+                                    info_string("nnue_simd_clamp=auto");
+                                }
+                                info_string("nnue_simd_note=may_not_apply_after_init");
                             }
                         }
                         "USI_Hash" => {
