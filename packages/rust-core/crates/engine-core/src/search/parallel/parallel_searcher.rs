@@ -518,8 +518,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Record start time for fail-safe
         let search_start = Instant::now();
 
-        // Reset state
-        self.shared_state.reset();
+        // Wire external stop_flag (from USI) into SharedSearchState for this search session.
+        // Without this, GUI-issued `stop` does not propagate to parallel workers,
+        // and the frontend may time out and fall back to fast finalize.
+        if let Some(ext_stop) = limits.stop_flag.clone() {
+            // Recreate shared_state with the provided stop flag so that all workers
+            // and the TimeManager observe the same flag as the USI layer.
+            self.shared_state =
+                Arc::new(SharedSearchState::with_threads(ext_stop, self.num_threads));
+        } else {
+            // Ensure clean state when no external flag is provided.
+            self.shared_state.reset();
+        }
+
+        // Reset counters for this session
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
         self.pending_work_items.store(0, Ordering::Release);
