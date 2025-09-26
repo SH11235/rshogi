@@ -50,11 +50,32 @@ impl Position {
             return captured_value;
         }
 
-        let from = mv.from().expect("Normal move must have from square");
+        // from が存在しない／from に駒が無い場合は不正入力（生成やメタデータの不整合）。
+        // SEE は順序付け用のヒューリスティックなので、ここでは安全側に早期終了する。
+        let from = match mv.from() {
+            Some(sq) => sq,
+            None => {
+                return if threshold != 0 {
+                    threshold - 1
+                } else {
+                    -10_000
+                };
+            }
+        };
+
         let mut occupied = self.board.all_bb;
 
-        // Get the initial attacker
-        let attacker = self.board.piece_on(from).expect("Move source must have a piece");
+        // Get the initial attacker（from に駒が無ければ安全側にフォールバック）
+        let attacker = match self.board.piece_on(from) {
+            Some(p) => p,
+            None => {
+                return if threshold != 0 {
+                    threshold - 1
+                } else {
+                    -10_000
+                };
+            }
+        };
         let attacker_value = if mv.is_promote() {
             Self::see_promoted_piece_value(attacker.piece_type)
         } else {
