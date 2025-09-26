@@ -136,6 +136,10 @@ impl MoveOrdering {
             let attacker_value = Self::piece_value(mv.piece_type());
             let mvv_lva = victim_value * 10 - attacker_value;
 
+            // SEE bonus/penalty at root to better prioritize tactically sound captures
+            // Root has few moves so SEE cost is acceptable here
+            let see_adj = if pos.see_ge(mv, 0) { 2_000 } else { -2_000 };
+
             // Add capture history score
             let capture_history_score = match self.history.lock() {
                 Ok(history) => {
@@ -150,7 +154,7 @@ impl MoveOrdering {
                 Err(_) => 0,
             };
 
-            return 100_000 + mvv_lva + capture_history_score / 10;
+            return 100_000 + mvv_lva + capture_history_score / 10 + see_adj;
         }
 
         // History heuristic for quiet moves
