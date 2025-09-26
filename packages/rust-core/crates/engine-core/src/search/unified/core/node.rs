@@ -326,8 +326,11 @@ where
         // - Skip for drops, promotions, in-check, and likely checking moves (see helper)
         // - Apply only when using pruning, shallow depth, and capture moves
         if USE_PRUNING
+            && !in_check
             && depth <= 4
             && is_capture
+            && !mv.is_drop()
+            && !mv.is_promote()
             && !crate::search::unified::pruning::should_skip_see_pruning(pos, mv)
         {
             // Keep captures with SEE >= 0, prune otherwise
