@@ -2,7 +2,7 @@
 
 use super::SharedSearchState;
 use crate::{search::types::TerminationReason, time_management::TimeManager};
-use log::{debug, info};
+use log::debug;
 use std::{
     sync::Arc,
     thread,
@@ -43,7 +43,7 @@ pub fn start_time_manager(
                 let hard_timeout = hard != u64::MAX && elapsed_ms >= hard;
                 let depth = shared_state.get_best_depth();
 
-                info!(
+                debug!(
                     "Time limit reached: elapsed={}ms soft={}ms hard={}ms nodes={} depth={} hard_timeout={} (stopping)",
                     elapsed_ms, soft, hard, nodes, depth, hard_timeout
                 );
