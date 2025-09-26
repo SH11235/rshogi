@@ -80,9 +80,14 @@ pub mod dispatch {
     }
 
     impl SimdLevel {
-        /// Detect the best available SIMD level for current CPU
+        /// Detect the best available SIMD level for current CPU with optional runtime clamp.
+        ///
+        /// You can clamp the maximum level by setting environment variable `SHOGI_SIMD_MAX` to
+        /// one of: `scalar`, `sse2`, `avx`, `avx512f`.
+        /// The effective level is `min(hw_detected, clamp)`.
         pub fn detect() -> Self {
-            if has_avx512f() {
+            // 1) Hardware detection
+            let hw = if has_avx512f() {
                 SimdLevel::Avx512f
             } else if has_avx() {
                 // ランタイムでは AVX2/AVX をまとめて AVX として扱う
@@ -91,6 +96,27 @@ pub mod dispatch {
                 SimdLevel::Sse2
             } else {
                 SimdLevel::Scalar
+            };
+
+            // 2) Optional runtime clamp via env var
+            let clamp = match std::env::var("SHOGI_SIMD_MAX") {
+                Ok(val) => match val.to_ascii_lowercase().as_str() {
+                    "scalar" => SimdLevel::Scalar,
+                    "sse2" => SimdLevel::Sse2,
+                    "avx" => SimdLevel::Avx,
+                    "avx512" | "avx512f" => SimdLevel::Avx512f,
+                    _ => hw,
+                },
+                Err(_) => hw,
+            };
+
+            // Return the minimum (Scalar < Sse2 < Avx < Avx512f)
+            use SimdLevel::*;
+            match (hw, clamp) {
+                (Scalar, _) | (_, Scalar) => Scalar,
+                (Sse2, _) | (_, Sse2) => Sse2,
+                (Avx, _) | (_, Avx) => Avx,
+                _ => Avx512f,
             }
         }
     }
@@ -229,25 +255,27 @@ pub fn add_row_scaled_f32(dst: &mut [f32], row: &[f32], k: f32) {
         static ADD_ROW_SCALED_F32: OnceLock<Kernel> = OnceLock::new();
 
         let f = ADD_ROW_SCALED_F32.get_or_init(|| {
-            if std::arch::is_x86_feature_detected!("avx512f") {
-                return |dst, row, k| unsafe { x86::add_row_scaled_f32_avx512f(dst, row, k) };
-            }
-            // 初回のみ CPU 機能を検出し最適カーネルを束縛
-            #[cfg(feature = "nnue_fast_fma")]
-            {
-                if std::arch::is_x86_feature_detected!("avx")
-                    && std::arch::is_x86_feature_detected!("fma")
-                {
-                    return |dst, row, k| unsafe { x86::add_row_scaled_f32_avx_fma(dst, row, k) };
+            // Respect runtime clamp via SimdLevel::detect()
+            match crate::simd::dispatch::SimdLevel::detect() {
+                crate::simd::dispatch::SimdLevel::Avx512f => {
+                    |dst, row, k| unsafe { x86::add_row_scaled_f32_avx512f(dst, row, k) }
                 }
+                crate::simd::dispatch::SimdLevel::Avx => {
+                    #[cfg(feature = "nnue_fast_fma")]
+                    {
+                        if std::arch::is_x86_feature_detected!("fma") {
+                            return |dst, row, k| unsafe {
+                                x86::add_row_scaled_f32_avx_fma(dst, row, k)
+                            };
+                        }
+                    }
+                    |dst, row, k| unsafe { x86::add_row_scaled_f32_avx(dst, row, k) }
+                }
+                crate::simd::dispatch::SimdLevel::Sse2 => {
+                    |dst, row, k| unsafe { x86::add_row_scaled_f32_sse2(dst, row, k) }
+                }
+                crate::simd::dispatch::SimdLevel::Scalar => add_row_scaled_f32_scalar as Kernel,
             }
-            if std::arch::is_x86_feature_detected!("avx") {
-                return |dst, row, k| unsafe { x86::add_row_scaled_f32_avx(dst, row, k) };
-            }
-            if std::arch::is_x86_feature_detected!("sse2") {
-                return |dst, row, k| unsafe { x86::add_row_scaled_f32_sse2(dst, row, k) };
-            }
-            add_row_scaled_f32_scalar as Kernel
         });
         f(dst, row, k)
     }

@@ -185,6 +185,10 @@ impl EngineState {
                         if let Err(e) = eng.load_nnue_weights(path) {
                             log_nnue_load_error(path, &*e);
                         }
+                        // Log NNUE backend kind (classic/single) for diagnostics
+                        if let Some(kind) = eng.nnue_backend_kind() {
+                            info_string(format!("nnue_backend={}", kind));
+                        }
                     }
                 }
             }
