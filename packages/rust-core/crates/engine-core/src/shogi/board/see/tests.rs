@@ -6,6 +6,28 @@ use crate::shogi::position::Position;
 use crate::usi::parse_usi_square;
 
 #[test]
+fn test_see_handles_missing_from_piece_gracefully() {
+    // 不正な入力（from に駒が無い）が与えられてもパニックしないことを確認
+    let mut pos = Position::empty();
+
+    // 取られ役だけ置く（to に白歩）
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.side_to_move = Color::Black;
+
+    // from は空マス、to は相手駒という不整合な手
+    let mv = Move::normal(
+        parse_usi_square("5g").unwrap(), // 空の想定
+        parse_usi_square("5a").unwrap(),
+        false,
+    );
+
+    // パニックしないこと、かつ see_ge(…,0) が false になることを確認
+    let _ = pos.see(mv); // 値自体は定義しない（安全側の値）
+    assert!(!pos.see_ge(mv, 0));
+}
+
+#[test]
 fn test_see_simple_pawn_capture() {
     // Test simple pawn takes pawn
     let mut pos = Position::empty();
