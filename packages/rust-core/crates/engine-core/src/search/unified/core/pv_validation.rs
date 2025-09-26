@@ -29,8 +29,9 @@ pub(crate) fn assert_pv_legal(pos: &Position, pv: &[Move]) {
 pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
     let mut p = pos.clone();
 
-    for &mv in pv.iter() {
-        // Skip null moves
+    for (i, &mv) in pv.iter().enumerate() {
+        let _i = i; // for debug macros
+                    // Skip null moves
         if mv == Move::NULL {
             crate::pv_debug!("[BUG] NULL move in PV at ply {_i}");
             return;
