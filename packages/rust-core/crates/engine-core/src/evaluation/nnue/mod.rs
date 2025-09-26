@@ -317,6 +317,13 @@ pub fn reset_single_fallback_hits() {
 }
 
 impl NNUEEvaluatorWrapper {
+    /// Return backend kind string for diagnostics ("classic" or "single")
+    pub fn backend_kind(&self) -> &'static str {
+        match &self.backend {
+            Backend::Classic { .. } => "classic",
+            Backend::Single { .. } => "single",
+        }
+    }
     /// Create new wrapper from weights file (typed error)
     pub fn new_typed(weights_path: &str) -> NNUEResult<Self> {
         match load_weights(weights_path) {

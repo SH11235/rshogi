@@ -833,6 +833,15 @@ impl Engine {
         Ok(())
     }
 
+    /// Return NNUE backend kind if available ("classic" or "single")
+    pub fn nnue_backend_kind(&self) -> Option<&'static str> {
+        let guard = self.nnue_evaluator.read();
+        match &*guard {
+            Some(wrapper) => Some(wrapper.backend_kind()),
+            None => None,
+        }
+    }
+
     /// Get current engine type
     pub fn get_engine_type(&self) -> EngineType {
         self.engine_type
