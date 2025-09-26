@@ -48,6 +48,8 @@ struct UsiOptions {
     stop_wait_ms: u64,
     // MultiPV lines
     multipv: u8,
+    // Policy: gameover時にもbestmoveを送るか
+    gameover_sends_bestmove: bool,
 }
 
 impl Default for UsiOptions {
@@ -74,8 +76,9 @@ impl Default for UsiOptions {
             stochastic_ponder: false,
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
-            stop_wait_ms: 200,
+            stop_wait_ms: 0,
             multipv: 1,
+            gameover_sends_bestmove: false,
         }
     }
 }
@@ -119,6 +122,8 @@ struct EngineState {
     // Session root hash for stale-result guard
     current_root_hash: Option<u64>,
     current_search_id: u64,
+    // Current (inner) time control for stop/gameover policy decisions
+    current_time_control: Option<TimeControl>,
     // Reaper: background joiner for detached worker threads
     reaper_tx: Option<mpsc::Sender<std::thread::JoinHandle<()>>>,
     reaper_handle: Option<std::thread::JoinHandle<()>>,
@@ -156,6 +161,7 @@ impl EngineState {
             reaper_tx: None,
             reaper_handle: None,
             reaper_queue_len: Arc::new(AtomicUsize::new(0)),
+            current_time_control: None,
         }
     }
 
@@ -297,6 +303,15 @@ fn print_time_policy_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name StopWaitMs type spin default {} min 0 max 2000",
         opts.stop_wait_ms
+    ));
+    // Gameover policy: whether to emit bestmove on gameover
+    usi_println(&format!(
+        "option name GameoverSendsBestmove type check default {}",
+        if opts.gameover_sends_bestmove {
+            "true"
+        } else {
+            "false"
+        }
     ));
 }
 
@@ -968,6 +983,7 @@ fn main() -> Result<()> {
                             ));
 
                             finalize_and_send(&mut state, "finalize", Some(&result), stale);
+                            state.current_time_control = None;
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
@@ -979,6 +995,7 @@ fn main() -> Result<()> {
                         state.stop_flag = None;
                         state.ponder_hit_flag = None;
                         state.result_rx = None;
+                        state.current_time_control = None;
                         usi_println("bestmove resign");
                     }
                 }
@@ -1004,33 +1021,17 @@ fn main() -> Result<()> {
                 continue;
             }
 
-            if cmd.starts_with("setoption ") {
-                // setoption name <n> value <v>
+            if let Some(body) = cmd.strip_prefix("setoption ") {
+                // Robust parse: setoption name <n> [value <v>]
                 let mut name: Option<String> = None;
                 let mut value: Option<String> = None;
-                let mut it = cmd.split_whitespace().skip(1);
-                while let Some(tok) = it.next() {
-                    match tok {
-                        "name" => {
-                            let mut n = String::new();
-                            for t in it.by_ref() {
-                                if t == "value" {
-                                    break;
-                                } else {
-                                    if !n.is_empty() {
-                                        n.push(' ');
-                                    }
-                                    n.push_str(t);
-                                }
-                            }
-                            name = Some(n);
-                        }
-                        "value" => {
-                            let v = it.clone().collect::<Vec<_>>().join(" ");
-                            value = Some(v);
-                            break;
-                        }
-                        _ => {}
+                if let Some(name_pos) = body.find("name") {
+                    let after_name = body[name_pos + 4..].trim_start();
+                    if let Some(val_pos) = after_name.find(" value ") {
+                        name = Some(after_name[..val_pos].trim().to_string());
+                        value = Some(after_name[val_pos + 7..].trim().to_string());
+                    } else {
+                        name = Some(after_name.trim().to_string());
                     }
                 }
 
@@ -1210,6 +1211,13 @@ fn main() -> Result<()> {
                                 }
                             }
                         }
+                        "GameoverSendsBestmove" => {
+                            if let Some(v) = value {
+                                let v = v.to_lowercase();
+                                state.opts.gameover_sends_bestmove =
+                                    matches!(v.as_str(), "true" | "1" | "on");
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1312,6 +1320,12 @@ fn main() -> Result<()> {
                     ponder_flag.clone(),
                     stop_flag.clone(),
                 );
+                // Keep inner time control for stop/gameover policy
+                let mut tc_for_stop = limits.time_control.clone();
+                if let TimeControl::Ponder(inner) = tc_for_stop {
+                    tc_for_stop = *inner;
+                }
+                state.current_time_control = Some(tc_for_stop);
 
                 // Spawn worker
                 let (tx, rx) = mpsc::channel();
@@ -1350,8 +1364,30 @@ fn main() -> Result<()> {
                     info_string("stop_requested");
                     // Try to get result promptly using a small-slice loop; otherwise finalize immediately
                     if let Some(rx) = state.result_rx.take() {
-                        let deadline =
-                            Instant::now() + Duration::from_millis(state.opts.stop_wait_ms);
+                        // Policy: stopは原則即時化。特に以下は0ms扱い:
+                        //  - FixedTime / Infinite
+                        //  - Byoyomiで main_time_ms == 0（純秒読み）
+                        //  - Byoyomiで main_time_ms <= NetworkDelay2（実質純秒読み扱い）
+                        let mut wait_ms = state.opts.stop_wait_ms;
+                        if let Some(tc) = &state.current_time_control {
+                            match tc {
+                                TimeControl::FixedTime { .. } | TimeControl::Infinite => {
+                                    wait_ms = 0;
+                                    info_string("stop_fast_finalize=fixed_or_infinite");
+                                }
+                                TimeControl::Byoyomi { main_time_ms, .. } => {
+                                    if *main_time_ms == 0
+                                        || *main_time_ms <= state.opts.network_delay2_ms
+                                    {
+                                        wait_ms = 0;
+                                        info_string("stop_fast_finalize=byoyomi");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        let deadline = Instant::now() + Duration::from_millis(wait_ms);
                         let mut finalized = false;
                         while Instant::now() < deadline && !finalized {
                             let now = Instant::now();
@@ -1397,6 +1433,7 @@ fn main() -> Result<()> {
                                     // Reset ponder state after explicit stop
                                     state.current_is_ponder = false;
                                     state.current_root_hash = None;
+                                    state.current_time_control = None;
                                     finalized = true;
                                 }
                                 Err(mpsc::RecvTimeoutError::Timeout) => { /* continue */ }
@@ -1432,6 +1469,7 @@ fn main() -> Result<()> {
                             // Reset ponder state after explicit stop
                             state.current_is_ponder = false;
                             state.current_root_hash = None;
+                            state.current_time_control = None;
                         }
                     }
                 }
@@ -1462,16 +1500,162 @@ fn main() -> Result<()> {
             }
 
             if cmd.starts_with("gameover ") {
-                // Treat as stop, but do not emit bestmove (silent cleanup)
-                if let Some(flag) = &state.stop_flag {
-                    flag.store(true, Ordering::SeqCst);
+                if state.opts.gameover_sends_bestmove {
+                    // stopと同等に扱い、bestmoveを送る
+                    if let Some(flag) = &state.stop_flag {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    if state.searching {
+                        if let Some(rx) = state.result_rx.take() {
+                            // stopと同じ待機ポリシー
+                            let mut wait_ms = state.opts.stop_wait_ms;
+                            if let Some(tc) = &state.current_time_control {
+                                match tc {
+                                    TimeControl::FixedTime { .. } | TimeControl::Infinite => {
+                                        wait_ms = 0;
+                                        info_string("gameover_fast_finalize=fixed_or_infinite");
+                                    }
+                                    TimeControl::Byoyomi { main_time_ms, .. } => {
+                                        if *main_time_ms == 0
+                                            || *main_time_ms <= state.opts.network_delay2_ms
+                                        {
+                                            wait_ms = 0;
+                                            info_string("gameover_fast_finalize=byoyomi");
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            let deadline = Instant::now() + Duration::from_millis(wait_ms);
+                            let mut finalized = false;
+                            while Instant::now() < deadline && !finalized {
+                                let remain = {
+                                    let now = Instant::now();
+                                    if deadline > now {
+                                        deadline - now
+                                    } else {
+                                        Duration::from_millis(0)
+                                    }
+                                };
+                                let slice = if remain > Duration::from_millis(20) {
+                                    Duration::from_millis(20)
+                                } else {
+                                    remain
+                                };
+                                match rx.recv_timeout(slice) {
+                                    Ok((sid, result)) => {
+                                        if sid != state.current_search_id {
+                                            info_string(format!(
+                                                "ignore_result stale_sid={} current_sid={}",
+                                                sid, state.current_search_id
+                                            ));
+                                            continue;
+                                        }
+                                        if let Some(h) = state.worker.take() {
+                                            let _ = h.join();
+                                        }
+                                        state.searching = false;
+                                        state.stop_flag = None;
+                                        state.ponder_hit_flag = None;
+                                        // Finalize centrally
+                                        let stale = state
+                                            .current_root_hash
+                                            .map(|h| h != state.position.zobrist_hash())
+                                            .unwrap_or(false);
+                                        finalize_and_send(
+                                            &mut state,
+                                            "gameover_finalize",
+                                            Some(&result),
+                                            stale,
+                                        );
+                                        state.current_is_ponder = false;
+                                        state.current_root_hash = None;
+                                        state.current_time_control = None;
+                                        finalized = true;
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Timeout) => { /* continue */ }
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                }
+                            }
+                            if !finalized {
+                                if let Some(h) = state.worker.take() {
+                                    if let Some(tx) = &state.reaper_tx {
+                                        let q =
+                                            state.reaper_queue_len.fetch_add(1, Ordering::SeqCst)
+                                                + 1;
+                                        let _ = tx.send(h);
+                                        const REAPER_QUEUE_SOFT_MAX: usize = 128;
+                                        if q > REAPER_QUEUE_SOFT_MAX {
+                                            info_string(format!("reaper_queue_len_high len={}", q));
+                                        } else {
+                                            info_string(format!("reaper_detach queued len={}", q));
+                                        }
+                                    }
+                                }
+                                state.searching = false;
+                                state.stop_flag = None;
+                                state.ponder_hit_flag = None;
+                                let stale = state
+                                    .current_root_hash
+                                    .map(|h| h != state.position.zobrist_hash())
+                                    .unwrap_or(false);
+                                finalize_and_send(
+                                    &mut state,
+                                    "gameover_timeout_finalize",
+                                    None,
+                                    stale,
+                                );
+                                state.current_is_ponder = false;
+                                state.current_root_hash = None;
+                                state.current_time_control = None;
+                            }
+                        } else {
+                            // No rx: そのまま即時finalize（最悪resignになる）
+                            state.searching = false;
+                            state.stop_flag = None;
+                            state.ponder_hit_flag = None;
+                            let stale = state
+                                .current_root_hash
+                                .map(|h| h != state.position.zobrist_hash())
+                                .unwrap_or(false);
+                            finalize_and_send(
+                                &mut state,
+                                "gameover_immediate_finalize",
+                                None,
+                                stale,
+                            );
+                            state.current_is_ponder = false;
+                            state.current_root_hash = None;
+                            state.current_time_control = None;
+                        }
+                    } else {
+                        // 検索が開始前/既に停止済みでも、要求に従いbestmoveを返す（合法手フォールバックなど）。
+                        state.searching = false;
+                        state.stop_flag = None;
+                        state.ponder_hit_flag = None;
+                        let stale = state
+                            .current_root_hash
+                            .map(|h| h != state.position.zobrist_hash())
+                            .unwrap_or(false);
+                        finalize_and_send(&mut state, "gameover_immediate_finalize", None, stale);
+                        state.current_is_ponder = false;
+                        state.current_root_hash = None;
+                        state.current_time_control = None;
+                    }
+                } else {
+                    // 従来どおり: bestmoveを出さずサイレント停止
+                    if let Some(flag) = &state.stop_flag {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    if let Some(h) = state.worker.take() {
+                        let _ = h.join();
+                    }
+                    state.searching = false;
+                    state.stop_flag = None;
+                    state.ponder_hit_flag = None;
+                    state.current_time_control = None;
                 }
-                if let Some(h) = state.worker.take() {
-                    let _ = h.join();
-                }
-                state.searching = false;
-                state.stop_flag = None;
-                state.ponder_hit_flag = None;
                 continue;
             }
 
