@@ -275,11 +275,15 @@ impl SearchContext {
                 let elapsed_ms = elapsed.as_millis() as u64;
                 // Safety window before hard limit to exit gracefully (adaptive)
                 // Do not preempt ultra-short budgets
+                // Safety margin before hard limit to allow unwind/commit time.
+                // - >=500ms: use 3% clamped to [120,400] (既存ロジック)
+                // - 200..=499ms: widen from 40ms -> 80ms to stabilize on slower CI/VMs
+                //   where recursive unwindとログI/Oに時間を要するケースがあったため。
                 let safety_ms = if hard_limit_ms >= 500 {
                     let three_percent = (hard_limit_ms.saturating_mul(3)) / 100; // 3%
                     three_percent.clamp(120, 400)
                 } else if hard_limit_ms >= 200 {
-                    40
+                    80
                 } else {
                     0
                 };
