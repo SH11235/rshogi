@@ -4,6 +4,7 @@ mod options;
 mod search;
 mod state;
 mod stop;
+mod util;
 
 use anyhow::Result;
 use engine_core::evaluation::nnue;

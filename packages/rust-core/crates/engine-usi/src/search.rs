@@ -8,14 +8,13 @@ use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
 use engine_core::search::types::InfoCallback;
 use engine_core::shogi::{Color, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
-use engine_core::usi::{
-    append_usi_score_and_bound, create_position, move_to_usi, score_view_from_internal,
-};
+use engine_core::usi::{append_usi_score_and_bound, create_position, move_to_usi};
 use log::info;
 
 use crate::finalize::{finalize_and_send, fmt_hash};
 use crate::io::{info_string, usi_println};
 use crate::state::{EngineState, GoParams, UsiOptions};
+use crate::util::score_view_with_clamp;
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     let mut tokens = cmd.split_whitespace().skip(1).peekable();
@@ -189,35 +188,34 @@ pub fn run_search_thread(
     if info_enabled {
         use std::sync::Arc as StdArc;
 
-        let callback: InfoCallback = StdArc::new(|depth, score, nodes, elapsed, pv, node_type| {
-            let mut line = String::from("info");
-            line.push_str(&format!(" depth {}", depth));
-            line.push_str(" multipv 1");
-            line.push_str(&format!(" time {}", elapsed.as_millis()));
-            line.push_str(&format!(" nodes {}", nodes));
-            if elapsed.as_millis() > 0 {
-                let nps = (nodes as u128).saturating_mul(1000) / elapsed.as_millis();
-                line.push_str(&format!(" nps {}", nps));
-            }
-
-            let mut view = score_view_from_internal(score);
-            if let engine_core::usi::ScoreView::Cp(cp) = view {
-                if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
-                    view = engine_core::usi::ScoreView::Cp(-29_999);
+        let multipv = limits.multipv;
+        let callback: InfoCallback =
+            StdArc::new(move |depth, score, nodes, elapsed, pv, node_type| {
+                let mut line = String::from("info");
+                line.push_str(&format!(" depth {}", depth));
+                if multipv > 1 {
+                    line.push_str(" multipv 1");
                 }
-            }
-            append_usi_score_and_bound(&mut line, view, node_type);
-
-            if !pv.is_empty() {
-                line.push_str(" pv");
-                for m in pv.iter() {
-                    line.push(' ');
-                    line.push_str(&move_to_usi(m));
+                line.push_str(&format!(" time {}", elapsed.as_millis()));
+                line.push_str(&format!(" nodes {}", nodes));
+                if elapsed.as_millis() > 0 {
+                    let nps = (nodes as u128).saturating_mul(1000) / elapsed.as_millis();
+                    line.push_str(&format!(" nps {}", nps));
                 }
-            }
 
-            crate::io::usi_println(&line);
-        });
+                let view = score_view_with_clamp(score);
+                append_usi_score_and_bound(&mut line, view, node_type);
+
+                if !pv.is_empty() {
+                    line.push_str(" pv");
+                    for m in pv.iter() {
+                        line.push(' ');
+                        line.push_str(&move_to_usi(m));
+                    }
+                }
+
+                crate::io::usi_println(&line);
+            });
 
         limits.info_callback = Some(callback);
     }

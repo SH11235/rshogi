@@ -1,10 +1,11 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
 use engine_core::search::SearchResult;
-use engine_core::usi::{append_usi_score_and_bound, move_to_usi, score_view_from_internal};
+use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
 use crate::io::{info_string, usi_println};
 use crate::state::EngineState;
+use crate::util::{emit_bestmove, score_view_with_clamp};
 
 #[inline]
 pub fn fmt_hash(h: u64) -> String {
@@ -165,12 +166,7 @@ pub fn finalize_and_send(
                         s.push_str(&format!(" nodes {}", nodes));
                         s.push_str(&format!(" nps {}", nps_agg));
                         s.push_str(&format!(" hashfull {}", hf_permille));
-                        let mut view = score_view_from_internal(line.score_internal);
-                        if let engine_core::usi::ScoreView::Cp(cp) = view {
-                            if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
-                                view = engine_core::usi::ScoreView::Cp(-29_999);
-                            }
-                        }
+                        let view = score_view_with_clamp(line.score_internal);
                         append_usi_score_and_bound(&mut s, view, line.bound);
                         if !line.pv.is_empty() {
                             s.push_str(" pv");
@@ -217,18 +213,13 @@ pub fn finalize_and_send(
     } else {
         None
     };
-    if let Some(p) = ponder_mv {
-        usi_println(&format!("bestmove {} ponder {}", final_usi, p));
-    } else {
-        usi_println(&format!("bestmove {}", final_usi));
-    }
+    emit_bestmove(&final_usi, ponder_mv);
     state.bestmove_emitted = true;
     state.current_root_hash = None;
 }
 
 fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_permille: u16) {
     let mut s = String::from("info");
-    s.push_str(" multipv 1");
     s.push_str(&format!(" depth {}", res.stats.depth));
     if let Some(sd) = res.stats.seldepth {
         s.push_str(&format!(" seldepth {}", sd));
@@ -237,13 +228,10 @@ fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_
     s.push_str(&format!(" nodes {}", res.stats.nodes));
     s.push_str(&format!(" nps {}", nps_agg));
     s.push_str(&format!(" hashfull {}", hf_permille));
-    let mut view = score_view_from_internal(res.score);
-    if let engine_core::usi::ScoreView::Cp(cp) = view {
-        if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
-            view = engine_core::usi::ScoreView::Cp(-29_999);
-        }
-    }
+
+    let view = score_view_with_clamp(res.score);
     append_usi_score_and_bound(&mut s, view, res.node_type);
+
     let pv_ref: &[_] = if !final_best.pv.is_empty() {
         &final_best.pv
     } else {
@@ -282,11 +270,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
             final_usi,
             ponder_mv
         ));
-        if let Some(p) = ponder_mv {
-            usi_println(&format!("bestmove {} ponder {}", final_usi, p));
-        } else {
-            usi_println(&format!("bestmove {}", final_usi));
-        }
+        emit_bestmove(&final_usi, ponder_mv);
         state.bestmove_emitted = true;
         state.current_root_hash = None;
         return;
@@ -299,7 +283,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
             let slice = list.as_slice();
             if slice.is_empty() {
                 info_string(format!("{}_fast_select_resign", label));
-                usi_println("bestmove resign");
+                emit_bestmove("resign", None);
             } else {
                 let pos = &state.position;
                 let in_check = pos.is_in_check();
@@ -334,12 +318,12 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
 
                 let final_usi = move_to_usi(&chosen);
                 info_string(format!("{}_fast_select_legal move={}", label, final_usi));
-                usi_println(&format!("bestmove {}", final_usi));
+                emit_bestmove(&final_usi, None);
             }
         }
         Err(e) => {
             info_string(format!("{}_fast_select_error resign_fallback=1 err={}", label, e));
-            usi_println("bestmove resign");
+            emit_bestmove("resign", None);
         }
     }
     state.bestmove_emitted = true;
