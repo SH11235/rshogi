@@ -1,6 +1,7 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
 use engine_core::search::SearchResult;
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi, score_view_from_internal};
+use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
 use crate::io::{info_string, usi_println};
 use crate::state::EngineState;
@@ -29,10 +30,8 @@ pub fn finalize_and_send(
     stale: bool,
 ) {
     if stale {
-        info_string(format!("{label}_stale resign=1"));
-        usi_println("bestmove resign");
-        state.bestmove_emitted = true;
-        state.current_root_hash = None;
+        info_string(format!("{label}_stale=1 fallback=fast"));
+        finalize_and_send_fast(state, label);
         return;
     }
 
@@ -294,17 +293,48 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     }
 
     info_string(format!("{}_fast_path=legal_fallback", label));
-    let mg = engine_core::movegen::MoveGenerator::new();
+    let mg = MoveGenerator::new();
     match mg.generate_all(&state.position) {
         Ok(list) => {
             let slice = list.as_slice();
-            if let Some(mv) = slice.first() {
-                let final_usi = move_to_usi(mv);
-                info_string(format!("{}_fast_select_legal move={}", label, final_usi));
-                usi_println(&format!("bestmove {}", final_usi));
-            } else {
+            if slice.is_empty() {
                 info_string(format!("{}_fast_select_resign", label));
                 usi_println("bestmove resign");
+            } else {
+                let pos = &state.position;
+                let in_check = pos.is_in_check();
+                let is_king_move = |m: &engine_core::shogi::Move| {
+                    m.piece_type()
+                        .or_else(|| {
+                            m.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type))
+                        })
+                        .map(|pt| matches!(pt, PieceType::King))
+                        .unwrap_or(false)
+                };
+                let is_tactical = |m: &engine_core::shogi::Move| {
+                    m.is_drop() || m.is_capture_hint() || m.is_promote()
+                };
+
+                let legal_moves: Vec<_> =
+                    slice.iter().copied().filter(|&m| pos.is_legal_move(m)).collect();
+
+                let chosen = if legal_moves.is_empty() {
+                    slice[0]
+                } else if in_check {
+                    legal_moves[0]
+                } else if let Some(mv) =
+                    legal_moves.iter().find(|m| is_tactical(m) && !is_king_move(m)).copied()
+                {
+                    mv
+                } else if let Some(mv) = legal_moves.iter().find(|m| !is_king_move(m)).copied() {
+                    mv
+                } else {
+                    legal_moves[0]
+                };
+
+                let final_usi = move_to_usi(&chosen);
+                info_string(format!("{}_fast_select_legal move={}", label, final_usi));
+                usi_println(&format!("bestmove {}", final_usi));
             }
         }
         Err(e) => {
