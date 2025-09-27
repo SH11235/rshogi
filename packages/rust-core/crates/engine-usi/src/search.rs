@@ -12,9 +12,9 @@ use engine_core::usi::{append_usi_score_and_bound, create_position, move_to_usi}
 use log::info;
 
 use crate::finalize::{finalize_and_send, fmt_hash};
-use crate::io::{info_string, usi_println};
+use crate::io::info_string;
 use crate::state::{EngineState, GoParams, UsiOptions};
-use crate::util::score_view_with_clamp;
+use crate::util::{emit_bestmove, score_view_with_clamp};
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     let mut tokens = cmd.split_whitespace().skip(1).peekable();
@@ -146,11 +146,7 @@ pub fn limits_from_go(
             Color::Black => gp.btime.unwrap_or_default(),
             Color::White => gp.wtime.unwrap_or_default(),
         };
-        let periods = gp
-            .periods
-            .or(Some(opts.byoyomi_periods))
-            .unwrap_or(opts.byoyomi_periods)
-            .clamp(1, 10);
+        let periods = gp.periods.unwrap_or(opts.byoyomi_periods).clamp(1, 10);
         builder.byoyomi(main_time, byo, periods)
     } else if let (Some(b), Some(w)) = (gp.btime, gp.wtime) {
         let white_inc = gp.winc.unwrap_or_default();
@@ -284,11 +280,12 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         if let Ok(list) = mg.generate_all(&state.position) {
             let slice = list.as_slice();
             if slice.is_empty() {
-                usi_println("bestmove resign");
+                emit_bestmove("resign", None);
                 state.bestmove_emitted = true;
                 return Ok(());
             } else if slice.len() == 1 {
-                usi_println(&format!("bestmove {}", move_to_usi(&slice[0])));
+                let mv_usi = move_to_usi(&slice[0]);
+                emit_bestmove(&mv_usi, None);
                 state.bestmove_emitted = true;
                 return Ok(());
             }
@@ -425,7 +422,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 state.ponder_hit_flag = None;
                 state.result_rx = None;
                 state.current_time_control = None;
-                usi_println("bestmove resign");
+                emit_bestmove("resign", None);
             }
         }
     }

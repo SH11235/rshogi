@@ -127,14 +127,13 @@ pub fn finalize_and_send(
     }
 
     info_string(format!(
-        "{}_select source={} move={} stale={} soft_ms={} hard_ms={}",
+        "{}_select source={} move={} soft_ms={} hard_ms={}",
         label,
         source_to_str(final_best.source),
         final_best
             .best_move
             .map(|m| move_to_usi(&m))
             .unwrap_or_else(|| "resign".to_string()),
-        if stale { 1 } else { 0 },
         soft_ms,
         hard_ms
     ));
