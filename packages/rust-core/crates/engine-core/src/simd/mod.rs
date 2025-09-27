@@ -210,6 +210,8 @@ fn run_selftest_avx512f() -> bool {
     lens.extend_from_slice(&[64, 80, 96, 128]);
     // k set
     let ks: [f32; 5] = [1.0, -1.0, 2.0, -2.0, 0.75];
+    const ABS_EPS: f32 = 1.0e-6;
+    const REL_EPS: f32 = 1.0e-6;
 
     let mut seed: u64 = 0x9e3779b97f4a7c15;
     for &n in &lens {
@@ -228,14 +230,25 @@ fn run_selftest_avx512f() -> bool {
                 add_row_scaled_f32_scalar(&mut refdst, &row, k);
                 // test (avx512f kernel)
                 unsafe { x86::add_row_scaled_f32_avx512f(&mut dst, &row, k) };
-                // bitwise compare
+                // 許容誤差付き比較（FMA との差分を吸収）
                 if refdst.len() != dst.len() {
                     return false;
                 }
                 for i in 0..n {
-                    if refdst[i].to_bits() != dst[i].to_bits() {
-                        return false;
+                    let a = refdst[i];
+                    let b = dst[i];
+                    if a.to_bits() == b.to_bits() {
+                        continue;
                     }
+                    let diff = (a - b).abs();
+                    if diff <= ABS_EPS {
+                        continue;
+                    }
+                    let max_abs = a.abs().max(b.abs());
+                    if max_abs == 0.0 || diff <= max_abs * REL_EPS {
+                        continue;
+                    }
+                    return false;
                 }
                 // reset dst for next k
                 dst.fill(0.0);
