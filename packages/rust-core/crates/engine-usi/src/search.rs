@@ -5,9 +5,12 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
+use engine_core::search::types::InfoCallback;
 use engine_core::shogi::{Color, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
-use engine_core::usi::{create_position, move_to_usi};
+use engine_core::usi::{
+    append_usi_score_and_bound, create_position, move_to_usi, score_view_from_internal,
+};
 use log::info;
 
 use crate::finalize::{finalize_and_send, fmt_hash};
@@ -178,14 +181,47 @@ pub fn limits_from_go(
 pub fn run_search_thread(
     engine: Arc<std::sync::Mutex<engine_core::engine::controller::Engine>>,
     mut position: Position,
-    limits: SearchLimits,
+    mut limits: SearchLimits,
     info_enabled: bool,
     tx: mpsc::Sender<(u64, engine_core::search::SearchResult)>,
     search_id: u64,
 ) {
     if info_enabled {
-        info_string("search_thread=info_enabled");
+        use std::sync::Arc as StdArc;
+
+        let callback: InfoCallback = StdArc::new(|depth, score, nodes, elapsed, pv, node_type| {
+            let mut line = String::from("info");
+            line.push_str(&format!(" depth {}", depth));
+            line.push_str(" multipv 1");
+            line.push_str(&format!(" time {}", elapsed.as_millis()));
+            line.push_str(&format!(" nodes {}", nodes));
+            if elapsed.as_millis() > 0 {
+                let nps = (nodes as u128).saturating_mul(1000) / elapsed.as_millis();
+                line.push_str(&format!(" nps {}", nps));
+            }
+
+            let mut view = score_view_from_internal(score);
+            if let engine_core::usi::ScoreView::Cp(cp) = view {
+                if cp <= -(engine_core::search::constants::SEARCH_INF - 1) {
+                    view = engine_core::usi::ScoreView::Cp(-29_999);
+                }
+            }
+            append_usi_score_and_bound(&mut line, view, node_type);
+
+            if !pv.is_empty() {
+                line.push_str(" pv");
+                for m in pv.iter() {
+                    line.push(' ');
+                    line.push_str(&move_to_usi(m));
+                }
+            }
+
+            crate::io::usi_println(&line);
+        });
+
+        limits.info_callback = Some(callback);
     }
+
     let start_ts = Instant::now();
     let mut result = {
         let mut eng = engine.lock().unwrap();

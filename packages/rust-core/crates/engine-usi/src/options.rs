@@ -36,23 +36,31 @@ pub fn send_id_and_options(opts: &UsiOptions) {
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
-    let mut tokens = cmd.split_whitespace().skip(1);
-    let mut name = None;
-    let mut value = None;
-    while let Some(tok) = tokens.next() {
-        match tok {
-            "name" => name = tokens.next().map(|s| s.to_string()),
-            "value" => {
-                value = Some(tokens.collect::<Vec<_>>().join(" "));
-                break;
-            }
-            _ => {}
-        }
+    if !cmd.starts_with("setoption") {
+        return Ok(());
     }
 
-    let name = match name {
-        Some(n) => n,
-        None => return Ok(()),
+    let body = cmd.strip_prefix("setoption").unwrap_or("").trim();
+    if body.is_empty() {
+        return Ok(());
+    }
+
+    let (name, value) = if let Some(name_pos) = body.find("name") {
+        let after_name = body[name_pos + 4..].trim_start();
+        if let Some(value_pos) = after_name.find(" value ") {
+            (
+                Some(after_name[..value_pos].trim().to_string()),
+                Some(after_name[value_pos + 7..].trim().to_string()),
+            )
+        } else {
+            (Some(after_name.trim().to_string()), None)
+        }
+    } else {
+        (None, None)
+    };
+
+    let Some(name) = name.filter(|n| !n.is_empty()) else {
+        return Ok(());
     };
     let value_ref = value.as_deref();
 
@@ -373,7 +381,10 @@ fn print_time_policy_options(opts: &UsiOptions) {
         "option name OverheadMs type spin default {} min 0 max 5000",
         opts.overhead_ms
     ));
-    usi_println("option name ByoyomiOverheadMs type spin default 200 min 0 max 5000");
+    usi_println(&format!(
+        "option name ByoyomiOverheadMs type spin default {} min 0 max 5000",
+        opts.network_delay2_ms
+    ));
     usi_println(&format!(
         "option name ByoyomiSafetyMs type spin default {} min 0 max 2000",
         opts.byoyomi_safety_ms
