@@ -150,6 +150,18 @@ pub fn finalize_and_send(
                 0
             };
 
+            // Emit TT diagnostics snapshot (address/size/hf/attempts)
+            {
+                let dbg = {
+                    let eng = state.engine.lock().unwrap();
+                    eng.tt_debug_info()
+                };
+                info_string(format!(
+                    "tt_debug addr={:#x} size_mb={} hf={} store_attempts={}",
+                    dbg.addr, dbg.size_mb, dbg.hf_permille, dbg.store_attempts
+                ));
+            }
+
             if state.opts.multipv > 1 {
                 if let Some(lines) = &res.lines {
                     for line in lines.iter() {
@@ -248,6 +260,14 @@ fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_
 
 pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     if let Ok(eng) = state.engine.try_lock() {
+        // Emit TT diagnostics even in fast finalize path
+        {
+            let dbg = eng.tt_debug_info();
+            info_string(format!(
+                "{}_fast_tt_debug addr={:#x} size_mb={} hf={} store_attempts={}",
+                label, dbg.addr, dbg.size_mb, dbg.hf_permille, dbg.store_attempts
+            ));
+        }
         let final_best = eng.choose_final_bestmove(&state.position, None);
         let final_usi = final_best
             .best_move

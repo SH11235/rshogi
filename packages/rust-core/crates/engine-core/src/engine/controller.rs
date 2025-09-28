@@ -33,6 +33,15 @@ pub struct FinalBest {
     pub source: FinalBestSource,
 }
 
+/// Lightweight TT debug snapshot for diagnostics
+#[derive(Debug, Clone, Copy)]
+pub struct TtDebugInfo {
+    pub addr: usize,
+    pub size_mb: usize,
+    pub hf_permille: u16,
+    pub store_attempts: u64,
+}
+
 // Game phase detection is now handled by the game_phase module
 // See docs/game-phase-module-guide.md for details
 
@@ -684,6 +693,70 @@ impl Engine {
     /// Get current number of threads
     pub fn get_threads(&self) -> usize {
         self.num_threads
+    }
+
+    /// Get a diagnostic snapshot of the currently referenced TT
+    pub fn tt_debug_info(&self) -> TtDebugInfo {
+        use std::sync::Arc as StdArc;
+        if self.use_parallel {
+            let addr = StdArc::as_ptr(&self.shared_tt) as usize;
+            let size_mb = self.shared_tt.size();
+            let hf = self.shared_tt.hashfull();
+            let attempts = self.shared_tt.store_attempts();
+            return TtDebugInfo {
+                addr,
+                size_mb,
+                hf_permille: hf,
+                store_attempts: attempts,
+            };
+        }
+        // Single-threaded: use active searcher's TT if present, otherwise fallback to shared_tt
+        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = match self.engine_type {
+            EngineType::Material => self
+                .material_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Nnue => self
+                .nnue_basic_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Enhanced => self
+                .material_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::EnhancedNnue => self
+                .nnue_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+        };
+
+        if let Some(tt) = tt_opt {
+            let addr = StdArc::as_ptr(&tt) as usize;
+            let size_mb = tt.size();
+            let hf = tt.hashfull();
+            let attempts = tt.store_attempts();
+            TtDebugInfo {
+                addr,
+                size_mb,
+                hf_permille: hf,
+                store_attempts: attempts,
+            }
+        } else {
+            let addr = StdArc::as_ptr(&self.shared_tt) as usize;
+            let size_mb = self.shared_tt.size();
+            let hf = self.shared_tt.hashfull();
+            let attempts = self.shared_tt.store_attempts();
+            TtDebugInfo {
+                addr,
+                size_mb,
+                hf_permille: hf,
+                store_attempts: attempts,
+            }
+        }
     }
 
     /// Set transposition table size in MB
