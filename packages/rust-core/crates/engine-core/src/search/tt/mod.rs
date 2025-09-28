@@ -132,9 +132,6 @@ impl TranspositionTable {
             num_buckets = num_buckets.next_power_of_two();
         }
 
-        // Round to power of 2 for fast indexing
-        let num_buckets = num_buckets.next_power_of_two();
-
         // Allocate buckets
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
@@ -841,7 +838,7 @@ impl TranspositionTable {
 
         // Update node counter and check if we need to update hashfull estimate
         let node_count = self.node_counter.fetch_add(1, Ordering::Relaxed);
-        if node_count.is_multiple_of(256) {
+        if (node_count & 255) == 0 {
             self.update_hashfull_estimate();
 
             // Check GC trigger conditions
