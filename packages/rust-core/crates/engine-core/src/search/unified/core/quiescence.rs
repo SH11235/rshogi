@@ -73,9 +73,9 @@ static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
 // Lightweight, time-based poll state for quiescence search.
 // We keep a thread-local last-poll timestamp (ms since search start) to avoid
 // relying solely on node-count based polling, which can be sparse on heavy paths.
-thread_local! {
-    static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) };
-}
+const QS_LIGHT_POLL_INTERVAL_MS: u64 = 12;
+const NEAR_HARD_WINDOW_MS: u64 = 50;
+thread_local! { static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
 
 #[inline(always)]
 fn qs_should_light_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
@@ -87,12 +87,17 @@ where
     if let Some(tm) = &searcher.time_manager {
         let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
         let hard = tm.hard_limit_ms();
-        // Near-hard window: always poll when within 50ms of hard deadline
-        let near_hard = hard < u64::MAX && elapsed_ms.saturating_add(50) >= hard;
-        // Lightweight periodic poll: ~every 12ms
+        // Near-hard window: always poll when within window of hard deadline
+        let near_hard =
+            hard > 0 && hard < u64::MAX && elapsed_ms.saturating_add(NEAR_HARD_WINDOW_MS) >= hard;
+        // Lightweight periodic poll: ~every QS_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
         let periodic = QS_LAST_LIGHT_POLL_MS.with(|c| {
             let last = c.get();
-            let due = elapsed_ms.saturating_sub(last) >= 12;
+            let due = if elapsed_ms <= last {
+                true
+            } else {
+                elapsed_ms - last >= QS_LIGHT_POLL_INTERVAL_MS
+            };
             if due {
                 c.set(elapsed_ms);
             }
@@ -358,6 +363,9 @@ where
         // Search all legal moves to find check evasion
         let mut best = -SEARCH_INF;
         for &mv in moves.iter() {
+            if qs_light_time_poll(searcher) {
+                return if best == -SEARCH_INF { alpha } else { best };
+            }
             // Check QNodes budget before each move (important for strict limit enforcement)
             if let Some(limit) = qlimit {
                 let exceeded = if let Some(ref counter) = qnodes_counter {

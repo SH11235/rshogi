@@ -10,6 +10,7 @@ use crate::{
     },
     shogi::{PieceType, Position, TriedMoves},
 };
+use std::cell::Cell;
 
 /// Search a single node in the tree
 pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool>(
@@ -29,6 +30,59 @@ where
     // Clear PV at this ply on entry (stack-based PV)
     if crate::search::types::SearchStack::is_valid_ply(ply) {
         searcher.search_stack[ply as usize].pv_line.clear();
+    }
+
+    // Lightweight, time-based polling helpers (thread-local state)
+    const AB_LIGHT_POLL_INTERVAL_MS: u64 = 12;
+    const NEAR_HARD_WINDOW_MS: u64 = 50;
+    thread_local! { static AB_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
+    #[inline(always)]
+    fn ab_should_light_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+        searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+    ) -> bool
+    where
+        E: Evaluator + Send + Sync + 'static,
+    {
+        if let Some(tm) = &searcher.time_manager {
+            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            let hard = tm.hard_limit_ms();
+            // Near hard deadline: force polling within window
+            let near_hard = hard > 0
+                && hard < u64::MAX
+                && elapsed_ms.saturating_add(NEAR_HARD_WINDOW_MS) >= hard;
+            // Periodic lightweight poll roughly every AB_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
+            let periodic = AB_LAST_LIGHT_POLL_MS.with(|c| {
+                let last = c.get();
+                let due = if elapsed_ms <= last {
+                    true
+                } else {
+                    elapsed_ms - last >= AB_LIGHT_POLL_INTERVAL_MS
+                };
+                if due {
+                    c.set(elapsed_ms);
+                }
+                due
+            });
+            return near_hard || periodic;
+        }
+        false
+    }
+    #[inline(always)]
+    fn ab_light_time_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+        searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+    ) -> bool
+    where
+        E: Evaluator + Send + Sync + 'static,
+    {
+        if ab_should_light_poll(searcher) {
+            searcher.context.process_events(&searcher.time_manager);
+            if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)
+                || searcher.context.should_stop()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     // Get adaptive polling mask based on time control (unified with alpha_beta)
@@ -53,6 +107,11 @@ where
         if searcher.context.should_stop() {
             return alpha;
         }
+    }
+
+    // Lightweight time-based polling to augment node-based checks
+    if ab_light_time_poll(searcher) {
+        return alpha;
     }
 
     let original_alpha = alpha;
@@ -141,6 +200,11 @@ where
         }
     };
 
+    // Poll after potentially heavy move generation
+    if ab_light_time_poll(searcher) {
+        return alpha;
+    }
+
     if moves.is_empty() {
         // No legal moves
         if in_check {
@@ -227,6 +291,11 @@ where
         _owned_moves = None;
     };
 
+    // Poll after potentially heavy ordering work
+    if ab_light_time_poll(searcher) {
+        return alpha;
+    }
+
     // Skip selective prefetch - let individual moves control their own prefetching
 
     // Early futility pruning check
@@ -249,6 +318,11 @@ where
         // Check stop flag at the beginning of each move
         if searcher.context.should_stop() {
             break; // Exit move loop immediately
+        }
+
+        // Lightweight polling inside the hot loop
+        if ab_light_time_poll(searcher) {
+            return best_score.max(alpha);
         }
 
         // Double safety check: verify piece ownership for normal moves
