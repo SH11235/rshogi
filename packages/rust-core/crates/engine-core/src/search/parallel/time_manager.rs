@@ -1,6 +1,6 @@
 //! Time management thread implementation
 
-use super::SharedSearchState;
+use super::{util::compute_finalize_window_ms, SharedSearchState};
 use crate::{
     search::types::{StopInfo, TerminationReason},
     time_management::TimeManager,
@@ -98,22 +98,6 @@ pub fn start_time_manager(
             debug!("Time manager stopped");
         }
     })
-}
-
-fn compute_finalize_window_ms(total_limit_ms: u64) -> u64 {
-    use crate::search::constants::NEAR_HARD_FINALIZE_MS;
-
-    if total_limit_ms == 0 || total_limit_ms == u64::MAX {
-        0
-    } else if total_limit_ms >= 1_000 {
-        NEAR_HARD_FINALIZE_MS
-    } else if total_limit_ms >= 500 {
-        NEAR_HARD_FINALIZE_MS / 2
-    } else if total_limit_ms >= 200 {
-        120
-    } else {
-        0
-    }
 }
 
 /// Start fail-safe guard thread

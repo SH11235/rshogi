@@ -23,6 +23,7 @@ use std::{
 use super::time_manager::{start_fail_safe_guard, start_time_manager};
 use super::work_queue::{Queues, WorkItem};
 use super::worker::{start_worker_with, WorkerConfig};
+use crate::search::parallel::util::compute_finalize_window_ms;
 
 #[cfg(feature = "ybwc")]
 use super::SplitPoint;
@@ -808,9 +809,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             }
         } else {
+            // Minimal hygiene wait to let workers observe the stop flag before the next search starts.
+            let mut waited_ms = 0u64;
+            while self.active_workers.load(Ordering::Acquire) != 0 && waited_ms < 50 {
+                thread::sleep(Duration::from_millis(5));
+                waited_ms += 5;
+            }
             info!(
-                "diag finalize_skip_join=1 pending_workers={} time_handle={} fail_safe_handle={}",
+                "diag finalize_skip_join=1 pending_workers={} waited_ms={} time_handle={} fail_safe_handle={}",
                 self.active_workers.load(Ordering::Acquire),
+                waited_ms,
                 time_handle.is_some(),
                 fail_safe_handle.is_some()
             );
@@ -1385,21 +1393,6 @@ fn compute_hard_guard_ms(total_hard_limit_ms: u64) -> u64 {
     }
 }
 
-fn compute_finalize_window_ms(total_limit_ms: u64) -> u64 {
-    use crate::search::constants::NEAR_HARD_FINALIZE_MS;
-    if total_limit_ms == 0 || total_limit_ms == u64::MAX {
-        0
-    } else if total_limit_ms >= 1_000 {
-        NEAR_HARD_FINALIZE_MS
-    } else if total_limit_ms >= 500 {
-        NEAR_HARD_FINALIZE_MS / 2
-    } else if total_limit_ms >= 200 {
-        120
-    } else {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests_compute_guard_and_wait {
     use super::*;
@@ -1424,6 +1417,7 @@ mod tests_compute_guard_and_wait {
     #[test]
     fn test_compute_finalize_window_ms_piecewise() {
         use crate::search::constants::NEAR_HARD_FINALIZE_MS;
+        use crate::search::parallel::util::compute_finalize_window_ms;
         assert_eq!(compute_finalize_window_ms(2_000), NEAR_HARD_FINALIZE_MS);
         assert_eq!(compute_finalize_window_ms(1_000), NEAR_HARD_FINALIZE_MS);
         assert_eq!(compute_finalize_window_ms(800), NEAR_HARD_FINALIZE_MS / 2);
