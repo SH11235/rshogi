@@ -345,12 +345,14 @@ impl FlexibleTTBucket {
             let idx = worst_idx * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
+            // A'案: data=0 → Key CAS → data=new
+            self.entries[idx + 1].store(0, Ordering::Release);
+
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
                 record_metric(m, MetricType::CasAttempt);
             }
 
-            // A案: Key を CAS で先に確保 → data=0 → 新 data を公開
             match self.entries[idx].compare_exchange(
                 old_key,
                 new_entry.key,
@@ -358,14 +360,13 @@ impl FlexibleTTBucket {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    // 最小窓での不整合を避けるため 0→新 値の順で公開
-                    self.entries[idx + 1].store(0, Ordering::Release);
+                    // 新キー公開後に最終データを公開
                     self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-
                     #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
                         record_metric(m, MetricType::CasSuccess);
-                        record_metric(m, MetricType::AtomicStore(2));
+                        // data=new の 1 ストアのみカウント
+                        record_metric(m, MetricType::AtomicStore(1));
                         record_metric(m, MetricType::ReplaceWorst);
                     }
                 }
@@ -379,7 +380,7 @@ impl FlexibleTTBucket {
                             record_metric(m, MetricType::AtomicStore(1));
                         }
                     } else {
-                        // 別 key に置換された：今回は見送り
+                        // 別 key に置換された：今回は見送り（data は 0 のまま）
                         #[cfg(feature = "tt_metrics")]
                         if let Some(m) = metrics {
                             record_metric(m, MetricType::CasFailure);
