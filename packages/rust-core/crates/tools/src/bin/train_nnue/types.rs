@@ -26,12 +26,25 @@ pub struct TrainingPosition {
     pub depth: Option<u8>,
     #[serde(default)]
     pub seldepth: Option<u8>,
+    #[serde(default)]
+    pub teacher_cp: Option<i32>,
+    #[serde(default)]
+    pub teacher_score: Option<TeacherScore>,
+    #[serde(default)]
+    pub teacher_weight: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LineInfo {
     #[serde(default)]
     pub score_cp: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TeacherScore {
+    #[serde(rename = "type")]
+    pub kind: Option<String>, // "cp" | "mate"
+    pub value: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -42,6 +55,7 @@ pub struct Config {
     pub optimizer: String,
     pub l2_reg: f32,
     pub label_type: String,
+    pub mu: f32,
     pub scale: f32,
     pub cp_clip: i32,
     pub accumulator_dim: usize,

@@ -189,7 +189,13 @@ impl Engine {
         };
 
         // Create shared TT for parallel search
-        let shared_tt = Arc::new(TranspositionTable::new(default_tt_size));
+        let mut shared_tt = Arc::new(TranspositionTable::new(default_tt_size));
+        #[cfg(feature = "tt_metrics")]
+        {
+            if let Some(tt) = Arc::get_mut(&mut shared_tt) {
+                tt.enable_metrics();
+            }
+        }
 
         Engine {
             engine_type,
@@ -209,6 +215,39 @@ impl Engine {
             pending_tt_size: None,
             desired_multi_pv: 1,
         }
+    }
+
+    /// Return TT metrics summary string if available (tt_metrics feature only)
+    #[cfg(feature = "tt_metrics")]
+    pub fn tt_metrics_summary(&self) -> Option<String> {
+        if self.use_parallel {
+            return self.shared_tt.metrics_summary_string();
+        }
+        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = match self.engine_type {
+            EngineType::Material => self
+                .material_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Nnue => self
+                .nnue_basic_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::Enhanced => self
+                .material_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            EngineType::EnhancedNnue => self
+                .nnue_enhanced_searcher
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+        };
+        tt_opt
+            .and_then(|tt| tt.metrics_summary_string())
+            .or_else(|| self.shared_tt.metrics_summary_string())
     }
 
     /// Get current hashfull estimate of the transposition table (permille: 0-1000)
@@ -697,7 +736,14 @@ impl Engine {
             }
 
             // Recreate shared TT with new size
-            self.shared_tt = Arc::new(TranspositionTable::new(new_size));
+            let mut new_tt_arc = Arc::new(TranspositionTable::new(new_size));
+            #[cfg(feature = "tt_metrics")]
+            {
+                if let Some(tt) = Arc::get_mut(&mut new_tt_arc) {
+                    tt.enable_metrics();
+                }
+            }
+            self.shared_tt = new_tt_arc;
 
             // Recreate the single-threaded searcher for the current engine type
             match self.engine_type {
@@ -785,6 +831,15 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    /// Return NNUE backend kind if available ("classic" or "single")
+    pub fn nnue_backend_kind(&self) -> Option<&'static str> {
+        let guard = self.nnue_evaluator.read();
+        match &*guard {
+            Some(wrapper) => Some(wrapper.backend_kind()),
+            None => None,
+        }
     }
 
     /// Get current engine type
@@ -900,7 +955,14 @@ impl Engine {
     pub fn clear_hash(&mut self) {
         // Recreate shared_tt with new size
         // This will effectively clear all entries
-        self.shared_tt = Arc::new(TranspositionTable::new(self.tt_size_mb));
+        let mut new_tt_arc = Arc::new(TranspositionTable::new(self.tt_size_mb));
+        #[cfg(feature = "tt_metrics")]
+        {
+            if let Some(tt) = Arc::get_mut(&mut new_tt_arc) {
+                tt.enable_metrics();
+            }
+        }
+        self.shared_tt = new_tt_arc;
 
         info!(
             "Hash table cleared (engine: {:?}, size: {}MB)",

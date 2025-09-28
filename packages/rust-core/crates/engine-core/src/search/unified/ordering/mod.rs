@@ -22,6 +22,35 @@ pub struct MoveOrdering {
 }
 
 impl MoveOrdering {
+    /// 軽量チェック: SEE を呼び出しても安全かどうか
+    /// - ドロップは対象外
+    /// - from に現在手番の駒がある
+    /// - to に相手方の駒がある（捕獲前提）
+    #[inline]
+    fn can_call_see(pos: &Position, mv: Move) -> bool {
+        if mv.is_drop() {
+            return false;
+        }
+        let from = match mv.from() {
+            Some(sq) => sq,
+            None => return false,
+        };
+        let from_piece = match pos.piece_at(from) {
+            Some(p) => p,
+            None => return false,
+        };
+        if from_piece.color != pos.side_to_move {
+            return false;
+        }
+        if let Some(to_piece) = pos.piece_at(mv.to()) {
+            if to_piece.color == pos.side_to_move {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        true
+    }
     /// Create new move ordering
     pub fn new(history: Arc<Mutex<History>>) -> Self {
         Self {
@@ -112,29 +141,25 @@ impl MoveOrdering {
         // For other moves, use normal scoring but without SearchStack-specific features
         // (since we're at root and don't have a meaningful SearchStack context)
 
-        // Special handling for king moves
-        if mv.piece_type() == Some(crate::PieceType::King) && !pos.is_in_check() {
-            if mv.is_capture_hint() {
-                if let Some(victim) = mv.captured_piece_type() {
-                    use crate::PieceType;
-                    match victim {
-                        PieceType::Rook | PieceType::Bishop => {
-                            return 50_000 + Self::piece_value(Some(victim));
-                        }
-                        _ => {
-                            return -10_000 + Self::piece_value(Some(victim));
-                        }
-                    }
-                }
-            }
-            return -20_000;
-        }
+        // Quiet king penalty（加点式に寄せるため、ここではフラグのみ）
+        let quiet_king_penalty_root = mv.piece_type() == Some(crate::PieceType::King)
+            && !pos.is_in_check()
+            && !mv.is_capture_hint()
+            && !mv.is_promote();
 
         // Good captures
         if mv.is_capture_hint() {
             let victim_value = Self::piece_value(mv.captured_piece_type());
             let attacker_value = Self::piece_value(mv.piece_type());
             let mvv_lva = victim_value * 10 - attacker_value;
+
+            // SEE bonus/penalty at root to better prioritize tactically sound captures
+            // Root has few moves so SEE cost is acceptable here
+            let see_adj = if Self::can_call_see(pos, mv) && pos.see_ge(mv, 0) {
+                2_000
+            } else {
+                -2_000
+            };
 
             // Add capture history score
             let capture_history_score = match self.history.lock() {
@@ -150,7 +175,7 @@ impl MoveOrdering {
                 Err(_) => 0,
             };
 
-            return 100_000 + mvv_lva + capture_history_score / 10;
+            return 100_000 + mvv_lva + capture_history_score / 10 + see_adj;
         }
 
         // History heuristic for quiet moves
@@ -159,7 +184,25 @@ impl MoveOrdering {
             Err(_) => 0,
         };
 
-        history_score
+        // Global killer bonus at root（ply=0）
+        let mut bonus = 0;
+        let killers = self.killer_table.get(0);
+        for (slot, &k) in killers.iter().enumerate() {
+            if Some(mv) == k {
+                bonus = 600 - slot as i32; // smaller than capture scores
+                break;
+            }
+        }
+
+        // ルートでも静かな玉手は控えめに減点。ただしSEE良しなら減点しない。
+        let mut score = history_score + bonus;
+        if quiet_king_penalty_root {
+            let see_good = Self::can_call_see(pos, mv) && pos.see_ge(mv, 0);
+            if !see_good {
+                score -= 3_000;
+            }
+        }
+        score
     }
 
     /// Score a single move using SearchStack
@@ -180,27 +223,17 @@ impl MoveOrdering {
             return 1_000_000;
         }
 
-        // Special handling for king moves - apply significant penalty
-        // unless we're in check (where king moves might be necessary)
-        if mv.piece_type() == Some(crate::PieceType::King) && !pos.is_in_check() {
-            // King moves should be considered last unless they're captures of major pieces
-            if mv.is_capture_hint() {
-                if let Some(victim) = mv.captured_piece_type() {
-                    use crate::PieceType;
-                    match victim {
-                        PieceType::Rook | PieceType::Bishop => {
-                            // Allow capturing major pieces with king but with penalty
-                            return 50_000 + Self::piece_value(Some(victim));
-                        }
-                        _ => {
-                            // Heavily penalize capturing minor pieces with king
-                            return -10_000 + Self::piece_value(Some(victim));
-                        }
-                    }
-                }
+        // Quiet king penalty（加点式に寄せる）
+        let mut quiet_king_penalty = 0;
+        if mv.piece_type() == Some(crate::PieceType::King)
+            && !pos.is_in_check()
+            && !mv.is_capture_hint()
+            && !mv.is_promote()
+        {
+            let see_good = Self::can_call_see(pos, mv) && pos.see_ge(mv, 0);
+            if !see_good {
+                quiet_king_penalty = if ply <= 8 { 3_000 } else { 1_500 };
             }
-            // Non-capturing king moves get heavy penalty
-            return -20_000;
         }
 
         // Good captures
@@ -209,6 +242,14 @@ impl MoveOrdering {
             let victim_value = Self::piece_value(mv.captured_piece_type());
             let attacker_value = Self::piece_value(mv.piece_type());
             let mvv_lva = victim_value * 10 - attacker_value;
+
+            // 非ルートでも SEE を利用したい場面はあるが、上記の整合チェックを通った時のみ呼ぶ
+            // （生成/メタデータの稀な不整合で from が空の場合などのパニックを回避）。
+            let see_adj = if Self::can_call_see(pos, mv) && pos.see_ge(mv, 0) {
+                500
+            } else {
+                0
+            };
 
             // Add capture history score
             let capture_history_score = match self.history.lock() {
@@ -224,7 +265,7 @@ impl MoveOrdering {
                 Err(_) => 0,
             };
 
-            return 100_000 + mvv_lva + capture_history_score / 10;
+            return 100_000 + mvv_lva + capture_history_score / 10 + see_adj;
         }
 
         // Counter move - check if this move is a known good response to the previous move
@@ -293,8 +334,8 @@ impl MoveOrdering {
             }
         };
 
-        // Base score with history
-        10_000 + history_score
+        // Base score with history and optional quiet-king penalty
+        10_000 + history_score - quiet_king_penalty
     }
 
     /// Get piece value for MVV-LVA

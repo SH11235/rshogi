@@ -125,7 +125,7 @@ where
         let _child_hash = pos.zobrist_hash;
 
         // Prefetch TT entry for the new position (root moves are always important)
-        if USE_TT && !searcher.disable_prefetch {
+        if USE_TT && !searcher.is_prefetch_disabled() {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
 
@@ -212,7 +212,7 @@ where
 
             // Debug logging for PV construction at root
             #[cfg(debug_assertions)]
-            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+            if cfg!(feature = "pv_debug_logs") {
                 eprintln!(
                     "[ROOT PV] depth={depth}, move_idx={move_idx}, best_move={}, score={score}",
                     crate::usi::move_to_usi(&mv)
@@ -234,7 +234,7 @@ where
             }
             #[cfg(debug_assertions)]
             {
-                if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                if cfg!(feature = "pv_debug_logs") {
                     // Validate child PV moves before extending
                     let mut valid_child_pv = Vec::new();
                     let mut temp_pos = pos.clone();
@@ -279,7 +279,7 @@ where
     if !pv.is_empty() {
         // Debug logging for final PV construction
         #[cfg(debug_assertions)]
-        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+        if cfg!(feature = "pv_debug_logs") {
             eprintln!(
                 "[ROOT FINAL PV] depth={depth}, score={best_score}, pv_len={}, pv={}",
                 pv.len(),
@@ -391,7 +391,7 @@ where
         let undo = pos.do_move(mv);
 
         // Optional prefetch
-        if USE_TT && !searcher.disable_prefetch {
+        if USE_TT && !searcher.is_prefetch_disabled() {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
 

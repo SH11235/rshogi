@@ -250,6 +250,21 @@ RUST_LOG=debug cargo run --release -p engine-usi
 
 注: `nnue_telemetry` はオーバーヘッドを抑えた軽量な集計（Relaxedの原子加算/スワップ）ですが、本番計測ではオフにすることを推奨します。
 
+### 診断系の有効化（開発時）
+
+探索ログやTTメトリクスをまとめて確認したい場合、メタフィーチャー`diagnostics`を利用してください。
+
+```bash
+cargo run -p engine-usi --release --features diagnostics -- \
+  # 例: 固定時間でのテスト
+  <<USI commands>>
+```
+
+有効時の目印:
+- 探索中の`info`行に`hashfull`が付与されます。
+- 終局時、`info multipv 1 ... hashfull ... pv ...`が必ず出力されます。
+- `tt-metrics`の要約が`info string tt_metrics ...`として出力されます。
+
 ### 5. 並列探索ベンチマーク
 
 #### parallel_benchmark

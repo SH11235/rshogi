@@ -100,6 +100,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             qnodes_counter: limits.qnodes_counter.clone(),
                             immediate_eval_at_depth_zero: limits.immediate_eval_at_depth_zero,
                             multipv: limits.multipv,
+                            enable_fail_safe: limits.enable_fail_safe,
                         };
 
                         // Convert to TimeLimits
@@ -517,8 +518,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Record start time for fail-safe
         let search_start = Instant::now();
 
-        // Reset state
-        self.shared_state.reset();
+        // Wire external stop_flag (from USI) into SharedSearchState for this search session.
+        // Without this, GUI-issued `stop` does not propagate to parallel workers,
+        // and the frontend may time out and fall back to fast finalize.
+        if let Some(ext_stop) = limits.stop_flag.clone() {
+            // Recreate shared_state with the provided stop flag so that all workers
+            // and the TimeManager observe the same flag as the USI layer.
+            self.shared_state =
+                Arc::new(SharedSearchState::with_threads(ext_stop, self.num_threads));
+        } else {
+            // Ensure clean state when no external flag is provided.
+            self.shared_state.reset();
+        }
+
+        // Reset counters for this session
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
         self.pending_work_items.store(0, Ordering::Release);
@@ -626,8 +639,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         };
 
         // Start fail-safe guard thread
-        let fail_safe_handle =
-            start_fail_safe_guard(search_start, limits.clone(), self.shared_state.clone());
+        let fail_safe_handle = if limits.enable_fail_safe {
+            Some(start_fail_safe_guard(search_start, limits.clone(), self.shared_state.clone()))
+        } else {
+            None
+        };
 
         // Main thread does iterative deepening and generates work
         let result = self.run_main_thread(position, limits, main_worker);
@@ -645,9 +661,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         if let Some(handle) = time_handle {
             let _ = handle.join();
         }
-
-        // Stop fail-safe guard
-        let _ = fail_safe_handle.join();
+        if let Some(h) = fail_safe_handle {
+            let _ = h.join();
+        }
 
         // If we spawned a TimeManager after ponderhit, join it too
         {
@@ -999,6 +1015,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         best_result.stats.nodes = self.shared_state.get_nodes();
         best_result.stats.qnodes = self.shared_state.get_qnodes();
+
+        // Propagate stop info recorded by time/fail-safe managers when available
+        if let Some(info) = self.shared_state.stop_info.get() {
+            best_result = SearchResult::with_stop_info(
+                best_result.best_move,
+                best_result.score,
+                best_result.stats,
+                best_result.node_type,
+                info.clone(),
+            );
+        }
 
         // Ensure we always have a move (fallback to first legal move if needed)
         if best_result.best_move.is_none() {

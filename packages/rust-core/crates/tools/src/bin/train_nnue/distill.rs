@@ -2259,6 +2259,7 @@ mod distill_training_tests {
             optimizer: "sgd".to_string(),
             l2_reg: 0.0,
             label_type: "cp".to_string(),
+            mu: 0.0,
             scale: 600.0,
             cp_clip: 1200,
             accumulator_dim: 2,

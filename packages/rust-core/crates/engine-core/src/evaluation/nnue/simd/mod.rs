@@ -118,6 +118,16 @@ pub mod scalar {
 pub struct SimdDispatcher;
 
 impl SimdDispatcher {
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    fn nnue_clamp() -> Option<&'static str> {
+        use std::sync::OnceLock;
+        static CLAMP: OnceLock<Option<String>> = OnceLock::new();
+        CLAMP
+            .get_or_init(|| std::env::var("SHOGI_NNUE_SIMD").ok().map(|s| s.to_ascii_lowercase()))
+            .as_deref()
+    }
+
     /// Select the best available implementation for affine transformation
     #[inline]
     pub fn affine_transform(
@@ -130,7 +140,11 @@ impl SimdDispatcher {
     ) {
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            let clamp = Self::nnue_clamp();
+            let try_avx2 = clamp.is_none() || clamp == Some("avx2");
+            let try_sse41 = clamp.is_none() || clamp == Some("sse41") || clamp == Some("sse4.1");
+
+            if try_avx2 && is_x86_feature_detected!("avx2") {
                 unsafe {
                     return x86_64::affine_transform_avx2(
                         input, weights, biases, output, input_dim, output_dim,
@@ -138,7 +152,7 @@ impl SimdDispatcher {
                 }
             }
 
-            if is_x86_feature_detected!("sse4.1") {
+            if try_sse41 && is_x86_feature_detected!("sse4.1") {
                 unsafe {
                     return x86_64::affine_transform_sse41(
                         input, weights, biases, output, input_dim, output_dim,
@@ -156,13 +170,17 @@ impl SimdDispatcher {
     pub fn clipped_relu(input: &[i32], output: &mut [i8], size: usize) {
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            let clamp = Self::nnue_clamp();
+            let try_avx2 = clamp.is_none() || clamp == Some("avx2");
+            let try_sse41 = clamp.is_none() || clamp == Some("sse41") || clamp == Some("sse4.1");
+
+            if try_avx2 && is_x86_feature_detected!("avx2") {
                 unsafe {
                     return x86_64::clipped_relu_avx2(input, output, size);
                 }
             }
 
-            if is_x86_feature_detected!("sse4.1") {
+            if try_sse41 && is_x86_feature_detected!("sse4.1") {
                 unsafe {
                     return x86_64::clipped_relu_sse41(input, output, size);
                 }
@@ -178,13 +196,17 @@ impl SimdDispatcher {
     pub fn transform_features(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            let clamp = Self::nnue_clamp();
+            let try_avx2 = clamp.is_none() || clamp == Some("avx2");
+            let try_sse41 = clamp.is_none() || clamp == Some("sse41") || clamp == Some("sse4.1");
+
+            if try_avx2 && is_x86_feature_detected!("avx2") {
                 unsafe {
                     return x86_64::transform_features_avx2(us, them, output, size);
                 }
             }
 
-            if is_x86_feature_detected!("sse4.1") {
+            if try_sse41 && is_x86_feature_detected!("sse4.1") {
                 unsafe {
                     return x86_64::transform_features_sse41(us, them, output, size);
                 }
@@ -206,7 +228,11 @@ impl SimdDispatcher {
     ) {
         #[cfg(target_arch = "x86_64")]
         {
-            if is_x86_feature_detected!("avx2") {
+            let clamp = Self::nnue_clamp();
+            let try_avx2 = clamp.is_none() || clamp == Some("avx2");
+            let try_sse41 = clamp.is_none() || clamp == Some("sse41") || clamp == Some("sse4.1");
+
+            if try_avx2 && is_x86_feature_detected!("avx2") {
                 unsafe {
                     return x86_64::update_accumulator_avx2(
                         accumulator,
@@ -218,7 +244,7 @@ impl SimdDispatcher {
                 }
             }
 
-            if is_x86_feature_detected!("sse4.1") {
+            if try_sse41 && is_x86_feature_detected!("sse4.1") {
                 unsafe {
                     return x86_64::update_accumulator_sse41(
                         accumulator,

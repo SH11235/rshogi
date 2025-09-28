@@ -539,3 +539,24 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 Prune 補足:
 - `--dry-run --prune` / `--dry-run --prune-on-success` では、削除計画（対象件数・合計サイズ）を表示します（`--verbose` で対象ファイル一覧も表示）。
 - 中間 manifest は prune 対象です（`pass2.manifest.json` と各 `pass2.part-*.manifest.json` を含む）。集約情報は orchestrator の manifest に記録されます。
+
+## 付録: 分析/補助ツール
+
+### analyze_endgame_performance（終盤探索性能の比較）
+- ツール: `analyze_endgame_performance`
+- 概要: 指定局面（またはファイルで複数局面）で Material/Enhanced/Nnue/EnhancedNnue の探索性能を固定時間で比較します。
+- 改良点（本セッションで追加）:
+  - 複数局面一括（`--sfen-file`）/ 反復実行（`--repeat`）/ JSON出力（`--json-out`）
+  - NNUE系で `--weights` 未指定時に警告
+- 使い方:
+  ```bash
+  # 単一局面
+  cargo run -p tools --bin analyze_endgame_performance -- \
+    --sfen "+B1sg1gsnl/2+N2k1b1/pP2pp2p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32" \
+    --time-ms 5000 --weights /path/to/nn.bin --repeat 3 --json-out runs/reports/endgame_perf.json
+
+  # 複数局面（1行1局面。行頭が 'sfen ' でも可）
+  cargo run -p tools --bin analyze_endgame_performance -- \
+    --sfen-file runs/fixtures/endgame.sfen.txt --time-ms 3000 \
+    --weights /path/to/nn.bin --repeat 5 --json-out runs/reports/endgame_perf_multi.json
+  ```
