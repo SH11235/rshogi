@@ -25,7 +25,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     if let Some(tm) = &searcher.time_manager {
-        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let elapsed_ms = tm.elapsed_ms();
         let hard = tm.hard_limit_ms();
         // Near hard deadline: force polling within window
         let near_hard = hard > 0

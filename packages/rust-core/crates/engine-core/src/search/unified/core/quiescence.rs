@@ -85,7 +85,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     if let Some(tm) = &searcher.time_manager {
-        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let elapsed_ms = tm.elapsed_ms();
         let hard = tm.hard_limit_ms();
         // Near-hard window: always poll when within window of hard deadline
         let near_hard =
@@ -175,7 +175,7 @@ where
 
     // Hard-limit short-circuit: if we are past the hard deadline (or planned end), exit immediately.
     if let Some(tm) = &searcher.time_manager {
-        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let elapsed_ms = tm.elapsed_ms();
         let hard = tm.hard_limit_ms();
         if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
             return alpha;

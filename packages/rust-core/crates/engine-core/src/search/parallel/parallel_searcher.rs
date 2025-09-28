@@ -724,6 +724,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         for iteration in 1.. {
             // Check for ponderhit and create TimeManager dynamically if needed
             self.handle_ponderhit_time_management(position, &limits);
+            // If TM was just created on ponderhit, attach it to the main thread searcher (idempotent)
+            if let Some(tm) = { self.time_manager.lock().unwrap().clone() } {
+                main_thread.attach_time_manager(tm);
+            }
 
             // Skip stop check on first iteration to ensure we get at least one result
             if iteration > 1 && self.shared_state.should_stop() {
