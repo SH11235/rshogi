@@ -18,9 +18,25 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release
   - `fast-fma` → `engine-core/nnue_fast_fma`（FMAで加算高速化、丸め微差を許容）
   - `diff-agg-hash` → `engine-core/diff_agg_hash`（差分集計のHashMap実装をA/B）
   - `nnue-telemetry` → `engine-core/nnue_telemetry`（軽量テレメトリ）
-  - `tt-metrics`, `ybwc`, `nightly`（必要に応じて）
+  - `tt_metrics`, `ybwc`, `nightly`（必要に応じて）
 
 注: `nnue_single_diff`（SINGLE 差分NNUE）は恒久化され、常時有効です。ビルド時の切替は不要になりました。
+
+### 診断ログ（任意）
+`diagnostics` フィーチャーを有効にすると、finalize 時に軽量な診断行を1本追加で出力します（既定はOFF）。
+
+```bash
+RUSTFLAGS="-C target-cpu=native" \
+  cargo run -p engine-usi --release --features diagnostics -- --usi
+```
+
+出力例（行の一部）:
+
+```
+info string finalize_diag seldepth=7 qratio=0.214 tt_hit_rate=0.356 tt_hits=62345 asp_fail=2 asp_hit=3 re_searches=1 pv_changed=1 dup_pct=12.5 root_fail_high=4
+```
+
+オーバーヘッドは最小限（文字列整形＋除算数回）で、検索ループ側の挙動を変更しません。
 
 ### 例
 ```bash
