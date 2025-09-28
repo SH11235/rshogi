@@ -61,9 +61,9 @@ impl TranspositionTable {
 
                 // Clear if too old
                 if age_distance >= threshold_age_distance {
-                    // Clear the entry atomically
-                    bucket.entries[key_idx].store(0, Ordering::Release);
+                    // Clear the entry atomically (data→key の順で公開)
                     bucket.entries[data_idx].store(0, Ordering::Release);
+                    bucket.entries[key_idx].store(0, Ordering::Release);
 
                     #[cfg(feature = "tt_metrics")]
                     self.gc_entries_cleared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -93,9 +93,9 @@ impl TranspositionTable {
 
                 // Clear if too old
                 if age_distance >= threshold_age_distance {
-                    // Clear the entry atomically
-                    bucket.entries[key_idx].store(0, Ordering::Release);
+                    // Clear the entry atomically (data→key の順で公開)
                     bucket.entries[data_idx].store(0, Ordering::Release);
+                    bucket.entries[key_idx].store(0, Ordering::Release);
 
                     #[cfg(feature = "tt_metrics")]
                     self.gc_entries_cleared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

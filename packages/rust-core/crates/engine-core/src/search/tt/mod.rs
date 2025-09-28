@@ -415,8 +415,9 @@ impl TranspositionTable {
 
     /// Bump age with shared reference (for shared TT with Arc)
     pub fn bump_age(&self) {
-        let next = self.current_age().wrapping_add(1) & AGE_MASK;
-        self.age.store(next, Ordering::Relaxed);
+        let _ = self.age.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.wrapping_add(1) & AGE_MASK)
+        });
         // Reset GC state for new search
         self.need_gc.store(false, Ordering::Relaxed);
         self.gc_progress.store(0, Ordering::Relaxed);
