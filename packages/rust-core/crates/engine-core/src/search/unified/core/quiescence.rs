@@ -218,6 +218,7 @@ where
                     flag.set(true);
                 }
             });
+            searcher.context.mark_time_stopped();
             searcher.context.stop();
             return alpha;
         }
@@ -234,6 +235,7 @@ where
                     flag.set(true);
                 }
             });
+            searcher.context.mark_time_stopped();
             searcher.context.stop();
             return alpha;
         }
