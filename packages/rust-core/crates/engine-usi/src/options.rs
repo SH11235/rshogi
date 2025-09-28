@@ -180,6 +180,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "ByoyomiDeadlineLeadMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.byoyomi_deadline_lead_ms = ms.min(2000);
+                }
+            }
+        }
         "ByoyomiSafetyMs" => {
             if let Some(v) = value_ref {
                 if let Ok(ms) = v.parse::<u64>() {
@@ -384,6 +391,10 @@ fn print_time_policy_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name ByoyomiOverheadMs type spin default {} min 0 max 5000",
         opts.network_delay2_ms
+    ));
+    usi_println(&format!(
+        "option name ByoyomiDeadlineLeadMs type spin default {} min 0 max 2000",
+        opts.byoyomi_deadline_lead_ms
     ));
     usi_println(&format!(
         "option name ByoyomiSafetyMs type spin default {} min 0 max 2000",
