@@ -12,6 +12,7 @@ pub struct DetailedTTMetrics {
     pub cas_successes: StdAtomicU64,
     pub cas_failures: StdAtomicU64,
     pub cas_key_match: StdAtomicU64, // CAS failed but key matched (Phase 5 optimization)
+    pub cas_failure_after_zero: StdAtomicU64, // CAS failure observed while slot's data is 0
 
     // Update pattern analysis
     pub update_existing: StdAtomicU64, // Updates to existing entries
@@ -47,6 +48,7 @@ impl DetailedTTMetrics {
         self.cas_successes.store(0, Relaxed);
         self.cas_failures.store(0, Relaxed);
         self.cas_key_match.store(0, Relaxed);
+        self.cas_failure_after_zero.store(0, Relaxed);
         self.update_existing.store(0, Relaxed);
         self.replace_empty.store(0, Relaxed);
         self.replace_worst.store(0, Relaxed);
@@ -97,6 +99,7 @@ impl DetailedTTMetrics {
             log::info!("  Attempts: {}", self.cas_attempts.load(Relaxed));
             log::info!("  Successes: {}", self.cas_successes.load(Relaxed));
             log::info!("  Failures: {}", self.cas_failures.load(Relaxed));
+            log::info!("  FailuresAfterZero: {}", self.cas_failure_after_zero.load(Relaxed));
             log::info!(
                 "  Key matches: {} ({:.1}% of failures)",
                 self.cas_key_match.load(Relaxed),
@@ -165,10 +168,11 @@ impl DetailedTTMetrics {
             };
             out.push_str("cas\n");
             out.push_str(&format!(
-                "  attempts={} success={} failure={} key_match={:.1}%\n",
+                "  attempts={} success={} failure={} after_zero={} key_match={:.1}%\n",
                 cas_attempts,
                 self.cas_successes.load(Relaxed),
                 cas_failures,
+                self.cas_failure_after_zero.load(Relaxed),
                 key_match_rate
             ));
         }
@@ -201,6 +205,7 @@ pub(crate) enum MetricType {
     CasAttempt,
     CasSuccess,
     CasFailure,
+    CasFailureAfterZero,
     ReplaceEmpty,
     ReplaceWorst,
 }
@@ -220,6 +225,7 @@ pub(crate) fn record_metric(metrics: &DetailedTTMetrics, metric_type: MetricType
         MetricType::CasAttempt => metrics.cas_attempts.fetch_add(1, Relaxed),
         MetricType::CasSuccess => metrics.cas_successes.fetch_add(1, Relaxed),
         MetricType::CasFailure => metrics.cas_failures.fetch_add(1, Relaxed),
+        MetricType::CasFailureAfterZero => metrics.cas_failure_after_zero.fetch_add(1, Relaxed),
         MetricType::ReplaceEmpty => metrics.replace_empty.fetch_add(1, Relaxed),
         MetricType::ReplaceWorst => metrics.replace_worst.fetch_add(1, Relaxed),
     };

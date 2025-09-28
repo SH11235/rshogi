@@ -298,11 +298,17 @@ impl TTBucket {
 
             // A'案: data=0 → Key CAS → data=new
             // First, clear data so readers won't treat this slot as valid during replacement
+            // Before zeroing, re-read key to reduce chance of racing with a completed replacement
+            let observed = self.entries[idx].load(Ordering::Acquire);
+            if observed != old_key {
+                // Another thread already replaced this slot; skip
+                return;
+            }
             self.entries[idx + 1].store(0, Ordering::Release);
             match self.entries[idx].compare_exchange(
                 old_key,
                 new_entry.key,
-                Ordering::Release,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -338,6 +344,10 @@ impl TTBucket {
                         if let Some(m) = metrics {
                             use super::metrics::{record_metric, MetricType};
                             record_metric(m, MetricType::CasFailure);
+                            // If data is currently zero, record after-zero failure
+                            if self.entries[idx + 1].load(Ordering::Relaxed) == 0 {
+                                record_metric(m, MetricType::CasFailureAfterZero);
+                            }
                         }
                     }
                     // If CAS failed, another thread updated this entry - we accept this race

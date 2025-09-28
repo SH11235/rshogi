@@ -350,7 +350,11 @@ impl FlexibleTTBucket {
             let idx = worst_idx * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
-            // A'案: data=0 → Key CAS → data=new
+            // A'案: data=0 → Key CAS → data=new（ゼロ化前に再確認）
+            let observed = self.entries[idx].load(Ordering::Acquire);
+            if observed != old_key {
+                return;
+            }
             self.entries[idx + 1].store(0, Ordering::Release);
 
             #[cfg(feature = "tt_metrics")]
@@ -361,7 +365,7 @@ impl FlexibleTTBucket {
             match self.entries[idx].compare_exchange(
                 old_key,
                 new_entry.key,
-                Ordering::Release,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -389,6 +393,9 @@ impl FlexibleTTBucket {
                         #[cfg(feature = "tt_metrics")]
                         if let Some(m) = metrics {
                             record_metric(m, MetricType::CasFailure);
+                            if self.entries[idx + 1].load(Ordering::Relaxed) == 0 {
+                                record_metric(m, MetricType::CasFailureAfterZero);
+                            }
                         }
                     }
                 }
