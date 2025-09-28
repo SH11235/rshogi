@@ -239,6 +239,11 @@ impl SearchContext {
     pub fn stop(&self) {
         // Use Release ordering to ensure the stop signal is visible to other threads quickly
         self.internal_stop.store(true, Ordering::Release);
+        // Also propagate to external stop flag (if wired) so that parallel coordinators
+        // and other threads observing the shared stop can react immediately.
+        if let Some(ref stop_flag) = self.limits.stop_flag {
+            stop_flag.store(true, Ordering::Release);
+        }
     }
 
     /// Get elapsed time
@@ -325,6 +330,12 @@ impl SearchContext {
     #[inline]
     pub fn was_time_stopped(&self) -> bool {
         self.time_stop_logged
+    }
+
+    /// Mark that a time-based stop occurred (used by hard/planned short-circuit paths)
+    #[inline]
+    pub fn mark_time_stopped(&mut self) {
+        self.time_stop_logged = true;
     }
 
     /// Get appropriate time check mask based on time control

@@ -266,6 +266,44 @@ fn test_pending_work_counter_accuracy() {
     );
 }
 
+/// External stop flag is observed by workers and leads to quick convergence.
+#[test]
+fn test_parallel_observes_external_stop_flag() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+    let mut pos = Position::startpos();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let limits = SearchLimits::builder().depth(10).stop_flag(stop.clone()).build();
+
+    // Arm an external stopper to fire shortly after search starts
+    let stopper = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+
+    let result = searcher.search(&mut pos, limits);
+    let _ = stopper.join();
+
+    // Search should have completed and counters converged
+    assert!(result.best_move.is_some(), "Search should return a best move");
+    assert_eq!(
+        searcher.pending_work_items.load(Ordering::Acquire),
+        0,
+        "Pending work items should be zero after external stop"
+    );
+    assert_eq!(
+        searcher.active_workers.load(Ordering::Acquire),
+        0,
+        "Active workers should be zero after external stop"
+    );
+}
+
 #[test]
 fn test_fallback_bestmove() {
     // Test that parallel searcher always returns a move, even in edge cases
