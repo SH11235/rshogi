@@ -807,6 +807,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     let _ = handle.join();
                 }
             }
+        } else {
+            // Detach any outstanding handles so次探索で持ち越さない
+            let _ = self.post_ponder_tm_handle.lock().unwrap().take();
+            *self.time_manager.lock().unwrap() = None;
         }
 
         // Log steal metrics
@@ -862,109 +866,36 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 main_thread.attach_time_manager(tm);
             }
 
+            let tm_opt = { self.time_manager.lock().unwrap().clone() };
+
             // Skip stop check on first iteration to ensure we get at least one result
             if iteration > 1 && self.shared_state.should_stop() {
+                if let Some(ref tm) = tm_opt {
+                    let elapsed_ms = tm.elapsed_ms();
+                    let current_nodes = self.shared_state.get_nodes();
+                    if let Some(action) =
+                        self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
+                    {
+                        tm.force_stop();
+                        return self.finalize_time_limit(position, action);
+                    }
+                }
+
                 if log::log_enabled!(log::Level::Debug) {
                     debug!("Main thread stopping at iteration {iteration}");
                 }
                 break;
             }
 
-            // Also check time manager on iterations after the first
             if iteration > 1 {
-                let tm_opt = { self.time_manager.lock().unwrap().clone() };
                 if let Some(ref tm) = tm_opt {
-                    let current_nodes = self.shared_state.get_nodes();
                     let elapsed_ms = tm.elapsed_ms();
-                    let soft = tm.soft_limit_ms();
-                    let hard = tm.hard_limit_ms();
-                    let planned = tm.scheduled_end_ms();
-                    let hard_reached = hard > 0 && hard < u64::MAX && elapsed_ms >= hard;
-                    let planned_reached =
-                        planned > 0 && planned < u64::MAX && elapsed_ms >= planned;
-                    let tm_requested_stop = tm.should_stop(current_nodes);
-
-                    use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
-
-                    let finalize_window = compute_finalize_window_ms(hard);
-                    let finalize_planned_window = if planned > 0 && planned < u64::MAX {
-                        compute_finalize_window_ms(planned)
-                    } else {
-                        0
-                    };
-                    let near_hard_finalize = hard > 0
-                        && hard < u64::MAX
-                        && elapsed_ms.saturating_add(finalize_window) >= hard;
-                    let near_planned_finalize = planned > 0
-                        && planned < u64::MAX
-                        && elapsed_ms.saturating_add(finalize_planned_window) >= planned;
-
-                    if tm_requested_stop
-                        || hard_reached
-                        || planned_reached
-                        || near_hard_finalize
-                        || near_planned_finalize
+                    let current_nodes = self.shared_state.get_nodes();
+                    if let Some(action) =
+                        self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
                     {
-                        let label = if tm_requested_stop {
-                            "tm_should_stop"
-                        } else if hard_reached {
-                            "hard_limit"
-                        } else if planned_reached {
-                            "planned_limit"
-                        } else if near_hard_finalize {
-                            "near_hard_finalize"
-                        } else {
-                            "near_planned_finalize"
-                        };
-                        let hard_timeout =
-                            hard_reached || (hard > 0 && hard < u64::MAX && elapsed_ms >= hard);
-                        return self.finalize_time_limit(
-                            position,
-                            TimeLimitFinalization {
-                                best_snapshot: best_result.clone(),
-                                elapsed_ms,
-                                current_nodes,
-                                soft_limit_ms: soft,
-                                hard_limit_ms: hard,
-                                planned_limit_ms: planned,
-                                hard_timeout,
-                                label: label.to_string(),
-                            },
-                        );
-                    }
-
-                    // Proactive near-deadline guard: avoid starting a new iteration close to deadlines
-                    let guard_ms_hard = compute_hard_guard_ms(hard);
-                    if (planned > 0
-                        && planned < u64::MAX
-                        && elapsed_ms.saturating_add(MAIN_NEAR_DEADLINE_WINDOW_MS) >= planned)
-                        || (hard > 0
-                            && hard < u64::MAX
-                            && elapsed_ms.saturating_add(guard_ms_hard) >= hard)
-                    {
-                        if log::log_enabled!(log::Level::Info) {
-                            log::info!(
-                                "diag main_guard_stop elapsed={}ms planned={}ms hard={}ms window={}ms safety={}ms",
-                                elapsed_ms,
-                                if planned == u64::MAX { 0 } else { planned },
-                                hard,
-                                MAIN_NEAR_DEADLINE_WINDOW_MS,
-                                guard_ms_hard
-                            );
-                        }
-                        return self.finalize_time_limit(
-                            position,
-                            TimeLimitFinalization {
-                                best_snapshot: best_result.clone(),
-                                elapsed_ms,
-                                current_nodes,
-                                soft_limit_ms: soft,
-                                hard_limit_ms: hard,
-                                planned_limit_ms: planned,
-                                hard_timeout: hard > 0 && hard < u64::MAX && elapsed_ms >= hard,
-                                label: "near_guard".to_string(),
-                            },
-                        );
+                        tm.force_stop();
+                        return self.finalize_time_limit(position, action);
                     }
                 }
             }
@@ -1197,6 +1128,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 &best_result,
             );
 
+            if let Some(ref tm) = tm_opt {
+                let elapsed_ms = tm.elapsed_ms();
+                let current_nodes = self.shared_state.get_nodes();
+                if let Some(action) =
+                    self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
+                {
+                    tm.force_stop();
+                    return self.finalize_time_limit(position, action);
+                }
+            }
+
             // Check depth limit
             if main_depth >= max_depth {
                 info!("Main thread reached maximum depth {max_depth}, waiting for workers to complete...");
@@ -1294,6 +1236,66 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         self.prepare_final_result(position, params.best_snapshot)
+    }
+
+    /// Evaluate whether the current timing requires immediate finalization.
+    fn assess_time_limit(
+        &self,
+        tm: &Arc<TimeManager>,
+        elapsed_ms: u64,
+        current_nodes: u64,
+        best_snapshot: &SearchResult,
+    ) -> Option<TimeLimitFinalization> {
+        use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
+
+        let soft = tm.soft_limit_ms();
+        let hard = tm.hard_limit_ms();
+        let planned = tm.scheduled_end_ms();
+
+        let hard_reached = hard > 0 && hard < u64::MAX && elapsed_ms >= hard;
+        let planned_reached = planned > 0 && planned < u64::MAX && elapsed_ms >= planned;
+        let tm_requested_stop = tm.should_stop(current_nodes);
+
+        let near_hard_finalize = hard > 0
+            && hard < u64::MAX
+            && elapsed_ms.saturating_add(compute_finalize_window_ms(hard)) >= hard;
+        let near_planned_finalize = planned > 0
+            && planned < u64::MAX
+            && elapsed_ms.saturating_add(compute_finalize_window_ms(planned)) >= planned;
+
+        let near_guard = (planned > 0
+            && planned < u64::MAX
+            && elapsed_ms.saturating_add(MAIN_NEAR_DEADLINE_WINDOW_MS) >= planned)
+            || (hard > 0
+                && hard < u64::MAX
+                && elapsed_ms.saturating_add(compute_hard_guard_ms(hard)) >= hard);
+
+        let label = if tm_requested_stop {
+            Some("tm_should_stop")
+        } else if hard_reached {
+            Some("hard_limit")
+        } else if planned_reached {
+            Some("planned_limit")
+        } else if near_hard_finalize {
+            Some("near_hard_finalize")
+        } else if near_planned_finalize {
+            Some("near_planned_finalize")
+        } else if near_guard {
+            Some("near_guard")
+        } else {
+            None
+        }?;
+
+        Some(TimeLimitFinalization {
+            best_snapshot: best_snapshot.clone(),
+            elapsed_ms,
+            current_nodes,
+            soft_limit_ms: soft,
+            hard_limit_ms: hard,
+            planned_limit_ms: planned,
+            hard_timeout: hard_reached,
+            label: label.to_string(),
+        })
     }
 
     /// Merge shared-state data into the best search result and ensure a legal move exists.
