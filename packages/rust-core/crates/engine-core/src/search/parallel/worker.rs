@@ -86,7 +86,14 @@ impl PendingWorkGuard {
 impl Drop for PendingWorkGuard {
     fn drop(&mut self) {
         if self.active {
-            self.counter.fetch_sub(1, Ordering::AcqRel);
+            // Safety decrement: avoid underflow when another thread has already zeroed it.
+            let _ = self.counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                if cur > 0 {
+                    Some(cur - 1)
+                } else {
+                    None
+                }
+            });
             if log::log_enabled!(log::Level::Trace) {
                 log::trace!("PendingWorkGuard: pending work decremented");
             }
@@ -242,26 +249,10 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
             // SearchThread automatically flushes nodes when work is completed
             // No need for manual node reporting here
 
-            // After stop or normal loop exit, clear pending accounting fast.
-            // Under stop conditions we prefer prompt shutdown over exact draining.
-            if shared_state.should_stop() {
-                pending_work_items.store(0, Ordering::Release);
-            } else {
-                // Best-effort quick drain when not in stop condition
-                for _ in 0..64 {
-                    let pending_left = pending_work_items.load(Ordering::Acquire);
-                    if pending_left == 0 {
-                        break;
-                    }
-                    if let Some(_item) =
-                        get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure)
-                    {
-                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
-                    } else {
-                        break;
-                    }
-                }
-            }
+            // メインスレッドが stop をブロードキャストした直後に pending を 0 にする設計へ統一。
+            // ここ（ワーカー終端）では pending を変更しない。
+            // 将来的に“通常終了での早期 break”を導入した場合に備えた最小限のドレインは
+            // 必要時に復活させる。
 
             if log::log_enabled!(log::Level::Debug) {
                 debug!("Worker {log_id} stopped");
@@ -274,4 +265,34 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
             shared_state.set_stop();
         }
     })
+}
+
+#[cfg(test)]
+mod tests_pending_guard {
+    use super::PendingWorkGuard;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn drop_decrements_when_positive() {
+        let c = Arc::new(AtomicU64::new(3));
+        {
+            let _g = PendingWorkGuard::new(c.clone());
+            // on drop, should decrement by 1
+        }
+        assert_eq!(c.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn drop_does_not_underflow_after_store_zero() {
+        let c = Arc::new(AtomicU64::new(1));
+        let g = PendingWorkGuard::new(c.clone());
+        // Simulate another thread zeroing the counter (e.g., stop path)
+        c.store(0, Ordering::Release);
+        drop(g);
+        // Should remain 0, not wrap to u64::MAX
+        assert_eq!(c.load(Ordering::Acquire), 0);
+    }
 }

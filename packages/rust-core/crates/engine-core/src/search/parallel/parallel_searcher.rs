@@ -3,6 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     movegen::MoveGenerator,
+    search::types::TerminationReason,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     shogi::{Move, Position},
     time_management::{GamePhase, TimeManager},
@@ -26,6 +27,25 @@ use super::worker::{start_worker_with, WorkerConfig};
 #[cfg(feature = "ybwc")]
 use super::SplitPoint;
 use super::{SearchThread, SharedSearchState};
+
+/// Parameters for finalizing search due to time limit
+#[derive(Debug, Clone)]
+struct TimeLimitFinalization {
+    /// Current best search result snapshot
+    best_snapshot: SearchResult,
+    /// Elapsed time in milliseconds
+    elapsed_ms: u64,
+    /// Current node count
+    current_nodes: u64,
+    /// Hard time limit in milliseconds
+    hard_limit_ms: u64,
+    /// Planned time limit in milliseconds
+    planned_limit_ms: u64,
+    /// Whether hard timeout was reached
+    hard_timeout: bool,
+    /// Label for diagnostic purposes
+    label: String,
+}
 
 /// Initial seed strategy parameters for parallel search work distribution
 /// These control how many work items are initially pushed to the global injector
@@ -205,6 +225,25 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         if (h > 0 && h < u64::MAX && e >= h) || (p > 0 && p < u64::MAX && e >= p) {
                             break;
                         }
+                        let guard_hard = compute_finalize_window_ms(h);
+                        let guard_planned = if p > 0 && p < u64::MAX {
+                            compute_finalize_window_ms(p)
+                        } else {
+                            0
+                        };
+                        if (h > 0 && h < u64::MAX && e.saturating_add(guard_hard) >= h)
+                            || (p > 0 && p < u64::MAX && e.saturating_add(guard_planned) >= p)
+                        {
+                            if log::log_enabled!(log::Level::Debug) {
+                                log::debug!(
+                                    "diag batch_guard_tripped elapsed={}ms hard={}ms planned={}ms",
+                                    e,
+                                    h,
+                                    if p == u64::MAX { 0 } else { p }
+                                );
+                            }
+                            break;
+                        }
                     }
                     let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
                     let start_index = i;
@@ -280,6 +319,25 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     let h = tm.hard_limit_ms();
                     let p = tm.scheduled_end_ms();
                     if (h > 0 && h < u64::MAX && e >= h) || (p > 0 && p < u64::MAX && e >= p) {
+                        break;
+                    }
+                    let guard_hard = compute_finalize_window_ms(h);
+                    let guard_planned = if p > 0 && p < u64::MAX {
+                        compute_finalize_window_ms(p)
+                    } else {
+                        0
+                    };
+                    if (h > 0 && h < u64::MAX && e.saturating_add(guard_hard) >= h)
+                        || (p > 0 && p < u64::MAX && e.saturating_add(guard_planned) >= p)
+                    {
+                        if log::log_enabled!(log::Level::Debug) {
+                            log::debug!(
+                                "diag batch_guard_tripped elapsed={}ms hard={}ms planned={}ms",
+                                e,
+                                h,
+                                if p == u64::MAX { 0 } else { p }
+                            );
+                        }
                         break;
                     }
                 }
@@ -405,6 +463,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Use pending_work_items for accurate completion detection
             let pending = self.pending_work_items.load(Ordering::Acquire);
             let active = self.active_workers.load(Ordering::Acquire);
+            let stop = self.shared_state.should_stop();
+            let tm_present = { self.time_manager.lock().unwrap().is_some() };
+
+            // 時間管理ありの stop モードでは、active==0 を満たした時点で即抜け
+            if stop && tm_present && active == 0 {
+                debug!(
+                    "Stop mode: all workers inactive; finishing wait regardless of pending={pending}"
+                );
+                break;
+            }
 
             // Check TimeManager should_stop first
             {
@@ -416,6 +484,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             "TimeManager triggered stop during wait (pending: {pending}, active: {active})"
                         );
                         self.shared_state.set_stop();
+                        // stop ブロードキャストと一緒に pending を 0 にする
+                        self.pending_work_items.store(0, Ordering::Release);
                         break;
                     }
                 }
@@ -700,13 +770,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Main thread does iterative deepening and generates work
         let result = self.run_main_thread(position, limits, main_worker);
 
+        let early_finalized = self.shared_state.is_finalized_early();
+
         // Stop all threads
-        info!("Search complete, stopping threads");
+        info!(
+            "Search complete{}; stopping threads",
+            if early_finalized {
+                " (early finalize)"
+            } else {
+                ""
+            }
+        );
         self.shared_state.set_stop();
 
-        // Wait for workers
-        for handle in handles {
-            let _ = handle.join();
+        // Wait for workers unless we deliberately finalized early
+        if !early_finalized {
+            for handle in handles {
+                let _ = handle.join();
+            }
         }
 
         // Stop time manager
@@ -788,82 +869,73 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Also check time manager on iterations after the first
             if iteration > 1 {
-                // Narrow lock scope by cloning Arc
                 let tm_opt = { self.time_manager.lock().unwrap().clone() };
                 if let Some(ref tm) = tm_opt {
                     let current_nodes = self.shared_state.get_nodes();
-                    if tm.should_stop(current_nodes) {
-                        if log::log_enabled!(log::Level::Debug) {
-                            debug!(
-                                "Main thread stopping at iteration {iteration} due to time limit"
-                            );
-                        }
-                        let elapsed_ms = tm.elapsed_ms();
-                        let hard = tm.hard_limit_ms();
-                        let hard_timeout = hard != u64::MAX && elapsed_ms >= hard;
-                        self.shared_state.set_stop_with_reason(
-                            crate::search::types::TerminationReason::TimeLimit,
-                            elapsed_ms,
-                            current_nodes,
-                            self.shared_state.get_best_depth(),
-                            hard_timeout,
-                        );
-                        break;
-                    }
-                    // Hard/planned immediate short-circuit right before work distribution
                     let elapsed_ms = tm.elapsed_ms();
                     let hard = tm.hard_limit_ms();
-                    if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
-                        if log::log_enabled!(log::Level::Info) {
-                            log::info!(
-                                "diag main_short_circuit reason=hard elapsed={}ms hard={}ms",
-                                elapsed_ms,
-                                hard
-                            );
-                        }
-                        self.shared_state.set_stop_with_reason(
-                            crate::search::types::TerminationReason::TimeLimit,
-                            elapsed_ms,
-                            current_nodes,
-                            self.shared_state.get_best_depth(),
-                            true,
-                        );
-                        break;
-                    }
                     let planned = tm.scheduled_end_ms();
-                    if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
-                        if log::log_enabled!(log::Level::Info) {
-                            log::info!(
-                                "diag main_short_circuit reason=planned elapsed={}ms planned={}ms",
-                                elapsed_ms,
-                                planned
-                            );
-                        }
-                        self.shared_state.set_stop_with_reason(
-                            crate::search::types::TerminationReason::TimeLimit,
-                            elapsed_ms,
-                            current_nodes,
-                            self.shared_state.get_best_depth(),
-                            false,
-                        );
-                        break;
-                    }
-                    // Proactive near-deadline guard: avoid starting a new iteration close to deadlines
+                    let hard_reached = hard > 0 && hard < u64::MAX && elapsed_ms >= hard;
+                    let planned_reached =
+                        planned > 0 && planned < u64::MAX && elapsed_ms >= planned;
+                    let tm_requested_stop = tm.should_stop(current_nodes);
+
                     use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
-                    let mut safety_ms = 0;
-                    if hard >= 500 {
-                        safety_ms = ((hard.saturating_mul(3)) / 100).clamp(120, 400);
-                    } else if hard >= 200 {
-                        safety_ms = 80;
+
+                    let finalize_window = compute_finalize_window_ms(hard);
+                    let finalize_planned_window = if planned > 0 && planned < u64::MAX {
+                        compute_finalize_window_ms(planned)
+                    } else {
+                        0
+                    };
+                    let near_hard_finalize = hard > 0
+                        && hard < u64::MAX
+                        && elapsed_ms.saturating_add(finalize_window) >= hard;
+                    let near_planned_finalize = planned > 0
+                        && planned < u64::MAX
+                        && elapsed_ms.saturating_add(finalize_planned_window) >= planned;
+
+                    if tm_requested_stop
+                        || hard_reached
+                        || planned_reached
+                        || near_hard_finalize
+                        || near_planned_finalize
+                    {
+                        let label = if tm_requested_stop {
+                            "tm_should_stop"
+                        } else if hard_reached {
+                            "hard_limit"
+                        } else if planned_reached {
+                            "planned_limit"
+                        } else if near_hard_finalize {
+                            "near_hard_finalize"
+                        } else {
+                            "near_planned_finalize"
+                        };
+                        let hard_timeout =
+                            hard_reached || (hard > 0 && hard < u64::MAX && elapsed_ms >= hard);
+                        return self.finalize_time_limit(
+                            position,
+                            TimeLimitFinalization {
+                                best_snapshot: best_result.clone(),
+                                elapsed_ms,
+                                current_nodes,
+                                hard_limit_ms: hard,
+                                planned_limit_ms: planned,
+                                hard_timeout,
+                                label: label.to_string(),
+                            },
+                        );
                     }
+
+                    // Proactive near-deadline guard: avoid starting a new iteration close to deadlines
+                    let guard_ms_hard = compute_hard_guard_ms(hard);
                     if (planned > 0
                         && planned < u64::MAX
                         && elapsed_ms.saturating_add(MAIN_NEAR_DEADLINE_WINDOW_MS) >= planned)
                         || (hard > 0
                             && hard < u64::MAX
-                            && elapsed_ms
-                                .saturating_add(safety_ms.max(MAIN_NEAR_DEADLINE_WINDOW_MS))
-                                >= hard)
+                            && elapsed_ms.saturating_add(guard_ms_hard) >= hard)
                     {
                         if log::log_enabled!(log::Level::Info) {
                             log::info!(
@@ -872,29 +944,27 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 if planned == u64::MAX { 0 } else { planned },
                                 hard,
                                 MAIN_NEAR_DEADLINE_WINDOW_MS,
-                                safety_ms
+                                guard_ms_hard
                             );
                         }
-                        self.shared_state.set_stop_with_reason(
-                            crate::search::types::TerminationReason::TimeLimit,
-                            elapsed_ms,
-                            current_nodes,
-                            self.shared_state.get_best_depth(),
-                            elapsed_ms >= hard,
+                        return self.finalize_time_limit(
+                            position,
+                            TimeLimitFinalization {
+                                best_snapshot: best_result.clone(),
+                                elapsed_ms,
+                                current_nodes,
+                                hard_limit_ms: hard,
+                                planned_limit_ms: planned,
+                                hard_timeout: hard > 0 && hard < u64::MAX && elapsed_ms >= hard,
+                                label: "near_guard".to_string(),
+                            },
                         );
-                        break;
                     }
                 }
             }
 
             // Calculate depths for this iteration
             let main_depth = iteration.min(max_depth as usize) as u8;
-
-            if main_depth > max_depth {
-                debug!("Reached max depth {max_depth}");
-                self.shared_state.set_stop();
-                break;
-            }
 
             let iter_start = Instant::now();
             if log::log_enabled!(log::Level::Debug) {
@@ -1127,6 +1197,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // 先に停止をブロードキャスト（特に時間制御時のテール短縮）
                 self.shared_state.set_stop();
+                // pending をメイン側で 0 に
+                self.pending_work_items.store(0, Ordering::Release);
 
                 // Wait for workers to complete their work
                 let wait_time = self.wait_for_workers_completion(
@@ -1146,12 +1218,76 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         }
 
-        // Get final best move from shared state if better
+        self.prepare_final_result(position, best_result)
+    }
+
+    /// Finalize search due to approaching or exceeding time limits.
+    fn finalize_time_limit(
+        &self,
+        position: &mut Position,
+        params: TimeLimitFinalization,
+    ) -> SearchResult {
+        if log::log_enabled!(log::Level::Info) {
+            log::info!(
+                "diag near_hard_finalize label={} elapsed={}ms hard={}ms planned={}ms nodes={}",
+                params.label,
+                params.elapsed_ms,
+                if params.hard_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.hard_limit_ms
+                },
+                if params.planned_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.planned_limit_ms
+                },
+                params.current_nodes
+            );
+        }
+
+        self.shared_state.set_stop_with_reason(
+            TerminationReason::TimeLimit,
+            params.elapsed_ms,
+            params.current_nodes,
+            self.shared_state.get_best_depth(),
+            params.hard_timeout,
+        );
+        self.pending_work_items.store(0, Ordering::Release);
+        self.shared_state.mark_finalized_early();
+
+        #[cfg(feature = "diagnostics")]
+        {
+            log::info!(
+                "info string near_hard_finalize=1 label={} elapsed={} hard={} planned={}",
+                params.label,
+                params.elapsed_ms,
+                if params.hard_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.hard_limit_ms
+                },
+                if params.planned_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.planned_limit_ms
+                }
+            );
+        }
+
+        self.prepare_final_result(position, params.best_snapshot)
+    }
+
+    /// Merge shared-state data into the best search result and ensure a legal move exists.
+    fn prepare_final_result(
+        &self,
+        position: &mut Position,
+        mut best_result: SearchResult,
+    ) -> SearchResult {
         if let Some(shared_move) = self.shared_state.get_best_move() {
             let shared_score = self.shared_state.get_best_score();
             let shared_depth = self.shared_state.get_best_depth();
 
-            // Use shared result if it's better or we don't have a move
             if best_result.best_move.is_none()
                 || shared_score > best_result.score
                 || (shared_score == best_result.score && shared_depth > best_result.stats.depth)
@@ -1165,7 +1301,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         best_result.stats.nodes = self.shared_state.get_nodes();
         best_result.stats.qnodes = self.shared_state.get_qnodes();
 
-        // Propagate stop info recorded by time/fail-safe managers when available
         if let Some(info) = self.shared_state.stop_info.get() {
             best_result = SearchResult::with_stop_info(
                 best_result.best_move,
@@ -1176,17 +1311,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             );
         }
 
-        // Ensure we always have a move (fallback to first legal move if needed)
         if best_result.best_move.is_none() {
             warn!(
                 "No best move found despite searching {} nodes, using fallback",
                 best_result.stats.nodes
             );
-            // Generate legal moves and use the first one as fallback
             let mg = MoveGenerator::new();
             if let Ok(moves) = mg.generate_all(position) {
-                if !moves.is_empty() {
-                    let fallback_move = moves.as_slice()[0];
+                if let Some(&fallback_move) = moves.as_slice().first() {
                     best_result.best_move = Some(fallback_move);
                     best_result.stats.depth = best_result.stats.depth.max(1);
                     best_result.stats.pv = vec![fallback_move];
@@ -1196,5 +1328,112 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         best_result
+    }
+}
+
+/// Compute guard window for hard deadline depending on the remaining hard time.
+/// Extracted for testability (piecewise as suggested in review).
+fn compute_hard_guard_ms(hard_ms: u64) -> u64 {
+    use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
+    if hard_ms >= 1_000 {
+        MAIN_NEAR_DEADLINE_WINDOW_MS
+    } else if hard_ms >= 500 {
+        150
+    } else if hard_ms >= 200 {
+        80
+    } else {
+        0
+    }
+}
+
+fn compute_finalize_window_ms(limit_ms: u64) -> u64 {
+    use crate::search::constants::NEAR_HARD_FINALIZE_MS;
+    if limit_ms == 0 || limit_ms == u64::MAX {
+        0
+    } else if limit_ms >= 1_000 {
+        NEAR_HARD_FINALIZE_MS
+    } else if limit_ms >= 500 {
+        NEAR_HARD_FINALIZE_MS / 2
+    } else if limit_ms >= 200 {
+        120
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests_compute_guard_and_wait {
+    use super::*;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::{SearchLimits, TranspositionTable},
+    };
+
+    #[test]
+    fn test_compute_hard_guard_ms_piecewise() {
+        use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
+        assert_eq!(compute_hard_guard_ms(2_000), MAIN_NEAR_DEADLINE_WINDOW_MS);
+        assert_eq!(compute_hard_guard_ms(1_000), MAIN_NEAR_DEADLINE_WINDOW_MS);
+        assert_eq!(compute_hard_guard_ms(800), 150);
+        assert_eq!(compute_hard_guard_ms(500), 150);
+        assert_eq!(compute_hard_guard_ms(400), 80);
+        assert_eq!(compute_hard_guard_ms(200), 80);
+        assert_eq!(compute_hard_guard_ms(180), 0);
+        assert_eq!(compute_hard_guard_ms(0), 0);
+    }
+
+    #[test]
+    fn test_compute_finalize_window_ms_piecewise() {
+        use crate::search::constants::NEAR_HARD_FINALIZE_MS;
+        assert_eq!(compute_finalize_window_ms(2_000), NEAR_HARD_FINALIZE_MS);
+        assert_eq!(compute_finalize_window_ms(1_000), NEAR_HARD_FINALIZE_MS);
+        assert_eq!(compute_finalize_window_ms(800), NEAR_HARD_FINALIZE_MS / 2);
+        assert_eq!(compute_finalize_window_ms(500), NEAR_HARD_FINALIZE_MS / 2);
+        assert_eq!(compute_finalize_window_ms(400), 120);
+        assert_eq!(compute_finalize_window_ms(200), 120);
+        assert_eq!(compute_finalize_window_ms(180), 0);
+        assert_eq!(compute_finalize_window_ms(0), 0);
+        assert_eq!(compute_finalize_window_ms(u64::MAX), 0);
+    }
+
+    #[test]
+    fn test_wait_finishes_when_stopped_and_inactive() {
+        // Arrange a ParallelSearcher and force stop with no active workers but non-zero pending.
+        let evaluator = std::sync::Arc::new(MaterialEvaluator);
+        let tt = std::sync::Arc::new(TranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
+
+        // Install a TimeManager to enable the stop-priority path (as used in time-control mode)
+        use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 100 },
+            ..Default::default()
+        };
+        let tm = std::sync::Arc::new(TimeManager::new(
+            &limits,
+            crate::Color::Black,
+            0,
+            GamePhase::Opening,
+        ));
+        searcher.set_time_manager(tm);
+
+        // Force counters/state
+        searcher.pending_work_items.store(42, std::sync::atomic::Ordering::Release);
+        searcher.active_workers.store(0, std::sync::atomic::Ordering::Release);
+        searcher.shared_state.set_stop();
+
+        let start = std::time::Instant::now();
+        let limits = SearchLimits::builder().depth(1).build();
+        let mut last = start;
+        let dummy_stats = SearchStats::default();
+        let dummy_res = SearchResult::new(None, 0, dummy_stats);
+
+        // Act
+        let waited = searcher.wait_for_workers_completion(start, &limits, &mut last, &dummy_res);
+
+        // Assert: should return quickly (ideally 0ms) regardless of pending.
+        assert!(waited <= 20, "waited too long: {}ms", waited);
+        // Counters untouched by the wait logic
+        assert_eq!(searcher.active_workers.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 }
