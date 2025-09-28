@@ -153,6 +153,8 @@ pub(super) fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    node::reset_near_deadline_flags();
+
     // Increment node count here (not in search_node to avoid double counting)
     searcher.stats.nodes += 1;
 

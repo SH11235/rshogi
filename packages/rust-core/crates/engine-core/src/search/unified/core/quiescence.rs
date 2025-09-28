@@ -74,7 +74,10 @@ static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
 // We keep a thread-local last-poll timestamp (ms since search start) to avoid
 // relying solely on node-count based polling, which can be sparse on heavy paths.
 use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
-thread_local! { static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
+thread_local! {
+    static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) };
+    static QS_NEAR_DEADLINE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
 
 // Diagnostics: one-time info logs for near-deadline and short-circuit events in QS
 #[cfg(feature = "diagnostics")]
@@ -101,9 +104,11 @@ where
         let near_planned = planned > 0
             && planned < u64::MAX
             && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= planned;
+        let near = near_hard || near_planned;
+
         #[cfg(feature = "diagnostics")]
         {
-            if near_hard || near_planned {
+            if near {
                 QS_NEAR_DEADLINE_LOGGED.with(|flag| {
                     if !flag.get() {
                         log::info!(
@@ -118,6 +123,8 @@ where
                 });
             }
         }
+
+        QS_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(near));
         // Lightweight periodic poll: ~every QS_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
         let periodic = QS_LAST_LIGHT_POLL_MS.with(|c| {
             let last = c.get();
@@ -131,7 +138,7 @@ where
             }
             due
         });
-        return near_hard || near_planned || periodic;
+        return near || periodic;
     }
     false
 }
@@ -198,6 +205,10 @@ pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    QS_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(false));
+    #[cfg(feature = "diagnostics")]
+    QS_NEAR_DEADLINE_LOGGED.with(|flag| flag.set(false));
+
     searcher.stats.nodes += 1;
     searcher.stats.qnodes += 1;
 
@@ -256,7 +267,11 @@ where
     }
 
     // Periodic time check (unified with alpha_beta and search_node)
-    let time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    let mut time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    if QS_NEAR_DEADLINE_ACTIVE.with(|flag| flag.get()) {
+        time_check_mask = time_check_mask.min(0x1FF);
+    }
+
     if time_check_mask == 0 || (searcher.stats.nodes & time_check_mask) == 0 {
         // Process events
         searcher.context.process_events(&searcher.time_manager);

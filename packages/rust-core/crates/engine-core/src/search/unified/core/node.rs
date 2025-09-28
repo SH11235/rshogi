@@ -15,11 +15,12 @@ use std::cell::Cell;
 // Lightweight, time-based polling helpers for alpha-beta search (module scope)
 use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
 thread_local! { static AB_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
+thread_local! { pub(super) static AB_NEAR_DEADLINE_ACTIVE: Cell<bool> = const { Cell::new(false) }; }
 
 // Diagnostics: one-time info logs for near-deadline and short-circuit events
 #[cfg(feature = "diagnostics")]
 thread_local! {
-    static AB_NEAR_DEADLINE_LOGGED: Cell<bool> = const { Cell::new(false) };
+    pub(super) static AB_NEAR_DEADLINE_LOGGED: Cell<bool> = const { Cell::new(false) };
     static AB_SHORT_CIRCUIT_LOGGED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -42,9 +43,11 @@ where
         let near_planned = planned > 0
             && planned < u64::MAX
             && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= planned;
+        let near = near_hard || near_planned;
+
         #[cfg(feature = "diagnostics")]
         {
-            if near_hard || near_planned {
+            if near {
                 AB_NEAR_DEADLINE_LOGGED.with(|flag| {
                     if !flag.get() {
                         log::info!(
@@ -59,6 +62,8 @@ where
                 });
             }
         }
+
+        AB_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(near));
         // Periodic lightweight poll roughly every AB_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
         let periodic = AB_LAST_LIGHT_POLL_MS.with(|c| {
             let last = c.get();
@@ -72,7 +77,7 @@ where
             }
             due
         });
-        return near_hard || near_planned || periodic;
+        return near || periodic;
     }
     false
 }
@@ -119,7 +124,10 @@ where
     // (helpers moved to module scope)
 
     // Get adaptive polling mask based on time control (unified with alpha_beta)
-    let time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    let mut time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    if AB_NEAR_DEADLINE_ACTIVE.with(|f| f.get()) {
+        time_check_mask = time_check_mask.min(0x1FF);
+    }
 
     // Early stop check
     if searcher.context.should_stop() {
@@ -1027,4 +1035,9 @@ mod tests {
         // Note: We don't assert that extensions > 0 because it's position/depth dependent
         // The important check is that extensions don't explode (checked above)
     }
+}
+pub(super) fn reset_near_deadline_flags() {
+    AB_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(false));
+    #[cfg(feature = "diagnostics")]
+    AB_NEAR_DEADLINE_LOGGED.with(|flag| flag.set(false));
 }
