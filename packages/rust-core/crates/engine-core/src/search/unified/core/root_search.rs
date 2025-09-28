@@ -61,6 +61,28 @@ where
         }
     };
 
+    // Diagnostics: log root in_check and attacker count once per root call
+    #[cfg(any(feature = "pv_debug_logs", feature = "tt_metrics"))]
+    {
+        use crate::shogi::board::Color;
+        let stm: Color = pos.side_to_move;
+        let in_check = pos.is_in_check();
+        let atk_count = if let Some(ksq) = pos.board.king_square(stm) {
+            pos.get_attackers_to(ksq, stm.opposite()).count_ones()
+        } else {
+            0
+        };
+        log::info!(
+            "diag root_check side={:?} in_check={} atk_count={} hash={:#016x} depth={} legal_moves={}",
+            stm,
+            in_check,
+            atk_count,
+            pos.zobrist_hash,
+            depth,
+            moves.len()
+        );
+    }
+
     if moves.is_empty() {
         // No legal moves - checkmate or stalemate
         if pos.is_in_check() {

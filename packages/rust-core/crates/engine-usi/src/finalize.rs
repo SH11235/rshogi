@@ -118,10 +118,34 @@ pub fn finalize_and_send(
                 .unwrap_or_else(|| "-".to_string());
             let rfhi = res.stats.root_fail_high_count.unwrap_or(0);
 
+            // Additional root snapshot (diagnostics)
+            let (root_in_check, root_legal_count, root_evasion_count) = {
+                let pos = &state.position;
+                let mg = MoveGenerator::new();
+                let in_check = pos.is_in_check();
+                let mut legal_count = 0usize;
+                let mut evasion_count = 0usize;
+                if let Ok(mvlist) = mg.generate_all(pos) {
+                    legal_count = mvlist.len();
+                    if in_check {
+                        for &mv in mvlist.as_slice().iter() {
+                            let undo = pos.do_move(mv);
+                            let still = pos.is_in_check();
+                            pos.undo_move(mv, undo);
+                            if !still {
+                                evasion_count += 1;
+                            }
+                        }
+                    }
+                }
+                (in_check, legal_count, evasion_count)
+            };
+
             info_string(format!(
-                "finalize_diag seldepth={} qratio={:.3} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={}",
+                "finalize_diag seldepth={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
                 sel,
                 qratio,
+                nodes.saturating_sub(qnodes),
                 tt_hit_rate,
                 tt_hits,
                 asp_fail,
@@ -129,7 +153,11 @@ pub fn finalize_and_send(
                 rese,
                 pvchg,
                 dup,
-                rfhi
+                rfhi,
+                root_in_check as i32,
+                root_legal_count,
+                root_evasion_count,
+                if std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false) {"Off"} else {"On"}
             ));
         }
     }
@@ -168,6 +196,24 @@ pub fn finalize_and_send(
                     "tt_debug addr={:#x} size_mb={} hf={} store_attempts={}",
                     dbg.addr, dbg.size_mb, dbg.hf_permille, dbg.store_attempts
                 ));
+            }
+
+            // Optional: TT roundtrip smoke test at current root hash
+            #[cfg(feature = "diagnostics")]
+            {
+                let root_hash = state.position.zobrist_hash;
+                let ok = {
+                    let eng = state.engine.lock().unwrap();
+                    #[cfg(feature = "tt-metrics")]
+                    {
+                        eng.tt_roundtrip_test(root_hash)
+                    }
+                    #[cfg(not(feature = "tt-metrics"))]
+                    {
+                        false
+                    }
+                };
+                info_string(format!("tt_roundtrip root={}", ok));
             }
 
             if state.opts.multipv > 1 {

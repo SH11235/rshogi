@@ -41,6 +41,11 @@ const QS_PROMO_QPLY_CAP: u8 = 4; // Limit relative depth for promotion checks in
                                  // Total budget across all check-like categories to prevent spikes
 const MAX_QS_TOTAL_CHECKS: usize = 6;
 
+// Runtime toggle for enabling checking moves in quiescence search.
+// Controlled via env var SHOGI_QS_DISABLE_CHECKS (set to "1" to disable checks).
+static QS_CHECKS_ENABLED: Lazy<bool> =
+    Lazy::new(|| !std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false));
+
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
 ///
 /// This function searches capture moves (and check evasions when in check) to ensure
@@ -489,6 +494,7 @@ where
     // === Add: non-drop, non-capture checking moves (limited) ===
     // Only enable with pruning profile to avoid blowing up basic search
     if USE_PRUNING
+        && *QS_CHECKS_ENABLED
         && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha
         && qply < QS_NONCAP_QPLY_CAP
         && checks_budget > 0
@@ -563,6 +569,7 @@ where
 
     // === Add: non-capture promotion moves that give check (limited) ===
     if USE_PRUNING
+        && *QS_CHECKS_ENABLED
         && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha
         && qply < QS_PROMO_QPLY_CAP
         && checks_budget > 0
@@ -635,7 +642,7 @@ where
 
     // === Add: checking drops (limited) ===
     // First, skip generation if stand pat is too far below alpha
-    if stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha && checks_budget > 0 {
+    if *QS_CHECKS_ENABLED && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha && checks_budget > 0 {
         // all_moves already generated above (generate_all). Extract checking drops.
         let them = pos.side_to_move.opposite();
         let ksq_opt = pos.board.king_square(them);
