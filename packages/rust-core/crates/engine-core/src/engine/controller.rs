@@ -665,6 +665,12 @@ impl Engine {
         }
     }
 
+    /// Run a TT roundtrip probe/store test for the given hash (diagnostics-only)
+    #[cfg(any(debug_assertions, feature = "tt_metrics"))]
+    pub fn tt_roundtrip_test(&self, key: u64) -> bool {
+        self.shared_tt.debug_roundtrip(key)
+    }
+
     /// Set transposition table size in MB
     pub fn set_hash_size(&mut self, size_mb: usize) {
         // Clamp to valid range (1-1024 MB)

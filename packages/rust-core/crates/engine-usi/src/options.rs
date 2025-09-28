@@ -33,6 +33,8 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name Stochastic_Ponder type check default false");
     usi_println("option name ForceTerminateOnHardDeadline type check default true");
     usi_println("option name MateEarlyStop type check default true");
+    // Diagnostics / policy knobs
+    usi_println("option name QSearchChecks type combo default On var On var Off");
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -158,6 +160,18 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "EvalFile" => {
             if let Some(v) = value_ref {
                 state.opts.eval_file = Some(v.to_string());
+            }
+        }
+        "QSearchChecks" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on {
+                    std::env::remove_var("SHOGI_QS_DISABLE_CHECKS");
+                    info_string("qsearch_checks=On");
+                } else {
+                    std::env::set_var("SHOGI_QS_DISABLE_CHECKS", "1");
+                    info_string("qsearch_checks=Off");
+                }
             }
         }
         "ClearHash" => {

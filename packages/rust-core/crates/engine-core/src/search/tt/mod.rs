@@ -949,7 +949,7 @@ impl TranspositionTable {
     }
 
     /// Debug helpers
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "tt_metrics"))]
     pub fn debug_roundtrip(&self, key: u64) -> bool {
         use crate::shogi::Move;
         // Store an EXACT entry at depth 10 and probe it back
