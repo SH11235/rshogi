@@ -1,6 +1,6 @@
 //! Byoyomi-specific rounding and scheduling tests
 
-use crate::time_management::test_utils::{mock_advance_time, mock_set_time};
+use crate::time_management::test_utils::mock_set_time;
 use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
 use crate::Color;
 
