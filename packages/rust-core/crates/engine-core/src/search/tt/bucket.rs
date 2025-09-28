@@ -236,8 +236,6 @@ impl TTBucket {
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
-        let _target_key = new_entry.key;
-
         // First pass: look for exact match or empty slot
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
