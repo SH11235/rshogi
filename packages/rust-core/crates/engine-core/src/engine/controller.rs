@@ -961,19 +961,8 @@ impl Engine {
         pos: &Position,
         max_depth: u8,
     ) -> Vec<crate::shogi::Move> {
-        // 常に shared TT を参照
-        let tt = &self.shared_tt;
         let mut tmp = pos.clone();
-        struct TtWrap<'a> {
-            tt: &'a TranspositionTable,
-        }
-        impl<'a> crate::search::tt::TTProbe for TtWrap<'a> {
-            fn probe(&self, hash: u64) -> Option<crate::search::tt::TTEntry> {
-                self.tt.probe_entry(hash)
-            }
-        }
-        let wrap = TtWrap { tt };
-        crate::search::tt::reconstruct_pv_generic(&wrap, &mut tmp, max_depth)
+        crate::search::tt::reconstruct_pv_generic(self.shared_tt.as_ref(), &mut tmp, max_depth)
     }
 
     /// Choose final bestmove from book/committed/TT/legal
