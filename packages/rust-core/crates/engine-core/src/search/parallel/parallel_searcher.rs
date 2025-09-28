@@ -37,6 +37,8 @@ struct TimeLimitFinalization {
     elapsed_ms: u64,
     /// Current node count
     current_nodes: u64,
+    /// Soft time limit in milliseconds (if available)
+    soft_limit_ms: u64,
     /// Hard time limit in milliseconds
     hard_limit_ms: u64,
     /// Planned time limit in milliseconds
@@ -790,19 +792,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         }
 
-        // Stop time manager
-        if let Some(handle) = time_handle {
-            let _ = handle.join();
-        }
-        if let Some(h) = fail_safe_handle {
-            let _ = h.join();
-        }
-
-        // If we spawned a TimeManager after ponderhit, join it too
-        {
-            let mut h = self.post_ponder_tm_handle.lock().unwrap();
-            if let Some(handle) = h.take() {
+        if !early_finalized {
+            if let Some(handle) = time_handle {
                 let _ = handle.join();
+            }
+            if let Some(h) = fail_safe_handle {
+                let _ = h.join();
+            }
+
+            // If we spawned a TimeManager after ponderhit, join it too
+            {
+                let mut h = self.post_ponder_tm_handle.lock().unwrap();
+                if let Some(handle) = h.take() {
+                    let _ = handle.join();
+                }
             }
         }
 
@@ -873,6 +876,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 if let Some(ref tm) = tm_opt {
                     let current_nodes = self.shared_state.get_nodes();
                     let elapsed_ms = tm.elapsed_ms();
+                    let soft = tm.soft_limit_ms();
                     let hard = tm.hard_limit_ms();
                     let planned = tm.scheduled_end_ms();
                     let hard_reached = hard > 0 && hard < u64::MAX && elapsed_ms >= hard;
@@ -920,6 +924,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 best_snapshot: best_result.clone(),
                                 elapsed_ms,
                                 current_nodes,
+                                soft_limit_ms: soft,
                                 hard_limit_ms: hard,
                                 planned_limit_ms: planned,
                                 hard_timeout,
@@ -953,6 +958,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 best_snapshot: best_result.clone(),
                                 elapsed_ms,
                                 current_nodes,
+                                soft_limit_ms: soft,
                                 hard_limit_ms: hard,
                                 planned_limit_ms: planned,
                                 hard_timeout: hard > 0 && hard < u64::MAX && elapsed_ms >= hard,
@@ -1229,9 +1235,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     ) -> SearchResult {
         if log::log_enabled!(log::Level::Info) {
             log::info!(
-                "diag near_hard_finalize label={} elapsed={}ms hard={}ms planned={}ms nodes={}",
+                "diag near_hard_finalize label={} elapsed={}ms soft={}ms hard={}ms planned={}ms nodes={}",
                 params.label,
                 params.elapsed_ms,
+                if params.soft_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.soft_limit_ms
+                },
                 if params.hard_limit_ms == u64::MAX {
                     0
                 } else {
@@ -1246,22 +1257,29 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             );
         }
 
-        self.shared_state.set_stop_with_reason(
-            TerminationReason::TimeLimit,
-            params.elapsed_ms,
-            params.current_nodes,
-            self.shared_state.get_best_depth(),
-            params.hard_timeout,
-        );
+        self.shared_state.set_stop_with_reason(crate::search::types::StopInfo {
+            reason: TerminationReason::TimeLimit,
+            elapsed_ms: params.elapsed_ms,
+            nodes: params.current_nodes,
+            depth_reached: self.shared_state.get_best_depth(),
+            hard_timeout: params.hard_timeout,
+            soft_limit_ms: params.soft_limit_ms,
+            hard_limit_ms: params.hard_limit_ms,
+        });
         self.pending_work_items.store(0, Ordering::Release);
         self.shared_state.mark_finalized_early();
 
         #[cfg(feature = "diagnostics")]
         {
             log::info!(
-                "info string near_hard_finalize=1 label={} elapsed={} hard={} planned={}",
+                "info string near_hard_finalize=1 label={} elapsed={} soft={} hard={} planned={}",
                 params.label,
                 params.elapsed_ms,
+                if params.soft_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.soft_limit_ms
+                },
                 if params.hard_limit_ms == u64::MAX {
                     0
                 } else {
@@ -1331,30 +1349,30 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 }
 
-/// Compute guard window for hard deadline depending on the remaining hard time.
+/// Compute guard window with respect to the *total* configured hard-limit time.
 /// Extracted for testability (piecewise as suggested in review).
-fn compute_hard_guard_ms(hard_ms: u64) -> u64 {
+fn compute_hard_guard_ms(total_hard_limit_ms: u64) -> u64 {
     use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
-    if hard_ms >= 1_000 {
+    if total_hard_limit_ms >= 1_000 {
         MAIN_NEAR_DEADLINE_WINDOW_MS
-    } else if hard_ms >= 500 {
+    } else if total_hard_limit_ms >= 500 {
         150
-    } else if hard_ms >= 200 {
+    } else if total_hard_limit_ms >= 200 {
         80
     } else {
         0
     }
 }
 
-fn compute_finalize_window_ms(limit_ms: u64) -> u64 {
+fn compute_finalize_window_ms(total_limit_ms: u64) -> u64 {
     use crate::search::constants::NEAR_HARD_FINALIZE_MS;
-    if limit_ms == 0 || limit_ms == u64::MAX {
+    if total_limit_ms == 0 || total_limit_ms == u64::MAX {
         0
-    } else if limit_ms >= 1_000 {
+    } else if total_limit_ms >= 1_000 {
         NEAR_HARD_FINALIZE_MS
-    } else if limit_ms >= 500 {
+    } else if total_limit_ms >= 500 {
         NEAR_HARD_FINALIZE_MS / 2
-    } else if limit_ms >= 200 {
+    } else if total_limit_ms >= 200 {
         120
     } else {
         0

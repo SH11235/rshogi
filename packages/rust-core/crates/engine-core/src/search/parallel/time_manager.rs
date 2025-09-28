@@ -49,13 +49,15 @@ pub fn start_time_manager(
                 );
 
                 // Record structured stop info and signal stop
-                shared_state.set_stop_with_reason(
-                    TerminationReason::TimeLimit,
+                shared_state.set_stop_with_reason(crate::search::types::StopInfo {
+                    reason: TerminationReason::TimeLimit,
                     elapsed_ms,
                     nodes,
-                    depth,
+                    depth_reached: depth,
                     hard_timeout,
-                );
+                    soft_limit_ms: soft,
+                    hard_limit_ms: hard,
+                });
                 break;
             }
         }
