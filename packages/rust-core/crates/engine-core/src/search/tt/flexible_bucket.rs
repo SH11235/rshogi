@@ -43,8 +43,12 @@ impl FlexibleTTBucket {
 
     /// Clear all entries using only shared reference (in-place via atomics)
     pub(crate) fn clear_atomic(&self) {
-        for entry in self.entries.iter() {
-            entry.store(0, Ordering::Relaxed);
+        let entries = self.size.entries();
+        for i in 0..entries {
+            let key_idx = i * 2;
+            let data_idx = key_idx + 1;
+            self.entries[data_idx].store(0, Ordering::Release);
+            self.entries[key_idx].store(0, Ordering::Release);
         }
     }
 
@@ -290,7 +294,8 @@ impl FlexibleTTBucket {
         // First pass: look for exact match or empty slot
         for i in 0..entries {
             let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Relaxed);
+            // Use Acquire when attempting update to match reader visibility guarantees
+            let old_key = self.entries[idx].load(Ordering::Acquire);
 
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
@@ -357,7 +362,7 @@ impl FlexibleTTBucket {
                 old_key,
                 new_entry.key,
                 Ordering::Release,
-                Ordering::Relaxed,
+                Ordering::Acquire,
             ) {
                 Ok(_) => {
                     // 新キー公開後に最終データを公開

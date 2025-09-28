@@ -66,8 +66,12 @@ impl TTBucket {
 
     /// Clear all entries using only shared reference (in-place via atomics)
     pub(crate) fn clear_atomic(&self) {
-        for e in &self.entries {
-            e.store(0, Ordering::Relaxed);
+        // Clear per entry with data->key order to respect publication invariants
+        for i in 0..BUCKET_SIZE {
+            let key_idx = i * 2;
+            let data_idx = key_idx + 1;
+            self.entries[data_idx].store(0, Ordering::Release);
+            self.entries[key_idx].store(0, Ordering::Release);
         }
     }
 
@@ -224,8 +228,8 @@ impl TTBucket {
 
             // We no longer use CAS for empty slots - direct store with proper ordering
             {
-                // Use Relaxed for empty slot detection
-                let old_key = self.entries[idx].load(Ordering::Relaxed);
+                // Use Acquire for key load when attempting potential updates
+                let old_key = self.entries[idx].load(Ordering::Acquire);
 
                 // Record atomic load
                 #[cfg(feature = "tt_metrics")]
@@ -292,23 +296,17 @@ impl TTBucket {
                 record_metric(m, MetricType::CasAttempt);
             }
 
-            // Design note: CAS replacement creates a brief window where readers might see
-            // new key with old data. This is a known and acceptable race condition in TT:
-            // 1. We update key first (with Release) to claim the slot
-            // 2. Then update data (with Release)
-            // Readers using Acquire on key will either see old key+old data or new key+new data
-            // in most cases. The brief inconsistency window is tolerable for TT's approximate nature.
+            // A'案: data=0 → Key CAS → data=new
+            // First, clear data so readers won't treat this slot as valid during replacement
+            self.entries[idx + 1].store(0, Ordering::Release);
             match self.entries[idx].compare_exchange(
                 old_key,
                 new_entry.key,
                 Ordering::Release,
-                Ordering::Relaxed,
+                Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // CAS succeeded - use two-phase publish to minimize race window
-                    // First, clear old data to ensure readers see depth=0 during the window
-                    self.entries[idx + 1].store(0, Ordering::Release);
-                    // Then store the actual new data
+                    // Publish final data after key is published
                     self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                     // Record metrics
@@ -316,9 +314,8 @@ impl TTBucket {
                     if let Some(m) = metrics {
                         use super::metrics::{record_metric, MetricType};
                         record_metric(m, MetricType::CasSuccess);
-                        // AtomicStore counts pure store operations only (not CAS)
-                        // Here we have 2 stores: first to clear (data=0), then actual data
-                        record_metric(m, MetricType::AtomicStore(2));
+                        // Count only the final data store
+                        record_metric(m, MetricType::AtomicStore(1));
                         record_metric(m, MetricType::ReplaceWorst);
                     }
                 }
