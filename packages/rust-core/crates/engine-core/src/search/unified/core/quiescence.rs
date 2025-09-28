@@ -22,6 +22,7 @@ use crate::{
 };
 use once_cell::sync::Lazy;
 use smallvec::SmallVec;
+use std::cell::Cell;
 use std::sync::atomic::Ordering;
 
 // Import victim_score from move_ordering module
@@ -68,6 +69,58 @@ static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
         !std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false)
     }
 });
+
+// Lightweight, time-based poll state for quiescence search.
+// We keep a thread-local last-poll timestamp (ms since search start) to avoid
+// relying solely on node-count based polling, which can be sparse on heavy paths.
+thread_local! {
+    static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[inline(always)]
+fn qs_should_light_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+) -> bool
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    if let Some(tm) = &searcher.time_manager {
+        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let hard = tm.hard_limit_ms();
+        // Near-hard window: always poll when within 50ms of hard deadline
+        let near_hard = hard < u64::MAX && elapsed_ms.saturating_add(50) >= hard;
+        // Lightweight periodic poll: ~every 12ms
+        let periodic = QS_LAST_LIGHT_POLL_MS.with(|c| {
+            let last = c.get();
+            let due = elapsed_ms.saturating_sub(last) >= 12;
+            if due {
+                c.set(elapsed_ms);
+            }
+            due
+        });
+        return near_hard || periodic;
+    }
+    false
+}
+
+#[inline(always)]
+fn qs_light_time_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+) -> bool
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    if qs_should_light_poll(searcher) {
+        // Process events and check time limit (unified path).
+        searcher.context.process_events(&searcher.time_manager);
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)
+            || searcher.context.should_stop()
+        {
+            return true;
+        }
+    }
+    false
+}
 
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
 ///
@@ -144,6 +197,11 @@ where
         if searcher.context.should_stop() {
             return alpha;
         }
+    }
+
+    // Lightweight time-based polling to cover paths where node-based polling is sparse
+    if qs_light_time_poll(searcher) {
+        return alpha;
     }
 
     // Check if in check first - this determines our search strategy
@@ -441,6 +499,11 @@ where
             return alpha; // Return current alpha value
         }
 
+        // Lightweight time-based polling inside hot loop
+        if qs_light_time_poll(searcher) {
+            return alpha;
+        }
+
         // Check QNodes budget before each capture move
         if let Some(limit) = qlimit {
             let exceeded = if let Some(ref counter) = qnodes_counter {
@@ -546,6 +609,10 @@ where
                 return alpha;
             }
 
+            if qs_light_time_poll(searcher) {
+                return alpha;
+            }
+
             // Budget enforcement
             if let Some(limit) = qlimit {
                 let exceeded = if let Some(ref counter) = qnodes_counter {
@@ -617,6 +684,10 @@ where
 
         for &mv in promo_check_noncaptures.iter() {
             if searcher.context.should_stop() {
+                return alpha;
+            }
+
+            if qs_light_time_poll(searcher) {
                 return alpha;
             }
 
@@ -707,6 +778,10 @@ where
             // Search checking drops
             for &mv in check_drops.iter() {
                 if searcher.context.should_stop() {
+                    return alpha;
+                }
+
+                if qs_light_time_poll(searcher) {
                     return alpha;
                 }
 
