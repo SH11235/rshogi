@@ -65,9 +65,7 @@ static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
     ))]
     {
         // Runtime default via env var
-        !std::env::var("SHOGI_QS_DISABLE_CHECKS")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+        !std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false)
     }
 });
 
