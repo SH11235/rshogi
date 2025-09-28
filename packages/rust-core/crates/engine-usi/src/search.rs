@@ -185,8 +185,18 @@ pub fn limits_from_go(
 
     builder = builder.time_parameters(tp);
     builder = builder.stop_flag(stop_flag);
-    if let Some(flag) = ponder_flag {
-        builder = builder.ponder_hit_flag(flag).ponder_with_inner();
+    // 重要: Ponder フラグは "go ponder" のときだけ有効化する。
+    // USI の Ponder オプション（ON/OFF）に関わらず、通常探索では Ponder に包まない。
+    if gp.ponder {
+        if let Some(flag) = ponder_flag {
+            builder = builder.ponder_hit_flag(flag).ponder_with_inner();
+            crate::io::info_string("ponder_wrapper=1");
+        } else {
+            // go ponder だがフラグがないケース（オプションOFFなど）でも挙動明示
+            crate::io::info_string("ponder_wrapper=0 (flag_missing)");
+        }
+    } else {
+        crate::io::info_string("ponder_wrapper=0");
     }
     builder.multipv(opts.multipv).enable_fail_safe(opts.fail_safe_guard).build()
 }
