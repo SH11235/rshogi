@@ -5,7 +5,9 @@ use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::DetailedTTMetrics;
 use super::prefetch::prefetch_memory;
-use super::utils::{try_update_entry_generic, UpdateResult, attempt_replace_worst, ReplaceAttemptResult};
+use super::utils::{
+    attempt_replace_worst, try_update_entry_generic, ReplaceAttemptResult, UpdateResult,
+};
 use crate::search::tt::simd::simd_enabled;
 use std::sync::atomic::{AtomicU64, Ordering};
 

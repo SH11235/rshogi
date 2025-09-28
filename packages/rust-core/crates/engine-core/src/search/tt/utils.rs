@@ -71,12 +71,8 @@ pub(crate) fn attempt_replace_worst(
         record_metric(m, MetricType::CasAttempt);
     }
 
-    match entries[idx].compare_exchange(
-        old_key,
-        new_entry.key,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    ) {
+    match entries[idx].compare_exchange(old_key, new_entry.key, Ordering::AcqRel, Ordering::Acquire)
+    {
         Ok(_) => {
             // 3) publish final data
             entries[idx + 1].store(new_entry.data, Ordering::Release);
