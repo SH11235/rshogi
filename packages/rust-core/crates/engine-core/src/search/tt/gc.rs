@@ -50,9 +50,14 @@ impl TranspositionTable {
                     continue; // Empty entry
                 }
 
-                // Load data
-                let data = bucket.entries[data_idx].load(Ordering::Acquire);
+                // Load data (Relaxed is sufficient; key Acquire already synchronized)
+                let data = bucket.entries[data_idx].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
+
+                // Skip transient replacement state (depth==0) to avoid fighting with writers
+                if entry.depth() == 0 {
+                    continue;
+                }
 
                 // Calculate age distance
                 let entry_age = entry.age();
@@ -82,9 +87,13 @@ impl TranspositionTable {
                     continue; // Empty entry
                 }
 
-                // Load data
-                let data = bucket.entries[data_idx].load(Ordering::Acquire);
+                // Load data (Relaxed is sufficient; key Acquire already synchronized)
+                let data = bucket.entries[data_idx].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
+
+                if entry.depth() == 0 {
+                    continue;
+                }
 
                 // Calculate age distance
                 let entry_age = entry.age();

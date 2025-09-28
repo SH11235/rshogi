@@ -2,9 +2,17 @@
 //!
 //! Overview
 //! - Single-table design with cache-friendly buckets (no sharding)
-//! - Lock-free writes via atomic publication order (value -> meta -> key/flag)
+//! - Lock-free writes via atomic publication order
 //! - Generation (age) management and incremental GC
 //! - EXACT-chain PV reconstruction integrated here
+//!
+//! Memory ordering invariants (reader/writer contract)
+//! - Reader (probe): `key.load(Acquire)` → if `key!=0` then `data.load(Relaxed)` and validate
+//! - Empty insert: publish `data.store(new, Release)` → then `key.store(new, Release)`
+//! - Replacement (worst entry): `data.store(0, Release)` → `key.compare_exchange(old, new, Release, Acquire)` →
+//!   on success `data.store(new, Release)`
+//! - Deletion/GC: `data.store(0, Release)` → `key.store(0, Release)`
+//!   These rules ensure readers never observe a "new key + old data(depth>0)" combination.
 //!
 //! Bucket structure
 //! This implementation uses a bucket structure to optimize cache performance:
