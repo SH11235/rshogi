@@ -27,6 +27,18 @@ pub fn search_root_with_window<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // Hard-limit short-circuit at root: exit immediately if past hard or planned end
+    if let Some(tm) = &searcher.time_manager {
+        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let hard = tm.hard_limit_ms();
+        if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+            return (initial_alpha, Vec::new());
+        }
+        let planned = tm.scheduled_end_ms();
+        if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+            return (initial_alpha, Vec::new());
+        }
+    }
     // Complete any remaining garbage collection from previous search
     #[cfg(feature = "hashfull_filter")]
     if USE_TT {
@@ -121,6 +133,21 @@ where
 
     // Search each move
     for (move_idx, &mv) in ordered_slice.iter().enumerate() {
+        // Lightweight polling at root for near-hard/stop responsiveness
+        if searcher.context.should_stop() {
+            break;
+        }
+        if let Some(tm) = &searcher.time_manager {
+            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            let hard = tm.hard_limit_ms();
+            if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+                break;
+            }
+            let planned = tm.scheduled_end_ms();
+            if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+                break;
+            }
+        }
         // In debug builds, validate that all moves from move generator are legal
         // (this should always be true, so we just assert it)
         #[cfg(debug_assertions)]
