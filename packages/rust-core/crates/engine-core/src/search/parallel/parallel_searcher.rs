@@ -141,6 +141,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         max_depth: u8,
         main_worker: Option<&DequeWorker<WorkItem>>,
     ) {
+        if self.shared_state.should_stop() {
+            return;
+        }
+        // Guard: avoid enqueueing more work if time has expired
+        if let Some(tm) = &*self.time_manager.lock().unwrap() {
+            let elapsed = tm.elapsed_ms();
+            let hard = tm.hard_limit_ms();
+            let planned = tm.scheduled_end_ms();
+            if (hard > 0 && hard < u64::MAX && elapsed >= hard)
+                || (planned > 0 && planned < u64::MAX && elapsed >= planned)
+            {
+                return;
+            }
+        }
         // Generate root moves for the first half of iterations to distribute work
         // (at least 3 iterations, but up to half of max_depth)
         let root_move_limit = (max_depth as usize / 2).max(3);
@@ -515,6 +529,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
         info!("Starting simple parallel search with {} threads", self.num_threads);
 
+        #[cfg(debug_assertions)]
+        if limits.stop_flag.is_none() {
+            log::warn!(
+                "limits.stop_flag not wired; parallel stop propagation may be delayed in tests"
+            );
+        }
+
         // Record start time for fail-safe
         let search_start = Instant::now();
 
@@ -751,6 +772,32 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         }
                         break;
                     }
+                    // Hard/planned immediate short-circuit right before work distribution
+                    let elapsed_ms = tm.elapsed_ms();
+                    let hard = tm.hard_limit_ms();
+                    if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+                        if log::log_enabled!(log::Level::Info) {
+                            log::info!(
+                                "diag main_short_circuit reason=hard elapsed={}ms hard={}ms",
+                                elapsed_ms,
+                                hard
+                            );
+                        }
+                        self.shared_state.set_stop();
+                        break;
+                    }
+                    let planned = tm.scheduled_end_ms();
+                    if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+                        if log::log_enabled!(log::Level::Info) {
+                            log::info!(
+                                "diag main_short_circuit reason=planned elapsed={}ms planned={}ms",
+                                elapsed_ms,
+                                planned
+                            );
+                        }
+                        self.shared_state.set_stop();
+                        break;
+                    }
                 }
             }
 
@@ -768,7 +815,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!("Starting iteration {iteration} (depth {main_depth})");
             }
 
-            // Distribute work to helper threads
+            // Distribute work to helper threads (guarded by stop/time checks)
+            if self.shared_state.should_stop() {
+                break;
+            }
             self.distribute_work_to_helpers(
                 position,
                 iteration,
@@ -777,7 +827,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 Some(&main_worker),
             );
 
-            // Main thread searches
+            // Main thread searches (time/stop will be checked inside)
             #[cfg(feature = "ybwc")]
             let result = {
                 // Use YBWC more aggressively for better parallelization
