@@ -138,7 +138,7 @@ fn bench_flexible_bucket_collision(c: &mut Criterion) {
             let mut idx = 0usize;
             b.iter(|| {
                 let k = keys[idx & (keys.len() - 1)];
-                black_box(tt.probe(black_box(k)));
+                black_box(tt.probe_entry(black_box(k)));
                 idx = idx.wrapping_add(1);
             });
         });

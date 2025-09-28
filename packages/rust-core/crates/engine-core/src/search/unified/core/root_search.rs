@@ -77,7 +77,7 @@ where
         searcher
             .tt
             .as_ref()
-            .and_then(|tt| tt.probe(pos.zobrist_hash))
+            .and_then(|tt| tt.probe_entry(pos.zobrist_hash))
             .and_then(|e| e.get_move())
     } else {
         None
@@ -351,7 +351,7 @@ where
         searcher
             .tt
             .as_ref()
-            .and_then(|tt| tt.probe(pos.zobrist_hash))
+            .and_then(|tt| tt.probe_entry(pos.zobrist_hash))
             .and_then(|e| e.get_move())
     } else {
         None
