@@ -269,10 +269,9 @@ impl SearchContext {
     ) -> bool {
         if let Some(ref tm) = time_manager {
             // Proactive early stop near hard limit to allow unwind/commit time
-            let elapsed = self.elapsed();
             let hard_limit_ms = tm.hard_limit_ms();
             if hard_limit_ms > 0 {
-                let elapsed_ms = elapsed.as_millis() as u64;
+                let elapsed_ms = tm.elapsed_ms();
                 // Safety window before hard limit to exit gracefully (adaptive)
                 // Do not preempt ultra-short budgets
                 // Safety margin before hard limit to allow unwind/commit time.
@@ -307,12 +306,11 @@ impl SearchContext {
             if tm.should_stop(nodes) {
                 // Log once per search (engine-core internal logging)
                 if !self.time_stop_logged {
-                    let elapsed = self.elapsed();
                     log::info!(
                         "Time limit exceeded: depth={} nodes={} elapsed={}ms",
                         self.current_depth,
                         nodes,
-                        elapsed.as_millis()
+                        tm.elapsed_ms()
                     );
                     self.time_stop_logged = true;
                 }

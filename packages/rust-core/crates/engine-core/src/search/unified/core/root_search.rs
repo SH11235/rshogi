@@ -29,13 +29,16 @@ where
 {
     // Hard-limit short-circuit at root: exit immediately if past hard or planned end
     if let Some(tm) = &searcher.time_manager {
-        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let elapsed_ms = tm.elapsed_ms();
         let hard = tm.hard_limit_ms();
         if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+            // Mark time-based stop to help upper layers salvage PV and attach StopInfo consistently
+            searcher.context.stop();
             return (initial_alpha, Vec::new());
         }
         let planned = tm.scheduled_end_ms();
         if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+            searcher.context.stop();
             return (initial_alpha, Vec::new());
         }
     }
@@ -138,13 +141,15 @@ where
             break;
         }
         if let Some(tm) = &searcher.time_manager {
-            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            let elapsed_ms = tm.elapsed_ms();
             let hard = tm.hard_limit_ms();
             if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+                searcher.context.stop();
                 break;
             }
             let planned = tm.scheduled_end_ms();
             if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+                searcher.context.stop();
                 break;
             }
         }

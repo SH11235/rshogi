@@ -156,7 +156,7 @@ where
     if let Some(tm) = &searcher.time_manager {
         let hard = tm.hard_limit_ms();
         if hard > 0 && hard < u64::MAX {
-            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            let elapsed_ms = tm.elapsed_ms();
             if elapsed_ms >= hard {
                 return alpha;
             }
@@ -167,7 +167,7 @@ where
     if let Some(tm) = &searcher.time_manager {
         let planned = tm.scheduled_end_ms();
         if planned > 0 && planned < u64::MAX {
-            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            let elapsed_ms = tm.elapsed_ms();
             if elapsed_ms >= planned {
                 return alpha;
             }
