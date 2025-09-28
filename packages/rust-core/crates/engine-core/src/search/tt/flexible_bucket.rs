@@ -36,6 +36,19 @@ impl FlexibleTTBucket {
         }
     }
 
+    /// Any key present in this flexible bucket? (Acquire)
+    #[inline]
+    pub(crate) fn any_key_nonzero_acquire(&self) -> bool {
+        let entries = self.size.entries();
+        for i in 0..entries {
+            let key = self.entries[i * 2].load(Ordering::Acquire);
+            if key != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Clear all entries in the bucket
     pub(crate) fn clear(&mut self) {
         for entry in self.entries.iter() {
