@@ -103,7 +103,7 @@ where
             && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= planned;
         #[cfg(feature = "diagnostics")]
         {
-            if (near_hard || near_planned) {
+            if near_hard || near_planned {
                 QS_NEAR_DEADLINE_LOGGED.with(|flag| {
                     if !flag.get() {
                         log::info!(
