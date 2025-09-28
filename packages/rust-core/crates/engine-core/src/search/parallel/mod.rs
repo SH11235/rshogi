@@ -11,6 +11,7 @@ mod parallel_searcher;
 #[cfg(test)]
 mod tests;
 mod time_manager;
+mod util;
 mod work_queue;
 mod worker;
 
