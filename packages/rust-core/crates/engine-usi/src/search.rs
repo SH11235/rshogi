@@ -332,7 +332,26 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     if let TimeControl::Ponder(inner) = tc_for_stop {
         tc_for_stop = *inner;
     }
-    state.current_time_control = Some(tc_for_stop);
+    state.current_time_control = Some(tc_for_stop.clone());
+
+    // Emit estimated time budget at search start (diagnostics aid)
+    // Uses the same allocation routine as engine-core TimeManager.
+    {
+        use engine_core::time_management::{
+            calculate_time_allocation, detect_game_phase_for_time, TimeParameters,
+        };
+        let params: TimeParameters = limits.time_parameters.unwrap_or_default();
+        let phase = detect_game_phase_for_time(&search_position, search_position.ply as u32);
+        let (soft, hard) = calculate_time_allocation(
+            &tc_for_stop,
+            search_position.side_to_move,
+            search_position.ply as u32,
+            gp.moves_to_go,
+            phase,
+            &params,
+        );
+        info_string(format!("time_budget soft_ms={} hard_ms={} tc={:?}", soft, hard, tc_for_stop));
+    }
 
     let (tx, rx) = mpsc::channel();
     let engine = Arc::clone(&state.engine);
