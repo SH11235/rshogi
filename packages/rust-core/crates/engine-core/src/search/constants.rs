@@ -85,7 +85,7 @@ pub const NEAR_DEADLINE_WINDOW_MS: u64 = 50;
 
 /// Lightweight polling interval (ms) for AB/QS time checks when not inside
 /// the near-deadline window.
-pub const LIGHT_POLL_INTERVAL_MS: u64 = 5;
+pub const LIGHT_POLL_INTERVAL_MS: u64 = 8;
 
 /// Main-thread guard window before starting a new iteration or distributing work.
 /// If we are within this window of the planned or hard deadline, we avoid

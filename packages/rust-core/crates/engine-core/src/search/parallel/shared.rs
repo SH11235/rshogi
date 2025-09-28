@@ -5,7 +5,6 @@
 #[cfg(feature = "ybwc")]
 use crate::shogi::Position;
 use crate::{
-    search::types::TerminationReason,
     shogi::{Move, PieceType, Square},
     Color,
 };
@@ -574,7 +573,7 @@ impl SharedSearchState {
 
     /// Get current best move
     pub fn get_best_move(&self) -> Option<Move> {
-        let encoded = self.best_move.load(Ordering::Relaxed);
+        let encoded = self.best_move.load(Ordering::Acquire);
         if encoded == 0 {
             None
         } else {
@@ -584,12 +583,12 @@ impl SharedSearchState {
 
     /// Get current best score
     pub fn get_best_score(&self) -> i32 {
-        self.best_score.load(Ordering::Relaxed)
+        self.best_score.load(Ordering::Acquire)
     }
 
     /// Get current best depth
     pub fn get_best_depth(&self) -> u8 {
-        self.best_depth.load(Ordering::Relaxed)
+        self.best_depth.load(Ordering::Acquire)
     }
 
     /// Add to node count
@@ -638,26 +637,9 @@ impl SharedSearchState {
     }
 
     /// Set stop flag with reason
-    pub fn set_stop_with_reason(
-        &self,
-        reason: TerminationReason,
-        elapsed_ms: u64,
-        nodes: u64,
-        depth: u8,
-        hard_timeout: bool,
-    ) {
-        use crate::search::types::StopInfo;
-
+    pub fn set_stop_with_reason(&self, stop_info: crate::search::types::StopInfo) {
         // Try to set stop info first (only first call succeeds)
-        self.stop_info.try_set(StopInfo {
-            reason,
-            elapsed_ms,
-            nodes,
-            depth_reached: depth,
-            hard_timeout,
-            soft_limit_ms: 0,
-            hard_limit_ms: 0,
-        });
+        self.stop_info.try_set(stop_info);
 
         // Then set the stop flag
         self.stop_flag.store(true, Ordering::Release);
