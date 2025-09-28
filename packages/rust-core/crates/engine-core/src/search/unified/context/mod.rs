@@ -236,6 +236,10 @@ impl SearchContext {
     }
 
     /// Signal internal stop
+    ///
+    /// Idempotent and safe under parallel search.
+    /// Uses Release/Acquire with readers (`should_stop`) to guarantee visibility across threads.
+    #[inline(always)]
     pub fn stop(&self) {
         // Use Release ordering to ensure the stop signal is visible to other threads quickly
         self.internal_stop.store(true, Ordering::Release);
@@ -327,7 +331,7 @@ impl SearchContext {
     }
 
     /// Whether this search stopped due to time limit (as decided by TimeManager)
-    #[inline]
+    #[inline(always)]
     pub fn was_time_stopped(&self) -> bool {
         self.time_stop_logged
     }
