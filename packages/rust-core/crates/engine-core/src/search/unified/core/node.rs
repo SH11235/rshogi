@@ -13,9 +13,15 @@ use crate::{
 use std::cell::Cell;
 
 // Lightweight, time-based polling helpers for alpha-beta search (module scope)
-const AB_LIGHT_POLL_INTERVAL_MS: u64 = 12;
-const AB_NEAR_HARD_WINDOW_MS: u64 = 50;
+use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
 thread_local! { static AB_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
+
+// Diagnostics: one-time info logs for near-deadline and short-circuit events
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    static AB_NEAR_DEADLINE_LOGGED: Cell<bool> = const { Cell::new(false) };
+    static AB_SHORT_CIRCUIT_LOGGED: Cell<bool> = const { Cell::new(false) };
+}
 
 #[inline(always)]
 fn ab_should_light_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
@@ -27,24 +33,46 @@ where
     if let Some(tm) = &searcher.time_manager {
         let elapsed_ms = tm.elapsed_ms();
         let hard = tm.hard_limit_ms();
+        let planned = tm.scheduled_end_ms();
         // Near hard deadline: force polling within window
         let near_hard = hard > 0
             && hard < u64::MAX
-            && elapsed_ms.saturating_add(AB_NEAR_HARD_WINDOW_MS) >= hard;
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= hard;
+        // Near planned rounded end: also force polling
+        let near_planned = planned > 0
+            && planned < u64::MAX
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= planned;
+        #[cfg(feature = "diagnostics")]
+        {
+            if (near_hard || near_planned) {
+                AB_NEAR_DEADLINE_LOGGED.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag near_deadline ab elapsed={}ms hard={}ms planned={}ms window={}ms",
+                            elapsed_ms,
+                            if hard == u64::MAX { 0 } else { hard },
+                            if planned == u64::MAX { 0 } else { planned },
+                            NEAR_DEADLINE_WINDOW_MS
+                        );
+                        flag.set(true);
+                    }
+                });
+            }
+        }
         // Periodic lightweight poll roughly every AB_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
         let periodic = AB_LAST_LIGHT_POLL_MS.with(|c| {
             let last = c.get();
             let due = if elapsed_ms <= last {
                 true
             } else {
-                elapsed_ms - last >= AB_LIGHT_POLL_INTERVAL_MS
+                elapsed_ms - last >= LIGHT_POLL_INTERVAL_MS
             };
             if due {
                 c.set(elapsed_ms);
             }
             due
         });
-        return near_hard || periodic;
+        return near_hard || near_planned || periodic;
     }
     false
 }

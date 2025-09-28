@@ -87,7 +87,7 @@ where
         } else {
             0
         };
-        log::info!(
+        log::debug!(
             "diag root_check side={:?} in_check={} atk_count={} hash={:#016x} depth={} legal_moves={}",
             stm,
             in_check,

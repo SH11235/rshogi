@@ -28,7 +28,13 @@ use crate::{
     },
     shogi::Position,
 };
+#[cfg(feature = "diagnostics")]
+use std::cell::Cell;
 use std::sync::atomic::Ordering;
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    static AB_SHORT_CIRCUIT_LOGGED_ONCE: Cell<bool> = const { Cell::new(false) };
+}
 
 /// Compute repetition penalty based on static evaluation from the side-to-move perspective.
 ///
@@ -158,6 +164,19 @@ where
         if hard > 0 && hard < u64::MAX {
             let elapsed_ms = tm.elapsed_ms();
             if elapsed_ms >= hard {
+                // Mark time-based stop so outer layers (root/ID) exit immediately
+                #[cfg(feature = "diagnostics")]
+                AB_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag short_circuit ab reason=hard elapsed={}ms hard={}ms",
+                            elapsed_ms,
+                            hard
+                        );
+                        flag.set(true);
+                    }
+                });
+                searcher.context.stop();
                 return alpha;
             }
         }
@@ -169,6 +188,19 @@ where
         if planned > 0 && planned < u64::MAX {
             let elapsed_ms = tm.elapsed_ms();
             if elapsed_ms >= planned {
+                // Planned rounded stop reached – signal stop for consistent unwind
+                #[cfg(feature = "diagnostics")]
+                AB_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag short_circuit ab reason=planned elapsed={}ms planned={}ms",
+                            elapsed_ms,
+                            planned
+                        );
+                        flag.set(true);
+                    }
+                });
+                searcher.context.stop();
                 return alpha;
             }
         }
