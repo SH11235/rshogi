@@ -64,6 +64,9 @@ fn test_parallel_search_node_counting() {
     // Run multiple searches to ensure stats don't accumulate incorrectly
     let nodes1 = result.stats.nodes;
 
+    // Reset TT so the second search isn't affected by warmed entries and remains comparable.
+    engine.clear_hash();
+
     let result2 = engine.search(&mut pos, limits.clone());
     let nodes2 = result2.stats.nodes;
 
