@@ -512,7 +512,7 @@ impl Engine {
 
         // 常に shared TT を参照
         let tt = self.shared_tt.clone();
-        let entry = tt.probe(child_hash)?;
+        let entry = tt.probe_entry(child_hash)?;
         if !entry.matches(child_hash) {
             return None;
         }
@@ -953,7 +953,7 @@ impl Engine {
         }
         impl<'a> crate::search::tt::TTProbe for TtWrap<'a> {
             fn probe(&self, hash: u64) -> Option<crate::search::tt::TTEntry> {
-                self.tt.probe(hash)
+                self.tt.probe_entry(hash)
             }
         }
         let wrap = TtWrap { tt };

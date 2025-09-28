@@ -183,7 +183,7 @@ fn bench_tt_performance(c: &mut Criterion) {
                 b.iter(|| {
                     for i in 0..100 {
                         let test_hash = hash.wrapping_add(i * 10);
-                        black_box(tt.probe(test_hash));
+                        black_box(tt.probe_entry(test_hash));
                     }
                 });
             },
@@ -207,7 +207,7 @@ fn bench_tt_performance(c: &mut Criterion) {
                 b.iter(|| {
                     for i in 0..100 {
                         let test_hash = hash.wrapping_add(i * 10);
-                        black_box(tt.probe(test_hash));
+                        black_box(tt.probe_entry(test_hash));
                     }
                 });
             },

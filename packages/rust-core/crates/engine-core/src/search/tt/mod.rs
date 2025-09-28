@@ -315,7 +315,7 @@ impl TranspositionTable {
     }
 
     /// Probe transposition table
-    pub fn probe(&self, hash: u64) -> Option<TTEntry> {
+    pub fn probe_entry(&self, hash: u64) -> Option<TTEntry> {
         debug_assert!(hash != 0, "Attempting to probe with zero hash");
 
         let idx = self.bucket_index(hash);
@@ -922,7 +922,7 @@ impl TTProbe for TranspositionTable {
     #[inline]
     fn probe(&self, hash: u64) -> Option<TTEntry> {
         // 明示的に固有メソッドを呼び出して可読性と誤解防止を図る
-        TranspositionTable::probe(self, hash)
+        TranspositionTable::probe_entry(self, hash)
     }
 }
 
@@ -954,7 +954,7 @@ mod pv_reconstruction_tests {
         tt.store(test_hash, Some(test_move), 100, 50, 10, NodeType::Exact);
 
         // Verify the entry was stored
-        let probe_result = tt.probe(test_hash);
+        let probe_result = tt.probe_entry(test_hash);
         assert!(probe_result.is_some(), "TT probe should find the entry");
         let entry = probe_result.unwrap();
         assert!(entry.matches(test_hash), "Entry should match the hash");

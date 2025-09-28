@@ -17,7 +17,7 @@ fn bench_bucket_sizes(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("probe", &size_str), &tt, |b, tt| {
             let hash = 0x1234567890ABCDEF;
             b.iter(|| {
-                black_box(tt.probe(black_box(hash)));
+                black_box(tt.probe_entry(black_box(hash)));
             });
         });
 
@@ -57,7 +57,7 @@ fn bench_8_entry_operations(c: &mut Criterion) {
     group.bench_function("probe_hit", |b| {
         let hash = (500_u64 << 32) | 500;
         b.iter(|| {
-            black_box(tt.probe(black_box(hash)));
+            black_box(tt.probe_entry(black_box(hash)));
         });
     });
 
@@ -65,7 +65,7 @@ fn bench_8_entry_operations(c: &mut Criterion) {
     group.bench_function("probe_miss", |b| {
         let hash = (9999_u64 << 32) | 9999;
         b.iter(|| {
-            black_box(tt.probe(black_box(hash)));
+            black_box(tt.probe_entry(black_box(hash)));
         });
     });
 
@@ -78,7 +78,7 @@ fn bench_8_entry_operations(c: &mut Criterion) {
 
             // 70% probes, 30% stores
             if counter % 10 < 7 {
-                black_box(tt.probe(black_box(hash)));
+                black_box(tt.probe_entry(black_box(hash)));
             } else {
                 tt.store(
                     black_box(hash),
@@ -113,7 +113,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
             let mut hash = 0u64;
             b.iter(|| {
                 hash += 1;
-                black_box(tt.probe(black_box(hash)));
+                black_box(tt.probe_entry(black_box(hash)));
             });
         });
 
@@ -123,7 +123,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
             b.iter(|| {
                 // Simple PRNG for consistent random pattern
                 hash = hash.wrapping_mul(6364136223846793005).wrapping_add(1);
-                black_box(tt.probe(black_box(hash)));
+                black_box(tt.probe_entry(black_box(hash)));
             });
         });
     }

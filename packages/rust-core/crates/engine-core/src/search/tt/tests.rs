@@ -260,26 +260,26 @@ mod tt_tests {
         tt.store(hash, None, 100, 50, 5, NodeType::Exact);
 
         // Initially, exact cut flag should not be set
-        let entry = tt.probe(hash).unwrap();
+        let entry = tt.probe_entry(hash).unwrap();
         assert!(!entry.has_abdada_cut());
 
         // Set the exact cut flag
         assert!(tt.set_exact_cut(hash));
 
         // Now the flag should be set
-        let entry = tt.probe(hash).unwrap();
+        let entry = tt.probe_entry(hash).unwrap();
         assert!(entry.has_abdada_cut());
 
         // Clear the flag
         assert!(tt.clear_exact_cut(hash));
 
         // Flag should be cleared
-        let entry = tt.probe(hash).unwrap();
+        let entry = tt.probe_entry(hash).unwrap();
         assert!(!entry.has_abdada_cut());
 
         // Test non-existent entry
         let non_existent_hash = 0xFEDCBA0987654321;
-        assert!(tt.probe(non_existent_hash).is_none());
+        assert!(tt.probe_entry(non_existent_hash).is_none());
         assert!(!tt.set_exact_cut(non_existent_hash));
         assert!(!tt.clear_exact_cut(non_existent_hash));
     }
@@ -321,7 +321,7 @@ mod tt_tests {
         }
 
         // The flag should still be set
-        let entry = tt.probe(hash).unwrap();
+        let entry = tt.probe_entry(hash).unwrap();
         assert!(entry.has_abdada_cut());
     }
 
@@ -337,7 +337,7 @@ mod tt_tests {
         assert!(tt.set_exact_cut(hash));
 
         // Probe the entry and verify other fields are intact
-        let entry = tt.probe(hash).unwrap();
+        let entry = tt.probe_entry(hash).unwrap();
         assert_eq!(entry.score(), 150);
         assert_eq!(entry.eval(), 75);
         assert_eq!(entry.depth(), 8);
@@ -410,7 +410,7 @@ mod tt_tests {
                 tt_clone.store(hash, None, 200, 60, thread_depth, NodeType::Exact);
 
                 // Immediately probe to check if the update is visible
-                tt_clone.probe(hash)
+                tt_clone.probe_entry(hash)
             });
             handles.push(handle);
         }
@@ -738,7 +738,7 @@ mod tt_tests {
         tt.store(new_hash, None, 200, 60, 15, NodeType::Exact);
 
         // The new entry should not be stored (bucket is full and empty slot mode is on)
-        let result = tt.probe(new_hash);
+        let result = tt.probe_entry(new_hash);
         assert!(result.is_none());
     }
 
@@ -810,7 +810,7 @@ mod tt_tests {
         // Last entry (still has empty slot) -> should be stored
         let h_last = base + ((BUCKET_SIZE - 1) as u64 * tt.num_buckets as u64);
         tt.store(h_last, None, 1, 0, 1, NodeType::Exact);
-        assert!(tt.probe(h_last).is_some());
+        assert!(tt.probe_entry(h_last).is_some());
     }
 
     #[test]
@@ -1117,7 +1117,7 @@ mod parallel_tests {
                     tt_clone.store(hash, None, score, 0, 10, NodeType::Exact);
 
                     // Immediately probe
-                    let entry = tt_clone.probe(hash);
+                    let entry = tt_clone.probe_entry(hash);
                     if let Some(found) = entry {
                         // Note: In high concurrency, the score might be from another thread
                         // that updated the same bucket position, so we check if it's valid
@@ -1198,7 +1198,7 @@ mod parallel_tests {
         for i in 0..shared_positions {
             // Use the same hash generation as in the threads
             let hash = splitmix64(0x00C0_FFEE_F00D_0000 ^ (i as u64)) | 1;
-            let entry = tt.probe(hash);
+            let entry = tt.probe_entry(hash);
             if entry.is_some() {
                 found_count += 1;
             }
@@ -1235,7 +1235,7 @@ mod parallel_tests {
                     // Periodically check if we can probe old entries
                     if i % 1000 == 0 && i > 0 {
                         let old_hash = ((thread_id as u64) << 56) | ((i - 1000 + 1) as u64);
-                        let _entry = tt_clone.probe(old_hash);
+                        let _entry = tt_clone.probe_entry(old_hash);
                         // Entry might or might not exist due to GC
                     }
                 }
@@ -1298,7 +1298,7 @@ mod parallel_tests {
                         tt_clone.store(hash, None, score, score / 2, depth, NodeType::Exact);
                     } else {
                         // Reader thread
-                        if let Some(entry) = tt_clone.probe(hash) {
+                        if let Some(entry) = tt_clone.probe_entry(hash) {
                             // Verify data consistency
                             let score = entry.score();
                             let eval = entry.eval();
@@ -1426,7 +1426,7 @@ mod parallel_tests {
         // Test that prefetch doesn't affect probe results
         for &(hash, expected_score, expected_depth) in &test_data {
             // Probe before prefetch
-            let before = tt.probe(hash);
+            let before = tt.probe_entry(hash);
             assert!(before.is_some());
             let before_entry = before.unwrap();
             assert_eq!(before_entry.score(), expected_score);
@@ -1439,7 +1439,7 @@ mod parallel_tests {
             tt.prefetch(hash, 0); // Non-temporal hint
 
             // Probe after prefetch - should be identical
-            let after = tt.probe(hash);
+            let after = tt.probe_entry(hash);
             assert!(after.is_some());
             let after_entry = after.unwrap();
             assert_eq!(after_entry.key, before_entry.key);
@@ -1450,13 +1450,13 @@ mod parallel_tests {
 
         // Test prefetch on non-existent entries
         let missing_hash = 0x9999_9999_9999_9999;
-        assert!(tt.probe(missing_hash).is_none());
+        assert!(tt.probe_entry(missing_hash).is_none());
 
         // Prefetch non-existent entry
         tt.prefetch_l1(missing_hash);
 
         // Should still be none
-        assert!(tt.probe(missing_hash).is_none());
+        assert!(tt.probe_entry(missing_hash).is_none());
     }
 
     #[test]
@@ -1476,7 +1476,7 @@ mod parallel_tests {
 
         // Test probe-triggered prefetch (if implemented)
         tt.store(h, None, 1, 0, 1, NodeType::Exact);
-        let _ = tt.probe(h);
+        let _ = tt.probe_entry(h);
         let after2 = tt.prefetch_stats().map(|s| s.calls).unwrap_or(0);
         // This assertion depends on whether probe() calls prefetch internally
         // If it does, we expect an increment
@@ -1495,7 +1495,7 @@ mod parallel_tests {
         let hash = 0x123456789ABCDEF0;
         tt.store(hash, None, 100, 50, 5, NodeType::Exact);
 
-        let entry = tt.probe(hash);
+        let entry = tt.probe_entry(hash);
         assert!(entry.is_some(), "Should be able to store and retrieve even with 0MB");
 
         // Verify stored values

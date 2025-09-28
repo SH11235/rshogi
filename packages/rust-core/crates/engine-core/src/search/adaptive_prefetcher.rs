@@ -312,7 +312,7 @@ mod tests {
         // Record hits and misses
         for i in 0..distance {
             let hash = pos.zobrist_hash() ^ (i as u64);
-            if tt.probe(hash).is_some() {
+            if tt.probe_entry(hash).is_some() {
                 prefetcher.record_hit();
             } else {
                 prefetcher.record_miss();

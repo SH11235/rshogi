@@ -28,7 +28,7 @@ pub trait TTOperations<const USE_TT: bool> {
     #[inline(always)]
     fn probe_tt(&self, hash: u64) -> Option<TTEntry> {
         if USE_TT {
-            self.tt().as_ref()?.probe(hash)
+            self.tt().as_ref()?.probe_entry(hash)
         } else {
             None
         }
