@@ -1,8 +1,5 @@
-[target.wasm32-unknown-unknown]
-rustflags = ["--cfg=getrandom_backend=\"wasm_js\""]
+[build]
+# Optimize code generation for the local machine.
+# Warning: binaries built with this setting may not run on older CPUs.
+rustflags = ["-C", "target-cpu=native"]
 
-# NOTE:
-# Linux 向けの mold 強制は削除しました（CI やローカルで RUSTFLAGS を使って任意に有効化してください）。
-# 例:
-#   RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build
-# もしくは .cargo/config.local.toml（VCS除外）でローカル限定設定にしてください。

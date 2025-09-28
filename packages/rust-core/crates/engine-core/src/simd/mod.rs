@@ -80,18 +80,9 @@ pub mod dispatch {
     }
 
     impl SimdLevel {
-        /// Detect the best available SIMD level for current CPU
+        /// Detect the effective SIMD level, including runtime clamp and self-test fallback.
         pub fn detect() -> Self {
-            if has_avx512f() {
-                SimdLevel::Avx512f
-            } else if has_avx() {
-                // ランタイムでは AVX2/AVX をまとめて AVX として扱う
-                SimdLevel::Avx
-            } else if has_sse2() {
-                SimdLevel::Sse2
-            } else {
-                SimdLevel::Scalar
-            }
+            super::effective_level()
         }
     }
 }
@@ -128,6 +119,149 @@ fn debug_assert_no_alias(dst: &[f32], row: &[f32]) {
         let rend = rp.saturating_add(rn);
         debug_assert!(dend <= rp || rend <= dp, "add_row_scaled_f32: dst/row must not alias");
     }
+}
+
+// -------------------------------------------------------------------------------------
+// Global effective level + self-test for AVX-512
+// -------------------------------------------------------------------------------------
+
+use std::sync::OnceLock;
+
+static EFFECTIVE_LEVEL: OnceLock<dispatch::SimdLevel> = OnceLock::new();
+static SELFTEST_STATUS: OnceLock<&'static str> = OnceLock::new();
+
+#[inline]
+fn hw_detect_with_clamp() -> dispatch::SimdLevel {
+    use dispatch::SimdLevel::*;
+    // 1) Hardware detection
+    let hw = if dispatch::has_avx512f() {
+        Avx512f
+    } else if dispatch::has_avx() {
+        Avx
+    } else if dispatch::has_sse2() {
+        Sse2
+    } else {
+        Scalar
+    };
+
+    // 2) Optional runtime clamp via env var
+    let clamp = match std::env::var("SHOGI_SIMD_MAX") {
+        Ok(val) => match val.to_ascii_lowercase().as_str() {
+            "scalar" => Scalar,
+            "sse2" => Sse2,
+            "avx" => Avx,
+            "avx512" | "avx512f" => Avx512f,
+            _ => hw,
+        },
+        Err(_) => hw,
+    };
+
+    match (hw, clamp) {
+        (Scalar, _) | (_, Scalar) => Scalar,
+        (Sse2, _) | (_, Sse2) => Sse2,
+        (Avx, _) | (_, Avx) => Avx,
+        _ => Avx512f,
+    }
+}
+
+#[inline]
+pub fn effective_level() -> dispatch::SimdLevel {
+    *EFFECTIVE_LEVEL.get_or_init(|| {
+        let mut lvl = hw_detect_with_clamp();
+        // Default: no self-test performed
+        let st: &'static str;
+        // Only self-test when selecting AVX-512F
+        if matches!(lvl, dispatch::SimdLevel::Avx512f) {
+            if run_selftest_avx512f() {
+                st = "pass";
+            } else {
+                // Fallback to AVX
+                lvl = dispatch::SimdLevel::Avx;
+                st = "fail";
+            }
+        } else {
+            st = "skipped";
+        }
+        let _ = SELFTEST_STATUS.set(st);
+        lvl
+    })
+}
+
+#[inline]
+pub fn selftest_status() -> &'static str {
+    effective_level();
+    SELFTEST_STATUS.get().copied().unwrap_or("not_run")
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn run_selftest_avx512f() -> bool {
+    // If CPU doesn't actually have AVX-512F, treat as fail-fast (will fallback)
+    if !dispatch::has_avx512f() {
+        return false;
+    }
+    // Quick deterministic LCG
+    #[inline]
+    fn lcg_step(x: &mut u64) -> u32 {
+        *x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (*x >> 32) as u32
+    }
+    // Lengths to test: 0..=63 plus some larger
+    let mut lens: Vec<usize> = (0..=63).collect();
+    lens.extend_from_slice(&[64, 80, 96, 128]);
+    // k set
+    let ks: [f32; 5] = [1.0, -1.0, 2.0, -2.0, 0.75];
+    const ABS_EPS: f32 = 1.0e-6;
+    const REL_EPS: f32 = 1.0e-6;
+
+    let mut seed: u64 = 0x9e3779b97f4a7c15;
+    for &n in &lens {
+        // 2 patterns per length
+        for _pat in 0..2 {
+            let mut row = vec![0.0f32; n];
+            let mut dst = vec![0.0f32; n];
+            let mut refdst = vec![0.0f32; n];
+            for v in row.iter_mut() {
+                let r = lcg_step(&mut seed) as f32 * (1.0 / 4294967296.0);
+                // Deterministic but 非整列な値
+                *v = (r * 2.0 - 1.0) * 0.999;
+            }
+            for &k in &ks {
+                // reference (scalar)
+                add_row_scaled_f32_scalar(&mut refdst, &row, k);
+                // test (avx512f kernel)
+                unsafe { x86::add_row_scaled_f32_avx512f(&mut dst, &row, k) };
+                // 許容誤差付き比較（FMA との差分を吸収）
+                if refdst.len() != dst.len() {
+                    return false;
+                }
+                for i in 0..n {
+                    let a = refdst[i];
+                    let b = dst[i];
+                    if a.to_bits() == b.to_bits() {
+                        continue;
+                    }
+                    let diff = (a - b).abs();
+                    if diff <= ABS_EPS {
+                        continue;
+                    }
+                    let max_abs = a.abs().max(b.abs());
+                    if max_abs == 0.0 || diff <= max_abs * REL_EPS {
+                        continue;
+                    }
+                    return false;
+                }
+                // reset dst for next k
+                dst.fill(0.0);
+                refdst.fill(0.0);
+            }
+        }
+    }
+    true
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn run_selftest_avx512f() -> bool {
+    false
 }
 
 // -------------------------------------------------------------------------------------
@@ -201,6 +335,9 @@ pub(super) fn add_row_scaled_f32_scalar(dst: &mut [f32], row: &[f32], k: f32) {
 pub fn add_row_scaled_f32(dst: &mut [f32], row: &[f32], k: f32) {
     debug_assert_eq!(dst.len(), row.len());
     debug_assert_no_alias(dst, row);
+    if row.is_empty() {
+        return;
+    }
 
     // wasm32: simd128 が有効なら常時ON、無効ならスカラ
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -229,25 +366,27 @@ pub fn add_row_scaled_f32(dst: &mut [f32], row: &[f32], k: f32) {
         static ADD_ROW_SCALED_F32: OnceLock<Kernel> = OnceLock::new();
 
         let f = ADD_ROW_SCALED_F32.get_or_init(|| {
-            if std::arch::is_x86_feature_detected!("avx512f") {
-                return |dst, row, k| unsafe { x86::add_row_scaled_f32_avx512f(dst, row, k) };
-            }
-            // 初回のみ CPU 機能を検出し最適カーネルを束縛
-            #[cfg(feature = "nnue_fast_fma")]
-            {
-                if std::arch::is_x86_feature_detected!("avx")
-                    && std::arch::is_x86_feature_detected!("fma")
-                {
-                    return |dst, row, k| unsafe { x86::add_row_scaled_f32_avx_fma(dst, row, k) };
+            // Respect runtime clamp via SimdLevel::detect()
+            match crate::simd::dispatch::SimdLevel::detect() {
+                crate::simd::dispatch::SimdLevel::Avx512f => {
+                    |dst, row, k| unsafe { x86::add_row_scaled_f32_avx512f(dst, row, k) }
                 }
+                crate::simd::dispatch::SimdLevel::Avx => {
+                    #[cfg(feature = "nnue_fast_fma")]
+                    {
+                        if std::arch::is_x86_feature_detected!("fma") {
+                            return |dst, row, k| unsafe {
+                                x86::add_row_scaled_f32_avx_fma(dst, row, k)
+                            };
+                        }
+                    }
+                    |dst, row, k| unsafe { x86::add_row_scaled_f32_avx(dst, row, k) }
+                }
+                crate::simd::dispatch::SimdLevel::Sse2 => {
+                    |dst, row, k| unsafe { x86::add_row_scaled_f32_sse2(dst, row, k) }
+                }
+                crate::simd::dispatch::SimdLevel::Scalar => add_row_scaled_f32_scalar as Kernel,
             }
-            if std::arch::is_x86_feature_detected!("avx") {
-                return |dst, row, k| unsafe { x86::add_row_scaled_f32_avx(dst, row, k) };
-            }
-            if std::arch::is_x86_feature_detected!("sse2") {
-                return |dst, row, k| unsafe { x86::add_row_scaled_f32_sse2(dst, row, k) };
-            }
-            add_row_scaled_f32_scalar as Kernel
         });
         f(dst, row, k)
     }
@@ -287,6 +426,31 @@ mod tests {
         assert_eq!(utils::align_up(15, 16), 16);
         assert_eq!(utils::align_up(16, 16), 16);
         assert_eq!(utils::align_up(17, 16), 32);
+    }
+
+    #[test]
+    fn test_add_row_scaled_small_lengths_bits() {
+        // 特にAVX-512のテイル（マスク）を意識して 0..=63 を重点確認
+        for len in 0usize..=63 {
+            let mut row = vec![0.0f32; len];
+            for i in 0..len {
+                row[i] = ((i as f32 + 0.125) * 0.07).sin();
+            }
+            // 検証セット: k = ±1, ±2
+            for &k in &[1.0f32, -1.0, 2.0, -2.0] {
+                let mut a = vec![0.0f32; len];
+                let mut b = vec![0.0f32; len];
+                // 参照（スカラ）
+                for (d, r) in a.iter_mut().zip(row.iter()) {
+                    *d += k * *r;
+                }
+                // 被検（ディスパッチ）
+                add_row_scaled_f32(&mut b, &row, k);
+                for i in 0..len {
+                    assert!(same_bits(a[i], b[i]), "len={len} i={i} k={k} a={} b={}", a[i], b[i]);
+                }
+            }
+        }
     }
 
     #[inline]

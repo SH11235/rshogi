@@ -30,13 +30,14 @@ pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
     let mut p = pos.clone();
 
     for (i, &mv) in pv.iter().enumerate() {
-        // Skip null moves
+        let _i = i; // for debug macros
+                    // Skip null moves
         if mv == Move::NULL {
-            crate::pv_debug!("[BUG] NULL move in PV at ply {i}");
+            crate::pv_debug!("[BUG] NULL move in PV at ply {_i}");
             return;
         }
 
-        let usi = crate::usi::move_to_usi(&mv);
+        let _usi = crate::usi::move_to_usi(&mv);
 
         // Pre-move validation
         if mv.is_drop() {
@@ -44,12 +45,12 @@ pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             let piece_type = mv.drop_piece_type();
             let hands = &p.hands[p.side_to_move as usize];
             let Some(hand_idx) = piece_type.hand_index() else {
-                crate::pv_debug!("[BUG] Invalid drop piece type (King) at ply {i}: {usi}");
+                crate::pv_debug!("[BUG] Invalid drop piece type (King) at ply {_i}: {_usi}");
                 return;
             };
             let count = hands[hand_idx];
             if count == 0 {
-                crate::pv_debug!("[BUG] No piece in hand for drop at ply {i}: {usi}");
+                crate::pv_debug!("[BUG] No piece in hand for drop at ply {_i}: {_usi}");
                 crate::pv_debug!("  Position: {}", crate::usi::position_to_sfen(&p));
                 return;
             }
@@ -57,20 +58,20 @@ pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             // For normal moves: check piece exists at from square
             if let Some(from) = mv.from() {
                 if p.piece_at(from).is_none() {
-                    crate::pv_debug!("[BUG] No piece at from square at ply {i}: {usi}");
+                    crate::pv_debug!("[BUG] No piece at from square at ply {_i}: {_usi}");
                     crate::pv_debug!("  Position: {}", crate::usi::position_to_sfen(&p));
                     crate::pv_debug!("  From square {from:?} is empty");
                     return;
                 }
             } else {
-                crate::pv_debug!("[BUG] Normal move has no from square at ply {i}: {usi}");
+                crate::pv_debug!("[BUG] Normal move has no from square at ply {_i}: {_usi}");
                 return;
             }
         }
 
         // Check if move is pseudo-legal before applying
         if !p.is_pseudo_legal(mv) {
-            crate::pv_debug!("[BUG] Illegal move in PV at ply {i}: {usi}");
+            crate::pv_debug!("[BUG] Illegal move in PV at ply {_i}: {_usi}");
             crate::pv_debug!("  Position: {}", crate::usi::position_to_sfen(&p));
             crate::pv_debug!("  Move is not pseudo-legal");
             return;
@@ -85,15 +86,10 @@ pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             if let Some(from) = mv.from() {
                 if p.piece_at(from).is_some() {
                     #[cfg(debug_assertions)]
-                    {
-                        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                            eprintln!("[BUG] From square not cleared at ply {i}: {usi}");
-                            eprintln!(
-                                "  Position after move: {}",
-                                crate::usi::position_to_sfen(&p)
-                            );
-                        }
-                    }
+                    crate::pv_debug_exec!({
+                        eprintln!("[BUG] From square not cleared at ply {_i}: {_usi}");
+                        eprintln!("  Position after move: {}", crate::usi::position_to_sfen(&p));
+                    });
                     return;
                 }
             }
@@ -109,7 +105,7 @@ pub fn pv_local_sanity(pos: &Position, pv: &[Move]) {
                 // So the piece we just moved belongs to the previous side_to_move.
             }
             _ => {
-                crate::pv_debug!("[BUG] To square not occupied by our piece at ply {i}: {usi}");
+                crate::pv_debug!("[BUG] To square not occupied by our piece at ply {_i}: {_usi}");
                 crate::pv_debug!("  Position after move: {}", crate::usi::position_to_sfen(&p));
                 return;
             }

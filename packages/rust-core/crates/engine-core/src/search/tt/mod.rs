@@ -218,6 +218,12 @@ impl TranspositionTable {
         self.metrics = Some(DetailedTTMetrics::new());
     }
 
+    /// Build TT metrics summary string (if metrics enabled)
+    #[cfg(feature = "tt_metrics")]
+    pub fn metrics_summary_string(&self) -> Option<String> {
+        self.metrics.as_ref().map(|m| m.to_summary_string())
+    }
+
     /// Get bucket index from hash
     #[inline(always)]
     fn bucket_index(&self, hash: u64) -> usize {
@@ -364,6 +370,12 @@ impl TranspositionTable {
 
     /// Get hashfull in permille (0-1000)
     pub fn hashfull(&self) -> u16 {
+        self.hashfull_estimate()
+    }
+
+    /// Alias for clarity: returns occupancy in permille (0..=1000)
+    #[inline]
+    pub fn hashfull_permille(&self) -> u16 {
         self.hashfull_estimate()
     }
 

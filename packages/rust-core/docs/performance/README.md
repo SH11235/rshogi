@@ -43,6 +43,23 @@ cargo flamegraph --bin see_flamegraph -o flamegraph.svg
 
 詳細は各ドキュメントを参照してください。
 
+## 診断機能（Diagnostics メタフィーチャー）
+
+開発/検証用途のログ・計測を一括で有効化できます。
+
+```bash
+cargo run -p engine-usi --release --features diagnostics
+```
+
+含まれる機能:
+- `tt_metrics`: 置換表（TT）詳細メトリクスの収集と要約出力（終局時に `info string tt_metrics ...`）。
+- `nnue_telemetry`: 探索中に1秒間隔で NNUE経路のカウンタを`debug`レベルで出力。
+- `pv_debug_logs`: PV構築・検証の詳細ログ（stderr）。
+
+補足（USI出力の強化）:
+- 探索中 `info` 行に `hashfull <permille>` を付与。
+- 終局時、SinglePVでも `info multipv 1 ... hashfull ... pv ...` を必ず出力。
+
 ## パフォーマンス目標
 
 - **探索速度**: 5M+ NPS (Material評価関数)
