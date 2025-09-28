@@ -41,6 +41,13 @@ impl FlexibleTTBucket {
         }
     }
 
+    /// Clear all entries using only shared reference (in-place via atomics)
+    pub(crate) fn clear_atomic(&self) {
+        for entry in self.entries.iter() {
+            entry.store(0, Ordering::Relaxed);
+        }
+    }
+
     /// Probe bucket for matching entry
     pub(crate) fn probe(&self, key: u64) -> Option<TTEntry> {
         match self.size {

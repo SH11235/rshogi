@@ -152,11 +152,20 @@ impl Engine {
             Arc::new(RwLock::new(None))
         };
 
-        // Initialize searchers based on engine type
+        // Create shared TT (単スレ・並列ともにこの 1 本を共有)
+        let mut shared_tt = Arc::new(TranspositionTable::new(default_tt_size));
+        #[cfg(feature = "tt_metrics")]
+        {
+            if let Some(tt) = Arc::get_mut(&mut shared_tt) {
+                tt.enable_metrics();
+            }
+        }
+
+        // Initialize single-thread searchers based on engine type using shared_tt
         let material_searcher = if engine_type == EngineType::Material {
-            Arc::new(Mutex::new(Some(MaterialSearcher::new_with_tt_size(
-                *material_evaluator,
-                default_tt_size,
+            Arc::new(Mutex::new(Some(MaterialSearcher::with_shared_tt(
+                material_evaluator.clone(),
+                shared_tt.clone(),
             ))))
         } else {
             Arc::new(Mutex::new(None))
@@ -167,18 +176,18 @@ impl Engine {
                 evaluator: nnue_evaluator.clone(),
                 locals: thread_local::ThreadLocal::new(),
             };
-            Arc::new(Mutex::new(Some(NnueBasicSearcher::new_with_tt_size(
-                nnue_proxy,
-                default_tt_size,
+            Arc::new(Mutex::new(Some(NnueBasicSearcher::with_shared_tt(
+                Arc::new(nnue_proxy),
+                shared_tt.clone(),
             ))))
         } else {
             Arc::new(Mutex::new(None))
         };
 
         let material_enhanced_searcher = if engine_type == EngineType::Enhanced {
-            Arc::new(Mutex::new(Some(MaterialEnhancedSearcher::new_with_tt_size(
-                *material_evaluator,
-                default_tt_size,
+            Arc::new(Mutex::new(Some(MaterialEnhancedSearcher::with_shared_tt(
+                material_evaluator.clone(),
+                shared_tt.clone(),
             ))))
         } else {
             Arc::new(Mutex::new(None))
@@ -189,22 +198,13 @@ impl Engine {
                 evaluator: nnue_evaluator.clone(),
                 locals: thread_local::ThreadLocal::new(),
             };
-            Arc::new(Mutex::new(Some(NnueEnhancedSearcher::new_with_tt_size(
-                nnue_proxy,
-                default_tt_size,
+            Arc::new(Mutex::new(Some(NnueEnhancedSearcher::with_shared_tt(
+                Arc::new(nnue_proxy),
+                shared_tt.clone(),
             ))))
         } else {
             Arc::new(Mutex::new(None))
         };
-
-        // Create shared TT for parallel search
-        let mut shared_tt = Arc::new(TranspositionTable::new(default_tt_size));
-        #[cfg(feature = "tt_metrics")]
-        {
-            if let Some(tt) = Arc::get_mut(&mut shared_tt) {
-                tt.enable_metrics();
-            }
-        }
 
         Engine {
             engine_type,
@@ -229,67 +229,14 @@ impl Engine {
     /// Return TT metrics summary string if available (tt_metrics feature only)
     #[cfg(feature = "tt_metrics")]
     pub fn tt_metrics_summary(&self) -> Option<String> {
-        if self.use_parallel {
-            return self.shared_tt.metrics_summary_string();
-        }
-        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = match self.engine_type {
-            EngineType::Material => self
-                .material_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::Nnue => self
-                .nnue_basic_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::Enhanced => self
-                .material_enhanced_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::EnhancedNnue => self
-                .nnue_enhanced_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-        };
-        tt_opt
-            .and_then(|tt| tt.metrics_summary_string())
-            .or_else(|| self.shared_tt.metrics_summary_string())
+        // TT は 1 本化しているため常に shared を参照
+        self.shared_tt.metrics_summary_string()
     }
 
     /// Get current hashfull estimate of the transposition table (permille: 0-1000)
-    /// - Uses shared TT in parallel mode; otherwise queries the active searcher's TT when available
-    /// - Falls back to shared TT when the active searcher is not yet initialized
+    /// 常に shared TT の値を返す
     pub fn tt_hashfull_permille(&self) -> u16 {
-        if self.use_parallel {
-            return self.shared_tt.hashfull();
-        }
-        // Use the re-exported TranspositionTable type consistently
-        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = match self.engine_type {
-            EngineType::Material => self
-                .material_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::Nnue => self
-                .nnue_basic_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::Enhanced => self
-                .material_enhanced_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::EnhancedNnue => self
-                .nnue_enhanced_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-        };
-        tt_opt.map(|tt| tt.hashfull()).unwrap_or_else(|| self.shared_tt.hashfull())
+        self.shared_tt.hashfull()
     }
 
     /// Detect game phase based on position
@@ -535,36 +482,8 @@ impl Engine {
         let _ = child.do_move(best_move);
         let child_hash = child.zobrist_hash;
 
-        // Choose TT source
-        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = if self.use_parallel {
-            Some(self.shared_tt.clone())
-        } else {
-            // Get the active searcher's TT handle
-            match self.engine_type {
-                EngineType::Material => self
-                    .material_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::Nnue => self
-                    .nnue_basic_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::Enhanced => self
-                    .material_enhanced_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::EnhancedNnue => self
-                    .nnue_enhanced_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            }
-        };
-
-        let tt = tt_opt?;
+        // 常に shared TT を参照
+        let tt = self.shared_tt.clone();
         let entry = tt.probe(child_hash)?;
         if !entry.matches(child_hash) {
             return None;
@@ -698,64 +617,15 @@ impl Engine {
     /// Get a diagnostic snapshot of the currently referenced TT
     pub fn tt_debug_info(&self) -> TtDebugInfo {
         use std::sync::Arc as StdArc;
-        if self.use_parallel {
-            let addr = StdArc::as_ptr(&self.shared_tt) as usize;
-            let size_mb = self.shared_tt.size();
-            let hf = self.shared_tt.hashfull();
-            let attempts = self.shared_tt.store_attempts();
-            return TtDebugInfo {
-                addr,
-                size_mb,
-                hf_permille: hf,
-                store_attempts: attempts,
-            };
-        }
-        // Single-threaded: use active searcher's TT if present, otherwise fallback to shared_tt
-        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = match self.engine_type {
-            EngineType::Material => self
-                .material_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::Nnue => self
-                .nnue_basic_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::Enhanced => self
-                .material_enhanced_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            EngineType::EnhancedNnue => self
-                .nnue_enhanced_searcher
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-        };
-
-        if let Some(tt) = tt_opt {
-            let addr = StdArc::as_ptr(&tt) as usize;
-            let size_mb = tt.size();
-            let hf = tt.hashfull();
-            let attempts = tt.store_attempts();
-            TtDebugInfo {
-                addr,
-                size_mb,
-                hf_permille: hf,
-                store_attempts: attempts,
-            }
-        } else {
-            let addr = StdArc::as_ptr(&self.shared_tt) as usize;
-            let size_mb = self.shared_tt.size();
-            let hf = self.shared_tt.hashfull();
-            let attempts = self.shared_tt.store_attempts();
-            TtDebugInfo {
-                addr,
-                size_mb,
-                hf_permille: hf,
-                store_attempts: attempts,
-            }
+        let addr = StdArc::as_ptr(&self.shared_tt) as usize;
+        let size_mb = self.shared_tt.size();
+        let hf = self.shared_tt.hashfull();
+        let attempts = self.shared_tt.store_attempts();
+        TtDebugInfo {
+            addr,
+            size_mb,
+            hf_permille: hf,
+            store_attempts: attempts,
         }
     }
 
@@ -818,13 +688,13 @@ impl Engine {
             }
             self.shared_tt = new_tt_arc;
 
-            // Recreate the single-threaded searcher for the current engine type
+            // Recreate the single-threaded searcher for the current engine type using shared_tt
             match self.engine_type {
                 EngineType::Material => {
                     if let Ok(mut guard) = self.material_searcher.lock() {
-                        let mut s = MaterialSearcher::new_with_tt_size(
-                            *self.material_evaluator,
-                            self.tt_size_mb,
+                        let mut s = MaterialSearcher::with_shared_tt(
+                            self.material_evaluator.clone(),
+                            self.shared_tt.clone(),
                         );
                         s.set_multi_pv(self.desired_multi_pv);
                         *guard = Some(s);
@@ -836,17 +706,19 @@ impl Engine {
                         locals: thread_local::ThreadLocal::new(),
                     };
                     if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
-                        let mut s =
-                            NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                        let mut s = NnueBasicSearcher::with_shared_tt(
+                            Arc::new(nnue_proxy),
+                            self.shared_tt.clone(),
+                        );
                         s.set_multi_pv(self.desired_multi_pv);
                         *guard = Some(s);
                     }
                 }
                 EngineType::Enhanced => {
                     if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
-                        let mut s = MaterialEnhancedSearcher::new_with_tt_size(
-                            *self.material_evaluator,
-                            self.tt_size_mb,
+                        let mut s = MaterialEnhancedSearcher::with_shared_tt(
+                            self.material_evaluator.clone(),
+                            self.shared_tt.clone(),
                         );
                         s.set_multi_pv(self.desired_multi_pv);
                         *guard = Some(s);
@@ -858,8 +730,10 @@ impl Engine {
                         locals: thread_local::ThreadLocal::new(),
                     };
                     if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
-                        let mut s =
-                            NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                        let mut s = NnueEnhancedSearcher::with_shared_tt(
+                            Arc::new(nnue_proxy),
+                            self.shared_tt.clone(),
+                        );
                         s.set_multi_pv(self.desired_multi_pv);
                         *guard = Some(s);
                     }
@@ -867,8 +741,8 @@ impl Engine {
             }
 
             info!(
-                "Applied hash size: {}MB, recreated {:?} searcher",
-                self.tt_size_mb, self.engine_type
+                "Applied hash size: {}MB; swapped shared_tt and rebound single-thread searcher",
+                self.tt_size_mb
             );
         }
     }
@@ -930,9 +804,9 @@ impl Engine {
                 match self.material_searcher.lock() {
                     Ok(mut searcher_guard) => {
                         if searcher_guard.is_none() {
-                            *searcher_guard = Some(MaterialSearcher::new_with_tt_size(
-                                *self.material_evaluator,
-                                self.tt_size_mb,
+                            *searcher_guard = Some(MaterialSearcher::with_shared_tt(
+                                self.material_evaluator.clone(),
+                                self.shared_tt.clone(),
                             ));
                         }
                     }
@@ -958,9 +832,9 @@ impl Engine {
                                 evaluator: self.nnue_evaluator.clone(),
                                 locals: thread_local::ThreadLocal::new(),
                             };
-                            *searcher_guard = Some(NnueBasicSearcher::new_with_tt_size(
-                                nnue_proxy,
-                                self.tt_size_mb,
+                            *searcher_guard = Some(NnueBasicSearcher::with_shared_tt(
+                                Arc::new(nnue_proxy),
+                                self.shared_tt.clone(),
                             ));
                         }
                     }
@@ -977,9 +851,9 @@ impl Engine {
                 match self.material_enhanced_searcher.lock() {
                     Ok(mut searcher_guard) => {
                         if searcher_guard.is_none() {
-                            *searcher_guard = Some(MaterialEnhancedSearcher::new_with_tt_size(
-                                *self.material_evaluator,
-                                self.tt_size_mb,
+                            *searcher_guard = Some(MaterialEnhancedSearcher::with_shared_tt(
+                                self.material_evaluator.clone(),
+                                self.shared_tt.clone(),
                             ));
                         }
                     }
@@ -1005,9 +879,9 @@ impl Engine {
                                 evaluator: self.nnue_evaluator.clone(),
                                 locals: thread_local::ThreadLocal::new(),
                             };
-                            *searcher_guard = Some(NnueEnhancedSearcher::new_with_tt_size(
-                                nnue_proxy,
-                                self.tt_size_mb,
+                            *searcher_guard = Some(NnueEnhancedSearcher::with_shared_tt(
+                                Arc::new(nnue_proxy),
+                                self.shared_tt.clone(),
                             ));
                         }
                     }
@@ -1024,92 +898,13 @@ impl Engine {
         self.set_multipv(self.desired_multi_pv);
     }
 
-    /// Clear the transposition table
+    /// Clear the transposition table (in-place)
     pub fn clear_hash(&mut self) {
-        // Recreate shared_tt with new size
-        // This will effectively clear all entries
-        let mut new_tt_arc = Arc::new(TranspositionTable::new(self.tt_size_mb));
-        #[cfg(feature = "tt_metrics")]
-        {
-            if let Some(tt) = Arc::get_mut(&mut new_tt_arc) {
-                tt.enable_metrics();
-            }
-        }
-        self.shared_tt = new_tt_arc;
-
-        info!(
-            "Hash table cleared (engine: {:?}, size: {}MB)",
-            self.engine_type, self.tt_size_mb
-        );
-
-        // Also need to clear searchers as they might have cached TT references
-        // Set them to None so they'll be recreated with the new TT on next search
-        if let Ok(mut guard) = self.material_searcher.lock() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.material_parallel_searcher.lock() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
-            *guard = None;
-        }
-
-        // Recreate the single-threaded searcher for the current engine type
-        match self.engine_type {
-            EngineType::Material => {
-                if let Ok(mut guard) = self.material_searcher.lock() {
-                    let mut s = MaterialSearcher::new_with_tt_size(
-                        *self.material_evaluator,
-                        self.tt_size_mb,
-                    );
-                    s.set_multi_pv(self.desired_multi_pv);
-                    *guard = Some(s);
-                }
-            }
-            EngineType::Nnue => {
-                let nnue_proxy = NNUEEvaluatorProxy {
-                    evaluator: self.nnue_evaluator.clone(),
-                    locals: thread_local::ThreadLocal::new(),
-                };
-                if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
-                    let mut s = NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
-                    s.set_multi_pv(self.desired_multi_pv);
-                    *guard = Some(s);
-                }
-            }
-            EngineType::Enhanced => {
-                if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
-                    let mut s = MaterialEnhancedSearcher::new_with_tt_size(
-                        *self.material_evaluator,
-                        self.tt_size_mb,
-                    );
-                    s.set_multi_pv(self.desired_multi_pv);
-                    *guard = Some(s);
-                }
-            }
-            EngineType::EnhancedNnue => {
-                let nnue_proxy = NNUEEvaluatorProxy {
-                    evaluator: self.nnue_evaluator.clone(),
-                    locals: thread_local::ThreadLocal::new(),
-                };
-                if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
-                    let mut s = NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
-                    s.set_multi_pv(self.desired_multi_pv);
-                    *guard = Some(s);
-                }
-            }
-        }
-
-        info!("Transposition table cleared and searchers recreated");
+        let tt_addr = Arc::as_ptr(&self.shared_tt) as usize;
+        let tt_mb = self.shared_tt.size();
+        // in-place クリア（Arc を差し替えない）
+        self.shared_tt.clear_in_place();
+        info!("Hash table cleared in-place (tt_addr=0x{:x} size={}MB)", tt_addr, tt_mb);
     }
 
     /// Reconstruct a PV from the current root position using the available TT
@@ -1118,48 +913,19 @@ impl Engine {
         pos: &Position,
         max_depth: u8,
     ) -> Vec<crate::shogi::Move> {
-        // Choose TT source consistent with get_ponder_from_tt
-        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = if self.use_parallel {
-            Some(self.shared_tt.clone())
-        } else {
-            match self.engine_type {
-                EngineType::Material => self
-                    .material_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::Nnue => self
-                    .nnue_basic_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::Enhanced => self
-                    .material_enhanced_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-                EngineType::EnhancedNnue => self
-                    .nnue_enhanced_searcher
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
-            }
-        };
-
-        if let Some(tt) = tt_opt {
-            let mut tmp = pos.clone();
-            struct TtWrap<'a> {
-                tt: &'a TranspositionTable,
-            }
-            impl<'a> crate::search::tt::TTProbe for TtWrap<'a> {
-                fn probe(&self, hash: u64) -> Option<crate::search::tt::TTEntry> {
-                    self.tt.probe(hash)
-                }
-            }
-            let wrap = TtWrap { tt: &tt };
-            return crate::search::tt::reconstruct_pv_generic(&wrap, &mut tmp, max_depth);
+        // 常に shared TT を参照
+        let tt = &self.shared_tt;
+        let mut tmp = pos.clone();
+        struct TtWrap<'a> {
+            tt: &'a TranspositionTable,
         }
-        Vec::new()
+        impl<'a> crate::search::tt::TTProbe for TtWrap<'a> {
+            fn probe(&self, hash: u64) -> Option<crate::search::tt::TTEntry> {
+                self.tt.probe(hash)
+            }
+        }
+        let wrap = TtWrap { tt };
+        crate::search::tt::reconstruct_pv_generic(&wrap, &mut tmp, max_depth)
     }
 
     /// Choose final bestmove from book/committed/TT/legal

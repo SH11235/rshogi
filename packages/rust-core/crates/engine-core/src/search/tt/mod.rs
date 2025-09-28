@@ -358,6 +358,41 @@ impl TranspositionTable {
         }
     }
 
+    /// Clear the entire table in-place without requiring exclusive ownership of Arc
+    /// This keeps the Arc identity stable so参照側と保存側の不一致を避けられる
+    pub fn clear_in_place(&self) {
+        // Buckets
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            for bucket in flexible_buckets.iter() {
+                bucket.clear_atomic();
+            }
+        } else {
+            for bucket in self.buckets.iter() {
+                bucket.clear_atomic();
+            }
+        }
+
+        // Occupied bitmap
+        for byte in self.occupied_bitmap.iter() {
+            byte.store(0, Ordering::Relaxed);
+        }
+
+        // Atomic counters/state
+        self.hashfull_estimate.store(0, Ordering::Relaxed);
+        self.node_counter.store(0, Ordering::Relaxed);
+        self.store_attempts.store(0, Ordering::Relaxed);
+        self.need_gc.store(false, Ordering::Relaxed);
+        self.gc_progress.store(0, Ordering::Relaxed);
+        self.high_hashfull_counter.store(0, Ordering::Relaxed);
+        self.empty_slot_mode_enabled.store(false, Ordering::Relaxed);
+        self.empty_slot_mode_last_hf.store(0, Ordering::Relaxed);
+
+        #[cfg(feature = "tt_metrics")]
+        if let Some(ref metrics) = self.metrics {
+            metrics.reset();
+        }
+    }
+
     /// Increment age (called at the start of each search)
     pub fn increment_age(&mut self) {
         self.age = self.age.wrapping_add(1) & AGE_MASK;

@@ -64,6 +64,13 @@ impl TTBucket {
         }
     }
 
+    /// Clear all entries using only shared reference (in-place via atomics)
+    pub(crate) fn clear_atomic(&self) {
+        for e in &self.entries {
+            e.store(0, Ordering::Relaxed);
+        }
+    }
+
     /// Probe bucket for matching entry using SIMD when available
     pub(crate) fn probe(&self, key: u64) -> Option<TTEntry> {
         // Try SIMD-optimized path first
