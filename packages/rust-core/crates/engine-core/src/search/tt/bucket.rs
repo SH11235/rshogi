@@ -5,7 +5,7 @@ use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::DetailedTTMetrics;
 use super::prefetch::prefetch_memory;
-use super::utils::{try_update_entry_generic, UpdateResult};
+use super::utils::{try_update_entry_generic, UpdateResult, attempt_replace_worst, ReplaceAttemptResult};
 use crate::search::tt::simd::simd_enabled;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -274,86 +274,50 @@ impl TTBucket {
             return;
         }
 
-        // Second pass: find least valuable entry to replace using SIMD if available
-        let (worst_idx, worst_score) = if self.store_simd_available() {
-            self.find_worst_entry_simd(current_age)
-        } else {
-            self.find_worst_entry_scalar(current_age)
-        };
+        // Second pass: replace worst entry if beneficial.
+        // 早期 skip により置換が流れてしまうケースを減らすため、
+        // バケット内で最大1回だけ再評価・再試行を行う。
+        let mut attempted_retry = false;
+        'replace_attempt: loop {
+            // 1) 最悪エントリの選定（SIMD/Scalar）
+            let (worst_idx, worst_score) = if self.store_simd_available() {
+                self.find_worst_entry_simd(current_age)
+            } else {
+                self.find_worst_entry_scalar(current_age)
+            };
 
-        // Check if new entry is more valuable than the worst existing entry
-        if new_entry.priority_score(current_age) > worst_score {
-            let idx = worst_idx * 2;
+            // 2) 新規の方が価値が高いなら置換へ
+            if new_entry.priority_score(current_age) > worst_score {
+                let idx = worst_idx * 2;
+                let old_key = self.entries[idx].load(Ordering::Relaxed);
 
-            // Use CAS to ensure atomic replacement
-            // Note: We don't retry here as we've already determined this is the best slot to replace
-            let old_key = self.entries[idx].load(Ordering::Relaxed);
-
-            // Record CAS attempt
-            #[cfg(feature = "tt_metrics")]
-            if let Some(m) = metrics {
-                use super::metrics::{record_metric, MetricType};
-                record_metric(m, MetricType::CasAttempt);
-            }
-
-            // A'案: data=0 → Key CAS → data=new
-            // First, clear data so readers won't treat this slot as valid during replacement
-            // Before zeroing, re-read key to reduce chance of racing with a completed replacement
-            let observed = self.entries[idx].load(Ordering::Acquire);
-            if observed != old_key {
-                // Another thread already replaced this slot; skip
-                return;
-            }
-            self.entries[idx + 1].store(0, Ordering::Release);
-            match self.entries[idx].compare_exchange(
-                old_key,
-                new_entry.key,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // Publish final data after key is published
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-
-                    // Record metrics
+                let result = {
                     #[cfg(feature = "tt_metrics")]
-                    if let Some(m) = metrics {
-                        use super::metrics::{record_metric, MetricType};
-                        record_metric(m, MetricType::CasSuccess);
-                        // Count only the final data store
-                        record_metric(m, MetricType::AtomicStore(1));
-                        record_metric(m, MetricType::ReplaceWorst);
+                    {
+                        attempt_replace_worst(&self.entries, idx, old_key, &new_entry, metrics)
                     }
-                }
-                Err(current) => {
-                    // Phase 5 optimization: Check if another thread wrote the same key
-                    if current == new_entry.key {
-                        // Same key - just update the data
-                        // Use Release ordering to ensure reader sees the updated data
-                        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                    #[cfg(not(feature = "tt_metrics"))]
+                    {
+                        attempt_replace_worst(&self.entries, idx, old_key, &new_entry, None)
+                    }
+                };
 
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            m.cas_key_match.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    } else {
-                        // CAS failed with different key
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            use super::metrics::{record_metric, MetricType};
-                            record_metric(m, MetricType::CasFailure);
-                            // If data is currently zero, record after-zero failure
-                            if self.entries[idx + 1].load(Ordering::Relaxed) == 0 {
-                                record_metric(m, MetricType::CasFailureAfterZero);
-                            }
+                match result {
+                    ReplaceAttemptResult::Replaced | ReplaceAttemptResult::UpdatedExisting => {
+                        break 'replace_attempt;
+                    }
+                    ReplaceAttemptResult::ObservedMismatch | ReplaceAttemptResult::CasFailed => {
+                        if !attempted_retry {
+                            attempted_retry = true;
+                            continue 'replace_attempt;
+                        } else {
+                            break 'replace_attempt;
                         }
                     }
-                    // If CAS failed, another thread updated this entry - we accept this race
-                    // as it's not critical (both threads are storing valid entries)
                 }
             }
+            // 新規エントリが十分価値が高くない or 完了
+            break 'replace_attempt;
         }
     }
 

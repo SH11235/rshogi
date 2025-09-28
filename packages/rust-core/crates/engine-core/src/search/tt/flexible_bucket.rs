@@ -4,7 +4,7 @@ use super::bucket::BucketSize;
 use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
-use super::utils::{try_update_entry_generic, UpdateResult};
+use super::utils::{try_update_entry_generic, UpdateResult, attempt_replace_worst, ReplaceAttemptResult};
 use crate::search::tt::simd::simd_enabled;
 use crate::search::NodeType;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -339,64 +339,47 @@ impl FlexibleTTBucket {
         }
 
         // Second pass: find worst entry to replace
-        let (worst_idx, worst_score) = match self.size {
+        let (mut worst_idx, mut worst_score) = match self.size {
             BucketSize::Large => self.find_worst_entry_16(current_age),
             BucketSize::Medium => self.find_worst_entry_8(current_age),
             BucketSize::Small => self.find_worst_entry_n(current_age, 4),
         };
 
-        // Replace if new entry is better
-        if new_entry.priority_score(current_age) > worst_score {
+        // Replace if new entry is better, with at most one re-evaluation/reattempt
+        let mut attempted_retry = false;
+        'replace_attempt: while new_entry.priority_score(current_age) > worst_score {
             let idx = worst_idx * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
-            // A'案: data=0 → Key CAS → data=new（ゼロ化前に再確認）
-            let observed = self.entries[idx].load(Ordering::Acquire);
-            if observed != old_key {
-                return;
-            }
-            self.entries[idx + 1].store(0, Ordering::Release);
-
-            #[cfg(feature = "tt_metrics")]
-            if let Some(m) = metrics {
-                record_metric(m, MetricType::CasAttempt);
-            }
-
-            match self.entries[idx].compare_exchange(
-                old_key,
-                new_entry.key,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // 新キー公開後に最終データを公開
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-                    #[cfg(feature = "tt_metrics")]
-                    if let Some(m) = metrics {
-                        record_metric(m, MetricType::CasSuccess);
-                        // data=new の 1 ストアのみカウント
-                        record_metric(m, MetricType::AtomicStore(1));
-                        record_metric(m, MetricType::ReplaceWorst);
-                    }
+            let result = {
+                #[cfg(feature = "tt_metrics")]
+                {
+                    attempt_replace_worst(&self.entries, idx, old_key, &new_entry, metrics)
                 }
-                Err(current) => {
-                    if current == new_entry.key {
-                        // 競合相手が同一 key を入れた：data だけ更新
-                        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            record_metric(m, MetricType::UpdateExisting);
-                            record_metric(m, MetricType::AtomicStore(1));
-                        }
+                #[cfg(not(feature = "tt_metrics"))]
+                {
+                    attempt_replace_worst(&self.entries, idx, old_key, &new_entry, None)
+                }
+            };
+
+            match result {
+                ReplaceAttemptResult::Replaced | ReplaceAttemptResult::UpdatedExisting => {
+                    break 'replace_attempt;
+                }
+                ReplaceAttemptResult::ObservedMismatch | ReplaceAttemptResult::CasFailed => {
+                    if !attempted_retry {
+                        attempted_retry = true;
+                        // 再評価
+                        let (wi, ws) = match self.size {
+                            BucketSize::Large => self.find_worst_entry_16(current_age),
+                            BucketSize::Medium => self.find_worst_entry_8(current_age),
+                            BucketSize::Small => self.find_worst_entry_n(current_age, 4),
+                        };
+                        worst_idx = wi;
+                        worst_score = ws;
+                        continue 'replace_attempt;
                     } else {
-                        // 別 key に置換された：今回は見送り（data は 0 のまま）
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            record_metric(m, MetricType::CasFailure);
-                            if self.entries[idx + 1].load(Ordering::Relaxed) == 0 {
-                                record_metric(m, MetricType::CasFailureAfterZero);
-                            }
-                        }
+                        break 'replace_attempt;
                     }
                 }
             }

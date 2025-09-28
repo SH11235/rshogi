@@ -32,6 +32,86 @@ pub(crate) enum UpdateResult {
     NotFound, // Key not found in this slot
 }
 
+/// Result of a replacement attempt on the worst slot
+#[derive(Debug, PartialEq)]
+pub(crate) enum ReplaceAttemptResult {
+    /// Replaced different key with new key+data (CAS succeeded)
+    Replaced,
+    /// Another thread already inserted the same key; data was updated only
+    UpdatedExisting,
+    /// CAS failed with different key (race)
+    CasFailed,
+    /// Observed key changed before zeroing (race detected earlier)
+    ObservedMismatch,
+}
+
+/// Common replacement attempt: data=0 → key CAS → data=new
+/// Returns a `ReplaceAttemptResult` for the caller to decide retry/re-evaluation policy.
+#[inline(always)]
+pub(crate) fn attempt_replace_worst(
+    entries: &[AtomicU64],
+    idx: usize, // key at idx, data at idx+1
+    old_key: u64,
+    new_entry: &TTEntry,
+    #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+    #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+) -> ReplaceAttemptResult {
+    // Re-read before zeroing to shrink interference window
+    let observed = entries[idx].load(Ordering::Acquire);
+    if observed != old_key {
+        return ReplaceAttemptResult::ObservedMismatch;
+    }
+
+    // 1) publish data=0 (invalidates readers by depth==0)
+    entries[idx + 1].store(0, Ordering::Release);
+
+    // 2) attempt CAS on key (count attempt here: after re-read and zeroing)
+    #[cfg(feature = "tt_metrics")]
+    if let Some(m) = metrics {
+        record_metric(m, MetricType::CasAttempt);
+    }
+
+    match entries[idx].compare_exchange(
+        old_key,
+        new_entry.key,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => {
+            // 3) publish final data
+            entries[idx + 1].store(new_entry.data, Ordering::Release);
+            #[cfg(feature = "tt_metrics")]
+            if let Some(m) = metrics {
+                record_metric(m, MetricType::CasSuccess);
+                record_metric(m, MetricType::AtomicStore(1));
+                record_metric(m, MetricType::ReplaceWorst);
+            }
+            ReplaceAttemptResult::Replaced
+        }
+        Err(current) => {
+            if current == new_entry.key {
+                // Same key: update data only
+                entries[idx + 1].store(new_entry.data, Ordering::Release);
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    record_metric(m, MetricType::UpdateExisting);
+                    record_metric(m, MetricType::AtomicStore(1));
+                }
+                ReplaceAttemptResult::UpdatedExisting
+            } else {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    record_metric(m, MetricType::CasFailure);
+                    if entries[idx + 1].load(Ordering::Relaxed) == 0 {
+                        record_metric(m, MetricType::CasFailureAfterZero);
+                    }
+                }
+                ReplaceAttemptResult::CasFailed
+            }
+        }
+    }
+}
+
 /// Get depth threshold based on hashfull - optimized branch version
 #[inline(always)]
 pub(crate) fn get_depth_threshold(hf: u16) -> u8 {
