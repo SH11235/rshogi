@@ -100,6 +100,32 @@ impl TTBucket {
         self.probe_scalar(key)
     }
 
+    /// Probe with optional metrics (counts key-match-but-depth0 drops when enabled)
+    #[cfg(feature = "tt_metrics")]
+    pub(crate) fn probe_with_metrics(
+        &self,
+        key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        if self.probe_simd_available() {
+            return self.probe_simd_impl_with_metrics(
+                key,
+                #[cfg(feature = "tt_metrics")]
+                metrics,
+                #[cfg(not(feature = "tt_metrics"))]
+                None,
+            );
+        }
+        self.probe_scalar_with_metrics(
+            key,
+            #[cfg(feature = "tt_metrics")]
+            metrics,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        )
+    }
+
     /// Check if SIMD probe is available
     /// This is inlined and the feature detection is cached by the CPU
     #[inline(always)]
@@ -109,7 +135,32 @@ impl TTBucket {
 
     /// SIMD-optimized probe implementation
     fn probe_simd_impl(&self, target_key: u64) -> Option<TTEntry> {
-        bucket_simd::probe_simd(&self.entries, target_key)
+        bucket_simd::probe_simd(
+            &self.entries,
+            target_key,
+            #[cfg(feature = "tt_metrics")]
+            None,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        )
+    }
+
+    /// SIMD probe with metrics
+    #[cfg(feature = "tt_metrics")]
+    fn probe_simd_impl_with_metrics(
+        &self,
+        target_key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        bucket_simd::probe_simd(
+            &self.entries,
+            target_key,
+            #[cfg(feature = "tt_metrics")]
+            metrics,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        )
     }
 
     /// Scalar fallback probe implementation with early termination
@@ -143,6 +194,45 @@ impl TTBucket {
 
             if entry.depth() > 0 {
                 return Some(entry);
+            }
+        }
+
+        None
+    }
+
+    /// Scalar probe with metrics
+    #[cfg(feature = "tt_metrics")]
+    fn probe_scalar_with_metrics(
+        &self,
+        target_key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        // Hybrid approach: early termination to minimize memory access
+        let mut matching_idx = None;
+
+        for i in 0..BUCKET_SIZE {
+            let key = self.entries[i * 2].load(Ordering::Acquire);
+            if key == target_key {
+                matching_idx = Some(i);
+                break;
+            }
+        }
+
+        if let Some(idx) = matching_idx {
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            let entry = TTEntry {
+                key: target_key,
+                data,
+            };
+            if entry.depth() > 0 {
+                return Some(entry);
+            } else {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    use super::metrics::{record_metric, MetricType};
+                    record_metric(m, MetricType::ProbeKeyMatchDepth0);
+                }
             }
         }
 
@@ -274,6 +364,12 @@ impl TTBucket {
                     if let Some(m) = metrics {
                         m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
                         m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        use super::metrics::{record_metric, MetricType};
+                        if new_entry.depth() > 0 {
+                            record_metric(m, MetricType::StoreDepthGT0);
+                        } else {
+                            record_metric(m, MetricType::StoreDepthEQ0);
+                        }
                     }
                     return;
                 } else {

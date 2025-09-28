@@ -25,9 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Maximum number of CAS retry attempts before giving up
 const MAX_CAS_RETRIES: usize = 3;
 
-/// Base backoff duration in nanoseconds for failed CAS operations
-const BASE_BACKOFF_NS: u64 = 100;
-
+// Backoff: use spin/yield only (no sleeping) for engine responsiveness.
 /// Result of update attempt
 #[derive(Debug, PartialEq)]
 pub(crate) enum UpdateResult {
@@ -72,7 +70,7 @@ pub(crate) fn attempt_replace_worst(
     // 2) attempt CAS on key (count attempt here: after re-read and zeroing)
     #[cfg(feature = "tt_metrics")]
     if let Some(m) = metrics {
-        record_metric(m, MetricType::CasAttempt);
+        record_metric(m, MetricType::CasAttemptKey);
     }
 
     match entries[idx].compare_exchange(old_key, new_entry.key, Ordering::AcqRel, Ordering::Acquire)
@@ -82,9 +80,14 @@ pub(crate) fn attempt_replace_worst(
             entries[idx + 1].store(new_entry.data, Ordering::Release);
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
-                record_metric(m, MetricType::CasSuccess);
+                record_metric(m, MetricType::CasSuccessKey);
                 record_metric(m, MetricType::AtomicStore(1));
                 record_metric(m, MetricType::ReplaceWorst);
+                if new_entry.depth() > 0 {
+                    record_metric(m, MetricType::StoreDepthGT0);
+                } else {
+                    record_metric(m, MetricType::StoreDepthEQ0);
+                }
             }
             ReplaceAttemptResult::Replaced
         }
@@ -94,8 +97,15 @@ pub(crate) fn attempt_replace_worst(
                 entries[idx + 1].store(new_entry.data, Ordering::Release);
                 #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
+                    // 同一キー一致を明示
+                    m.cas_key_match.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     record_metric(m, MetricType::UpdateExisting);
                     record_metric(m, MetricType::AtomicStore(1));
+                    if new_entry.depth() > 0 {
+                        record_metric(m, MetricType::StoreDepthGT0);
+                    } else {
+                        record_metric(m, MetricType::StoreDepthEQ0);
+                    }
                 }
                 ReplaceAttemptResult::UpdatedExisting
             } else {
@@ -171,7 +181,7 @@ pub(crate) fn try_update_entry_generic(
     // This makes CAS operations more observable for Phase 5 optimization
     #[cfg(feature = "tt_metrics")]
     if let Some(m) = metrics {
-        record_metric(m, MetricType::CasAttempt);
+        record_metric(m, MetricType::CasAttemptData);
     }
 
     match entries[idx + 1].compare_exchange_weak(
@@ -184,10 +194,15 @@ pub(crate) fn try_update_entry_generic(
             // CAS succeeded - data updated with proper memory ordering
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
-                record_metric(m, MetricType::CasSuccess);
+                record_metric(m, MetricType::CasSuccessData);
                 record_metric(m, MetricType::UpdateExisting);
                 record_metric(m, MetricType::AtomicStore(1)); // Only 1 CAS operation
                 record_metric(m, MetricType::EffectiveUpdate);
+                if new_entry.depth() > 0 {
+                    record_metric(m, MetricType::StoreDepthGT0);
+                } else {
+                    record_metric(m, MetricType::StoreDepthEQ0);
+                }
             }
             UpdateResult::Updated
         }
@@ -231,15 +246,16 @@ fn try_update_with_backoff(
         if attempt == 1 {
             std::hint::spin_loop();
         } else {
-            // Exponential backoff for subsequent retries (only in high contention)
-            // Keep it minimal to avoid excessive delays in game engines
-            std::thread::sleep(std::time::Duration::from_nanos(BASE_BACKOFF_NS << (attempt - 2)));
+            // 過度なスリープはエンジンに悪影響のため使用しない。
+            // 軽いヒントまたは短い譲歩のみ。
+            std::hint::spin_loop();
+            std::thread::yield_now();
         }
 
         // Record CAS attempt for retry
         #[cfg(feature = "tt_metrics")]
         if let Some(m) = metrics {
-            record_metric(m, MetricType::CasAttempt);
+            record_metric(m, MetricType::CasAttemptData);
         }
 
         // Attempt CAS with fresh current value
@@ -252,10 +268,15 @@ fn try_update_with_backoff(
             Ok(_) => {
                 #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
-                    record_metric(m, MetricType::CasSuccess);
+                    record_metric(m, MetricType::CasSuccessData);
                     record_metric(m, MetricType::UpdateExisting);
                     record_metric(m, MetricType::AtomicStore(attempt as u32));
                     record_metric(m, MetricType::EffectiveUpdate);
+                    if new_entry.depth() > 0 {
+                        record_metric(m, MetricType::StoreDepthGT0);
+                    } else {
+                        record_metric(m, MetricType::StoreDepthEQ0);
+                    }
                 }
                 return UpdateResult::Updated;
             }

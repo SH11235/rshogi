@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) fn probe_simd(
     entries: &[AtomicU64; BUCKET_SIZE * 2],
     target_key: u64,
+    #[cfg(feature = "tt_metrics")] metrics: Option<&crate::search::tt::metrics::DetailedTTMetrics>,
+    #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
 ) -> Option<TTEntry> {
     // Load all 4 keys at once for SIMD comparison
     // Use Acquire ordering for key loads to synchronize with writers
@@ -30,6 +32,12 @@ pub(crate) fn probe_simd(
 
         if entry.depth() > 0 {
             return Some(entry);
+        } else {
+            #[cfg(feature = "tt_metrics")]
+            if let Some(m) = metrics {
+                use crate::search::tt::metrics::{record_metric, MetricType};
+                record_metric(m, MetricType::ProbeKeyMatchDepth0);
+            }
         }
     }
 

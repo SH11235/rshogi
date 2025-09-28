@@ -67,6 +67,8 @@ pub use constants::BUCKET_SIZE;
 
 /// Transposition table implementation
 pub struct TranspositionTable {
+    /// Debug/diagnostic table id
+    id: u64,
     /// Buckets for the transposition table (legacy fixed-size)
     buckets: Vec<TTBucket>,
     /// Flexible buckets (new dynamic-size)
@@ -118,13 +120,17 @@ impl TranspositionTable {
         let bucket_size = std::mem::size_of::<TTBucket>();
         debug_assert_eq!(bucket_size, 64);
 
-        let num_buckets = if size_mb == 0 {
+        let mut num_buckets = if size_mb == 0 {
             // Minimum size: 64KB = 1024 buckets
             1024
         } else {
             // 飽和乗算で極端なサイズ指定時のオーバーフローを防止
             size_mb.saturating_mul(1024 * 1024) / bucket_size
         };
+        // Round up to next power of two for fast indexing
+        if !num_buckets.is_power_of_two() {
+            num_buckets = num_buckets.next_power_of_two();
+        }
 
         // Round to power of 2 for fast indexing
         let num_buckets = num_buckets.next_power_of_two();
@@ -139,7 +145,23 @@ impl TranspositionTable {
         let bitmap_size = num_buckets.div_ceil(8); // Round up to nearest byte
         let occupied_bitmap = (0..bitmap_size).map(|_| AtomicU8::new(0)).collect();
 
+        // Assign unique TT id
+        static NEXT_TT_ID: AtomicU64 = AtomicU64::new(1);
+        let my_id = NEXT_TT_ID.fetch_add(1, Ordering::Relaxed);
+
+        // Basic health asserts and init log
+        debug_assert!(num_buckets.is_power_of_two(), "num_buckets must be power of two");
+        debug_assert_eq!(bitmap_size, num_buckets.div_ceil(8));
+        log::info!(
+            "TT init: size_mb={} num_buckets={} mask=0x{:x} fixed_bucket_size={}B",
+            size_mb,
+            num_buckets,
+            num_buckets - 1,
+            bucket_size
+        );
+
         TranspositionTable {
+            id: my_id,
             buckets,
             flexible_buckets: None,
             num_buckets,
@@ -170,7 +192,7 @@ impl TranspositionTable {
         let bucket_size = bucket_size.unwrap_or_else(|| BucketSize::optimal_for_size(size_mb));
         let bytes_per_bucket = bucket_size.bytes();
 
-        let num_buckets = if size_mb == 0 {
+        let mut num_buckets = if size_mb == 0 {
             // Minimum size depends on bucket size
             match bucket_size {
                 BucketSize::Small => 1024, // 64KB minimum
@@ -181,9 +203,10 @@ impl TranspositionTable {
             // 飽和乗算で極端なサイズ指定時のオーバーフローを防止
             size_mb.saturating_mul(1024 * 1024) / bytes_per_bucket
         };
-
         // Round to power of 2 for fast indexing
-        let num_buckets = num_buckets.next_power_of_two();
+        if !num_buckets.is_power_of_two() {
+            num_buckets = num_buckets.next_power_of_two();
+        }
 
         // Allocate flexible buckets
         let mut flexible_buckets = Vec::with_capacity(num_buckets);
@@ -195,7 +218,22 @@ impl TranspositionTable {
         let bitmap_size = num_buckets.div_ceil(8); // Round up to nearest byte
         let occupied_bitmap = (0..bitmap_size).map(|_| AtomicU8::new(0)).collect();
 
+        // Assign unique TT id
+        static NEXT_TT_ID: AtomicU64 = AtomicU64::new(1);
+        let my_id = NEXT_TT_ID.fetch_add(1, Ordering::Relaxed);
+
+        debug_assert!(num_buckets.is_power_of_two(), "num_buckets must be power of two");
+        debug_assert_eq!(bitmap_size, num_buckets.div_ceil(8));
+        log::info!(
+            "TT init(flex): size_mb={} num_buckets={} mask=0x{:x} bucket_size={:?} entry_bytes=16",
+            size_mb,
+            num_buckets,
+            num_buckets - 1,
+            bucket_size
+        );
+
         TranspositionTable {
+            id: my_id,
             buckets: Vec::new(),
             flexible_buckets: Some(flexible_buckets),
             num_buckets,
@@ -295,7 +333,14 @@ impl TranspositionTable {
 
         for i in 0..sample_size {
             let idx = (start_idx.wrapping_add(i * 97)) & (self.num_buckets - 1); // 97 is prime
-            let any = if let Some(ref flex) = self.flexible_buckets {
+                                                                                 // Prefer fast occupancy bitmap; fall back to key check to avoid stale bitmap effects
+            let byte_idx = idx / 8;
+            let bit_idx = idx % 8;
+            let mask = 1u8 << bit_idx;
+            let occ = (self.occupied_bitmap[byte_idx].load(Ordering::Relaxed) & mask) != 0;
+            let any = if occ {
+                true
+            } else if let Some(ref flex) = self.flexible_buckets {
                 flex[idx].any_key_nonzero_acquire()
             } else {
                 self.buckets[idx].any_key_nonzero_acquire()
@@ -340,9 +385,23 @@ impl TranspositionTable {
         }
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
-            flexible_buckets[idx].probe(hash)
+            #[cfg(feature = "tt_metrics")]
+            {
+                flexible_buckets[idx].probe_with_metrics(hash, self.metrics.as_ref())
+            }
+            #[cfg(not(feature = "tt_metrics"))]
+            {
+                flexible_buckets[idx].probe(hash)
+            }
         } else {
-            self.buckets[idx].probe(hash)
+            #[cfg(feature = "tt_metrics")]
+            {
+                self.buckets[idx].probe_with_metrics(hash, self.metrics.as_ref())
+            }
+            #[cfg(not(feature = "tt_metrics"))]
+            {
+                self.buckets[idx].probe(hash)
+            }
         }
     }
 
@@ -534,7 +593,7 @@ impl TranspositionTable {
                         #[cfg(feature = "tt_metrics")]
                         if let Some(ref m) = self.metrics {
                             use metrics::{record_metric, MetricType};
-                            record_metric(m, MetricType::CasAttempt);
+                            record_metric(m, MetricType::CasAttemptData);
                         }
 
                         match bucket.entries[data_idx].compare_exchange_weak(
@@ -547,7 +606,7 @@ impl TranspositionTable {
                                 #[cfg(feature = "tt_metrics")]
                                 if let Some(ref m) = self.metrics {
                                     use metrics::{record_metric, MetricType};
-                                    record_metric(m, MetricType::CasSuccess);
+                                    record_metric(m, MetricType::CasSuccessData);
                                 }
                                 return true;
                             }
@@ -585,7 +644,7 @@ impl TranspositionTable {
                         #[cfg(feature = "tt_metrics")]
                         if let Some(ref m) = self.metrics {
                             use metrics::{record_metric, MetricType};
-                            record_metric(m, MetricType::CasAttempt);
+                            record_metric(m, MetricType::CasAttemptData);
                         }
 
                         match bucket.entries[data_idx].compare_exchange_weak(
@@ -598,7 +657,7 @@ impl TranspositionTable {
                                 #[cfg(feature = "tt_metrics")]
                                 if let Some(ref m) = self.metrics {
                                     use metrics::{record_metric, MetricType};
-                                    record_metric(m, MetricType::CasSuccess);
+                                    record_metric(m, MetricType::CasSuccessData);
                                 }
                                 return true;
                             }
@@ -890,6 +949,23 @@ impl TranspositionTable {
     #[cfg(feature = "tt_metrics")]
     pub fn metrics(&self) -> Option<&DetailedTTMetrics> {
         self.metrics.as_ref()
+    }
+
+    /// Debug helpers
+    #[cfg(debug_assertions)]
+    pub fn debug_roundtrip(&self, key: u64) -> bool {
+        use crate::shogi::Move;
+        // Store an EXACT entry at depth 10 and probe it back
+        self.store(key, None::<Move>, 0, 0, 10, NodeType::Exact);
+        match self.probe_entry(key) {
+            Some(e) => e.key == key && e.depth() >= 10,
+            None => false,
+        }
+    }
+
+    /// Get TT id for diagnostics
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Get prefetch statistics

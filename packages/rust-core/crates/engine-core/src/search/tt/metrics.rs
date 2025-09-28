@@ -8,11 +8,17 @@ use std::sync::atomic::AtomicU64 as StdAtomicU64;
 #[derive(Default)]
 pub struct DetailedTTMetrics {
     // CAS-related (future use)
-    pub cas_attempts: StdAtomicU64,
-    pub cas_successes: StdAtomicU64,
+    pub cas_attempts: StdAtomicU64,  // aggregate (key + data)
+    pub cas_successes: StdAtomicU64, // aggregate (key + data)
     pub cas_failures: StdAtomicU64,
     pub cas_key_match: StdAtomicU64, // CAS failed but key matched (Phase 5 optimization)
     pub cas_failure_after_zero: StdAtomicU64, // CAS failure observed while slot's data is 0
+
+    // CAS breakdown
+    pub cas_attempts_key: StdAtomicU64,
+    pub cas_attempts_data: StdAtomicU64,
+    pub cas_successes_key: StdAtomicU64,
+    pub cas_successes_data: StdAtomicU64,
 
     // Update pattern analysis
     pub update_existing: StdAtomicU64, // Updates to existing entries
@@ -31,6 +37,11 @@ pub struct DetailedTTMetrics {
     pub depth_filtered: StdAtomicU64, // Updates skipped due to depth filter
     pub hashfull_filtered: StdAtomicU64, // Updates skipped due to hashfull filter
     pub effective_updates: StdAtomicU64, // Updates that improved the entry
+
+    // Depth composition / probe diagnostics
+    pub stores_depth_gt0: StdAtomicU64,
+    pub stores_depth_eq0: StdAtomicU64,
+    pub probes_key_match_but_depth0: StdAtomicU64,
 }
 
 #[cfg(feature = "tt_metrics")]
@@ -49,6 +60,10 @@ impl DetailedTTMetrics {
         self.cas_failures.store(0, Relaxed);
         self.cas_key_match.store(0, Relaxed);
         self.cas_failure_after_zero.store(0, Relaxed);
+        self.cas_attempts_key.store(0, Relaxed);
+        self.cas_attempts_data.store(0, Relaxed);
+        self.cas_successes_key.store(0, Relaxed);
+        self.cas_successes_data.store(0, Relaxed);
         self.update_existing.store(0, Relaxed);
         self.replace_empty.store(0, Relaxed);
         self.replace_worst.store(0, Relaxed);
@@ -59,6 +74,9 @@ impl DetailedTTMetrics {
         self.depth_filtered.store(0, Relaxed);
         self.hashfull_filtered.store(0, Relaxed);
         self.effective_updates.store(0, Relaxed);
+        self.stores_depth_gt0.store(0, Relaxed);
+        self.stores_depth_eq0.store(0, Relaxed);
+        self.probes_key_match_but_depth0.store(0, Relaxed);
     }
 
     /// Print metrics summary
@@ -100,8 +118,18 @@ impl DetailedTTMetrics {
 
         if self.cas_attempts.load(Relaxed) > 0 {
             log::info!("\nCAS operations:");
-            log::info!("  Attempts: {}", self.cas_attempts.load(Relaxed));
-            log::info!("  Successes: {}", self.cas_successes.load(Relaxed));
+            log::info!(
+                "  Attempts(total)={} Successes(total)={}",
+                self.cas_attempts.load(Relaxed),
+                self.cas_successes.load(Relaxed)
+            );
+            log::info!(
+                "  Attempts: key={} data={}  Successes: key={} data={}",
+                self.cas_attempts_key.load(Relaxed),
+                self.cas_attempts_data.load(Relaxed),
+                self.cas_successes_key.load(Relaxed),
+                self.cas_successes_data.load(Relaxed)
+            );
             log::info!("  Failures: {}", self.cas_failures.load(Relaxed));
             log::info!("  FailuresAfterZero: {}", self.cas_failure_after_zero.load(Relaxed));
             log::info!(
@@ -123,6 +151,24 @@ impl DetailedTTMetrics {
             log::info!("  Depth filtered: {depth_filtered}");
             log::info!("  Hashfull filtered: {hashfull_filtered}");
             log::info!("  Effective updates: {}", self.effective_updates.load(Relaxed));
+        }
+
+        // Depth composition
+        let gt0 = self.stores_depth_gt0.load(Relaxed);
+        let eq0 = self.stores_depth_eq0.load(Relaxed);
+        if gt0 + eq0 > 0 {
+            let total = gt0 + eq0;
+            let pct_gt0 = gt0 as f64 / total as f64 * 100.0;
+            let pct_eq0 = eq0 as f64 / total as f64 * 100.0;
+            log::info!(
+                "\nDepth composition (stores): gt0={} ({:.1}%), eq0={} ({:.1}%)",
+                gt0,
+                pct_gt0,
+                eq0,
+                pct_eq0
+            );
+            let dropped = self.probes_key_match_but_depth0.load(Relaxed);
+            log::info!("  Probes matched but depth==0 (dropped): {}", dropped);
         }
     }
 
@@ -172,12 +218,19 @@ impl DetailedTTMetrics {
             };
             out.push_str("cas\n");
             out.push_str(&format!(
-                "  attempts={} success={} failure={} after_zero={} key_match={:.1}%\n",
+                "  attempts(total)={} success(total)={} failure={} after_zero={} key_match={:.1}%\n",
                 cas_attempts,
                 self.cas_successes.load(Relaxed),
                 cas_failures,
                 self.cas_failure_after_zero.load(Relaxed),
                 key_match_rate
+            ));
+            out.push_str(&format!(
+                "  attempts: key={} data={}  success: key={} data={}\n",
+                self.cas_attempts_key.load(Relaxed),
+                self.cas_attempts_data.load(Relaxed),
+                self.cas_successes_key.load(Relaxed),
+                self.cas_successes_data.load(Relaxed)
             ));
         }
 
@@ -190,6 +243,24 @@ impl DetailedTTMetrics {
                 depth_filtered,
                 hashfull_filtered,
                 self.effective_updates.load(Relaxed)
+            ));
+        }
+
+        // Depth composition
+        let gt0 = self.stores_depth_gt0.load(Relaxed);
+        let eq0 = self.stores_depth_eq0.load(Relaxed);
+        if gt0 + eq0 > 0 {
+            let total = gt0 + eq0;
+            let pct_gt0 = gt0 as f64 / total as f64 * 100.0;
+            let pct_eq0 = eq0 as f64 / total as f64 * 100.0;
+            out.push_str("depth\n");
+            out.push_str(&format!(
+                "  stores: gt0={} ({:.1}%) eq0={} ({:.1}%) dropped_on_probe={}\n",
+                gt0,
+                pct_gt0,
+                eq0,
+                pct_eq0,
+                self.probes_key_match_but_depth0.load(Relaxed)
             ));
         }
 
@@ -206,12 +277,17 @@ pub(crate) enum MetricType {
     DepthFiltered,
     UpdateExisting,
     EffectiveUpdate,
-    CasAttempt,
-    CasSuccess,
+    CasAttemptKey,
+    CasAttemptData,
+    CasSuccessKey,
+    CasSuccessData,
     CasFailure,
     CasFailureAfterZero,
     ReplaceEmpty,
     ReplaceWorst,
+    StoreDepthGT0,
+    StoreDepthEQ0,
+    ProbeKeyMatchDepth0,
 }
 
 /// Record metrics - cold path to minimize overhead
@@ -221,16 +297,57 @@ pub(crate) enum MetricType {
 pub(crate) fn record_metric(metrics: &DetailedTTMetrics, metric_type: MetricType) {
     use std::sync::atomic::Ordering::Relaxed;
     match metric_type {
-        MetricType::AtomicLoad => metrics.atomic_loads.fetch_add(1, Relaxed),
-        MetricType::AtomicStore(n) => metrics.atomic_stores.fetch_add(n as u64, Relaxed),
-        MetricType::DepthFiltered => metrics.depth_filtered.fetch_add(1, Relaxed),
-        MetricType::UpdateExisting => metrics.update_existing.fetch_add(1, Relaxed),
-        MetricType::EffectiveUpdate => metrics.effective_updates.fetch_add(1, Relaxed),
-        MetricType::CasAttempt => metrics.cas_attempts.fetch_add(1, Relaxed),
-        MetricType::CasSuccess => metrics.cas_successes.fetch_add(1, Relaxed),
-        MetricType::CasFailure => metrics.cas_failures.fetch_add(1, Relaxed),
-        MetricType::CasFailureAfterZero => metrics.cas_failure_after_zero.fetch_add(1, Relaxed),
-        MetricType::ReplaceEmpty => metrics.replace_empty.fetch_add(1, Relaxed),
-        MetricType::ReplaceWorst => metrics.replace_worst.fetch_add(1, Relaxed),
+        MetricType::AtomicLoad => {
+            metrics.atomic_loads.fetch_add(1, Relaxed);
+        }
+        MetricType::AtomicStore(n) => {
+            metrics.atomic_stores.fetch_add(n as u64, Relaxed);
+        }
+        MetricType::DepthFiltered => {
+            metrics.depth_filtered.fetch_add(1, Relaxed);
+        }
+        MetricType::UpdateExisting => {
+            metrics.update_existing.fetch_add(1, Relaxed);
+        }
+        MetricType::EffectiveUpdate => {
+            metrics.effective_updates.fetch_add(1, Relaxed);
+        }
+        MetricType::CasAttemptKey => {
+            metrics.cas_attempts.fetch_add(1, Relaxed);
+            metrics.cas_attempts_key.fetch_add(1, Relaxed);
+        }
+        MetricType::CasAttemptData => {
+            metrics.cas_attempts.fetch_add(1, Relaxed);
+            metrics.cas_attempts_data.fetch_add(1, Relaxed);
+        }
+        MetricType::CasSuccessKey => {
+            metrics.cas_successes.fetch_add(1, Relaxed);
+            metrics.cas_successes_key.fetch_add(1, Relaxed);
+        }
+        MetricType::CasSuccessData => {
+            metrics.cas_successes.fetch_add(1, Relaxed);
+            metrics.cas_successes_data.fetch_add(1, Relaxed);
+        }
+        MetricType::CasFailure => {
+            metrics.cas_failures.fetch_add(1, Relaxed);
+        }
+        MetricType::CasFailureAfterZero => {
+            metrics.cas_failure_after_zero.fetch_add(1, Relaxed);
+        }
+        MetricType::ReplaceEmpty => {
+            metrics.replace_empty.fetch_add(1, Relaxed);
+        }
+        MetricType::ReplaceWorst => {
+            metrics.replace_worst.fetch_add(1, Relaxed);
+        }
+        MetricType::StoreDepthGT0 => {
+            metrics.stores_depth_gt0.fetch_add(1, Relaxed);
+        }
+        MetricType::StoreDepthEQ0 => {
+            metrics.stores_depth_eq0.fetch_add(1, Relaxed);
+        }
+        MetricType::ProbeKeyMatchDepth0 => {
+            metrics.probes_key_match_but_depth0.fetch_add(1, Relaxed);
+        }
     };
 }

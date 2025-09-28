@@ -76,6 +76,39 @@ impl FlexibleTTBucket {
         }
     }
 
+    /// Probe with optional metrics (counts key-match-but-depth0 drops when enabled)
+    #[cfg(feature = "tt_metrics")]
+    pub(crate) fn probe_with_metrics(
+        &self,
+        key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        match self.size {
+            BucketSize::Small => self.probe_small_with_metrics(
+                key,
+                #[cfg(feature = "tt_metrics")]
+                metrics,
+                #[cfg(not(feature = "tt_metrics"))]
+                None,
+            ),
+            BucketSize::Medium => self.probe_medium_with_metrics(
+                key,
+                #[cfg(feature = "tt_metrics")]
+                metrics,
+                #[cfg(not(feature = "tt_metrics"))]
+                None,
+            ),
+            BucketSize::Large => self.probe_large_with_metrics(
+                key,
+                #[cfg(feature = "tt_metrics")]
+                metrics,
+                #[cfg(not(feature = "tt_metrics"))]
+                None,
+            ),
+        }
+    }
+
     /// Optimized probe for small buckets (4 entries)
     fn probe_small(&self, target_key: u64) -> Option<TTEntry> {
         // Fixed-size for better optimization
@@ -89,6 +122,33 @@ impl FlexibleTTBucket {
                 if entry.depth() > 0 {
                     return Some(entry);
                 }
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "tt_metrics")]
+    fn probe_small_with_metrics(
+        &self,
+        target_key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        for i in 0..4 {
+            let idx = i * 2;
+            let key = self.entries[idx].load(Ordering::Acquire);
+            if key == target_key {
+                let data = self.entries[idx + 1].load(Ordering::Relaxed);
+                let entry = TTEntry { key, data };
+                if entry.depth() > 0 {
+                    return Some(entry);
+                } else {
+                    #[cfg(feature = "tt_metrics")]
+                    if let Some(m) = metrics {
+                        record_metric(m, MetricType::ProbeKeyMatchDepth0);
+                    }
+                }
+                break;
             }
         }
         None
@@ -133,6 +193,55 @@ impl FlexibleTTBucket {
         None
     }
 
+    #[cfg(feature = "tt_metrics")]
+    fn probe_medium_with_metrics(
+        &self,
+        target_key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        if simd_enabled() {
+            let mut keys = [0u64; 8];
+            for (i, key) in keys.iter_mut().enumerate() {
+                *key = self.entries[i * 2].load(Ordering::Acquire);
+            }
+            if let Some(idx) = crate::search::tt::simd::find_matching_key_8(&keys, target_key) {
+                let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+                let entry = TTEntry {
+                    key: keys[idx],
+                    data,
+                };
+                if entry.depth() > 0 {
+                    return Some(entry);
+                } else {
+                    #[cfg(feature = "tt_metrics")]
+                    if let Some(m) = metrics {
+                        record_metric(m, MetricType::ProbeKeyMatchDepth0);
+                    }
+                }
+            }
+        } else {
+            for i in 0..8 {
+                let idx = i * 2;
+                let key = self.entries[idx].load(Ordering::Acquire);
+                if key == target_key {
+                    let data = self.entries[idx + 1].load(Ordering::Relaxed);
+                    let entry = TTEntry { key, data };
+                    if entry.depth() > 0 {
+                        return Some(entry);
+                    } else {
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            record_metric(m, MetricType::ProbeKeyMatchDepth0);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        None
+    }
+
     /// Optimized probe for large buckets (16 entries)
     fn probe_large(&self, target_key: u64) -> Option<TTEntry> {
         // Try SIMD if available for 16 entries
@@ -167,6 +276,55 @@ impl FlexibleTTBucket {
                         return Some(entry);
                     }
                     break; // Early termination
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "tt_metrics")]
+    fn probe_large_with_metrics(
+        &self,
+        target_key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        if simd_enabled() {
+            let mut keys = [0u64; 16];
+            for (i, key) in keys.iter_mut().enumerate() {
+                *key = self.entries[i * 2].load(Ordering::Acquire);
+            }
+            if let Some(idx) = crate::search::tt::simd::find_matching_key_16(&keys, target_key) {
+                let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+                let entry = TTEntry {
+                    key: keys[idx],
+                    data,
+                };
+                if entry.depth() > 0 {
+                    return Some(entry);
+                } else {
+                    #[cfg(feature = "tt_metrics")]
+                    if let Some(m) = metrics {
+                        record_metric(m, MetricType::ProbeKeyMatchDepth0);
+                    }
+                }
+            }
+        } else {
+            for i in 0..16 {
+                let idx = i * 2;
+                let key = self.entries[idx].load(Ordering::Acquire);
+                if key == target_key {
+                    let data = self.entries[idx + 1].load(Ordering::Relaxed);
+                    let entry = TTEntry { key, data };
+                    if entry.depth() > 0 {
+                        return Some(entry);
+                    } else {
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            record_metric(m, MetricType::ProbeKeyMatchDepth0);
+                        }
+                    }
+                    break;
                 }
             }
         }
@@ -343,6 +501,11 @@ impl FlexibleTTBucket {
                 if let Some(m) = metrics {
                     record_metric(m, MetricType::ReplaceEmpty);
                     record_metric(m, MetricType::AtomicStore(2));
+                    if new_entry.depth() > 0 {
+                        record_metric(m, MetricType::StoreDepthGT0);
+                    } else {
+                        record_metric(m, MetricType::StoreDepthEQ0);
+                    }
                 }
                 return;
             }
