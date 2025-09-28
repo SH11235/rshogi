@@ -242,25 +242,24 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
             // SearchThread automatically flushes nodes when work is completed
             // No need for manual node reporting here
 
-            // After stop or normal loop exit, drain any remaining enqueued work items
-            // without processing them to keep pending_work_items consistent.
-            // This prevents leftover pending counts when stop is requested while work remains queued.
-            loop {
-                let pending_left = pending_work_items.load(Ordering::Acquire);
-                if pending_left == 0 {
-                    break;
-                }
-                match get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure) {
-                    Some(_item) => {
-                        // Cancel the work item by accounting only
-                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
-                        if log::log_enabled!(log::Level::Trace) {
-                            log::trace!("Worker {log_id} drained one pending work item (remaining before: {pending_left})");
-                        }
-                        // Continue draining until queues appear empty or counter reaches zero
-                        continue;
+            // After stop or normal loop exit, clear pending accounting fast.
+            // Under stop conditions we prefer prompt shutdown over exact draining.
+            if shared_state.should_stop() {
+                pending_work_items.store(0, Ordering::Release);
+            } else {
+                // Best-effort quick drain when not in stop condition
+                for _ in 0..64 {
+                    let pending_left = pending_work_items.load(Ordering::Acquire);
+                    if pending_left == 0 {
+                        break;
                     }
-                    None => break,
+                    if let Some(_item) =
+                        get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure)
+                    {
+                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
+                    } else {
+                        break;
+                    }
                 }
             }
 
