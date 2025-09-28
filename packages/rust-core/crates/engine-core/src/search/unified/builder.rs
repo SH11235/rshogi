@@ -99,12 +99,20 @@ where
                 Some(existing)
             } else {
                 // 自前で作成する場合は、tt_metricsが有効なら計測を有効化してからArc化
-                let mut tt = TranspositionTable::new(self.tt_size_mb);
-                #[cfg(feature = "tt_metrics")]
-                {
-                    tt.enable_metrics();
-                }
-                Some(Arc::new(tt))
+                let tt_arc = {
+                    let t0 = TranspositionTable::new(self.tt_size_mb);
+                    #[cfg(feature = "tt_metrics")]
+                    {
+                        let mut t1 = t0;
+                        t1.enable_metrics();
+                        Arc::new(t1)
+                    }
+                    #[cfg(not(feature = "tt_metrics"))]
+                    {
+                        Arc::new(t0)
+                    }
+                };
+                Some(tt_arc)
             }
         } else {
             None

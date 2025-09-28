@@ -175,13 +175,21 @@ impl Engine {
         };
 
         // Create shared TT (単スレ・並列ともにこの 1 本を共有)
-        let mut shared_tt = Arc::new(TranspositionTable::new(default_tt_size));
-        #[cfg(feature = "tt_metrics")]
-        {
-            if let Some(tt) = Arc::get_mut(&mut shared_tt) {
-                tt.enable_metrics();
+        let shared_tt = {
+            let arc0 = Arc::new(TranspositionTable::new(default_tt_size));
+            #[cfg(feature = "tt_metrics")]
+            {
+                let mut arc1 = arc0;
+                if let Some(tt) = Arc::get_mut(&mut arc1) {
+                    tt.enable_metrics();
+                }
+                arc1
             }
-        }
+            #[cfg(not(feature = "tt_metrics"))]
+            {
+                arc0
+            }
+        };
 
         // Initialize single-thread searchers based on engine type using shared_tt
         let material_searcher = if engine_type == EngineType::Material {
@@ -707,13 +715,21 @@ impl Engine {
             }
 
             // Recreate shared TT with new size
-            let mut new_tt_arc = Arc::new(TranspositionTable::new(new_size));
-            #[cfg(feature = "tt_metrics")]
-            {
-                if let Some(tt) = Arc::get_mut(&mut new_tt_arc) {
-                    tt.enable_metrics();
+            let new_tt_arc = {
+                let arc0 = Arc::new(TranspositionTable::new(new_size));
+                #[cfg(feature = "tt_metrics")]
+                {
+                    let mut arc1 = arc0;
+                    if let Some(tt) = Arc::get_mut(&mut arc1) {
+                        tt.enable_metrics();
+                    }
+                    arc1
                 }
-            }
+                #[cfg(not(feature = "tt_metrics"))]
+                {
+                    arc0
+                }
+            };
             self.shared_tt = new_tt_arc;
 
             // Recreate the single-threaded searcher for the current engine type using shared_tt
