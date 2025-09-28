@@ -91,6 +91,14 @@ pub fn finalize_and_send(
             stop_reason
         ));
 
+        // 極小Byoyomi対策の可視化: ハード/ソフト上限と停止理由
+        if let Some(si) = res.stop_info.as_ref() {
+            info_string(format!(
+                "time_caps hard_ms={} soft_ms={} reason={:?}",
+                si.hard_limit_ms, si.soft_limit_ms, si.reason
+            ));
+        }
+
         #[cfg(feature = "diagnostics")]
         {
             let nodes = res.stats.nodes.max(1);
