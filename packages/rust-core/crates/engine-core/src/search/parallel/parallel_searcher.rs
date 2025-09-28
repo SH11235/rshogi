@@ -23,7 +23,7 @@ use std::{
 use super::time_manager::{start_fail_safe_guard, start_time_manager};
 use super::work_queue::{Queues, WorkItem};
 use super::worker::{start_worker_with, WorkerConfig};
-use crate::search::parallel::util::compute_finalize_window_ms;
+use crate::search::parallel::util::{compute_finalize_window_ms, compute_hard_guard_ms};
 
 #[cfg(feature = "ybwc")]
 use super::SplitPoint;
@@ -810,18 +810,42 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         } else {
             // Minimal hygiene wait to let workers observe the stop flag before the next search starts.
-            let mut waited_ms = 0u64;
-            while self.active_workers.load(Ordering::Acquire) != 0 && waited_ms < 50 {
-                thread::sleep(Duration::from_millis(5));
-                waited_ms += 5;
+            const HYGIENE_WAIT_MAX_MS: u64 = 50;
+            const HYGIENE_WAIT_STEP_MS: u64 = 5;
+            const HYGIENE_LEAD_MS: u64 = 100;
+            const HYGIENE_IO_MS: u64 = 15;
+
+            let mut max_wait_ms = HYGIENE_WAIT_MAX_MS;
+            if let Some(info) = self.shared_state.stop_info.get() {
+                if info.hard_limit_ms > 0 && info.hard_limit_ms < u64::MAX {
+                    let remaining = info.hard_limit_ms.saturating_sub(info.elapsed_ms);
+                    let reserved = HYGIENE_LEAD_MS + HYGIENE_IO_MS;
+                    let safe_budget = remaining.saturating_sub(reserved);
+                    max_wait_ms = max_wait_ms.min(safe_budget);
+                }
             }
-            info!(
-                "diag finalize_skip_join=1 pending_workers={} waited_ms={} time_handle={} fail_safe_handle={}",
-                self.active_workers.load(Ordering::Acquire),
-                waited_ms,
-                time_handle.is_some(),
-                fail_safe_handle.is_some()
-            );
+
+            let mut waited_ms = 0u64;
+            while self.active_workers.load(Ordering::Acquire) != 0 && waited_ms < max_wait_ms {
+                thread::sleep(Duration::from_millis(HYGIENE_WAIT_STEP_MS));
+                waited_ms += HYGIENE_WAIT_STEP_MS;
+            }
+
+            #[cfg(feature = "diagnostics")]
+            {
+                let active_remaining = self.active_workers.load(Ordering::Acquire);
+                let pending_remaining = self.pending_work_items.load(Ordering::Acquire);
+                info!(
+                    "diag finalize_skip_join=1 active_workers={} pending_items={} waited_ms={} max_wait_ms={} time_handle={} fail_safe_handle={}",
+                    active_remaining,
+                    pending_remaining,
+                    waited_ms,
+                    max_wait_ms,
+                    time_handle.is_some(),
+                    fail_safe_handle.is_some()
+                );
+            }
+
             // 次探索に持ち越さないよう未処理ハンドルをデタッチ
             let _ = self.post_ponder_tm_handle.lock().unwrap().take();
             *self.time_manager.lock().unwrap() = None;
@@ -1378,26 +1402,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 }
 
-/// Compute guard window with respect to the *total* configured hard-limit time.
-/// Extracted for testability (piecewise as suggested in review).
-fn compute_hard_guard_ms(total_hard_limit_ms: u64) -> u64 {
-    use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
-    if total_hard_limit_ms >= 1_000 {
-        MAIN_NEAR_DEADLINE_WINDOW_MS
-    } else if total_hard_limit_ms >= 500 {
-        150
-    } else if total_hard_limit_ms >= 200 {
-        80
-    } else {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests_compute_guard_and_wait {
     use super::*;
     use crate::{
         evaluation::evaluate::MaterialEvaluator,
+        search::parallel::util::compute_hard_guard_ms,
         search::{SearchLimits, TranspositionTable},
     };
 

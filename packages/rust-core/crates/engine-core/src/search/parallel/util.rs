@@ -1,6 +1,6 @@
 //! Shared helpers for parallel search timing logic.
 
-use crate::search::constants::NEAR_HARD_FINALIZE_MS;
+use crate::search::constants::{MAIN_NEAR_DEADLINE_WINDOW_MS, NEAR_HARD_FINALIZE_MS};
 
 /// Compute the near-finalization guard window (in ms) for a given absolute limit.
 ///
@@ -16,6 +16,20 @@ pub(crate) fn compute_finalize_window_ms(total_limit_ms: u64) -> u64 {
         NEAR_HARD_FINALIZE_MS / 2
     } else if total_limit_ms >= 200 {
         120
+    } else {
+        0
+    }
+}
+
+/// Compute the hard-deadline guard window (ms) used by the main-thread near-guard logic.
+#[inline]
+pub(crate) fn compute_hard_guard_ms(total_hard_limit_ms: u64) -> u64 {
+    if total_hard_limit_ms >= 1_000 {
+        MAIN_NEAR_DEADLINE_WINDOW_MS
+    } else if total_hard_limit_ms >= 500 {
+        150
+    } else if total_hard_limit_ms >= 200 {
+        80
     } else {
         0
     }
