@@ -460,7 +460,7 @@ mod tt_tests {
         }
 
         // Advance age to make some entries old
-        tt.age = 6;
+        tt.age.store(6, Ordering::Relaxed);
 
         // Trigger GC
         tt.need_gc.store(true, Ordering::Relaxed);
