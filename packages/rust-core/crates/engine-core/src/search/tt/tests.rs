@@ -440,7 +440,7 @@ mod tt_tests {
 
     #[test]
     fn test_incremental_gc() {
-        let mut tt = TranspositionTable::new(1); // 1MB table
+        let tt = TranspositionTable::new(1); // 1MB table
         let position = Position::startpos();
 
         // Fill table with entries of different ages

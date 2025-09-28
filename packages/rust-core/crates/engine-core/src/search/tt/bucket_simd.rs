@@ -11,7 +11,9 @@ pub(crate) fn probe_simd(
     target_key: u64,
 ) -> Option<TTEntry> {
     // Load all 4 keys at once for SIMD comparison
-    // Use Acquire ordering for key loads to ensure proper synchronization with Release stores
+    // Use Acquire ordering for key loads to synchronize with writers
+    // Writers publish either Release stores (empty-slot) or AcqRel CAS (replacement) for the key,
+    // so Acquire here ensures corresponding data visibility.
     let mut keys = [0u64; BUCKET_SIZE];
     for (i, key) in keys.iter_mut().enumerate() {
         *key = entries[i * 2].load(Ordering::Acquire);

@@ -122,7 +122,8 @@ impl TranspositionTable {
             // Minimum size: 64KB = 1024 buckets
             1024
         } else {
-            (size_mb * 1024 * 1024) / bucket_size
+            // 飽和乗算で極端なサイズ指定時のオーバーフローを防止
+            size_mb.saturating_mul(1024 * 1024) / bucket_size
         };
 
         // Round to power of 2 for fast indexing
@@ -177,7 +178,8 @@ impl TranspositionTable {
                 BucketSize::Large => 256,  // 64KB minimum
             }
         } else {
-            (size_mb * 1024 * 1024) / bytes_per_bucket
+            // 飽和乗算で極端なサイズ指定時のオーバーフローを防止
+            size_mb.saturating_mul(1024 * 1024) / bytes_per_bucket
         };
 
         // Round to power of 2 for fast indexing
@@ -255,6 +257,7 @@ impl TranspositionTable {
     }
 
     /// Check if bucket is occupied in bitmap
+    #[cfg(test)]
     #[inline]
     fn is_bucket_occupied(&self, bucket_idx: usize) -> bool {
         let byte_idx = bucket_idx / 8;
@@ -274,28 +277,36 @@ impl TranspositionTable {
         self.occupied_bitmap[byte_idx].fetch_and(mask, Ordering::Relaxed);
     }
 
-    /// Update hashfull estimate based on occupied bitmap sampling
+    /// Update hashfull estimate by sampling actual keys (key != 0) in buckets
+    ///
+    /// 以前は「占有ビットマップ」を用いてタッチ率を近似していたが、短時間で飽和するため
+    /// 実効占有率の推定精度を上げるべく、実キーの有無をサンプリングする方式に切り替える。
     fn update_hashfull_estimate(&self) {
         // Sample ~1% of buckets (minimum 64, maximum 1024), but never exceed num_buckets
         let mut sample_size = (self.num_buckets / 100).clamp(64, 1024);
         if sample_size > self.num_buckets {
             sample_size = self.num_buckets;
         }
-        let mut occupied_count = 0;
+        let mut occupied_count = 0usize;
 
-        // Use deterministic sampling based on node counter for consistency
-        let start_idx = (self.node_counter.load(Ordering::Relaxed) as usize) % self.num_buckets;
+        // Deterministic sampling start based on node counter
+        let start_idx =
+            (self.node_counter.load(Ordering::Relaxed) as usize) & (self.num_buckets - 1);
 
         for i in 0..sample_size {
-            let bucket_idx = (start_idx + i * 97) % self.num_buckets; // 97 is prime for good distribution
-            if self.is_bucket_occupied(bucket_idx) {
+            let idx = (start_idx.wrapping_add(i * 97)) & (self.num_buckets - 1); // 97 is prime
+            let any = if let Some(ref flex) = self.flexible_buckets {
+                flex[idx].any_key_nonzero_acquire()
+            } else {
+                self.buckets[idx].any_key_nonzero_acquire()
+            };
+            if any {
                 occupied_count += 1;
             }
         }
 
-        // Calculate hashfull (permille)
-        let hashfull = (occupied_count * 1000) / sample_size;
-        self.hashfull_estimate.store(hashfull as u16, Ordering::Relaxed);
+        let hf = (occupied_count * 1000) / sample_size;
+        self.hashfull_estimate.store(hf as u16, Ordering::Relaxed);
     }
 
     /// Get current hashfull estimate
@@ -908,8 +919,10 @@ impl TranspositionTable {
 }
 
 impl TTProbe for TranspositionTable {
+    #[inline]
     fn probe(&self, hash: u64) -> Option<TTEntry> {
-        self.probe(hash)
+        // 明示的に固有メソッドを呼び出して可読性と誤解防止を図る
+        TranspositionTable::probe(self, hash)
     }
 }
 

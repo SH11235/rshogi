@@ -9,8 +9,12 @@
 //! - Subsequent retries use minimal exponential backoff (100ns base)
 //!
 //! ### Memory Ordering
-//! - Release/Relaxed ordering for optimal performance on x86/ARM
-//! - Atomic operations are carefully minimized for game engine requirements
+//! - Reader: key は `Acquire` で読み、対応する `data` は `Relaxed` で読む（key の公開と整合）
+//! - Writer（空きスロット）: `data` を `Release` → `key` を `Release` で公開
+//! - Writer（置換）: `data=0` を `Release` で公開 → `key` を `compare_exchange(AcqRel, Acquire)` で CAS → 最後に `data` を `Release`
+//! - これにより、読取側の `Acquire` と書込側の `Release/AcqRel` が対になり、
+//!   「key が一致した時点で対応する data は一貫して観測できる」ことを保証します。
+//! - Atomic 操作はゲームエンジン要件の範囲で最小化しています。
 
 use super::constants::{DEPTH_MASK, DEPTH_SHIFT};
 use super::entry::TTEntry;

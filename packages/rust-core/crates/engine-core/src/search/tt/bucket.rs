@@ -59,6 +59,18 @@ impl TTBucket {
         }
     }
 
+    /// Any key present in this bucket? (Acquire)
+    #[inline]
+    pub(crate) fn any_key_nonzero_acquire(&self) -> bool {
+        for i in 0..BUCKET_SIZE {
+            let key = self.entries[i * 2].load(Ordering::Acquire);
+            if key != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Clear all entries in the bucket
     pub(crate) fn clear(&mut self) {
         for e in &self.entries {
@@ -117,10 +129,12 @@ impl TTBucket {
 
         // If we found a match, load data with Relaxed ordering
         if let Some(idx) = matching_idx {
-            // Design note: We use Relaxed for data load because the key's Acquire ordering
-            // already provides the necessary synchronization. The writer uses Release ordering
-            // when storing key, which ensures all prior writes (including data) are visible
-            // when we read the key with Acquire.
+            // Design note: We use Relaxed for data because the key's Acquire load already
+            // synchronizes with writers. Writers publish either:
+            // - empty-slot path: data(Release) -> key(Release)
+            // - replacement path: data=0(Release) -> key CAS(AcqRel/Acquire) -> data(Release)
+            // Thus, once key==target is observed with Acquire, the corresponding data is
+            // consistently visible.
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: target_key,
