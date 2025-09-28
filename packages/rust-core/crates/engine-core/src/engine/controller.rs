@@ -12,7 +12,10 @@ use crate::{
 };
 use log::{debug, error, info, warn};
 use parking_lot::RwLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use crate::game_phase::{detect_game_phase, GamePhase, Profile};
 
@@ -137,6 +140,25 @@ pub struct Engine {
     pending_tt_size: Option<usize>,
     // Desired MultiPV (applied to new/recreated searchers)
     desired_multi_pv: u8,
+    // Active searches counter for clear_hash safety
+    active_searches: AtomicUsize,
+}
+
+/// RAII guard to track active searches for safe operations (e.g., clear_hash)
+struct ActiveSearchGuard(*const AtomicUsize);
+impl ActiveSearchGuard {
+    fn new(counter: &AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        ActiveSearchGuard(counter as *const _)
+    }
+}
+impl Drop for ActiveSearchGuard {
+    fn drop(&mut self) {
+        unsafe {
+            // SAFETY: pointer originates from a valid &AtomicUsize living longer than guard
+            (*self.0).fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Engine {
@@ -223,6 +245,7 @@ impl Engine {
             tt_size_mb: default_tt_size,
             pending_tt_size: None,
             desired_multi_pv: 1,
+            active_searches: AtomicUsize::new(0),
         }
     }
 
@@ -369,6 +392,10 @@ impl Engine {
         self.apply_pending_thread_count();
         // Apply pending TT size if any
         self.apply_pending_tt_size();
+        // 共有TTの age を新探索エポックとして前進
+        self.shared_tt.bump_age();
+        // 検索アクティブガード（関数終了時に自動デクリメント）
+        let _active_guard = ActiveSearchGuard::new(&self.active_searches);
 
         // Detect phase once and use for both thread calculation and logging
         let phase = self.detect_game_phase(pos);
@@ -385,8 +412,8 @@ impl Engine {
         // Additional debug log for tuning support
         debug!("phase={:?} ply={} threads={}", phase, pos.ply, active_threads);
 
-        // Use parallel search if enabled and supported
-        if self.use_parallel {
+        // Execute search and ensure active counter decremented at end
+        let result = if self.use_parallel {
             match self.engine_type {
                 EngineType::Material | EngineType::Enhanced => {
                     self.search_parallel_material(pos, limits, active_threads)
@@ -466,7 +493,8 @@ impl Engine {
                     }
                 }
             }
-        }
+        };
+        result
     }
 
     /// Try to get a ponder move directly from TT for the child position after `best_move`.
@@ -900,6 +928,10 @@ impl Engine {
 
     /// Clear the transposition table (in-place)
     pub fn clear_hash(&mut self) {
+        if self.active_searches.load(Ordering::Relaxed) != 0 {
+            warn!("clear_hash requested during active search; skipping in-place clear");
+            return;
+        }
         let tt_addr = Arc::as_ptr(&self.shared_tt) as usize;
         let tt_mb = self.shared_tt.size();
         // in-place クリア（Arc を差し替えない）

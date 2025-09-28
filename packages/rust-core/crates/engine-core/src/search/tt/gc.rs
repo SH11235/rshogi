@@ -33,7 +33,7 @@ impl TranspositionTable {
 
     /// Clear old entries in a single bucket
     fn clear_old_entries_in_bucket(&self, bucket_idx: usize) {
-        let current_age = self.age;
+        let current_age = self.current_age();
         let threshold_age_distance = self.gc_threshold_age_distance;
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {

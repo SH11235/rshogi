@@ -343,13 +343,49 @@ impl FlexibleTTBucket {
         // Replace if new entry is better
         if new_entry.priority_score(current_age) > worst_score {
             let idx = worst_idx * 2;
-            self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-            self.entries[idx].store(new_entry.key, Ordering::Release);
+            let old_key = self.entries[idx].load(Ordering::Relaxed);
 
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
-                record_metric(m, MetricType::ReplaceWorst);
-                record_metric(m, MetricType::AtomicStore(2));
+                record_metric(m, MetricType::CasAttempt);
+            }
+
+            // A案: Key を CAS で先に確保 → data=0 → 新 data を公開
+            match self.entries[idx].compare_exchange(
+                old_key,
+                new_entry.key,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // 最小窓での不整合を避けるため 0→新 値の順で公開
+                    self.entries[idx + 1].store(0, Ordering::Release);
+                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+                    #[cfg(feature = "tt_metrics")]
+                    if let Some(m) = metrics {
+                        record_metric(m, MetricType::CasSuccess);
+                        record_metric(m, MetricType::AtomicStore(2));
+                        record_metric(m, MetricType::ReplaceWorst);
+                    }
+                }
+                Err(current) => {
+                    if current == new_entry.key {
+                        // 競合相手が同一 key を入れた：data だけ更新
+                        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            record_metric(m, MetricType::UpdateExisting);
+                            record_metric(m, MetricType::AtomicStore(1));
+                        }
+                    } else {
+                        // 別 key に置換された：今回は見送り
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            record_metric(m, MetricType::CasFailure);
+                        }
+                    }
+                }
             }
         }
     }

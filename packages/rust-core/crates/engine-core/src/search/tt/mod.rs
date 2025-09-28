@@ -66,7 +66,7 @@ pub struct TranspositionTable {
     /// Number of buckets (always power of 2)
     num_buckets: usize,
     /// Current age (generation counter)
-    age: u8,
+    age: AtomicU8,
     /// Bucket size configuration
     #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
@@ -134,7 +134,7 @@ impl TranspositionTable {
             buckets,
             flexible_buckets: None,
             num_buckets,
-            age: 0,
+            age: AtomicU8::new(0),
             bucket_size: None,
             prefetcher: None,
             #[cfg(feature = "tt_metrics")]
@@ -189,7 +189,7 @@ impl TranspositionTable {
             buckets: Vec::new(),
             flexible_buckets: Some(flexible_buckets),
             num_buckets,
-            age: 0,
+            age: AtomicU8::new(0),
             bucket_size: Some(bucket_size),
             prefetcher: None,
             #[cfg(feature = "tt_metrics")]
@@ -268,8 +268,11 @@ impl TranspositionTable {
 
     /// Update hashfull estimate based on occupied bitmap sampling
     fn update_hashfull_estimate(&self) {
-        // Sample ~1% of buckets (minimum 64, maximum 1024)
-        let sample_size = (self.num_buckets / 100).clamp(64, 1024);
+        // Sample ~1% of buckets (minimum 64, maximum 1024), but never exceed num_buckets
+        let mut sample_size = (self.num_buckets / 100).clamp(64, 1024);
+        if sample_size > self.num_buckets {
+            sample_size = self.num_buckets;
+        }
         let mut occupied_count = 0;
 
         // Use deterministic sampling based on node counter for consistency
@@ -342,7 +345,7 @@ impl TranspositionTable {
         }
 
         // Reset counters
-        self.age = 0;
+        self.age.store(0, Ordering::Relaxed);
         self.hashfull_estimate.store(0, Ordering::Relaxed);
         self.node_counter.store(0, Ordering::Relaxed);
         self.store_attempts.store(0, Ordering::Relaxed);
@@ -377,7 +380,8 @@ impl TranspositionTable {
             byte.store(0, Ordering::Relaxed);
         }
 
-        // Atomic counters/state
+        // Atomic counters/state (including age)
+        self.age.store(0, Ordering::Relaxed);
         self.hashfull_estimate.store(0, Ordering::Relaxed);
         self.node_counter.store(0, Ordering::Relaxed);
         self.store_attempts.store(0, Ordering::Relaxed);
@@ -395,7 +399,8 @@ impl TranspositionTable {
 
     /// Increment age (called at the start of each search)
     pub fn increment_age(&mut self) {
-        self.age = self.age.wrapping_add(1) & AGE_MASK;
+        let next = (self.age.load(Ordering::Relaxed) & AGE_MASK).wrapping_add(1) & AGE_MASK;
+        self.age.store(next, Ordering::Relaxed);
 
         // Reset GC state for new search
         self.need_gc.store(false, Ordering::Relaxed);
@@ -405,7 +410,17 @@ impl TranspositionTable {
 
     /// Get current age
     pub fn current_age(&self) -> u8 {
-        self.age
+        self.age.load(Ordering::Relaxed) & AGE_MASK
+    }
+
+    /// Bump age with shared reference (for shared TT with Arc)
+    pub fn bump_age(&self) {
+        let next = self.current_age().wrapping_add(1) & AGE_MASK;
+        self.age.store(next, Ordering::Relaxed);
+        // Reset GC state for new search
+        self.need_gc.store(false, Ordering::Relaxed);
+        self.gc_progress.store(0, Ordering::Relaxed);
+        self.high_hashfull_counter.store(0, Ordering::Relaxed);
     }
 
     /// Get hashfull in permille (0-1000)
@@ -643,7 +658,7 @@ impl TranspositionTable {
             eval,
             depth,
             node_type,
-            age: self.age,
+            age: self.current_age(),
             is_pv: false,
             ..Default::default()
         };
@@ -667,7 +682,7 @@ impl TranspositionTable {
             eval,
             depth,
             node_type,
-            age: self.age,
+            age: self.current_age(),
             is_pv: false,
             ..Default::default()
         };
@@ -677,7 +692,7 @@ impl TranspositionTable {
     /// Store entry in transposition table with parameters
     pub fn store_with_params(&self, mut params: TTEntryParams) {
         // Override age with current table age
-        params.age = self.age;
+        params.age = self.current_age();
         self.store_entry(params);
     }
 
@@ -777,7 +792,7 @@ impl TranspositionTable {
             let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
             flexible_buckets[idx].store_with_metrics_and_mode(
                 new_entry,
-                self.age,
+                self.current_age(),
                 empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 self.metrics.as_ref(),
@@ -789,7 +804,7 @@ impl TranspositionTable {
             let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
             self.buckets[idx].store_with_mode(
                 new_entry,
-                self.age,
+                self.current_age(),
                 empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 self.metrics.as_ref(),
