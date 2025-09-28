@@ -31,6 +31,7 @@ diagnostics = [
     "engine-core/tt_metrics",
     "engine-core/nnue_telemetry",
     "engine-core/pv_debug_logs",
+    "engine-core/diagnostics",
 ]
 
 # メタフィーチャー（任意）: 実験系を一括ON

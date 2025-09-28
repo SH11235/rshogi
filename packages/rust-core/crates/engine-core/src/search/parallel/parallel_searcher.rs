@@ -343,7 +343,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let max_wait_ms = {
             let tm_opt = { self.time_manager.lock().unwrap().clone() };
             if let Some(ref tm) = tm_opt {
-                let elapsed_ms = search_start.elapsed().as_millis() as u64;
+                let elapsed_ms = tm.elapsed_ms();
                 let soft_limit = tm.soft_limit_ms();
                 if soft_limit > elapsed_ms {
                     let remaining = soft_limit - elapsed_ms;

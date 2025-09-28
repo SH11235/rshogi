@@ -73,9 +73,15 @@ static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
 // Lightweight, time-based poll state for quiescence search.
 // We keep a thread-local last-poll timestamp (ms since search start) to avoid
 // relying solely on node-count based polling, which can be sparse on heavy paths.
-const QS_LIGHT_POLL_INTERVAL_MS: u64 = 12;
-const NEAR_HARD_WINDOW_MS: u64 = 50;
+use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
 thread_local! { static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
+
+// Diagnostics: one-time info logs for near-deadline and short-circuit events in QS
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    static QS_NEAR_DEADLINE_LOGGED: Cell<bool> = const { Cell::new(false) };
+    static QS_SHORT_CIRCUIT_LOGGED_ONCE: Cell<bool> = const { Cell::new(false) };
+}
 
 #[inline(always)]
 fn qs_should_light_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
@@ -87,23 +93,45 @@ where
     if let Some(tm) = &searcher.time_manager {
         let elapsed_ms = tm.elapsed_ms();
         let hard = tm.hard_limit_ms();
-        // Near-hard window: always poll when within window of hard deadline
-        let near_hard =
-            hard > 0 && hard < u64::MAX && elapsed_ms.saturating_add(NEAR_HARD_WINDOW_MS) >= hard;
+        let planned = tm.scheduled_end_ms();
+        // Near-hard/planned window: always poll when within window of deadline
+        let near_hard = hard > 0
+            && hard < u64::MAX
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= hard;
+        let near_planned = planned > 0
+            && planned < u64::MAX
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= planned;
+        #[cfg(feature = "diagnostics")]
+        {
+            if (near_hard || near_planned) {
+                QS_NEAR_DEADLINE_LOGGED.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag near_deadline qs elapsed={}ms hard={}ms planned={}ms window={}ms",
+                            elapsed_ms,
+                            if hard == u64::MAX { 0 } else { hard },
+                            if planned == u64::MAX { 0 } else { planned },
+                            NEAR_DEADLINE_WINDOW_MS
+                        );
+                        flag.set(true);
+                    }
+                });
+            }
+        }
         // Lightweight periodic poll: ~every QS_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
         let periodic = QS_LAST_LIGHT_POLL_MS.with(|c| {
             let last = c.get();
             let due = if elapsed_ms <= last {
                 true
             } else {
-                elapsed_ms - last >= QS_LIGHT_POLL_INTERVAL_MS
+                elapsed_ms - last >= LIGHT_POLL_INTERVAL_MS
             };
             if due {
                 c.set(elapsed_ms);
             }
             due
         });
-        return near_hard || periodic;
+        return near_hard || near_planned || periodic;
     }
     false
 }
@@ -178,10 +206,35 @@ where
         let elapsed_ms = tm.elapsed_ms();
         let hard = tm.hard_limit_ms();
         if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+            // Mirror alpha-beta: mark time stop so outer layers bail out immediately
+            #[cfg(feature = "diagnostics")]
+            QS_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                if !flag.get() {
+                    log::info!(
+                        "diag short_circuit qs reason=hard elapsed={}ms hard={}ms",
+                        elapsed_ms,
+                        hard
+                    );
+                    flag.set(true);
+                }
+            });
+            searcher.context.stop();
             return alpha;
         }
         let planned = tm.scheduled_end_ms();
         if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+            #[cfg(feature = "diagnostics")]
+            QS_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                if !flag.get() {
+                    log::info!(
+                        "diag short_circuit qs reason=planned elapsed={}ms planned={}ms",
+                        elapsed_ms,
+                        planned
+                    );
+                    flag.set(true);
+                }
+            });
+            searcher.context.stop();
             return alpha;
         }
     }
