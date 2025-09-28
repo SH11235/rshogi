@@ -28,6 +28,13 @@ nnue_fast_fma = []
 # 差分集計をHashMapで行うA/B用（デフォルトは線形マップ）
 diff_agg_hash = []
 
+# Quiescence-search checking-moves policy compile-time overrides
+# - qs_checks_force_off: disable checking moves in QS regardless of env/USI option
+# - qs_checks_force_on:  enable checking moves in QS regardless of env/USI option
+# If neither is set, runtime env var SHOGI_QS_DISABLE_CHECKS controls it (USI option QSearchChecks).
+qs_checks_force_off = []
+qs_checks_force_on = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

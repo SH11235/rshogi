@@ -141,6 +141,29 @@ pub fn finalize_and_send(
                 (in_check, legal_count, evasion_count)
             };
 
+            // Report whether quiescence allows checking moves, honoring compile-time overrides first
+            let checks_in_q_allowed = {
+                #[cfg(feature = "qs_checks_force_off")]
+                {
+                    "Off"
+                }
+                #[cfg(all(not(feature = "qs_checks_force_off"), feature = "qs_checks_force_on"))]
+                {
+                    "On"
+                }
+                #[cfg(all(
+                    not(feature = "qs_checks_force_off"),
+                    not(feature = "qs_checks_force_on")
+                ))]
+                {
+                    if std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false) {
+                        "Off"
+                    } else {
+                        "On"
+                    }
+                }
+            };
+
             info_string(format!(
                 "finalize_diag seldepth={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
                 sel,
@@ -157,7 +180,7 @@ pub fn finalize_and_send(
                 root_in_check as i32,
                 root_legal_count,
                 root_evasion_count,
-                if std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false) {"Off"} else {"On"}
+                checks_in_q_allowed
             ));
         }
     }
@@ -204,11 +227,11 @@ pub fn finalize_and_send(
                 let root_hash = state.position.zobrist_hash;
                 let ok = {
                     let eng = state.engine.lock().unwrap();
-                    #[cfg(feature = "tt-metrics")]
+                    #[cfg(feature = "tt_metrics")]
                     {
                         eng.tt_roundtrip_test(root_hash)
                     }
-                    #[cfg(not(feature = "tt-metrics"))]
+                    #[cfg(not(feature = "tt_metrics"))]
                     {
                         false
                     }
@@ -251,7 +274,7 @@ pub fn finalize_and_send(
         }
     }
 
-    #[cfg(feature = "tt-metrics")]
+    #[cfg(feature = "tt_metrics")]
     {
         let summary_opt = {
             let eng = state.engine.lock().unwrap();
