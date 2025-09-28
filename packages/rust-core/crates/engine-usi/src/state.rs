@@ -38,6 +38,9 @@ pub struct UsiOptions {
     pub mate_early_stop: bool,
     // Stop bounded wait time
     pub stop_wait_ms: u64,
+    // 純秒読みでGUIの厳格締切より少し手前で確実に返すための追加リード（ms）
+    // network_delay2_ms に加算して最終化を前倒しする。既定: 300ms
+    pub byoyomi_deadline_lead_ms: u64,
     // MultiPV lines
     pub multipv: u8,
     // Policy: gameover時にもbestmoveを送るか
@@ -75,6 +78,7 @@ impl Default for UsiOptions {
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
             stop_wait_ms: 0,
+            byoyomi_deadline_lead_ms: 300,
             multipv: 1,
             gameover_sends_bestmove: false,
             fail_safe_guard: false,

@@ -128,6 +128,16 @@ pub fn limits_from_go(
     tp.move_horizon_trigger_ms = opts.move_horizon_trigger_ms;
     tp.move_horizon_min_moves = opts.move_horizon_min_moves;
 
+    // 純秒読み（main=0）時の締切リードを worst-case ネット遅延に加算して、
+    // エンジンの最終化をGUI締切（byoyomi）より前倒しにする。
+    // goコマンドのパラメータから純秒読みを推定: btime=wtime=0 かつ byoyomi>0
+    let pure_byoyomi =
+        gp.byoyomi.unwrap_or(0) > 0 && gp.btime.unwrap_or(0) == 0 && gp.wtime.unwrap_or(0) == 0;
+    if pure_byoyomi && opts.byoyomi_deadline_lead_ms > 0 {
+        // 上限 2000ms（オプション側でも clamp 済み）。
+        tp.network_delay2_ms = tp.network_delay2_ms.saturating_add(opts.byoyomi_deadline_lead_ms);
+    }
+
     let mut builder = SearchLimitsBuilder::default();
 
     if let Some(d) = gp.depth {
