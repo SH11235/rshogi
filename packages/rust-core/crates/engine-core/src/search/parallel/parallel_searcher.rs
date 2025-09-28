@@ -808,7 +808,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             }
         } else {
-            // Detach any outstanding handles so次探索で持ち越さない
+            info!(
+                "diag finalize_skip_join=1 pending_workers={} time_handle={} fail_safe_handle={}",
+                self.active_workers.load(Ordering::Acquire),
+                time_handle.is_some(),
+                fail_safe_handle.is_some()
+            );
+            // 次探索に持ち越さないよう未処理ハンドルをデタッチ
             let _ = self.post_ponder_tm_handle.lock().unwrap().take();
             *self.time_manager.lock().unwrap() = None;
         }
@@ -868,26 +874,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             let tm_opt = { self.time_manager.lock().unwrap().clone() };
 
-            // Skip stop check on first iteration to ensure we get at least one result
-            if iteration > 1 && self.shared_state.should_stop() {
-                if let Some(ref tm) = tm_opt {
-                    let elapsed_ms = tm.elapsed_ms();
-                    let current_nodes = self.shared_state.get_nodes();
-                    if let Some(action) =
-                        self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
-                    {
-                        tm.force_stop();
-                        return self.finalize_time_limit(position, action);
-                    }
+            if let Some(ref tm) = tm_opt {
+                let elapsed_ms = tm.elapsed_ms();
+                let current_nodes = self.shared_state.get_nodes();
+                if let Some(action) =
+                    self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
+                {
+                    tm.force_stop();
+                    return self.finalize_time_limit(position, action);
                 }
-
-                if log::log_enabled!(log::Level::Debug) {
-                    debug!("Main thread stopping at iteration {iteration}");
-                }
-                break;
             }
 
-            if iteration > 1 {
+            if self.shared_state.should_stop() {
                 if let Some(ref tm) = tm_opt {
                     let elapsed_ms = tm.elapsed_ms();
                     let current_nodes = self.shared_state.get_nodes();
@@ -898,6 +896,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         return self.finalize_time_limit(position, action);
                     }
                 }
+
+                let params = TimeLimitFinalization {
+                    best_snapshot: best_result.clone(),
+                    elapsed_ms: search_start.elapsed().as_millis() as u64,
+                    current_nodes: self.shared_state.get_nodes(),
+                    soft_limit_ms: tm_opt.as_ref().map(|tm| tm.soft_limit_ms()).unwrap_or(u64::MAX),
+                    hard_limit_ms: tm_opt.as_ref().map(|tm| tm.hard_limit_ms()).unwrap_or(u64::MAX),
+                    planned_limit_ms: tm_opt
+                        .as_ref()
+                        .map(|tm| tm.scheduled_end_ms())
+                        .unwrap_or(u64::MAX),
+                    hard_timeout: false,
+                    label: "external_stop".to_string(),
+                };
+                if let Some(ref tm) = tm_opt {
+                    tm.force_stop();
+                }
+                return self.finalize_time_limit(position, params);
             }
 
             // Calculate depths for this iteration
@@ -1128,7 +1144,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 &best_result,
             );
 
-            if let Some(ref tm) = tm_opt {
+            // ハートビート直後は TM を再取得して評価（ponderhit 直後の作成を確実に拾う）
+            if let Some(ref tm) = { self.time_manager.lock().unwrap().clone() } {
                 let elapsed_ms = tm.elapsed_ms();
                 let current_nodes = self.shared_state.get_nodes();
                 if let Some(action) =
@@ -1270,9 +1287,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 && hard < u64::MAX
                 && elapsed_ms.saturating_add(compute_hard_guard_ms(hard)) >= hard);
 
-        let label = if tm_requested_stop {
-            Some("tm_should_stop")
-        } else if hard_reached {
+        // 優先順位: hard/planned 到達 > 近傍 finalize > TM の一般的な should_stop > guard
+        // より具体的な理由を優先してラベル付けする（テスト容易性と診断の明確化のため）
+        let label = if hard_reached {
             Some("hard_limit")
         } else if planned_reached {
             Some("planned_limit")
@@ -1280,6 +1297,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             Some("near_hard_finalize")
         } else if near_planned_finalize {
             Some("near_planned_finalize")
+        } else if tm_requested_stop {
+            Some("tm_should_stop")
         } else if near_guard {
             Some("near_guard")
         } else {
@@ -1455,5 +1474,132 @@ mod tests_compute_guard_and_wait {
         assert!(waited <= 20, "waited too long: {}ms", waited);
         // Counters untouched by the wait logic
         assert_eq!(searcher.active_workers.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+}
+
+#[cfg(test)]
+mod tests_assess_time_and_finalize {
+    use super::*;
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::types::TerminationReason;
+    use crate::search::TranspositionTable;
+    use crate::shogi::Position;
+
+    fn make_searcher() -> ParallelSearcher<MaterialEvaluator> {
+        let evaluator = std::sync::Arc::new(MaterialEvaluator);
+        let tt = std::sync::Arc::new(TranspositionTable::new(16));
+        ParallelSearcher::new(evaluator, tt, 1)
+    }
+
+    #[test]
+    fn test_assess_time_limit_tm_should_stop() {
+        use crate::time_management::{
+            mock_set_time, GamePhase, TimeControl, TimeLimits, TimeManager,
+        };
+
+        mock_set_time(0);
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 1000 },
+            ..Default::default()
+        };
+        let tm = std::sync::Arc::new(TimeManager::new(
+            &limits,
+            crate::Color::Black,
+            0,
+            GamePhase::Opening,
+        ));
+        // Force immediate stop
+        tm.force_stop();
+
+        let searcher = make_searcher();
+        let snapshot = SearchResult::new(None, 0, SearchStats::default());
+        let action = searcher
+            .assess_time_limit(&tm, tm.elapsed_ms(), 0, &snapshot)
+            .expect("expected Some for tm_should_stop");
+        assert_eq!(action.label, "tm_should_stop");
+    }
+
+    #[test]
+    fn test_assess_time_limit_hard_limit() {
+        use crate::time_management::{
+            mock_set_time, GamePhase, TimeControl, TimeLimits, TimeManager,
+        };
+
+        mock_set_time(0);
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 200 },
+            ..Default::default()
+        };
+        let tm = std::sync::Arc::new(TimeManager::new(
+            &limits,
+            crate::Color::White,
+            0,
+            GamePhase::Opening,
+        ));
+        let hard = tm.hard_limit_ms();
+        assert!(hard > 0 && hard != u64::MAX);
+        mock_set_time(hard.saturating_add(1));
+
+        let searcher = make_searcher();
+        let snapshot = SearchResult::new(None, 0, SearchStats::default());
+        let action = searcher
+            .assess_time_limit(&tm, tm.elapsed_ms(), 0, &snapshot)
+            .expect("expected Some for hard_limit");
+        assert_eq!(action.label, "hard_limit");
+        assert!(action.hard_timeout);
+    }
+
+    #[test]
+    fn test_assess_time_limit_near_hard_finalize() {
+        use crate::time_management::{
+            mock_set_time, GamePhase, TimeControl, TimeLimits, TimeManager,
+        };
+
+        mock_set_time(0);
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 1000 },
+            ..Default::default()
+        };
+        let tm = std::sync::Arc::new(TimeManager::new(
+            &limits,
+            crate::Color::White,
+            0,
+            GamePhase::Opening,
+        ));
+        let hard = tm.hard_limit_ms();
+        let window = compute_finalize_window_ms(hard);
+        // Move time just inside the finalize window (but before hard)
+        let elapsed = hard.saturating_sub(window).saturating_add(1);
+        mock_set_time(elapsed);
+
+        let searcher = make_searcher();
+        let snapshot = SearchResult::new(None, 0, SearchStats::default());
+        let action = searcher
+            .assess_time_limit(&tm, tm.elapsed_ms(), 0, &snapshot)
+            .expect("expected Some for near_hard_finalize");
+        assert_eq!(action.label, "near_hard_finalize");
+        assert!(!action.hard_timeout);
+    }
+
+    #[test]
+    fn test_finalize_time_limit_marks_early() {
+        let searcher = make_searcher();
+        let mut pos = Position::startpos();
+        let snapshot = SearchResult::new(None, 0, SearchStats::default());
+        let params = TimeLimitFinalization {
+            best_snapshot: snapshot,
+            elapsed_ms: 123,
+            current_nodes: 456,
+            soft_limit_ms: u64::MAX,
+            hard_limit_ms: u64::MAX,
+            planned_limit_ms: u64::MAX,
+            hard_timeout: false,
+            label: "unit_test".to_string(),
+        };
+
+        let _ = searcher.finalize_time_limit(&mut pos, params);
+        assert!(searcher.shared_state.is_finalized_early());
+        let info = searcher.shared_state.stop_info.get().cloned().expect("stop info set");
+        assert!(matches!(info.reason, TerminationReason::TimeLimit));
     }
 }

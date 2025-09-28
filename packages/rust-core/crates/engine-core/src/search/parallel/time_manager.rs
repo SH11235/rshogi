@@ -1,8 +1,13 @@
 //! Time management thread implementation
 
 use super::SharedSearchState;
-use crate::{search::types::TerminationReason, time_management::TimeManager};
+use crate::{
+    search::types::{StopInfo, TerminationReason},
+    time_management::TimeManager,
+};
 use log::debug;
+#[cfg(feature = "diagnostics")]
+use log::info;
 use std::{
     sync::Arc,
     thread,
@@ -35,21 +40,48 @@ pub fn start_time_manager(
             }
 
             let nodes = shared_state.get_nodes();
+            let elapsed_ms = time_manager.elapsed_ms();
+            let soft = time_manager.soft_limit_ms();
+            let hard = time_manager.hard_limit_ms();
+            let planned = time_manager.scheduled_end_ms();
+
+            let near_hard = hard != u64::MAX
+                && hard > 0
+                && elapsed_ms.saturating_add(compute_finalize_window_ms(hard)) >= hard;
+            let near_planned = planned != u64::MAX
+                && planned > 0
+                && elapsed_ms.saturating_add(compute_finalize_window_ms(planned)) >= planned;
+
             // Evaluate time-based stop unconditionally (no node-count guard)
-            if time_manager.should_stop(nodes) {
-                let elapsed_ms = time_manager.elapsed_ms();
-                let soft = time_manager.soft_limit_ms();
-                let hard = time_manager.hard_limit_ms();
+            if time_manager.should_stop(nodes) || near_hard || near_planned {
                 let hard_timeout = hard != u64::MAX && elapsed_ms >= hard;
                 let depth = shared_state.get_best_depth();
 
                 debug!(
-                    "Time limit reached: elapsed={}ms soft={}ms hard={}ms nodes={} depth={} hard_timeout={} (stopping)",
-                    elapsed_ms, soft, hard, nodes, depth, hard_timeout
+                    "Time limit reached/near: elapsed={}ms soft={}ms hard={}ms planned={}ms nodes={} depth={} hard_timeout={} near_hard={} near_planned={}",
+                    elapsed_ms,
+                    soft,
+                    hard,
+                    planned,
+                    nodes,
+                    depth,
+                    hard_timeout,
+                    near_hard,
+                    near_planned
                 );
 
+                #[cfg(feature = "diagnostics")]
+                {
+                    if near_hard || near_planned {
+                        info!(
+                            "diag tm_near_finalize=1 elapsed={} soft={} hard={} planned={}",
+                            elapsed_ms, soft, hard, planned
+                        );
+                    }
+                }
+
                 // Record structured stop info and signal stop
-                shared_state.set_stop_with_reason(crate::search::types::StopInfo {
+                shared_state.set_stop_with_reason(StopInfo {
                     reason: TerminationReason::TimeLimit,
                     elapsed_ms,
                     nodes,
@@ -66,6 +98,22 @@ pub fn start_time_manager(
             debug!("Time manager stopped");
         }
     })
+}
+
+fn compute_finalize_window_ms(total_limit_ms: u64) -> u64 {
+    use crate::search::constants::NEAR_HARD_FINALIZE_MS;
+
+    if total_limit_ms == 0 || total_limit_ms == u64::MAX {
+        0
+    } else if total_limit_ms >= 1_000 {
+        NEAR_HARD_FINALIZE_MS
+    } else if total_limit_ms >= 500 {
+        NEAR_HARD_FINALIZE_MS / 2
+    } else if total_limit_ms >= 200 {
+        120
+    } else {
+        0
+    }
 }
 
 /// Start fail-safe guard thread
