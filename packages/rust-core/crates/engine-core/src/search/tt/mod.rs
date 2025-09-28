@@ -81,6 +81,8 @@ pub struct TranspositionTable {
     hashfull_estimate: AtomicU16,
     /// Node counter for periodic updates
     node_counter: AtomicU64,
+    /// Diagnostic: number of TT store attempts (filtered含む)
+    store_attempts: AtomicU64,
     /// GC flag - set when table is nearly full
     need_gc: AtomicBool,
     /// GC progress - next bucket to process
@@ -140,6 +142,7 @@ impl TranspositionTable {
             occupied_bitmap,
             hashfull_estimate: AtomicU16::new(0),
             node_counter: AtomicU64::new(0),
+            store_attempts: AtomicU64::new(0),
             need_gc: AtomicBool::new(false),
             gc_progress: AtomicU64::new(0),
             gc_threshold_age_distance: 4, // Default: clear entries with age distance >= 4
@@ -194,6 +197,7 @@ impl TranspositionTable {
             occupied_bitmap,
             hashfull_estimate: AtomicU16::new(0),
             node_counter: AtomicU64::new(0),
+            store_attempts: AtomicU64::new(0),
             need_gc: AtomicBool::new(false),
             gc_progress: AtomicU64::new(0),
             gc_threshold_age_distance: 4,
@@ -341,6 +345,7 @@ impl TranspositionTable {
         self.age = 0;
         self.hashfull_estimate.store(0, Ordering::Relaxed);
         self.node_counter.store(0, Ordering::Relaxed);
+        self.store_attempts.store(0, Ordering::Relaxed);
         self.need_gc.store(false, Ordering::Relaxed);
         self.gc_progress.store(0, Ordering::Relaxed);
         self.high_hashfull_counter.store(0, Ordering::Relaxed);
@@ -386,6 +391,11 @@ impl TranspositionTable {
         } else {
             self.buckets.len() * std::mem::size_of::<TTBucket>()
         }
+    }
+
+    /// Diagnostic: store attempts counter（Relaxed）
+    pub fn store_attempts(&self) -> u64 {
+        self.store_attempts.load(Ordering::Relaxed)
     }
 
     /// Set ABDADA exact cut flag for the given hash
@@ -655,6 +665,8 @@ impl TranspositionTable {
 
     /// Store entry using parameters
     fn store_entry(&self, params: TTEntryParams) {
+        // Lightweight diagnostics: count store attempts even if filtered
+        self.store_attempts.fetch_add(1, Ordering::Relaxed);
         #[cfg(not(feature = "tt_metrics"))]
         let _metrics: Option<&()> = None;
         // Debug assertions to validate input values
