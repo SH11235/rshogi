@@ -36,7 +36,15 @@ fn test_pure_byoyomi_schedules_before_hard_with_margin() {
 
     // セーフティマージン適用後の上限以下であること
     // safety は hard_limit に応じて段階適用される（>=5000ms なら nd2）
-    let safety = tm.network_delay2_ms().min(if hard >= 5000 { tm.network_delay2_ms() } else if hard >= 1000 { 500 } else if hard >= 500 { 200 } else { 100 });
+    let safety = tm.network_delay2_ms().min(if hard >= 5000 {
+        tm.network_delay2_ms()
+    } else if hard >= 1000 {
+        500
+    } else if hard >= 500 {
+        200
+    } else {
+        100
+    });
     assert!(scheduled <= hard.saturating_sub(safety));
 
     // 計画時刻に到達したら停止すること
@@ -59,4 +67,3 @@ fn test_fixed_nodes_time_manager_respects_node_limit() {
     // ちょうど到達で停止
     assert!(tm.should_stop(10_000));
 }
-
