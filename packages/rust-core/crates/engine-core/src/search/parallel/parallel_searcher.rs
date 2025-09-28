@@ -601,6 +601,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Start worker threads with correct stealer indices
         let mut handles = Vec::new();
+        // Snapshot shared TimeManager (if any) for workers
+        let shared_tm_snapshot = { self.time_manager.lock().unwrap().clone() };
         for (i, worker) in workers.into_iter().enumerate() {
             let my_stealer_index = i + 1; // Since main thread took index 0
             let log_id = my_stealer_index; // Use same ID for logging
@@ -611,6 +613,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 limits: limits.clone(),
                 evaluator: self.evaluator.clone(),
                 tt: self.tt.clone(),
+                time_manager: shared_tm_snapshot.clone(),
                 shared_state: self.shared_state.clone(),
                 queues: self.queues.clone(),
                 active_workers: self.active_workers.clone(),
@@ -706,6 +709,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             self.tt.clone(),
             self.shared_state.clone(),
         );
+        // Attach shared TimeManager to main thread searcher if available
+        if let Some(tm) = { self.time_manager.lock().unwrap().clone() } {
+            main_thread.attach_time_manager(tm);
+        }
 
         let max_depth = limits.depth.unwrap_or(255);
 

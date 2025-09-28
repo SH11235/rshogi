@@ -25,6 +25,7 @@ pub struct WorkerConfig<E: Evaluator + Send + Sync + 'static> {
     pub limits: SearchLimits,
     pub evaluator: Arc<E>,
     pub tt: Arc<TranspositionTable>,
+    pub time_manager: Option<Arc<crate::time_management::TimeManager>>,
     pub shared_state: Arc<SharedSearchState>,
     pub queues: Arc<Queues>,
     pub active_workers: Arc<AtomicUsize>,
@@ -114,6 +115,7 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
     let steal_success = config.steal_success;
     let steal_failure = config.steal_failure;
     let pending_work_items = config.pending_work_items;
+    let shared_tm = config.time_manager;
 
     thread::spawn(move || {
         use std::panic::{self, AssertUnwindSafe};
@@ -125,6 +127,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
 
             // Create search thread
             let mut search_thread = SearchThread::new(log_id, evaluator, tt, shared_state.clone());
+            if let Some(tm) = &shared_tm {
+                search_thread.attach_time_manager(tm.clone());
+            }
 
             // Simple work loop
             while !shared_state.should_stop() {

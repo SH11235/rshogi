@@ -173,6 +173,19 @@ where
     searcher.stats.nodes += 1;
     searcher.stats.qnodes += 1;
 
+    // Hard-limit short-circuit: if we are past the hard deadline (or planned end), exit immediately.
+    if let Some(tm) = &searcher.time_manager {
+        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let hard = tm.hard_limit_ms();
+        if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+            return alpha;
+        }
+        let planned = tm.scheduled_end_ms();
+        if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+            return alpha;
+        }
+    }
+
     // Extract qnodes limit and shared counter at function start for efficiency
     let qlimit = searcher.context.limits().qnodes_limit;
     let qnodes_counter = searcher.context.limits().qnodes_counter.clone();
