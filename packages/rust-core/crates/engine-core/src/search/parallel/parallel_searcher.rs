@@ -192,7 +192,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // Create batches of root moves manually
                 let mut i = 0;
                 let mut batch_idx = 0;
+                // Snapshot TM once; re-check only elapsed inside loop
+                let tm_opt = { self.time_manager.lock().unwrap().clone() };
                 while i < moves.len() {
+                    if self.shared_state.should_stop() {
+                        break;
+                    }
+                    if let Some(ref tm) = tm_opt {
+                        let e = tm.elapsed_ms();
+                        let h = tm.hard_limit_ms();
+                        let p = tm.scheduled_end_ms();
+                        if (h > 0 && h < u64::MAX && e >= h) || (p > 0 && p < u64::MAX && e >= p) {
+                            break;
+                        }
+                    }
                     let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
                     let start_index = i;
 
@@ -257,7 +270,19 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Calculate how many helpers to seed to injector for initial distribution
             let seed_helpers = (self.num_threads.saturating_sub(1)).min(INITIAL_SEED_HELPERS);
 
+            let tm_opt = { self.time_manager.lock().unwrap().clone() };
             for helper_id in 1..self.num_threads {
+                if self.shared_state.should_stop() {
+                    break;
+                }
+                if let Some(ref tm) = tm_opt {
+                    let e = tm.elapsed_ms();
+                    let h = tm.hard_limit_ms();
+                    let p = tm.scheduled_end_ms();
+                    if (h > 0 && h < u64::MAX && e >= h) || (p > 0 && p < u64::MAX && e >= p) {
+                        break;
+                    }
+                }
                 let helper_depth =
                     self.calculate_helper_depth(main_depth, helper_id, iteration, max_depth);
 
@@ -314,17 +339,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     "Sending heartbeat (elapsed: {elapsed_since_heartbeat:?}, nodes: {total_nodes})"
                 );
                 // Ensure PV is not empty for heartbeat
-                let pv_to_send = if best_result.stats.pv.is_empty() {
-                    // Use best move if available, otherwise skip heartbeat
+                let mut pv_to_send = if best_result.stats.pv.is_empty() {
                     if let Some(best_move) = best_result.best_move {
                         vec![best_move]
                     } else {
-                        // Skip heartbeat if no PV available
                         Vec::new()
                     }
                 } else {
                     best_result.stats.pv.clone()
                 };
+                if pv_to_send.is_empty() {
+                    if let Some(m) = self.shared_state.get_best_move() {
+                        pv_to_send.push(m);
+                    }
+                }
 
                 if !pv_to_send.is_empty() {
                     callback(
@@ -770,6 +798,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 "Main thread stopping at iteration {iteration} due to time limit"
                             );
                         }
+                        let elapsed_ms = tm.elapsed_ms();
+                        let hard = tm.hard_limit_ms();
+                        let hard_timeout = hard != u64::MAX && elapsed_ms >= hard;
+                        self.shared_state.set_stop_with_reason(
+                            crate::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms,
+                            current_nodes,
+                            self.shared_state.get_best_depth(),
+                            hard_timeout,
+                        );
                         break;
                     }
                     // Hard/planned immediate short-circuit right before work distribution
@@ -783,7 +821,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 hard
                             );
                         }
-                        self.shared_state.set_stop();
+                        self.shared_state.set_stop_with_reason(
+                            crate::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms,
+                            current_nodes,
+                            self.shared_state.get_best_depth(),
+                            true,
+                        );
                         break;
                     }
                     let planned = tm.scheduled_end_ms();
@@ -795,7 +839,49 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 planned
                             );
                         }
-                        self.shared_state.set_stop();
+                        self.shared_state.set_stop_with_reason(
+                            crate::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms,
+                            current_nodes,
+                            self.shared_state.get_best_depth(),
+                            false,
+                        );
+                        break;
+                    }
+                    // Proactive near-deadline guard: avoid starting a new iteration close to deadlines
+                    use crate::search::constants::MAIN_NEAR_DEADLINE_WINDOW_MS;
+                    let mut safety_ms = 0;
+                    if hard >= 500 {
+                        safety_ms = ((hard.saturating_mul(3)) / 100).clamp(120, 400);
+                    } else if hard >= 200 {
+                        safety_ms = 80;
+                    }
+                    if (planned > 0
+                        && planned < u64::MAX
+                        && elapsed_ms.saturating_add(MAIN_NEAR_DEADLINE_WINDOW_MS) >= planned)
+                        || (hard > 0
+                            && hard < u64::MAX
+                            && elapsed_ms
+                                .saturating_add(safety_ms.max(MAIN_NEAR_DEADLINE_WINDOW_MS))
+                                >= hard)
+                    {
+                        if log::log_enabled!(log::Level::Info) {
+                            log::info!(
+                                "diag main_guard_stop elapsed={}ms planned={}ms hard={}ms window={}ms safety={}ms",
+                                elapsed_ms,
+                                if planned == u64::MAX { 0 } else { planned },
+                                hard,
+                                MAIN_NEAR_DEADLINE_WINDOW_MS,
+                                safety_ms
+                            );
+                        }
+                        self.shared_state.set_stop_with_reason(
+                            crate::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms,
+                            current_nodes,
+                            self.shared_state.get_best_depth(),
+                            elapsed_ms >= hard,
+                        );
                         break;
                     }
                 }
@@ -1039,6 +1125,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             if main_depth >= max_depth {
                 info!("Main thread reached maximum depth {max_depth}, waiting for workers to complete...");
 
+                // 先に停止をブロードキャスト（特に時間制御時のテール短縮）
+                self.shared_state.set_stop();
+
                 // Wait for workers to complete their work
                 let wait_time = self.wait_for_workers_completion(
                     search_start,
@@ -1047,13 +1136,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     &best_result,
                 );
 
-                // Give workers a bit more time to update shared state
-                if wait_time < 2000 {
+                // 追加待ちは TimeManager がない場合（depth-only）に限定
+                if self.time_manager.lock().unwrap().is_none() && wait_time < 2000 {
                     thread::sleep(Duration::from_millis(50));
                 }
 
                 info!("All workers completed, stopping search");
-                self.shared_state.set_stop();
                 break;
             }
         }

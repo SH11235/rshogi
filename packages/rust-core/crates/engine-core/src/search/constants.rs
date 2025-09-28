@@ -87,6 +87,11 @@ pub const NEAR_DEADLINE_WINDOW_MS: u64 = 50;
 /// the near-deadline window.
 pub const LIGHT_POLL_INTERVAL_MS: u64 = 12;
 
+/// Main-thread guard window before starting a new iteration or distributing work.
+/// If we are within this window of the planned or hard deadline, we avoid
+/// starting a new heavy iteration to guarantee timely self-stop.
+pub const MAIN_NEAR_DEADLINE_WINDOW_MS: u64 = 300;
+
 /// Validate that constants maintain proper relationships
 #[cfg(test)]
 mod tests {
