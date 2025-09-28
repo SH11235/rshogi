@@ -41,10 +41,28 @@ const QS_PROMO_QPLY_CAP: u8 = 4; // Limit relative depth for promotion checks in
                                  // Total budget across all check-like categories to prevent spikes
 const MAX_QS_TOTAL_CHECKS: usize = 6;
 
-// Runtime toggle for enabling checking moves in quiescence search.
-// Controlled via env var SHOGI_QS_DISABLE_CHECKS (set to "1" to disable checks).
-static QS_CHECKS_ENABLED: Lazy<bool> =
-    Lazy::new(|| !std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false));
+// Runtime/compile-time toggle for enabling checking moves in quiescence search.
+// Priority (high → low):
+// 1) Compile-time features: `qs_checks_force_off` / `qs_checks_force_on`
+// 2) Runtime env var: `SHOGI_QS_DISABLE_CHECKS` ("1" disables checks)
+static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
+    // Mutual exclusion guard (both features at once is invalid)
+    #[cfg(all(feature = "qs_checks_force_off", feature = "qs_checks_force_on"))]
+    compile_error!("qs_checks_force_off and qs_checks_force_on are mutually exclusive");
+
+    // Compile-time overrides
+    #[cfg(feature = "qs_checks_force_off")]
+    {
+        return false;
+    }
+    #[cfg(feature = "qs_checks_force_on")]
+    {
+        return true;
+    }
+
+    // Runtime default via env var
+    !std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false)
+});
 
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
 ///
