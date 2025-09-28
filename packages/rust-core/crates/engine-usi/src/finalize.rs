@@ -120,12 +120,13 @@ pub fn finalize_and_send(
 
             // Additional root snapshot (diagnostics)
             let (root_in_check, root_legal_count, root_evasion_count) = {
-                let pos = &state.position;
+                // Work on a clone to avoid mutably borrowing shared state
+                let mut pos = state.position.clone();
                 let mg = MoveGenerator::new();
                 let in_check = pos.is_in_check();
                 let mut legal_count = 0usize;
                 let mut evasion_count = 0usize;
-                if let Ok(mvlist) = mg.generate_all(pos) {
+                if let Ok(mvlist) = mg.generate_all(&pos) {
                     legal_count = mvlist.len();
                     if in_check {
                         for &mv in mvlist.as_slice().iter() {
@@ -222,19 +223,12 @@ pub fn finalize_and_send(
             }
 
             // Optional: TT roundtrip smoke test at current root hash
-            #[cfg(feature = "diagnostics")]
+            #[cfg(all(feature = "diagnostics", feature = "tt_metrics"))]
             {
                 let root_hash = state.position.zobrist_hash;
                 let ok = {
                     let eng = state.engine.lock().unwrap();
-                    #[cfg(feature = "tt_metrics")]
-                    {
-                        eng.tt_roundtrip_test(root_hash)
-                    }
-                    #[cfg(not(feature = "tt_metrics"))]
-                    {
-                        false
-                    }
+                    eng.tt_roundtrip_test(root_hash)
                 };
                 info_string(format!("tt_roundtrip root={}", ok));
             }

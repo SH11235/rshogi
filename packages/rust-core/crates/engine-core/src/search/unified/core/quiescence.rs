@@ -53,15 +53,22 @@ static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
     // Compile-time overrides
     #[cfg(feature = "qs_checks_force_off")]
     {
-        return false;
+        false
     }
-    #[cfg(feature = "qs_checks_force_on")]
+    #[cfg(all(not(feature = "qs_checks_force_off"), feature = "qs_checks_force_on"))]
     {
-        return true;
+        true
     }
-
-    // Runtime default via env var
-    !std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false)
+    #[cfg(all(
+        not(feature = "qs_checks_force_off"),
+        not(feature = "qs_checks_force_on")
+    ))]
+    {
+        // Runtime default via env var
+        !std::env::var("SHOGI_QS_DISABLE_CHECKS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
 });
 
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
