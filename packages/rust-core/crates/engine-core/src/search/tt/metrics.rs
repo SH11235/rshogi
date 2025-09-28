@@ -71,21 +71,25 @@ impl DetailedTTMetrics {
 
         log::info!("=== TT Detailed Metrics ===");
         log::info!("Update patterns:");
-        log::info!(
-            "  Existing updates: {} ({:.1}%)",
-            self.update_existing.load(Relaxed),
-            self.update_existing.load(Relaxed) as f64 / total_updates as f64 * 100.0
-        );
-        log::info!(
-            "  Empty slots used: {} ({:.1}%)",
-            self.replace_empty.load(Relaxed),
-            self.replace_empty.load(Relaxed) as f64 / total_updates as f64 * 100.0
-        );
-        log::info!(
-            "  Worst replaced: {} ({:.1}%)",
-            self.replace_worst.load(Relaxed),
-            self.replace_worst.load(Relaxed) as f64 / total_updates as f64 * 100.0
-        );
+        if total_updates > 0 {
+            log::info!(
+                "  Existing updates: {} ({:.1}%)",
+                self.update_existing.load(Relaxed),
+                self.update_existing.load(Relaxed) as f64 / total_updates as f64 * 100.0
+            );
+            log::info!(
+                "  Empty slots used: {} ({:.1}%)",
+                self.replace_empty.load(Relaxed),
+                self.replace_empty.load(Relaxed) as f64 / total_updates as f64 * 100.0
+            );
+            log::info!(
+                "  Worst replaced: {} ({:.1}%)",
+                self.replace_worst.load(Relaxed),
+                self.replace_worst.load(Relaxed) as f64 / total_updates as f64 * 100.0
+            );
+        } else {
+            log::info!("  (no updates recorded)");
+        }
 
         log::info!("\nAtomic operations:");
         log::info!("  Stores: {}", self.atomic_stores.load(Relaxed));
