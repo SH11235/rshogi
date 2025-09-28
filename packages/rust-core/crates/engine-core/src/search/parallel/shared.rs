@@ -485,6 +485,9 @@ pub struct SharedSearchState {
 
     /// Total number of threads
     pub total_threads: usize,
+
+    /// Whether the search finalized early (for skipping worker joins)
+    finalized_early: AtomicBool,
 }
 
 impl SharedSearchState {
@@ -510,6 +513,7 @@ impl SharedSearchState {
             split_point_manager: Arc::new(SplitPointManager::new()),
             active_threads: AtomicUsize::new(0),
             total_threads: num_threads,
+            finalized_early: AtomicBool::new(false),
         }
     }
 
@@ -527,6 +531,7 @@ impl SharedSearchState {
         #[cfg(feature = "ybwc")]
         self.split_point_manager.clear();
         self.active_threads.store(0, Ordering::Relaxed);
+        self.finalized_early.store(false, Ordering::Release);
     }
 
     /// Try to update best move/score if better (lock-free)
@@ -620,6 +625,16 @@ impl SharedSearchState {
     /// Set stop flag
     pub fn set_stop(&self) {
         self.stop_flag.store(true, Ordering::Release);
+    }
+
+    /// Mark search as finalized early (main thread returning without worker join)
+    pub fn mark_finalized_early(&self) {
+        self.finalized_early.store(true, Ordering::Release);
+    }
+
+    /// Check whether search has finalized early.
+    pub fn is_finalized_early(&self) -> bool {
+        self.finalized_early.load(Ordering::Acquire)
     }
 
     /// Set stop flag with reason
