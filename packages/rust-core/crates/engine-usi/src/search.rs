@@ -87,6 +87,8 @@ pub fn parse_go(cmd: &str) -> GoParams {
             "binc" => gp.binc = it.next().and_then(|v| v.parse().ok()),
             "winc" => gp.winc = it.next().and_then(|v| v.parse().ok()),
             "byoyomi" => gp.byoyomi = it.next().and_then(|v| v.parse().ok()),
+            // periods: 秒読みの残り回数（将来のGUI/スクリプト互換のため事前対応）
+            "periods" => gp.periods = it.next().and_then(|v| v.parse().ok()),
             "rtime" => {
                 let _ = it.next();
             }
@@ -135,7 +137,13 @@ pub fn limits_from_go(
         gp.byoyomi.unwrap_or(0) > 0 && gp.btime.unwrap_or(0) == 0 && gp.wtime.unwrap_or(0) == 0;
     if pure_byoyomi && opts.byoyomi_deadline_lead_ms > 0 {
         // 上限 2000ms（オプション側でも clamp 済み）。
+        let before = tp.network_delay2_ms;
         tp.network_delay2_ms = tp.network_delay2_ms.saturating_add(opts.byoyomi_deadline_lead_ms);
+        // デバッグ容易性のためのログ
+        info_string(format!(
+            "deadline_lead_applied=1 before={} add={} after={}",
+            before, opts.byoyomi_deadline_lead_ms, tp.network_delay2_ms
+        ));
     }
 
     let mut builder = SearchLimitsBuilder::default();
