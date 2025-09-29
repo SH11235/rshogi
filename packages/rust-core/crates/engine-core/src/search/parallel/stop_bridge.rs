@@ -112,6 +112,34 @@ impl EngineStopBridge {
         debug!("EngineStopBridge: session handles cleared");
     }
 
+    /// Forcefully clear references when the previous session failed to shut down cleanly.
+    /// This should be used sparingly as it aborts any outstanding workers by dropping handles.
+    pub fn force_clear(&self) {
+        {
+            let mut guard = self.inner.shared_state.lock().unwrap();
+            if let Some(shared) = guard.as_ref().and_then(|weak| weak.upgrade()) {
+                shared.set_stop();
+                shared.close_work_queues();
+            }
+            *guard = None;
+        }
+        {
+            let mut guard = self.inner.pending_work_items.lock().unwrap();
+            *guard = None;
+        }
+        {
+            let mut guard = self.inner.external_stop_flag.lock().unwrap();
+            if let Some(flag) = guard.as_ref().and_then(|weak| weak.upgrade()) {
+                flag.store(true, Ordering::Release);
+            }
+            *guard = None;
+        }
+        self.inner.finalize_claimed.store(false, Ordering::Release);
+        // Advance session epoch so that stale finalize messages are ignored.
+        self.inner.session_id.fetch_add(1, Ordering::AcqRel);
+        debug!("EngineStopBridge: force_clear executed");
+    }
+
     /// Issue a best-effort immediate stop request to the currently running search.
     pub fn request_stop_immediate(&self) {
         let shared_upgraded = {

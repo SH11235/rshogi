@@ -1,10 +1,10 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
+use engine_core::search::limits::{FallbackDeadlines, SearchLimits, SearchLimitsBuilder};
 use engine_core::search::types::{InfoCallback, InfoStringCallback};
 use engine_core::shogi::{Color, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
@@ -13,7 +13,7 @@ use log::info;
 
 use crate::finalize::{finalize_and_send, fmt_hash};
 use crate::io::info_string;
-use crate::state::{EngineState, GoParams, UsiOptions};
+use crate::state::{EngineState, GoParams, IdleStateSnapshot, UsiOptions};
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -100,6 +100,62 @@ pub fn parse_go(cmd: &str) -> GoParams {
         }
     }
     gp
+}
+
+#[derive(Debug)]
+struct IdleWaitOutcome {
+    waited: Duration,
+    timed_out: bool,
+    final_status: IdleStateSnapshot,
+}
+
+fn compute_idle_wait_budget(gp: &GoParams, opts: &UsiOptions) -> Duration {
+    let stop_wait = Duration::from_millis(opts.stop_wait_ms.min(2_000));
+    let byoyomi = gp.byoyomi.unwrap_or(0);
+    if byoyomi == 0 {
+        return stop_wait.max(Duration::from_millis(50)).min(Duration::from_millis(1_000));
+    }
+    let byoyomi_quarter = Duration::from_millis((byoyomi / 4).min(1_000));
+    let cap = Duration::from_millis(1_000);
+    stop_wait
+        .checked_add(Duration::from_millis(100))
+        .unwrap_or(cap)
+        .max(Duration::from_millis(50))
+        .min(byoyomi_quarter.max(Duration::from_millis(100)))
+        .min(cap)
+}
+
+fn wait_for_engine_idle(state: &EngineState, max_wait: Duration) -> IdleWaitOutcome {
+    let check_interval = Duration::from_millis(50);
+    let start = Instant::now();
+    loop {
+        let status = state.idle_status();
+        if status.is_idle() {
+            return IdleWaitOutcome {
+                waited: start.elapsed(),
+                timed_out: false,
+                final_status: status,
+            };
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= max_wait {
+            return IdleWaitOutcome {
+                waited: elapsed,
+                timed_out: true,
+                final_status: status,
+            };
+        }
+        let remaining = max_wait.saturating_sub(elapsed);
+        let wait_dur = if remaining < check_interval {
+            remaining
+        } else {
+            check_interval
+        };
+        if wait_dur.is_zero() {
+            continue;
+        }
+        state.idle_sync.wait_timeout(wait_dur);
+    }
 }
 
 pub fn limits_from_go(
@@ -284,6 +340,33 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     state.last_go_params = Some(gp.clone());
 
+    let wait_budget = compute_idle_wait_budget(&gp, &state.opts);
+    let idle_outcome = wait_for_engine_idle(state, wait_budget);
+    let waited_before_go_ms = idle_outcome.waited.as_millis() as u64;
+    if idle_outcome.timed_out {
+        let status = idle_outcome.final_status;
+        info_string(format!(
+            "go_wait_for_idle_timeout=1 waited_ms={} worker_active={} reaper_pending={} pending_work={} active_workers={}",
+            waited_before_go_ms,
+            status.worker_active as u8,
+            status.reaper_pending,
+            status.pending_work_items,
+            status.active_workers
+        ));
+        state.stop_bridge.force_clear();
+        state.notify_idle();
+    } else if waited_before_go_ms > 0 {
+        let status = idle_outcome.final_status;
+        info_string(format!(
+            "go_wait_for_idle waited_ms={} worker_active={} reaper_pending={} pending_work={} active_workers={}",
+            waited_before_go_ms,
+            status.worker_active as u8,
+            status.reaper_pending,
+            status.pending_work_items,
+            status.active_workers
+        ));
+    }
+
     let mut search_position = state.position.clone();
     let current_is_stochastic_ponder = gp.ponder && state.opts.stochastic_ponder;
     if current_is_stochastic_ponder {
@@ -323,13 +406,19 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         }
     }
 
-    let limits = limits_from_go(
+    let mut limits = limits_from_go(
         &gp,
         search_position.side_to_move,
         &state.opts,
         ponder_flag.clone(),
         Arc::clone(&stop_flag),
     );
+
+    if waited_before_go_ms > 0 {
+        if let Some(ref mut params) = limits.time_parameters {
+            params.network_delay2_ms = params.network_delay2_ms.saturating_add(waited_before_go_ms);
+        }
+    }
 
     let mut tc_for_stop = limits.time_control.clone();
     if let TimeControl::Ponder(inner) = tc_for_stop {
@@ -353,7 +442,26 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             phase,
             &params,
         );
-        info_string(format!("time_budget soft_ms={} hard_ms={} tc={:?}", soft, hard, tc_for_stop));
+        info_string(format!(
+            "time_budget waited_ms={} soft_ms={} hard_ms={} tc={:?}",
+            waited_before_go_ms, soft, hard, tc_for_stop
+        ));
+
+        if hard != u64::MAX && hard > 0 {
+            let base = Instant::now();
+            let hard_deadline = base + Duration::from_millis(hard);
+            let soft_deadline = if soft != u64::MAX && soft > 0 {
+                Some(base + Duration::from_millis(soft))
+            } else {
+                None
+            };
+            limits.fallback_deadlines = Some(FallbackDeadlines {
+                soft_deadline,
+                hard_deadline,
+                soft_limit_ms: if soft != u64::MAX { soft } else { 0 },
+                hard_limit_ms: hard,
+            });
+        }
     }
 
     let (tx, rx) = mpsc::channel();
@@ -400,6 +508,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 }
                 if let Some(h) = state.worker.take() {
                     let _ = h.join();
+                    state.notify_idle();
                 }
                 state.searching = false;
                 state.stop_flag = None;
@@ -460,12 +569,14 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     finalize_and_send(state, "finalize", Some(&result), stale);
                     state.current_time_control = None;
                     state.current_root_hash = None;
+                    state.notify_idle();
                 }
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
                 if let Some(h) = state.worker.take() {
                     let _ = h.join();
+                    state.notify_idle();
                 }
                 state.searching = false;
                 state.stop_flag = None;
@@ -473,6 +584,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 state.result_rx = None;
                 state.current_time_control = None;
                 emit_bestmove("resign", None);
+                state.notify_idle();
             }
         }
     }

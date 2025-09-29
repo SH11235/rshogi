@@ -90,6 +90,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         info_string(format!("oob_finalize_joined sid={} label={}", sid, label));
                         if let Some(h) = state.worker.take() {
                             let _ = h.join();
+                            state.notify_idle();
                         }
                         state.searching = false;
                         state.stop_flag = None;
@@ -102,6 +103,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
                         state.current_time_control = None;
+                        state.notify_idle();
                     } else {
                         // Stale result id; fall back to fast finalize path
                         info_string(format!(
@@ -135,6 +137,7 @@ fn fast_finalize_and_detach(state: &mut EngineState, label: &str) {
                 info_string(format!("reaper_detach queued len={}", q));
             }
         }
+        state.notify_idle();
     }
 
     state.searching = false;
@@ -144,4 +147,5 @@ fn fast_finalize_and_detach(state: &mut EngineState, label: &str) {
     state.current_is_ponder = false;
     state.current_root_hash = None;
     state.current_time_control = None;
+    state.notify_idle();
 }

@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Condvar;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -142,6 +143,7 @@ pub struct EngineState {
     pub finalizer_rx: Option<mpsc::Receiver<FinalizerMsg>>,
     // Current engine-core session id (epoch) for matching finalize requests
     pub current_session_core_id: Option<u64>,
+    pub idle_sync: Arc<IdleSync>,
 }
 
 impl EngineState {
@@ -156,6 +158,8 @@ impl EngineState {
         // Register OOB finalizer channel
         let (fin_tx, fin_rx) = mpsc::channel();
         stop_bridge.register_finalizer(fin_tx);
+
+        let idle_sync = Arc::new(IdleSync::default());
 
         Self {
             engine: Arc::new(Mutex::new(engine)),
@@ -184,6 +188,59 @@ impl EngineState {
             stop_bridge,
             finalizer_rx: Some(fin_rx),
             current_session_core_id: None,
+            idle_sync,
         }
+    }
+
+    #[inline]
+    pub fn notify_idle(&self) {
+        self.idle_sync.notify_all();
+    }
+
+    pub fn idle_status(&self) -> IdleStateSnapshot {
+        let worker_active = self.worker.is_some();
+        let reaper_pending = self.reaper_queue_len.load(std::sync::atomic::Ordering::Acquire);
+        let stop_snapshot = self.stop_bridge.snapshot();
+        IdleStateSnapshot {
+            worker_active,
+            reaper_pending,
+            pending_work_items: stop_snapshot.pending_work_items,
+            active_workers: stop_snapshot.active_workers,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct IdleStateSnapshot {
+    pub worker_active: bool,
+    pub reaper_pending: usize,
+    pub pending_work_items: u64,
+    pub active_workers: usize,
+}
+
+impl IdleStateSnapshot {
+    #[inline]
+    pub fn is_idle(&self) -> bool {
+        !self.worker_active
+            && self.reaper_pending == 0
+            && self.pending_work_items == 0
+            && self.active_workers == 0
+    }
+}
+
+#[derive(Default)]
+pub struct IdleSync {
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl IdleSync {
+    pub fn notify_all(&self) {
+        self.condvar.notify_all();
+    }
+
+    pub fn wait_timeout(&self, timeout: std::time::Duration) {
+        let guard = self.lock.lock().unwrap();
+        let _ = self.condvar.wait_timeout(guard, timeout).unwrap();
     }
 }
