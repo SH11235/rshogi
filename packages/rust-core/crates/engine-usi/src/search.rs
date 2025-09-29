@@ -313,11 +313,15 @@ pub fn run_search_thread(
             let _ = signal.send(());
         }
 
-        eng.search(&mut position, limits)
+        let res = eng.search(&mut position, limits);
+        // Explicitly drop lock before sending result
+        drop(eng);
+        res
     };
     if result.stats.elapsed.as_millis() == 0 {
         result.stats.elapsed = start_ts.elapsed();
     }
+    // Send result immediately after lock release, before any cleanup
     let _ = tx.send((search_id, result));
 }
 

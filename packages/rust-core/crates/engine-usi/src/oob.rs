@@ -101,6 +101,10 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if let Some(rx_res) = &state.result_rx {
                     let chunk_ms = 50u64; // Wait in 50ms chunks
                     let max_rounds = wait_budget_ms.div_ceil(chunk_ms);
+                    info_string(format!(
+                        "oob_recv_wait_start budget_ms={} max_rounds={}",
+                        wait_budget_ms, max_rounds
+                    ));
                     for round in 0..max_rounds {
                         match rx_res.recv_timeout(Duration::from_millis(chunk_ms)) {
                             Ok(pair) => {
@@ -113,7 +117,15 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                                 break;
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
-                                // Continue waiting
+                                // Log every 4 rounds (200ms) to track progress
+                                if round % 4 == 3 || round == max_rounds - 1 {
+                                    info_string(format!(
+                                        "oob_recv_waiting round={}/{} waited_ms={}",
+                                        round + 1,
+                                        max_rounds,
+                                        (round + 1) * chunk_ms
+                                    ));
+                                }
                                 continue;
                             }
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -121,6 +133,12 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                                 break;
                             }
                         }
+                    }
+                    if finalize_candidate.is_none() {
+                        info_string(format!(
+                            "oob_recv_timeout_all budget_ms={} max_rounds={}",
+                            wait_budget_ms, max_rounds
+                        ));
                     }
                 }
 
