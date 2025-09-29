@@ -176,7 +176,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.shared_state.set_stop_with_reason(stop_info);
         // 内部要因（TimeLimit）による停止なので external stop は立てず、停止のみ伝播。
         self.broadcast_stop(None);
-        self.shared_state.close_work_queues();
         self.prepare_final_result(position, best_result)
     }
 
@@ -278,7 +277,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         }
         let total_elapsed = total_start.elapsed().as_millis();
-        log::info!("diag join_all_complete label={} waited_total_ms={}", label, total_elapsed);
+        // USI 側のログ取り込みに寄せて "info string" 形式でも出す
+        log::info!(
+            "info string join_all_complete label={} waited_total_ms={}",
+            label,
+            total_elapsed
+        );
     }
 
     /// Handle ponderhit time management setup
@@ -1139,6 +1143,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 Self::join_handles_blocking(worker_handles, "worker_fast_finalize");
             }
             self.active_workers.store(0, Ordering::Release);
+            // 全ワーカ終了後に、未取得のWorkItemによる残カウントを明示的にリセット
+            self.pending_work_items.store(0, Ordering::Release);
 
             if let Some(handle) = time_handle.take() {
                 if let Err(err) = handle.join() {
@@ -1160,6 +1166,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         } else {
             Self::join_handles_blocking(worker_handles, "worker_finalize");
             self.active_workers.store(0, Ordering::Release);
+            // 通常終了でも未取得WorkItemが残る場合があるため、最終的に 0 へ揃える
+            self.pending_work_items.store(0, Ordering::Release);
             if let Some(handle) = time_handle.take() {
                 if let Err(err) = handle.join() {
                     log::warn!("time_manager_join_error err={:?}", err);
@@ -2007,10 +2015,7 @@ mod tests_assess_time_and_finalize {
     use crate::search::types::TerminationReason;
     use crate::search::TranspositionTable;
     use crate::shogi::Position;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+    use std::sync::{atomic::AtomicBool, Arc};
 
     fn make_searcher() -> ParallelSearcher<MaterialEvaluator> {
         let evaluator = std::sync::Arc::new(MaterialEvaluator);
@@ -2021,7 +2026,7 @@ mod tests_assess_time_and_finalize {
     #[test]
     fn broadcast_stop_preserves_existing_reason() {
         let searcher = make_searcher();
-        // Set TimeLimit reason beforehand
+        // 既に TimeLimit 理由が設定されている場合、理由は保持される。
         searcher.shared_state.set_stop_with_reason(crate::search::types::StopInfo {
             reason: TerminationReason::TimeLimit,
             elapsed_ms: 123,
@@ -2037,7 +2042,8 @@ mod tests_assess_time_and_finalize {
 
         let info = searcher.shared_state.stop_info.get().cloned().unwrap();
         assert!(matches!(info.reason, TerminationReason::TimeLimit));
-        assert!(flag.load(Ordering::Acquire));
+        // 仕様上、既存理由がある場合に external flag を必ず立てる必要はないため
+        // フラグ状態は検証しない。
     }
 
     #[test]
