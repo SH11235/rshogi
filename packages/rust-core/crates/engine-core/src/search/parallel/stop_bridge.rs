@@ -1,4 +1,5 @@
 use super::SharedSearchState;
+use crate::search::snapshot::RootSnapshot;
 use crate::search::types::{StopInfo, TerminationReason};
 use log::debug;
 use std::sync::{
@@ -123,18 +124,23 @@ impl EngineStopBridge {
         }
 
         if let Some(shared) = shared_upgraded {
-            let nodes = shared.get_nodes();
-            let depth = shared.get_best_depth();
-            let stop_info = StopInfo {
-                reason: TerminationReason::UserStop,
-                elapsed_ms: 0,
-                nodes,
-                depth_reached: depth,
-                hard_timeout: false,
-                soft_limit_ms: 0,
-                hard_limit_ms: 0,
-            };
-            shared.set_stop_with_reason(stop_info);
+            // Do not overwrite existing stop_info (e.g., TimeLimit). If already set, only set the flag.
+            if shared.stop_info.get().is_some() {
+                shared.set_stop();
+            } else {
+                let nodes = shared.get_nodes();
+                let depth = shared.get_best_depth();
+                let stop_info = StopInfo {
+                    reason: TerminationReason::UserStop,
+                    elapsed_ms: 0,
+                    nodes,
+                    depth_reached: depth,
+                    hard_timeout: false,
+                    soft_limit_ms: 0,
+                    hard_limit_ms: 0,
+                };
+                shared.set_stop_with_reason(stop_info);
+            }
             shared.close_work_queues();
         }
 
@@ -176,6 +182,15 @@ impl EngineStopBridge {
                 ..StopSnapshot::default()
             }
         }
+    }
+
+    /// Try reading a consistent root snapshot for the active session.
+    pub fn try_read_snapshot(&self) -> Option<RootSnapshot> {
+        let shared_state = {
+            let guard = self.inner.shared_state.lock().unwrap();
+            guard.as_ref().and_then(|weak| weak.upgrade())
+        }?;
+        shared_state.snapshot.try_read()
     }
 
     /// Register USI-side finalizer channel to receive finalize/session messages.

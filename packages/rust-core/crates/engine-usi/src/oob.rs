@@ -18,7 +18,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
     };
 
     // Drain at most a few messages to keep the loop responsive
-    for _ in 0..4 {
+    // 増やして取りこぼしを抑制（E2E検証支援）
+    for _ in 0..16 {
         let msg = match rx.try_recv() {
             Ok(m) => m,
             Err(mpsc::TryRecvError::Empty) => break,
@@ -37,6 +38,11 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 // Accept only if this session is active and we haven't emitted yet
                 if !state.searching || state.bestmove_emitted {
                     continue;
+                }
+                // Late-bind if SessionStart hasn't arrived yet
+                if state.current_session_core_id.is_none() {
+                    state.current_session_core_id = Some(session_id);
+                    info_string(format!("oob_session_late_bind id={}", session_id));
                 }
                 if state.current_session_core_id != Some(session_id) {
                     // Stale or mismatched session; ignore
@@ -81,6 +87,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 // Step 3: finalize
                 if let Some((sid, result)) = finalize_candidate {
                     if sid == state.current_search_id {
+                        info_string(format!("oob_finalize_joined sid={} label={}", sid, label));
                         if let Some(h) = state.worker.take() {
                             let _ = h.join();
                         }
@@ -97,9 +104,14 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         state.current_time_control = None;
                     } else {
                         // Stale result id; fall back to fast finalize path
+                        info_string(format!(
+                            "oob_finalize_stale sid={} cur_sid={} fast_path=1",
+                            sid, state.current_search_id
+                        ));
                         fast_finalize_and_detach(state, label);
                     }
                 } else {
+                    info_string(format!("oob_finalize_fast_path no_result=1 sid={}", session_id));
                     fast_finalize_and_detach(state, label);
                 }
             }
