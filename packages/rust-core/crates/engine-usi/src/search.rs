@@ -305,23 +305,25 @@ pub fn run_search_thread(
     limits.info_string_callback = Some(info_string_cb);
 
     let start_ts = Instant::now();
+    // search() now calls wait_for_completion() internally before returning.
+    // The Engine lock is held during result computation but released before hygiene wait,
+    // allowing concurrent access from the next go command.
     let mut result = {
         let mut eng = engine.lock().unwrap();
 
-        // Stage 2: Signal that engine lock acquired and search starting
+        // Signal that engine lock acquired and search starting
         if let Some(signal) = startup_signal {
             let _ = signal.send(());
         }
 
-        let res = eng.search(&mut position, limits);
-        // Explicitly drop lock before sending result
-        drop(eng);
-        res
+        eng.search(&mut position, limits)
+        // Lock is released here
     };
+
     if result.stats.elapsed.as_millis() == 0 {
         result.stats.elapsed = start_ts.elapsed();
     }
-    // Send result immediately after lock release, before any cleanup
+    // Send result immediately after search completes
     let _ = tx.send((search_id, result));
 }
 
@@ -612,7 +614,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         run_search_thread(engine, pos, limits, info_enabled, tx, sid, Some(startup_tx))
     });
 
-    // Stage 2: Wait for worker to acquire engine lock and start TimeManager
+    // Wait for worker to acquire engine lock and start TimeManager
 
     let startup_timeout = Duration::from_millis(startup_timeout_ms);
     let startup_wait_start = Instant::now();
@@ -659,7 +661,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         state.current_is_stochastic_ponder
     ));
 
-    // Stage 0: Enhanced diagnostics for time loss investigation
+    // Enhanced diagnostics for time loss investigation
     use std::sync::atomic::Ordering;
     let reaper_pending = state.reaper_queue_len.load(Ordering::Relaxed);
     let detach_cumulative = state.oob_detach_count.load(Ordering::Relaxed);

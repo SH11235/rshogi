@@ -201,6 +201,8 @@ fn test_parallel_nnue_diff_hooks_no_fallback() {
 
     reset_single_fallback_hits();
     let _ = ps.search(&mut pos, limits);
+    // Phase 3: wait_for_completion() must be called to clean up threads
+    ps.wait_for_completion();
     // フック経路ではフォールバックしない（端数ノイズは 1 以下に収まる想定）
     assert!(
         single_fallback_hits() <= 1,
@@ -224,6 +226,8 @@ fn test_completion_wait_robustness() {
     let limits = SearchLimits::builder().depth(6).build();
 
     let result = searcher.search(&mut pos, limits);
+    // Phase 3: wait_for_completion() must be called to clean up threads
+    searcher.wait_for_completion();
 
     // Verify that search completed properly
     assert!(result.best_move.is_some(), "Should find a best move");
@@ -259,6 +263,8 @@ fn test_pending_work_counter_accuracy() {
     // Run a short search
     let limits = SearchLimits::builder().depth(3).build();
     let _result = searcher.search(&mut pos, limits);
+    // Phase 3: wait_for_completion() must be called to clean up threads
+    searcher.wait_for_completion();
 
     // After search, pending work should be zero
     assert_eq!(
