@@ -77,18 +77,24 @@ impl EngineStopBridge {
             guard.as_ref().and_then(|weak| weak.upgrade())
         };
         if let Some(shared) = shared_upgraded {
-            let nodes = shared.get_nodes();
-            let depth = shared.get_best_depth();
-            let stop_info = StopInfo {
-                reason: TerminationReason::UserStop,
-                elapsed_ms: 0,
-                nodes,
-                depth_reached: depth,
-                hard_timeout: false,
-                soft_limit_ms: 0,
-                hard_limit_ms: 0,
-            };
-            shared.set_stop_with_reason(stop_info);
+            let stop_flag = shared.stop_flag.load(Ordering::Acquire);
+            if stop_flag {
+                // 既に外部停止フラグが立っている場合のみ理由を付与
+                let nodes = shared.get_nodes();
+                let depth = shared.get_best_depth();
+                let stop_info = StopInfo {
+                    reason: TerminationReason::UserStop,
+                    elapsed_ms: 0,
+                    nodes,
+                    depth_reached: depth,
+                    hard_timeout: false,
+                    soft_limit_ms: 0,
+                    hard_limit_ms: 0,
+                };
+                shared.set_stop_with_reason(stop_info);
+            } else {
+                shared.set_stop();
+            }
             shared.close_work_queues();
         }
 
