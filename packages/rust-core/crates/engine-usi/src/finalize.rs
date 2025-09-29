@@ -72,10 +72,11 @@ fn compute_tt_probe_budget_ms(stop_info: Option<&StopInfo>, snapshot_elapsed_ms:
 fn try_lock_engine_with_budget<'a>(
     engine: &'a Arc<Mutex<engine_core::engine::controller::Engine>>,
     budget_ms: u64,
-) -> Option<(MutexGuard<'a, engine_core::engine::controller::Engine>, u64)> {
+) -> Option<(MutexGuard<'a, engine_core::engine::controller::Engine>, u64, u64)> {
     let start = Instant::now();
     if let Ok(guard) = engine.try_lock() {
-        return Some((guard, start.elapsed().as_millis() as u64));
+        let elapsed = start.elapsed();
+        return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
     }
     if budget_ms == 0 {
         return None;
@@ -84,8 +85,8 @@ fn try_lock_engine_with_budget<'a>(
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_micros(TT_LOCK_BACKOFF_US));
         if let Ok(guard) = engine.try_lock() {
-            let spent = start.elapsed().as_millis() as u64;
-            return Some((guard, spent));
+            let elapsed = start.elapsed();
+            return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
         }
     }
     None
@@ -443,7 +444,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 let budget_ms =
                     compute_tt_probe_budget_ms(stop_info_snapshot.as_ref(), snap.elapsed_ms);
                 if shallow {
-                    if let Some((eng_guard, spent_ms)) =
+                    if let Some((eng_guard, spent_ms, spent_us)) =
                         try_lock_engine_with_budget(&state.engine, budget_ms)
                     {
                         let final_best = eng_guard.choose_final_bestmove(&state.position, None);
@@ -473,6 +474,13 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                             budget_ms,
                             spent_ms
                         ));
+                        info_string(format!(
+                            "{}_fast_snapshot_tt sid={} root_key={} tt_probe_spent_us={}",
+                            label,
+                            snap.search_id,
+                            fmt_hash(snap.root_key),
+                            spent_us
+                        ));
                         emit_bestmove(&final_usi, ponder_mv);
                         state.bestmove_emitted = true;
                         state.current_root_hash = None;
@@ -487,7 +495,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                     None
                 };
                 info_string(format!(
-                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=0 tt_probe_budget_ms={}",
+                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=0 tt_probe_budget_ms={} note=depth_sufficient",
                     label,
                     snap.search_id,
                     fmt_hash(snap.root_key),
@@ -506,7 +514,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     }
 
     let fallback_budget_ms = compute_tt_probe_budget_ms(stop_info_snapshot.as_ref(), 0);
-    if let Some((eng_guard, spent_ms)) =
+    if let Some((eng_guard, spent_ms, spent_us)) =
         try_lock_engine_with_budget(&state.engine, fallback_budget_ms)
     {
         let dbg = eng_guard.tt_debug_info();
@@ -526,7 +534,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         };
         drop(eng_guard);
         info_string(format!(
-            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={}",
+            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,
@@ -535,7 +543,8 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
             dbg.hf_permille,
             dbg.store_attempts,
             fallback_budget_ms,
-            spent_ms
+            spent_ms,
+            spent_us
         ));
         info_string(format!(
             "{}_fast_select sid={} root_key={} source={} move={} ponder={:?}",
@@ -590,28 +599,38 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                     slice.iter().copied().filter(|&m| pos.is_legal_move(m)).collect();
 
                 let chosen = if legal_moves.is_empty() {
-                    slice[0]
+                    None
                 } else if in_check {
-                    legal_moves[0]
+                    legal_moves.first().copied()
                 } else if let Some(mv) =
                     legal_moves.iter().find(|m| is_tactical(m) && !is_king_move(m)).copied()
                 {
-                    mv
+                    Some(mv)
                 } else if let Some(mv) = legal_moves.iter().find(|m| !is_king_move(m)).copied() {
-                    mv
+                    Some(mv)
                 } else {
-                    legal_moves[0]
+                    legal_moves.first().copied()
                 };
 
-                let final_usi = move_to_usi(&chosen);
-                info_string(format!(
-                    "{}_fast_select_legal sid={} root_key={} move={}",
-                    label,
-                    state.current_session_core_id.unwrap_or(0),
-                    root_key_hex,
-                    final_usi
-                ));
-                emit_bestmove(&final_usi, None);
+                if let Some(chosen) = chosen {
+                    let final_usi = move_to_usi(&chosen);
+                    info_string(format!(
+                        "{}_fast_select_legal sid={} root_key={} move={}",
+                        label,
+                        state.current_session_core_id.unwrap_or(0),
+                        root_key_hex,
+                        final_usi
+                    ));
+                    emit_bestmove(&final_usi, None);
+                } else {
+                    info_string(format!(
+                        "{}_fast_select_resign sid={} root_key={} no_legal_moves=1",
+                        label,
+                        state.current_session_core_id.unwrap_or(0),
+                        root_key_hex
+                    ));
+                    emit_bestmove("resign", None);
+                }
             }
         }
         Err(e) => {
