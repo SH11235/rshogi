@@ -103,22 +103,28 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     #[inline]
     fn broadcast_stop(&self, external_stop: Option<&Arc<AtomicBool>>) {
-        let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
-        let elapsed_ms = tm_snapshot.as_ref().map(|tm| tm.elapsed_ms()).unwrap_or(0);
-        let soft_ms = tm_snapshot.as_ref().map(|tm| tm.soft_limit_ms()).unwrap_or(0);
-        let hard_ms = tm_snapshot.as_ref().map(|tm| tm.hard_limit_ms()).unwrap_or(0);
-        let nodes = self.shared_state.get_nodes();
-        let depth = self.shared_state.get_best_depth();
-        let stop_info = StopInfo {
-            reason: TerminationReason::UserStop,
-            elapsed_ms,
-            nodes,
-            depth_reached: depth,
-            hard_timeout: false,
-            soft_limit_ms: soft_ms,
-            hard_limit_ms: hard_ms,
-        };
-        self.shared_state.set_stop_with_reason(stop_info);
+        let user_stop = external_stop.map(|flag| flag.load(Ordering::Acquire)).unwrap_or(false);
+
+        if user_stop {
+            let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
+            let elapsed_ms = tm_snapshot.as_ref().map(|tm| tm.elapsed_ms()).unwrap_or(0);
+            let soft_ms = tm_snapshot.as_ref().map(|tm| tm.soft_limit_ms()).unwrap_or(0);
+            let hard_ms = tm_snapshot.as_ref().map(|tm| tm.hard_limit_ms()).unwrap_or(0);
+            let nodes = self.shared_state.get_nodes();
+            let depth = self.shared_state.get_best_depth();
+            let stop_info = StopInfo {
+                reason: TerminationReason::UserStop,
+                elapsed_ms,
+                nodes,
+                depth_reached: depth,
+                hard_timeout: false,
+                soft_limit_ms: soft_ms,
+                hard_limit_ms: hard_ms,
+            };
+            self.shared_state.set_stop_with_reason(stop_info);
+        } else {
+            self.shared_state.set_stop();
+        }
         self.shared_state.close_work_queues();
         self.pending_work_items.store(0, Ordering::Release);
         if let Some(flag) = external_stop {
@@ -1117,12 +1123,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Iterative deepening
         for iteration in 1.. {
-            if self.shared_state.should_stop()
-                || limits
-                    .stop_flag
-                    .as_ref()
-                    .map(|flag| flag.load(Ordering::Acquire))
-                    .unwrap_or(false)
+            if limits
+                .stop_flag
+                .as_ref()
+                .map(|flag| flag.load(Ordering::Acquire))
+                .unwrap_or(false)
             {
                 self.broadcast_stop(limits.stop_flag.as_ref());
                 return self.prepare_final_result(position, best_result);
@@ -1168,29 +1173,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
                 }
 
-                self.broadcast_stop(limits.stop_flag.as_ref());
-
-                let params = TimeLimitFinalization {
-                    best_snapshot: best_result.clone(),
-                    elapsed_ms: search_start.elapsed().as_millis() as u64,
-                    current_nodes: self.shared_state.get_nodes(),
-                    soft_limit_ms: tm_opt.as_ref().map(|tm| tm.soft_limit_ms()).unwrap_or(u64::MAX),
-                    hard_limit_ms: tm_opt.as_ref().map(|tm| tm.hard_limit_ms()).unwrap_or(u64::MAX),
-                    planned_limit_ms: tm_opt
-                        .as_ref()
-                        .map(|tm| tm.scheduled_end_ms())
-                        .unwrap_or(u64::MAX),
-                    hard_timeout: false,
-                    label: "external_stop".to_string(),
-                };
-                if let Some(ref tm) = tm_opt {
-                    tm.force_stop();
+                let user_stop_now =
+                    limits.stop_flag.as_ref().map(|f| f.load(Ordering::Acquire)).unwrap_or(false);
+                if user_stop_now {
+                    self.broadcast_stop(limits.stop_flag.as_ref());
+                    return self.prepare_final_result(position, best_result);
+                } else {
+                    self.shared_state.set_stop();
+                    self.shared_state.close_work_queues();
+                    self.pending_work_items.store(0, Ordering::Release);
+                    return self.prepare_final_result(position, best_result);
                 }
-                return self.finalize_time_limit(
-                    position,
-                    params,
-                    limits.info_string_callback.as_ref(),
-                );
             }
 
             // Calculate depths for this iteration
