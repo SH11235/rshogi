@@ -8,6 +8,7 @@ use engine_core::time_management::TimeControl;
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
+use crate::util::join_search_handle;
 
 pub fn handle_stop(state: &mut EngineState) {
     if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
@@ -145,19 +146,7 @@ pub fn handle_stop(state: &mut EngineState) {
                     }
                 }
 
-                if let Some(h) = state.worker.take() {
-                    if let Some(tx) = &state.reaper_tx {
-                        let q = state.reaper_queue_len.fetch_add(1, Ordering::SeqCst) + 1;
-                        let _ = tx.send(h);
-                        const REAPER_QUEUE_SOFT_MAX: usize = 128;
-                        if q > REAPER_QUEUE_SOFT_MAX {
-                            info_string(format!("reaper_queue_len_high len={}", q));
-                        } else {
-                            info_string(format!("reaper_detach queued len={}", q));
-                        }
-                    }
-                    state.notify_idle();
-                }
+                let worker = state.worker.take();
                 state.searching = false;
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
@@ -165,6 +154,9 @@ pub fn handle_stop(state: &mut EngineState) {
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
                 state.current_time_control = None;
+                if let Some(handle) = worker {
+                    join_search_handle(handle, "stop_timeout_finalize");
+                }
                 state.notify_idle();
             }
         }
@@ -293,19 +285,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                             ));
                         }
                     }
-                    if let Some(h) = state.worker.take() {
-                        if let Some(tx) = &state.reaper_tx {
-                            let q = state.reaper_queue_len.fetch_add(1, Ordering::SeqCst) + 1;
-                            let _ = tx.send(h);
-                            const REAPER_QUEUE_SOFT_MAX: usize = 128;
-                            if q > REAPER_QUEUE_SOFT_MAX {
-                                info_string(format!("reaper_queue_len_high len={}", q));
-                            } else {
-                                info_string(format!("reaper_detach queued len={}", q));
-                            }
-                        }
-                        state.notify_idle();
-                    }
+                    let worker = state.worker.take();
                     state.searching = false;
                     state.stop_flag = None;
                     state.ponder_hit_flag = None;
@@ -313,6 +293,9 @@ pub fn handle_gameover(state: &mut EngineState) {
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
                     state.current_time_control = None;
+                    if let Some(handle) = worker {
+                        join_search_handle(handle, "gameover_timeout_finalize");
+                    }
                     state.notify_idle();
                 }
             } else {

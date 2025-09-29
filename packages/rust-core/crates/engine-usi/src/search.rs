@@ -589,3 +589,25 @@ pub fn poll_search_completion(state: &mut EngineState) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use engine_core::search::limits::SearchLimits;
+    use engine_core::time_management::TimeParameters;
+
+    #[test]
+    fn time_parameters_option_remains_after_unwrap() {
+        let mut params = TimeParameters::default();
+        params.network_delay2_ms = 1234;
+
+        let limits = SearchLimits {
+            time_parameters: Some(params),
+            ..SearchLimits::default()
+        };
+
+        let extracted = limits.time_parameters.unwrap_or_default();
+        assert_eq!(extracted.network_delay2_ms, 1234);
+        assert!(limits.time_parameters.is_some(), "time_parameters was unexpectedly moved out");
+        assert_eq!(limits.time_parameters.unwrap_or_default().network_delay2_ms, 1234);
+    }
+}

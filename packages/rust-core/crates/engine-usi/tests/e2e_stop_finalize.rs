@@ -127,6 +127,20 @@ impl UsiProc {
         }
         false
     }
+
+    fn assert_no_contains(&self, pat: &str, timeout_ms: u64) {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        while Instant::now() < deadline {
+            match self.rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(line) => {
+                    println!("OUT: {}", line);
+                    assert!(!line.contains(pat), "unexpected log containing '{}': {}", pat, line);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
 }
 
 impl Drop for UsiProc {
@@ -312,7 +326,7 @@ fn e2e_ponder_stop_then_go_fast() {
 
         p.write_line("position startpos moves 7g7f 3c3d");
         p.write_line("go ponder btime 0 wtime 0 byoyomi 2000");
-        std::thread::sleep(Duration::from_millis(80));
+        p.assert_no_contains("fallback_deadline_trigger=", 300);
         p.write_line("stop");
         assert!(p.wait_for_contains("bestmove ", 2000));
 
