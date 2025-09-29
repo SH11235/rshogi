@@ -9,6 +9,12 @@ use engine_core::search::parallel::FinalizerMsg;
 use engine_core::shogi::Position;
 use engine_core::time_management::TimeControl;
 
+#[derive(Debug)]
+pub struct ReaperJob {
+    pub handle: thread::JoinHandle<()>,
+    pub label: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
     // Core engine settings
@@ -135,7 +141,7 @@ pub struct EngineState {
     // Current (inner) time control for stop/gameover policy decisions
     pub current_time_control: Option<TimeControl>,
     // Reaper: background joiner for detached worker threads
-    pub reaper_tx: Option<mpsc::Sender<std::thread::JoinHandle<()>>>,
+    pub reaper_tx: Option<mpsc::Sender<ReaperJob>>,
     pub reaper_handle: Option<std::thread::JoinHandle<()>>,
     pub reaper_queue_len: Arc<AtomicUsize>,
     pub stop_bridge: Arc<EngineStopBridge>,

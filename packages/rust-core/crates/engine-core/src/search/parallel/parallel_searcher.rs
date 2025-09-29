@@ -110,9 +110,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             flag.store(true, Ordering::Release);
         }
 
-        let user_stop = external_stop.is_some();
+        let already_has_reason = self.shared_state.stop_info.get().is_some();
 
-        if user_stop {
+        if already_has_reason {
+            self.shared_state.set_stop();
+            self.shared_state.close_work_queues();
+            return;
+        }
+
+        if external_stop.is_some() {
             let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
             let elapsed_ms = tm_snapshot.as_ref().map(|tm| tm.elapsed_ms()).unwrap_or(0);
             let soft_ms = tm_snapshot.as_ref().map(|tm| tm.soft_limit_ms()).unwrap_or(0);
@@ -926,6 +932,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Record start time for fail-safe
         let search_start = Instant::now();
 
+        // Reset pending work accounting with a fresh counter per session
+        self.pending_work_items = Arc::new(AtomicU64::new(0));
+
         // Wire external stop_flag (from USI) into SharedSearchState for this search session.
         // Without this, GUI-issued `stop` does not propagate to parallel workers,
         // and the frontend may time out and fall back to fast finalize.
@@ -955,7 +964,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Reset counters for this session
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
-        self.pending_work_items.store(0, Ordering::Release);
 
         // Create limits with shared qnodes counter from shared state
         let mut limits = limits;

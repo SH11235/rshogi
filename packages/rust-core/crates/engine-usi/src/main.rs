@@ -20,8 +20,9 @@ use io::{info_string, usi_println};
 use oob::poll_oob_finalize;
 use options::{apply_options_to_engine, handle_setoption, send_id_and_options};
 use search::{handle_go, parse_position, poll_search_completion};
-use state::EngineState;
+use state::{EngineState, ReaperJob};
 use stop::{handle_gameover, handle_ponderhit, handle_stop};
+use util::join_search_handle;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -39,25 +40,26 @@ fn main() -> Result<()> {
         Err(_) => info_string("nnue_simd_clamp=auto"),
     }
 
-    let (reaper_tx, reaper_rx) = mpsc::channel::<thread::JoinHandle<()>>();
+    let (reaper_tx, reaper_rx) = mpsc::channel::<ReaperJob>();
     let reaper_queue_len = Arc::clone(&state.reaper_queue_len);
     let idle_sync = Arc::clone(&state.idle_sync);
     let reaper_handle = thread::Builder::new()
         .name("usi-reaper".to_string())
         .spawn(move || {
             let mut cum_ms: u128 = 0;
-            for h in reaper_rx {
+            for job in reaper_rx {
+                let ReaperJob { handle, label } = job;
                 let start = Instant::now();
-                let _ = h.join();
+                join_search_handle(handle, &label);
                 let dur = start.elapsed().as_millis();
                 reaper_queue_len.fetch_sub(1, Ordering::SeqCst);
                 idle_sync.notify_all();
                 if dur > 50 {
-                    usi_println(&format!("info string reaper_join_ms={dur}"));
+                    info_string(format!("reaper_join label={} waited_ms={}", label, dur));
                 }
                 cum_ms += dur;
                 if cum_ms >= 1000 {
-                    usi_println(&format!("info string reaper_cum_join_ms={cum_ms}"));
+                    info_string(format!("reaper_cum_join_ms={cum_ms}"));
                     cum_ms = 0;
                 }
             }
