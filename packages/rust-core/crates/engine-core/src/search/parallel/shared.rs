@@ -544,6 +544,7 @@ impl SharedSearchState {
         // Reset snapshot to a clean default for the new generation
         let snap = RootSnapshot {
             search_id: self.generation(),
+            // 他フィールドは初期化リセット目的でデフォルト (root_key=0, best=None, pv empty 等)
             ..Default::default()
         };
         self.snapshot.publish(&snap);
@@ -565,6 +566,23 @@ impl SharedSearchState {
             nodes: self.get_nodes(),
             elapsed_ms,
             ..Default::default()
+        };
+        self.snapshot.publish(&snap);
+    }
+
+    /// Publish minimal fields while preserving previously published PV if any.
+    /// This avoids wiping PV on iterations with no improvement.
+    pub fn publish_minimal_snapshot_preserve_pv(&self, root_key: u64, elapsed_ms: u32) {
+        let prev = self.snapshot.try_read();
+        let snap = RootSnapshot {
+            search_id: self.generation(),
+            root_key,
+            best: self.get_best_move(),
+            depth: self.get_best_depth(),
+            score_cp: self.get_best_score(),
+            nodes: self.get_nodes(),
+            elapsed_ms,
+            pv: prev.map(|p| p.pv).unwrap_or_default(),
         };
         self.snapshot.publish(&snap);
     }

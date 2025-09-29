@@ -562,17 +562,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // Also emit a compact heartbeat via info_string for diagnostics/GUI
                 if let Some(ref cb2) = limits.info_string_callback {
-                    let depth = best_result.stats.depth.max(1);
+                    let depth = self.shared_state.get_best_depth().max(1);
                     let elapsed_ms = search_start.elapsed().as_millis();
-                    let pv0 = pv_to_send.first().copied();
-                    #[allow(unused_mut)]
-                    let mut pv0_usi = String::from("-");
-                    #[allow(unused_variables)]
-                    if let Some(m) = pv0 {
-                        #[allow(unused_imports)]
-                        use crate::usi::move_to_usi;
-                        pv0_usi = move_to_usi(&m);
-                    }
+                    let pv0_usi = pv_to_send
+                        .first()
+                        .map(crate::usi::move_to_usi)
+                        .unwrap_or_else(|| "-".to_string());
                     cb2(&format!(
                         "hb depth={} nodes={} elapsed_ms={} pv0={}",
                         depth, total_nodes, elapsed_ms, pv0_usi
@@ -1354,9 +1349,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 main_thread.search_iteration(position, &limits, main_depth)
             };
 
-            // After finishing this iteration (or shallow step), publish minimal snapshot
-            let elapsed_ms = search_start.elapsed().as_millis() as u32;
-            self.shared_state.publish_minimal_snapshot(position.zobrist_hash(), elapsed_ms);
+            // After finishing this iteration (or shallow step), snapshot publish happens below
 
             // Clean up completed split points
             #[cfg(feature = "ybwc")]
@@ -1388,14 +1381,48 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     search_id: self.shared_state.generation(),
                     root_key: position.zobrist_hash(),
                     best: best_result.best_move,
-                    pv: best_result.stats.pv.clone().into(),
+                    pv: SmallVec::from_vec(best_result.stats.pv.clone()),
                     depth: best_result.stats.depth,
                     score_cp: best_result.score,
                     nodes: nodes_total,
                     elapsed_ms,
-                    ..Default::default()
                 };
+                self.emit_info_string(
+                    &limits,
+                    format!(
+                        "snapshot_publish kind=pv_commit depth={} nodes={} pv_len={}",
+                        snap.depth,
+                        snap.nodes,
+                        snap.pv.len()
+                    ),
+                );
                 self.shared_state.snapshot.publish(&snap);
+            } else {
+                // Preserve previous PV; refresh minimal fields only
+                let elapsed_ms = search_start.elapsed().as_millis() as u32;
+                if let Some(prev) = self.shared_state.snapshot.try_read() {
+                    if let (Some(b), Some(pv0)) =
+                        (self.shared_state.get_best_move(), prev.pv.first().copied())
+                    {
+                        if b != pv0 {
+                            let b_usi = crate::usi::move_to_usi(&b);
+                            let pv0_usi = crate::usi::move_to_usi(&pv0);
+                            self.emit_info_string(
+                                &limits,
+                                format!(
+                                    "snapshot_warn_pv_head_mismatch=1 best={} pv0={}",
+                                    b_usi, pv0_usi
+                                ),
+                            );
+                        }
+                    }
+                }
+                self.emit_info_string(
+                    &limits,
+                    format!("snapshot_publish kind=min_preserve elapsed_ms={}", elapsed_ms),
+                );
+                self.shared_state
+                    .publish_minimal_snapshot_preserve_pv(position.zobrist_hash(), elapsed_ms);
             }
 
             // SearchThread internally handles node counting and reporting to shared_state
@@ -1529,8 +1556,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         info_cb: Option<&InfoStringCallback>,
     ) -> SearchResult {
         // Publish a minimal snapshot before stopping so that USI fast path can read it
-        self.shared_state
-            .publish_minimal_snapshot(position.zobrist_hash(), params.elapsed_ms as u32);
+        self.shared_state.publish_minimal_snapshot_preserve_pv(
+            position.zobrist_hash(),
+            params.elapsed_ms as u32,
+        );
         if log::log_enabled!(log::Level::Info) {
             log::info!(
                 "diag near_hard_finalize label={} elapsed={}ms soft={}ms hard={}ms planned={}ms nodes={}",

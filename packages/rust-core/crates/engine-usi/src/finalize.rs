@@ -337,7 +337,8 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         if sid_ok && rk_ok {
             if let Some(best) = snap.best {
                 // If snapshot is shallow (depth<2 or PVが空)、ごく短時間のTTベース最終選択を試みる（try_lockのみ）。
-                let shallow = snap.depth < 2 || snap.pv.is_empty();
+                let shallow =
+                    snap.depth < FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT || snap.pv.is_empty();
                 if shallow {
                     if let Ok(eng) = state.engine.try_lock() {
                         let final_best = eng.choose_final_bestmove(&state.position, None);
@@ -481,3 +482,4 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     state.bestmove_emitted = true;
     state.current_root_hash = None;
 }
+const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 2;
