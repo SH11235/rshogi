@@ -28,6 +28,9 @@ fn source_to_str(src: FinalBestSource) -> &'static str {
 
 const TT_LOCK_BACKOFF_US: u64 = 100;
 
+/// StopInfo から "残り" 時間を見積もり、TT ロックに使ってよい猶予を ms で返す。
+/// 現状は soft/hard の最小値のみを参照する。将来 planned limit も StopInfo に
+/// 反映された場合には、ここで同様に最小値へ折り込む。
 fn compute_tt_probe_budget_ms(stop_info: Option<&StopInfo>, snapshot_elapsed_ms: u32) -> u64 {
     let stop_info = match stop_info {
         Some(si) => si,
@@ -430,6 +433,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
 
     // Try snapshot first to avoid engine lock when possible
     if let Some(snap) = state.stop_bridge.try_read_snapshot() {
+        // SessionStart より先に Finalize が届く場合は root_key 側で裏取りする。
         let sid_ok = state.current_session_core_id.map(|sid| sid == snap.search_id).unwrap_or(true);
         let rk_ok = snap.root_key == state.position.zobrist_hash();
         if sid_ok && rk_ok {
@@ -522,8 +526,10 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         };
         drop(eng_guard);
         info_string(format!(
-            "{}_fast_tt_debug addr={:#x} size_mb={} hf={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={}",
+            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={}",
             label,
+            state.current_session_core_id.unwrap_or(0),
+            root_key_hex,
             dbg.addr,
             dbg.size_mb,
             dbg.hf_permille,
@@ -532,9 +538,10 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
             spent_ms
         ));
         info_string(format!(
-            "{}_fast_select sid={} source={} move={} ponder={:?}",
+            "{}_fast_select sid={} root_key={} source={} move={} ponder={:?}",
             label,
             state.current_session_core_id.unwrap_or(0),
+            root_key_hex,
             source_to_str(final_best.source),
             final_usi,
             ponder_mv
@@ -557,7 +564,12 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         Ok(list) => {
             let slice = list.as_slice();
             if slice.is_empty() {
-                info_string(format!("{}_fast_select_resign", label));
+                info_string(format!(
+                    "{}_fast_select_resign sid={} root_key={}",
+                    label,
+                    state.current_session_core_id.unwrap_or(0),
+                    root_key_hex
+                ));
                 emit_bestmove("resign", None);
             } else {
                 let pos = &state.position;
@@ -592,12 +604,24 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 };
 
                 let final_usi = move_to_usi(&chosen);
-                info_string(format!("{}_fast_select_legal move={}", label, final_usi));
+                info_string(format!(
+                    "{}_fast_select_legal sid={} root_key={} move={}",
+                    label,
+                    state.current_session_core_id.unwrap_or(0),
+                    root_key_hex,
+                    final_usi
+                ));
                 emit_bestmove(&final_usi, None);
             }
         }
         Err(e) => {
-            info_string(format!("{}_fast_select_error resign_fallback=1 err={}", label, e));
+            info_string(format!(
+                "{}_fast_select_error sid={} root_key={} resign_fallback=1 err={}",
+                label,
+                state.current_session_core_id.unwrap_or(0),
+                root_key_hex,
+                e
+            ));
             emit_bestmove("resign", None);
         }
     }

@@ -258,3 +258,37 @@ fn e2e_stop_fast_finalize_fixed_and_infinite_and_ponder() {
         "bestmove not emitted promptly for ponder stop"
     );
 }
+
+#[test]
+#[ignore]
+fn e2e_byoyomi_oob_finalize_logs() {
+    let mut p = UsiProc::spawn();
+    p.write_line("usi");
+    assert!(p.wait_for_contains("usiok", 2000), "usiok timeout");
+
+    // 実戦に近い秒読み設定で TimeManager が near-hard finalize を発火するよう、
+    // MinThinkMs とタイムバッファ関連を詰める。
+    p.write_line("setoption name Threads value 8");
+    p.write_line("setoption name MinThinkMs value 4000");
+    p.write_line("setoption name ByoyomiDeadlineLeadMs value 0");
+    p.write_line("setoption name ByoyomiSafetyMs value 0");
+    p.write_line("setoption name OverheadMs value 0");
+    p.write_line("setoption name ByoyomiOverheadMs value 0");
+    p.write_line("setoption name StopWaitMs value 0");
+
+    p.write_line("isready");
+    assert!(p.wait_for_contains("readyok", 2000), "readyok timeout after option updates");
+
+    p.write_line("usinewgame");
+    p.write_line("position startpos");
+    p.write_line("go btime 0 wtime 0 byoyomi 2000");
+
+    assert!(
+        p.wait_for_contains("oob_finalize_request", 5000),
+        "OOB finalize log was not observed"
+    );
+    assert!(
+        p.wait_for_contains("bestmove ", 2000),
+        "bestmove was not emitted after OOB finalize"
+    );
+}
