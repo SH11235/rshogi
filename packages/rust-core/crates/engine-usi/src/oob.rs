@@ -97,64 +97,42 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 ));
 
                 // Step 3: try to receive result with bounded waiting
-                // Review feedback: Limit max consecutive blocking to 2 rounds (100ms)
-                // to keep USI main loop responsive
                 let mut finalize_candidate: Option<(u64, engine_core::search::SearchResult)> = None;
                 if let Some(rx_res) = &state.result_rx {
                     let chunk_ms = 50u64; // Wait in 50ms chunks
                     let max_rounds = wait_budget_ms.div_ceil(chunk_ms);
-                    let max_consecutive_rounds = 2; // Max 100ms consecutive blocking
                     info_string(format!(
                         "oob_recv_wait_start budget_ms={} max_rounds={}",
                         wait_budget_ms, max_rounds
                     ));
 
-                    let mut rounds_done = 0;
-                    while rounds_done < max_rounds {
-                        let rounds_this_batch =
-                            (max_rounds - rounds_done).min(max_consecutive_rounds);
-
-                        for batch_round in 0..rounds_this_batch {
-                            let round = rounds_done + batch_round;
-                            match rx_res.recv_timeout(Duration::from_millis(chunk_ms)) {
-                                Ok(pair) => {
+                    for round in 0..max_rounds {
+                        match rx_res.recv_timeout(Duration::from_millis(chunk_ms)) {
+                            Ok(pair) => {
+                                info_string(format!(
+                                    "oob_recv_result round={} waited_ms={}",
+                                    round,
+                                    (round + 1) * chunk_ms
+                                ));
+                                finalize_candidate = Some(pair);
+                                break;
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                // Log every 4 rounds (200ms) to track progress
+                                if round % 4 == 3 || round == max_rounds - 1 {
                                     info_string(format!(
-                                        "oob_recv_result round={} waited_ms={}",
-                                        round,
+                                        "oob_recv_waiting round={}/{} waited_ms={}",
+                                        round + 1,
+                                        max_rounds,
                                         (round + 1) * chunk_ms
                                     ));
-                                    finalize_candidate = Some(pair);
-                                    break;
                                 }
-                                Err(mpsc::RecvTimeoutError::Timeout) => {
-                                    // Log every 4 rounds (200ms) to track progress
-                                    if round % 4 == 3 || round == max_rounds - 1 {
-                                        info_string(format!(
-                                            "oob_recv_waiting round={}/{} waited_ms={}",
-                                            round + 1,
-                                            max_rounds,
-                                            (round + 1) * chunk_ms
-                                        ));
-                                    }
-                                    continue;
-                                }
-                                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                    info_string("oob_recv_disconnected");
-                                    break;
-                                }
+                                continue;
                             }
-                        }
-
-                        if finalize_candidate.is_some() {
-                            break;
-                        }
-
-                        rounds_done += rounds_this_batch;
-
-                        // Early return point: put rx back and exit to keep main loop responsive
-                        if rounds_done < max_rounds {
-                            state.finalizer_rx = Some(rx);
-                            return;
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                info_string("oob_recv_disconnected");
+                                break;
+                            }
                         }
                     }
 

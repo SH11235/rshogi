@@ -490,14 +490,12 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     if waited_before_go_ms > 0 {
         if let Some(ref mut params) = limits.time_parameters {
-            // Stage 5: Clamp wait time attribution for pure byoyomi to prevent excessive budget consumption
+            // Phase 1: Accurate wait attribution for pure byoyomi (up to 2000ms)
+            // Reflects actual startup delay in time budget to prevent TimeManager over-optimization
             let is_pure_byoyomi = gp.byoyomi.unwrap_or(0) > 0
                 && gp.btime.unwrap_or(0) == 0
                 && gp.wtime.unwrap_or(0) == 0;
 
-            // Phase 1: Accurate time budget for pure byoyomi
-            // Reflect actual wait time up to 2000ms (was 500ms)
-            // This prevents TimeManager from using too much time when startup is delayed
             let clamped_wait = if is_pure_byoyomi {
                 waited_before_go_ms.min(2000)
             } else {
@@ -559,8 +557,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         }
     }
 
-    // Stage 1.5: Calculate startup timeout based on time control
-    // Review feedback: Adjust timeout based on time control to avoid wasting time
+    // Calculate startup handshake timeout based on time control
+    // Prevents wasting time in short byoyomi (e.g., 500-800ms)
     let startup_timeout_ms = if let Some(ref params) = limits.time_parameters {
         // Calculate safety budget (similar to go_wait_for_reaper logic)
         let safety_budget = state.opts.byoyomi_safety_ms
@@ -587,9 +585,15 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                 white_ms,
                 black_ms,
             } => {
-                // Fischer: clamp(200ms, (inc + avg_residual) / 4, 1200ms)
-                let avg_residual = (white_ms + black_ms) / 2;
-                ((increment_ms + avg_residual / 10) / 4).clamp(200, 1200)
+                // Fischer: Use side-to-move residual instead of average for tighter bound
+                use engine_core::shogi::Color;
+                let stm = search_position.side_to_move;
+                let residual = match stm {
+                    Color::White => *white_ms,
+                    Color::Black => *black_ms,
+                };
+                // Heuristic: quarter of (inc + residual/10), clamped
+                ((increment_ms + residual / 10) / 4).clamp(200, 1200)
             }
             _ => 1200, // Default for other modes
         }
