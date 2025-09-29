@@ -1,5 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use engine_core::time_management::TimeControl;
@@ -75,7 +76,48 @@ pub fn handle_stop(state: &mut EngineState) {
                 }
             }
             if !finalized {
-                if let Ok((sid, result)) = rx.try_recv() {
+                state.stop_bridge.request_stop_immediate();
+
+                let mut waited_after_stop_ms = 0u64;
+                let mut finalize_candidate: Option<(u64, engine_core::search::SearchResult)> = None;
+
+                for backoff in [5u64, 10, 20, 40] {
+                    match rx.try_recv() {
+                        Ok(pair) => {
+                            finalize_candidate = Some(pair);
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {
+                            thread::sleep(Duration::from_millis(backoff));
+                            waited_after_stop_ms += backoff;
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                if finalize_candidate.is_none() {
+                    match rx.try_recv() {
+                        Ok(pair) => finalize_candidate = Some(pair),
+                        Err(mpsc::TryRecvError::Empty) => {}
+                        Err(mpsc::TryRecvError::Disconnected) => {}
+                    }
+                }
+
+                let snapshot = state.stop_bridge.snapshot();
+                let detach_flag = finalize_candidate
+                    .as_ref()
+                    .map(|(sid, _)| *sid != state.current_search_id)
+                    .unwrap_or(true);
+
+                info_string(format!(
+                    "fast_finalize active_threads={} pending={} waited_ms={} detach={}",
+                    snapshot.active_workers,
+                    snapshot.pending_work_items,
+                    waited_after_stop_ms,
+                    if detach_flag { 1 } else { 0 }
+                ));
+
+                if let Some((sid, result)) = finalize_candidate {
                     if sid == state.current_search_id {
                         if let Some(h) = state.worker.take() {
                             let _ = h.join();
@@ -100,6 +142,7 @@ pub fn handle_stop(state: &mut EngineState) {
                         ));
                     }
                 }
+
                 if let Some(h) = state.worker.take() {
                     if let Some(tx) = &state.reaper_tx {
                         let q = state.reaper_queue_len.fetch_add(1, Ordering::SeqCst) + 1;

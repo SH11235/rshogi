@@ -3,7 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     movegen::MoveGenerator,
-    search::types::TerminationReason,
+    search::types::{InfoStringCallback, TerminationReason},
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     shogi::{Move, Position},
     time_management::{GamePhase, TimeManager},
@@ -30,7 +30,7 @@ use crate::search::parallel::util::{
 
 #[cfg(feature = "ybwc")]
 use super::SplitPoint;
-use super::{SearchThread, SharedSearchState};
+use super::{EngineStopBridge, SearchThread, SharedSearchState};
 
 /// Parameters for finalizing search due to time limit
 #[derive(Debug, Clone)]
@@ -95,9 +95,100 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 
     /// Outstanding work counter for accurate completion detection
     pub(super) pending_work_items: Arc<AtomicU64>,
+
+    /// Bridge for propagating immediate stop requests without locking the engine
+    stop_bridge: Arc<EngineStopBridge>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
+    #[inline]
+    fn broadcast_stop(&self, external_stop: Option<&Arc<AtomicBool>>) {
+        self.shared_state.set_stop();
+        self.shared_state.close_work_queues();
+        self.pending_work_items.store(0, Ordering::Release);
+        if let Some(flag) = external_stop {
+            flag.store(true, Ordering::Release);
+        }
+    }
+
+    #[inline]
+    fn emit_info_string<S: AsRef<str>>(&self, limits: &SearchLimits, message: S) {
+        if let Some(cb) = &limits.info_string_callback {
+            cb(message.as_ref());
+        } else {
+            log::info!("info string {}", message.as_ref());
+        }
+    }
+
+    #[inline]
+    fn wait_for_active_clear(&self, max_wait_ms: u64) -> (u64, usize) {
+        if max_wait_ms == 0 {
+            return (0, self.active_workers.load(Ordering::Acquire));
+        }
+
+        let mut waited = 0;
+        while waited < max_wait_ms {
+            let active = self.active_workers.load(Ordering::Acquire);
+            if active == 0 {
+                return (waited, active);
+            }
+            thread::sleep(Duration::from_millis(HYGIENE_WAIT_STEP_MS));
+            waited += HYGIENE_WAIT_STEP_MS;
+        }
+
+        let active = self.active_workers.load(Ordering::Acquire);
+        (max_wait_ms, active)
+    }
+
+    fn resolve_residual_workers(&self, _limits: &SearchLimits) -> (u64, usize, u64) {
+        self.shared_state.set_stop();
+        self.shared_state.close_work_queues();
+        self.pending_work_items.store(0, Ordering::Release);
+
+        let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
+        let wait_budget_ms = if let Some(ref tm) = tm_snapshot {
+            compute_hygiene_wait_budget(
+                tm.elapsed_ms(),
+                tm.hard_limit_ms(),
+                tm.scheduled_end_ms(),
+                HYGIENE_WAIT_MAX_MS,
+            )
+            .max(HYGIENE_WAIT_STEP_MS)
+        } else {
+            HYGIENE_WAIT_MAX_MS
+        };
+
+        let mut waited = 0;
+        while waited < wait_budget_ms {
+            let active = self.active_workers.load(Ordering::Acquire);
+            let pending = self.pending_work_items.load(Ordering::Acquire);
+            if active == 0 && pending == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(HYGIENE_WAIT_STEP_MS));
+            waited += HYGIENE_WAIT_STEP_MS;
+        }
+
+        let remaining_active = self.active_workers.load(Ordering::Acquire);
+        let remaining_pending = self.pending_work_items.load(Ordering::Acquire);
+        (waited, remaining_active, remaining_pending)
+    }
+
+    fn spawn_join_reaper(handles: Vec<thread::JoinHandle<()>>, label: &'static str) {
+        if handles.is_empty() {
+            return;
+        }
+
+        thread::spawn(move || {
+            for handle in handles {
+                if let Err(err) = handle.join() {
+                    log::warn!("join_reaper_error label={} err={:?}", label, err);
+                }
+            }
+            log::info!("diag join_reaper_complete label={label}");
+        });
+    }
+
     /// Handle ponderhit time management setup
     fn handle_ponderhit_time_management(&self, position: &Position, limits: &SearchLimits) {
         if let crate::time_management::TimeControl::Ponder(ref inner) = limits.time_control {
@@ -124,6 +215,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             time_parameters: limits.time_parameters,
                             stop_flag: limits.stop_flag.clone(),
                             info_callback: None, // Don't need callback for TimeManager
+                            info_string_callback: None,
                             iteration_callback: None,
                             ponder_hit_flag: None,
                             qnodes_counter: limits.qnodes_counter.clone(),
@@ -171,6 +263,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         main_worker: Option<&DequeWorker<WorkItem>>,
     ) {
         if self.shared_state.should_stop() {
+            return;
+        }
+        if self.shared_state.work_queues_closed() {
             return;
         }
         // Guard: avoid enqueueing more work if time has expired
@@ -267,6 +362,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
 
                     if !batch_moves.is_empty() {
+                        if self.shared_state.work_queues_closed() {
+                            break;
+                        }
                         // For root moves, use slightly shallower depth to avoid long-running tasks
                         let helper_depth = main_depth.saturating_sub(1).max(1);
 
@@ -358,6 +456,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     depth: helper_depth,
                     position: Arc::new(position.clone()),
                 };
+
+                if self.shared_state.work_queues_closed() {
+                    break;
+                }
 
                 // Increment pending work counter
                 self.pending_work_items.fetch_add(1, Ordering::AcqRel);
@@ -480,6 +582,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!(
                     "Stop mode: all workers inactive; finishing wait regardless of pending={pending}"
                 );
+                self.pending_work_items.store(0, Ordering::Release);
+                self.emit_info_string(
+                    limits,
+                    format!(
+                        "wait_skip_pending=1 pending={} elapsed_ms={}",
+                        pending,
+                        search_start.elapsed().as_millis()
+                    ),
+                );
                 #[cfg(feature = "diagnostics")]
                 {
                     info!(
@@ -547,7 +658,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 
     /// Create new parallel searcher
-    pub fn new(evaluator: Arc<E>, tt: Arc<TranspositionTable>, num_threads: usize) -> Self {
+    pub fn new(
+        evaluator: Arc<E>,
+        tt: Arc<TranspositionTable>,
+        num_threads: usize,
+        stop_bridge: Arc<EngineStopBridge>,
+    ) -> Self {
         assert!(num_threads > 0, "Need at least one thread");
 
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -573,6 +689,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             steal_failure: Arc::new(AtomicU64::new(0)),
             post_ponder_tm_handle: Arc::new(Mutex::new(None)),
             pending_work_items: Arc::new(AtomicU64::new(0)),
+            stop_bridge,
         }
     }
 
@@ -655,11 +772,31 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 residual_pending,
                 residual_finalized
             );
-            #[cfg(feature = "diagnostics")]
-            {
-                info!(
-                    "info string search_residual_workers=1 active={} pending={} finalized_early={}",
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "search_residual_workers=1 active={} pending={} finalized_early={}",
                     residual_active, residual_pending, residual_finalized as u8
+                ),
+            );
+
+            let (waited_ms, remaining_active, remaining_pending) =
+                self.resolve_residual_workers(&limits);
+
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "search_residual_workers_resolved=1 waited_ms={} remaining_active={} remaining_pending={}",
+                    waited_ms,
+                    remaining_active,
+                    remaining_pending
+                ),
+            );
+
+            if remaining_active != 0 {
+                warn!(
+                    "Residual workers persisted after hygiene wait: active={} pending={}",
+                    remaining_active, remaining_pending
                 );
             }
         }
@@ -681,10 +818,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Recreate shared_state with the provided stop flag so that all workers
             // and the TimeManager observe the same flag as the USI layer.
             self.shared_state =
-                Arc::new(SharedSearchState::with_threads(ext_stop, self.num_threads));
+                Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
+            self.shared_state.reopen_work_queues();
+            self.stop_bridge.publish_session(
+                &self.shared_state,
+                &self.pending_work_items,
+                Some(&ext_stop),
+            );
         } else {
             // Ensure clean state when no external flag is provided.
             self.shared_state.reset();
+            self.stop_bridge.publish_session(
+                &self.shared_state,
+                &self.pending_work_items,
+                Some(&self.shared_state.stop_flag),
+            );
         }
 
         // Reset counters for this session
@@ -781,7 +929,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         // Start time management if needed
-        let time_handle = {
+        let mut time_handle = {
             let tm_guard = self.time_manager.lock().unwrap();
             if let Some(ref tm) = *tm_guard {
                 // Start time manager if we have any time limit
@@ -798,11 +946,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         };
 
         // Start fail-safe guard thread
-        let fail_safe_handle = if limits.enable_fail_safe {
+        let mut fail_safe_handle = if limits.enable_fail_safe {
             Some(start_fail_safe_guard(search_start, limits.clone(), self.shared_state.clone()))
         } else {
             None
         };
+
+        // Preserve info string callback for post-search diagnostics before moving limits
+        let info_string_cb = limits.info_string_callback.clone();
 
         // Main thread does iterative deepening and generates work
         let result = self.run_main_thread(position, limits, main_worker);
@@ -819,31 +970,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         );
         self.shared_state.set_stop();
+        self.shared_state.close_work_queues();
+        self.pending_work_items.store(0, Ordering::Release);
 
-        // Wait for workers unless we deliberately finalized early
-        if !early_finalized {
-            for handle in handles {
-                let _ = handle.join();
-            }
-        }
+        let mut worker_handles = handles;
 
-        if !early_finalized {
-            if let Some(handle) = time_handle {
-                let _ = handle.join();
-            }
-            if let Some(h) = fail_safe_handle {
-                let _ = h.join();
-            }
-
-            // If we spawned a TimeManager after ponderhit, join it too
-            {
-                let mut h = self.post_ponder_tm_handle.lock().unwrap();
-                if let Some(handle) = h.take() {
-                    let _ = handle.join();
-                }
-            }
-        } else {
-            // Minimal hygiene wait to let workers observe the stop flag before the next search starts.
+        if early_finalized {
             let stop_info_snapshot = self.shared_state.stop_info.get();
             let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
             let (elapsed_ms, hard_limit_ms) = stop_info_snapshot
@@ -861,35 +993,64 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 HYGIENE_WAIT_MAX_MS,
             );
 
-            let mut waited_ms = 0u64;
-            while self.active_workers.load(Ordering::Acquire) != 0 && waited_ms < max_wait_ms {
-                thread::sleep(Duration::from_millis(HYGIENE_WAIT_STEP_MS));
-                waited_ms += HYGIENE_WAIT_STEP_MS;
+            let (waited_ms, remaining_active) = self.wait_for_active_clear(max_wait_ms);
+            let remaining_pending = self.pending_work_items.load(Ordering::Acquire);
+
+            if let Some(cb) = info_string_cb.as_ref() {
+                cb(&format!(
+                    "fast_finalize_hygiene waited_ms={} remaining_active={} remaining_pending={}",
+                    waited_ms, remaining_active, remaining_pending
+                ));
             }
 
-            #[cfg(feature = "diagnostics")]
-            {
-                let active_remaining = self.active_workers.load(Ordering::Acquire);
-                let pending_remaining = self.pending_work_items.load(Ordering::Acquire);
-                info!(
-                    "diag finalize_skip_join=1 active_workers={} pending_items={} waited_ms={} max_wait_ms={} hard_limit_ms={} planned_limit_ms={} time_handle={} fail_safe_handle={}",
-                    active_remaining,
-                    pending_remaining,
-                    waited_ms,
-                    max_wait_ms,
-                    if hard_limit_ms == u64::MAX { 0 } else { hard_limit_ms },
-                    if planned_limit_ms == u64::MAX {
-                        0
-                    } else {
-                        planned_limit_ms
-                    },
-                    time_handle.is_some(),
-                    fail_safe_handle.is_some()
-                );
+            if remaining_active == 0 {
+                for handle in worker_handles.drain(..) {
+                    if let Err(err) = handle.join() {
+                        log::warn!("worker_join_error early_finalize err={:?}", err);
+                    }
+                }
+            } else {
+                Self::spawn_join_reaper(worker_handles, "worker_fast_finalize");
             }
 
-            // 次探索に持ち越さないよう未処理ハンドルをデタッチ
-            let _ = self.post_ponder_tm_handle.lock().unwrap().take();
+            if let Some(handle) = time_handle.take() {
+                if let Err(err) = handle.join() {
+                    log::warn!("time_manager_join_error_fast_finalize err={:?}", err);
+                }
+            }
+            if let Some(handle) = fail_safe_handle.take() {
+                if let Err(err) = handle.join() {
+                    log::warn!("fail_safe_join_error_fast_finalize err={:?}", err);
+                }
+            }
+            if let Some(handle) = self.post_ponder_tm_handle.lock().unwrap().take() {
+                if let Err(err) = handle.join() {
+                    log::warn!("post_ponder_tm_join_error_fast_finalize err={:?}", err);
+                }
+            }
+
+            *self.time_manager.lock().unwrap() = None;
+        } else {
+            for handle in worker_handles {
+                if let Err(err) = handle.join() {
+                    log::warn!("worker_join_error err={:?}", err);
+                }
+            }
+            if let Some(handle) = time_handle.take() {
+                if let Err(err) = handle.join() {
+                    log::warn!("time_manager_join_error err={:?}", err);
+                }
+            }
+            if let Some(handle) = fail_safe_handle.take() {
+                if let Err(err) = handle.join() {
+                    log::warn!("fail_safe_join_error err={:?}", err);
+                }
+            }
+            if let Some(handle) = self.post_ponder_tm_handle.lock().unwrap().take() {
+                if let Err(err) = handle.join() {
+                    log::warn!("post_ponder_tm_join_error err={:?}", err);
+                }
+            }
             *self.time_manager.lock().unwrap() = None;
         }
 
@@ -903,6 +1064,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 "Steal metrics: success={steal_success_count}, failure={steal_failure_count}, rate={success_rate:.1}%"
             );
         }
+
+        self.stop_bridge.clear();
 
         result
     }
@@ -939,6 +1102,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Iterative deepening
         for iteration in 1.. {
+            if self.shared_state.should_stop()
+                || limits
+                    .stop_flag
+                    .as_ref()
+                    .map(|flag| flag.load(Ordering::Acquire))
+                    .unwrap_or(false)
+            {
+                self.broadcast_stop(limits.stop_flag.as_ref());
+                return self.prepare_final_result(position, best_result);
+            }
+
             // Check for ponderhit and create TimeManager dynamically if needed
             self.handle_ponderhit_time_management(position, &limits);
             // If TM was just created on ponderhit, attach it to the main thread searcher (idempotent)
@@ -955,7 +1129,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
                 {
                     tm.force_stop();
-                    return self.finalize_time_limit(position, action);
+                    return self.finalize_time_limit(
+                        position,
+                        action,
+                        limits.info_string_callback.as_ref(),
+                    );
                 }
             }
 
@@ -967,9 +1145,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
                     {
                         tm.force_stop();
-                        return self.finalize_time_limit(position, action);
+                        return self.finalize_time_limit(
+                            position,
+                            action,
+                            limits.info_string_callback.as_ref(),
+                        );
                     }
                 }
+
+                self.broadcast_stop(limits.stop_flag.as_ref());
 
                 let params = TimeLimitFinalization {
                     best_snapshot: best_result.clone(),
@@ -987,7 +1171,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 if let Some(ref tm) = tm_opt {
                     tm.force_stop();
                 }
-                return self.finalize_time_limit(position, params);
+                return self.finalize_time_limit(
+                    position,
+                    params,
+                    limits.info_string_callback.as_ref(),
+                );
             }
 
             // Calculate depths for this iteration
@@ -1226,7 +1414,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     self.assess_time_limit(tm, elapsed_ms, current_nodes, &best_result)
                 {
                     tm.force_stop();
-                    return self.finalize_time_limit(position, action);
+                    return self.finalize_time_limit(
+                        position,
+                        action,
+                        limits.info_string_callback.as_ref(),
+                    );
                 }
             }
 
@@ -1265,6 +1457,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         &self,
         position: &mut Position,
         params: TimeLimitFinalization,
+        info_cb: Option<&InfoStringCallback>,
     ) -> SearchResult {
         if log::log_enabled!(log::Level::Info) {
             log::info!(
@@ -1288,6 +1481,30 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 },
                 params.current_nodes
             );
+        }
+
+        if let Some(cb) = info_cb {
+            cb(&format!(
+                "near_hard_finalize=1 label={} elapsed={} soft={} hard={} planned={} nodes={}",
+                params.label,
+                params.elapsed_ms,
+                if params.soft_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.soft_limit_ms
+                },
+                if params.hard_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.hard_limit_ms
+                },
+                if params.planned_limit_ms == u64::MAX {
+                    0
+                } else {
+                    params.planned_limit_ms
+                },
+                params.current_nodes
+            ));
         }
 
         self.shared_state.set_stop_with_reason(crate::search::types::StopInfo {
@@ -1506,7 +1723,8 @@ mod tests_compute_guard_and_wait {
         // Arrange a ParallelSearcher and force stop with no active workers but non-zero pending.
         let evaluator = std::sync::Arc::new(MaterialEvaluator);
         let tt = std::sync::Arc::new(TranspositionTable::new(16));
-        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
+        let mut searcher =
+            ParallelSearcher::new(evaluator, tt, 2, std::sync::Arc::new(EngineStopBridge::new()));
 
         // Install a TimeManager to enable the stop-priority path (as used in time-control mode)
         use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
@@ -1554,7 +1772,7 @@ mod tests_assess_time_and_finalize {
     fn make_searcher() -> ParallelSearcher<MaterialEvaluator> {
         let evaluator = std::sync::Arc::new(MaterialEvaluator);
         let tt = std::sync::Arc::new(TranspositionTable::new(16));
-        ParallelSearcher::new(evaluator, tt, 1)
+        ParallelSearcher::new(evaluator, tt, 1, std::sync::Arc::new(EngineStopBridge::new()))
     }
 
     #[test]
@@ -1663,7 +1881,7 @@ mod tests_assess_time_and_finalize {
             label: "unit_test".to_string(),
         };
 
-        let _ = searcher.finalize_time_limit(&mut pos, params);
+        let _ = searcher.finalize_time_limit(&mut pos, params, None);
         assert!(searcher.shared_state.is_finalized_early());
         let info = searcher.shared_state.stop_info.get().cloned().expect("stop info set");
         assert!(matches!(info.reason, TerminationReason::TimeLimit));

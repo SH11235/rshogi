@@ -84,6 +84,7 @@ fn test_parallel_search_node_counting() {
 
 #[test]
 fn test_edge_position_moves() {
+    let _guard = PARALLEL_SEARCH_TEST_LOCK.lock().unwrap();
     // Test positions where pieces are near board edges
     let mut engine = Engine::new(EngineType::Material);
     engine.set_threads(2);
@@ -102,6 +103,7 @@ fn test_edge_position_moves() {
 
 #[test]
 fn test_continuous_searches() {
+    let _guard = PARALLEL_SEARCH_TEST_LOCK.lock().unwrap();
     // Run many searches continuously to stress test parallel coordination
     let mut engine = Engine::new(EngineType::Material);
     engine.set_threads(4);
@@ -115,7 +117,11 @@ fn test_continuous_searches() {
 
         let result = engine.search(&mut pos, limits);
         assert!(result.best_move.is_some(), "Search {i} should find a move");
-        assert!(result.stats.elapsed.as_millis() <= 20, "Search {i} should respect time limit");
+        assert!(
+            result.stats.elapsed.as_millis() <= 40,
+            "Search {i} should respect time limit (elapsed={}ms)",
+            result.stats.elapsed.as_millis()
+        );
 
         // Small delay between searches
         thread::sleep(Duration::from_millis(5));

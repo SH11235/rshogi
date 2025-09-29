@@ -5,7 +5,7 @@
 use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
-    search::parallel::ParallelSearcher,
+    search::parallel::{EngineStopBridge, ParallelSearcher},
     search::unified::UnifiedSearcher,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
@@ -142,6 +142,8 @@ pub struct Engine {
     desired_multi_pv: u8,
     // Active searches counter for clear_hash safety
     active_searches: AtomicUsize,
+    // Bridge to issue immediate stop requests without locking Engine mutex
+    stop_bridge: Arc<EngineStopBridge>,
 }
 
 /// RAII guard to track active searches for safe operations (e.g., clear_hash)
@@ -166,6 +168,8 @@ impl Engine {
     pub fn new(engine_type: EngineType) -> Self {
         let material_evaluator = Arc::new(MaterialEvaluator);
         let default_tt_size = 1024; // Default TT size in MB
+
+        let stop_bridge = Arc::new(EngineStopBridge::new());
 
         let nnue_evaluator = if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
             // Initialize with zero weights for NNUE engine
@@ -254,7 +258,18 @@ impl Engine {
             pending_tt_size: None,
             desired_multi_pv: 1,
             active_searches: AtomicUsize::new(0),
+            stop_bridge,
         }
+    }
+
+    /// Issue an immediate stop request to the currently running search without acquiring locks.
+    pub fn request_stop_immediate(&self) {
+        self.stop_bridge.request_stop_immediate();
+    }
+
+    /// Obtain a clone of the stop bridge for out-of-engine coordination (USI layer).
+    pub fn stop_bridge_handle(&self) -> Arc<EngineStopBridge> {
+        Arc::clone(&self.stop_bridge)
     }
 
     /// Return TT metrics summary string if available (tt_metrics feature only)
@@ -405,6 +420,8 @@ impl Engine {
         // 検索アクティブガード（関数終了時に自動デクリメント）
         let _active_guard = ActiveSearchGuard::new(&self.active_searches);
 
+        self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
+
         // Detect phase once and use for both thread calculation and logging
         let phase = self.detect_game_phase(pos);
         let active_threads = self.calculate_active_threads_from_phase(phase);
@@ -502,6 +519,7 @@ impl Engine {
                 }
             }
         };
+        self.stop_bridge.update_external_stop_flag(None);
         result
     }
 
@@ -553,6 +571,7 @@ impl Engine {
                         self.material_evaluator.clone(),
                         self.shared_tt.clone(),
                         self.num_threads, // Use max threads, not active threads
+                        Arc::clone(&self.stop_bridge),
                     ));
                 }
 
@@ -594,6 +613,7 @@ impl Engine {
                         Arc::new(nnue_proxy),
                         self.shared_tt.clone(),
                         self.num_threads, // Use max threads, not active threads
+                        Arc::clone(&self.stop_bridge),
                     ));
                 }
 
