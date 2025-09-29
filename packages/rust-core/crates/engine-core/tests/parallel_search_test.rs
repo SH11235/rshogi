@@ -5,7 +5,7 @@ use engine_core::{
     shogi::Position,
 };
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -37,11 +37,11 @@ fn test_parallel_search_short_time() {
         eprintln!("WARNING: Elapsed time was 0ms with 1ms byoyomi limit");
     }
 
-    // Reset stop flag
-    stop_flag.store(false, Ordering::SeqCst);
+    // Reset stop flag (ParallelSearcher 側で stop ブロードキャストが入るため、再利用ではなく新規フラグを渡す)
+    let stop_flag = Arc::new(AtomicBool::new(false));
 
     // Test 2: Depth-limited search
-    let limits = SearchLimits::builder().depth(1).stop_flag(stop_flag.clone()).build();
+    let limits = SearchLimits::builder().depth(1).stop_flag(stop_flag).build();
 
     let result = engine.search(&mut pos, limits.clone());
     assert!(result.best_move.is_some(), "Should find a move at depth 1");

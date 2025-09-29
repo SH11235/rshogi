@@ -3,7 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     movegen::MoveGenerator,
-    search::types::{InfoStringCallback, TerminationReason},
+    search::types::{InfoStringCallback, StopInfo, TerminationReason},
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     shogi::{Move, Position},
     time_management::{GamePhase, TimeManager},
@@ -103,7 +103,22 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     #[inline]
     fn broadcast_stop(&self, external_stop: Option<&Arc<AtomicBool>>) {
-        self.shared_state.set_stop();
+        let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
+        let elapsed_ms = tm_snapshot.as_ref().map(|tm| tm.elapsed_ms()).unwrap_or(0);
+        let soft_ms = tm_snapshot.as_ref().map(|tm| tm.soft_limit_ms()).unwrap_or(0);
+        let hard_ms = tm_snapshot.as_ref().map(|tm| tm.hard_limit_ms()).unwrap_or(0);
+        let nodes = self.shared_state.get_nodes();
+        let depth = self.shared_state.get_best_depth();
+        let stop_info = StopInfo {
+            reason: TerminationReason::UserStop,
+            elapsed_ms,
+            nodes,
+            depth_reached: depth,
+            hard_timeout: false,
+            soft_limit_ms: soft_ms,
+            hard_limit_ms: hard_ms,
+        };
+        self.shared_state.set_stop_with_reason(stop_info);
         self.shared_state.close_work_queues();
         self.pending_work_items.store(0, Ordering::Release);
         if let Some(flag) = external_stop {
