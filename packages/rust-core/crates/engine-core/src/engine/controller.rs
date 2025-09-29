@@ -555,6 +555,7 @@ impl Engine {
     }
 
     /// Parallel search with material evaluator
+    /// Phase 3: Searcher lock is released after search() to allow concurrent cleanup
     fn search_parallel_material(
         &mut self,
         pos: &mut Position,
@@ -563,35 +564,54 @@ impl Engine {
     ) -> SearchResult {
         debug!("Starting parallel material search with {active_threads} active threads");
 
-        // Initialize parallel searcher if needed or if thread count changed
+        // Phase 3: Perform search with lock, then release before cleanup
+        let result = {
+            // Initialize parallel searcher if needed or if thread count changed
+            match self.material_parallel_searcher.lock() {
+                Ok(mut searcher_guard) => {
+                    if searcher_guard.is_none() {
+                        *searcher_guard = Some(MaterialParallelSearcher::new(
+                            self.material_evaluator.clone(),
+                            self.shared_tt.clone(),
+                            self.num_threads, // Use max threads, not active threads
+                            Arc::clone(&self.stop_bridge),
+                        ));
+                    }
+
+                    // Always adjust to current active thread count
+                    if let Some(searcher) = searcher_guard.as_mut() {
+                        searcher.adjust_thread_count(active_threads);
+                        // Phase 3: search() returns immediately after result determined
+                        searcher.search(pos, limits)
+                    } else {
+                        error!("Failed to initialize parallel material searcher");
+                        SearchResult::new(None, 0, SearchStats::default())
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to lock material parallel searcher: {}", e);
+                    SearchResult::new(None, 0, SearchStats::default())
+                }
+            } // Lock released here
+        };
+
+        // Phase 3: Perform cleanup (hygiene wait + thread join) without holding lock
         match self.material_parallel_searcher.lock() {
             Ok(mut searcher_guard) => {
-                if searcher_guard.is_none() {
-                    *searcher_guard = Some(MaterialParallelSearcher::new(
-                        self.material_evaluator.clone(),
-                        self.shared_tt.clone(),
-                        self.num_threads, // Use max threads, not active threads
-                        Arc::clone(&self.stop_bridge),
-                    ));
-                }
-
-                // Always adjust to current active thread count
                 if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.adjust_thread_count(active_threads);
-                    searcher.search(pos, limits)
-                } else {
-                    error!("Failed to initialize parallel material searcher");
-                    SearchResult::new(None, 0, SearchStats::default())
+                    searcher.wait_for_completion();
                 }
             }
             Err(e) => {
-                error!("Failed to lock material parallel searcher: {}", e);
-                SearchResult::new(None, 0, SearchStats::default())
+                error!("Failed to lock material parallel searcher for cleanup: {}", e);
             }
         }
+
+        result
     }
 
     /// Parallel search with NNUE evaluator
+    /// Phase 3: Searcher lock is released after search() to allow concurrent cleanup
     fn search_parallel_nnue(
         &mut self,
         pos: &mut Position,
@@ -600,37 +620,55 @@ impl Engine {
     ) -> SearchResult {
         debug!("Starting parallel NNUE search with {active_threads} active threads");
 
-        // Initialize parallel searcher if needed or if thread count changed
+        // Phase 3: Perform search with lock, then release before cleanup
+        let result = {
+            // Initialize parallel searcher if needed or if thread count changed
+            match self.nnue_parallel_searcher.lock() {
+                Ok(mut searcher_guard) => {
+                    if searcher_guard.is_none() {
+                        let nnue_proxy = NNUEEvaluatorProxy {
+                            evaluator: self.nnue_evaluator.clone(),
+                            locals: thread_local::ThreadLocal::new(),
+                        };
+                        // 差分Accを並列でも使う：HookSuppressorなしでフック対が有効
+                        *searcher_guard = Some(NnueParallelSearcher::new(
+                            Arc::new(nnue_proxy),
+                            self.shared_tt.clone(),
+                            self.num_threads, // Use max threads, not active threads
+                            Arc::clone(&self.stop_bridge),
+                        ));
+                    }
+
+                    // Always adjust to current active thread count
+                    if let Some(searcher) = searcher_guard.as_mut() {
+                        searcher.adjust_thread_count(active_threads);
+                        // Phase 3: search() returns immediately after result determined
+                        searcher.search(pos, limits)
+                    } else {
+                        error!("Failed to initialize parallel NNUE searcher");
+                        SearchResult::new(None, 0, SearchStats::default())
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to lock NNUE parallel searcher: {}", e);
+                    SearchResult::new(None, 0, SearchStats::default())
+                }
+            } // Lock released here
+        };
+
+        // Phase 3: Perform cleanup (hygiene wait + thread join) without holding lock
         match self.nnue_parallel_searcher.lock() {
             Ok(mut searcher_guard) => {
-                if searcher_guard.is_none() {
-                    let nnue_proxy = NNUEEvaluatorProxy {
-                        evaluator: self.nnue_evaluator.clone(),
-                        locals: thread_local::ThreadLocal::new(),
-                    };
-                    // 差分Accを並列でも使う：HookSuppressorなしでフック対が有効
-                    *searcher_guard = Some(NnueParallelSearcher::new(
-                        Arc::new(nnue_proxy),
-                        self.shared_tt.clone(),
-                        self.num_threads, // Use max threads, not active threads
-                        Arc::clone(&self.stop_bridge),
-                    ));
-                }
-
-                // Always adjust to current active thread count
                 if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.adjust_thread_count(active_threads);
-                    searcher.search(pos, limits)
-                } else {
-                    error!("Failed to initialize parallel NNUE searcher");
-                    SearchResult::new(None, 0, SearchStats::default())
+                    searcher.wait_for_completion();
                 }
             }
             Err(e) => {
-                error!("Failed to lock NNUE parallel searcher: {}", e);
-                SearchResult::new(None, 0, SearchStats::default())
+                error!("Failed to lock NNUE parallel searcher for cleanup: {}", e);
             }
         }
+
+        result
     }
 
     /// Set number of threads for parallel search

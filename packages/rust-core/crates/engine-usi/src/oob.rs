@@ -67,8 +67,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 // Step 1: broadcast immediate stop to search threads
                 state.stop_bridge.request_stop_immediate();
 
-                // Step 2: compute wait budget based on time control and StopWaitMs
-                // Stage 1: Prefer in-place join with extended waiting
+                // compute wait budget based on time control and StopWaitMs
+                // Prefer in-place join with extended waiting
                 let stop_wait_ms = state.opts.stop_wait_ms;
                 let is_pure_byoyomi = if let Some(ref tc) = state.current_time_control {
                     use engine_core::time_management::TimeControl;
@@ -173,39 +173,13 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         fast_finalize_and_detach(state, label);
                     }
                 } else {
-                    // Review feedback: For pure byoyomi with sufficient margin, prohibit detach
-                    // and extend wait instead of giving up
-                    let should_prohibit_detach = if is_pure_byoyomi {
-                        // Check if we have at least 300ms margin left
-                        if let Some(ref tc) = state.current_time_control {
-                            use engine_core::time_management::TimeControl;
-                            if let TimeControl::Byoyomi { byoyomi_ms, .. } = tc {
-                                // Estimate elapsed: start time not available here, use conservative heuristic
-                                // If we reach here with budget ≥ 200ms, likely still have margin
-                                wait_budget_ms >= 200 && *byoyomi_ms >= 1000
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if should_prohibit_detach {
-                        info_string(format!(
-                            "oob_finalize_prohibit_detach pure_byo=1 budget={} retry=1",
-                            wait_budget_ms
-                        ));
-                        // Put rx back and retry on next poll
-                        state.finalizer_rx = Some(rx);
-                        return;
-                    }
-
+                    // Result not received within wait budget → detach and send bestmove
+                    // Note: Previously tried to prohibit detach for pure byoyomi with margin,
+                    // but this caused infinite loops because Finalize message is not resent.
+                    // Better to detach and output bestmove than to time-loss.
                     info_string(format!(
-                        "oob_finalize_timeout no_result=1 sid={} detach=1",
-                        session_id
+                        "oob_finalize_timeout no_result=1 sid={} budget_ms={} detach=1",
+                        session_id, wait_budget_ms
                     ));
                     fast_finalize_and_detach(state, label);
                 }

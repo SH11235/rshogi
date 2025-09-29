@@ -4,7 +4,7 @@ use crate::search::constants::{MAIN_NEAR_DEADLINE_WINDOW_MS, NEAR_HARD_FINALIZE_
 
 /// Default上限: finalize後の衛生待機で許可する最大待ち時間 (ms)
 pub(crate) const HYGIENE_WAIT_MAX_MS: u64 = 50;
-/// Stage 4: 残余時間が十分な場合の拡張上限 (ms)
+/// 残余時間が十分な場合の拡張上限 (ms)
 pub(crate) const HYGIENE_WAIT_EXTENDED_MAX_MS: u64 = 250;
 /// 待機ループのステップ幅 (ms)。5ms 刻みで sleep させる。
 pub(crate) const HYGIENE_WAIT_STEP_MS: u64 = 5;
@@ -68,7 +68,7 @@ pub(crate) fn compute_hard_guard_ms(total_hard_limit_ms: u64) -> u64 {
     }
 }
 
-/// Stage 4: 残余時間に基づいて衛生待機の動的上限を計算する。
+/// 残余時間に基づいて衛生待機の動的上限を計算する。
 ///
 /// 残余時間が十分にある場合（≥1000ms）は拡張上限（250ms）、
 /// それ以外は通常上限（50ms）を返す。
