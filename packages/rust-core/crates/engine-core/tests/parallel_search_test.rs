@@ -4,10 +4,13 @@ use engine_core::{
     search::SearchLimits,
     shogi::Position,
 };
+use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+static PARALLEL_SEARCH_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[test]
 fn test_parallel_search_short_time() {
@@ -47,6 +50,7 @@ fn test_parallel_search_short_time() {
 
 #[test]
 fn test_parallel_search_node_counting() {
+    let _guard = PARALLEL_SEARCH_TEST_LOCK.lock().unwrap();
     // Test that node counting doesn't underflow in parallel search
     let mut engine = Engine::new(EngineType::Material);
     engine.set_threads(4);
