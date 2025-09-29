@@ -150,6 +150,10 @@ fn qs_light_time_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    if searcher.context.should_stop() {
+        return true;
+    }
+
     if qs_should_light_poll(searcher) {
         // Process events and check time limit (unified path).
         searcher.context.process_events(&searcher.time_manager);

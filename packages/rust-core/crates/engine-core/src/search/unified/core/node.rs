@@ -89,6 +89,11 @@ fn ab_light_time_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // If stop が既に立っているなら、間引きロジックを飛ばして即座に脱出する。
+    if searcher.context.should_stop() {
+        return true;
+    }
+
     if ab_should_light_poll(searcher) {
         searcher.context.process_events(&searcher.time_manager);
         if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)

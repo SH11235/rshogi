@@ -23,7 +23,10 @@ use std::{
 use super::time_manager::{start_fail_safe_guard, start_time_manager};
 use super::work_queue::{Queues, WorkItem};
 use super::worker::{start_worker_with, WorkerConfig};
-use crate::search::parallel::util::{compute_finalize_window_ms, compute_hard_guard_ms};
+use crate::search::parallel::util::{
+    compute_finalize_window_ms, compute_hard_guard_ms, compute_hygiene_wait_budget,
+    HYGIENE_WAIT_MAX_MS, HYGIENE_WAIT_STEP_MS,
+};
 
 #[cfg(feature = "ybwc")]
 use super::SplitPoint;
@@ -810,20 +813,22 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         } else {
             // Minimal hygiene wait to let workers observe the stop flag before the next search starts.
-            const HYGIENE_WAIT_MAX_MS: u64 = 50;
-            const HYGIENE_WAIT_STEP_MS: u64 = 5;
-            const HYGIENE_LEAD_MS: u64 = 100;
-            const HYGIENE_IO_MS: u64 = 15;
+            let stop_info_snapshot = self.shared_state.stop_info.get();
+            let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
+            let (elapsed_ms, hard_limit_ms) = stop_info_snapshot
+                .as_ref()
+                .map(|info| (info.elapsed_ms, info.hard_limit_ms))
+                .or_else(|| tm_snapshot.as_ref().map(|tm| (tm.elapsed_ms(), tm.hard_limit_ms())))
+                .unwrap_or((0, u64::MAX));
+            let planned_limit_ms =
+                tm_snapshot.as_ref().map(|tm| tm.scheduled_end_ms()).unwrap_or(u64::MAX);
 
-            let mut max_wait_ms = HYGIENE_WAIT_MAX_MS;
-            if let Some(info) = self.shared_state.stop_info.get() {
-                if info.hard_limit_ms > 0 && info.hard_limit_ms < u64::MAX {
-                    let remaining = info.hard_limit_ms.saturating_sub(info.elapsed_ms);
-                    let reserved = HYGIENE_LEAD_MS + HYGIENE_IO_MS;
-                    let safe_budget = remaining.saturating_sub(reserved);
-                    max_wait_ms = max_wait_ms.min(safe_budget);
-                }
-            }
+            let max_wait_ms = compute_hygiene_wait_budget(
+                elapsed_ms,
+                hard_limit_ms,
+                planned_limit_ms,
+                HYGIENE_WAIT_MAX_MS,
+            );
 
             let mut waited_ms = 0u64;
             while self.active_workers.load(Ordering::Acquire) != 0 && waited_ms < max_wait_ms {
@@ -836,11 +841,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 let active_remaining = self.active_workers.load(Ordering::Acquire);
                 let pending_remaining = self.pending_work_items.load(Ordering::Acquire);
                 info!(
-                    "diag finalize_skip_join=1 active_workers={} pending_items={} waited_ms={} max_wait_ms={} time_handle={} fail_safe_handle={}",
+                    "diag finalize_skip_join=1 active_workers={} pending_items={} waited_ms={} max_wait_ms={} hard_limit_ms={} planned_limit_ms={} time_handle={} fail_safe_handle={}",
                     active_remaining,
                     pending_remaining,
                     waited_ms,
                     max_wait_ms,
+                    if hard_limit_ms == u64::MAX { 0 } else { hard_limit_ms },
+                    if planned_limit_ms == u64::MAX {
+                        0
+                    } else {
+                        planned_limit_ms
+                    },
                     time_handle.is_some(),
                     fail_safe_handle.is_some()
                 );
@@ -1407,7 +1418,9 @@ mod tests_compute_guard_and_wait {
     use super::*;
     use crate::{
         evaluation::evaluate::MaterialEvaluator,
-        search::parallel::util::compute_hard_guard_ms,
+        search::parallel::util::{
+            compute_hard_guard_ms, compute_hygiene_wait_budget, HYGIENE_WAIT_MAX_MS,
+        },
         search::{SearchLimits, TranspositionTable},
     };
 
@@ -1437,6 +1450,24 @@ mod tests_compute_guard_and_wait {
         assert_eq!(compute_finalize_window_ms(180), 0);
         assert_eq!(compute_finalize_window_ms(0), 0);
         assert_eq!(compute_finalize_window_ms(u64::MAX), 0);
+    }
+
+    #[test]
+    fn test_compute_hygiene_wait_budget_clips_by_remaining() {
+        let default = HYGIENE_WAIT_MAX_MS;
+        assert_eq!(compute_hygiene_wait_budget(900, 1_000, u64::MAX, default), 0);
+        assert_eq!(compute_hygiene_wait_budget(880, 1_000, u64::MAX, default), 5);
+        assert_eq!(compute_hygiene_wait_budget(0, 10_000, u64::MAX, default), default);
+        assert_eq!(compute_hygiene_wait_budget(0, u64::MAX, u64::MAX, default), default);
+    }
+
+    #[test]
+    fn test_compute_hygiene_wait_budget_prefers_planned_limit() {
+        let default = HYGIENE_WAIT_MAX_MS;
+        // planned limit が hard よりも近い場合は planned を優先
+        assert_eq!(compute_hygiene_wait_budget(860, 2_000, 1_000, default), 25);
+        // planned が既に尽きている場合は 0
+        assert_eq!(compute_hygiene_wait_budget(995, u64::MAX, 1_000, default), 0);
     }
 
     #[test]
