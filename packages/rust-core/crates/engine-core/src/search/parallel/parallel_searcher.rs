@@ -3,11 +3,14 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     movegen::MoveGenerator,
-    search::limits::FallbackDeadlines,
-    search::types::{InfoStringCallback, StopInfo, TerminationReason},
-    search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
+    search::{
+        limits::FallbackDeadlines,
+        types::{InfoStringCallback, StopInfo, TerminationReason},
+        SearchLimits, SearchResult, SearchStats, TranspositionTable,
+    },
     shogi::{Move, Position},
     time_management::{GamePhase, TimeManager},
+    TimeControl,
 };
 use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
 use log::{debug, info, warn};
@@ -1223,8 +1226,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             let tm_opt = { self.time_manager.lock().unwrap().clone() };
-
-            if tm_opt.is_none() {
+            let is_ponder = matches!(limits.time_control, TimeControl::Ponder(_));
+            if tm_opt.is_none() && !is_ponder {
                 if let Some(deadlines) = fallback_deadlines {
                     let now = Instant::now();
                     if now >= deadlines.hard_deadline {
