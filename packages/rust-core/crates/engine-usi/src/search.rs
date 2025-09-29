@@ -342,9 +342,9 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     let wait_budget = compute_idle_wait_budget(&gp, &state.opts);
     let idle_outcome = wait_for_engine_idle(state, wait_budget);
-    let waited_before_go_ms = idle_outcome.waited.as_millis() as u64;
+    let mut waited_before_go_ms = idle_outcome.waited.as_millis() as u64;
     if idle_outcome.timed_out {
-        let status = idle_outcome.final_status;
+        let status = idle_outcome.final_status.clone();
         info_string(format!(
             "go_wait_for_idle_timeout=1 waited_ms={} worker_active={} reaper_pending={} pending_work={} active_workers={}",
             waited_before_go_ms,
@@ -353,7 +353,40 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             status.pending_work_items,
             status.active_workers
         ));
-        state.stop_bridge.force_clear();
+        // Reaper が残っているだけなら追加で待って衝突を避ける（Engine mutex 競合対策）
+        if !status.worker_active
+            && status.active_workers == 0
+            && status.pending_work_items == 0
+            && status.reaper_pending > 0
+        {
+            let extra_cap = std::time::Duration::from_millis(1200);
+            let start2 = std::time::Instant::now();
+            loop {
+                let s2 = state.idle_status();
+                if s2.reaper_pending == 0 {
+                    break;
+                }
+                if start2.elapsed() >= extra_cap {
+                    break;
+                }
+                state.idle_sync.wait_timeout(std::time::Duration::from_millis(50));
+            }
+            let extra = start2.elapsed().as_millis() as u64;
+            waited_before_go_ms = waited_before_go_ms.saturating_add(extra);
+            let s2 = state.idle_status();
+            info_string(format!(
+                "go_wait_for_reaper waited_ms={} reaper_pending_after={} worker_active={} active_workers={}",
+                extra,
+                s2.reaper_pending,
+                s2.worker_active as u8,
+                s2.active_workers
+            ));
+        }
+        // 前セッションの stop 残骸を明示的に破棄（Reaper 待ちだけでなければ）
+        let post = state.idle_status();
+        if post.worker_active || post.active_workers > 0 || post.pending_work_items > 0 {
+            state.stop_bridge.force_clear();
+        }
         state.notify_idle();
     } else if waited_before_go_ms > 0 {
         let status = idle_outcome.final_status;

@@ -8,7 +8,7 @@ use engine_core::time_management::TimeControl;
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
-use crate::util::{enqueue_reaper, join_search_handle};
+use crate::util::enqueue_reaper;
 
 pub fn handle_stop(state: &mut EngineState) {
     if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
@@ -295,9 +295,10 @@ pub fn handle_gameover(state: &mut EngineState) {
                     state.current_root_hash = None;
                     state.current_time_control = None;
                     if let Some(handle) = worker {
-                        join_search_handle(handle, "gameover_timeout_finalize");
+                        enqueue_reaper(state, handle, "gameover_timeout_finalize");
+                    } else {
+                        state.notify_idle();
                     }
-                    state.notify_idle();
                 }
             } else {
                 state.searching = false;

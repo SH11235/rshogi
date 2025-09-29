@@ -106,19 +106,19 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     #[inline]
     fn broadcast_stop(&self, external_stop: Option<&Arc<AtomicBool>>) {
-        if let Some(flag) = external_stop {
-            flag.store(true, Ordering::Release);
-        }
-
         let already_has_reason = self.shared_state.stop_info.get().is_some();
 
         if already_has_reason {
+            // 既に StopInfo が設定済み（例: TimeLimit）の場合は、理由を維持しつつ停止のみ伝播。
             self.shared_state.set_stop();
             self.shared_state.close_work_queues();
             return;
         }
 
         if external_stop.is_some() {
+            if let Some(flag) = external_stop {
+                flag.store(true, Ordering::Release);
+            }
             let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
             let elapsed_ms = tm_snapshot.as_ref().map(|tm| tm.elapsed_ms()).unwrap_or(0);
             let soft_ms = tm_snapshot.as_ref().map(|tm| tm.soft_limit_ms()).unwrap_or(0);
@@ -153,7 +153,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     fn finalize_fallback_deadline(
         &self,
         position: &mut Position,
-        limits: &SearchLimits,
         best_result: SearchResult,
         search_start: Instant,
         deadlines: FallbackDeadlines,
@@ -175,7 +174,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         };
 
         self.shared_state.set_stop_with_reason(stop_info);
-        self.broadcast_stop(limits.stop_flag.as_ref());
+        // 内部要因（TimeLimit）による停止なので external stop は立てず、停止のみ伝播。
+        self.broadcast_stop(None);
         self.shared_state.close_work_queues();
         self.prepare_final_result(position, best_result)
     }
@@ -953,6 +953,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         } else {
             // Ensure clean state when no external flag is provided.
             self.shared_state.reset();
+            self.shared_state.reopen_work_queues();
             self.stop_bridge.publish_session(
                 &self.shared_state,
                 &self.pending_work_items,
@@ -1264,7 +1265,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         );
                         return self.finalize_fallback_deadline(
                             position,
-                            &limits,
                             best_result,
                             search_start,
                             deadlines,
@@ -1282,7 +1282,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             );
                             return self.finalize_fallback_deadline(
                                 position,
-                                &limits,
                                 best_result,
                                 search_start,
                                 deadlines,
@@ -2008,11 +2007,48 @@ mod tests_assess_time_and_finalize {
     use crate::search::types::TerminationReason;
     use crate::search::TranspositionTable;
     use crate::shogi::Position;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     fn make_searcher() -> ParallelSearcher<MaterialEvaluator> {
         let evaluator = std::sync::Arc::new(MaterialEvaluator);
         let tt = std::sync::Arc::new(TranspositionTable::new(16));
         ParallelSearcher::new(evaluator, tt, 1, std::sync::Arc::new(EngineStopBridge::new()))
+    }
+
+    #[test]
+    fn broadcast_stop_preserves_existing_reason() {
+        let searcher = make_searcher();
+        // Set TimeLimit reason beforehand
+        searcher.shared_state.set_stop_with_reason(crate::search::types::StopInfo {
+            reason: TerminationReason::TimeLimit,
+            elapsed_ms: 123,
+            nodes: 456,
+            depth_reached: 7,
+            hard_timeout: false,
+            soft_limit_ms: 0,
+            hard_limit_ms: 0,
+        });
+
+        let flag = Arc::new(AtomicBool::new(false));
+        searcher.broadcast_stop(Some(&flag));
+
+        let info = searcher.shared_state.stop_info.get().cloned().unwrap();
+        assert!(matches!(info.reason, TerminationReason::TimeLimit));
+        assert!(flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn pending_counter_is_replaced_per_session() {
+        let mut searcher = make_searcher();
+        let old_ptr = Arc::as_ptr(&searcher.pending_work_items);
+        let mut pos = Position::startpos();
+        let limits = SearchLimits::builder().depth(1).build();
+        let _ = searcher.search(&mut pos, limits);
+        let new_ptr = Arc::as_ptr(&searcher.pending_work_items);
+        assert_ne!(old_ptr, new_ptr, "pending counter should be replaced per session");
     }
 
     #[test]
