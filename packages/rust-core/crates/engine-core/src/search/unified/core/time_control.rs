@@ -58,7 +58,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     // If already stopped, check every node for immediate exit
-    if searcher.context.should_stop() {
+    if searcher.context.should_stop() || searcher.context.was_time_stopped() {
         return EVERY_NODE; // immediate response
     }
 

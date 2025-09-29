@@ -90,7 +90,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     // If stop が既に立っているなら、間引きロジックを飛ばして即座に脱出する。
-    if searcher.context.should_stop() {
+    if searcher.context.should_stop() || searcher.context.was_time_stopped() {
         return true;
     }
 
@@ -135,7 +135,7 @@ where
     }
 
     // Early stop check
-    if searcher.context.should_stop() {
+    if searcher.context.should_stop() || searcher.context.was_time_stopped() {
         return alpha;
     }
 
@@ -362,7 +362,7 @@ where
     // Search moves
     for &mv in ordered_slice.iter() {
         // Check stop flag at the beginning of each move
-        if searcher.context.should_stop() {
+        if searcher.context.should_stop() || searcher.context.was_time_stopped() {
             return best_score.max(alpha); // Exit immediately on stop for consistency
         }
 
@@ -817,6 +817,11 @@ where
         // Simple optimization: skip shallow nodes（dynamic policy with hashfull）
         let hf = searcher.tt.as_ref().map(|tt| tt.hashfull()).unwrap_or(0);
         if !crate::search::tt::filter::should_skip_tt_store_dyn(depth, is_pv, node_type, hf) {
+            // 防御策: 停止が確定した局面では TT を汚さない
+            if searcher.context.should_stop() || searcher.context.was_time_stopped() {
+                return best_score;
+            }
+
             let mut boosted_depth = crate::search::tt::filter::boost_tt_depth(depth, node_type);
             // Apply additional boost for PV nodes
             boosted_depth = crate::search::tt::filter::boost_pv_depth(boosted_depth, is_pv);

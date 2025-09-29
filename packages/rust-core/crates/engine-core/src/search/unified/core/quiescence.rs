@@ -150,7 +150,7 @@ fn qs_light_time_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
-    if searcher.context.should_stop() {
+    if searcher.context.should_stop() || searcher.context.was_time_stopped() {
         return true;
     }
 
