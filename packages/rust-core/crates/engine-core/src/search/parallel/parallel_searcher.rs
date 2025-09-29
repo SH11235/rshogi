@@ -103,7 +103,11 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     #[inline]
     fn broadcast_stop(&self, external_stop: Option<&Arc<AtomicBool>>) {
-        let user_stop = external_stop.map(|flag| flag.load(Ordering::Acquire)).unwrap_or(false);
+        if let Some(flag) = external_stop {
+            flag.store(true, Ordering::Release);
+        }
+
+        let user_stop = external_stop.is_some();
 
         if user_stop {
             let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
@@ -127,9 +131,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
         self.shared_state.close_work_queues();
         self.pending_work_items.store(0, Ordering::Release);
-        if let Some(flag) = external_stop {
-            flag.store(true, Ordering::Release);
-        }
     }
 
     #[inline]
@@ -632,8 +633,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         debug!(
                             "TimeManager triggered stop during wait (pending: {pending}, active: {active})"
                         );
-                        self.shared_state.set_stop();
-                        // stop ブロードキャストと一緒に pending を 0 にする
+                        let stop_info = StopInfo {
+                            reason: TerminationReason::TimeLimit,
+                            elapsed_ms: tm.elapsed_ms(),
+                            nodes,
+                            depth_reached: self.shared_state.get_best_depth(),
+                            hard_timeout: false,
+                            soft_limit_ms: tm.soft_limit_ms(),
+                            hard_limit_ms: tm.hard_limit_ms(),
+                        };
+                        self.shared_state.set_stop_with_reason(stop_info);
                         self.pending_work_items.store(0, Ordering::Release);
                         break;
                     }

@@ -9,20 +9,24 @@ use std::time::Duration;
 
 #[test]
 fn user_stop_sets_stop_info() {
+    let mut engine = Engine::new(EngineType::Material);
+    engine.set_threads(2);
+    let mut pos = Position::startpos();
+
     let stop_flag = Arc::new(AtomicBool::new(false));
     let limits = SearchLimits::builder().depth(6).stop_flag(stop_flag.clone()).build();
+    let stop_bridge = engine.stop_bridge_handle();
+    let stop_flag_thread = stop_flag.clone();
 
-    let handle = thread::spawn(move || {
-        let mut engine = Engine::new(EngineType::Material);
-        engine.set_threads(2);
-        let mut pos = Position::startpos();
-        engine.search(&mut pos, limits)
+    let stopper = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(10));
+        stop_flag_thread.store(true, Ordering::Release);
+        stop_bridge.request_stop_immediate();
     });
 
-    thread::sleep(Duration::from_millis(10));
-    stop_flag.store(true, Ordering::Release);
+    let result = engine.search(&mut pos, limits);
+    stopper.join().expect("stop thread");
 
-    let result = handle.join().expect("search thread");
     let stop_info = result.stop_info.expect("stop info present");
     assert_eq!(stop_info.reason, TerminationReason::UserStop);
 }
