@@ -6,6 +6,7 @@ use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
+use crate::util::join_search_handle;
 
 /// Poll and handle out-of-band finalize requests coming from engine-core.
 ///
@@ -125,27 +126,17 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 }
 
 fn fast_finalize_and_detach(state: &mut EngineState, label: &str) {
-    // Detach worker to reaper if exists
-    if let Some(h) = state.worker.take() {
-        if let Some(tx) = &state.reaper_tx {
-            let q = state.reaper_queue_len.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            let _ = tx.send(h);
-            const REAPER_QUEUE_SOFT_MAX: usize = 128;
-            if q > REAPER_QUEUE_SOFT_MAX {
-                info_string(format!("reaper_queue_len_high len={}", q));
-            } else {
-                info_string(format!("reaper_detach queued len={}", q));
-            }
-        }
-        state.notify_idle();
-    }
-
+    let worker = state.worker.take();
     state.searching = false;
     state.stop_flag = None;
     state.ponder_hit_flag = None;
+    state.result_rx = None;
     finalize_and_send_fast(state, label);
     state.current_is_ponder = false;
     state.current_root_hash = None;
     state.current_time_control = None;
+    if let Some(handle) = worker {
+        join_search_handle(handle, label);
+    }
     state.notify_idle();
 }

@@ -9,8 +9,7 @@ use crate::{
         SearchLimits, SearchResult, SearchStats, TranspositionTable,
     },
     shogi::{Move, Position},
-    time_management::{GamePhase, TimeManager},
-    TimeControl,
+    time_management::{GamePhase, TimeControl, TimeManager},
 };
 use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
 use log::{debug, info, warn};
@@ -237,19 +236,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         (waited, remaining_active, remaining_pending)
     }
 
-    fn spawn_join_reaper(handles: Vec<thread::JoinHandle<()>>, label: &'static str) {
-        if handles.is_empty() {
-            return;
-        }
-
-        thread::spawn(move || {
-            for handle in handles {
-                if let Err(err) = handle.join() {
-                    log::warn!("join_reaper_error label={} err={:?}", label, err);
+    fn join_handles_blocking(handles: Vec<thread::JoinHandle<()>>, label: &'static str) {
+        for handle in handles {
+            let start = Instant::now();
+            match handle.join() {
+                Ok(()) => {
+                    let elapsed = start.elapsed();
+                    if elapsed >= Duration::from_millis(20) {
+                        log::info!(
+                            "diag join_complete label={label} waited_ms={}",
+                            elapsed.as_millis()
+                        );
+                    }
+                }
+                Err(err) => {
+                    log::warn!("join_error label={} err={:?}", label, err);
                 }
             }
-            log::info!("diag join_reaper_complete label={label}");
-        });
+        }
     }
 
     /// Handle ponderhit time management setup
@@ -1110,8 +1114,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
                 }
             } else {
-                Self::spawn_join_reaper(worker_handles, "worker_fast_finalize");
+                Self::join_handles_blocking(worker_handles, "worker_fast_finalize");
             }
+            self.active_workers.store(0, Ordering::Release);
 
             if let Some(handle) = time_handle.take() {
                 if let Err(err) = handle.join() {
