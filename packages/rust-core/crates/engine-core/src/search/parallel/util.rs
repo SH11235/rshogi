@@ -2,6 +2,17 @@
 
 use crate::search::constants::{MAIN_NEAR_DEADLINE_WINDOW_MS, NEAR_HARD_FINALIZE_MS};
 
+/// Default上限: finalize後の衛生待機で許可する最大待ち時間 (ms)
+pub(crate) const HYGIENE_WAIT_MAX_MS: u64 = 50;
+/// 待機ループのステップ幅 (ms)。5ms 刻みで sleep させる。
+pub(crate) const HYGIENE_WAIT_STEP_MS: u64 = 5;
+/// finalize後も確保しておきたい思考リード (ms)
+pub(crate) const HYGIENE_LEAD_MS: u64 = 100;
+/// finalize後に発生し得る入出力オーバーヘッド (ms)
+pub(crate) const HYGIENE_IO_MS: u64 = 15;
+
+const HYGIENE_RESERVED_MS: u64 = HYGIENE_LEAD_MS + HYGIENE_IO_MS;
+
 /// Compute the near-finalization guard window (in ms) for a given absolute limit.
 ///
 /// `total_limit_ms` は “総ハード／プラン済み締切” の時間であり、残り時間ではない。
@@ -33,4 +44,33 @@ pub(crate) fn compute_hard_guard_ms(total_hard_limit_ms: u64) -> u64 {
     } else {
         0
     }
+}
+
+/// finalize 時の衛生待機に使う安全な上限時間を計算する。
+///
+/// - `elapsed_ms`: 直近探索で消費した時間
+/// - `hard_limit_ms`: ハード締切 (無効なら 0 または `u64::MAX`)
+/// - `planned_limit_ms`: 予定締切 (無効なら 0 または `u64::MAX`)
+/// - `default_max_ms`: 通常の上限 (例: 50ms)
+#[inline]
+pub(crate) fn compute_hygiene_wait_budget(
+    elapsed_ms: u64,
+    hard_limit_ms: u64,
+    planned_limit_ms: u64,
+    default_max_ms: u64,
+) -> u64 {
+    let nearest_deadline = [hard_limit_ms, planned_limit_ms]
+        .into_iter()
+        .filter(|limit| *limit > 0 && *limit < u64::MAX)
+        .min()
+        .unwrap_or(u64::MAX);
+
+    if nearest_deadline == u64::MAX {
+        return default_max_ms;
+    }
+
+    let remaining = nearest_deadline.saturating_sub(elapsed_ms);
+    let safe_budget = remaining.saturating_sub(HYGIENE_RESERVED_MS);
+
+    default_max_ms.min(safe_budget)
 }

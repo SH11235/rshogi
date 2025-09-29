@@ -161,6 +161,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                             moves,
                             start_index,
                         } => {
+                            if shared_state.should_stop() {
+                                break;
+                            }
                             // Skip debug logging in hot path unless explicitly enabled
                             if log::log_enabled!(log::Level::Debug) {
                                 debug!(
@@ -174,6 +177,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
 
                             // Process all moves in the batch
                             for move_to_search in moves.iter() {
+                                if shared_state.should_stop() {
+                                    break;
+                                }
                                 // Search the specific root move (reusing the same position)
                                 let _result = search_thread.search_root_move(
                                     &mut pos,
@@ -193,6 +199,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                             depth,
                             position,
                         } => {
+                            if shared_state.should_stop() {
+                                break;
+                            }
                             // Skip debug logging in hot path unless explicitly enabled
                             if log::log_enabled!(log::Level::Debug) {
                                 debug!(
@@ -203,6 +212,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                             // Clone position from Arc for this search
                             let mut pos = (*position).clone();
 
+                            if shared_state.should_stop() {
+                                continue;
+                            }
                             // Do the search
                             let _result =
                                 search_thread.search_iteration(&mut pos, &worker_limits, depth);
