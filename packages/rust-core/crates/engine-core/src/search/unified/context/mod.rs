@@ -344,19 +344,6 @@ impl SearchContext {
         self.time_stop_logged = true;
     }
 
-    /// Get appropriate time check mask based on time control
-    pub fn get_time_check_mask(&self) -> u64 {
-        use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
-        use crate::time_management::TimeControl;
-
-        match &self.limits.time_control {
-            TimeControl::FixedNodes { .. } => 0x3FF, // 1024 nodes - more frequent checks for node-based limits
-            TimeControl::Byoyomi { .. } => TIME_CHECK_MASK_BYOYOMI,
-            TimeControl::Ponder(_) => TIME_CHECK_MASK_NORMAL, // Ponder always uses NORMAL (opponent's time)
-            _ => TIME_CHECK_MASK_NORMAL,
-        }
-    }
-
     /// Set current depth for logging
     pub fn set_current_depth(&mut self, depth: u8) {
         self.current_depth = depth;
@@ -495,41 +482,5 @@ mod tests {
         let expected_normal: i32 = 100_000 / 8192;
         assert!((hits_normal - expected_normal).abs() <= 2,
             "Normal mask should check approximately every 8192 nodes, got {hits_normal} hits, expected around {expected_normal}");
-    }
-
-    #[test]
-    fn test_search_context_time_check_mask() {
-        use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
-
-        let mut ctx = SearchContext::new();
-
-        // Test normal time control
-        ctx.set_limits(SearchLimits::default());
-        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_NORMAL);
-
-        // Test byoyomi
-        let byoyomi_limits = SearchLimits::builder()
-            .time_control(TimeControl::Byoyomi {
-                main_time_ms: 0,
-                byoyomi_ms: 6000,
-                periods: 1,
-            })
-            .build();
-        ctx.set_limits(byoyomi_limits);
-        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_BYOYOMI);
-
-        // Test fixed nodes (should use more frequent checks)
-        let node_limits = SearchLimits::builder()
-            .time_control(TimeControl::FixedNodes { nodes: 100000 })
-            .build();
-        ctx.set_limits(node_limits);
-        assert_eq!(ctx.get_time_check_mask(), 0x3FF); // 1024 nodes
-
-        // Test ponder mode (should use normal mask)
-        let ponder_limits = SearchLimits::builder()
-            .time_control(TimeControl::Ponder(Box::new(TimeControl::Infinite)))
-            .build();
-        ctx.set_limits(ponder_limits);
-        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_NORMAL);
     }
 }

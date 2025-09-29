@@ -480,6 +480,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!(
                     "Stop mode: all workers inactive; finishing wait regardless of pending={pending}"
                 );
+                #[cfg(feature = "diagnostics")]
+                {
+                    info!(
+                        "info string wait_skip_pending=1 pending={} elapsed_ms={}",
+                        pending,
+                        search_start.elapsed().as_millis()
+                    );
+                }
                 break;
             }
 
@@ -636,6 +644,25 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     /// Main search entry point
     pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
         info!("Starting simple parallel search with {} threads", self.num_threads);
+
+        let residual_active = self.active_workers.load(Ordering::Acquire);
+        let residual_pending = self.pending_work_items.load(Ordering::Acquire);
+        let residual_finalized = self.shared_state.is_finalized_early();
+        if residual_active != 0 || residual_pending != 0 {
+            warn!(
+                "Residual workers detected before new search: active={} pending={} finalized_early={}",
+                residual_active,
+                residual_pending,
+                residual_finalized
+            );
+            #[cfg(feature = "diagnostics")]
+            {
+                info!(
+                    "info string search_residual_workers=1 active={} pending={} finalized_early={}",
+                    residual_active, residual_pending, residual_finalized as u8
+                );
+            }
+        }
 
         #[cfg(debug_assertions)]
         if limits.stop_flag.is_none() {
