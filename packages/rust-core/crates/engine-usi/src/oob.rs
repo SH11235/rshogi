@@ -6,7 +6,7 @@ use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
-use crate::util::join_search_handle;
+use crate::util::{enqueue_reaper, join_search_handle};
 
 /// Poll and handle out-of-band finalize requests coming from engine-core.
 ///
@@ -90,7 +90,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     if sid == state.current_search_id {
                         info_string(format!("oob_finalize_joined sid={} label={}", sid, label));
                         if let Some(h) = state.worker.take() {
-                            let _ = h.join();
+                            join_search_handle(h, label);
                             state.notify_idle();
                         }
                         state.searching = false;
@@ -136,7 +136,8 @@ fn fast_finalize_and_detach(state: &mut EngineState, label: &str) {
     state.current_root_hash = None;
     state.current_time_control = None;
     if let Some(handle) = worker {
-        join_search_handle(handle, label);
+        enqueue_reaper(state, handle, label);
+    } else {
+        state.notify_idle();
     }
-    state.notify_idle();
 }

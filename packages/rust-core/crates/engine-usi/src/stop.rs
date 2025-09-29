@@ -8,7 +8,7 @@ use engine_core::time_management::TimeControl;
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
-use crate::util::join_search_handle;
+use crate::util::{enqueue_reaper, join_search_handle};
 
 pub fn handle_stop(state: &mut EngineState) {
     if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
@@ -155,9 +155,10 @@ pub fn handle_stop(state: &mut EngineState) {
                 state.current_root_hash = None;
                 state.current_time_control = None;
                 if let Some(handle) = worker {
-                    join_search_handle(handle, "stop_timeout_finalize");
+                    enqueue_reaper(state, handle, "stop_timeout_finalize");
+                } else {
+                    state.notify_idle();
                 }
-                state.notify_idle();
             }
         }
     }
@@ -185,7 +186,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                 flag.store(true, Ordering::SeqCst);
             }
             if let Some(h) = state.worker.take() {
-                let _ = h.join();
+                enqueue_reaper(state, h, "gameover_post_emit_join");
             }
             state.searching = false;
             state.stop_flag = None;
@@ -323,7 +324,8 @@ pub fn handle_gameover(state: &mut EngineState) {
             flag.store(true, Ordering::SeqCst);
         }
         if let Some(h) = state.worker.take() {
-            let _ = h.join();
+            enqueue_reaper(state, h, "gameover_no_bestmove_join");
+        } else {
             state.notify_idle();
         }
         state.searching = false;
