@@ -9,6 +9,7 @@ use crate::{
     Color,
 };
 use crossbeam_utils::CachePadded;
+use smallvec::SmallVec;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
@@ -571,18 +572,23 @@ impl SharedSearchState {
     }
 
     /// Publish minimal fields while preserving previously published PV if any.
-    /// This avoids wiping PV on iterations with no improvement.
+    /// Only snapshots from the current generation are eligible; cross-generation
+    /// data is discarded to prevent stale PV leakage when a new search begins.
     pub fn publish_minimal_snapshot_preserve_pv(&self, root_key: u64, elapsed_ms: u32) {
-        let prev = self.snapshot.try_read();
+        let current_generation = self.generation();
+        let preserved_pv = match self.snapshot.try_read() {
+            Some(prev) if prev.search_id == current_generation => prev.pv,
+            _ => SmallVec::new(),
+        };
         let snap = RootSnapshot {
-            search_id: self.generation(),
+            search_id: current_generation,
             root_key,
             best: self.get_best_move(),
             depth: self.get_best_depth(),
             score_cp: self.get_best_score(),
             nodes: self.get_nodes(),
             elapsed_ms,
-            pv: prev.map(|p| p.pv).unwrap_or_default(),
+            pv: preserved_pv,
         };
         self.snapshot.publish(&snap);
     }
@@ -756,7 +762,9 @@ impl SharedSearchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::snapshot::RootSnapshot;
     use crate::shogi::{Color, Move, PieceType, Square};
+    use smallvec::smallvec;
     use std::sync::{atomic::AtomicBool, Arc};
 
     #[test]
@@ -781,6 +789,54 @@ mod tests {
         // Test clear
         history.clear();
         assert_eq!(history.get(Color::Black, PieceType::Pawn, Square::new(5, 5)), 0);
+    }
+
+    #[test]
+    fn snapshot_preserve_pv_same_generation() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let state = SharedSearchState::with_threads(stop_flag, 1);
+        let current_gen = state.generation();
+        let base_snap = RootSnapshot {
+            search_id: current_gen,
+            root_key: 42,
+            best: Some(Move::null()),
+            pv: smallvec![Move::null()],
+            depth: 3,
+            score_cp: 120,
+            nodes: 10,
+            elapsed_ms: 5,
+        };
+        state.snapshot.publish(&base_snap);
+
+        state.publish_minimal_snapshot_preserve_pv(99, 12);
+        let snap = state.snapshot.try_read().expect("snapshot available");
+        assert_eq!(snap.search_id, current_gen);
+        assert_eq!(snap.pv.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_preserve_pv_discards_on_generation_mismatch() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let state = SharedSearchState::with_threads(stop_flag, 1);
+        let current_gen = state.generation();
+
+        // Publish snapshot from a future generation to simulate stale data
+        let mismatched_snap = RootSnapshot {
+            search_id: current_gen.wrapping_add(1),
+            root_key: 7,
+            best: Some(Move::null()),
+            pv: smallvec![Move::null()],
+            depth: 2,
+            score_cp: 50,
+            nodes: 4,
+            elapsed_ms: 3,
+        };
+        state.snapshot.publish(&mismatched_snap);
+
+        state.publish_minimal_snapshot_preserve_pv(13, 20);
+        let snap = state.snapshot.try_read().expect("snapshot available");
+        assert_eq!(snap.search_id, current_gen);
+        assert!(snap.pv.is_empty());
     }
 
     #[test]

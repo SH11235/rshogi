@@ -134,12 +134,31 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
 
             // Create search thread
             let mut search_thread = SearchThread::new(log_id, evaluator, tt, shared_state.clone());
+            search_thread.generation = shared_state.generation();
             if let Some(tm) = &shared_tm {
                 search_thread.attach_time_manager(tm.clone());
             }
 
             // Simple work loop
             while !shared_state.should_stop() {
+                let current_generation = shared_state.generation();
+                if search_thread.generation != current_generation {
+                    log::warn!(
+                        "worker_epoch_mismatch id={} old={} current={}",
+                        log_id,
+                        search_thread.generation,
+                        current_generation
+                    );
+                    debug_assert!(
+                        search_thread.generation == current_generation,
+                        "worker {} observed generation change from {} to {}",
+                        log_id,
+                        search_thread.generation,
+                        current_generation
+                    );
+                    break;
+                }
+
                 // Try to get work using truly lock-free work stealing
                 let work =
                     get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure);

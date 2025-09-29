@@ -163,6 +163,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 
     fn resolve_residual_workers(&self, _limits: &SearchLimits) -> (u64, usize, u64) {
+        let expected_generation = self.shared_state.generation();
         self.shared_state.set_stop();
         self.shared_state.close_work_queues();
         self.pending_work_items.store(0, Ordering::Release);
@@ -193,6 +194,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         let remaining_active = self.active_workers.load(Ordering::Acquire);
         let remaining_pending = self.pending_work_items.load(Ordering::Acquire);
+        debug_assert_eq!(
+            expected_generation,
+            self.shared_state.generation(),
+            "SharedSearchState generation changed during residual worker resolution"
+        );
         (waited, remaining_active, remaining_pending)
     }
 
@@ -564,13 +570,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 if let Some(ref cb2) = limits.info_string_callback {
                     let depth = self.shared_state.get_best_depth().max(1);
                     let elapsed_ms = search_start.elapsed().as_millis();
+                    let sid = self.shared_state.generation();
                     let pv0_usi = pv_to_send
                         .first()
                         .map(crate::usi::move_to_usi)
                         .unwrap_or_else(|| "-".to_string());
                     cb2(&format!(
-                        "hb depth={} nodes={} elapsed_ms={} pv0={}",
-                        depth, total_nodes, elapsed_ms, pv0_usi
+                        "hb sid={} depth={} nodes={} elapsed_ms={} pv0={}",
+                        sid, depth, total_nodes, elapsed_ms, pv0_usi
                     ));
                 }
                 *last_heartbeat = Instant::now();
@@ -814,8 +821,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let residual_pending = self.pending_work_items.load(Ordering::Acquire);
         let residual_finalized = self.shared_state.is_finalized_early();
         if residual_active != 0 || residual_pending != 0 {
+            let sid = self.shared_state.generation();
             warn!(
-                "Residual workers detected before new search: active={} pending={} finalized_early={}",
+                "Residual workers detected before new search: sid={} active={} pending={} finalized_early={}",
+                sid,
                 residual_active,
                 residual_pending,
                 residual_finalized
@@ -823,8 +832,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             self.emit_info_string(
                 &limits,
                 format!(
-                    "search_residual_workers=1 active={} pending={} finalized_early={}",
-                    residual_active, residual_pending, residual_finalized as u8
+                    "search_residual_workers=1 sid={} active={} pending={} finalized_early={}",
+                    sid, residual_active, residual_pending, residual_finalized as u8
                 ),
             );
 
@@ -834,7 +843,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             self.emit_info_string(
                 &limits,
                 format!(
-                    "search_residual_workers_resolved=1 waited_ms={} remaining_active={} remaining_pending={}",
+                    "search_residual_workers_resolved=1 sid={} waited_ms={} remaining_active={} remaining_pending={}",
+                    sid,
                     waited_ms,
                     remaining_active,
                     remaining_pending
@@ -1143,6 +1153,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             self.tt.clone(),
             self.shared_state.clone(),
         );
+        main_thread.generation = self.shared_state.generation();
         // Attach shared TimeManager to main thread searcher if available
         if let Some(tm) = { self.time_manager.lock().unwrap().clone() } {
             main_thread.attach_time_manager(tm);
@@ -1390,7 +1401,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 self.emit_info_string(
                     &limits,
                     format!(
-                        "snapshot_publish kind=pv_commit depth={} nodes={} pv_len={}",
+                        "snapshot_publish kind=pv_commit sid={} root_key={:016x} depth={} nodes={} pv_len={}",
+                        snap.search_id,
+                        snap.root_key,
                         snap.depth,
                         snap.nodes,
                         snap.pv.len()
@@ -1410,8 +1423,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             self.emit_info_string(
                                 &limits,
                                 format!(
-                                    "snapshot_warn_pv_head_mismatch=1 best={} pv0={}",
-                                    b_usi, pv0_usi
+                                    "snapshot_warn_pv_head_mismatch=1 sid={} best={} pv0={}",
+                                    self.shared_state.generation(),
+                                    b_usi,
+                                    pv0_usi
                                 ),
                             );
                         }
@@ -1419,7 +1434,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
                 self.emit_info_string(
                     &limits,
-                    format!("snapshot_publish kind=min_preserve elapsed_ms={}", elapsed_ms),
+                    format!(
+                        "snapshot_publish kind=min_preserve sid={} root_key={:016x} elapsed_ms={}",
+                        self.shared_state.generation(),
+                        position.zobrist_hash(),
+                        elapsed_ms
+                    ),
                 );
                 self.shared_state
                     .publish_minimal_snapshot_preserve_pv(position.zobrist_hash(), elapsed_ms);
