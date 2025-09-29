@@ -20,6 +20,12 @@ pub struct RootSnapshot {
 }
 
 /// Seqlock + double-buffer publisher for RootSnapshot
+///
+/// Single-writer only: publish() must be called from a single thread
+/// (main search thread) per session. Readers may be many and concurrent.
+/// Memory ordering: writer sets seq odd (AcqRel), writes inactive buffer,
+/// flips active_idx (Release), then sets seq even (Release). Readers load
+/// seq (Acquire) twice and only accept even/unchanged snapshots.
 pub struct RootSnapshotPublisher {
     seq: AtomicU64,
     active_idx: AtomicU8, // 0 or 1
@@ -46,16 +52,6 @@ impl RootSnapshotPublisher {
     }
 
     #[inline]
-    fn inactive_ptr(&self) -> *mut RootSnapshot {
-        let idx = self.active_idx.load(Ordering::Relaxed);
-        if idx == 0 {
-            self.buf1.get()
-        } else {
-            self.buf0.get()
-        }
-    }
-
-    #[inline]
     fn active_ref(&self) -> &RootSnapshot {
         if self.active_idx.load(Ordering::Relaxed) == 0 {
             unsafe { &*self.buf0.get() }
@@ -68,13 +64,18 @@ impl RootSnapshotPublisher {
     pub fn publish(&self, snap: &RootSnapshot) {
         // Begin write: odd seq
         self.seq.fetch_add(1, Ordering::AcqRel);
-        // Write to inactive buffer (raw pointer write to avoid &mut from &self)
-        let dst = self.inactive_ptr();
+        // Write to inactive buffer with replace to drop the old value properly
+        let cur = self.active_idx.load(Ordering::Relaxed);
+        let new_idx = cur ^ 1;
+        let dst = if new_idx == 0 {
+            self.buf0.get()
+        } else {
+            self.buf1.get()
+        };
         unsafe {
-            std::ptr::write(dst, snap.clone());
+            let _old = std::ptr::replace(dst, snap.clone());
         }
         // Flip active index
-        let new_idx = self.active_idx.load(Ordering::Relaxed) ^ 1;
         self.active_idx.store(new_idx, Ordering::Release);
         // End write: even seq
         self.seq.fetch_add(1, Ordering::Release);
