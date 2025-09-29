@@ -76,25 +76,28 @@ impl EngineStopBridge {
             let guard = self.inner.shared_state.lock().unwrap();
             guard.as_ref().and_then(|weak| weak.upgrade())
         };
+        let external_flag_upgraded = {
+            let guard = self.inner.external_stop_flag.lock().unwrap();
+            guard.as_ref().and_then(|weak| weak.upgrade())
+        };
+
+        if let Some(ref external_flag) = external_flag_upgraded {
+            external_flag.store(true, Ordering::Release);
+        }
+
         if let Some(shared) = shared_upgraded {
-            let stop_flag = shared.stop_flag.load(Ordering::Acquire);
-            if stop_flag {
-                // 既に外部停止フラグが立っている場合のみ理由を付与
-                let nodes = shared.get_nodes();
-                let depth = shared.get_best_depth();
-                let stop_info = StopInfo {
-                    reason: TerminationReason::UserStop,
-                    elapsed_ms: 0,
-                    nodes,
-                    depth_reached: depth,
-                    hard_timeout: false,
-                    soft_limit_ms: 0,
-                    hard_limit_ms: 0,
-                };
-                shared.set_stop_with_reason(stop_info);
-            } else {
-                shared.set_stop();
-            }
+            let nodes = shared.get_nodes();
+            let depth = shared.get_best_depth();
+            let stop_info = StopInfo {
+                reason: TerminationReason::UserStop,
+                elapsed_ms: 0,
+                nodes,
+                depth_reached: depth,
+                hard_timeout: false,
+                soft_limit_ms: 0,
+                hard_limit_ms: 0,
+            };
+            shared.set_stop_with_reason(stop_info);
             shared.close_work_queues();
         }
 
@@ -103,13 +106,6 @@ impl EngineStopBridge {
             guard.as_ref().and_then(|weak| weak.upgrade())
         } {
             pending.store(0, Ordering::Release);
-        }
-
-        if let Some(external_flag) = {
-            let guard = self.inner.external_stop_flag.lock().unwrap();
-            guard.as_ref().and_then(|weak| weak.upgrade())
-        } {
-            external_flag.store(true, Ordering::Release);
         }
 
         debug!("EngineStopBridge: stop broadcasted");
