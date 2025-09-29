@@ -4,6 +4,8 @@ use crate::search::constants::{MAIN_NEAR_DEADLINE_WINDOW_MS, NEAR_HARD_FINALIZE_
 
 /// Default上限: finalize後の衛生待機で許可する最大待ち時間 (ms)
 pub(crate) const HYGIENE_WAIT_MAX_MS: u64 = 50;
+/// Stage 4: 残余時間が十分な場合の拡張上限 (ms)
+pub(crate) const HYGIENE_WAIT_EXTENDED_MAX_MS: u64 = 250;
 /// 待機ループのステップ幅 (ms)。5ms 刻みで sleep させる。
 pub(crate) const HYGIENE_WAIT_STEP_MS: u64 = 5;
 /// finalize後も確保しておきたい思考リード (ms)
@@ -63,6 +65,36 @@ pub(crate) fn compute_hard_guard_ms(total_hard_limit_ms: u64) -> u64 {
         80
     } else {
         0
+    }
+}
+
+/// Stage 4: 残余時間に基づいて衛生待機の動的上限を計算する。
+///
+/// 残余時間が十分にある場合（≥1000ms）は拡張上限（250ms）、
+/// それ以外は通常上限（50ms）を返す。
+#[inline]
+pub(crate) fn compute_dynamic_hygiene_max(
+    elapsed_ms: u64,
+    hard_limit_ms: u64,
+    planned_limit_ms: u64,
+) -> u64 {
+    let nearest_deadline = [hard_limit_ms, planned_limit_ms]
+        .into_iter()
+        .filter(|limit| *limit > 0 && *limit < u64::MAX)
+        .min()
+        .unwrap_or(u64::MAX);
+
+    if nearest_deadline == u64::MAX {
+        return HYGIENE_WAIT_MAX_MS;
+    }
+
+    let remaining = nearest_deadline.saturating_sub(elapsed_ms);
+
+    // 残余時間が1000ms以上なら拡張上限、それ以外は通常上限
+    if remaining >= 1000 {
+        HYGIENE_WAIT_EXTENDED_MAX_MS
+    } else {
+        HYGIENE_WAIT_MAX_MS
     }
 }
 

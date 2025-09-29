@@ -144,6 +144,7 @@ pub struct EngineState {
     pub reaper_tx: Option<mpsc::Sender<ReaperJob>>,
     pub reaper_handle: Option<std::thread::JoinHandle<()>>,
     pub reaper_queue_len: Arc<AtomicUsize>,
+    pub oob_detach_count: Arc<AtomicUsize>,
     pub stop_bridge: Arc<EngineStopBridge>,
     // OOB finalize channel (from engine-core time manager via StopBridge)
     pub finalizer_rx: Option<mpsc::Receiver<FinalizerMsg>>,
@@ -191,6 +192,7 @@ impl EngineState {
             reaper_tx: None,
             reaper_handle: None,
             reaper_queue_len: Arc::new(AtomicUsize::new(0)),
+            oob_detach_count: Arc::new(AtomicUsize::new(0)),
             stop_bridge,
             finalizer_rx: Some(fin_rx),
             current_session_core_id: None,

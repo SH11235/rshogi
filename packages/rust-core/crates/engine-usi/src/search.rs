@@ -264,6 +264,7 @@ pub fn run_search_thread(
     info_enabled: bool,
     tx: mpsc::Sender<(u64, engine_core::search::SearchResult)>,
     search_id: u64,
+    startup_signal: Option<mpsc::SyncSender<()>>,
 ) {
     if info_enabled {
         use std::sync::Arc as StdArc;
@@ -306,6 +307,12 @@ pub fn run_search_thread(
     let start_ts = Instant::now();
     let mut result = {
         let mut eng = engine.lock().unwrap();
+
+        // Stage 2: Signal that engine lock acquired and search starting
+        if let Some(signal) = startup_signal {
+            let _ = signal.send(());
+        }
+
         eng.search(&mut position, limits)
     };
     if result.stats.elapsed.as_millis() == 0 {
@@ -377,14 +384,20 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             }
             let extra_cap = std::time::Duration::from_millis(extra_cap_ms);
             let start2 = std::time::Instant::now();
+            let mut end_reason = "timeout";
             loop {
                 // エンジンの Mutex が空なら即開始
                 if let Ok(g) = state.engine.try_lock() {
                     drop(g);
+                    end_reason = "engine_free";
                     break;
                 }
                 let s2 = state.idle_status();
-                if s2.reaper_pending == 0 || start2.elapsed() >= extra_cap {
+                if s2.reaper_pending == 0 {
+                    end_reason = "reaper_done";
+                    break;
+                }
+                if start2.elapsed() >= extra_cap {
                     break;
                 }
                 state.idle_sync.wait_timeout(std::time::Duration::from_millis(50));
@@ -394,12 +407,13 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             let s2 = state.idle_status();
             let engine_free = state.engine.try_lock().is_ok();
             info_string(format!(
-                "go_wait_for_reaper waited_ms={} reaper_pending_after={} worker_active={} active_workers={} engine_free={}",
+                "go_wait_for_reaper waited_ms={} reaper_pending_after={} worker_active={} active_workers={} engine_free={} end_reason={}",
                 extra,
                 s2.reaper_pending,
                 s2.worker_active as u8,
                 s2.active_workers,
-                if engine_free { 1 } else { 0 }
+                if engine_free { 1 } else { 0 },
+                end_reason
             ));
         }
         // 前セッションの stop 残骸を明示的に破棄（Reaper 待ちだけでなければ）
@@ -472,7 +486,26 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     if waited_before_go_ms > 0 {
         if let Some(ref mut params) = limits.time_parameters {
-            params.network_delay2_ms = params.network_delay2_ms.saturating_add(waited_before_go_ms);
+            // Stage 5: Clamp wait time attribution for pure byoyomi to prevent excessive budget consumption
+            let is_pure_byoyomi = gp.byoyomi.unwrap_or(0) > 0
+                && gp.btime.unwrap_or(0) == 0
+                && gp.wtime.unwrap_or(0) == 0;
+
+            let clamped_wait = if is_pure_byoyomi {
+                // For pure byoyomi, clamp to 500ms to avoid excessive time budget attribution
+                waited_before_go_ms.min(500)
+            } else {
+                waited_before_go_ms
+            };
+
+            params.network_delay2_ms = params.network_delay2_ms.saturating_add(clamped_wait);
+
+            if clamped_wait < waited_before_go_ms {
+                info_string(format!(
+                    "wait_time_clamped waited={} clamped={} pure_byo={}",
+                    waited_before_go_ms, clamped_wait, is_pure_byoyomi as u8
+                ));
+            }
         }
     }
 
@@ -521,13 +554,35 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     }
 
     let (tx, rx) = mpsc::channel();
+    let (startup_tx, startup_rx) = mpsc::sync_channel(1);
     let engine = Arc::clone(&state.engine);
     let pos = search_position.clone();
     let info_enabled = true;
     state.current_search_id = state.current_search_id.wrapping_add(1);
     let sid = state.current_search_id;
-    let handle =
-        thread::spawn(move || run_search_thread(engine, pos, limits, info_enabled, tx, sid));
+    let handle = thread::spawn(move || {
+        run_search_thread(engine, pos, limits, info_enabled, tx, sid, Some(startup_tx))
+    });
+
+    // Stage 2: Wait for worker to acquire engine lock and start TimeManager
+    let startup_timeout = Duration::from_millis(1200);
+    let startup_wait_start = Instant::now();
+    let _startup_success = match startup_rx.recv_timeout(startup_timeout) {
+        Ok(()) => {
+            let waited_ms = startup_wait_start.elapsed().as_millis() as u64;
+            info_string(format!("go_startup_handshake waited_ms={} timeout=0", waited_ms));
+            true
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let waited_ms = startup_wait_start.elapsed().as_millis() as u64;
+            info_string(format!("go_startup_handshake_timeout waited_ms={} timeout=1", waited_ms));
+            false
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            info_string("go_startup_handshake_disconnected");
+            false
+        }
+    };
 
     state.searching = true;
     state.stop_flag = Some(Arc::clone(&stop_flag));
@@ -545,6 +600,17 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         gp.ponder,
         state.current_is_stochastic_ponder
     ));
+
+    // Stage 0: Enhanced diagnostics for time loss investigation
+    use std::sync::atomic::Ordering;
+    let reaper_pending = state.reaper_queue_len.load(Ordering::Relaxed);
+    let detach_cumulative = state.oob_detach_count.load(Ordering::Relaxed);
+    let threads = state.opts.threads;
+    info_string(format!(
+        "search_diagnostics reaper_pending={} oob_detach_cumulative={} threads={}",
+        reaper_pending, detach_cumulative, threads
+    ));
+
     Ok(())
 }
 
@@ -599,7 +665,15 @@ pub fn poll_search_completion(state: &mut EngineState) {
                             state.current_search_id = state.current_search_id.wrapping_add(1);
                             let sid2 = state.current_search_id;
                             let handle = thread::spawn(move || {
-                                run_search_thread(engine, pos2, limits, info_enabled, tx2, sid2)
+                                run_search_thread(
+                                    engine,
+                                    pos2,
+                                    limits,
+                                    info_enabled,
+                                    tx2,
+                                    sid2,
+                                    None,
+                                )
                             });
                             state.searching = true;
                             state.stop_flag = Some(stop_flag);
