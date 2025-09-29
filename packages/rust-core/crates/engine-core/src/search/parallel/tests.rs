@@ -1,6 +1,6 @@
 //! Tests for parallel searcher
 
-use super::parallel_searcher::*;
+use super::{parallel_searcher::*, EngineStopBridge};
 use crate::{
     evaluation::evaluate::MaterialEvaluator,
     search::{SearchLimits, TranspositionTable},
@@ -21,7 +21,7 @@ fn create_capture_heavy_position() -> Position {
 fn test_parallel_qnodes_budget() {
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4, Arc::new(EngineStopBridge::new()));
 
     let mut pos = create_capture_heavy_position();
 
@@ -52,7 +52,7 @@ fn test_parallel_qnodes_budget() {
 fn test_parallel_qnodes_aggregation() {
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4, Arc::new(EngineStopBridge::new()));
 
     // Use a position with captures available to ensure quiescence search
     let mut pos = create_capture_heavy_position();
@@ -84,7 +84,7 @@ fn test_parallel_qnodes_aggregation() {
 fn test_qnodes_counter_sharing() {
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
-    let searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let searcher = ParallelSearcher::new(evaluator, tt, 4, Arc::new(EngineStopBridge::new()));
 
     // Get the qnodes counter
     let counter1 = searcher.shared_state.get_qnodes_counter();
@@ -104,7 +104,8 @@ fn test_parallel_qnodes_overshoot_minimal() {
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
     let num_threads = 4;
-    let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
+    let mut searcher =
+        ParallelSearcher::new(evaluator, tt, num_threads, Arc::new(EngineStopBridge::new()));
 
     let mut pos = create_capture_heavy_position();
 
@@ -193,7 +194,7 @@ fn test_parallel_nnue_diff_hooks_no_fallback() {
     let evaluator = std::sync::Arc::new(TestNnueProxy(std::sync::RwLock::new(wrapper)));
     let tt = std::sync::Arc::new(TranspositionTable::new(16));
     // 2スレッドで並列探索（差分フック経路）
-    let mut ps = ParallelSearcher::new(evaluator, tt, 2);
+    let mut ps = ParallelSearcher::new(evaluator, tt, 2, Arc::new(EngineStopBridge::new()));
 
     let mut pos = Position::startpos();
     let limits = SearchLimits::builder().depth(3).build();
@@ -214,7 +215,8 @@ fn test_completion_wait_robustness() {
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
     let num_threads = 4;
-    let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
+    let mut searcher =
+        ParallelSearcher::new(evaluator, tt, num_threads, Arc::new(EngineStopBridge::new()));
 
     let mut pos = Position::startpos();
 
@@ -247,7 +249,7 @@ fn test_pending_work_counter_accuracy() {
     // Test that pending_work_items accurately tracks work
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 2, Arc::new(EngineStopBridge::new()));
 
     // Verify initial state
     assert_eq!(searcher.pending_work_items.load(Ordering::Acquire), 0);
@@ -271,7 +273,7 @@ fn test_pending_work_counter_accuracy() {
 fn test_parallel_observes_external_stop_flag() {
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4, Arc::new(EngineStopBridge::new()));
 
     let mut pos = Position::startpos();
 
@@ -309,7 +311,7 @@ fn test_fallback_bestmove() {
     // Test that parallel searcher always returns a move, even in edge cases
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 1); // Single thread to simplify
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 1, Arc::new(EngineStopBridge::new())); // Single thread to simplify
 
     let mut pos = Position::startpos();
 
@@ -350,7 +352,7 @@ fn test_fallback_bestmove_extreme_limits() {
     // Test fallback with extremely restrictive limits
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(TranspositionTable::new(16));
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4, Arc::new(EngineStopBridge::new()));
 
     // Use a complex middle game position
     let mut pos =

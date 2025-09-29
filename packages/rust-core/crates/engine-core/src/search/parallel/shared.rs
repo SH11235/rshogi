@@ -487,6 +487,9 @@ pub struct SharedSearchState {
 
     /// Whether the search finalized early (for skipping worker joins)
     finalized_early: AtomicBool,
+
+    /// Flag to prevent new work from being enqueued once stop is requested
+    work_closed: AtomicBool,
 }
 
 impl SharedSearchState {
@@ -513,6 +516,7 @@ impl SharedSearchState {
             active_threads: AtomicUsize::new(0),
             total_threads: num_threads,
             finalized_early: AtomicBool::new(false),
+            work_closed: AtomicBool::new(false),
         }
     }
 
@@ -531,6 +535,7 @@ impl SharedSearchState {
         self.split_point_manager.clear();
         self.active_threads.store(0, Ordering::Relaxed);
         self.finalized_early.store(false, Ordering::Release);
+        self.work_closed.store(false, Ordering::Release);
     }
 
     /// Try to update best move/score if better (lock-free)
@@ -650,6 +655,21 @@ impl SharedSearchState {
         self.stop_flag.store(false, Ordering::Release);
     }
 
+    /// Close work queues to prevent further enqueues (idempotent)
+    pub fn close_work_queues(&self) {
+        self.work_closed.store(true, Ordering::Release);
+    }
+
+    /// Re-open work queues for a fresh search session
+    pub fn reopen_work_queues(&self) {
+        self.work_closed.store(false, Ordering::Release);
+    }
+
+    /// Check if work queues are closed
+    pub fn work_queues_closed(&self) -> bool {
+        self.work_closed.load(Ordering::Acquire)
+    }
+
     /// Increment active thread count
     pub fn increment_active_threads(&self) {
         self.active_threads.fetch_add(1, Ordering::AcqRel);
@@ -669,6 +689,11 @@ impl SharedSearchState {
         } else {
             0.0
         }
+    }
+
+    /// Snapshot current active worker count
+    pub fn active_thread_count(&self) -> usize {
+        self.active_threads.load(Ordering::Acquire)
     }
 
     /// Check if split point should be created based on current conditions

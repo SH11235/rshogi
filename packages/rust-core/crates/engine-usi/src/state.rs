@@ -3,6 +3,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use engine_core::engine::controller::{Engine, EngineType};
+use engine_core::search::parallel::EngineStopBridge;
 use engine_core::shogi::Position;
 use engine_core::time_management::TimeControl;
 
@@ -135,6 +136,7 @@ pub struct EngineState {
     pub reaper_tx: Option<mpsc::Sender<std::thread::JoinHandle<()>>>,
     pub reaper_handle: Option<std::thread::JoinHandle<()>>,
     pub reaper_queue_len: Arc<AtomicUsize>,
+    pub stop_bridge: Arc<EngineStopBridge>,
 }
 
 impl EngineState {
@@ -145,6 +147,7 @@ impl EngineState {
         let mut engine = Engine::new(EngineType::Material);
         engine.set_threads(1);
         engine.set_hash_size(1024);
+        let stop_bridge = engine.stop_bridge_handle();
 
         Self {
             engine: Arc::new(Mutex::new(engine)),
@@ -170,6 +173,7 @@ impl EngineState {
             reaper_tx: None,
             reaper_handle: None,
             reaper_queue_len: Arc::new(AtomicUsize::new(0)),
+            stop_bridge,
         }
     }
 }

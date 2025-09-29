@@ -11,6 +11,9 @@ pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move], NodeType) + 
 /// Iteration callback type for committed iteration results
 pub type IterationCallback = Arc<dyn Fn(&CommittedIteration) + Send + Sync>;
 
+/// Callback type for lightweight `info string` diagnostics.
+pub type InfoStringCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Search statistics
 #[derive(Clone, Debug, Default)]
 pub struct SearchStats {

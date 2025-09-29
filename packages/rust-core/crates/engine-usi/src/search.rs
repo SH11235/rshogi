@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
-use engine_core::search::types::InfoCallback;
+use engine_core::search::types::{InfoCallback, InfoStringCallback};
 use engine_core::shogi::{Color, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
 use engine_core::usi::{append_usi_score_and_bound, create_position, move_to_usi};
@@ -243,6 +243,9 @@ pub fn run_search_thread(
 
         limits.info_callback = Some(callback);
     }
+
+    let info_string_cb: InfoStringCallback = Arc::new(|msg: &str| crate::io::info_string(msg));
+    limits.info_string_callback = Some(info_string_cb);
 
     let start_ts = Instant::now();
     let mut result = {
