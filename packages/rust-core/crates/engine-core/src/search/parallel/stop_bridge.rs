@@ -1,4 +1,5 @@
 use super::SharedSearchState;
+use crate::search::types::{StopInfo, TerminationReason};
 use log::debug;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -76,7 +77,18 @@ impl EngineStopBridge {
             guard.as_ref().and_then(|weak| weak.upgrade())
         };
         if let Some(shared) = shared_upgraded {
-            shared.set_stop();
+            let nodes = shared.get_nodes();
+            let depth = shared.get_best_depth();
+            let stop_info = StopInfo {
+                reason: TerminationReason::UserStop,
+                elapsed_ms: 0,
+                nodes,
+                depth_reached: depth,
+                hard_timeout: false,
+                soft_limit_ms: 0,
+                hard_limit_ms: 0,
+            };
+            shared.set_stop_with_reason(stop_info);
             shared.close_work_queues();
         }
 
