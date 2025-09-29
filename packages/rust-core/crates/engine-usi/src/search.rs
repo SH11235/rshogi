@@ -447,7 +447,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             waited_before_go_ms, soft, hard, tc_for_stop
         ));
 
-        if hard != u64::MAX && hard > 0 {
+        if hard != u64::MAX && hard > 0 && !gp.ponder {
             let base = Instant::now();
             let hard_deadline = base + Duration::from_millis(hard);
             let soft_deadline = if soft != u64::MAX && soft > 0 {
