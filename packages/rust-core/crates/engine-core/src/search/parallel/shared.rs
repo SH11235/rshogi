@@ -442,6 +442,7 @@ impl SharedHistory {
 }
 
 use crate::search::common::SharedStopInfo;
+use crate::search::snapshot::{RootSnapshot, RootSnapshotPublisher};
 
 /// Shared search state for parallel threads
 pub struct SharedSearchState {
@@ -490,6 +491,9 @@ pub struct SharedSearchState {
 
     /// Flag to prevent new work from being enqueued once stop is requested
     work_closed: AtomicBool,
+
+    /// Root snapshot publisher for out-of-band finalize (read-only on USI side)
+    pub snapshot: Arc<RootSnapshotPublisher>,
 }
 
 impl SharedSearchState {
@@ -517,6 +521,7 @@ impl SharedSearchState {
             total_threads: num_threads,
             finalized_early: AtomicBool::new(false),
             work_closed: AtomicBool::new(false),
+            snapshot: Arc::new(RootSnapshotPublisher::new()),
         }
     }
 
@@ -536,11 +541,32 @@ impl SharedSearchState {
         self.active_threads.store(0, Ordering::Relaxed);
         self.finalized_early.store(false, Ordering::Release);
         self.work_closed.store(false, Ordering::Release);
+        // Reset snapshot to a clean default for the new generation
+        let snap = RootSnapshot {
+            search_id: self.generation(),
+            ..Default::default()
+        };
+        self.snapshot.publish(&snap);
     }
 
     /// Get current generation (epoch) for this search state.
     pub fn generation(&self) -> u64 {
         self.current_generation.load(Ordering::Acquire)
+    }
+
+    /// Publish a minimal snapshot from current shared state (best/depth/score/nodes only)
+    pub fn publish_minimal_snapshot(&self, root_key: u64, elapsed_ms: u32) {
+        let snap = RootSnapshot {
+            search_id: self.generation(),
+            root_key,
+            best: self.get_best_move(),
+            depth: self.get_best_depth(),
+            score_cp: self.get_best_score(),
+            nodes: self.get_nodes(),
+            elapsed_ms,
+            ..Default::default()
+        };
+        self.snapshot.publish(&snap);
     }
 
     /// Try to update best move/score if better (lock-free)

@@ -54,6 +54,18 @@ pub fn start_time_manager(
                 && planned > 0
                 && elapsed_ms.saturating_add(compute_finalize_window_ms(planned)) >= planned;
 
+            #[cfg(feature = "diagnostics")]
+            {
+                // Trace current polling status for E2E diagnostics
+                let line = format!(
+                    "info string tm_poll elapsed={} soft={} hard={} planned={} near_hard={} near_planned={}",
+                    elapsed_ms, soft, hard, planned, near_hard as u8, near_planned as u8
+                );
+                // 出力経路: logger + stdout (logger未初期化環境での可視化確保)
+                info!("{}", line);
+                println!("{}", line);
+            }
+
             // Evaluate time-based stop unconditionally (no node-count guard)
             if time_manager.should_stop(nodes) || near_hard || near_planned {
                 let hard_timeout = hard != u64::MAX && elapsed_ms >= hard;
@@ -93,6 +105,15 @@ pub fn start_time_manager(
                     FinalizeReason::TimeManagerStop
                 };
                 stop_bridge.request_finalize(fin_reason);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let line = format!(
+                        "info string tm_request_finalize reason={:?} elapsed_ms={} nodes={}",
+                        fin_reason, elapsed_ms, nodes
+                    );
+                    info!("{}", line);
+                    println!("{}", line);
+                }
 
                 // Record structured stop info and signal stop
                 shared_state.set_stop_with_reason(StopInfo {

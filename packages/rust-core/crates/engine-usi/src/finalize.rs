@@ -330,6 +330,35 @@ fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_
 }
 
 pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
+    // Try snapshot first to avoid engine lock when possible
+    if let Some(snap) = state.stop_bridge.try_read_snapshot() {
+        let sid_ok = state.current_session_core_id.map(|sid| sid == snap.search_id).unwrap_or(true);
+        let rk_ok = snap.root_key == state.position.zobrist_hash();
+        if sid_ok && rk_ok {
+            if let Some(best) = snap.best {
+                // Emit using snapshot (prefer PV if present)
+                let final_usi = move_to_usi(&best);
+                let ponder_mv = if state.opts.ponder {
+                    snap.pv.get(1).map(move_to_usi)
+                } else {
+                    None
+                };
+                info_string(format!(
+                    "{}_fast_snapshot depth={} nodes={} elapsed={} pv_len={}",
+                    label,
+                    snap.depth,
+                    snap.nodes,
+                    snap.elapsed_ms,
+                    snap.pv.len()
+                ));
+                emit_bestmove(&final_usi, ponder_mv);
+                state.bestmove_emitted = true;
+                state.current_root_hash = None;
+                return;
+            }
+        }
+    }
+
     if let Ok(eng) = state.engine.try_lock() {
         // Emit TT diagnostics even in fast finalize path
         {

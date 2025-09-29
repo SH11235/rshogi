@@ -1136,6 +1136,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         let max_depth = limits.depth.unwrap_or(255);
 
+        // Publish an initial minimal snapshot so USI can fast-finalize immediately if needed
+        self.shared_state.publish_minimal_snapshot(position.zobrist_hash(), 0);
+
         // Heartbeat tracking for periodic info callbacks
         let mut last_heartbeat = Instant::now();
         let mut last_heartbeat_nodes = 0u64;
@@ -1326,6 +1329,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             };
 
+            // After finishing this iteration (or shallow step), publish minimal snapshot
+            let elapsed_ms = search_start.elapsed().as_millis() as u32;
+            self.shared_state.publish_minimal_snapshot(position.zobrist_hash(), elapsed_ms);
+
             #[cfg(not(feature = "ybwc"))]
             let result = {
                 // Simple traditional search without YBWC
@@ -1486,6 +1493,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         params: TimeLimitFinalization,
         info_cb: Option<&InfoStringCallback>,
     ) -> SearchResult {
+        // Publish a minimal snapshot before stopping so that USI fast path can read it
+        self.shared_state
+            .publish_minimal_snapshot(position.zobrist_hash(), params.elapsed_ms as u32);
         if log::log_enabled!(log::Level::Info) {
             log::info!(
                 "diag near_hard_finalize label={} elapsed={}ms soft={}ms hard={}ms planned={}ms nodes={}",
