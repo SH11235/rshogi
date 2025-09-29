@@ -559,6 +559,25 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         best_result.node_type,
                     );
                 }
+
+                // Also emit a compact heartbeat via info_string for diagnostics/GUI
+                if let Some(ref cb2) = limits.info_string_callback {
+                    let depth = best_result.stats.depth.max(1);
+                    let elapsed_ms = search_start.elapsed().as_millis();
+                    let pv0 = pv_to_send.first().copied();
+                    #[allow(unused_mut)]
+                    let mut pv0_usi = String::from("-");
+                    #[allow(unused_variables)]
+                    if let Some(m) = pv0 {
+                        #[allow(unused_imports)]
+                        use crate::usi::move_to_usi;
+                        pv0_usi = move_to_usi(&m);
+                    }
+                    cb2(&format!(
+                        "hb depth={} nodes={} elapsed_ms={} pv0={}",
+                        depth, total_nodes, elapsed_ms, pv0_usi
+                    ));
+                }
                 *last_heartbeat = Instant::now();
                 *last_heartbeat_nodes = total_nodes;
             }
@@ -1329,15 +1348,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             };
 
-            // After finishing this iteration (or shallow step), publish minimal snapshot
-            let elapsed_ms = search_start.elapsed().as_millis() as u32;
-            self.shared_state.publish_minimal_snapshot(position.zobrist_hash(), elapsed_ms);
-
             #[cfg(not(feature = "ybwc"))]
             let result = {
                 // Simple traditional search without YBWC
                 main_thread.search_iteration(position, &limits, main_depth)
             };
+
+            // After finishing this iteration (or shallow step), publish minimal snapshot
+            let elapsed_ms = search_start.elapsed().as_millis() as u32;
+            self.shared_state.publish_minimal_snapshot(position.zobrist_hash(), elapsed_ms);
 
             // Clean up completed split points
             #[cfg(feature = "ybwc")]
@@ -1355,12 +1374,28 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             // Update best result (always update if we don't have a move yet)
-            if best_result.best_move.is_none()
+            let improved = best_result.best_move.is_none()
                 || result.score > best_result.score
                 || (result.score == best_result.score
-                    && result.stats.depth > best_result.stats.depth)
-            {
+                    && result.stats.depth > best_result.stats.depth);
+            if improved {
                 best_result = result.clone();
+                // Publish PV snapshot at commit point (single-writer: main thread only)
+                use crate::search::snapshot::RootSnapshot;
+                let nodes_total = self.shared_state.get_nodes();
+                let elapsed_ms = search_start.elapsed().as_millis() as u32;
+                let snap = RootSnapshot {
+                    search_id: self.shared_state.generation(),
+                    root_key: position.zobrist_hash(),
+                    best: best_result.best_move,
+                    pv: best_result.stats.pv.clone().into(),
+                    depth: best_result.stats.depth,
+                    score_cp: best_result.score,
+                    nodes: nodes_total,
+                    elapsed_ms,
+                    ..Default::default()
+                };
+                self.shared_state.snapshot.publish(&snap);
             }
 
             // SearchThread internally handles node counting and reporting to shared_state

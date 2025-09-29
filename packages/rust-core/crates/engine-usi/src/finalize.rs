@@ -336,6 +336,39 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         let rk_ok = snap.root_key == state.position.zobrist_hash();
         if sid_ok && rk_ok {
             if let Some(best) = snap.best {
+                // If snapshot is shallow (depth<2 or PVが空)、ごく短時間のTTベース最終選択を試みる（try_lockのみ）。
+                let shallow = snap.depth < 2 || snap.pv.is_empty();
+                if shallow {
+                    if let Ok(eng) = state.engine.try_lock() {
+                        let final_best = eng.choose_final_bestmove(&state.position, None);
+                        let final_usi = final_best
+                            .best_move
+                            .map(|m| move_to_usi(&m))
+                            .unwrap_or_else(|| move_to_usi(&best));
+                        let ponder_mv = if state.opts.ponder {
+                            final_best
+                                .pv
+                                .get(1)
+                                .map(move_to_usi)
+                                .or_else(|| snap.pv.get(1).map(move_to_usi))
+                        } else {
+                            None
+                        };
+                        info_string(format!(
+                            "{}_fast_snapshot depth={} nodes={} elapsed={} pv_len={} tt_probe=1",
+                            label,
+                            snap.depth,
+                            snap.nodes,
+                            snap.elapsed_ms,
+                            snap.pv.len()
+                        ));
+                        emit_bestmove(&final_usi, ponder_mv);
+                        state.bestmove_emitted = true;
+                        state.current_root_hash = None;
+                        return;
+                    }
+                }
+
                 // Emit using snapshot (prefer PV if present)
                 let final_usi = move_to_usi(&best);
                 let ponder_mv = if state.opts.ponder {
@@ -344,7 +377,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                     None
                 };
                 info_string(format!(
-                    "{}_fast_snapshot depth={} nodes={} elapsed={} pv_len={}",
+                    "{}_fast_snapshot depth={} nodes={} elapsed={} pv_len={} tt_probe=0",
                     label,
                     snap.depth,
                     snap.nodes,
