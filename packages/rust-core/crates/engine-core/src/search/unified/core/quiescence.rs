@@ -73,6 +73,7 @@ static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
 // Lightweight, time-based poll state for quiescence search.
 // We keep a thread-local last-poll timestamp (ms since search start) to avoid
 // relying solely on node-count based polling, which can be sparse on heavy paths.
+use super::time_control::NEAR_DEADLINE_MASK;
 use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
 thread_local! {
     static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) };
@@ -273,7 +274,7 @@ where
     // Periodic time check (unified with alpha_beta and search_node)
     let mut time_check_mask = super::time_control::get_event_poll_mask(searcher);
     if QS_NEAR_DEADLINE_ACTIVE.with(|flag| flag.get()) {
-        time_check_mask = time_check_mask.min(0x1FF);
+        time_check_mask = time_check_mask.min(NEAR_DEADLINE_MASK);
     }
 
     if time_check_mask == 0 || (searcher.stats.nodes & time_check_mask) == 0 {

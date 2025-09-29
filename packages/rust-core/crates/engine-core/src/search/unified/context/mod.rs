@@ -73,6 +73,8 @@ impl SearchContext {
     pub fn set_limits(&mut self, limits: SearchLimits) {
         self.ponder_hit_flag = limits.ponder_hit_flag.clone();
         self.limits = limits;
+        self.time_stop_logged = false;
+        self.internal_stop.store(false, Ordering::Relaxed);
     }
 
     /// Convert from ponder mode to normal search
