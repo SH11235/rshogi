@@ -67,25 +67,64 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 // Step 1: broadcast immediate stop to search threads
                 state.stop_bridge.request_stop_immediate();
 
-                // Step 2: try to pick up a result quickly without blocking
+                // Step 2: compute wait budget based on time control and StopWaitMs
+                // Stage 1: Prefer in-place join with extended waiting
+                let stop_wait_ms = state.opts.stop_wait_ms;
+                let is_pure_byoyomi = if let Some(ref tc) = state.current_time_control {
+                    use engine_core::time_management::TimeControl;
+                    matches!(
+                        tc,
+                        TimeControl::Byoyomi {
+                            main_time_ms: 0,
+                            ..
+                        }
+                    )
+                } else {
+                    false
+                };
+
+                let wait_budget_ms = if is_pure_byoyomi {
+                    // Pure byoyomi: allow longer wait (150-250ms range)
+                    stop_wait_ms.clamp(150, 250)
+                } else {
+                    // Other time controls: conservative wait
+                    stop_wait_ms.clamp(50, 150)
+                };
+
+                info_string(format!(
+                    "oob_finalize_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={}",
+                    wait_budget_ms, is_pure_byoyomi as u8, stop_wait_ms
+                ));
+
+                // Step 3: try to receive result with bounded waiting
                 let mut finalize_candidate: Option<(u64, engine_core::search::SearchResult)> = None;
                 if let Some(rx_res) = &state.result_rx {
-                    for backoff in [0u64, 5, 10] {
-                        if backoff > 0 {
-                            std::thread::sleep(Duration::from_millis(backoff));
-                        }
-                        match rx_res.try_recv() {
+                    let chunk_ms = 50u64; // Wait in 50ms chunks
+                    let max_rounds = wait_budget_ms.div_ceil(chunk_ms);
+                    for round in 0..max_rounds {
+                        match rx_res.recv_timeout(Duration::from_millis(chunk_ms)) {
                             Ok(pair) => {
+                                info_string(format!(
+                                    "oob_recv_result round={} waited_ms={}",
+                                    round,
+                                    (round + 1) * chunk_ms
+                                ));
                                 finalize_candidate = Some(pair);
                                 break;
                             }
-                            Err(mpsc::TryRecvError::Empty) => continue,
-                            Err(mpsc::TryRecvError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                // Continue waiting
+                                continue;
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                info_string("oob_recv_disconnected");
+                                break;
+                            }
                         }
                     }
                 }
 
-                // Step 3: finalize
+                // Step 4: finalize with result or detach as last resort
                 if let Some((sid, result)) = finalize_candidate {
                     if sid == state.current_search_id {
                         info_string(format!("oob_finalize_joined sid={} label={}", sid, label));
@@ -114,7 +153,10 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         fast_finalize_and_detach(state, label);
                     }
                 } else {
-                    info_string(format!("oob_finalize_fast_path no_result=1 sid={}", session_id));
+                    info_string(format!(
+                        "oob_finalize_timeout no_result=1 sid={} detach=1",
+                        session_id
+                    ));
                     fast_finalize_and_detach(state, label);
                 }
             }
@@ -126,6 +168,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 }
 
 fn fast_finalize_and_detach(state: &mut EngineState, label: &str) {
+    use std::sync::atomic::Ordering;
+
     let worker = state.worker.take();
     state.searching = false;
     state.stop_flag = None;
@@ -136,6 +180,9 @@ fn fast_finalize_and_detach(state: &mut EngineState, label: &str) {
     state.current_root_hash = None;
     state.current_time_control = None;
     if let Some(handle) = worker {
+        // Increment detach counter for diagnostics
+        let count = state.oob_detach_count.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        info_string(format!("oob_detach label={} detach_count={}", label, count));
         enqueue_reaper(state, handle, label);
     } else {
         state.notify_idle();

@@ -27,8 +27,8 @@ use super::time_manager::{start_fail_safe_guard, start_time_manager};
 use super::work_queue::{Queues, WorkItem};
 use super::worker::{start_worker_with, WorkerConfig};
 use crate::search::parallel::util::{
-    compute_finalize_window_ms, compute_hard_guard_ms, compute_hygiene_wait_budget,
-    HYGIENE_WAIT_MAX_MS, HYGIENE_WAIT_STEP_MS,
+    compute_dynamic_hygiene_max, compute_finalize_window_ms, compute_hard_guard_ms,
+    compute_hygiene_wait_budget, HYGIENE_WAIT_MAX_MS, HYGIENE_WAIT_STEP_MS,
 };
 
 #[cfg(feature = "ybwc")]
@@ -206,11 +206,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
         let wait_budget_ms = if let Some(ref tm) = tm_snapshot {
+            // Stage 4: Use dynamic hygiene max based on remaining time
+            let dynamic_max = compute_dynamic_hygiene_max(
+                tm.elapsed_ms(),
+                tm.hard_limit_ms(),
+                tm.scheduled_end_ms(),
+            );
             compute_hygiene_wait_budget(
                 tm.elapsed_ms(),
                 tm.hard_limit_ms(),
                 tm.scheduled_end_ms(),
-                HYGIENE_WAIT_MAX_MS,
+                dynamic_max,
             )
             .max(HYGIENE_WAIT_STEP_MS)
         } else {
@@ -238,7 +244,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         (waited, remaining_active, remaining_pending)
     }
 
-    fn join_handles_blocking<I>(handles: I, label: &str)
+    fn join_handles_blocking<I>(handles: I, label: &str, info_cb: Option<&InfoStringCallback>)
     where
         I: IntoIterator<Item = thread::JoinHandle<()>>,
     {
@@ -277,12 +283,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         }
         let total_elapsed = total_start.elapsed().as_millis();
-        // USI 側のログ取り込みに寄せて "info string" 形式でも出す
-        log::info!(
-            "info string join_all_complete label={} waited_total_ms={}",
-            label,
-            total_elapsed
-        );
+        // USI 側のコールバックがある場合は確実に info string として出力
+        if let Some(cb) = info_cb {
+            cb(&format!("join_all_complete label={} waited_total_ms={}", label, total_elapsed));
+        } else {
+            // ない場合は logger 経由で診断出力
+            log::info!(
+                "info string join_all_complete label={} waited_total_ms={}",
+                label,
+                total_elapsed
+            );
+        }
     }
 
     /// Handle ponderhit time management setup
@@ -1119,11 +1130,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let planned_limit_ms =
                 tm_snapshot.as_ref().map(|tm| tm.scheduled_end_ms()).unwrap_or(u64::MAX);
 
+            // Stage 4: Use dynamic hygiene max based on remaining time
+            let dynamic_max =
+                compute_dynamic_hygiene_max(elapsed_ms, hard_limit_ms, planned_limit_ms);
             let max_wait_ms = compute_hygiene_wait_budget(
                 elapsed_ms,
                 hard_limit_ms,
                 planned_limit_ms,
-                HYGIENE_WAIT_MAX_MS,
+                dynamic_max,
             );
 
             let (waited_ms, remaining_active) = self.wait_for_active_clear(max_wait_ms);
@@ -1138,12 +1152,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             if remaining_active == 0 {
                 let drain = worker_handles.drain(..);
-                Self::join_handles_blocking(drain, "worker_fast_finalize");
+                Self::join_handles_blocking(drain, "worker_fast_finalize", info_string_cb.as_ref());
             } else {
-                Self::join_handles_blocking(worker_handles, "worker_fast_finalize");
+                Self::join_handles_blocking(
+                    worker_handles,
+                    "worker_fast_finalize",
+                    info_string_cb.as_ref(),
+                );
             }
             self.active_workers.store(0, Ordering::Release);
-            // 全ワーカ終了後に、未取得のWorkItemによる残カウントを明示的にリセット
+            // 全ワーカ join 後：未取得の WorkItem は破棄（仕様）。カウンタを最終的に 0 へ揃える。
             self.pending_work_items.store(0, Ordering::Release);
 
             if let Some(handle) = time_handle.take() {
@@ -1164,9 +1182,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             *self.time_manager.lock().unwrap() = None;
         } else {
-            Self::join_handles_blocking(worker_handles, "worker_finalize");
+            Self::join_handles_blocking(worker_handles, "worker_finalize", info_string_cb.as_ref());
             self.active_workers.store(0, Ordering::Release);
-            // 通常終了でも未取得WorkItemが残る場合があるため、最終的に 0 へ揃える
+            // 通常終了でも未取得 WorkItem が残る場合があるため、最終的に 0 へ揃える（テスト仕様）
             self.pending_work_items.store(0, Ordering::Release);
             if let Some(handle) = time_handle.take() {
                 if let Err(err) = handle.join() {
