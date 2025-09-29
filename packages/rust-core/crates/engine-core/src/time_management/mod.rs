@@ -567,6 +567,12 @@ impl TimeManager {
         self.inner.soft_limit_ms.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
+    pub fn override_limits_for_test(&self, soft_ms: u64, hard_ms: u64) {
+        self.inner.soft_limit_ms.store(soft_ms, Ordering::Relaxed);
+        self.inner.hard_limit_ms.store(hard_ms, Ordering::Relaxed);
+    }
+
     /// Get hard time limit in milliseconds
     pub fn hard_limit_ms(&self) -> u64 {
         self.inner.hard_limit_ms.load(Ordering::Relaxed)

@@ -75,6 +75,9 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Number of threads
     num_threads: usize,
 
+    /// Maximum configurable threads for this searcher
+    max_threads: usize,
+
     /// Work queues (truly lock-free, no locks at all)
     queues: Arc<Queues>,
 
@@ -555,6 +558,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             time_manager: Arc::new(Mutex::new(None)),
             shared_state,
             num_threads,
+            max_threads: num_threads,
             queues,
             active_workers: Arc::new(AtomicUsize::new(0)),
             steal_success: Arc::new(AtomicU64::new(0)),
@@ -571,7 +575,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
     /// Adjust the number of active threads dynamically
     pub fn adjust_thread_count(&mut self, new_active_threads: usize) {
-        let new_active = new_active_threads.min(self.num_threads).max(1);
+        let new_active = new_active_threads.min(self.max_threads).max(1);
         if new_active != self.num_threads {
             debug!("Adjusting active thread count from {} to {}", self.num_threads, new_active);
             self.num_threads = new_active;

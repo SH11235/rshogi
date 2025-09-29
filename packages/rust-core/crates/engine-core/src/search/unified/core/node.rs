@@ -13,6 +13,7 @@ use crate::{
 use std::cell::Cell;
 
 // Lightweight, time-based polling helpers for alpha-beta search (module scope)
+use super::time_control::NEAR_DEADLINE_MASK;
 use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
 thread_local! { static AB_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
 thread_local! { pub(super) static AB_NEAR_DEADLINE_ACTIVE: Cell<bool> = const { Cell::new(false) }; }
@@ -131,7 +132,7 @@ where
     // Get adaptive polling mask based on time control (unified with alpha_beta)
     let mut time_check_mask = super::time_control::get_event_poll_mask(searcher);
     if AB_NEAR_DEADLINE_ACTIVE.with(|f| f.get()) {
-        time_check_mask = time_check_mask.min(0x1FF);
+        time_check_mask = time_check_mask.min(NEAR_DEADLINE_MASK);
     }
 
     // Early stop check
@@ -150,7 +151,7 @@ where
         }
 
         // Check if stop was triggered by events
-        if searcher.context.should_stop() {
+        if searcher.context.should_stop() || searcher.context.was_time_stopped() {
             return alpha;
         }
     }

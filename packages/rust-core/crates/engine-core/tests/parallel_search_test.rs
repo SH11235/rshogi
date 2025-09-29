@@ -66,6 +66,7 @@ fn test_parallel_search_node_counting() {
 
     // Reset TT so the second search isn't affected by warmed entries and remains comparable.
     engine.clear_hash();
+    pos = Position::startpos();
 
     let result2 = engine.search(&mut pos, limits.clone());
     let nodes2 = result2.stats.nodes;

@@ -19,6 +19,8 @@ mod masks {
 }
 use masks::*;
 
+pub(super) const NEAR_DEADLINE_MASK: u64 = N32_MASK;
+
 #[inline(always)]
 fn is_ponder_like<E, const USE_TT: bool, const USE_PRUNING: bool>(
     searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING>,
@@ -62,70 +64,8 @@ where
         return EVERY_NODE; // immediate response
     }
 
-    // If stop_flag is present, use more frequent polling for responsiveness
-    // This replaces the separate stop_check_interval logic
-    if searcher.context.limits().stop_flag.is_some() {
-        return N64_MASK; // responsive stop polling
-    }
-
-    // Check if we have FixedNodes in either limits or time manager
-    if let TimeControl::FixedNodes { .. } = &searcher.context.limits().time_control {
-        return N64_MASK;
-    }
-
-    // Ponder-like modes (explicit ponder or infinite-like soft limit): frequent polling
-    if is_ponder_like(searcher) {
-        return N64_MASK; // ponderhit/infinite responsiveness
-    }
-
-    // Special handling for Byoyomi time control - need more frequent checks
-    if let Some(tm) = &searcher.time_manager {
-        if let TimeControl::Byoyomi { byoyomi_ms, .. } = tm.time_control() {
-            // For Byoyomi, adapt based on remaining within current period when in byoyomi.
-            if let Some((_, current_period_ms, in_byoyomi)) = tm.get_byoyomi_state() {
-                if in_byoyomi && byoyomi_ms > 0 {
-                    let ratio = current_period_ms as f64 / byoyomi_ms as f64;
-                    if ratio < 0.25 {
-                        return N8_MASK; // 8 nodes when last 25%
-                    } else if ratio < 0.5 {
-                        return N32_MASK; // 32 nodes when under 50%
-                    } else {
-                        return N32_MASK; // default byoyomi polling remains strict
-                    }
-                }
-            }
-            // Not yet in byoyomi period: keep strict but not ultra-fine
-            return N32_MASK;
-        }
-    }
-
-    // If TimeManager exists, adapt polling frequency near hard limit
-    if let Some(tm) = &searcher.time_manager {
-        let hard = tm.hard_limit_ms();
-        if hard < u64::MAX && hard > 0 {
-            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
-            if elapsed_ms < hard {
-                let remain = hard - elapsed_ms;
-                // Strengthen polling when within 2*NetworkDelay2
-                let nd2 = tm.network_delay2_ms();
-                if nd2 > 0 && remain <= nd2.saturating_mul(2) {
-                    return masks::EVERY_NODE; // ultra-responsive near IO boundary
-                }
-                // Ramp up responsiveness as we approach hard limit (strictly inside thresholds)
-                match remain {
-                    0..=50 => return EVERY_NODE,  // ultra-critical: every node
-                    51..=100 => return N8_MASK,   // 8 nodes
-                    101..=150 => return N16_MASK, // 16 nodes
-                    151..=300 => return N32_MASK, // 32 nodes
-                    301..=500 => return N64_MASK, // 64 nodes
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // For time-based controls, use adaptive intervals based on soft limit
-    if let Some(tm) = &searcher.time_manager {
+    // Base mask derived from soft limit (or default when TimeManager is absent)
+    let mut mask = if let Some(tm) = &searcher.time_manager {
         match tm.soft_limit_ms() {
             0..=50 => N32_MASK,
             51..=100 => N64_MASK,
@@ -134,10 +74,73 @@ where
             _ => N1024_MASK,
         }
     } else {
-        // For searches without TimeManager (infinite search, depth-only, etc)
-        // Use more frequent polling to ensure responsive stop command handling
         N128_MASK
+    };
+
+    if let Some(tm) = &searcher.time_manager {
+        // Byoyomi-specific tightening
+        if let TimeControl::Byoyomi { byoyomi_ms, .. } = tm.time_control() {
+            let byoyomi_mask =
+                if let Some((_, current_period_ms, in_byoyomi)) = tm.get_byoyomi_state() {
+                    if in_byoyomi && byoyomi_ms > 0 {
+                        let ratio = current_period_ms as f64 / byoyomi_ms as f64;
+                        if ratio < 0.25 {
+                            N8_MASK
+                        } else {
+                            N32_MASK
+                        }
+                    } else {
+                        N32_MASK
+                    }
+                } else {
+                    N32_MASK
+                };
+            mask = mask.min(byoyomi_mask);
+        }
+
+        // Hard limit proximity tightening
+        let hard = tm.hard_limit_ms();
+        if hard > 0 && hard < u64::MAX {
+            let elapsed_ms = tm.elapsed_ms();
+            if elapsed_ms >= hard {
+                mask = EVERY_NODE;
+            } else {
+                let remain = hard - elapsed_ms;
+                let nd2 = tm.network_delay2_ms();
+                if nd2 > 0 && remain <= nd2.saturating_mul(2) {
+                    mask = EVERY_NODE;
+                }
+                let near_mask = match remain {
+                    0..=50 => Some(EVERY_NODE),
+                    51..=100 => Some(N8_MASK),
+                    101..=150 => Some(N16_MASK),
+                    151..=300 => Some(N32_MASK),
+                    301..=500 => Some(N64_MASK),
+                    _ => None,
+                };
+                if let Some(candidate) = near_mask {
+                    mask = mask.min(candidate);
+                }
+            }
+        }
     }
+
+    // Fixed-nodes search enforces at least N64 polling
+    if let TimeControl::FixedNodes { .. } = &searcher.context.limits().time_control {
+        mask = mask.min(N64_MASK);
+    }
+
+    // Ponder (or soft-limit == u64::MAX) should never poll less frequently than every 64 nodes
+    if is_ponder_like(searcher) {
+        mask = mask.min(N64_MASK);
+    }
+
+    // External stop flag wiring guarantees responsiveness; treat as upper bound N64
+    if searcher.context.limits().stop_flag.is_some() {
+        mask = mask.min(N64_MASK);
+    }
+
+    mask
 }
 
 #[cfg(test)]
@@ -229,6 +232,7 @@ mod tests {
             0,
             crate::time_management::GamePhase::Opening,
         ));
+        time_manager.override_limits_for_test(2000, u64::MAX);
         searcher.time_manager = Some(time_manager);
 
         assert_eq!(get_event_poll_mask(&searcher), N32_MASK);
@@ -269,8 +273,6 @@ mod tests {
 
     #[test]
     fn test_soft_limit_thresholds() {
-        let evaluator = MaterialEvaluator;
-
         // Test various soft limit values
         let test_cases = vec![
             (25, N32_MASK),     // 0..=50
@@ -286,37 +288,21 @@ mod tests {
         ];
 
         for (soft_limit_ms, expected_mask) in test_cases {
-            let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
+            let mut searcher = UnifiedSearcher::<_, true, false>::new(MaterialEvaluator);
 
-            // Set up fixed time to get a specific soft limit
-            let limits = SearchLimitsBuilder::default()
-                .fixed_time_ms(soft_limit_ms * 2) // TimeManager typically uses ~50% for soft limit
-                .build();
+            let limits = SearchLimitsBuilder::default().fixed_time_ms(1000).build();
             searcher.context.set_limits(limits.clone());
 
-            // Create time manager
             let time_manager = Arc::new(crate::time_management::TimeManager::new(
                 &limits.clone().into(),
                 crate::shogi::Color::Black,
                 0,
                 crate::time_management::GamePhase::Opening,
             ));
-
-            // Manually override soft limit for testing
-            // Note: In real usage, TimeManager calculates this based on time control
+            time_manager.override_limits_for_test(soft_limit_ms, u64::MAX);
             searcher.time_manager = Some(time_manager);
 
-            // For this test, we need to verify the logic would work correctly
-            // The actual soft_limit calculation is internal to TimeManager
-            // So we test the match arms directly
-            let mask = match soft_limit_ms {
-                0..=50 => N32_MASK,
-                51..=100 => N64_MASK,
-                101..=200 => N128_MASK,
-                201..=500 => N256_MASK,
-                _ => N1024_MASK,
-            };
-
+            let mask = get_event_poll_mask(&searcher);
             assert_eq!(mask, expected_mask, "Failed for soft_limit_ms={soft_limit_ms}");
         }
     }
