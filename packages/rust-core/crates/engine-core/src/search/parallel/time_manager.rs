@@ -1,6 +1,7 @@
 //! Time management thread implementation
 
 use super::{util::compute_finalize_window_ms, SharedSearchState};
+use crate::search::parallel::stop_bridge::{EngineStopBridge, FinalizeReason};
 use crate::{
     search::types::{StopInfo, TerminationReason},
     time_management::TimeManager,
@@ -18,6 +19,7 @@ use std::{
 pub fn start_time_manager(
     time_manager: Arc<TimeManager>,
     shared_state: Arc<SharedSearchState>,
+    stop_bridge: Arc<EngineStopBridge>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         if log::log_enabled!(log::Level::Debug) {
@@ -79,6 +81,18 @@ pub fn start_time_manager(
                         );
                     }
                 }
+
+                // Proactively request out-of-band finalize to USI layer
+                let fin_reason = if hard_timeout {
+                    FinalizeReason::Hard
+                } else if near_hard {
+                    FinalizeReason::NearHard
+                } else if near_planned || (planned != u64::MAX && elapsed_ms >= planned) {
+                    FinalizeReason::Planned
+                } else {
+                    FinalizeReason::TimeManagerStop
+                };
+                stop_bridge.request_finalize(fin_reason);
 
                 // Record structured stop info and signal stop
                 shared_state.set_stop_with_reason(StopInfo {

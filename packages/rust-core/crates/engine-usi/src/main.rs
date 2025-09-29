@@ -1,5 +1,6 @@
 mod finalize;
 mod io;
+mod oob;
 mod options;
 mod search;
 mod state;
@@ -16,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use io::{info_string, usi_println};
+use oob::poll_oob_finalize;
 use options::{apply_options_to_engine, handle_setoption, send_id_and_options};
 use search::{handle_go, parse_position, poll_search_completion};
 use state::EngineState;
@@ -78,6 +80,8 @@ fn main() -> Result<()> {
 
     loop {
         poll_search_completion(&mut state);
+        // Handle out-of-band finalize requests emitted by time manager
+        poll_oob_finalize(&mut state);
 
         if let Ok(line) = line_rx.try_recv() {
             let cmd = line.trim();

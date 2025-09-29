@@ -22,4 +22,4 @@ pub use search_thread::SearchThread;
 pub use shared::{SharedHistory, SharedSearchState};
 #[cfg(feature = "ybwc")]
 pub use shared::{SplitPoint, SplitPointManager};
-pub use stop_bridge::{EngineStopBridge, StopSnapshot};
+pub use stop_bridge::{EngineStopBridge, FinalizeReason, FinalizerMsg, StopSnapshot};
