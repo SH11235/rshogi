@@ -359,14 +359,32 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             && status.pending_work_items == 0
             && status.reaper_pending > 0
         {
-            let extra_cap = std::time::Duration::from_millis(1200);
+            // 追加待機上限（可用時間に応じて自動調整）
+            let mut extra_cap_ms: u64 = 1200;
+            if let Some(ms) = gp.movetime {
+                extra_cap_ms = extra_cap_ms.min(ms.saturating_sub(300)).max(200);
+            } else if let Some(byo) = gp.byoyomi {
+                if gp.btime.unwrap_or(0) == 0 && gp.wtime.unwrap_or(0) == 0 {
+                    let safety = state
+                        .opts
+                        .byoyomi_safety_ms
+                        .saturating_add(state.opts.byoyomi_deadline_lead_ms)
+                        .saturating_add(state.opts.overhead_ms)
+                        .saturating_add(state.opts.network_delay2_ms);
+                    let est_hard = byo.saturating_sub(safety);
+                    extra_cap_ms = extra_cap_ms.min(est_hard).max(200);
+                }
+            }
+            let extra_cap = std::time::Duration::from_millis(extra_cap_ms);
             let start2 = std::time::Instant::now();
             loop {
-                let s2 = state.idle_status();
-                if s2.reaper_pending == 0 {
+                // エンジンの Mutex が空なら即開始
+                if let Ok(g) = state.engine.try_lock() {
+                    drop(g);
                     break;
                 }
-                if start2.elapsed() >= extra_cap {
+                let s2 = state.idle_status();
+                if s2.reaper_pending == 0 || start2.elapsed() >= extra_cap {
                     break;
                 }
                 state.idle_sync.wait_timeout(std::time::Duration::from_millis(50));
@@ -374,17 +392,22 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             let extra = start2.elapsed().as_millis() as u64;
             waited_before_go_ms = waited_before_go_ms.saturating_add(extra);
             let s2 = state.idle_status();
+            let engine_free = state.engine.try_lock().is_ok();
             info_string(format!(
-                "go_wait_for_reaper waited_ms={} reaper_pending_after={} worker_active={} active_workers={}",
+                "go_wait_for_reaper waited_ms={} reaper_pending_after={} worker_active={} active_workers={} engine_free={}",
                 extra,
                 s2.reaper_pending,
                 s2.worker_active as u8,
-                s2.active_workers
+                s2.active_workers,
+                if engine_free { 1 } else { 0 }
             ));
         }
         // 前セッションの stop 残骸を明示的に破棄（Reaper 待ちだけでなければ）
         let post = state.idle_status();
-        if post.worker_active || post.active_workers > 0 || post.pending_work_items > 0 {
+        let engine_free = state.engine.try_lock().is_ok();
+        if !engine_free
+            && (post.worker_active || post.active_workers > 0 || post.pending_work_items > 0)
+        {
             state.stop_bridge.force_clear();
         }
         state.notify_idle();
