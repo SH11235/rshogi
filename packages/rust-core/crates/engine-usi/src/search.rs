@@ -495,9 +495,11 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                 && gp.btime.unwrap_or(0) == 0
                 && gp.wtime.unwrap_or(0) == 0;
 
+            // Phase 1: Accurate time budget for pure byoyomi
+            // Reflect actual wait time up to 2000ms (was 500ms)
+            // This prevents TimeManager from using too much time when startup is delayed
             let clamped_wait = if is_pure_byoyomi {
-                // For pure byoyomi, clamp to 500ms to avoid excessive time budget attribution
-                waited_before_go_ms.min(500)
+                waited_before_go_ms.min(2000)
             } else {
                 waited_before_go_ms
             };
@@ -557,6 +559,44 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         }
     }
 
+    // Stage 1.5: Calculate startup timeout based on time control
+    // Review feedback: Adjust timeout based on time control to avoid wasting time
+    let startup_timeout_ms = if let Some(ref params) = limits.time_parameters {
+        // Calculate safety budget (similar to go_wait_for_reaper logic)
+        let safety_budget = state.opts.byoyomi_safety_ms
+            + state.opts.byoyomi_deadline_lead_ms
+            + state.opts.overhead_ms
+            + params.network_delay2_ms;
+
+        match &limits.time_control {
+            TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms,
+                ..
+            } if *byoyomi_ms > 0 => {
+                // Pure byoyomi: min(1200ms, max(200ms, byo - safety_budget))
+                let max_wait = byoyomi_ms.saturating_sub(safety_budget);
+                max_wait.clamp(200, 1200)
+            }
+            TimeControl::FixedTime { ms_per_move } => {
+                // Fixed time: clamp(200ms, ms_per_move / 4, 1200ms)
+                (ms_per_move / 4).clamp(200, 1200)
+            }
+            TimeControl::Fischer {
+                increment_ms,
+                white_ms,
+                black_ms,
+            } => {
+                // Fischer: clamp(200ms, (inc + avg_residual) / 4, 1200ms)
+                let avg_residual = (white_ms + black_ms) / 2;
+                ((increment_ms + avg_residual / 10) / 4).clamp(200, 1200)
+            }
+            _ => 1200, // Default for other modes
+        }
+    } else {
+        1200 // Default when no time parameters
+    };
+
     let (tx, rx) = mpsc::channel();
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
     let engine = Arc::clone(&state.engine);
@@ -569,21 +609,31 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     });
 
     // Stage 2: Wait for worker to acquire engine lock and start TimeManager
-    let startup_timeout = Duration::from_millis(1200);
+
+    let startup_timeout = Duration::from_millis(startup_timeout_ms);
     let startup_wait_start = Instant::now();
     let _startup_success = match startup_rx.recv_timeout(startup_timeout) {
         Ok(()) => {
             let waited_ms = startup_wait_start.elapsed().as_millis() as u64;
-            info_string(format!("go_startup_handshake waited_ms={} timeout=0", waited_ms));
+            info_string(format!(
+                "go_startup_handshake waited_ms={} timeout_ms={} timeout=0",
+                waited_ms, startup_timeout_ms
+            ));
             true
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             let waited_ms = startup_wait_start.elapsed().as_millis() as u64;
-            info_string(format!("go_startup_handshake_timeout waited_ms={} timeout=1", waited_ms));
+            info_string(format!(
+                "go_startup_handshake_timeout waited_ms={} timeout_ms={} timeout=1",
+                waited_ms, startup_timeout_ms
+            ));
             false
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            info_string("go_startup_handshake_disconnected");
+            info_string(format!(
+                "go_startup_handshake_disconnected timeout_ms={}",
+                startup_timeout_ms
+            ));
             false
         }
     };

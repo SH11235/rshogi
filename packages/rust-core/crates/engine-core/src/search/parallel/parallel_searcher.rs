@@ -1777,6 +1777,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         });
         self.shared_state.mark_finalized_early();
 
+        // Phase 2: Immediate stop propagation (yanerau-style)
+        // Clear pending work items to signal all workers to stop
+        self.pending_work_items.store(0, Ordering::Release);
+        // Note: work_queues.close() is handled by set_stop() in shared_state
+
         #[cfg(feature = "diagnostics")]
         {
             log::info!(
