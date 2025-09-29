@@ -133,7 +133,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             self.shared_state.set_stop();
         }
         self.shared_state.close_work_queues();
-        self.pending_work_items.store(0, Ordering::Release);
     }
 
     #[inline]
@@ -172,7 +171,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.shared_state.set_stop_with_reason(stop_info);
         self.broadcast_stop(limits.stop_flag.as_ref());
         self.shared_state.close_work_queues();
-        self.pending_work_items.store(0, Ordering::Release);
         self.prepare_final_result(position, best_result)
     }
 
@@ -200,7 +198,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let expected_generation = self.shared_state.generation();
         self.shared_state.set_stop();
         self.shared_state.close_work_queues();
-        self.pending_work_items.store(0, Ordering::Release);
 
         let tm_snapshot = { self.time_manager.lock().unwrap().clone() };
         let wait_budget_ms = if let Some(ref tm) = tm_snapshot {
@@ -236,7 +233,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         (waited, remaining_active, remaining_pending)
     }
 
-    fn join_handles_blocking(handles: Vec<thread::JoinHandle<()>>, label: &'static str) {
+    fn join_handles_blocking<I>(handles: I, label: &str)
+    where
+        I: IntoIterator<Item = thread::JoinHandle<()>>,
+    {
+        let total_start = Instant::now();
         for handle in handles {
             let start = Instant::now();
             match handle.join() {
@@ -244,16 +245,34 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     let elapsed = start.elapsed();
                     if elapsed >= Duration::from_millis(20) {
                         log::info!(
-                            "diag join_complete label={label} waited_ms={}",
+                            "diag join_complete label={} waited_ms={}",
+                            label,
                             elapsed.as_millis()
                         );
                     }
                 }
-                Err(err) => {
-                    log::warn!("join_error label={} err={:?}", label, err);
+                Err(payload) => {
+                    let panic_str = {
+                        let any_ref = payload.as_ref();
+                        if let Some(s) = any_ref.downcast_ref::<&str>() {
+                            Some((*s).to_string())
+                        } else {
+                            any_ref.downcast_ref::<String>().cloned()
+                        }
+                    };
+                    match panic_str {
+                        Some(msg) => {
+                            log::warn!("join_error label={} panic='{}'", label, msg);
+                        }
+                        None => {
+                            log::warn!("join_error label={} panic=<non-string>", label);
+                        }
+                    }
                 }
             }
         }
+        let total_elapsed = total_start.elapsed().as_millis();
+        log::info!("diag join_all_complete label={} waited_total_ms={}", label, total_elapsed);
     }
 
     /// Handle ponderhit time management setup
@@ -669,7 +688,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!(
                     "Stop mode: all workers inactive; finishing wait regardless of pending={pending}"
                 );
-                self.pending_work_items.store(0, Ordering::Release);
                 self.emit_info_string(
                     limits,
                     format!(
@@ -708,7 +726,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             hard_limit_ms: tm.hard_limit_ms(),
                         };
                         self.shared_state.set_stop_with_reason(stop_info);
-                        self.pending_work_items.store(0, Ordering::Release);
                         break;
                     }
                 }
@@ -1075,7 +1092,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         );
         self.shared_state.set_stop();
         self.shared_state.close_work_queues();
-        self.pending_work_items.store(0, Ordering::Release);
 
         let mut worker_handles = handles;
 
@@ -1108,11 +1124,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             if remaining_active == 0 {
-                for handle in worker_handles.drain(..) {
-                    if let Err(err) = handle.join() {
-                        log::warn!("worker_join_error early_finalize err={:?}", err);
-                    }
-                }
+                let drain = worker_handles.drain(..);
+                Self::join_handles_blocking(drain, "worker_fast_finalize");
             } else {
                 Self::join_handles_blocking(worker_handles, "worker_fast_finalize");
             }
@@ -1136,11 +1149,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             *self.time_manager.lock().unwrap() = None;
         } else {
-            for handle in worker_handles {
-                if let Err(err) = handle.join() {
-                    log::warn!("worker_join_error err={:?}", err);
-                }
-            }
+            Self::join_handles_blocking(worker_handles, "worker_finalize");
+            self.active_workers.store(0, Ordering::Release);
             if let Some(handle) = time_handle.take() {
                 if let Err(err) = handle.join() {
                     log::warn!("time_manager_join_error err={:?}", err);
@@ -1314,7 +1324,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 } else {
                     self.shared_state.set_stop();
                     self.shared_state.close_work_queues();
-                    self.pending_work_items.store(0, Ordering::Release);
                     return self.prepare_final_result(position, best_result);
                 }
             }
@@ -1642,8 +1651,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // 先に停止をブロードキャスト（特に時間制御時のテール短縮）
                 self.shared_state.set_stop();
-                // pending をメイン側で 0 に
-                self.pending_work_items.store(0, Ordering::Release);
 
                 // Wait for workers to complete their work
                 let wait_time = self.wait_for_workers_completion(
@@ -1735,7 +1742,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             soft_limit_ms: params.soft_limit_ms,
             hard_limit_ms: params.hard_limit_ms,
         });
-        self.pending_work_items.store(0, Ordering::Release);
         self.shared_state.mark_finalized_early();
 
         #[cfg(feature = "diagnostics")]
