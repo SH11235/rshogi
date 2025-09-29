@@ -13,15 +13,32 @@ pub(crate) const HYGIENE_IO_MS: u64 = 15;
 
 const HYGIENE_RESERVED_MS: u64 = HYGIENE_LEAD_MS + HYGIENE_IO_MS;
 
+/// Compute the base polling tick (ms) used by the time manager for a given reference window.
+#[inline]
+pub(crate) fn poll_tick_ms(window_ref_ms: u64) -> u64 {
+    if window_ref_ms == u64::MAX {
+        20
+    } else if window_ref_ms <= 200 {
+        5
+    } else if window_ref_ms <= 800 {
+        10
+    } else {
+        20
+    }
+}
+
 /// Compute the near-finalization guard window (in ms) for a given absolute limit.
 ///
 /// `total_limit_ms` は “総ハード／プラン済み締切” の時間であり、残り時間ではない。
-/// 1000ms 以上では 500ms、500–999ms では 250ms、200–499ms では 120ms、それ未満は 0ms を返す。
+/// 1000ms 以上では 500ms、500–999ms では 250ms、200–499ms では 120ms、それ未満は
+/// ポーリング周期に応じた最低限のガード（10ms）を確保する。
 #[inline]
 pub(crate) fn compute_finalize_window_ms(total_limit_ms: u64) -> u64 {
     if total_limit_ms == 0 || total_limit_ms == u64::MAX {
-        0
-    } else if total_limit_ms >= 1_000 {
+        return 0;
+    }
+
+    let base = if total_limit_ms >= 1_000 {
         NEAR_HARD_FINALIZE_MS
     } else if total_limit_ms >= 500 {
         NEAR_HARD_FINALIZE_MS / 2
@@ -29,7 +46,10 @@ pub(crate) fn compute_finalize_window_ms(total_limit_ms: u64) -> u64 {
         120
     } else {
         0
-    }
+    };
+
+    let tick = poll_tick_ms(total_limit_ms);
+    base.max(tick.saturating_mul(2))
 }
 
 /// Compute the hard-deadline guard window (ms) used by the main-thread near-guard logic.

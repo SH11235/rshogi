@@ -1167,6 +1167,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Heartbeat tracking for periodic info callbacks
         let mut last_heartbeat = Instant::now();
         let mut last_heartbeat_nodes = 0u64;
+        let mut warned_pv_mismatch = false;
 
         // Iterative deepening
         for iteration in 1.. {
@@ -1388,11 +1389,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 use crate::search::snapshot::RootSnapshot;
                 let nodes_total = self.shared_state.get_nodes();
                 let elapsed_ms = search_start.elapsed().as_millis() as u32;
+                let mut commit_pv = SmallVec::from_vec(best_result.stats.pv.clone());
+                if commit_pv.is_empty() {
+                    if let Some(bm) = best_result.best_move {
+                        commit_pv.push(bm);
+                    } else if let Some(prev) = self.shared_state.snapshot.try_read() {
+                        if prev.search_id == self.shared_state.generation() && !prev.pv.is_empty() {
+                            commit_pv = prev.pv;
+                        }
+                    }
+                }
                 let snap = RootSnapshot {
                     search_id: self.shared_state.generation(),
                     root_key: position.zobrist_hash(),
                     best: best_result.best_move,
-                    pv: SmallVec::from_vec(best_result.stats.pv.clone()),
+                    pv: commit_pv,
                     depth: best_result.stats.depth,
                     score_cp: best_result.score,
                     nodes: nodes_total,
@@ -1410,6 +1421,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     ),
                 );
                 self.shared_state.snapshot.publish(&snap);
+                warned_pv_mismatch = false;
             } else {
                 // Preserve previous PV; refresh minimal fields only
                 let elapsed_ms = search_start.elapsed().as_millis() as u32;
@@ -1417,7 +1429,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     if let (Some(b), Some(pv0)) =
                         (self.shared_state.get_best_move(), prev.pv.first().copied())
                     {
-                        if b != pv0 {
+                        if b != pv0 && !warned_pv_mismatch {
                             let b_usi = crate::usi::move_to_usi(&b);
                             let pv0_usi = crate::usi::move_to_usi(&pv0);
                             self.emit_info_string(
@@ -1429,6 +1441,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                     pv0_usi
                                 ),
                             );
+                            warned_pv_mismatch = true;
                         }
                     }
                 }
@@ -1809,16 +1822,23 @@ mod tests_compute_guard_and_wait {
     #[test]
     fn test_compute_finalize_window_ms_piecewise() {
         use crate::search::constants::NEAR_HARD_FINALIZE_MS;
-        use crate::search::parallel::util::compute_finalize_window_ms;
+        use crate::search::parallel::util::{compute_finalize_window_ms, poll_tick_ms};
         assert_eq!(compute_finalize_window_ms(2_000), NEAR_HARD_FINALIZE_MS);
         assert_eq!(compute_finalize_window_ms(1_000), NEAR_HARD_FINALIZE_MS);
         assert_eq!(compute_finalize_window_ms(800), NEAR_HARD_FINALIZE_MS / 2);
         assert_eq!(compute_finalize_window_ms(500), NEAR_HARD_FINALIZE_MS / 2);
         assert_eq!(compute_finalize_window_ms(400), 120);
         assert_eq!(compute_finalize_window_ms(200), 120);
-        assert_eq!(compute_finalize_window_ms(180), 0);
+        assert_eq!(compute_finalize_window_ms(180), 10);
         assert_eq!(compute_finalize_window_ms(0), 0);
         assert_eq!(compute_finalize_window_ms(u64::MAX), 0);
+
+        assert_eq!(poll_tick_ms(50), 5);
+        assert_eq!(poll_tick_ms(200), 5);
+        assert_eq!(poll_tick_ms(300), 10);
+        assert_eq!(poll_tick_ms(900), 20);
+        assert_eq!(poll_tick_ms(1_500), 20);
+        assert_eq!(poll_tick_ms(u64::MAX), 20);
     }
 
     #[test]

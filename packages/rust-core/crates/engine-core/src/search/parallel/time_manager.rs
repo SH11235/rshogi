@@ -1,6 +1,9 @@
 //! Time management thread implementation
 
-use super::{util::compute_finalize_window_ms, SharedSearchState};
+use super::{
+    util::{compute_finalize_window_ms, poll_tick_ms},
+    SharedSearchState,
+};
 use crate::search::parallel::stop_bridge::{EngineStopBridge, FinalizeReason};
 use crate::{
     search::types::{StopInfo, TerminationReason},
@@ -22,19 +25,12 @@ pub fn start_time_manager(
     stop_bridge: Arc<EngineStopBridge>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let mut poll_interval = Duration::from_millis(20);
         if log::log_enabled!(log::Level::Debug) {
             debug!("Time manager started");
         }
 
         loop {
-            // Poll interval based on time control
-            let poll_interval = match time_manager.soft_limit_ms() {
-                0..=50 => Duration::from_millis(2),
-                51..=100 => Duration::from_millis(5),
-                101..=500 => Duration::from_millis(10),
-                _ => Duration::from_millis(20),
-            };
-
             thread::sleep(poll_interval);
 
             if shared_state.should_stop() {
@@ -46,6 +42,15 @@ pub fn start_time_manager(
             let soft = time_manager.soft_limit_ms();
             let hard = time_manager.hard_limit_ms();
             let planned = time_manager.scheduled_end_ms();
+
+            let nearest_remaining = [soft, hard, planned]
+                .into_iter()
+                .filter(|limit| *limit > 0 && *limit < u64::MAX && *limit > elapsed_ms)
+                .map(|limit| limit - elapsed_ms)
+                .min();
+            poll_interval = nearest_remaining
+                .map(|remain| Duration::from_millis(poll_tick_ms(remain)))
+                .unwrap_or_else(|| Duration::from_millis(20));
 
             let near_hard = hard != u64::MAX
                 && hard > 0

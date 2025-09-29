@@ -50,6 +50,8 @@ struct EngineStopBridgeInner {
     finalizer_tx: Mutex<Option<std::sync::mpsc::Sender<FinalizerMsg>>>,
     // Current session id (engine-core epoch). Used to tag finalize requests.
     session_id: AtomicU64,
+    // Tracks whether the current session already emitted bestmove via OOB finalize.
+    finalize_claimed: AtomicBool,
 }
 
 impl EngineStopBridge {
@@ -79,6 +81,7 @@ impl EngineStopBridge {
         self.update_external_stop_flag(external_stop);
         // Record current session id and notify USI side
         self.inner.session_id.store(session_id, Ordering::Release);
+        self.inner.finalize_claimed.store(false, Ordering::Release);
         if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
             let _ = tx.send(FinalizerMsg::SessionStart { session_id });
         }
@@ -105,6 +108,7 @@ impl EngineStopBridge {
             let mut guard = self.inner.external_stop_flag.lock().unwrap();
             *guard = None;
         }
+        self.inner.finalize_claimed.store(false, Ordering::Release);
         debug!("EngineStopBridge: session handles cleared");
     }
 
@@ -193,6 +197,15 @@ impl EngineStopBridge {
         shared_state.snapshot.try_read()
     }
 
+    /// Try reading StopInfo snapshot of the current session, if any.
+    pub fn try_read_stop_info(&self) -> Option<StopInfo> {
+        let shared_state = {
+            let guard = self.inner.shared_state.lock().unwrap();
+            guard.as_ref().and_then(|weak| weak.upgrade())
+        }?;
+        shared_state.stop_info.get().cloned()
+    }
+
     /// Register USI-side finalizer channel to receive finalize/session messages.
     pub fn register_finalizer(&self, tx: std::sync::mpsc::Sender<FinalizerMsg>) {
         let mut guard = self.inner.finalizer_tx.lock().unwrap();
@@ -206,6 +219,15 @@ impl EngineStopBridge {
         if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
             let _ = tx.send(FinalizerMsg::Finalize { session_id, reason });
         }
+    }
+
+    /// Attempt to claim the right to emit bestmove for the active session.
+    /// Returns true only once per session (first caller wins).
+    pub fn try_claim_finalize(&self) -> bool {
+        self.inner
+            .finalize_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 

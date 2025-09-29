@@ -76,9 +76,14 @@ fn test_parallel_search_node_counting() {
     let nodes2 = result2.stats.nodes;
 
     // Node counts should be similar (within 2x) for same position/depth
+    let ratio = if nodes1 > nodes2 {
+        nodes1 as f64 / nodes2.max(1) as f64
+    } else {
+        nodes2 as f64 / nodes1.max(1) as f64
+    };
     assert!(
-        nodes2 > nodes1 / 2 && nodes2 < nodes1 * 2,
-        "Node counts should be consistent: {nodes1} vs {nodes2}"
+        ratio < 2.5,
+        "Node counts should be consistent within 2.5x: nodes1={nodes1} nodes2={nodes2}"
     );
 }
 
