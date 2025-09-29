@@ -261,7 +261,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         debug!("TimeManager created on ponderhit (soft limit: {soft_limit}ms)");
 
                         // Start time manager thread and remember its handle to join later
-                        let tm_handle = start_time_manager(tm.clone(), self.shared_state.clone());
+                        let tm_handle = start_time_manager(
+                            tm.clone(),
+                            self.shared_state.clone(),
+                            self.stop_bridge.clone(),
+                        );
                         {
                             let mut h = self.post_ponder_tm_handle.lock().unwrap();
                             // If somehow already set, overwrite (shouldn't happen with is_none() guard)
@@ -854,6 +858,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 &self.shared_state,
                 &self.pending_work_items,
                 Some(&ext_stop),
+                self.shared_state.generation(),
             );
         } else {
             // Ensure clean state when no external flag is provided.
@@ -862,6 +867,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 &self.shared_state,
                 &self.pending_work_items,
                 Some(&self.shared_state.stop_flag),
+                self.shared_state.generation(),
             );
         }
 
@@ -965,7 +971,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // Start time manager if we have any time limit
                 // Even for short searches, we need time control to work properly
                 if tm.soft_limit_ms() > 0 {
-                    Some(start_time_manager(tm.clone(), self.shared_state.clone()))
+                    Some(start_time_manager(
+                        tm.clone(),
+                        self.shared_state.clone(),
+                        self.stop_bridge.clone(),
+                    ))
                 } else {
                     debug!("Skipping time manager (soft_limit: 0ms)");
                     None

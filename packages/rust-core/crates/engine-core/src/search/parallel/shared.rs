@@ -538,6 +538,11 @@ impl SharedSearchState {
         self.work_closed.store(false, Ordering::Release);
     }
 
+    /// Get current generation (epoch) for this search state.
+    pub fn generation(&self) -> u64 {
+        self.current_generation.load(Ordering::Acquire)
+    }
+
     /// Try to update best move/score if better (lock-free)
     pub fn maybe_update_best(&self, score: i32, mv: Option<Move>, depth: u8, generation: u64) {
         // Check generation to avoid stale updates

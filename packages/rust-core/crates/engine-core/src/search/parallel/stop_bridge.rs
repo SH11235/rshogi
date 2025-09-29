@@ -6,6 +6,33 @@ use std::sync::{
     Arc, Mutex, Weak,
 };
 
+/// Reason for an out-of-band finalize request issued by time management or other guards.
+#[derive(Debug, Clone, Copy)]
+pub enum FinalizeReason {
+    /// Hard deadline reached (elapsed >= hard)
+    Hard,
+    /// Approaching hard deadline window (near-hard finalize window)
+    NearHard,
+    /// Planned rounded stop time reached/near
+    Planned,
+    /// Generic time-manager stop (e.g., node limit or emergency)
+    TimeManagerStop,
+    /// User/GUI stop propagation (for consistency)
+    UserStop,
+}
+
+/// Messages delivered to the USI layer to coordinate exactly-once bestmove emission.
+#[derive(Debug, Clone)]
+pub enum FinalizerMsg {
+    /// New search session started (publish current session id)
+    SessionStart { session_id: u64 },
+    /// Request immediate finalize for the given session
+    Finalize {
+        session_id: u64,
+        reason: FinalizeReason,
+    },
+}
+
 /// Non-blocking conduit for issuing immediate stop requests from outer layers (USI, GUI) to
 /// the running parallel search without needing to grab Engine mutexes.
 #[derive(Clone, Default)]
@@ -18,6 +45,10 @@ struct EngineStopBridgeInner {
     shared_state: Mutex<Option<Weak<SharedSearchState>>>,
     pending_work_items: Mutex<Option<Weak<AtomicU64>>>,
     external_stop_flag: Mutex<Option<Weak<AtomicBool>>>,
+    // Finalizer message channel to USI layer (optional)
+    finalizer_tx: Mutex<Option<std::sync::mpsc::Sender<FinalizerMsg>>>,
+    // Current session id (engine-core epoch). Used to tag finalize requests.
+    session_id: AtomicU64,
 }
 
 impl EngineStopBridge {
@@ -34,6 +65,7 @@ impl EngineStopBridge {
         shared_state: &Arc<SharedSearchState>,
         pending_work: &Arc<AtomicU64>,
         external_stop: Option<&Arc<AtomicBool>>,
+        session_id: u64,
     ) {
         {
             let mut guard = self.inner.shared_state.lock().unwrap();
@@ -44,6 +76,11 @@ impl EngineStopBridge {
             *guard = Some(Arc::downgrade(pending_work));
         }
         self.update_external_stop_flag(external_stop);
+        // Record current session id and notify USI side
+        self.inner.session_id.store(session_id, Ordering::Release);
+        if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
+            let _ = tx.send(FinalizerMsg::SessionStart { session_id });
+        }
         debug!("EngineStopBridge: session handles published");
     }
 
@@ -138,6 +175,21 @@ impl EngineStopBridge {
                 pending_work_items: pending,
                 ..StopSnapshot::default()
             }
+        }
+    }
+
+    /// Register USI-side finalizer channel to receive finalize/session messages.
+    pub fn register_finalizer(&self, tx: std::sync::mpsc::Sender<FinalizerMsg>) {
+        let mut guard = self.inner.finalizer_tx.lock().unwrap();
+        *guard = Some(tx);
+        debug!("EngineStopBridge: finalizer channel registered");
+    }
+
+    /// Issue an out-of-band finalize request to USI layer.
+    pub fn request_finalize(&self, reason: FinalizeReason) {
+        let session_id = self.inner.session_id.load(Ordering::Acquire);
+        if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
+            let _ = tx.send(FinalizerMsg::Finalize { session_id, reason });
         }
     }
 }
