@@ -99,6 +99,17 @@ pub fn start_time_manager(
                     }
                 }
 
+                // Record structured stop info and signal stop
+                shared_state.set_stop_with_reason(StopInfo {
+                    reason: TerminationReason::TimeLimit,
+                    elapsed_ms,
+                    nodes,
+                    depth_reached: depth,
+                    hard_timeout,
+                    soft_limit_ms: soft,
+                    hard_limit_ms: hard,
+                });
+
                 // Proactively request out-of-band finalize to USI layer
                 let fin_reason = if hard_timeout {
                     FinalizeReason::Hard
@@ -119,17 +130,6 @@ pub fn start_time_manager(
                     info!("{}", line);
                     println!("{}", line);
                 }
-
-                // Record structured stop info and signal stop
-                shared_state.set_stop_with_reason(StopInfo {
-                    reason: TerminationReason::TimeLimit,
-                    elapsed_ms,
-                    nodes,
-                    depth_reached: depth,
-                    hard_timeout,
-                    soft_limit_ms: soft,
-                    hard_limit_ms: hard,
-                });
                 break;
             }
         }
