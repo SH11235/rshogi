@@ -292,3 +292,33 @@ fn e2e_byoyomi_oob_finalize_logs() {
         "bestmove was not emitted after OOB finalize"
     );
 }
+
+#[test]
+#[ignore]
+fn e2e_ponder_stop_then_go_fast() {
+    let mut p = UsiProc::spawn();
+    usi_handshake(&mut p);
+    p.write_line("setoption name Threads value 4");
+    p.write_line("setoption name StopWaitMs value 100");
+    p.write_line("setoption name USI_Ponder value true");
+    p.write_line("isready");
+    assert!(p.wait_for_contains("readyok", 2000));
+
+    for _ in 0..5 {
+        p.write_line("usinewgame");
+        p.write_line("position startpos");
+        p.write_line("go btime 0 wtime 0 byoyomi 2000");
+        assert!(p.wait_for_contains("bestmove ", 4000));
+
+        p.write_line("position startpos moves 7g7f 3c3d");
+        p.write_line("go ponder btime 0 wtime 0 byoyomi 2000");
+        std::thread::sleep(Duration::from_millis(80));
+        p.write_line("stop");
+        assert!(p.wait_for_contains("bestmove ", 2000));
+
+        p.write_line("position startpos moves 7g7f 3c3d 2g2f");
+        p.write_line("go btime 0 wtime 0 byoyomi 2000");
+        assert!(p.wait_for_contains("oob_session_start", 1000));
+        assert!(p.wait_for_contains("bestmove ", 4000));
+    }
+}

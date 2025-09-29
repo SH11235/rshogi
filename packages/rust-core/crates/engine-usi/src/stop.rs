@@ -56,6 +56,7 @@ pub fn handle_stop(state: &mut EngineState) {
                         }
                         if let Some(h) = state.worker.take() {
                             let _ = h.join();
+                            state.notify_idle();
                         }
                         state.searching = false;
                         state.stop_flag = None;
@@ -121,6 +122,7 @@ pub fn handle_stop(state: &mut EngineState) {
                     if sid == state.current_search_id {
                         if let Some(h) = state.worker.take() {
                             let _ = h.join();
+                            state.notify_idle();
                         }
                         state.searching = false;
                         state.stop_flag = None;
@@ -154,6 +156,7 @@ pub fn handle_stop(state: &mut EngineState) {
                             info_string(format!("reaper_detach queued len={}", q));
                         }
                     }
+                    state.notify_idle();
                 }
                 state.searching = false;
                 state.stop_flag = None;
@@ -162,6 +165,7 @@ pub fn handle_stop(state: &mut EngineState) {
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
                 state.current_time_control = None;
+                state.notify_idle();
             }
         }
     }
@@ -244,6 +248,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                             }
                             if let Some(h) = state.worker.take() {
                                 let _ = h.join();
+                                state.notify_idle();
                             }
                             state.searching = false;
                             state.stop_flag = None;
@@ -267,6 +272,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                         if sid == state.current_search_id {
                             if let Some(h) = state.worker.take() {
                                 let _ = h.join();
+                                state.notify_idle();
                             }
                             state.searching = false;
                             state.stop_flag = None;
@@ -298,6 +304,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                                 info_string(format!("reaper_detach queued len={}", q));
                             }
                         }
+                        state.notify_idle();
                     }
                     state.searching = false;
                     state.stop_flag = None;
@@ -306,6 +313,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
                     state.current_time_control = None;
+                    state.notify_idle();
                 }
             } else {
                 state.searching = false;
@@ -315,6 +323,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
                 state.current_time_control = None;
+                state.notify_idle();
             }
         } else {
             state.searching = false;
@@ -324,6 +333,7 @@ pub fn handle_gameover(state: &mut EngineState) {
             state.current_is_ponder = false;
             state.current_root_hash = None;
             state.current_time_control = None;
+            state.notify_idle();
         }
     } else {
         if let Some(flag) = &state.stop_flag {
@@ -331,6 +341,7 @@ pub fn handle_gameover(state: &mut EngineState) {
         }
         if let Some(h) = state.worker.take() {
             let _ = h.join();
+            state.notify_idle();
         }
         state.searching = false;
         state.stop_flag = None;

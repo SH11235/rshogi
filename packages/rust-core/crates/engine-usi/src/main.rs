@@ -41,6 +41,7 @@ fn main() -> Result<()> {
 
     let (reaper_tx, reaper_rx) = mpsc::channel::<thread::JoinHandle<()>>();
     let reaper_queue_len = Arc::clone(&state.reaper_queue_len);
+    let idle_sync = Arc::clone(&state.idle_sync);
     let reaper_handle = thread::Builder::new()
         .name("usi-reaper".to_string())
         .spawn(move || {
@@ -50,6 +51,7 @@ fn main() -> Result<()> {
                 let _ = h.join();
                 let dur = start.elapsed().as_millis();
                 reaper_queue_len.fetch_sub(1, Ordering::SeqCst);
+                idle_sync.notify_all();
                 if dur > 50 {
                     usi_println(&format!("info string reaper_join_ms={dur}"));
                 }
@@ -59,6 +61,7 @@ fn main() -> Result<()> {
                     cum_ms = 0;
                 }
             }
+            idle_sync.notify_all();
         })
         .expect("failed to spawn reaper thread");
     state.reaper_tx = Some(reaper_tx);
@@ -121,6 +124,7 @@ fn main() -> Result<()> {
                 }
                 if let Some(h) = state.worker.take() {
                     let _ = h.join();
+                    state.notify_idle();
                 }
                 state.reaper_tx.take();
                 if let Some(h) = state.reaper_handle.take() {

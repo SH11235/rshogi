@@ -3,7 +3,7 @@
 use crate::time_management::{TimeControl, TimeParameters};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
 use super::types::{InfoCallback, InfoStringCallback, IterationCallback};
@@ -38,6 +38,8 @@ pub struct SearchLimits {
     pub multipv: u8,
     /// Enable fail-safe guard (parallel searchのみ). 既定: false
     pub enable_fail_safe: bool,
+    /// Local deadlines used as a fallback when time manager / OOB finalize is unavailable
+    pub fallback_deadlines: Option<FallbackDeadlines>,
 }
 
 impl Default for SearchLimits {
@@ -58,6 +60,7 @@ impl Default for SearchLimits {
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
+            fallback_deadlines: None,
         }
     }
 }
@@ -127,6 +130,7 @@ pub struct SearchLimitsBuilder {
     immediate_eval_at_depth_zero: bool,
     multipv: u8,
     enable_fail_safe: bool,
+    fallback_deadlines: Option<FallbackDeadlines>,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -146,6 +150,7 @@ impl Default for SearchLimitsBuilder {
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
+            fallback_deadlines: None,
         }
     }
 }
@@ -320,6 +325,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set fallback deadlines for local deadline enforcement
+    pub fn fallback_deadlines(mut self, deadlines: FallbackDeadlines) -> Self {
+        self.fallback_deadlines = Some(deadlines);
+        self
+    }
+
     /// Enable/disable fail-safe guard (parallel search only)
     pub fn enable_fail_safe(mut self, enable: bool) -> Self {
         self.enable_fail_safe = enable;
@@ -363,6 +374,7 @@ impl SearchLimitsBuilder {
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
+            fallback_deadlines: self.fallback_deadlines,
         }
     }
 }
@@ -393,6 +405,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
+            fallback_deadlines: None,
         }
     }
 }
@@ -442,6 +455,7 @@ impl Clone for SearchLimits {
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
+            fallback_deadlines: self.fallback_deadlines,
         }
     }
 }
@@ -468,8 +482,17 @@ impl std::fmt::Debug for SearchLimits {
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .field("multipv", &self.multipv)
             .field("enable_fail_safe", &self.enable_fail_safe)
+            .field("fallback_deadlines", &self.fallback_deadlines.is_some())
             .finish()
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FallbackDeadlines {
+    pub soft_deadline: Option<Instant>,
+    pub hard_deadline: Instant,
+    pub soft_limit_ms: u64,
+    pub hard_limit_ms: u64,
 }
 
 #[cfg(test)]

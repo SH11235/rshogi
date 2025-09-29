@@ -3,6 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     movegen::MoveGenerator,
+    search::limits::FallbackDeadlines,
     search::types::{InfoStringCallback, StopInfo, TerminationReason},
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     shogi::{Move, Position},
@@ -142,6 +143,37 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
     }
 
+    fn finalize_fallback_deadline(
+        &self,
+        position: &mut Position,
+        limits: &SearchLimits,
+        best_result: SearchResult,
+        search_start: Instant,
+        deadlines: FallbackDeadlines,
+        hard: bool,
+    ) -> SearchResult {
+        use crate::search::types::{StopInfo, TerminationReason};
+
+        let elapsed_ms = search_start.elapsed().as_millis() as u64;
+        let nodes = self.shared_state.get_nodes();
+        let depth = self.shared_state.get_best_depth();
+        let stop_info = StopInfo {
+            reason: TerminationReason::TimeLimit,
+            elapsed_ms,
+            nodes,
+            depth_reached: depth,
+            hard_timeout: hard,
+            soft_limit_ms: deadlines.soft_limit_ms,
+            hard_limit_ms: deadlines.hard_limit_ms,
+        };
+
+        self.shared_state.set_stop_with_reason(stop_info);
+        self.broadcast_stop(limits.stop_flag.as_ref());
+        self.shared_state.close_work_queues();
+        self.pending_work_items.store(0, Ordering::Release);
+        self.prepare_final_result(position, best_result)
+    }
+
     #[inline]
     fn wait_for_active_clear(&self, max_wait_ms: u64) -> (u64, usize) {
         if max_wait_ms == 0 {
@@ -250,6 +282,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             immediate_eval_at_depth_zero: limits.immediate_eval_at_depth_zero,
                             multipv: limits.multipv,
                             enable_fail_safe: limits.enable_fail_safe,
+                            fallback_deadlines: limits.fallback_deadlines,
                         };
 
                         // Convert to TimeLimits
@@ -1160,6 +1193,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         let max_depth = limits.depth.unwrap_or(255);
+        let fallback_deadlines = limits.fallback_deadlines;
 
         // Publish an initial minimal snapshot so USI can fast-finalize immediately if needed
         self.shared_state.publish_minimal_snapshot(position.zobrist_hash(), 0);
@@ -1189,6 +1223,49 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             let tm_opt = { self.time_manager.lock().unwrap().clone() };
+
+            if tm_opt.is_none() {
+                if let Some(deadlines) = fallback_deadlines {
+                    let now = Instant::now();
+                    if now >= deadlines.hard_deadline {
+                        self.emit_info_string(
+                            &limits,
+                            format!(
+                                "fallback_deadline_trigger=hard elapsed_ms={} nodes={}",
+                                search_start.elapsed().as_millis(),
+                                self.shared_state.get_nodes()
+                            ),
+                        );
+                        return self.finalize_fallback_deadline(
+                            position,
+                            &limits,
+                            best_result,
+                            search_start,
+                            deadlines,
+                            true,
+                        );
+                    } else if let Some(soft_deadline) = deadlines.soft_deadline {
+                        if now >= soft_deadline {
+                            self.emit_info_string(
+                                &limits,
+                                format!(
+                                    "fallback_deadline_trigger=soft elapsed_ms={} nodes={}",
+                                    search_start.elapsed().as_millis(),
+                                    self.shared_state.get_nodes()
+                                ),
+                            );
+                            return self.finalize_fallback_deadline(
+                                position,
+                                &limits,
+                                best_result,
+                                search_start,
+                                deadlines,
+                                false,
+                            );
+                        }
+                    }
+                }
+            }
 
             if let Some(ref tm) = tm_opt {
                 let elapsed_ms = tm.elapsed_ms();
