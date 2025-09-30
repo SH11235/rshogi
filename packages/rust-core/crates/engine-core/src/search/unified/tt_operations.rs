@@ -40,6 +40,15 @@ pub trait TTOperations<const USE_TT: bool> {
     /// Probe transposition table (compile-time optimized)
     #[inline(always)]
     fn probe_tt(&self, hash: u64, side_to_move: crate::Color) -> Option<TTEntry> {
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!("[TT_DIAG] probe_tt: USE_TT={USE_TT} hash={hash:016x}");
+            }
+        }
+
         if USE_TT {
             self.tt().as_ref()?.probe_entry(hash, side_to_move)
         } else {
@@ -50,6 +59,15 @@ pub trait TTOperations<const USE_TT: bool> {
     /// Store in transposition table (compile-time optimized)
     #[inline(always)]
     fn store_tt(&self, params: TTStoreParams) {
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!("[TT_DIAG] store_tt: USE_TT={USE_TT} hash={:016x}", params.hash);
+            }
+        }
+
         if USE_TT {
             if let Some(ref tt) = self.tt() {
                 // Adjust mate scores to be relative to root position
