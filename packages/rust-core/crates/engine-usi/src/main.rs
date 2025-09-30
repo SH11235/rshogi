@@ -96,8 +96,7 @@ fn main() -> Result<()> {
                                 TryResult::Pending => {
                                     // Detach: drop session without joining to avoid hang
                                     info_string("isready_join_skipped pending=1");
-                                    state.notify_idle(); // Notify even when detaching
-                                                         // session drops here, JoinHandle detaches
+                                    // session drops here, JoinHandle detaches
                                 }
                                 _ => {
                                     // Disconnected or late result: safe to join
@@ -107,12 +106,15 @@ fn main() -> Result<()> {
                         }
                     }
 
+                    // Reset state before notifying idle
                     state.searching = false;
                     state.stop_flag = None;
                     state.ponder_hit_flag = None;
                     state.current_time_control = None;
                 }
 
+                // Notify idle after state is consistent
+                state.notify_idle();
                 apply_options_to_engine(&mut state);
                 usi_println("readyok");
                 continue;
@@ -157,8 +159,7 @@ fn main() -> Result<()> {
                             TryResult::Pending => {
                                 // Detach: drop session without joining to avoid hang
                                 info_string("quit_join_skipped pending=1");
-                                state.notify_idle(); // Notify even when detaching
-                                                     // session drops here, JoinHandle detaches
+                                // session drops here, JoinHandle detaches
                             }
                             _ => {
                                 // Disconnected or late result: safe to join
@@ -168,6 +169,7 @@ fn main() -> Result<()> {
                     }
                 }
 
+                // Notify idle after cleanup is complete
                 state.notify_idle();
                 break;
             }
