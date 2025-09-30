@@ -961,6 +961,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Check if this is the first search (generation == 0) or if we need to wire ext_stop
             // We detect first search by checking if shared_state.stop_flag is the same as ext_stop
             let needs_rewire = !Arc::ptr_eq(&self.shared_state.stop_flag, &ext_stop);
+            let current_gen = self.shared_state.generation();
+
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "session_init sid={} gen={} needs_rewire={} stop_flag_value={}",
+                    limits.session_id,
+                    current_gen,
+                    needs_rewire,
+                    ext_stop.load(Ordering::Acquire)
+                ),
+            );
 
             if needs_rewire {
                 // First search with ext_stop: create new SharedSearchState
@@ -973,12 +985,30 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 ));
                 // reset() increments generation and clears counters
                 self.shared_state.reset();
+
+                self.emit_info_string(
+                    &limits,
+                    format!(
+                        "session_init_created_new_state sid={} gen={}",
+                        limits.session_id,
+                        self.shared_state.generation()
+                    ),
+                );
             } else {
                 // Subsequent search: reuse existing SharedSearchState
                 // IMPORTANT: Clear ext_stop before reset to ensure clean state
                 ext_stop.store(false, Ordering::Release);
                 // reset() increments generation and clears counters (including stop_flag)
                 self.shared_state.reset();
+
+                self.emit_info_string(
+                    &limits,
+                    format!(
+                        "session_init_reused_state sid={} gen={}",
+                        limits.session_id,
+                        self.shared_state.generation()
+                    ),
+                );
             }
 
             self.shared_state.reopen_work_queues();
