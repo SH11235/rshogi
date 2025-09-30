@@ -275,11 +275,13 @@ impl TranspositionTable {
 
     /// Get bucket index from hash
     #[inline(always)]
-    fn bucket_index(&self, hash: u64, side_to_move: Color) -> usize {
-        // YaneuraOu approach: Mix side_to_move into hash before indexing
-        // This separates positions that differ only in turn without biasing distribution
-        let adjusted_hash = (hash >> 1) ^ (side_to_move as u64);
-        (adjusted_hash as usize) & (self.num_buckets - 1)
+    fn bucket_index(&self, hash: u64, _side_to_move: Color) -> usize {
+        // Standard approach: Use hash directly for indexing
+        // Position's Zobrist hash already includes side_to_move (64-bit random key),
+        // so no additional XOR is needed. Adding 1-bit XOR would reduce entropy.
+        //
+        // Note: side_to_move parameter kept for API compatibility but unused.
+        (hash as usize) & (self.num_buckets - 1)
     }
 
     /// Mark bucket as occupied in bitmap

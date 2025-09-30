@@ -2037,8 +2037,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             {
                 best_result.best_move = Some(shared_move);
                 best_result.score = shared_score;
-                best_result.stats.depth = shared_depth;
             }
+
+            // Always update depth to the maximum reached by any thread
+            // This prevents depth=1 when nodes=6M inconsistencies
+            best_result.stats.depth = best_result.stats.depth.max(shared_depth);
         }
 
         best_result.stats.nodes = self.shared_state.get_nodes();
