@@ -482,45 +482,56 @@ impl Engine {
             debug!("Pre-publishing external stop flag for session {session_id}");
         }
 
-        // Spawn search in background thread
-        let handle = thread::spawn(move || {
-            // RAII guard ensures active_searches is decremented even on panic
-            let _guard = ActiveSearchGuard(active_searches);
+        // Spawn search in background thread with named thread for debugging
+        let handle = thread::Builder::new()
+            .name(format!("engine-search-{}", session_id))
+            .spawn(move || {
+                // RAII guard ensures active_searches is decremented even on panic
+                let _guard = ActiveSearchGuard(active_searches);
 
-            // Build search arguments
-            let args = SearchThreadArgs {
-                engine_type,
-                use_parallel,
-                num_threads,
-                material_evaluator,
-                nnue_evaluator,
-                shared_tt,
-                stop_bridge,
-                material_parallel_searcher,
-                nnue_parallel_searcher,
-                material_searcher,
-                nnue_basic_searcher,
-                material_enhanced_searcher,
-                nnue_enhanced_searcher,
-            };
+                // Build search arguments
+                let args = SearchThreadArgs {
+                    engine_type,
+                    use_parallel,
+                    num_threads,
+                    material_evaluator,
+                    nnue_evaluator,
+                    shared_tt,
+                    stop_bridge,
+                    material_parallel_searcher,
+                    nnue_parallel_searcher,
+                    material_searcher,
+                    nnue_basic_searcher,
+                    material_enhanced_searcher,
+                    nnue_enhanced_searcher,
+                };
 
-            // Catch panics to ensure we don't send on a disconnected channel
-            let search_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Self::search_in_thread(&mut pos_clone, limits, args)
-            }));
+                // Catch panics to ensure we don't send on a disconnected channel
+                let search_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::search_in_thread(&mut pos_clone, limits, args)
+                }));
 
-            match search_result {
-                Ok(result) => {
-                    // Send result back (ignore send error if receiver dropped)
-                    let _ = tx.send(result);
+                match search_result {
+                    Ok(result) => {
+                        // Send result back (ignore send error if receiver dropped)
+                        let _ = tx.send(result);
+                    }
+                    Err(panic_err) => {
+                        // Extract panic message safely via downcast
+                        let msg = if let Some(s) = panic_err.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic_err.downcast_ref::<&'static str>() {
+                            s.to_string()
+                        } else {
+                            "non-string panic payload".to_string()
+                        };
+                        error!("search_in_thread session={} panicked: {}", session_id, msg);
+                        // Don't send result - USI layer will detect Disconnected via TryResult
+                    }
                 }
-                Err(panic_err) => {
-                    error!("search_in_thread panicked: {:?}", panic_err);
-                    // Don't send result - USI layer will detect Disconnected via TryResult
-                }
-            }
-            // _guard is dropped here, ensuring active_searches is decremented
-        });
+                // _guard is dropped here, ensuring active_searches is decremented
+            })
+            .expect("failed to spawn search thread");
 
         // Return session handle immediately (with JoinHandle for isready/quit)
         SearchSession::new(session_id, rx, Some(handle))
@@ -1297,8 +1308,12 @@ impl Engine {
 
     /// Clear the transposition table (in-place)
     pub fn clear_hash(&mut self) {
-        if self.active_searches.load(Ordering::Relaxed) != 0 {
-            warn!("clear_hash requested during active search; skipping in-place clear");
+        let active = self.active_searches.load(Ordering::SeqCst);
+        if active != 0 {
+            warn!(
+                "clear_hash requested during active search; skipping (active_searches={})",
+                active
+            );
             return;
         }
         let tt_addr = Arc::as_ptr(&self.shared_tt) as usize;

@@ -96,7 +96,8 @@ fn main() -> Result<()> {
                                 TryResult::Pending => {
                                     // Detach: drop session without joining to avoid hang
                                     info_string("isready_join_skipped pending=1");
-                                    // session drops here, JoinHandle detaches
+                                    state.notify_idle(); // Notify even when detaching
+                                                         // session drops here, JoinHandle detaches
                                 }
                                 _ => {
                                     // Disconnected or late result: safe to join
@@ -156,7 +157,8 @@ fn main() -> Result<()> {
                             TryResult::Pending => {
                                 // Detach: drop session without joining to avoid hang
                                 info_string("quit_join_skipped pending=1");
-                                // session drops here, JoinHandle detaches
+                                state.notify_idle(); // Notify even when detaching
+                                                     // session drops here, JoinHandle detaches
                             }
                             _ => {
                                 // Disconnected or late result: safe to join

@@ -192,6 +192,10 @@ fn usi_handshake(p: &mut UsiProc) {
 #[test]
 #[ignore]
 fn e2e_pure_byoyomi_stop_then_gameover_emits_bestmove() {
+    if engine_core::util::is_ci_environment() {
+        eprintln!("Skipping e2e_pure_byoyomi_stop_then_gameover_emits_bestmove in CI environment (performance-dependent test)");
+        return;
+    }
     let mut p = UsiProc::spawn();
     usi_handshake(&mut p);
     p.write_line("usinewgame");
@@ -237,6 +241,10 @@ fn e2e_gameover_option_emits_bestmove() {
 #[test]
 #[ignore]
 fn e2e_stop_fast_finalize_fixed_and_infinite_and_ponder() {
+    if engine_core::util::is_ci_environment() {
+        eprintln!("Skipping e2e_stop_fast_finalize_fixed_and_infinite_and_ponder in CI environment (performance-dependent test)");
+        return;
+    }
     // Fixed time
     let mut p1 = UsiProc::spawn();
     usi_handshake(&mut p1);

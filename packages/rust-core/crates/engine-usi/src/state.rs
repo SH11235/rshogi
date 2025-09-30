@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 use std::sync::Condvar;
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -134,7 +134,6 @@ pub struct EngineState {
     pub bestmove_emitted: bool,
     // Current (inner) time control for stop/gameover policy decisions
     pub current_time_control: Option<TimeControl>,
-    pub oob_detach_count: Arc<AtomicUsize>,
     pub stop_bridge: Arc<EngineStopBridge>,
     // OOB finalize channel (from engine-core time manager via StopBridge)
     pub finalizer_rx: Option<mpsc::Receiver<FinalizerMsg>>,
@@ -178,7 +177,6 @@ impl EngineState {
             current_search_id: 0,
             bestmove_emitted: false,
             current_time_control: None,
-            oob_detach_count: Arc::new(AtomicUsize::new(0)),
             stop_bridge,
             finalizer_rx: Some(fin_rx),
             current_session_core_id: None,
