@@ -7,7 +7,7 @@ use crate::{
     search::{SearchLimits, TranspositionTable},
 };
 use crossbeam_deque::Worker as DequeWorker;
-use log::{debug, error};
+use log::{debug, error, info, warn};
 use std::{
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -121,6 +121,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
     thread::spawn(move || {
         use std::panic::{self, AssertUnwindSafe};
 
+        // Capture generation at spawn for logging (before panic::catch_unwind)
+        let gen_at_spawn = shared_state.generation();
+
         let res = panic::catch_unwind(AssertUnwindSafe(|| {
             if log::log_enabled!(log::Level::Debug) {
                 debug!("Worker {log_id} started");
@@ -128,27 +131,28 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
 
             // Create search thread
             let mut search_thread = SearchThread::new(log_id, evaluator, tt, shared_state.clone());
-            search_thread.generation = shared_state.generation();
+            search_thread.generation = gen_at_spawn;
             if let Some(tm) = &shared_tm {
                 search_thread.attach_time_manager(tm.clone());
             }
 
             // Simple work loop
+            let should_stop_initial = shared_state.should_stop();
+            info!(
+                "worker_spawn id={} gen_read={} should_stop_at_entry={}",
+                log_id, gen_at_spawn, should_stop_initial
+            );
+
+            if should_stop_initial {
+                info!("worker_exit id={} reason=initial_stop gen={}", log_id, gen_at_spawn);
+            }
+
             while !shared_state.should_stop() {
                 let current_generation = shared_state.generation();
                 if search_thread.generation != current_generation {
-                    log::warn!(
-                        "worker_epoch_mismatch id={} old={} current={}",
-                        log_id,
-                        search_thread.generation,
-                        current_generation
-                    );
-                    debug_assert!(
-                        search_thread.generation == current_generation,
-                        "worker {} observed generation change from {} to {}",
-                        log_id,
-                        search_thread.generation,
-                        current_generation
+                    warn!(
+                        "worker_exit id={} reason=gen_mismatch exp={} got={}",
+                        log_id, search_thread.generation, current_generation
                     );
                     break;
                 }
@@ -279,14 +283,12 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
             // 将来的に“通常終了での早期 break”を導入した場合に備えた最小限のドレインは
             // 必要時に復活させる。
 
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("Worker {log_id} stopped");
-            }
+            info!("worker_exit id={} reason=normal gen={}", log_id, gen_at_spawn);
         }));
 
         if res.is_err() {
             // どれかワーカーが落ちたら全体停止フラグを立てる
-            error!("Worker {log_id} panicked; requesting graceful stop");
+            error!("worker_exit id={} reason=panic gen={}", log_id, gen_at_spawn);
             shared_state.set_stop();
         }
     })
