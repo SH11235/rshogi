@@ -95,7 +95,7 @@ fn test_qnodes_counter_sharing() {
     assert_eq!(counter2.load(Ordering::Relaxed), 42);
 
     // Reset should clear it
-    searcher.shared_state.reset();
+    searcher.shared_state.reset(1); // session_id=1 for test
     assert_eq!(counter1.load(Ordering::Relaxed), 0);
 }
 

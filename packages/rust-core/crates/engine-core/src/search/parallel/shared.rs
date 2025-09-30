@@ -527,7 +527,10 @@ impl SharedSearchState {
     }
 
     /// Reset state for new search
-    pub fn reset(&self) {
+    ///
+    /// # Arguments
+    /// * `session_id` - The session ID for this new search session
+    pub fn reset(&self, session_id: u64) {
         self.best_move.store(0, Ordering::Relaxed);
         self.best_score.store(i32::MIN, Ordering::Relaxed);
         self.best_depth.store(0, Ordering::Relaxed);
@@ -542,9 +545,10 @@ impl SharedSearchState {
         self.active_threads.store(0, Ordering::Relaxed);
         self.finalized_early.store(false, Ordering::Release);
         self.work_closed.store(false, Ordering::Release);
-        // Reset snapshot to a clean default for the new generation
+        // Reset snapshot to a clean default for the new session
+        // IMPORTANT: Use session_id (not generation) to ensure snapshot belongs to this session
         let snap = RootSnapshot {
-            search_id: self.generation(),
+            search_id: session_id,
             // 他フィールドは初期化リセット目的でデフォルト (root_key=0, best=None, pv empty 等)
             ..Default::default()
         };
@@ -557,9 +561,14 @@ impl SharedSearchState {
     }
 
     /// Publish a minimal snapshot from current shared state (best/depth/score/nodes only)
-    pub fn publish_minimal_snapshot(&self, root_key: u64, elapsed_ms: u32) {
+    ///
+    /// # Arguments
+    /// * `session_id` - The session ID for this search session
+    /// * `root_key` - The zobrist hash of the root position
+    /// * `elapsed_ms` - Elapsed time in milliseconds
+    pub fn publish_minimal_snapshot(&self, session_id: u64, root_key: u64, elapsed_ms: u32) {
         let snap = RootSnapshot {
-            search_id: self.generation(),
+            search_id: session_id,
             root_key,
             best: self.get_best_move(),
             depth: self.get_best_depth(),
@@ -574,14 +583,25 @@ impl SharedSearchState {
     /// Publish minimal fields while preserving previously published PV if any.
     /// Only snapshots from the current generation are eligible; cross-generation
     /// data is discarded to prevent stale PV leakage when a new search begins.
-    pub fn publish_minimal_snapshot_preserve_pv(&self, root_key: u64, elapsed_ms: u32) {
-        let current_generation = self.generation();
+    /// Publish a minimal snapshot while preserving previously published PV if from same session
+    ///
+    /// # Arguments
+    /// * `session_id` - The session ID for this search session
+    /// * `root_key` - The zobrist hash of the root position
+    /// * `elapsed_ms` - Elapsed time in milliseconds
+    pub fn publish_minimal_snapshot_preserve_pv(
+        &self,
+        session_id: u64,
+        root_key: u64,
+        elapsed_ms: u32,
+    ) {
+        // Only preserve PV from the same session (not previous generation)
         let preserved_pv = match self.snapshot.try_read() {
-            Some(prev) if prev.search_id == current_generation => prev.pv,
+            Some(prev) if prev.search_id == session_id => prev.pv,
             _ => SmallVec::new(),
         };
         let snap = RootSnapshot {
-            search_id: current_generation,
+            search_id: session_id,
             root_key,
             best: self.get_best_move(),
             depth: self.get_best_depth(),
@@ -808,7 +828,7 @@ mod tests {
         };
         state.snapshot.publish(&base_snap);
 
-        state.publish_minimal_snapshot_preserve_pv(99, 12);
+        state.publish_minimal_snapshot_preserve_pv(current_gen, 99, 12);
         let snap = state.snapshot.try_read().expect("snapshot available");
         assert_eq!(snap.search_id, current_gen);
         assert_eq!(snap.pv.len(), 1);
@@ -833,7 +853,7 @@ mod tests {
         };
         state.snapshot.publish(&mismatched_snap);
 
-        state.publish_minimal_snapshot_preserve_pv(13, 20);
+        state.publish_minimal_snapshot_preserve_pv(current_gen, 13, 20);
         let snap = state.snapshot.try_read().expect("snapshot available");
         assert_eq!(snap.search_id, current_gen);
         assert!(snap.pv.is_empty());
