@@ -381,12 +381,11 @@ mod tests {
 
     #[test]
     fn test_fixed_time_slow_mover_and_ratio() {
-        let mut params = TimeParameters::default();
-        // Slow mover 150%
-        params.slow_mover_pct = 150;
-        // Ratio clamp 1.05
-        params.max_time_ratio = 1.05;
-
+        let params = TimeParameters {
+            slow_mover_pct: 150,
+            max_time_ratio: 1.05,
+            ..TimeParameters::default()
+        };
         let (soft, hard) = calculate_time_allocation(
             &TimeControl::FixedTime { ms_per_move: 1000 },
             Color::Black,
@@ -405,9 +404,11 @@ mod tests {
 
     #[test]
     fn test_fischer_move_horizon_guard() {
-        let mut params = TimeParameters::default();
-        params.move_horizon_trigger_ms = 6000;
-        params.move_horizon_min_moves = 10; // guard share = remain/10
+        let params = TimeParameters {
+            move_horizon_trigger_ms: 6000,
+            move_horizon_min_moves: 10, // guard share = remain/10
+            ..TimeParameters::default()
+        };
 
         // remain=5000ms, inc=0 → guard 有効
         let (soft, hard) = calculate_fischer_time(5000, 0, 0, None, GamePhase::MiddleGame, &params);
@@ -420,8 +421,10 @@ mod tests {
     #[test]
     fn test_fixed_time_slowmover_scales_soft() {
         // ms_per_move = 1000, base soft = 900, slowmover 150% => 1350, overhead (min 10) => 1340
-        let mut params = TimeParameters::default();
-        params.slow_mover_pct = 150;
+        let params = TimeParameters {
+            slow_mover_pct: 150,
+            ..TimeParameters::default()
+        };
         let (soft, hard) = calculate_time_allocation(
             &TimeControl::FixedTime { ms_per_move: 1000 },
             Color::Black,
@@ -437,8 +440,10 @@ mod tests {
     #[test]
     fn test_fixed_time_max_time_ratio_clamps_hard() {
         // With small ratio, hard should be clamped to soft * ratio
-        let mut params = TimeParameters::default();
-        params.max_time_ratio = 1.1; // 110%
+        let params = TimeParameters {
+            max_time_ratio: 1.1, // 110%
+            ..TimeParameters::default()
+        };
         let (soft, hard) = calculate_time_allocation(
             &TimeControl::FixedTime { ms_per_move: 1000 },
             Color::Black,
