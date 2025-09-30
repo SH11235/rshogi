@@ -61,15 +61,6 @@ struct TimeLimitFinalization {
 /// for better work stealing distribution across threads
 const INITIAL_SEED_HELPERS: usize = 2;
 
-/// Phase 3: Cleanup state for deferred thread joining after Engine lock release
-struct CleanupState {
-    worker_handles: Vec<thread::JoinHandle<()>>,
-    time_handle: Option<thread::JoinHandle<()>>,
-    fail_safe_handle: Option<thread::JoinHandle<()>>,
-    info_string_cb: Option<InfoStringCallback>,
-    early_finalized: bool,
-}
-
 /// Simplified parallel searcher
 pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Shared transposition table
@@ -110,9 +101,6 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 
     /// Bridge for propagating immediate stop requests without locking the engine
     stop_bridge: Arc<EngineStopBridge>,
-
-    /// Phase 3: Temporary storage for cleanup state (thread handles) between search() and wait_for_completion()
-    cleanup_state: Option<CleanupState>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
@@ -835,7 +823,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             post_ponder_tm_handle: Arc::new(Mutex::new(None)),
             pending_work_items: Arc::new(AtomicU64::new(0)),
             stop_bridge,
-            cleanup_state: None,
         }
     }
 
@@ -905,9 +892,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 
     /// Main search entry point
-    /// Phase 3: Split search() into two parts to enable early Engine lock release.
-    /// This part performs the actual search and returns the result immediately.
-    /// The hygiene wait and thread cleanup are deferred to `wait_for_completion()`.
     pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
         info!("Starting simple parallel search with {} threads", self.num_threads);
 
@@ -1086,7 +1070,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         // Start time management if needed
-        let time_handle = {
+        let mut time_handle = {
             let tm_guard = self.time_manager.lock().unwrap();
             if let Some(ref tm) = *tm_guard {
                 // Start time manager if we have any time limit
@@ -1107,7 +1091,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         };
 
         // Start fail-safe guard thread
-        let fail_safe_handle = if limits.enable_fail_safe {
+        let mut fail_safe_handle = if limits.enable_fail_safe {
             Some(start_fail_safe_guard(search_start, limits.clone(), self.shared_state.clone()))
         } else {
             None
@@ -1119,8 +1103,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Main thread does iterative deepening and generates work
         let result = self.run_main_thread(position, limits, main_worker);
 
-        // Phase 3: Stop threads immediately but DO NOT wait here
         let early_finalized = self.shared_state.is_finalized_early();
+
+        // Stop all threads
         info!(
             "Search complete{}; stopping threads",
             if early_finalized {
@@ -1132,36 +1117,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.shared_state.set_stop();
         self.shared_state.close_work_queues();
 
-        // Store handles for later cleanup in wait_for_completion()
-        // SAFETY: We use a temporary internal struct to pass these handles.
-        // This is safe because wait_for_completion() will be called immediately after
-        // the Engine lock is released by the caller (run_search_thread).
-        self.cleanup_state = Some(CleanupState {
-            worker_handles: handles,
-            time_handle,
-            fail_safe_handle,
-            info_string_cb,
-            early_finalized,
-        });
-
-        result
-    }
-
-    /// Phase 3: Perform hygiene wait and thread cleanup AFTER Engine lock is released.
-    /// This must be called by the caller (run_search_thread) immediately after search() returns.
-    pub fn wait_for_completion(&mut self) {
-        let cleanup = self
-            .cleanup_state
-            .take()
-            .expect("wait_for_completion called without prior search");
-
-        let CleanupState {
-            worker_handles: mut handles,
-            mut time_handle,
-            mut fail_safe_handle,
-            info_string_cb,
-            early_finalized,
-        } = cleanup;
+        let mut worker_handles = handles;
 
         if early_finalized {
             let stop_info_snapshot = self.shared_state.stop_info.get();
@@ -1195,11 +1151,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             if remaining_active == 0 {
-                let drain = handles.drain(..);
+                let drain = worker_handles.drain(..);
                 Self::join_handles_blocking(drain, "worker_fast_finalize", info_string_cb.as_ref());
             } else {
                 Self::join_handles_blocking(
-                    handles,
+                    worker_handles,
                     "worker_fast_finalize",
                     info_string_cb.as_ref(),
                 );
@@ -1226,7 +1182,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             *self.time_manager.lock().unwrap() = None;
         } else {
-            Self::join_handles_blocking(handles, "worker_finalize", info_string_cb.as_ref());
+            Self::join_handles_blocking(worker_handles, "worker_finalize", info_string_cb.as_ref());
             self.active_workers.store(0, Ordering::Release);
             // 通常終了でも未取得 WorkItem が残る場合があるため、最終的に 0 へ揃える（テスト仕様）
             self.pending_work_items.store(0, Ordering::Release);
@@ -1260,6 +1216,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         self.stop_bridge.clear();
+
+        result
     }
 
     /// Run main thread with iterative deepening
