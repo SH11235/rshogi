@@ -143,7 +143,7 @@ pub struct Engine {
     // Desired MultiPV (applied to new/recreated searchers)
     desired_multi_pv: u8,
     // Active searches counter for clear_hash safety
-    active_searches: AtomicUsize,
+    active_searches: Arc<AtomicUsize>,
     // Bridge to issue immediate stop requests without locking Engine mutex
     stop_bridge: Arc<EngineStopBridge>,
     // Session ID counter for async search
@@ -244,7 +244,7 @@ impl Engine {
             tt_size_mb: default_tt_size,
             pending_tt_size: None,
             desired_multi_pv: 1,
-            active_searches: AtomicUsize::new(0),
+            active_searches: Arc::new(AtomicUsize::new(0)),
             stop_bridge,
             session_counter: 0,
         }
@@ -400,7 +400,7 @@ impl Engine {
     pub fn start_search(&mut self, pos: Position, limits: SearchLimits) -> SearchSession {
         // Generate unique session ID
         let session_id = self.next_session_id();
-        debug!("Starting async search session {}", session_id);
+        debug!("Starting async search session {session_id}");
 
         // Apply pending configuration
         self.apply_pending_thread_count();
@@ -431,6 +431,24 @@ impl Engine {
         let material_enhanced_searcher = self.material_enhanced_searcher.clone();
         let nnue_enhanced_searcher = self.nnue_enhanced_searcher.clone();
 
+        // Update external stop flag in bridge before spawning thread
+        self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
+
+        // Increment active searches before spawning thread
+        self.active_searches.fetch_add(1, Ordering::SeqCst);
+        let active_searches = self.active_searches.clone();
+
+        // Publish session to stop bridge immediately before spawning thread.
+        // This ensures that request_stop_immediate() can reach the search session
+        // even if called right after start_search() returns.
+        // For single-threaded searches, the internal stop flag will be published later
+        // by the search thread, but the external stop flag is already registered above.
+        if limits.stop_flag.is_some() {
+            // External stop flag is already registered via update_external_stop_flag() above.
+            // The search thread will call publish_session/update again with full handles.
+            debug!("Pre-publishing external stop flag for session {session_id}");
+        }
+
         // Spawn search in background thread
         thread::spawn(move || {
             // Run the search (this will block until search completes)
@@ -454,6 +472,9 @@ impl Engine {
 
             // Send result back (ignore send error if receiver dropped)
             let _ = tx.send(result);
+
+            // Decrement active searches after search completes
+            active_searches.fetch_sub(1, Ordering::SeqCst);
         });
 
         // Return session handle immediately
@@ -482,9 +503,6 @@ impl Engine {
         material_enhanced_searcher: Arc<Mutex<Option<MaterialEnhancedSearcher>>>,
         nnue_enhanced_searcher: Arc<Mutex<Option<NnueEnhancedSearcher>>>,
     ) -> SearchResult {
-        // Update external stop flag in bridge
-        stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
-
         // Detect game phase and calculate active threads
         let phase = detect_game_phase(pos, pos.ply as u32, Profile::Search);
         let base_threads = num_threads;
@@ -532,6 +550,7 @@ impl Engine {
                     material_evaluator,
                     shared_tt,
                     material_searcher,
+                    stop_bridge,
                 ),
                 EngineType::Nnue => Self::search_single_nnue_static(
                     pos,
@@ -539,6 +558,7 @@ impl Engine {
                     nnue_evaluator,
                     shared_tt,
                     nnue_basic_searcher,
+                    stop_bridge,
                 ),
                 EngineType::Enhanced => Self::search_single_enhanced_material_static(
                     pos,
@@ -546,6 +566,7 @@ impl Engine {
                     material_evaluator,
                     shared_tt,
                     material_enhanced_searcher,
+                    stop_bridge,
                 ),
                 EngineType::EnhancedNnue => Self::search_single_enhanced_nnue_static(
                     pos,
@@ -553,6 +574,7 @@ impl Engine {
                     nnue_evaluator,
                     shared_tt,
                     nnue_enhanced_searcher,
+                    stop_bridge,
                 ),
             }
         }
@@ -573,30 +595,32 @@ impl Engine {
     ) -> SearchResult {
         debug!("Starting parallel material search with {active_threads} active threads");
 
-        match material_parallel_searcher.lock() {
-            Ok(mut searcher_guard) => {
-                if searcher_guard.is_none() {
-                    *searcher_guard = Some(MaterialParallelSearcher::new(
-                        material_evaluator,
-                        shared_tt,
-                        active_threads,
-                        stop_bridge,
-                    ));
-                }
+        // Take searcher out of Mutex to avoid holding lock during search
+        let mut searcher = {
+            let mut guard = material_parallel_searcher.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(MaterialParallelSearcher::new(
+                    material_evaluator,
+                    shared_tt.clone(),
+                    active_threads,
+                    stop_bridge.clone(),
+                ));
+            }
+            guard.take().expect("searcher must be Some after initialization")
+        }; // Lock released here
 
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.adjust_thread_count(active_threads);
-                    searcher.search(pos, limits)
-                } else {
-                    error!("Failed to initialize parallel material searcher");
-                    SearchResult::new(None, 0, SearchStats::default())
-                }
-            }
-            Err(e) => {
-                error!("Failed to lock material parallel searcher: {e}");
-                SearchResult::new(None, 0, SearchStats::default())
-            }
+        // Search without holding Mutex
+        searcher.adjust_thread_count(active_threads);
+        let result = searcher.search(pos, limits);
+
+        // Put searcher back (best effort - if fails, next search will recreate)
+        if let Ok(mut guard) = material_parallel_searcher.lock() {
+            if guard.is_none() {
+                *guard = Some(searcher);
+            } // If already filled by concurrent operation, drop this instance
         }
+
+        result
     }
 
     /// Static helper for parallel NNUE search
@@ -612,34 +636,36 @@ impl Engine {
     ) -> SearchResult {
         debug!("Starting parallel NNUE search with {active_threads} active threads");
 
-        match nnue_parallel_searcher.lock() {
-            Ok(mut searcher_guard) => {
-                if searcher_guard.is_none() {
-                    let nnue_proxy = NNUEEvaluatorProxy {
-                        evaluator: nnue_evaluator,
-                        locals: thread_local::ThreadLocal::new(),
-                    };
-                    *searcher_guard = Some(NnueParallelSearcher::new(
-                        Arc::new(nnue_proxy),
-                        shared_tt,
-                        active_threads,
-                        stop_bridge,
-                    ));
-                }
+        // Take searcher out of Mutex to avoid holding lock during search
+        let mut searcher = {
+            let mut guard = nnue_parallel_searcher.lock().unwrap();
+            if guard.is_none() {
+                let nnue_proxy = NNUEEvaluatorProxy {
+                    evaluator: nnue_evaluator,
+                    locals: thread_local::ThreadLocal::new(),
+                };
+                *guard = Some(NnueParallelSearcher::new(
+                    Arc::new(nnue_proxy),
+                    shared_tt.clone(),
+                    active_threads,
+                    stop_bridge.clone(),
+                ));
+            }
+            guard.take().expect("searcher must be Some after initialization")
+        }; // Lock released here
 
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.adjust_thread_count(active_threads);
-                    searcher.search(pos, limits)
-                } else {
-                    error!("Failed to initialize parallel NNUE searcher");
-                    SearchResult::new(None, 0, SearchStats::default())
-                }
-            }
-            Err(e) => {
-                error!("Failed to lock NNUE parallel searcher: {e}");
-                SearchResult::new(None, 0, SearchStats::default())
-            }
+        // Search without holding Mutex
+        searcher.adjust_thread_count(active_threads);
+        let result = searcher.search(pos, limits);
+
+        // Put searcher back (best effort - if fails, next search will recreate)
+        if let Ok(mut guard) = nnue_parallel_searcher.lock() {
+            if guard.is_none() {
+                *guard = Some(searcher);
+            } // If already filled by concurrent operation, drop this instance
         }
+
+        result
     }
 
     /// Static helper for single-threaded material search
@@ -649,21 +675,44 @@ impl Engine {
         _material_evaluator: Arc<MaterialEvaluator>,
         _shared_tt: Arc<TranspositionTable>,
         material_searcher: Arc<Mutex<Option<MaterialSearcher>>>,
+        stop_bridge: Arc<EngineStopBridge>,
     ) -> SearchResult {
-        match material_searcher.lock() {
-            Ok(mut searcher_guard) => {
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.search(pos, limits)
+        // Take searcher out of Mutex to avoid holding lock during search
+        let mut searcher = match material_searcher.lock() {
+            Ok(mut guard) => {
+                if let Some(s) = guard.take() {
+                    s
                 } else {
                     error!("Material searcher not initialized");
-                    SearchResult::new(None, 0, SearchStats::default())
+                    return SearchResult::new(None, 0, SearchStats::default());
                 }
             }
             Err(e) => {
                 error!("Failed to lock material searcher: {e}");
-                SearchResult::new(None, 0, SearchStats::default())
+                return SearchResult::new(None, 0, SearchStats::default());
+            }
+        }; // Lock released here
+
+        // Publish session to stop bridge for single-threaded search
+        // This ensures request_stop_immediate() can reach the search even in single-threaded mode
+        if let Some(ext_stop) = limits.stop_flag.as_ref() {
+            // Single-threaded searches don't have SharedSearchState or pending_work,
+            // but we can still register the external stop flag
+            debug!("Publishing external stop flag for single-threaded material search");
+            stop_bridge.update_external_stop_flag(Some(ext_stop));
+        }
+
+        // Search without holding Mutex
+        let result = searcher.search(pos, limits);
+
+        // Put searcher back
+        if let Ok(mut guard) = material_searcher.lock() {
+            if guard.is_none() {
+                *guard = Some(searcher);
             }
         }
+
+        result
     }
 
     /// Static helper for single-threaded NNUE search
@@ -673,24 +722,40 @@ impl Engine {
         _nnue_evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
         _shared_tt: Arc<TranspositionTable>,
         nnue_basic_searcher: Arc<Mutex<Option<NnueBasicSearcher>>>,
+        stop_bridge: Arc<EngineStopBridge>,
     ) -> SearchResult {
         debug!("Starting NNUE search");
-        match nnue_basic_searcher.lock() {
-            Ok(mut searcher_guard) => {
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    let result = searcher.search(pos, limits);
-                    debug!("NNUE search completed");
-                    result
-                } else {
+
+        // Take searcher out of Mutex to avoid holding lock during search
+        let mut searcher = {
+            let mut guard = nnue_basic_searcher.lock().unwrap();
+            match guard.take() {
+                Some(s) => s,
+                None => {
                     error!("NNUE searcher not initialized");
-                    SearchResult::new(None, 0, SearchStats::default())
+                    return SearchResult::new(None, 0, SearchStats::default());
                 }
             }
-            Err(e) => {
-                error!("Failed to lock NNUE searcher: {e}");
-                SearchResult::new(None, 0, SearchStats::default())
+        }; // Lock released here
+
+        // Publish session to stop bridge for single-threaded search
+        if let Some(ext_stop) = limits.stop_flag.as_ref() {
+            debug!("Publishing external stop flag for single-threaded NNUE search");
+            stop_bridge.update_external_stop_flag(Some(ext_stop));
+        }
+
+        // Perform search without holding Mutex
+        let result = searcher.search(pos, limits);
+        debug!("NNUE search completed");
+
+        // Put searcher back (best effort - OK if fails, will be recreated)
+        if let Ok(mut guard) = nnue_basic_searcher.lock() {
+            if guard.is_none() {
+                *guard = Some(searcher);
             }
         }
+
+        result
     }
 
     /// Static helper for single-threaded enhanced material search
@@ -700,22 +765,39 @@ impl Engine {
         _material_evaluator: Arc<MaterialEvaluator>,
         _shared_tt: Arc<TranspositionTable>,
         material_enhanced_searcher: Arc<Mutex<Option<MaterialEnhancedSearcher>>>,
+        stop_bridge: Arc<EngineStopBridge>,
     ) -> SearchResult {
         debug!("Starting Enhanced search");
-        match material_enhanced_searcher.lock() {
-            Ok(mut searcher_guard) => {
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.search(pos, limits)
-                } else {
+
+        // Take searcher out of Mutex to avoid holding lock during search
+        let mut searcher = {
+            let mut guard = material_enhanced_searcher.lock().unwrap();
+            match guard.take() {
+                Some(s) => s,
+                None => {
                     error!("Enhanced searcher not initialized");
-                    SearchResult::new(None, 0, SearchStats::default())
+                    return SearchResult::new(None, 0, SearchStats::default());
                 }
             }
-            Err(e) => {
-                error!("Failed to lock enhanced searcher: {e}");
-                SearchResult::new(None, 0, SearchStats::default())
+        }; // Lock released here
+
+        // Publish session to stop bridge for single-threaded search
+        if let Some(ext_stop) = limits.stop_flag.as_ref() {
+            debug!("Publishing external stop flag for single-threaded enhanced material search");
+            stop_bridge.update_external_stop_flag(Some(ext_stop));
+        }
+
+        // Perform search without holding Mutex
+        let result = searcher.search(pos, limits);
+
+        // Put searcher back (best effort - OK if fails, will be recreated)
+        if let Ok(mut guard) = material_enhanced_searcher.lock() {
+            if guard.is_none() {
+                *guard = Some(searcher);
             }
         }
+
+        result
     }
 
     /// Static helper for single-threaded enhanced NNUE search
@@ -725,22 +807,39 @@ impl Engine {
         _nnue_evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
         _shared_tt: Arc<TranspositionTable>,
         nnue_enhanced_searcher: Arc<Mutex<Option<NnueEnhancedSearcher>>>,
+        stop_bridge: Arc<EngineStopBridge>,
     ) -> SearchResult {
         debug!("Starting Enhanced NNUE search");
-        match nnue_enhanced_searcher.lock() {
-            Ok(mut searcher_guard) => {
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.search(pos, limits)
-                } else {
+
+        // Take searcher out of Mutex to avoid holding lock during search
+        let mut searcher = {
+            let mut guard = nnue_enhanced_searcher.lock().unwrap();
+            match guard.take() {
+                Some(s) => s,
+                None => {
                     error!("Enhanced NNUE searcher not initialized");
-                    SearchResult::new(None, 0, SearchStats::default())
+                    return SearchResult::new(None, 0, SearchStats::default());
                 }
             }
-            Err(e) => {
-                error!("Failed to lock enhanced NNUE searcher: {e}");
-                SearchResult::new(None, 0, SearchStats::default())
+        }; // Lock released here
+
+        // Publish session to stop bridge for single-threaded search
+        if let Some(ext_stop) = limits.stop_flag.as_ref() {
+            debug!("Publishing external stop flag for single-threaded enhanced NNUE search");
+            stop_bridge.update_external_stop_flag(Some(ext_stop));
+        }
+
+        // Perform search without holding Mutex
+        let result = searcher.search(pos, limits);
+
+        // Put searcher back (best effort - OK if fails, will be recreated)
+        if let Ok(mut guard) = nnue_enhanced_searcher.lock() {
+            if guard.is_none() {
+                *guard = Some(searcher);
             }
         }
+
+        result
     }
 
     /// Search for best move in position (synchronous wrapper around start_search)
@@ -807,15 +906,16 @@ impl Engine {
             self.use_parallel = new_threads > 1;
 
             // Clear existing parallel searchers so they'll be recreated with new thread count
-            if let Ok(mut guard) = self.material_parallel_searcher.lock() {
+            // Use try_lock to avoid blocking if searchers are in use
+            if let Ok(mut guard) = self.material_parallel_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock material parallel searcher for clearing");
+                debug!("Could not acquire material parallel searcher lock, will be cleared on next recreation");
             }
-            if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
+            if let Ok(mut guard) = self.nnue_parallel_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock NNUE parallel searcher for clearing");
+                debug!("Could not acquire NNUE parallel searcher lock, will be cleared on next recreation");
             }
 
             info!(
@@ -869,35 +969,38 @@ impl Engine {
             self.tt_size_mb = new_size;
 
             // Clear existing searchers so they'll be recreated with new TT size
-            if let Ok(mut guard) = self.material_searcher.lock() {
+            // Use try_lock to avoid blocking if searchers are in use
+            if let Ok(mut guard) = self.material_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock material searcher for clearing");
+                debug!(
+                    "Could not acquire material searcher lock, will be cleared on next recreation"
+                );
             }
-            if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+            if let Ok(mut guard) = self.nnue_basic_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock NNUE basic searcher for clearing");
+                debug!("Could not acquire NNUE basic searcher lock, will be cleared on next recreation");
             }
-            if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+            if let Ok(mut guard) = self.material_enhanced_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock material enhanced searcher for clearing");
+                debug!("Could not acquire material enhanced searcher lock, will be cleared on next recreation");
             }
-            if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+            if let Ok(mut guard) = self.nnue_enhanced_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock NNUE enhanced searcher for clearing");
+                debug!("Could not acquire NNUE enhanced searcher lock, will be cleared on next recreation");
             }
-            if let Ok(mut guard) = self.material_parallel_searcher.lock() {
+            if let Ok(mut guard) = self.material_parallel_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock material parallel searcher for clearing");
+                debug!("Could not acquire material parallel searcher lock, will be cleared on next recreation");
             }
-            if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
+            if let Ok(mut guard) = self.nnue_parallel_searcher.try_lock() {
                 *guard = None;
             } else {
-                error!("Failed to lock NNUE parallel searcher for clearing");
+                debug!("Could not acquire NNUE parallel searcher lock, will be cleared on next recreation");
             }
 
             // Recreate shared TT with new size

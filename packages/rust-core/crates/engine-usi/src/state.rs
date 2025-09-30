@@ -4,6 +4,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use engine_core::engine::controller::{Engine, EngineType};
+use engine_core::engine::session::SearchSession;
 use engine_core::search::parallel::EngineStopBridge;
 use engine_core::search::parallel::FinalizerMsg;
 use engine_core::shogi::Position;
@@ -127,6 +128,8 @@ pub struct EngineState {
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
     pub worker: Option<thread::JoinHandle<()>>,
     pub result_rx: Option<mpsc::Receiver<(u64, engine_core::search::SearchResult)>>,
+    // Async search session (non-blocking)
+    pub search_session: Option<SearchSession>,
     // Stochastic Ponder control
     pub current_is_stochastic_ponder: bool,
     pub current_is_ponder: bool,
@@ -180,6 +183,7 @@ impl EngineState {
             ponder_hit_flag: None,
             worker: None,
             result_rx: None,
+            search_session: None,
             current_is_stochastic_ponder: false,
             current_is_ponder: false,
             stoch_suppress_result: false,
@@ -204,51 +208,15 @@ impl EngineState {
     pub fn notify_idle(&self) {
         self.idle_sync.notify_all();
     }
-
-    pub fn idle_status(&self) -> IdleStateSnapshot {
-        let worker_active = self.worker.is_some();
-        let reaper_pending = self.reaper_queue_len.load(std::sync::atomic::Ordering::Acquire);
-        let stop_snapshot = self.stop_bridge.snapshot();
-        IdleStateSnapshot {
-            worker_active,
-            reaper_pending,
-            pending_work_items: stop_snapshot.pending_work_items,
-            active_workers: stop_snapshot.active_workers,
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct IdleStateSnapshot {
-    pub worker_active: bool,
-    pub reaper_pending: usize,
-    pub pending_work_items: u64,
-    pub active_workers: usize,
-}
-
-impl IdleStateSnapshot {
-    #[inline]
-    pub fn is_idle(&self) -> bool {
-        !self.worker_active
-            && self.reaper_pending == 0
-            && self.pending_work_items == 0
-            && self.active_workers == 0
-    }
 }
 
 #[derive(Default)]
 pub struct IdleSync {
-    lock: Mutex<()>,
     condvar: Condvar,
 }
 
 impl IdleSync {
     pub fn notify_all(&self) {
         self.condvar.notify_all();
-    }
-
-    pub fn wait_timeout(&self, timeout: std::time::Duration) {
-        let guard = self.lock.lock().unwrap();
-        let _ = self.condvar.wait_timeout(guard, timeout).unwrap();
     }
 }
