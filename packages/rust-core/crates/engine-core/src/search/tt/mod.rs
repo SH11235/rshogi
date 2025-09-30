@@ -281,7 +281,24 @@ impl TranspositionTable {
         // so no additional XOR is needed. Adding 1-bit XOR would reduce entropy.
         //
         // Note: side_to_move parameter kept for API compatibility but unused.
-        (hash as usize) & (self.num_buckets - 1)
+        let idx = (hash as usize) & (self.num_buckets - 1);
+
+        // 診断ログ追加
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static INDEX_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = INDEX_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 20 {
+                // 最初の20回だけログ
+                eprintln!(
+                    "[TT_DIAG] bucket_index: hash={hash:016x} -> idx={idx} (num_buckets={})",
+                    self.num_buckets
+                );
+            }
+        }
+
+        idx
     }
 
     /// Mark bucket as occupied in bitmap
@@ -385,7 +402,7 @@ impl TranspositionTable {
             }
         }
 
-        if let Some(ref flexible_buckets) = self.flexible_buckets {
+        let result = if let Some(ref flexible_buckets) = self.flexible_buckets {
             #[cfg(feature = "tt_metrics")]
             {
                 flexible_buckets[idx].probe_with_metrics(hash, self.metrics.as_ref())
@@ -403,7 +420,27 @@ impl TranspositionTable {
             {
                 self.buckets[idx].probe(hash)
             }
+        };
+
+        // 診断ログ追加（ヒット/ミスの情報）
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
+            static HIT_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if result.is_some() {
+                let hits = HIT_COUNT.fetch_add(1, Ordering::Relaxed);
+                // HIT は常にログ出力（最初の200回）
+                if hits < 200 {
+                    eprintln!("[TT_DIAG] PROBE #{count}: hash={hash:016x} side={side_to_move:?} HIT (hits={hits})");
+                }
+            } else if count < 100 {
+                eprintln!("[TT_DIAG] PROBE #{count}: hash={hash:016x} side={side_to_move:?} MISS");
+            }
         }
+
+        result
     }
 
     /// Clear the entire table
@@ -724,6 +761,22 @@ impl TranspositionTable {
     /// Store entry in transposition table (convenience method)
     pub fn store(&self, args: TTStoreArgs) {
         let params: TTEntryParams = args.into_params(self.current_age());
+
+        // 診断ログ追加
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static STORE_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = STORE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 100 {
+                // 最初の100回だけログ
+                eprintln!(
+                    "[TT_DIAG] STORE #{count}: hash={:016x} side={:?} depth={} move={:?}",
+                    params.key, params.side_to_move, params.depth, params.mv
+                );
+            }
+        }
+
         self.store_with_params(params);
     }
 

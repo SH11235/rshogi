@@ -134,6 +134,14 @@ impl Position {
         self.hash ^= ZOBRIST.side_to_move;
         self.zobrist_hash = self.hash;
 
+        // 診断チェック追加
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.hash, self.zobrist_hash,
+            "Hash fields out of sync after do_move: hash={:016x} zobrist={:016x}",
+            self.hash, self.zobrist_hash
+        );
+
         // Increment ply
         self.ply += 1;
 
