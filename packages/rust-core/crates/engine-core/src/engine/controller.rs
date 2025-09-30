@@ -47,6 +47,39 @@ pub struct TtDebugInfo {
     pub store_attempts: u64,
 }
 
+/// Arguments bundle for search_in_thread to avoid too many function parameters
+struct SearchThreadArgs {
+    engine_type: EngineType,
+    use_parallel: bool,
+    num_threads: usize,
+    material_evaluator: Arc<MaterialEvaluator>,
+    nnue_evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
+    shared_tt: Arc<TranspositionTable>,
+    stop_bridge: Arc<EngineStopBridge>,
+    material_parallel_searcher: Arc<Mutex<Option<MaterialParallelSearcher>>>,
+    nnue_parallel_searcher: Arc<Mutex<Option<NnueParallelSearcher>>>,
+    material_searcher: Arc<Mutex<Option<MaterialSearcher>>>,
+    nnue_basic_searcher: Arc<Mutex<Option<NnueBasicSearcher>>>,
+    material_enhanced_searcher: Arc<Mutex<Option<MaterialEnhancedSearcher>>>,
+    nnue_enhanced_searcher: Arc<Mutex<Option<NnueEnhancedSearcher>>>,
+}
+
+/// Arguments bundle for parallel search static helpers
+struct ParallelSearchArgs {
+    active_threads: usize,
+    shared_tt: Arc<TranspositionTable>,
+    stop_bridge: Arc<EngineStopBridge>,
+}
+
+/// RAII guard to ensure active_searches counter is decremented even on panic
+struct ActiveSearchGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveSearchGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 // Game phase detection is now handled by the game_phase module
 // See docs/game-phase-module-guide.md for details
 
@@ -451,10 +484,11 @@ impl Engine {
 
         // Spawn search in background thread
         let handle = thread::spawn(move || {
-            // Run the search (this will block until search completes)
-            let result = Self::search_in_thread(
-                &mut pos_clone,
-                limits,
+            // RAII guard ensures active_searches is decremented even on panic
+            let _guard = ActiveSearchGuard(active_searches);
+
+            // Build search arguments
+            let args = SearchThreadArgs {
                 engine_type,
                 use_parallel,
                 num_threads,
@@ -468,13 +502,24 @@ impl Engine {
                 nnue_basic_searcher,
                 material_enhanced_searcher,
                 nnue_enhanced_searcher,
-            );
+            };
 
-            // Send result back (ignore send error if receiver dropped)
-            let _ = tx.send(result);
+            // Catch panics to ensure we don't send on a disconnected channel
+            let search_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::search_in_thread(&mut pos_clone, limits, args)
+            }));
 
-            // Decrement active searches after search completes
-            active_searches.fetch_sub(1, Ordering::SeqCst);
+            match search_result {
+                Ok(result) => {
+                    // Send result back (ignore send error if receiver dropped)
+                    let _ = tx.send(result);
+                }
+                Err(panic_err) => {
+                    error!("search_in_thread panicked: {:?}", panic_err);
+                    // Don't send result - USI layer will detect Disconnected via TryResult
+                }
+            }
+            // _guard is dropped here, ensuring active_searches is decremented
         });
 
         // Return session handle immediately (with JoinHandle for isready/quit)
@@ -485,27 +530,14 @@ impl Engine {
     ///
     /// This is called by `start_search()` in a spawned thread and performs
     /// the actual search logic without holding any Engine locks.
-    #[allow(clippy::too_many_arguments)]
     fn search_in_thread(
         pos: &mut Position,
         limits: SearchLimits,
-        engine_type: EngineType,
-        use_parallel: bool,
-        num_threads: usize,
-        material_evaluator: Arc<MaterialEvaluator>,
-        nnue_evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
-        shared_tt: Arc<TranspositionTable>,
-        stop_bridge: Arc<EngineStopBridge>,
-        material_parallel_searcher: Arc<Mutex<Option<MaterialParallelSearcher>>>,
-        nnue_parallel_searcher: Arc<Mutex<Option<NnueParallelSearcher>>>,
-        material_searcher: Arc<Mutex<Option<MaterialSearcher>>>,
-        nnue_basic_searcher: Arc<Mutex<Option<NnueBasicSearcher>>>,
-        material_enhanced_searcher: Arc<Mutex<Option<MaterialEnhancedSearcher>>>,
-        nnue_enhanced_searcher: Arc<Mutex<Option<NnueEnhancedSearcher>>>,
+        args: SearchThreadArgs,
     ) -> SearchResult {
         // Detect game phase and calculate active threads
         let phase = detect_game_phase(pos, pos.ply as u32, Profile::Search);
-        let base_threads = num_threads;
+        let base_threads = args.num_threads;
         let active_threads = match phase {
             GamePhase::Opening => base_threads,
             GamePhase::MiddleGame => base_threads,
@@ -514,67 +546,69 @@ impl Engine {
 
         debug!(
             "search_in_thread: engine_type={:?}, parallel={}, active_threads={} (phase={:?})",
-            engine_type, use_parallel, active_threads, phase
+            args.engine_type, args.use_parallel, active_threads, phase
         );
 
+        let parallel_args = ParallelSearchArgs {
+            active_threads,
+            shared_tt: args.shared_tt.clone(),
+            stop_bridge: args.stop_bridge.clone(),
+        };
+
         // Execute search based on engine type and parallelism
-        if use_parallel {
-            match engine_type {
+        if args.use_parallel {
+            match args.engine_type {
                 EngineType::Material | EngineType::Enhanced => {
                     Self::search_parallel_material_static(
                         pos,
                         limits,
-                        active_threads,
-                        material_evaluator,
-                        shared_tt,
-                        stop_bridge,
-                        material_parallel_searcher,
+                        parallel_args,
+                        args.material_evaluator,
+                        args.material_parallel_searcher,
                     )
                 }
                 EngineType::Nnue | EngineType::EnhancedNnue => Self::search_parallel_nnue_static(
                     pos,
                     limits,
-                    active_threads,
-                    nnue_evaluator,
-                    shared_tt,
-                    stop_bridge,
-                    nnue_parallel_searcher,
+                    parallel_args,
+                    args.nnue_evaluator,
+                    args.nnue_parallel_searcher,
                 ),
             }
         } else {
             // Single-threaded search
-            match engine_type {
+            match args.engine_type {
                 EngineType::Material => Self::search_single_material_static(
                     pos,
                     limits,
-                    material_evaluator,
-                    shared_tt,
-                    material_searcher,
-                    stop_bridge,
+                    args.material_evaluator,
+                    args.shared_tt,
+                    args.material_searcher,
+                    args.stop_bridge,
                 ),
                 EngineType::Nnue => Self::search_single_nnue_static(
                     pos,
                     limits,
-                    nnue_evaluator,
-                    shared_tt,
-                    nnue_basic_searcher,
-                    stop_bridge,
+                    args.nnue_evaluator,
+                    args.shared_tt,
+                    args.nnue_basic_searcher,
+                    args.stop_bridge,
                 ),
                 EngineType::Enhanced => Self::search_single_enhanced_material_static(
                     pos,
                     limits,
-                    material_evaluator,
-                    shared_tt,
-                    material_enhanced_searcher,
-                    stop_bridge,
+                    args.material_evaluator,
+                    args.shared_tt,
+                    args.material_enhanced_searcher,
+                    args.stop_bridge,
                 ),
                 EngineType::EnhancedNnue => Self::search_single_enhanced_nnue_static(
                     pos,
                     limits,
-                    nnue_evaluator,
-                    shared_tt,
-                    nnue_enhanced_searcher,
-                    stop_bridge,
+                    args.nnue_evaluator,
+                    args.shared_tt,
+                    args.nnue_enhanced_searcher,
+                    args.stop_bridge,
                 ),
             }
         }
@@ -583,17 +617,14 @@ impl Engine {
     // ===== Static helper methods for background search thread =====
 
     /// Static helper for parallel material search
-    #[allow(clippy::too_many_arguments)]
     fn search_parallel_material_static(
         pos: &mut Position,
         limits: SearchLimits,
-        active_threads: usize,
+        args: ParallelSearchArgs,
         material_evaluator: Arc<MaterialEvaluator>,
-        shared_tt: Arc<TranspositionTable>,
-        stop_bridge: Arc<EngineStopBridge>,
         material_parallel_searcher: Arc<Mutex<Option<MaterialParallelSearcher>>>,
     ) -> SearchResult {
-        debug!("Starting parallel material search with {active_threads} active threads");
+        debug!("Starting parallel material search with {} active threads", args.active_threads);
 
         // Take searcher out of Mutex to avoid holding lock during search
         let mut searcher = {
@@ -607,16 +638,16 @@ impl Engine {
             if guard.is_none() {
                 *guard = Some(MaterialParallelSearcher::new(
                     material_evaluator,
-                    shared_tt.clone(),
-                    active_threads,
-                    stop_bridge.clone(),
+                    args.shared_tt.clone(),
+                    args.active_threads,
+                    args.stop_bridge.clone(),
                 ));
             }
             guard.take().expect("searcher must be Some after initialization")
         }; // Lock released here
 
         // Search without holding Mutex
-        searcher.adjust_thread_count(active_threads);
+        searcher.adjust_thread_count(args.active_threads);
         let result = searcher.search(pos, limits);
 
         // Put searcher back (best effort - if fails, next search will recreate)
@@ -630,17 +661,14 @@ impl Engine {
     }
 
     /// Static helper for parallel NNUE search
-    #[allow(clippy::too_many_arguments)]
     fn search_parallel_nnue_static(
         pos: &mut Position,
         limits: SearchLimits,
-        active_threads: usize,
+        args: ParallelSearchArgs,
         nnue_evaluator: Arc<RwLock<Option<NNUEEvaluatorWrapper>>>,
-        shared_tt: Arc<TranspositionTable>,
-        stop_bridge: Arc<EngineStopBridge>,
         nnue_parallel_searcher: Arc<Mutex<Option<NnueParallelSearcher>>>,
     ) -> SearchResult {
-        debug!("Starting parallel NNUE search with {active_threads} active threads");
+        debug!("Starting parallel NNUE search with {} active threads", args.active_threads);
 
         // Take searcher out of Mutex to avoid holding lock during search
         let mut searcher = {
@@ -658,16 +686,16 @@ impl Engine {
                 };
                 *guard = Some(NnueParallelSearcher::new(
                     Arc::new(nnue_proxy),
-                    shared_tt.clone(),
-                    active_threads,
-                    stop_bridge.clone(),
+                    args.shared_tt.clone(),
+                    args.active_threads,
+                    args.stop_bridge.clone(),
                 ));
             }
             guard.take().expect("searcher must be Some after initialization")
         }; // Lock released here
 
         // Search without holding Mutex
-        searcher.adjust_thread_count(active_threads);
+        searcher.adjust_thread_count(args.active_threads);
         let result = searcher.search(pos, limits);
 
         // Put searcher back (best effort - if fails, next search will recreate)

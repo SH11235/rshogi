@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Condvar;
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
 
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::engine::session::SearchSession;
@@ -9,12 +8,6 @@ use engine_core::search::parallel::EngineStopBridge;
 use engine_core::search::parallel::FinalizerMsg;
 use engine_core::shogi::Position;
 use engine_core::time_management::TimeControl;
-
-#[derive(Debug)]
-pub struct ReaperJob {
-    pub handle: thread::JoinHandle<()>,
-    pub label: String,
-}
 
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
@@ -141,10 +134,6 @@ pub struct EngineState {
     pub bestmove_emitted: bool,
     // Current (inner) time control for stop/gameover policy decisions
     pub current_time_control: Option<TimeControl>,
-    // Reaper: background joiner for detached worker threads
-    pub reaper_tx: Option<mpsc::Sender<ReaperJob>>,
-    pub reaper_handle: Option<std::thread::JoinHandle<()>>,
-    pub reaper_queue_len: Arc<AtomicUsize>,
     pub oob_detach_count: Arc<AtomicUsize>,
     pub stop_bridge: Arc<EngineStopBridge>,
     // OOB finalize channel (from engine-core time manager via StopBridge)
@@ -189,9 +178,6 @@ impl EngineState {
             current_search_id: 0,
             bestmove_emitted: false,
             current_time_control: None,
-            reaper_tx: None,
-            reaper_handle: None,
-            reaper_queue_len: Arc::new(AtomicUsize::new(0)),
             oob_detach_count: Arc::new(AtomicUsize::new(0)),
             stop_bridge,
             finalizer_rx: Some(fin_rx),
