@@ -426,13 +426,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     ));
 
     // Enhanced diagnostics for time loss investigation
-    use std::sync::atomic::Ordering;
-    let detach_cumulative = state.oob_detach_count.load(Ordering::Relaxed);
     let threads = state.opts.threads;
-    info_string(format!(
-        "search_diagnostics oob_detach_cumulative={} threads={}",
-        detach_cumulative, threads
-    ));
+    info_string(format!("search_diagnostics threads={}", threads));
 
     Ok(())
 }
