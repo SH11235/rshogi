@@ -694,6 +694,7 @@ impl Engine {
                 }
             };
             if guard.is_none() {
+                info!("controller_create_searcher reason=guard_is_none");
                 let nnue_proxy = NNUEEvaluatorProxy {
                     evaluator: nnue_evaluator,
                     locals: thread_local::ThreadLocal::new(),
@@ -704,6 +705,8 @@ impl Engine {
                     args.active_threads,
                     args.stop_bridge.clone(),
                 ));
+            } else {
+                info!("controller_reuse_searcher guard_has_existing=1");
             }
             guard.take().expect("searcher must be Some after initialization")
         }; // Lock released here
@@ -715,8 +718,13 @@ impl Engine {
         // Put searcher back (best effort - if fails, next search will recreate)
         if let Ok(mut guard) = nnue_parallel_searcher.lock() {
             if guard.is_none() {
+                info!("controller_return_searcher status=success");
                 *guard = Some(searcher);
-            } // If already filled by concurrent operation, drop this instance
+            } else {
+                info!("controller_return_searcher status=already_filled");
+            }
+        } else {
+            info!("controller_return_searcher status=lock_failed");
         }
 
         result

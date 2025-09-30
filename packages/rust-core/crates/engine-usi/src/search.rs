@@ -256,12 +256,18 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // Reuse existing stop_flag to allow ParallelSearcher to detect rewiring needs
     // Reset the flag value if reusing
     let stop_flag = if let Some(existing) = &state.stop_flag {
-        info_string(format!("stop_flag_reuse state_has_existing=1 addr={:p}", Arc::as_ptr(existing)));
+        info_string(format!(
+            "stop_flag_reuse state_has_existing=1 addr={:p}",
+            Arc::as_ptr(existing)
+        ));
         existing.store(false, std::sync::atomic::Ordering::Release);
         Arc::clone(existing)
     } else {
         let new_flag = Arc::new(AtomicBool::new(false));
-        info_string(format!("stop_flag_create state_has_existing=0 addr={:p}", Arc::as_ptr(&new_flag)));
+        info_string(format!(
+            "stop_flag_create state_has_existing=0 addr={:p}",
+            Arc::as_ptr(&new_flag)
+        ));
         new_flag
     };
     let ponder_flag = if state.opts.ponder {
