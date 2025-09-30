@@ -199,10 +199,11 @@ pub fn limits_from_go(
     }
 
     // Set up info callback for search progress reporting
+    let multipv = opts.multipv.max(1);
     let info_callback: InfoCallback =
         Arc::new(move |depth, score, nodes, elapsed, pv, node_type| {
-            use engine_core::search::NodeType;
-            use engine_core::usi::move_to_usi;
+            use crate::util::score_view_with_clamp;
+            use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 
             let elapsed_ms = elapsed.as_millis();
             let nps = if elapsed_ms > 0 {
@@ -211,18 +212,24 @@ pub fn limits_from_go(
                 0
             };
 
-            let node_type_str = match node_type {
-                NodeType::Exact => "",
-                NodeType::LowerBound => " lowerbound",
-                NodeType::UpperBound => " upperbound",
-            };
+            let mut info_line =
+                format!("info depth {depth} time {elapsed_ms} nodes {nodes} nps {nps}");
 
-            let pv_str = pv.iter().map(move_to_usi).collect::<Vec<_>>().join(" ");
+            // Add MultiPV line number if multipv > 1
+            // Future improvement: callback should receive line index from engine
+            if multipv > 1 {
+                info_line.push_str(" multipv 1");
+            }
 
-            let info_line = format!(
-                "info depth {} score cp {}{} nodes {} time {} nps {} pv {}",
-                depth, score, node_type_str, nodes, elapsed_ms, nps, pv_str
-            );
+            // Append score (cp or mate) with bound using standard USI format
+            let score_view = score_view_with_clamp(score);
+            append_usi_score_and_bound(&mut info_line, score_view, node_type);
+
+            // Append PV if available
+            if !pv.is_empty() {
+                info_line.push_str(" pv ");
+                info_line.push_str(&pv.iter().map(move_to_usi).collect::<Vec<_>>().join(" "));
+            }
 
             println!("{info_line}");
         });
@@ -295,11 +302,22 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         if let Ok(list) = mg.generate_all(&state.position) {
             let slice = list.as_slice();
             if slice.is_empty() {
+                info_string(format!(
+                    "early_return reason=no_legal_moves ply={} hash={}",
+                    state.position.ply,
+                    fmt_hash(state.position.zobrist_hash())
+                ));
                 emit_bestmove("resign", None);
                 state.bestmove_emitted = true;
                 return Ok(());
             } else if slice.len() == 1 {
                 let mv_usi = move_to_usi(&slice[0]);
+                info_string(format!(
+                    "early_return reason=only_one_legal_move ply={} hash={} move={}",
+                    state.position.ply,
+                    fmt_hash(state.position.zobrist_hash()),
+                    mv_usi
+                ));
                 emit_bestmove(&mv_usi, None);
                 state.bestmove_emitted = true;
                 return Ok(());
@@ -394,8 +412,6 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.searching = true;
     state.stop_flag = Some(Arc::clone(&stop_flag));
     state.ponder_hit_flag = ponder_flag;
-    state.worker = None; // No manual worker thread
-    state.result_rx = None; // No manual channel
     state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
@@ -427,10 +443,11 @@ pub fn poll_search_completion(state: &mut EngineState) {
         return;
     }
 
-    // Use SearchSession::try_recv_result() instead of manual channel
+    // Use SearchSession::try_poll() to detect thread disconnection
     if let Some(session) = &state.search_session {
-        match session.try_recv_result() {
-            Some(result) => {
+        use engine_core::engine::TryResult;
+        match session.try_poll() {
+            TryResult::Ok(result) => {
                 // Search completed, clean up state
                 state.searching = false;
                 state.stop_flag = None;
@@ -493,8 +510,52 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     state.notify_idle();
                 }
             }
-            None => {
+            TryResult::Pending => {
                 // Still searching (no result yet)
+            }
+            TryResult::Disconnected => {
+                // Search thread disconnected without sending result (panic or early exit)
+                // Clean up state and emit fallback bestmove
+                use engine_core::usi::move_to_usi;
+                use log::error;
+
+                error!(
+                    "Search thread disconnected unexpectedly for session {}",
+                    session.session_id()
+                );
+                info_string(format!(
+                    "search_thread_disconnected session_id={} root_hash={}",
+                    session.session_id(),
+                    state.current_root_hash.map(fmt_hash).unwrap_or_else(|| "none".to_string())
+                ));
+
+                state.searching = false;
+                state.stop_flag = None;
+                state.ponder_hit_flag = None;
+                state.search_session = None;
+                state.current_time_control = None;
+                state.current_root_hash = None;
+
+                // Fallback: try to get a safe bestmove from Engine (TT or legal moves)
+                let bestmove = {
+                    let engine = state.engine.lock().unwrap();
+                    let final_best = engine.choose_final_bestmove(&state.position, None);
+                    final_best.best_move.map(|m| move_to_usi(&m))
+                };
+
+                match bestmove {
+                    Some(mv) => {
+                        info_string(format!("fallback_bestmove move={mv} source=tt_or_legal"));
+                        emit_bestmove(&mv, None);
+                    }
+                    None => {
+                        info_string("fallback_bestmove move=resign source=no_legal_moves");
+                        emit_bestmove("resign", None);
+                    }
+                }
+
+                state.bestmove_emitted = true;
+                state.notify_idle();
             }
         }
     }

@@ -6,7 +6,6 @@ use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
-use crate::util::{enqueue_reaper, join_search_handle};
 
 /// Poll and handle out-of-band finalize requests coming from engine-core.
 ///
@@ -96,29 +95,31 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     wait_budget_ms, is_pure_byoyomi as u8, stop_wait_ms
                 ));
 
-                // Step 3: try to receive result with bounded waiting
-                let mut finalize_candidate: Option<(u64, engine_core::search::SearchResult)> = None;
-                if let Some(rx_res) = &state.result_rx {
+                // Step 3: try to receive result with bounded waiting using SearchSession
+                let mut finalize_candidate: Option<engine_core::search::SearchResult> = None;
+                if let Some(session) = &state.search_session {
                     let chunk_ms = 50u64; // Wait in 50ms chunks
                     let max_rounds = wait_budget_ms.div_ceil(chunk_ms);
                     info_string(format!(
-                        "oob_recv_wait_start budget_ms={} max_rounds={}",
-                        wait_budget_ms, max_rounds
+                        "oob_recv_wait_start budget_ms={} max_rounds={} session_id={}",
+                        wait_budget_ms,
+                        max_rounds,
+                        session.session_id()
                     ));
 
                     for round in 0..max_rounds {
-                        match rx_res.recv_timeout(Duration::from_millis(chunk_ms)) {
-                            Ok(pair) => {
+                        match session.recv_result_timeout(Duration::from_millis(chunk_ms)) {
+                            Some(result) => {
                                 info_string(format!(
                                     "oob_recv_result round={} waited_ms={}",
                                     round,
                                     (round + 1) * chunk_ms
                                 ));
-                                finalize_candidate = Some(pair);
+                                finalize_candidate = Some(result);
                                 break;
                             }
-                            Err(mpsc::RecvTimeoutError::Timeout) => {
-                                // Log every 4 rounds (200ms) to track progress
+                            None => {
+                                // Timeout or disconnected - log every 4 rounds (200ms)
                                 if round % 4 == 3 || round == max_rounds - 1 {
                                     info_string(format!(
                                         "oob_recv_waiting round={}/{} waited_ms={}",
@@ -128,10 +129,6 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                                     ));
                                 }
                                 continue;
-                            }
-                            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                info_string("oob_recv_disconnected");
-                                break;
                             }
                         }
                     }
@@ -144,44 +141,32 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     }
                 }
 
-                // Step 4: finalize with result or detach as last resort
-                if let Some((sid, result)) = finalize_candidate {
-                    if sid == state.current_search_id {
-                        info_string(format!("oob_finalize_joined sid={} label={}", sid, label));
-                        if let Some(h) = state.worker.take() {
-                            join_search_handle(h, label);
-                            state.notify_idle();
-                        }
-                        state.searching = false;
-                        state.stop_flag = None;
-                        state.ponder_hit_flag = None;
-                        let stale = state
-                            .current_root_hash
-                            .map(|h| h != state.position.zobrist_hash())
-                            .unwrap_or(false);
-                        finalize_and_send(state, label, Some(&result), stale);
-                        state.current_is_ponder = false;
-                        state.current_root_hash = None;
-                        state.current_time_control = None;
-                        state.notify_idle();
-                    } else {
-                        // Stale result id; fall back to fast finalize path
-                        info_string(format!(
-                            "oob_finalize_stale sid={} cur_sid={} fast_path=1",
-                            sid, state.current_search_id
-                        ));
-                        fast_finalize_and_detach(state, label);
-                    }
+                // Step 4: finalize with result or use fast path
+                if let Some(result) = finalize_candidate {
+                    info_string(format!("oob_finalize_joined label={}", label));
+                    state.searching = false;
+                    state.stop_flag = None;
+                    state.ponder_hit_flag = None;
+                    state.search_session = None;
+                    let stale = state
+                        .current_root_hash
+                        .map(|h| h != state.position.zobrist_hash())
+                        .unwrap_or(false);
+                    finalize_and_send(state, label, Some(&result), stale);
+                    state.current_is_ponder = false;
+                    state.current_root_hash = None;
+                    state.current_time_control = None;
+                    state.notify_idle();
                 } else {
-                    // Result not received within wait budget → detach and send bestmove
-                    // Note: Previously tried to prohibit detach for pure byoyomi with margin,
+                    // Result not received within wait budget → fast finalize
+                    // Note: Previously tried to prohibit fast path for pure byoyomi with margin,
                     // but this caused infinite loops because Finalize message is not resent.
-                    // Better to detach and output bestmove than to time-loss.
+                    // Better to send bestmove immediately than to time-loss.
                     info_string(format!(
-                        "oob_finalize_timeout no_result=1 sid={} budget_ms={} detach=1",
+                        "oob_finalize_timeout no_result=1 sid={} budget_ms={}",
                         session_id, wait_budget_ms
                     ));
-                    fast_finalize_and_detach(state, label);
+                    fast_finalize_no_detach(state, label);
                 }
             }
         }
@@ -191,24 +176,15 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
     state.finalizer_rx = Some(rx);
 }
 
-fn fast_finalize_and_detach(state: &mut EngineState, label: &str) {
-    use std::sync::atomic::Ordering;
-
-    let worker = state.worker.take();
+/// Fast finalize without waiting for result (SearchSession will clean up automatically)
+fn fast_finalize_no_detach(state: &mut EngineState, label: &str) {
     state.searching = false;
     state.stop_flag = None;
     state.ponder_hit_flag = None;
-    state.result_rx = None;
+    state.search_session = None;
     finalize_and_send_fast(state, label);
     state.current_is_ponder = false;
     state.current_root_hash = None;
     state.current_time_control = None;
-    if let Some(handle) = worker {
-        // Increment detach counter for diagnostics
-        let count = state.oob_detach_count.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        info_string(format!("oob_detach label={} detach_count={}", label, count));
-        enqueue_reaper(state, handle, label);
-    } else {
-        state.notify_idle();
-    }
+    state.notify_idle();
 }
