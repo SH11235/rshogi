@@ -7,7 +7,20 @@ use crate::{
     search::NodeType,
     search::{adaptive_prefetcher::AdaptivePrefetcher, tt::TTEntry, TranspositionTable},
     shogi::Move,
+    Color,
 };
+
+/// Parameters for storing to transposition table
+#[derive(Clone, Copy)]
+pub struct TTStoreParams {
+    pub hash: u64,
+    pub depth: u8,
+    pub score: i32,
+    pub node_type: NodeType,
+    pub best_move: Option<Move>,
+    pub ply: u8,
+    pub side_to_move: Color,
+}
 use std::sync::Arc;
 
 /// Trait for transposition table operations
@@ -26,9 +39,9 @@ pub trait TTOperations<const USE_TT: bool> {
 
     /// Probe transposition table (compile-time optimized)
     #[inline(always)]
-    fn probe_tt(&self, hash: u64) -> Option<TTEntry> {
+    fn probe_tt(&self, hash: u64, side_to_move: crate::Color) -> Option<TTEntry> {
         if USE_TT {
-            self.tt().as_ref()?.probe_entry(hash)
+            self.tt().as_ref()?.probe_entry(hash, side_to_move)
         } else {
             None
         }
@@ -36,30 +49,31 @@ pub trait TTOperations<const USE_TT: bool> {
 
     /// Store in transposition table (compile-time optimized)
     #[inline(always)]
-    fn store_tt(
-        &self,
-        hash: u64,
-        depth: u8,
-        score: i32,
-        node_type: NodeType,
-        best_move: Option<Move>,
-        ply: u8,
-    ) {
+    fn store_tt(&self, params: TTStoreParams) {
         if USE_TT {
             if let Some(ref tt) = self.tt() {
                 // Adjust mate scores to be relative to root position
-                let adjusted_score = crate::search::common::adjust_mate_score_for_tt(score, ply);
+                let adjusted_score =
+                    crate::search::common::adjust_mate_score_for_tt(params.score, params.ply);
 
                 // Safety check: ensure adjusted score fits in i16
                 debug_assert!(
                     adjusted_score >= i16::MIN as i32 && adjusted_score <= i16::MAX as i32,
                     "Adjusted mate score {} out of i16 range at ply {}",
                     adjusted_score,
-                    ply
+                    params.ply
                 );
 
                 // Store entry (duplication tracking temporarily disabled)
-                tt.store(hash, best_move, adjusted_score as i16, 0, depth, node_type);
+                tt.store(crate::search::tt::TTStoreArgs::new(
+                    params.hash,
+                    params.best_move,
+                    adjusted_score as i16,
+                    0,
+                    params.depth,
+                    params.node_type,
+                    params.side_to_move,
+                ));
 
                 // // Update duplication statistics based on store result
                 // if let Some(ref stats) = self.duplication_stats {
@@ -87,10 +101,10 @@ pub trait TTOperations<const USE_TT: bool> {
 
     /// Prefetch transposition table entry (compile-time optimized)
     #[inline(always)]
-    fn prefetch_tt(&self, hash: u64) {
+    fn prefetch_tt(&self, hash: u64, side_to_move: crate::Color) {
         if USE_TT && !self.is_prefetch_disabled() {
             if let Some(ref tt) = self.tt() {
-                tt.prefetch_l1(hash); // Use L1 cache for immediate access
+                tt.prefetch_l1(hash, side_to_move); // Use L1 cache for immediate access
             }
         }
     }
@@ -184,13 +198,13 @@ mod tests {
     fn test_probe_tt_compile_time_optimization() {
         // With TT enabled
         let searcher_with_tt = UnifiedSearcher::<_, true, false>::new(MaterialEvaluator);
-        let result = searcher_with_tt.probe_tt(12345);
+        let result = searcher_with_tt.probe_tt(12345, Color::Black);
         // Should return None (empty table) but not panic
         assert!(result.is_none());
 
         // With TT disabled - should always return None
         let searcher_without_tt = UnifiedSearcher::<_, false, false>::new(MaterialEvaluator);
-        let result = searcher_without_tt.probe_tt(12345);
+        let result = searcher_without_tt.probe_tt(12345, Color::Black);
         assert!(result.is_none());
     }
 }

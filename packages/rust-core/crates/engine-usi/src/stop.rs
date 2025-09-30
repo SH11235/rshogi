@@ -55,7 +55,8 @@ pub fn handle_stop(state: &mut EngineState) {
                         // No session_id check needed - SearchSession manages this internally
                         // No worker join needed - SearchSession manages thread lifecycle
                         state.searching = false;
-                        // Keep stop_flag for reuse in next session (don't set to None)
+                        // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                        state.stop_flag = None;
                         state.ponder_hit_flag = None;
 
                         let stale = state
@@ -122,7 +123,8 @@ pub fn handle_stop(state: &mut EngineState) {
                 // Finalize with result if available
                 if let Some(result) = finalize_candidate {
                     state.searching = false;
-                    // Keep stop_flag for reuse in next session (don't set to None)
+                    // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                    state.stop_flag = None;
                     state.ponder_hit_flag = None;
 
                     let stale = state
@@ -140,7 +142,8 @@ pub fn handle_stop(state: &mut EngineState) {
                 // No result available - use fast finalize
                 // SearchSession will clean up automatically on drop
                 state.searching = false;
-                // Keep stop_flag for reuse in next session (don't set to None)
+                // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                state.stop_flag = None;
                 state.ponder_hit_flag = None;
                 finalize_and_send_fast(state, "stop_timeout_finalize");
                 state.current_is_ponder = false;
@@ -175,7 +178,8 @@ pub fn handle_gameover(state: &mut EngineState) {
             }
             // No worker to clean up - SearchSession handles this automatically
             state.searching = false;
-            // Keep stop_flag for reuse in next session (don't set to None)
+            // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+            state.stop_flag = None;
             state.ponder_hit_flag = None;
             state.current_time_control = None;
             state.notify_idle();
@@ -226,7 +230,8 @@ pub fn handle_gameover(state: &mut EngineState) {
                             // No session_id check needed - SearchSession manages this internally
                             // No worker join needed - SearchSession manages thread lifecycle
                             state.searching = false;
-                            // Keep stop_flag for reuse in next session (don't set to None)
+                            // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                            state.stop_flag = None;
                             state.ponder_hit_flag = None;
 
                             let stale = state
@@ -251,7 +256,8 @@ pub fn handle_gameover(state: &mut EngineState) {
                     use engine_core::engine::TryResult;
                     if let TryResult::Ok(result) = session.try_poll() {
                         state.searching = false;
-                        // Keep stop_flag for reuse in next session (don't set to None)
+                        // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                        state.stop_flag = None;
                         state.ponder_hit_flag = None;
 
                         let stale = state
@@ -269,7 +275,8 @@ pub fn handle_gameover(state: &mut EngineState) {
                     // No result available - use fast finalize
                     // SearchSession will clean up automatically on drop
                     state.searching = false;
-                    // Keep stop_flag for reuse in next session (don't set to None)
+                    // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                    state.stop_flag = None;
                     state.ponder_hit_flag = None;
                     finalize_and_send_fast(state, "gameover_timeout_finalize");
                     state.current_is_ponder = false;
@@ -279,7 +286,8 @@ pub fn handle_gameover(state: &mut EngineState) {
                 }
             } else {
                 state.searching = false;
-                // Keep stop_flag for reuse in next session (don't set to None)
+                // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                state.stop_flag = None;
                 state.ponder_hit_flag = None;
                 finalize_and_send_fast(state, "gameover_immediate_finalize");
                 state.current_is_ponder = false;
@@ -289,7 +297,8 @@ pub fn handle_gameover(state: &mut EngineState) {
             }
         } else {
             state.searching = false;
-            // Keep stop_flag for reuse in next session (don't set to None)
+            // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+            state.stop_flag = None;
             state.ponder_hit_flag = None;
             finalize_and_send_fast(state, "gameover_immediate_finalize");
             state.current_is_ponder = false;
@@ -304,7 +313,8 @@ pub fn handle_gameover(state: &mut EngineState) {
         // SearchSession will clean up automatically on drop
         state.search_session = None;
         state.searching = false;
-        // Keep stop_flag for reuse in next session (don't set to None)
+        // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+        state.stop_flag = None;
         state.ponder_hit_flag = None;
         state.current_time_control = None;
         state.notify_idle();

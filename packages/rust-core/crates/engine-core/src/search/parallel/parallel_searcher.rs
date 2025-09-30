@@ -983,53 +983,37 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Without this, GUI-issued `stop` does not propagate to parallel workers,
         // and the frontend may time out and fall back to fast finalize.
 
-        // IMPORTANT: Each ParallelSearcher instance is created fresh per search by Engine,
-        // so generation always starts at 0. We must ALWAYS wire the ext_stop.
+        // IMPORTANT: Each search session must use a fresh stop flag to avoid race conditions
+        // Recreate SharedSearchState with the new stop flag for this session
         if let Some(ext_stop) = limits.stop_flag.clone() {
             // Log pre-reset state
             let pre_gen = self.shared_state.generation();
-            let pre_ext_stop = ext_stop.load(Ordering::Acquire);
-            let pre_shared_stop = self.shared_state.should_stop();
-            let pre_queues_closed = self.shared_state.work_queues_closed();
-            let needs_rewire = !Arc::ptr_eq(&self.shared_state.stop_flag, &ext_stop);
             let searcher_addr = self as *const _ as usize;
             self.emit_info_string(
                 &limits,
                 format!(
-                    "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={} needs_rewire={} searcher_addr=0x{:x}",
-                    limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed, needs_rewire as u8, searcher_addr
+                    "pre_reset sid={} gen={} stop_flag_addr={:p} searcher_addr=0x{:x}",
+                    limits.session_id,
+                    pre_gen,
+                    Arc::as_ptr(&ext_stop),
+                    searcher_addr
                 ),
             );
 
-            // IMPORTANT: Ensure ext_stop is false before resetting
-            ext_stop.store(false, Ordering::Release);
-
-            // Only recreate SharedSearchState if we need to wire a different stop flag
-            // Otherwise, reuse existing SharedSearchState to keep workers alive
-            if needs_rewire {
-                // Recreate shared_state with the provided stop flag
-                self.shared_state = Arc::new(SharedSearchState::with_threads(
-                    Arc::clone(&ext_stop),
-                    self.num_threads,
-                ));
-            }
+            // Recreate shared_state with the new stop flag for this session
+            // This ensures no interference with any previous session's stop flag
+            self.shared_state =
+                Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
 
             // reset() increments generation and clears counters
-            // This will cause old workers (if any) to exit via generation mismatch
             self.shared_state.reset();
             self.shared_state.reopen_work_queues();
 
             // Log post-reset state
             let post_gen = self.shared_state.generation();
-            let post_shared_stop = self.shared_state.should_stop();
-            let post_queues_closed = self.shared_state.work_queues_closed();
-            let arc_eq = Arc::ptr_eq(&ext_stop, &self.shared_state.stop_flag) as u8;
             self.emit_info_string(
                 &limits,
-                format!(
-                    "post_reset sid={} gen={} shared_stop={} queues_closed={} arc_eq={}",
-                    limits.session_id, post_gen, post_shared_stop, post_queues_closed, arc_eq
-                ),
+                format!("post_reset sid={} gen={}", limits.session_id, post_gen),
             );
 
             self.stop_bridge.publish_session(

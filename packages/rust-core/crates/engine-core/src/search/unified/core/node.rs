@@ -266,7 +266,7 @@ where
 
     // Try TT move first if available（ABDADAのExact優先／PVガード強化）
     let tt_move = if USE_TT {
-        let tt_entry = searcher.probe_tt(hash);
+        let tt_entry = searcher.probe_tt(hash, pos.side_to_move);
 
         // Note: Duplication statistics are updated during TT probe in alpha_beta().
         // Store-time updates are temporarily disabled in tt_operations.rs.
@@ -274,7 +274,7 @@ where
         // ABDADA: Check if sibling node found exact cut
         if depth > 2 {
             if let Some(ref tt) = searcher.tt {
-                if tt.has_exact_cut(hash) {
+                if tt.has_exact_cut(hash, pos.side_to_move) {
                     let is_pv_node = beta > alpha + 1; // widen window indicates PV node
                                                        // Early return with the stored score if available and reliable
                     if let Some(entry) = tt_entry {
@@ -525,7 +525,7 @@ where
             && !searcher.is_prefetch_disabled()
             && !crate::search::tt::filter::should_skip_prefetch(depth, moves_searched as usize)
         {
-            searcher.prefetch_tt(pos.zobrist_hash);
+            searcher.prefetch_tt(pos.zobrist_hash, pos.side_to_move);
         }
 
         let mut score;
@@ -782,7 +782,7 @@ where
                     // ABDADA: Set exact cut flag for siblings
                     if USE_TT && depth > 2 {
                         if let Some(ref tt) = searcher.tt {
-                            tt.set_exact_cut(hash);
+                            tt.set_exact_cut(hash, pos.side_to_move);
                         }
                     }
 
@@ -826,7 +826,15 @@ where
             let mut boosted_depth = crate::search::tt::filter::boost_tt_depth(depth, node_type);
             // Apply additional boost for PV nodes
             boosted_depth = crate::search::tt::filter::boost_pv_depth(boosted_depth, is_pv);
-            searcher.store_tt(hash, boosted_depth, best_score, node_type, best_move, ply as u8);
+            searcher.store_tt(crate::search::unified::tt_operations::TTStoreParams {
+                hash,
+                depth: boosted_depth,
+                score: best_score,
+                node_type,
+                best_move,
+                ply: ply as u8,
+                side_to_move: pos.side_to_move,
+            });
         }
     }
 

@@ -116,7 +116,7 @@ where
         searcher
             .tt
             .as_ref()
-            .and_then(|tt| tt.probe_entry(pos.zobrist_hash))
+            .and_then(|tt| tt.probe_entry(pos.zobrist_hash, pos.side_to_move))
             .and_then(|e| e.get_move())
     } else {
         None
@@ -182,7 +182,7 @@ where
 
         // Prefetch TT entry for the new position (root moves are always important)
         if USE_TT && !searcher.is_prefetch_disabled() {
-            searcher.prefetch_tt(pos.zobrist_hash);
+            searcher.prefetch_tt(pos.zobrist_hash, pos.side_to_move);
         }
 
         // Search with null window for moves after the first
@@ -407,7 +407,7 @@ where
         searcher
             .tt
             .as_ref()
-            .and_then(|tt| tt.probe_entry(pos.zobrist_hash))
+            .and_then(|tt| tt.probe_entry(pos.zobrist_hash, pos.side_to_move))
             .and_then(|e| e.get_move())
     } else {
         None
@@ -448,7 +448,7 @@ where
 
         // Optional prefetch
         if USE_TT && !searcher.is_prefetch_disabled() {
-            searcher.prefetch_tt(pos.zobrist_hash);
+            searcher.prefetch_tt(pos.zobrist_hash, pos.side_to_move);
         }
 
         // Search pattern like PVS at root

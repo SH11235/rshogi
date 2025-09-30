@@ -37,7 +37,7 @@ pub mod utils;
 mod tests;
 
 use crate::Position;
-use crate::{search::SEARCH_INF, shogi::Move};
+use crate::{search::SEARCH_INF, shogi::Move, Color};
 use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
 use flexible_bucket::FlexibleTTBucket;
@@ -275,9 +275,12 @@ impl TranspositionTable {
 
     /// Get bucket index from hash
     #[inline(always)]
-    fn bucket_index(&self, hash: u64) -> usize {
+    fn bucket_index(&self, hash: u64, side_to_move: Color) -> usize {
         // Use fast masking since num_buckets is always power of 2
-        (hash as usize) & (self.num_buckets - 1)
+        let idx = (hash as usize) & (self.num_buckets - 1);
+        // Force LSB to match side_to_move for separation (YaneuraOu approach)
+        // This ensures different turn positions go to different buckets
+        (idx & !1) | (side_to_move as usize)
     }
 
     /// Mark bucket as occupied in bitmap
@@ -357,10 +360,10 @@ impl TranspositionTable {
     }
 
     /// Probe transposition table
-    pub fn probe_entry(&self, hash: u64) -> Option<TTEntry> {
+    pub fn probe_entry(&self, hash: u64, side_to_move: Color) -> Option<TTEntry> {
         debug_assert!(hash != 0, "Attempting to probe with zero hash");
 
-        let idx = self.bucket_index(hash);
+        let idx = self.bucket_index(hash, side_to_move);
 
         #[cfg(feature = "tt_metrics")]
         if let Some(ref metrics) = self.metrics {
@@ -525,8 +528,8 @@ impl TranspositionTable {
     }
 
     /// Set ABDADA exact cut flag for the given hash
-    pub fn set_exact_cut(&self, hash: u64) -> bool {
-        let idx = self.bucket_index(hash);
+    pub fn set_exact_cut(&self, hash: u64, side_to_move: Color) -> bool {
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             let bucket = &flexible_buckets[idx];
@@ -566,8 +569,8 @@ impl TranspositionTable {
     }
 
     /// Clear ABDADA exact cut flag for the given hash (used during age update)
-    pub fn clear_exact_cut(&self, hash: u64) -> bool {
-        let idx = self.bucket_index(hash);
+    pub fn clear_exact_cut(&self, hash: u64, side_to_move: Color) -> bool {
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             let bucket = &flexible_buckets[idx];
@@ -677,8 +680,8 @@ impl TranspositionTable {
     }
 
     /// Check if ABDADA exact cut flag is set for the given hash
-    pub fn has_exact_cut(&self, hash: u64) -> bool {
-        let idx = self.bucket_index(hash);
+    pub fn has_exact_cut(&self, hash: u64, side_to_move: Color) -> bool {
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             let bucket = &flexible_buckets[idx];
@@ -717,51 +720,20 @@ impl TranspositionTable {
         false // Entry not found or flag not set
     }
 
-    /// Store entry in transposition table
-    pub fn store(
-        &self,
-        hash: u64,
-        mv: Option<Move>,
-        score: i16,
-        eval: i16,
-        depth: u8,
-        node_type: NodeType,
-    ) {
-        let params = TTEntryParams {
-            key: hash,
-            mv,
-            score,
-            eval,
-            depth,
-            node_type,
-            age: self.current_age(),
-            is_pv: false,
-            ..Default::default()
-        };
-        self.store_entry(params);
+    /// Store entry in transposition table (convenience method)
+    pub fn store(&self, args: TTStoreArgs) {
+        let params: TTEntryParams = args.into_params(self.current_age());
+        self.store_with_params(params);
     }
 
-    /// Store entry and return whether it was a new entry
-    pub fn store_and_check_new(
-        &self,
-        hash: u64,
-        mv: Option<Move>,
-        score: i16,
-        eval: i16,
-        depth: u8,
-        node_type: NodeType,
-    ) -> bool {
-        let params = TTEntryParams {
-            key: hash,
-            mv,
-            score,
-            eval,
-            depth,
-            node_type,
-            age: self.current_age(),
-            is_pv: false,
-            ..Default::default()
-        };
+    /// Store entry and return whether it was a new entry (convenience method)
+    pub fn store_and_check_new(&self, args: TTStoreArgs) -> bool {
+        let params: TTEntryParams = args.into_params(self.current_age());
+        self.store_and_check_new_with_params(params)
+    }
+
+    /// Store entry and return whether it was a new entry (with params)
+    pub fn store_and_check_new_with_params(&self, params: TTEntryParams) -> bool {
         self.store_entry_and_check_new(params)
     }
 
@@ -775,7 +747,7 @@ impl TranspositionTable {
     /// Store entry using parameters and return whether it was a new entry
     fn store_entry_and_check_new(&self, params: TTEntryParams) -> bool {
         // First check if entry already exists
-        let idx = self.bucket_index(params.key);
+        let idx = self.bucket_index(params.key, params.side_to_move);
         let existing = if let Some(ref flexible_buckets) = self.flexible_buckets {
             flexible_buckets[idx].probe(params.key)
         } else {
@@ -831,7 +803,7 @@ impl TranspositionTable {
             }
         }
 
-        let idx = self.bucket_index(params.key);
+        let idx = self.bucket_index(params.key, params.side_to_move);
 
         // Mark bucket as occupied
         self.mark_bucket_occupied(idx);
@@ -908,27 +880,27 @@ impl TranspositionTable {
 
     /// Prefetch a hash into L1 cache
     #[inline]
-    pub fn prefetch_l1(&self, hash: u64) {
-        self.prefetch(hash, 3); // Temporal locality hint (L1)
+    pub fn prefetch_l1(&self, hash: u64, side_to_move: Color) {
+        self.prefetch(hash, side_to_move, 3); // Temporal locality hint (L1)
     }
 
     /// Prefetch a hash into L2 cache
     #[inline]
-    pub fn prefetch_l2(&self, hash: u64) {
-        self.prefetch(hash, 2); // Moderate temporal locality (L2)
+    pub fn prefetch_l2(&self, hash: u64, side_to_move: Color) {
+        self.prefetch(hash, side_to_move, 2); // Moderate temporal locality (L2)
     }
 
     /// Prefetch a hash into L3 cache
     #[inline]
-    pub fn prefetch_l3(&self, hash: u64) {
-        self.prefetch(hash, 1); // L3 cache
+    pub fn prefetch_l3(&self, hash: u64, side_to_move: Color) {
+        self.prefetch(hash, side_to_move, 1); // L3 cache
     }
 
     /// Prefetch implementation with locality hint
-    pub fn prefetch(&self, hash: u64, hint: i32) {
+    pub fn prefetch(&self, hash: u64, side_to_move: Color, hint: i32) {
         debug_assert!(hash != 0, "Attempting to prefetch with zero hash");
 
-        let idx = self.bucket_index(hash);
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             flexible_buckets[idx].prefetch(hint);
@@ -952,9 +924,10 @@ impl TranspositionTable {
     #[cfg(any(debug_assertions, feature = "tt_metrics"))]
     pub fn debug_roundtrip(&self, key: u64) -> bool {
         use crate::shogi::Move;
+        use crate::Color;
         // Store an EXACT entry at depth 10 and probe it back
-        self.store(key, None::<Move>, 0, 0, 10, NodeType::Exact);
-        match self.probe_entry(key) {
+        self.store(TTStoreArgs::new(key, None::<Move>, 0, 0, 10, NodeType::Exact, Color::Black));
+        match self.probe_entry(key, Color::Black) {
             Some(e) => e.key == key && e.depth() >= 10,
             None => false,
         }
@@ -991,11 +964,89 @@ impl TranspositionTable {
     }
 }
 
+/// 引数過多警告(clippy::too_many_arguments)を避けるためのストア用引数構造体
+#[derive(Clone, Copy)]
+pub struct TTStoreArgs {
+    pub hash: u64,
+    pub mv: Option<Move>,
+    pub score: i16,
+    pub eval: i16,
+    pub depth: u8,
+    pub node_type: NodeType,
+    pub side_to_move: Color,
+    pub is_pv: bool, // 将来的に PV ストア時に利用
+    // 拡張フラグ（任意）
+    pub singular_extension: bool,
+    pub null_move: bool,
+    pub tt_move_tried: bool,
+    pub mate_threat: bool,
+}
+
+impl Default for TTStoreArgs {
+    fn default() -> Self {
+        Self {
+            hash: 0,
+            mv: None,
+            score: 0,
+            eval: 0,
+            depth: 0,
+            node_type: NodeType::Exact,
+            side_to_move: Color::Black,
+            is_pv: false,
+            singular_extension: false,
+            null_move: false,
+            tt_move_tried: false,
+            mate_threat: false,
+        }
+    }
+}
+
+impl TTStoreArgs {
+    pub fn new(
+        hash: u64,
+        mv: Option<Move>,
+        score: i16,
+        eval: i16,
+        depth: u8,
+        node_type: NodeType,
+        side_to_move: Color,
+    ) -> Self {
+        Self {
+            hash,
+            mv,
+            score,
+            eval,
+            depth,
+            node_type,
+            side_to_move,
+            ..Default::default()
+        }
+    }
+
+    fn into_params(self, current_age: u8) -> TTEntryParams {
+        TTEntryParams {
+            key: self.hash,
+            mv: self.mv,
+            score: self.score,
+            eval: self.eval,
+            depth: self.depth,
+            node_type: self.node_type,
+            age: current_age,
+            is_pv: self.is_pv,
+            side_to_move: self.side_to_move,
+            singular_extension: self.singular_extension,
+            null_move: self.null_move,
+            tt_move_tried: self.tt_move_tried,
+            mate_threat: self.mate_threat,
+        }
+    }
+}
+
 impl TTProbe for TranspositionTable {
     #[inline]
-    fn probe(&self, hash: u64) -> Option<TTEntry> {
+    fn probe(&self, hash: u64, side_to_move: Color) -> Option<TTEntry> {
         // 明示的に固有メソッドを呼び出して可読性と誤解防止を図る
-        TranspositionTable::probe_entry(self, hash)
+        TranspositionTable::probe_entry(self, hash, side_to_move)
     }
 }
 
@@ -1024,10 +1075,18 @@ mod pv_reconstruction_tests {
         // First, test basic TT functionality
         let test_hash = pos.zobrist_hash;
         let test_move = legal_usi(&pos, "7g7f");
-        tt.store(test_hash, Some(test_move), 100, 50, 10, NodeType::Exact);
+        tt.store(TTStoreArgs::new(
+            test_hash,
+            Some(test_move),
+            100,
+            50,
+            10,
+            NodeType::Exact,
+            Color::Black,
+        ));
 
         // Verify the entry was stored
-        let probe_result = tt.probe_entry(test_hash);
+        let probe_result = tt.probe_entry(test_hash, Color::Black);
         assert!(probe_result.is_some(), "TT probe should find the entry");
         let entry = probe_result.unwrap();
         assert!(entry.matches(test_hash), "Entry should match the hash");
@@ -1081,17 +1140,17 @@ mod pv_reconstruction_tests {
 
         // Store some entries in TT
         let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash1, Some(move1), 100, 50, 10, NodeType::Exact, Color::Black));
 
         // Make move1
         let undo1 = pos.do_move(move1);
         let hash2 = pos.zobrist_hash;
-        tt.store(hash2, Some(move2), -50, -25, 9, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash2, Some(move2), -50, -25, 9, NodeType::Exact, Color::Black));
 
         // Make move2
         let undo2 = pos.do_move(move2);
         let hash3 = pos.zobrist_hash;
-        tt.store(hash3, Some(move3), 25, 20, 8, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash3, Some(move3), 25, 20, 8, NodeType::Exact, Color::Black));
 
         // Undo moves to get back to root
         pos.undo_move(move2, undo2);
@@ -1147,14 +1206,22 @@ mod pv_reconstruction_tests {
 
         // Store first move as EXACT
         let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash1, Some(move1), 100, 50, 10, NodeType::Exact, Color::Black));
 
         // Make move1
         let undo1 = pos.do_move(move1);
         let hash2 = pos.zobrist_hash;
 
         // Store second move as LOWERBOUND (not EXACT)
-        tt.store(hash2, Some(move2), -50, -25, 9, NodeType::LowerBound);
+        tt.store(TTStoreArgs::new(
+            hash2,
+            Some(move2),
+            -50,
+            -25,
+            9,
+            NodeType::LowerBound,
+            Color::Black,
+        ));
 
         // Undo to root
         pos.undo_move(move1, undo1);
@@ -1199,25 +1266,33 @@ mod pv_reconstruction_tests {
 
         // Store entries that would create a cycle
         let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 0, 0, 10, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash1, Some(move1), 0, 0, 10, NodeType::Exact, Color::Black));
 
         let undo1 = pos.do_move(move1);
         let hash2 = pos.zobrist_hash;
-        tt.store(hash2, Some(move2), 0, 0, 9, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash2, Some(move2), 0, 0, 9, NodeType::Exact, Color::Black));
 
         let undo2 = pos.do_move(move2);
         let hash3 = pos.zobrist_hash;
-        tt.store(hash3, Some(move3), 0, 0, 8, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash3, Some(move3), 0, 0, 8, NodeType::Exact, Color::Black));
 
         let undo3 = pos.do_move(move3);
         let hash4 = pos.zobrist_hash;
-        tt.store(hash4, Some(move4), 0, 0, 7, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash4, Some(move4), 0, 0, 7, NodeType::Exact, Color::Black));
 
         // Make move4 to complete the cycle
         let undo4 = pos.do_move(move4);
 
         // Add a move that would create a cycle back to start position
-        tt.store(pos.zobrist_hash, Some(move1), 0, 0, 6, NodeType::Exact);
+        tt.store(TTStoreArgs::new(
+            pos.zobrist_hash,
+            Some(move1),
+            0,
+            0,
+            6,
+            NodeType::Exact,
+            Color::Black,
+        ));
 
         // Undo all moves to get back to start
         pos.undo_move(move4, undo4);
@@ -1260,14 +1335,22 @@ mod pv_reconstruction_tests {
 
         // Store first move
         let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash1, Some(move1), 100, 50, 10, NodeType::Exact, Color::Black));
 
         // Make first move
         let undo1 = pos.do_move(move1);
         let hash2 = pos.zobrist_hash;
 
         // Store illegal move for second position
-        tt.store(hash2, Some(illegal_move), 50, 25, 9, NodeType::Exact);
+        tt.store(TTStoreArgs::new(
+            hash2,
+            Some(illegal_move),
+            50,
+            25,
+            9,
+            NodeType::Exact,
+            Color::Black,
+        ));
 
         // Undo to get back to start
         pos.undo_move(move1, undo1);
@@ -1286,7 +1369,7 @@ mod pv_reconstruction_tests {
 
 // --- Integrated PV reconstruction (moved from pv_reconstruction.rs) ---
 pub trait TTProbe {
-    fn probe(&self, hash: u64) -> Option<TTEntry>;
+    fn probe(&self, hash: u64, side_to_move: Color) -> Option<TTEntry>;
 }
 
 /// Generic PV reconstruction from transposition table
@@ -1304,7 +1387,7 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
         if !visited.insert(hash) {
             break;
         }
-        let entry = match tt.probe(hash) {
+        let entry = match tt.probe(hash, pos.side_to_move) {
             Some(e) if e.matches(hash) => e,
             _ => break,
         };

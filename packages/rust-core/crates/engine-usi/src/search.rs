@@ -253,23 +253,10 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         return Ok(());
     }
 
-    // Reuse existing stop_flag to allow ParallelSearcher to detect rewiring needs
-    // Reset the flag value if reusing
-    let stop_flag = if let Some(existing) = &state.stop_flag {
-        info_string(format!(
-            "stop_flag_reuse state_has_existing=1 addr={:p}",
-            Arc::as_ptr(existing)
-        ));
-        existing.store(false, std::sync::atomic::Ordering::Release);
-        Arc::clone(existing)
-    } else {
-        let new_flag = Arc::new(AtomicBool::new(false));
-        info_string(format!(
-            "stop_flag_create state_has_existing=0 addr={:p}",
-            Arc::as_ptr(&new_flag)
-        ));
-        new_flag
-    };
+    // Create a new stop_flag for each search session to avoid race conditions
+    // with concurrent searches (previous session may still be running)
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    info_string(format!("stop_flag_create addr={:p}", Arc::as_ptr(&stop_flag)));
     let ponder_flag = if state.opts.ponder {
         Some(Arc::new(AtomicBool::new(false)))
     } else {
@@ -462,7 +449,8 @@ pub fn poll_search_completion(state: &mut EngineState) {
             TryResult::Ok(result) => {
                 // Search completed, clean up state
                 state.searching = false;
-                // Keep stop_flag for reuse in next session (don't set to None)
+                // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                state.stop_flag = None;
                 state.ponder_hit_flag = None;
                 state.search_session = None;
                 state.notify_idle();
@@ -542,7 +530,8 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 ));
 
                 state.searching = false;
-                // Keep stop_flag for reuse in next session (don't set to None)
+                // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                state.stop_flag = None;
                 state.ponder_hit_flag = None;
                 state.search_session = None;
                 state.current_time_control = None;

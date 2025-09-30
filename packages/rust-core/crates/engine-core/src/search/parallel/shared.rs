@@ -534,7 +534,7 @@ impl SharedSearchState {
         self.current_generation.fetch_add(1, Ordering::Relaxed);
         self.nodes_searched.store(0, Ordering::Relaxed);
         self.qnodes_searched.store(0, Ordering::Relaxed);
-        self.stop_flag.store(false, Ordering::Release); // IMPORTANT: Reset stop flag for new search
+        // stop_flag is not reset here - each session should use a fresh flag
         self.history.clear();
         self.duplication_stats.reset();
         #[cfg(feature = "ybwc")]
