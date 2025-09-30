@@ -16,6 +16,10 @@ pub struct SearchLimits {
     pub nodes: Option<u64>,
     pub qnodes_limit: Option<u64>,
     pub time_parameters: Option<TimeParameters>,
+    /// Session ID for OOB (out-of-band) finalize coordination
+    /// This must match the Engine's session_id for proper snapshot reception
+    /// Default: 0 (tests and legacy code), should be set by Engine::start_search()
+    pub session_id: u64,
     /// Stop flag for interrupting search (temporarily kept for compatibility)
     pub stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress (temporarily kept for compatibility)
@@ -51,6 +55,7 @@ impl Default for SearchLimits {
             nodes: None,
             qnodes_limit: None,
             time_parameters: None,
+            session_id: 0, // Default for tests, should be set by Engine::start_search()
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -122,6 +127,7 @@ pub struct SearchLimitsBuilder {
     nodes: Option<u64>,
     qnodes_limit: Option<u64>,
     time_parameters: Option<TimeParameters>,
+    session_id: u64,
     stop_flag: Option<Arc<AtomicBool>>,
     info_callback: Option<InfoCallback>,
     info_string_callback: Option<InfoStringCallback>,
@@ -142,6 +148,7 @@ impl Default for SearchLimitsBuilder {
             nodes: None,
             qnodes_limit: None,
             time_parameters: None,
+            session_id: 0, // Default for tests, should be overridden by Engine
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -337,6 +344,15 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set session ID for OOB finalize coordination
+    ///
+    /// This is typically set by Engine::start_search() and must match the session ID
+    /// used for OOB message passing to ensure proper snapshot reception.
+    pub fn session_id(mut self, id: u64) -> Self {
+        self.session_id = id;
+        self
+    }
+
     /// Build SearchLimits
     ///
     /// Validates the configuration and builds the SearchLimits.
@@ -365,6 +381,7 @@ impl SearchLimitsBuilder {
             nodes: self.nodes,
             qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
+            session_id: self.session_id,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
             info_string_callback: self.info_string_callback,
@@ -396,6 +413,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             nodes: tm.nodes,
             qnodes_limit: None,
             time_parameters: tm.time_parameters,
+            session_id: 0, // Default, should be set by Engine
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -446,6 +464,7 @@ impl Clone for SearchLimits {
             nodes: self.nodes,
             qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
+            session_id: self.session_id,
             stop_flag: self.stop_flag.clone(),
             info_callback: self.info_callback.clone(), // Arc can be cloned
             info_string_callback: self.info_string_callback.clone(),
@@ -473,6 +492,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("nodes", &self.nodes)
             .field("qnodes_limit", &self.qnodes_limit)
             .field("time_parameters", &self.time_parameters)
+            .field("session_id", &self.session_id)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
             .field("info_string_callback", &self.info_string_callback.is_some())

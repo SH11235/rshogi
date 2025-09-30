@@ -320,6 +320,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             nodes: limits.nodes,
                             qnodes_limit: limits.qnodes_limit,
                             time_parameters: limits.time_parameters,
+                            session_id: limits.session_id, // Propagate session_id
                             stop_flag: limits.stop_flag.clone(),
                             info_callback: None, // Don't need callback for TimeManager
                             info_string_callback: None,
@@ -963,7 +964,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 &self.shared_state,
                 &self.pending_work_items,
                 Some(&ext_stop),
-                self.shared_state.generation(),
+                limits.session_id, // Use session_id from limits (set by Engine)
             );
         } else {
             // Ensure clean state when no external flag is provided.
@@ -973,7 +974,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 &self.shared_state,
                 &self.pending_work_items,
                 Some(&self.shared_state.stop_flag),
-                self.shared_state.generation(),
+                limits.session_id, // Use session_id from limits (set by Engine)
             );
         }
 

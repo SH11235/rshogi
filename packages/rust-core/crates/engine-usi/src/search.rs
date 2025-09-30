@@ -412,13 +412,15 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.searching = true;
     state.stop_flag = Some(Arc::clone(&stop_flag));
     state.ponder_hit_flag = ponder_flag;
+    let session_id = session.session_id();
     state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
     state.current_root_hash = Some(search_position.zobrist_hash());
     state.bestmove_emitted = false;
     info_string(format!(
-        "search_started root={} gui={} ponder={} stoch={}",
+        "search_started sid={} root={} gui={} ponder={} stoch={}",
+        session_id,
         fmt_hash(search_position.zobrist_hash()),
         fmt_hash(state.position.zobrist_hash()),
         gp.ponder,
@@ -427,7 +429,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     // Enhanced diagnostics for time loss investigation
     let threads = state.opts.threads;
-    info_string(format!("search_diagnostics threads={}", threads));
+    info_string(format!("search_diagnostics sid={} threads={}", session_id, threads));
 
     Ok(())
 }
