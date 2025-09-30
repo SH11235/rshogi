@@ -126,8 +126,6 @@ pub struct EngineState {
     pub searching: bool,
     pub stop_flag: Option<Arc<AtomicBool>>,
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
-    pub worker: Option<thread::JoinHandle<()>>,
-    pub result_rx: Option<mpsc::Receiver<(u64, engine_core::search::SearchResult)>>,
     // Async search session (non-blocking)
     pub search_session: Option<SearchSession>,
     // Stochastic Ponder control
@@ -181,8 +179,6 @@ impl EngineState {
             searching: false,
             stop_flag: None,
             ponder_hit_flag: None,
-            worker: None,
-            result_rx: None,
             search_session: None,
             current_is_stochastic_ponder: false,
             current_is_ponder: false,

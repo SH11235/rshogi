@@ -101,6 +101,31 @@ fn main() -> Result<()> {
             }
 
             if cmd == "isready" {
+                // Ensure any ongoing search completes before readyok
+                if state.searching {
+                    if let Some(flag) = &state.stop_flag {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+
+                    if let Some(session) = state.search_session.take() {
+                        let bridge = {
+                            let engine = state.engine.lock().unwrap();
+                            engine.stop_bridge_handle()
+                        };
+
+                        // Try to get result with 1200ms timeout
+                        let _ = session.request_stop_and_wait(&bridge, Duration::from_millis(1200));
+
+                        // Join the thread to ensure complete cleanup
+                        session.join_blocking();
+                    }
+
+                    state.searching = false;
+                    state.stop_flag = None;
+                    state.ponder_hit_flag = None;
+                    state.current_time_control = None;
+                }
+
                 apply_options_to_engine(&mut state);
                 usi_println("readyok");
                 continue;
@@ -124,10 +149,23 @@ fn main() -> Result<()> {
                 if let Some(flag) = &state.stop_flag {
                     flag.store(true, Ordering::SeqCst);
                 }
-                if let Some(h) = state.worker.take() {
-                    let _ = h.join();
-                    state.notify_idle();
+
+                // Ensure any ongoing search completes before quit
+                if let Some(session) = state.search_session.take() {
+                    let bridge = {
+                        let engine = state.engine.lock().unwrap();
+                        engine.stop_bridge_handle()
+                    };
+
+                    // Try to get result with 1500ms timeout
+                    let _ = session.request_stop_and_wait(&bridge, Duration::from_millis(1500));
+
+                    // Join the thread to ensure complete cleanup before quit
+                    session.join_blocking();
                 }
+
+                state.notify_idle();
+
                 state.reaper_tx.take();
                 if let Some(h) = state.reaper_handle.take() {
                     let _ = h.join();

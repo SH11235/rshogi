@@ -450,7 +450,7 @@ impl Engine {
         }
 
         // Spawn search in background thread
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             // Run the search (this will block until search completes)
             let result = Self::search_in_thread(
                 &mut pos_clone,
@@ -477,8 +477,8 @@ impl Engine {
             active_searches.fetch_sub(1, Ordering::SeqCst);
         });
 
-        // Return session handle immediately
-        SearchSession::new(session_id, rx)
+        // Return session handle immediately (with JoinHandle for isready/quit)
+        SearchSession::new(session_id, rx, Some(handle))
     }
 
     /// Internal helper to run search in a background thread.
@@ -597,7 +597,13 @@ impl Engine {
 
         // Take searcher out of Mutex to avoid holding lock during search
         let mut searcher = {
-            let mut guard = material_parallel_searcher.lock().unwrap();
+            let mut guard = match material_parallel_searcher.lock() {
+                Ok(g) => g,
+                Err(poison) => {
+                    error!("Material parallel searcher mutex poisoned; recovering");
+                    poison.into_inner()
+                }
+            };
             if guard.is_none() {
                 *guard = Some(MaterialParallelSearcher::new(
                     material_evaluator,
@@ -638,7 +644,13 @@ impl Engine {
 
         // Take searcher out of Mutex to avoid holding lock during search
         let mut searcher = {
-            let mut guard = nnue_parallel_searcher.lock().unwrap();
+            let mut guard = match nnue_parallel_searcher.lock() {
+                Ok(g) => g,
+                Err(poison) => {
+                    error!("NNUE parallel searcher mutex poisoned; recovering");
+                    poison.into_inner()
+                }
+            };
             if guard.is_none() {
                 let nnue_proxy = NNUEEvaluatorProxy {
                     evaluator: nnue_evaluator,
@@ -687,9 +699,15 @@ impl Engine {
                     return SearchResult::new(None, 0, SearchStats::default());
                 }
             }
-            Err(e) => {
-                error!("Failed to lock material searcher: {e}");
-                return SearchResult::new(None, 0, SearchStats::default());
+            Err(poison) => {
+                error!("Material searcher mutex poisoned; recovering");
+                let mut guard = poison.into_inner();
+                if let Some(s) = guard.take() {
+                    s
+                } else {
+                    error!("Material searcher not initialized after poison recovery");
+                    return SearchResult::new(None, 0, SearchStats::default());
+                }
             }
         }; // Lock released here
 
@@ -728,7 +746,13 @@ impl Engine {
 
         // Take searcher out of Mutex to avoid holding lock during search
         let mut searcher = {
-            let mut guard = nnue_basic_searcher.lock().unwrap();
+            let mut guard = match nnue_basic_searcher.lock() {
+                Ok(g) => g,
+                Err(poison) => {
+                    error!("NNUE basic searcher mutex poisoned; recovering");
+                    poison.into_inner()
+                }
+            };
             match guard.take() {
                 Some(s) => s,
                 None => {
@@ -771,7 +795,13 @@ impl Engine {
 
         // Take searcher out of Mutex to avoid holding lock during search
         let mut searcher = {
-            let mut guard = material_enhanced_searcher.lock().unwrap();
+            let mut guard = match material_enhanced_searcher.lock() {
+                Ok(g) => g,
+                Err(poison) => {
+                    error!("Enhanced material searcher mutex poisoned; recovering");
+                    poison.into_inner()
+                }
+            };
             match guard.take() {
                 Some(s) => s,
                 None => {
@@ -813,7 +843,13 @@ impl Engine {
 
         // Take searcher out of Mutex to avoid holding lock during search
         let mut searcher = {
-            let mut guard = nnue_enhanced_searcher.lock().unwrap();
+            let mut guard = match nnue_enhanced_searcher.lock() {
+                Ok(g) => g,
+                Err(poison) => {
+                    error!("Enhanced NNUE searcher mutex poisoned; recovering");
+                    poison.into_inner()
+                }
+            };
             match guard.take() {
                 Some(s) => s,
                 None => {
