@@ -117,7 +117,10 @@ pub fn finalize_and_send(
     let committed = if let Some(res) = result {
         let mut committed_pv = res.stats.pv.clone();
         if let Some(bm) = res.best_move {
-            if committed_pv.first().copied() != Some(bm) {
+            // Use equals_without_piece_type to avoid false positives from piece type differences
+            let has_mismatch =
+                committed_pv.first().is_none_or(|pv0| !pv0.equals_without_piece_type(&bm));
+            if has_mismatch {
                 info_string(format!(
                     "pv_head_mismatch=1 pv0={} best={}",
                     committed_pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string()),
