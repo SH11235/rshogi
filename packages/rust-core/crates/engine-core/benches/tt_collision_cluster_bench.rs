@@ -1,6 +1,11 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use engine_core::search::tt::{BucketSize, TranspositionTable};
-use engine_core::search::NodeType;
+use engine_core::{
+    search::{
+        tt::{BucketSize, TTStoreArgs, TranspositionTable},
+        NodeType,
+    },
+    Color,
+};
 use std::hint::black_box;
 use std::{env, time::Duration};
 
@@ -57,7 +62,7 @@ fn bench_fixed_bucket_collision(c: &mut Criterion) {
 
     // Pre-fill a bit to warm up the bucket
     for &k in &keys[0..prefill.min(keys.len())] {
-        tt.store(k, None, 100, 0, 12, NodeType::Exact);
+        tt.store(TTStoreArgs::new(k, None, 100i16, 0i16, 12u8, NodeType::Exact, Color::Black));
     }
 
     group.throughput(Throughput::Elements(1));
@@ -65,14 +70,15 @@ fn bench_fixed_bucket_collision(c: &mut Criterion) {
         let mut idx = 0usize;
         b.iter(|| {
             let k = keys[idx & (keys.len() - 1)];
-            tt.store(
+            tt.store(black_box(TTStoreArgs::new(
                 black_box(k),
                 None,
-                black_box(77),
-                black_box(0),
-                black_box(10),
+                black_box(77i16),
+                black_box(0i16),
+                black_box(10u8),
                 NodeType::Exact,
-            );
+                Color::Black,
+            )));
             idx = idx.wrapping_add(1);
         });
     });
@@ -112,7 +118,7 @@ fn bench_flexible_bucket_collision(c: &mut Criterion) {
         // Pre-fill one bucket well beyond its capacity to ensure worst-entry replacement path
         let prefill = (bsize.entries() * prefill_mult).min(keys.len());
         for &k in &keys[0..prefill] {
-            tt.store(k, None, 90, 0, 8, NodeType::Exact);
+            tt.store(TTStoreArgs::new(k, None, 90i16, 0i16, 8u8, NodeType::Exact, Color::Black));
         }
 
         group.throughput(Throughput::Elements(1));
@@ -120,14 +126,15 @@ fn bench_flexible_bucket_collision(c: &mut Criterion) {
             let mut idx = 0usize;
             b.iter(|| {
                 let k = keys[idx & (keys.len() - 1)];
-                tt.store(
+                tt.store(black_box(TTStoreArgs::new(
                     black_box(k),
                     None,
-                    black_box(65),
-                    black_box(0),
-                    black_box(7),
+                    black_box(65i16),
+                    black_box(0i16),
+                    black_box(7u8),
                     NodeType::Exact,
-                );
+                    Color::Black,
+                )));
                 idx = idx.wrapping_add(1);
             });
         });
@@ -138,7 +145,7 @@ fn bench_flexible_bucket_collision(c: &mut Criterion) {
             let mut idx = 0usize;
             b.iter(|| {
                 let k = keys[idx & (keys.len() - 1)];
-                black_box(tt.probe_entry(black_box(k)));
+                black_box(tt.probe_entry(black_box(k), Color::Black));
                 idx = idx.wrapping_add(1);
             });
         });

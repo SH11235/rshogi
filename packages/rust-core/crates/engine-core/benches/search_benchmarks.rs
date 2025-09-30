@@ -4,8 +4,9 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::{
-    evaluation::evaluate::MaterialEvaluator, search::unified::UnifiedSearcher,
-    search::SearchLimitsBuilder, Position,
+    evaluation::evaluate::MaterialEvaluator,
+    search::{tt::TTStoreArgs, unified::UnifiedSearcher, SearchLimitsBuilder},
+    Color, Position,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -177,13 +178,21 @@ fn bench_tt_performance(c: &mut Criterion) {
                 // Pre-fill TT
                 for i in 0..1000 {
                     let test_hash = hash.wrapping_add(i);
-                    tt.store(test_hash, None, 100, 0, 5, engine_core::search::NodeType::Exact);
+                    tt.store(TTStoreArgs::new(
+                        test_hash,
+                        None,
+                        100i16,
+                        0i16,
+                        5u8,
+                        engine_core::search::NodeType::Exact,
+                        Color::Black,
+                    ));
                 }
 
                 b.iter(|| {
                     for i in 0..100 {
                         let test_hash = hash.wrapping_add(i * 10);
-                        black_box(tt.probe_entry(test_hash));
+                        black_box(tt.probe_entry(test_hash, Color::Black));
                     }
                 });
             },
@@ -201,13 +210,21 @@ fn bench_tt_performance(c: &mut Criterion) {
                 // Pre-fill TT
                 for i in 0..1000 {
                     let test_hash = hash.wrapping_add(i);
-                    tt.store(test_hash, None, 100, 0, 5, engine_core::search::NodeType::Exact);
+                    tt.store(TTStoreArgs::new(
+                        test_hash,
+                        None,
+                        100i16,
+                        0i16,
+                        5u8,
+                        engine_core::search::NodeType::Exact,
+                        Color::Black,
+                    ));
                 }
 
                 b.iter(|| {
                     for i in 0..100 {
                         let test_hash = hash.wrapping_add(i * 10);
-                        black_box(tt.probe_entry(test_hash));
+                        black_box(tt.probe_entry(test_hash, Color::Black));
                     }
                 });
             },

@@ -397,7 +397,7 @@ mod tests {
         );
 
         // soft: 900 * 1.5 - overhead(<=10) = 1350 - 10 = 1340
-        assert!(soft >= 1330 && soft <= 1340);
+        assert!((1330..=1340).contains(&soft));
         // hard: clamp to soft*1.05 (rounded), then - overhead
         let max_hard = ((soft as f64 * 1.05) + 0.5) as u64;
         assert!(hard <= max_hard);

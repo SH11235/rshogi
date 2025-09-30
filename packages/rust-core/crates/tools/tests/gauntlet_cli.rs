@@ -215,7 +215,7 @@ fn test_gauntlet_blockwise_seed_keeps_adjacent_pairs() {
     // Load JSON and verify adjacency of opening_index in 2-game blocks
     let data: Value = serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
     let series = data["series"].as_array().unwrap();
-    assert!(series.len() % 2 == 0);
+    assert!(series.len().is_multiple_of(2));
     for i in (0..series.len()).step_by(2) {
         let a = series[i]["opening_index"].as_u64().unwrap();
         let b = series[i + 1]["opening_index"].as_u64().unwrap();

@@ -84,7 +84,7 @@ fn test_multipv_limits_takes_precedence() {
         assert!(!lines.is_empty());
         // 十分な深さがあれば2本期待できる
         if result.stats.depth >= 3 {
-            assert!(lines.len() >= 1, "At least 1 line should be returned");
+            assert!(!lines.is_empty(), "At least 1 line should be returned");
         }
     }
 }

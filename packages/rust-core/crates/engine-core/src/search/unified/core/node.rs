@@ -841,6 +841,12 @@ where
     best_score
 }
 
+pub(super) fn reset_near_deadline_flags() {
+    AB_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(false));
+    #[cfg(feature = "diagnostics")]
+    AB_NEAR_DEADLINE_LOGGED.with(|flag| flag.set(false));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1054,9 +1060,4 @@ mod tests {
         // Note: We don't assert that extensions > 0 because it's position/depth dependent
         // The important check is that extensions don't explode (checked above)
     }
-}
-pub(super) fn reset_near_deadline_flags() {
-    AB_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(false));
-    #[cfg(feature = "diagnostics")]
-    AB_NEAR_DEADLINE_LOGGED.with(|flag| flag.set(false));
 }

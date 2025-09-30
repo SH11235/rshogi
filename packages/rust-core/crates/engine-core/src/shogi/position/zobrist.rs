@@ -604,7 +604,7 @@ mod tests {
 
             // Add kings (required) - vary their positions too
             let black_king_file = ((i * 7) % crate::shogi::BOARD_FILES) as u8;
-            let black_king_rank = 'g' as u8 + (i % 3) as u8;
+            let black_king_rank = b'g' + (i % 3) as u8;
             let black_king_file_char = (b'9' - black_king_file) as char;
             let black_king_rank_char = black_king_rank as char;
             if let Ok(sq) =
@@ -620,7 +620,7 @@ mod tests {
             }
 
             let white_king_file = ((i * 3) % crate::shogi::BOARD_FILES) as u8;
-            let white_king_rank = 'a' as u8 + (i % 3) as u8;
+            let white_king_rank = b'a' + (i % 3) as u8;
             let white_king_file_char = (b'9' - white_king_file) as char;
             let white_king_rank_char = white_king_rank as char;
             if let Ok(sq) =
@@ -701,10 +701,10 @@ mod tests {
             let hash = pos.zobrist_hash;
             hash_values.push(hash);
 
-            // Count bits
-            for bit in 0..64 {
+            // Count bits (use enumerate to avoid needless_range_loop)
+            for (bit, count) in bit_counts.iter_mut().enumerate() {
                 if (hash >> bit) & 1 == 1 {
-                    bit_counts[bit] += 1;
+                    *count += 1;
                 }
             }
         }
