@@ -1704,7 +1704,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     if let (Some(b), Some(pv0)) =
                         (self.shared_state.get_best_move(), prev.pv.first().copied())
                     {
-                        if b != pv0 && !warned_pv_mismatch {
+                        // Use equals_without_piece_type to avoid false positives from piece type differences
+                        if !b.equals_without_piece_type(&pv0) && !warned_pv_mismatch {
                             let b_usi = crate::usi::move_to_usi(&b);
                             let pv0_usi = crate::usi::move_to_usi(&pv0);
                             self.emit_info_string(
