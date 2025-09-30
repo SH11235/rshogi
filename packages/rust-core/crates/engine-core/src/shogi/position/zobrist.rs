@@ -50,7 +50,9 @@ impl ZobristTable {
         let mut table = ZobristTable {
             piece_square: [[[0; BOARD_SQUARES]; MAX_PIECE_INDEX]; 2],
             hand: [[[0; MAX_HAND_COUNT + 1]; 7]; 2],
-            side_to_move: rng.random(),
+            // Use fixed value with LSB=1 to separate side-to-move in bucket index
+            // Following YaneuraOu's approach: XORing this flips LSB of hash
+            side_to_move: 1,
         };
 
         // Generate random values for pieces on squares
