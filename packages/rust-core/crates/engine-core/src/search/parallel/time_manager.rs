@@ -61,14 +61,17 @@ pub fn start_time_manager(
 
             #[cfg(feature = "diagnostics")]
             {
-                // Trace current polling status for E2E diagnostics
+                // Trace current polling status for E2E diagnostics (debug level to reduce noise)
                 let line = format!(
                     "info string tm_poll elapsed={} soft={} hard={} planned={} near_hard={} near_planned={}",
                     elapsed_ms, soft, hard, planned, near_hard as u8, near_planned as u8
                 );
-                // 出力経路: logger + stdout (logger未初期化環境での可視化確保)
-                info!("{}", line);
-                println!("{}", line);
+                // 出力経路: logger のみ (debug level)
+                debug!("{}", line);
+                // stdout 出力は near_hard または near_planned の場合のみ
+                if near_hard || near_planned {
+                    println!("{}", line);
+                }
             }
 
             // Evaluate time-based stop unconditionally (no node-count guard)
