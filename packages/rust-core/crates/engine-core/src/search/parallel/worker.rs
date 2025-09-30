@@ -75,12 +75,6 @@ impl PendingWorkGuard {
             active: true,
         }
     }
-
-    /// Prevent decrement (if ownership of accounting was transferred)
-    #[allow(dead_code)]
-    fn disarm(mut self) {
-        self.active = false;
-    }
 }
 
 impl Drop for PendingWorkGuard {
