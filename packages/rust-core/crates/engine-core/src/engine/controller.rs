@@ -694,7 +694,6 @@ impl Engine {
                 }
             };
             if guard.is_none() {
-                eprintln!("info string controller_create_searcher reason=guard_is_none");
                 let nnue_proxy = NNUEEvaluatorProxy {
                     evaluator: nnue_evaluator,
                     locals: thread_local::ThreadLocal::new(),
@@ -705,34 +704,20 @@ impl Engine {
                     args.active_threads,
                     args.stop_bridge.clone(),
                 ));
-            } else {
-                eprintln!("info string controller_reuse_searcher guard_has_existing=1");
             }
             let searcher = guard.take().expect("searcher must be Some after initialization");
-            eprintln!(
-                "info string controller_took_searcher addr=0x{:x}",
-                &searcher as *const _ as usize
-            );
             searcher
         }; // Lock released here
 
         // Search without holding Mutex
-        eprintln!("info string controller_before_adjust_threads target={}", args.active_threads);
         searcher.adjust_thread_count(args.active_threads);
-        eprintln!("info string controller_before_search sid={}", limits.session_id);
         let result = searcher.search(pos, limits);
-        eprintln!("info string controller_after_search nodes={}", result.stats.nodes);
 
         // Put searcher back (best effort - if fails, next search will recreate)
         if let Ok(mut guard) = nnue_parallel_searcher.lock() {
             if guard.is_none() {
-                eprintln!("info string controller_return_searcher status=success");
                 *guard = Some(searcher);
-            } else {
-                eprintln!("info string controller_return_searcher status=already_filled");
             }
-        } else {
-            eprintln!("info string controller_return_searcher status=lock_failed");
         }
 
         result

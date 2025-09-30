@@ -922,7 +922,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
     /// Main search entry point
     pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
-        eprintln!("info string searcher_search_entry sid={}", limits.session_id);
         info!("Starting simple parallel search with {} threads", self.num_threads);
 
         let residual_active = self.active_workers.load(Ordering::Acquire);
@@ -1228,9 +1227,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let info_string_cb = limits.info_string_callback.clone();
 
         // Main thread does iterative deepening and generates work
-        eprintln!("info string searcher_before_main_thread sid={}", limits.session_id);
         let result = self.run_main_thread(position, limits, main_worker);
-        eprintln!("info string searcher_after_main_thread nodes={}", result.stats.nodes);
 
         let early_finalized = self.shared_state.is_finalized_early();
 
@@ -1346,7 +1343,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         self.stop_bridge.clear();
 
-        eprintln!("info string searcher_search_exit nodes={}", result.stats.nodes);
         result
     }
 
