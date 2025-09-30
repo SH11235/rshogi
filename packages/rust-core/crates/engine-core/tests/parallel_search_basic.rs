@@ -5,7 +5,7 @@
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
     search::{
-        parallel::{ParallelSearcher, SearchThread, SharedSearchState},
+        parallel::{EngineStopBridge, ParallelSearcher, SearchThread, SharedSearchState},
         SearchLimitsBuilder, ShardedTranspositionTable,
     },
     shogi::Position,
@@ -106,7 +106,7 @@ fn test_parallel_searcher_integration() {
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(ShardedTranspositionTable::new(16));
 
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4, Arc::new(EngineStopBridge::new()));
     let mut position = Position::startpos();
 
     // Test with time limit
@@ -125,7 +125,7 @@ fn test_barrier_deadlock_prevention() {
     // Test that early stop doesn't cause deadlock
     let evaluator = Arc::new(MaterialEvaluator);
     let tt = Arc::new(ShardedTranspositionTable::new(16));
-    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4, Arc::new(EngineStopBridge::new()));
     let mut position = Position::startpos();
 
     // Very short time limit to trigger early stop

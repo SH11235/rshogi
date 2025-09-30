@@ -78,6 +78,24 @@ pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
 /// Can be overridden with SearchLimits::builder().qnodes_limit()
 pub const DEFAULT_QNODES_LIMIT: u64 = 1_000_000;
 
+/// Near-deadline window (ms) used by lightweight time polling to increase
+/// responsiveness as we approach either the hard limit or a scheduled
+/// rounded stop time.
+pub const NEAR_DEADLINE_WINDOW_MS: u64 = 50;
+
+/// Lightweight polling interval (ms) for AB/QS time checks when not inside
+/// the near-deadline window.
+pub const LIGHT_POLL_INTERVAL_MS: u64 = 8;
+
+/// Main-thread guard window before starting a new iteration or distributing work.
+/// If we are within this window of the planned or hard deadline, we avoid
+/// starting a new heavy iteration to guarantee timely self-stop.
+pub const MAIN_NEAR_DEADLINE_WINDOW_MS: u64 = 500;
+
+/// Window (ms) before the hard deadline at which we proactively finalize
+/// the current best move and exit without waiting for GUI stop.
+pub const NEAR_HARD_FINALIZE_MS: u64 = 500;
+
 /// Validate that constants maintain proper relationships
 #[cfg(test)]
 mod tests {

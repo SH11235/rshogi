@@ -263,7 +263,7 @@ cargo run -p engine-usi --release --features diagnostics -- \
 有効時の目印:
 - 探索中の`info`行に`hashfull`が付与されます。
 - 終局時、`info multipv 1 ... hashfull ... pv ...`が必ず出力されます。
-- `tt-metrics`の要約が`info string tt_metrics ...`として出力されます。
+- `tt_metrics`の要約が`info string tt_metrics ...`として出力されます。
 
 ### 5. 並列探索ベンチマーク
 

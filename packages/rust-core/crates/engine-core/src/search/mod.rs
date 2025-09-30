@@ -7,6 +7,7 @@ pub mod limits;
 pub mod parallel;
 pub mod search_basic;
 pub mod search_enhanced;
+pub mod snapshot;
 pub mod tt;
 pub mod types;
 pub mod unified;

@@ -5,7 +5,10 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
-    search::{parallel::ParallelSearcher, SearchLimitsBuilder, TranspositionTable},
+    search::{
+        parallel::{EngineStopBridge, ParallelSearcher},
+        SearchLimitsBuilder, TranspositionTable,
+    },
     shogi::Position,
     time_management::TimeControl,
 };
@@ -71,7 +74,12 @@ fn bench_depth_search(c: &mut Criterion) {
                     b.iter(|| {
                         // Fresh TT for each iteration to ensure consistency
                         let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
-                        let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
+                        let mut searcher = ParallelSearcher::new(
+                            evaluator.clone(),
+                            tt,
+                            threads,
+                            Arc::new(EngineStopBridge::new()),
+                        );
                         let mut pos_clone = position.clone();
 
                         let limits = SearchLimitsBuilder::default().depth(config.depth).build();
@@ -111,7 +119,12 @@ fn bench_nps_throughput(c: &mut Criterion) {
 
                     for _ in 0..iters {
                         let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
-                        let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
+                        let mut searcher = ParallelSearcher::new(
+                            evaluator.clone(),
+                            tt,
+                            threads,
+                            Arc::new(EngineStopBridge::new()),
+                        );
                         let mut pos_clone = position.clone();
 
                         let limits = SearchLimitsBuilder::default()
@@ -160,7 +173,12 @@ fn bench_stop_latency(c: &mut Criterion) {
 
                     for _ in 0..iters {
                         let tt = Arc::new(TranspositionTable::new(64)); // Smaller TT for latency test
-                        let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
+                        let mut searcher = ParallelSearcher::new(
+                            evaluator.clone(),
+                            tt,
+                            threads,
+                            Arc::new(EngineStopBridge::new()),
+                        );
                         let mut pos_clone = position.clone();
 
                         let limits = SearchLimitsBuilder::default()
@@ -201,7 +219,8 @@ fn bench_speedup_efficiency(c: &mut Criterion) {
 
     // First, get baseline with 1 thread
     let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
-    let mut baseline_searcher = ParallelSearcher::new(evaluator.clone(), tt, 1);
+    let mut baseline_searcher =
+        ParallelSearcher::new(evaluator.clone(), tt, 1, Arc::new(EngineStopBridge::new()));
     let mut pos_clone = position.clone();
 
     let baseline_limits = SearchLimitsBuilder::default().depth(config.depth).build();
@@ -225,7 +244,12 @@ fn bench_speedup_efficiency(c: &mut Criterion) {
             |b, &threads| {
                 b.iter(|| {
                     let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
-                    let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
+                    let mut searcher = ParallelSearcher::new(
+                        evaluator.clone(),
+                        tt,
+                        threads,
+                        Arc::new(EngineStopBridge::new()),
+                    );
                     let mut pos_clone = position.clone();
 
                     let start = std::time::Instant::now();
@@ -264,7 +288,12 @@ fn bench_pv_consistency(c: &mut Criterion) {
                 |b, &threads| {
                     // Get reference PV with single thread
                     let tt = Arc::new(TranspositionTable::new(128));
-                    let mut ref_searcher = ParallelSearcher::new(evaluator.clone(), tt, 1);
+                    let mut ref_searcher = ParallelSearcher::new(
+                        evaluator.clone(),
+                        tt,
+                        1,
+                        Arc::new(EngineStopBridge::new()),
+                    );
                     let mut ref_pos = position.clone();
 
                     let limits = SearchLimitsBuilder::default().depth(6).build();
@@ -273,7 +302,12 @@ fn bench_pv_consistency(c: &mut Criterion) {
 
                     b.iter(|| {
                         let tt = Arc::new(TranspositionTable::new(128));
-                        let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
+                        let mut searcher = ParallelSearcher::new(
+                            evaluator.clone(),
+                            tt,
+                            threads,
+                            Arc::new(EngineStopBridge::new()),
+                        );
                         let mut pos_clone = position.clone();
 
                         let limits = SearchLimitsBuilder::default().depth(6).build();

@@ -73,6 +73,8 @@ impl SearchContext {
     pub fn set_limits(&mut self, limits: SearchLimits) {
         self.ponder_hit_flag = limits.ponder_hit_flag.clone();
         self.limits = limits;
+        self.time_stop_logged = false;
+        self.internal_stop.store(false, Ordering::Relaxed);
     }
 
     /// Convert from ponder mode to normal search
@@ -236,9 +238,18 @@ impl SearchContext {
     }
 
     /// Signal internal stop
+    ///
+    /// Idempotent and safe under parallel search.
+    /// Uses Release/Acquire with readers (`should_stop`) to guarantee visibility across threads.
+    #[inline(always)]
     pub fn stop(&self) {
         // Use Release ordering to ensure the stop signal is visible to other threads quickly
         self.internal_stop.store(true, Ordering::Release);
+        // Also propagate to external stop flag (if wired) so that parallel coordinators
+        // and other threads observing the shared stop can react immediately.
+        if let Some(ref stop_flag) = self.limits.stop_flag {
+            stop_flag.store(true, Ordering::Release);
+        }
     }
 
     /// Get elapsed time
@@ -269,10 +280,9 @@ impl SearchContext {
     ) -> bool {
         if let Some(ref tm) = time_manager {
             // Proactive early stop near hard limit to allow unwind/commit time
-            let elapsed = self.elapsed();
             let hard_limit_ms = tm.hard_limit_ms();
             if hard_limit_ms > 0 {
-                let elapsed_ms = elapsed.as_millis() as u64;
+                let elapsed_ms = tm.elapsed_ms();
                 // Safety window before hard limit to exit gracefully (adaptive)
                 // Do not preempt ultra-short budgets
                 // Safety margin before hard limit to allow unwind/commit time.
@@ -307,12 +317,11 @@ impl SearchContext {
             if tm.should_stop(nodes) {
                 // Log once per search (engine-core internal logging)
                 if !self.time_stop_logged {
-                    let elapsed = self.elapsed();
                     log::info!(
                         "Time limit exceeded: depth={} nodes={} elapsed={}ms",
                         self.current_depth,
                         nodes,
-                        elapsed.as_millis()
+                        tm.elapsed_ms()
                     );
                     self.time_stop_logged = true;
                 }
@@ -324,22 +333,15 @@ impl SearchContext {
     }
 
     /// Whether this search stopped due to time limit (as decided by TimeManager)
-    #[inline]
+    #[inline(always)]
     pub fn was_time_stopped(&self) -> bool {
         self.time_stop_logged
     }
 
-    /// Get appropriate time check mask based on time control
-    pub fn get_time_check_mask(&self) -> u64 {
-        use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
-        use crate::time_management::TimeControl;
-
-        match &self.limits.time_control {
-            TimeControl::FixedNodes { .. } => 0x3FF, // 1024 nodes - more frequent checks for node-based limits
-            TimeControl::Byoyomi { .. } => TIME_CHECK_MASK_BYOYOMI,
-            TimeControl::Ponder(_) => TIME_CHECK_MASK_NORMAL, // Ponder always uses NORMAL (opponent's time)
-            _ => TIME_CHECK_MASK_NORMAL,
-        }
+    /// Mark that a time-based stop occurred (used by hard/planned short-circuit paths)
+    #[inline]
+    pub fn mark_time_stopped(&mut self) {
+        self.time_stop_logged = true;
     }
 
     /// Set current depth for logging
@@ -480,41 +482,5 @@ mod tests {
         let expected_normal: i32 = 100_000 / 8192;
         assert!((hits_normal - expected_normal).abs() <= 2,
             "Normal mask should check approximately every 8192 nodes, got {hits_normal} hits, expected around {expected_normal}");
-    }
-
-    #[test]
-    fn test_search_context_time_check_mask() {
-        use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
-
-        let mut ctx = SearchContext::new();
-
-        // Test normal time control
-        ctx.set_limits(SearchLimits::default());
-        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_NORMAL);
-
-        // Test byoyomi
-        let byoyomi_limits = SearchLimits::builder()
-            .time_control(TimeControl::Byoyomi {
-                main_time_ms: 0,
-                byoyomi_ms: 6000,
-                periods: 1,
-            })
-            .build();
-        ctx.set_limits(byoyomi_limits);
-        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_BYOYOMI);
-
-        // Test fixed nodes (should use more frequent checks)
-        let node_limits = SearchLimits::builder()
-            .time_control(TimeControl::FixedNodes { nodes: 100000 })
-            .build();
-        ctx.set_limits(node_limits);
-        assert_eq!(ctx.get_time_check_mask(), 0x3FF); // 1024 nodes
-
-        // Test ponder mode (should use normal mask)
-        let ponder_limits = SearchLimits::builder()
-            .time_control(TimeControl::Ponder(Box::new(TimeControl::Infinite)))
-            .build();
-        ctx.set_limits(ponder_limits);
-        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_NORMAL);
     }
 }

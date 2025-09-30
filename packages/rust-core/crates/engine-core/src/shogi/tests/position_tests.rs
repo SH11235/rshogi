@@ -156,6 +156,31 @@ fn test_do_move_all_piece_types() {
 }
 
 #[test]
+fn test_in_check_after_simple_opening_is_false() {
+    // USI: startpos; 9g9f 3c3d は先手王手ではない
+    let mut pos = Position::startpos();
+    // 9g9f
+    let m1 = Move::normal(parse_usi_square("9g").unwrap(), parse_usi_square("9f").unwrap(), false);
+    pos.do_move(m1);
+    // 3c3d
+    let m2 = Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
+    pos.do_move(m2);
+    assert!(!pos.is_in_check(), "After 9g9f 3c3d, side-to-move should NOT be in check");
+}
+
+#[test]
+fn test_in_check_after_8g8f_8d8e_is_false() {
+    let mut pos = Position::startpos();
+    // 8g8f
+    let m1 = Move::normal(parse_usi_square("8g").unwrap(), parse_usi_square("8f").unwrap(), false);
+    pos.do_move(m1);
+    // 8c8d（白の歩の通常の前進）
+    let m2 = Move::normal(parse_usi_square("8c").unwrap(), parse_usi_square("8d").unwrap(), false);
+    pos.do_move(m2);
+    assert!(!pos.is_in_check(), "After 8g8f 8d8e, side-to-move should NOT be in check");
+}
+
+#[test]
 fn test_do_move_drop_all_piece_types() {
     // 各駒種の持ち駒打ちをテスト
     let test_cases = vec![

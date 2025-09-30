@@ -10,6 +10,101 @@ use crate::{
     },
     shogi::{PieceType, Position, TriedMoves},
 };
+use std::cell::Cell;
+
+// Lightweight, time-based polling helpers for alpha-beta search (module scope)
+use super::time_control::NEAR_DEADLINE_MASK;
+use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
+thread_local! { static AB_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) }; }
+thread_local! { pub(super) static AB_NEAR_DEADLINE_ACTIVE: Cell<bool> = const { Cell::new(false) }; }
+
+// Diagnostics: one-time info logs for near-deadline and short-circuit events
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    pub(super) static AB_NEAR_DEADLINE_LOGGED: Cell<bool> = const { Cell::new(false) };
+    static AB_SHORT_CIRCUIT_LOGGED: Cell<bool> = const { Cell::new(false) };
+}
+
+#[inline(always)]
+fn ab_should_light_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+) -> bool
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    if let Some(tm) = &searcher.time_manager {
+        let elapsed_ms = tm.elapsed_ms();
+        let hard = tm.hard_limit_ms();
+        let planned = tm.scheduled_end_ms();
+        // Near hard deadline: force polling within window
+        let near_hard = hard > 0
+            && hard < u64::MAX
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= hard;
+        // Near planned rounded end: also force polling
+        let near_planned = planned > 0
+            && planned < u64::MAX
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= planned;
+        let near = near_hard || near_planned;
+
+        #[cfg(feature = "diagnostics")]
+        {
+            if near {
+                AB_NEAR_DEADLINE_LOGGED.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag near_deadline ab elapsed={}ms hard={}ms planned={}ms window={}ms",
+                            elapsed_ms,
+                            if hard == u64::MAX { 0 } else { hard },
+                            if planned == u64::MAX { 0 } else { planned },
+                            NEAR_DEADLINE_WINDOW_MS
+                        );
+                        flag.set(true);
+                    }
+                });
+            }
+        }
+
+        AB_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(near));
+        // Periodic lightweight poll roughly every AB_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
+        let periodic = AB_LAST_LIGHT_POLL_MS.with(|c| {
+            let last = c.get();
+            let due = if elapsed_ms <= last {
+                true
+            } else {
+                elapsed_ms - last >= LIGHT_POLL_INTERVAL_MS
+            };
+            if due {
+                c.set(elapsed_ms);
+            }
+            due
+        });
+        return near || periodic;
+    }
+    false
+}
+
+#[inline(always)]
+fn ab_light_time_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+) -> bool
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    // If stop が既に立っているなら、間引きロジックを飛ばして即座に脱出する。
+    if searcher.context.should_stop() || searcher.context.was_time_stopped() {
+        return true;
+    }
+
+    if ab_should_light_poll(searcher) {
+        searcher.context.process_events(&searcher.time_manager);
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)
+            || searcher.context.should_stop()
+        {
+            return true;
+        }
+    }
+    false
+}
 
 /// Search a single node in the tree
 pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool>(
@@ -31,11 +126,17 @@ where
         searcher.search_stack[ply as usize].pv_line.clear();
     }
 
+    // Lightweight, time-based polling helpers (thread-local state)
+    // (helpers moved to module scope)
+
     // Get adaptive polling mask based on time control (unified with alpha_beta)
-    let time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    let mut time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    if AB_NEAR_DEADLINE_ACTIVE.with(|f| f.get()) {
+        time_check_mask = time_check_mask.min(NEAR_DEADLINE_MASK);
+    }
 
     // Early stop check
-    if searcher.context.should_stop() {
+    if searcher.context.should_stop() || searcher.context.was_time_stopped() {
         return alpha;
     }
 
@@ -50,9 +151,14 @@ where
         }
 
         // Check if stop was triggered by events
-        if searcher.context.should_stop() {
+        if searcher.context.should_stop() || searcher.context.was_time_stopped() {
             return alpha;
         }
+    }
+
+    // Lightweight time-based polling to augment node-based checks
+    if ab_light_time_poll(searcher) {
+        return alpha;
     }
 
     let original_alpha = alpha;
@@ -141,6 +247,11 @@ where
         }
     };
 
+    // Poll after potentially heavy move generation
+    if ab_light_time_poll(searcher) {
+        return alpha;
+    }
+
     if moves.is_empty() {
         // No legal moves
         if in_check {
@@ -227,6 +338,11 @@ where
         _owned_moves = None;
     };
 
+    // Poll after potentially heavy ordering work
+    if ab_light_time_poll(searcher) {
+        return alpha;
+    }
+
     // Skip selective prefetch - let individual moves control their own prefetching
 
     // Early futility pruning check
@@ -247,8 +363,13 @@ where
     // Search moves
     for &mv in ordered_slice.iter() {
         // Check stop flag at the beginning of each move
-        if searcher.context.should_stop() {
-            break; // Exit move loop immediately
+        if searcher.context.should_stop() || searcher.context.was_time_stopped() {
+            return best_score.max(alpha); // Exit immediately on stop for consistency
+        }
+
+        // Lightweight polling inside the hot loop
+        if ab_light_time_poll(searcher) {
+            return best_score.max(alpha);
         }
 
         // Double safety check: verify piece ownership for normal moves
@@ -697,6 +818,11 @@ where
         // Simple optimization: skip shallow nodes（dynamic policy with hashfull）
         let hf = searcher.tt.as_ref().map(|tt| tt.hashfull()).unwrap_or(0);
         if !crate::search::tt::filter::should_skip_tt_store_dyn(depth, is_pv, node_type, hf) {
+            // 防御策: 停止が確定した局面では TT を汚さない
+            if searcher.context.should_stop() || searcher.context.was_time_stopped() {
+                return best_score;
+            }
+
             let mut boosted_depth = crate::search::tt::filter::boost_tt_depth(depth, node_type);
             // Apply additional boost for PV nodes
             boosted_depth = crate::search::tt::filter::boost_pv_depth(boosted_depth, is_pv);
@@ -920,4 +1046,9 @@ mod tests {
         // Note: We don't assert that extensions > 0 because it's position/depth dependent
         // The important check is that extensions don't explode (checked above)
     }
+}
+pub(super) fn reset_near_deadline_flags() {
+    AB_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(false));
+    #[cfg(feature = "diagnostics")]
+    AB_NEAR_DEADLINE_LOGGED.with(|flag| flag.set(false));
 }

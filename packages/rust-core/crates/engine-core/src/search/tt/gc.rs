@@ -33,7 +33,7 @@ impl TranspositionTable {
 
     /// Clear old entries in a single bucket
     fn clear_old_entries_in_bucket(&self, bucket_idx: usize) {
-        let current_age = self.age;
+        let current_age = self.current_age();
         let threshold_age_distance = self.gc_threshold_age_distance;
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
@@ -50,9 +50,14 @@ impl TranspositionTable {
                     continue; // Empty entry
                 }
 
-                // Load data
-                let data = bucket.entries[data_idx].load(Ordering::Acquire);
+                // Load data (Relaxed is sufficient; key Acquire already synchronized)
+                let data = bucket.entries[data_idx].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
+
+                // Skip transient replacement state (depth==0) to avoid fighting with writers
+                if entry.depth() == 0 {
+                    continue;
+                }
 
                 // Calculate age distance
                 let entry_age = entry.age();
@@ -61,9 +66,9 @@ impl TranspositionTable {
 
                 // Clear if too old
                 if age_distance >= threshold_age_distance {
-                    // Clear the entry atomically
-                    bucket.entries[key_idx].store(0, Ordering::Release);
+                    // Clear the entry atomically (data→key の順で公開)
                     bucket.entries[data_idx].store(0, Ordering::Release);
+                    bucket.entries[key_idx].store(0, Ordering::Release);
 
                     #[cfg(feature = "tt_metrics")]
                     self.gc_entries_cleared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -82,9 +87,13 @@ impl TranspositionTable {
                     continue; // Empty entry
                 }
 
-                // Load data
-                let data = bucket.entries[data_idx].load(Ordering::Acquire);
+                // Load data (Relaxed is sufficient; key Acquire already synchronized)
+                let data = bucket.entries[data_idx].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
+
+                if entry.depth() == 0 {
+                    continue;
+                }
 
                 // Calculate age distance
                 let entry_age = entry.age();
@@ -93,9 +102,9 @@ impl TranspositionTable {
 
                 // Clear if too old
                 if age_distance >= threshold_age_distance {
-                    // Clear the entry atomically
-                    bucket.entries[key_idx].store(0, Ordering::Release);
+                    // Clear the entry atomically (data→key の順で公開)
                     bucket.entries[data_idx].store(0, Ordering::Release);
+                    bucket.entries[key_idx].store(0, Ordering::Release);
 
                     #[cfg(feature = "tt_metrics")]
                     self.gc_entries_cleared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

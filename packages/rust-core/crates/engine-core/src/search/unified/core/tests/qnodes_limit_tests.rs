@@ -143,11 +143,13 @@ fn test_qnodes_token_return_on_stop() {
         time_parameters: None,
         stop_flag: Some(stop_flag),
         info_callback: None,
+        info_string_callback: None,
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
         multipv: 1,
         enable_fail_safe: false,
+        fallback_deadlines: None,
     });
 
     // Create position
@@ -199,11 +201,13 @@ fn test_qnodes_token_return_on_limit_exceeded() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        info_string_callback: None,
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
         multipv: 1,
         enable_fail_safe: false,
+        fallback_deadlines: None,
     });
 
     // Create position with captures available

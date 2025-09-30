@@ -1,8 +1,17 @@
 //! Time management thread implementation
 
-use super::SharedSearchState;
-use crate::{search::types::TerminationReason, time_management::TimeManager};
+use super::{
+    util::{compute_finalize_window_ms, poll_tick_ms},
+    SharedSearchState,
+};
+use crate::search::parallel::stop_bridge::{EngineStopBridge, FinalizeReason};
+use crate::{
+    search::types::{StopInfo, TerminationReason},
+    time_management::TimeManager,
+};
 use log::debug;
+#[cfg(feature = "diagnostics")]
+use log::info;
 use std::{
     sync::Arc,
     thread,
@@ -13,21 +22,15 @@ use std::{
 pub fn start_time_manager(
     time_manager: Arc<TimeManager>,
     shared_state: Arc<SharedSearchState>,
+    stop_bridge: Arc<EngineStopBridge>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let mut poll_interval = Duration::from_millis(20);
         if log::log_enabled!(log::Level::Debug) {
             debug!("Time manager started");
         }
 
         loop {
-            // Poll interval based on time control
-            let poll_interval = match time_manager.soft_limit_ms() {
-                0..=50 => Duration::from_millis(2),
-                51..=100 => Duration::from_millis(5),
-                101..=500 => Duration::from_millis(10),
-                _ => Duration::from_millis(20),
-            };
-
             thread::sleep(poll_interval);
 
             if shared_state.should_stop() {
@@ -35,27 +38,98 @@ pub fn start_time_manager(
             }
 
             let nodes = shared_state.get_nodes();
+            let elapsed_ms = time_manager.elapsed_ms();
+            let soft = time_manager.soft_limit_ms();
+            let hard = time_manager.hard_limit_ms();
+            let planned = time_manager.scheduled_end_ms();
+
+            let nearest_remaining = [soft, hard, planned]
+                .into_iter()
+                .filter(|limit| *limit > 0 && *limit < u64::MAX && *limit > elapsed_ms)
+                .map(|limit| limit - elapsed_ms)
+                .min();
+            poll_interval = nearest_remaining
+                .map(|remain| Duration::from_millis(poll_tick_ms(remain)))
+                .unwrap_or_else(|| Duration::from_millis(20));
+
+            let near_hard = hard != u64::MAX
+                && hard > 0
+                && elapsed_ms.saturating_add(compute_finalize_window_ms(hard)) >= hard;
+            let near_planned = planned != u64::MAX
+                && planned > 0
+                && elapsed_ms.saturating_add(compute_finalize_window_ms(planned)) >= planned;
+
+            #[cfg(feature = "diagnostics")]
+            {
+                // Trace current polling status for E2E diagnostics
+                let line = format!(
+                    "info string tm_poll elapsed={} soft={} hard={} planned={} near_hard={} near_planned={}",
+                    elapsed_ms, soft, hard, planned, near_hard as u8, near_planned as u8
+                );
+                // 出力経路: logger + stdout (logger未初期化環境での可視化確保)
+                info!("{}", line);
+                println!("{}", line);
+            }
+
             // Evaluate time-based stop unconditionally (no node-count guard)
-            if time_manager.should_stop(nodes) {
-                let elapsed_ms = time_manager.elapsed_ms();
-                let soft = time_manager.soft_limit_ms();
-                let hard = time_manager.hard_limit_ms();
+            if time_manager.should_stop(nodes) || near_hard || near_planned {
                 let hard_timeout = hard != u64::MAX && elapsed_ms >= hard;
                 let depth = shared_state.get_best_depth();
 
                 debug!(
-                    "Time limit reached: elapsed={}ms soft={}ms hard={}ms nodes={} depth={} hard_timeout={} (stopping)",
-                    elapsed_ms, soft, hard, nodes, depth, hard_timeout
-                );
-
-                // Record structured stop info and signal stop
-                shared_state.set_stop_with_reason(
-                    TerminationReason::TimeLimit,
+                    "Time limit reached/near: elapsed={}ms soft={}ms hard={}ms planned={}ms nodes={} depth={} hard_timeout={} near_hard={} near_planned={}",
                     elapsed_ms,
+                    soft,
+                    hard,
+                    planned,
                     nodes,
                     depth,
                     hard_timeout,
+                    near_hard,
+                    near_planned
                 );
+
+                #[cfg(feature = "diagnostics")]
+                {
+                    if near_hard || near_planned {
+                        info!(
+                            "diag tm_near_finalize=1 elapsed={} soft={} hard={} planned={}",
+                            elapsed_ms, soft, hard, planned
+                        );
+                    }
+                }
+
+                // Record structured stop info and signal stop
+                shared_state.set_stop_with_reason(StopInfo {
+                    reason: TerminationReason::TimeLimit,
+                    elapsed_ms,
+                    nodes,
+                    depth_reached: depth,
+                    hard_timeout,
+                    soft_limit_ms: soft,
+                    hard_limit_ms: hard,
+                });
+
+                // Proactively request out-of-band finalize to USI layer
+                let fin_reason = if hard_timeout {
+                    FinalizeReason::Hard
+                } else if near_hard {
+                    FinalizeReason::NearHard
+                } else if near_planned || (planned != u64::MAX && elapsed_ms >= planned) {
+                    FinalizeReason::Planned
+                } else {
+                    FinalizeReason::TimeManagerStop
+                };
+                stop_bridge.request_finalize(fin_reason);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let line = format!(
+                        "info string tm_request_finalize reason={:?} elapsed_ms={} nodes={}",
+                        fin_reason, elapsed_ms, nodes
+                    );
+                    info!("{}", line);
+                    println!("{}", line);
+                }
                 break;
             }
         }

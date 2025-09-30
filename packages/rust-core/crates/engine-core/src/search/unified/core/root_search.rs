@@ -27,6 +27,23 @@ pub fn search_root_with_window<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // Hard-limit short-circuit at root: exit immediately if past hard or planned end
+    if let Some(tm) = &searcher.time_manager {
+        let elapsed_ms = tm.elapsed_ms();
+        let hard = tm.hard_limit_ms();
+        if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+            // Mark time-based stop to help upper layers salvage PV and attach StopInfo consistently
+            searcher.context.mark_time_stopped();
+            searcher.context.stop();
+            return (initial_alpha, Vec::new());
+        }
+        let planned = tm.scheduled_end_ms();
+        if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+            searcher.context.mark_time_stopped();
+            searcher.context.stop();
+            return (initial_alpha, Vec::new());
+        }
+    }
     // Complete any remaining garbage collection from previous search
     #[cfg(feature = "hashfull_filter")]
     if USE_TT {
@@ -61,6 +78,28 @@ where
         }
     };
 
+    // Diagnostics: log root in_check and attacker count once per root call
+    #[cfg(any(feature = "pv_debug_logs", feature = "tt_metrics"))]
+    {
+        use crate::shogi::board::Color;
+        let stm: Color = pos.side_to_move;
+        let in_check = pos.is_in_check();
+        let atk_count = if let Some(ksq) = pos.board.king_square(stm) {
+            pos.get_attackers_to(ksq, stm.opposite()).count_ones()
+        } else {
+            0
+        };
+        log::debug!(
+            "diag root_check side={:?} in_check={} atk_count={} hash={:#016x} depth={} legal_moves={}",
+            stm,
+            in_check,
+            atk_count,
+            pos.zobrist_hash,
+            depth,
+            moves.len()
+        );
+    }
+
     if moves.is_empty() {
         // No legal moves - checkmate or stalemate
         if pos.is_in_check() {
@@ -77,7 +116,7 @@ where
         searcher
             .tt
             .as_ref()
-            .and_then(|tt| tt.probe(pos.zobrist_hash))
+            .and_then(|tt| tt.probe_entry(pos.zobrist_hash))
             .and_then(|e| e.get_move())
     } else {
         None
@@ -99,6 +138,23 @@ where
 
     // Search each move
     for (move_idx, &mv) in ordered_slice.iter().enumerate() {
+        // Lightweight polling at root for near-hard/stop responsiveness
+        if searcher.context.should_stop() {
+            break;
+        }
+        if let Some(tm) = &searcher.time_manager {
+            let elapsed_ms = tm.elapsed_ms();
+            let hard = tm.hard_limit_ms();
+            if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+                searcher.context.stop();
+                break;
+            }
+            let planned = tm.scheduled_end_ms();
+            if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+                searcher.context.stop();
+                break;
+            }
+        }
         // In debug builds, validate that all moves from move generator are legal
         // (this should always be true, so we just assert it)
         #[cfg(debug_assertions)]
@@ -351,7 +407,7 @@ where
         searcher
             .tt
             .as_ref()
-            .and_then(|tt| tt.probe(pos.zobrist_hash))
+            .and_then(|tt| tt.probe_entry(pos.zobrist_hash))
             .and_then(|e| e.get_move())
     } else {
         None

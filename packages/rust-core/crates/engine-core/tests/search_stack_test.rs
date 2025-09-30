@@ -27,11 +27,13 @@ fn test_search_stack_integration() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        info_string_callback: None,
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
         multipv: 1,
         enable_fail_safe: false,
+        fallback_deadlines: None,
     };
 
     let result = searcher.search(&mut pos, limits);
@@ -69,11 +71,13 @@ fn test_search_stack_killers() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        info_string_callback: None,
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
         multipv: 1,
         enable_fail_safe: false,
+        fallback_deadlines: None,
     };
 
     let result = searcher.search(&mut pos, limits);
@@ -103,11 +107,13 @@ fn test_search_stack_static_eval_cache() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        info_string_callback: None,
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
         multipv: 1,
         enable_fail_safe: false,
+        fallback_deadlines: None,
     };
 
     let result = searcher.search(&mut pos, limits);

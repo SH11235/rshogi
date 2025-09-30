@@ -1,20 +1,18 @@
 use std::sync::atomic::AtomicBool;
-use std::sync::{mpsc, Arc};
-use std::thread;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
-use engine_core::search::types::InfoCallback;
-use engine_core::shogi::{Color, Position};
+use engine_core::search::limits::{FallbackDeadlines, SearchLimits, SearchLimitsBuilder};
+use engine_core::shogi::Color;
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
-use engine_core::usi::{append_usi_score_and_bound, create_position, move_to_usi};
+use engine_core::usi::{create_position, move_to_usi};
 use log::info;
 
 use crate::finalize::{finalize_and_send, fmt_hash};
 use crate::io::info_string;
 use crate::state::{EngineState, GoParams, UsiOptions};
-use crate::util::{emit_bestmove, score_view_with_clamp};
+use crate::util::emit_bestmove;
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     let mut tokens = cmd.split_whitespace().skip(1).peekable();
@@ -87,6 +85,8 @@ pub fn parse_go(cmd: &str) -> GoParams {
             "binc" => gp.binc = it.next().and_then(|v| v.parse().ok()),
             "winc" => gp.winc = it.next().and_then(|v| v.parse().ok()),
             "byoyomi" => gp.byoyomi = it.next().and_then(|v| v.parse().ok()),
+            // periods: 秒読みの残り回数（将来のGUI/スクリプト互換のため事前対応）
+            "periods" => gp.periods = it.next().and_then(|v| v.parse().ok()),
             "rtime" => {
                 let _ = it.next();
             }
@@ -107,6 +107,7 @@ pub fn limits_from_go(
     ponder_flag: Option<Arc<AtomicBool>>,
     stop_flag: Arc<AtomicBool>,
 ) -> SearchLimits {
+    use engine_core::search::types::{InfoCallback, InfoStringCallback};
     let builder = TimeParametersBuilder::new()
         .overhead_ms(opts.overhead_ms)
         .unwrap()
@@ -127,6 +128,22 @@ pub fn limits_from_go(
     tp.max_time_ratio = (opts.max_time_ratio_pct as f64 / 100.0).max(1.0);
     tp.move_horizon_trigger_ms = opts.move_horizon_trigger_ms;
     tp.move_horizon_min_moves = opts.move_horizon_min_moves;
+
+    // 純秒読み（main=0）時の締切リードを worst-case ネット遅延に加算して、
+    // エンジンの最終化をGUI締切（byoyomi）より前倒しにする。
+    // goコマンドのパラメータから純秒読みを推定: btime=wtime=0 かつ byoyomi>0
+    let pure_byoyomi =
+        gp.byoyomi.unwrap_or(0) > 0 && gp.btime.unwrap_or(0) == 0 && gp.wtime.unwrap_or(0) == 0;
+    if pure_byoyomi && opts.byoyomi_deadline_lead_ms > 0 {
+        // 上限 2000ms（オプション側でも clamp 済み）。
+        let before = tp.network_delay2_ms;
+        tp.network_delay2_ms = tp.network_delay2_ms.saturating_add(opts.byoyomi_deadline_lead_ms);
+        // デバッグ容易性のためのログ
+        info_string(format!(
+            "deadline_lead_applied=1 before={} add={} after={}",
+            before, opts.byoyomi_deadline_lead_ms, tp.network_delay2_ms
+        ));
+    }
 
     let mut builder = SearchLimitsBuilder::default();
 
@@ -167,64 +184,67 @@ pub fn limits_from_go(
 
     builder = builder.time_parameters(tp);
     builder = builder.stop_flag(stop_flag);
-    if let Some(flag) = ponder_flag {
-        builder = builder.ponder_hit_flag(flag).ponder_with_inner();
-    }
-    builder.multipv(opts.multipv).enable_fail_safe(opts.fail_safe_guard).build()
-}
-
-pub fn run_search_thread(
-    engine: Arc<std::sync::Mutex<engine_core::engine::controller::Engine>>,
-    mut position: Position,
-    mut limits: SearchLimits,
-    info_enabled: bool,
-    tx: mpsc::Sender<(u64, engine_core::search::SearchResult)>,
-    search_id: u64,
-) {
-    if info_enabled {
-        use std::sync::Arc as StdArc;
-
-        let multipv = limits.multipv;
-        let callback: InfoCallback =
-            StdArc::new(move |depth, score, nodes, elapsed, pv, node_type| {
-                let mut line = String::from("info");
-                line.push_str(&format!(" depth {}", depth));
-                if multipv > 1 {
-                    line.push_str(" multipv 1");
-                }
-                line.push_str(&format!(" time {}", elapsed.as_millis()));
-                line.push_str(&format!(" nodes {}", nodes));
-                if elapsed.as_millis() > 0 {
-                    let nps = (nodes as u128).saturating_mul(1000) / elapsed.as_millis();
-                    line.push_str(&format!(" nps {}", nps));
-                }
-
-                let view = score_view_with_clamp(score);
-                append_usi_score_and_bound(&mut line, view, node_type);
-
-                if !pv.is_empty() {
-                    line.push_str(" pv");
-                    for m in pv.iter() {
-                        line.push(' ');
-                        line.push_str(&move_to_usi(m));
-                    }
-                }
-
-                crate::io::usi_println(&line);
-            });
-
-        limits.info_callback = Some(callback);
+    // 重要: Ponder フラグは "go ponder" のときだけ有効化する。
+    // USI の Ponder オプション（ON/OFF）に関わらず、通常探索では Ponder に包まない。
+    if gp.ponder {
+        if let Some(flag) = ponder_flag {
+            builder = builder.ponder_hit_flag(flag).ponder_with_inner();
+            crate::io::info_string("ponder_wrapper=1");
+        } else {
+            // go ponder だがフラグがないケース（オプションOFFなど）でも挙動明示
+            crate::io::info_string("ponder_wrapper=0 (flag_missing)");
+        }
+    } else {
+        crate::io::info_string("ponder_wrapper=0");
     }
 
-    let start_ts = Instant::now();
-    let mut result = {
-        let mut eng = engine.lock().unwrap();
-        eng.search(&mut position, limits)
-    };
-    if result.stats.elapsed.as_millis() == 0 {
-        result.stats.elapsed = start_ts.elapsed();
-    }
-    let _ = tx.send((search_id, result));
+    // Set up info callback for search progress reporting
+    let multipv = opts.multipv.max(1);
+    let info_callback: InfoCallback =
+        Arc::new(move |depth, score, nodes, elapsed, pv, node_type| {
+            use crate::util::score_view_with_clamp;
+            use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
+
+            let elapsed_ms = elapsed.as_millis();
+            let nps = if elapsed_ms > 0 {
+                (nodes as u128 * 1000 / elapsed_ms) as u64
+            } else {
+                0
+            };
+
+            let mut info_line =
+                format!("info depth {depth} time {elapsed_ms} nodes {nodes} nps {nps}");
+
+            // Add MultiPV line number if multipv > 1
+            // Future improvement: callback should receive line index from engine
+            if multipv > 1 {
+                info_line.push_str(" multipv 1");
+            }
+
+            // Append score (cp or mate) with bound using standard USI format
+            let score_view = score_view_with_clamp(score);
+            append_usi_score_and_bound(&mut info_line, score_view, node_type);
+
+            // Append PV if available
+            if !pv.is_empty() {
+                info_line.push_str(" pv ");
+                info_line.push_str(&pv.iter().map(move_to_usi).collect::<Vec<_>>().join(" "));
+            }
+
+            println!("{info_line}");
+        });
+
+    // Set up info string callback for textual diagnostics
+    let info_string_callback: InfoStringCallback = Arc::new(|msg: &str| {
+        println!("info string {msg}");
+    });
+
+    builder
+        .multipv(opts.multipv)
+        .enable_fail_safe(opts.fail_safe_guard)
+        .info_callback(info_callback)
+        .info_string_callback(info_string_callback)
+        .build()
 }
 
 pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -253,6 +273,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     state.last_go_params = Some(gp.clone());
 
+    // With start_search(), waiting is minimal since Engine lock releases immediately
+    let waited_before_go_ms = 0_u64;
     let mut search_position = state.position.clone();
     let current_is_stochastic_ponder = gp.ponder && state.opts.stochastic_ponder;
     if current_is_stochastic_ponder {
@@ -280,11 +302,22 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         if let Ok(list) = mg.generate_all(&state.position) {
             let slice = list.as_slice();
             if slice.is_empty() {
+                info_string(format!(
+                    "early_return reason=no_legal_moves ply={} hash={}",
+                    state.position.ply,
+                    fmt_hash(state.position.zobrist_hash())
+                ));
                 emit_bestmove("resign", None);
                 state.bestmove_emitted = true;
                 return Ok(());
             } else if slice.len() == 1 {
                 let mv_usi = move_to_usi(&slice[0]);
+                info_string(format!(
+                    "early_return reason=only_one_legal_move ply={} hash={} move={}",
+                    state.position.ply,
+                    fmt_hash(state.position.zobrist_hash()),
+                    mv_usi
+                ));
                 emit_bestmove(&mv_usi, None);
                 state.bestmove_emitted = true;
                 return Ok(());
@@ -292,7 +325,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         }
     }
 
-    let limits = limits_from_go(
+    let mut limits = limits_from_go(
         &gp,
         search_position.side_to_move,
         &state.opts,
@@ -300,26 +333,86 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         Arc::clone(&stop_flag),
     );
 
+    if waited_before_go_ms > 0 {
+        if let Some(ref mut params) = limits.time_parameters {
+            // Phase 1: Accurate wait attribution for pure byoyomi (up to 2000ms)
+            // Reflects actual startup delay in time budget to prevent TimeManager over-optimization
+            let is_pure_byoyomi = gp.byoyomi.unwrap_or(0) > 0
+                && gp.btime.unwrap_or(0) == 0
+                && gp.wtime.unwrap_or(0) == 0;
+
+            let clamped_wait = if is_pure_byoyomi {
+                waited_before_go_ms.min(2000)
+            } else {
+                waited_before_go_ms
+            };
+
+            params.network_delay2_ms = params.network_delay2_ms.saturating_add(clamped_wait);
+
+            if clamped_wait < waited_before_go_ms {
+                info_string(format!(
+                    "wait_time_clamped waited={} clamped={} pure_byo={}",
+                    waited_before_go_ms, clamped_wait, is_pure_byoyomi as u8
+                ));
+            }
+        }
+    }
+
     let mut tc_for_stop = limits.time_control.clone();
     if let TimeControl::Ponder(inner) = tc_for_stop {
         tc_for_stop = *inner;
     }
-    state.current_time_control = Some(tc_for_stop);
+    state.current_time_control = Some(tc_for_stop.clone());
 
-    let (tx, rx) = mpsc::channel();
-    let engine = Arc::clone(&state.engine);
-    let pos = search_position.clone();
-    let info_enabled = true;
+    // Emit estimated time budget at search start (diagnostics aid)
+    // Uses the same allocation routine as engine-core TimeManager.
+    {
+        use engine_core::time_management::{
+            calculate_time_allocation, detect_game_phase_for_time, TimeParameters,
+        };
+        let params: TimeParameters = limits.time_parameters.unwrap_or_default();
+        let phase = detect_game_phase_for_time(&search_position, search_position.ply as u32);
+        let (soft, hard) = calculate_time_allocation(
+            &tc_for_stop,
+            search_position.side_to_move,
+            search_position.ply as u32,
+            gp.moves_to_go,
+            phase,
+            &params,
+        );
+        info_string(format!(
+            "time_budget waited_ms={} soft_ms={} hard_ms={} tc={:?}",
+            waited_before_go_ms, soft, hard, tc_for_stop
+        ));
+
+        if hard != u64::MAX && hard > 0 && !gp.ponder {
+            let base = Instant::now();
+            let hard_deadline = base + Duration::from_millis(hard);
+            let soft_deadline = if soft != u64::MAX && soft > 0 {
+                Some(base + Duration::from_millis(soft))
+            } else {
+                None
+            };
+            limits.fallback_deadlines = Some(FallbackDeadlines {
+                soft_deadline,
+                hard_deadline,
+                soft_limit_ms: if soft != u64::MAX { soft } else { 0 },
+                hard_limit_ms: hard,
+            });
+        }
+    }
+
+    // Use start_search() - non-blocking, Engine lock released immediately
     state.current_search_id = state.current_search_id.wrapping_add(1);
-    let sid = state.current_search_id;
-    let handle =
-        thread::spawn(move || run_search_thread(engine, pos, limits, info_enabled, tx, sid));
+    let session = {
+        let mut engine_guard = state.engine.lock().unwrap();
+        engine_guard.start_search(search_position.clone(), limits)
+    }; // Engine lock released here immediately
 
     state.searching = true;
     state.stop_flag = Some(Arc::clone(&stop_flag));
     state.ponder_hit_flag = ponder_flag;
-    state.worker = Some(handle);
-    state.result_rx = Some(rx);
+    state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
     state.current_root_hash = Some(search_position.zobrist_hash());
@@ -331,6 +424,11 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         gp.ponder,
         state.current_is_stochastic_ponder
     ));
+
+    // Enhanced diagnostics for time loss investigation
+    let threads = state.opts.threads;
+    info_string(format!("search_diagnostics threads={}", threads));
+
     Ok(())
 }
 
@@ -338,23 +436,18 @@ pub fn poll_search_completion(state: &mut EngineState) {
     if !state.searching {
         return;
     }
-    if let Some(rx) = &state.result_rx {
-        match rx.try_recv() {
-            Ok((sid, result)) => {
-                if sid != state.current_search_id {
-                    info_string(format!(
-                        "ignore_result stale_sid={} current_sid={}",
-                        sid, state.current_search_id
-                    ));
-                    return;
-                }
-                if let Some(h) = state.worker.take() {
-                    let _ = h.join();
-                }
+
+    // Use SearchSession::try_poll() to detect thread disconnection
+    if let Some(session) = &state.search_session {
+        use engine_core::engine::TryResult;
+        match session.try_poll() {
+            TryResult::Ok(result) => {
+                // Search completed, clean up state
                 state.searching = false;
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
-                state.result_rx = None;
+                state.search_session = None;
+                state.notify_idle();
 
                 let was_ponder = state.current_is_ponder;
                 state.current_is_ponder = false;
@@ -377,20 +470,18 @@ pub fn poll_search_completion(state: &mut EngineState) {
                             if let TimeControl::Ponder(inner) = tc_for_stop {
                                 tc_for_stop = *inner;
                             }
-                            let (tx2, rx2) = mpsc::channel();
-                            let engine = Arc::clone(&state.engine);
-                            let pos2 = state.position.clone();
-                            let info_enabled = true;
+
+                            // Phase 2: Use start_search() for re-search after ponder hit
                             state.current_search_id = state.current_search_id.wrapping_add(1);
-                            let sid2 = state.current_search_id;
-                            let handle = thread::spawn(move || {
-                                run_search_thread(engine, pos2, limits, info_enabled, tx2, sid2)
-                            });
+                            let session = {
+                                let mut engine_guard = state.engine.lock().unwrap();
+                                engine_guard.start_search(state.position.clone(), limits)
+                            };
+
                             state.searching = true;
                             state.stop_flag = Some(stop_flag);
                             state.ponder_hit_flag = None;
-                            state.worker = Some(handle);
-                            state.result_rx = Some(rx2);
+                            state.search_session = Some(session);
                             state.current_is_stochastic_ponder = false;
                             state.current_time_control = Some(tc_for_stop);
                             state.current_root_hash = Some(state.position.zobrist_hash());
@@ -410,20 +501,80 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     finalize_and_send(state, "finalize", Some(&result), stale);
                     state.current_time_control = None;
                     state.current_root_hash = None;
+                    state.notify_idle();
                 }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                if let Some(h) = state.worker.take() {
-                    let _ = h.join();
-                }
+            TryResult::Pending => {
+                // Still searching (no result yet)
+            }
+            TryResult::Disconnected => {
+                // Search thread disconnected without sending result (panic or early exit)
+                // Clean up state and emit fallback bestmove
+                use engine_core::usi::move_to_usi;
+                use log::error;
+
+                error!(
+                    "Search thread disconnected unexpectedly for session {}",
+                    session.session_id()
+                );
+                info_string(format!(
+                    "search_thread_disconnected session_id={} root_hash={}",
+                    session.session_id(),
+                    state.current_root_hash.map(fmt_hash).unwrap_or_else(|| "none".to_string())
+                ));
+
                 state.searching = false;
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
-                state.result_rx = None;
+                state.search_session = None;
                 state.current_time_control = None;
-                emit_bestmove("resign", None);
+                state.current_root_hash = None;
+
+                // Fallback: try to get a safe bestmove from Engine (TT or legal moves)
+                let bestmove = {
+                    let engine = state.engine.lock().unwrap();
+                    let final_best = engine.choose_final_bestmove(&state.position, None);
+                    final_best.best_move.map(|m| move_to_usi(&m))
+                };
+
+                match bestmove {
+                    Some(mv) => {
+                        info_string(format!("fallback_bestmove move={mv} source=tt_or_legal"));
+                        emit_bestmove(&mv, None);
+                    }
+                    None => {
+                        info_string("fallback_bestmove move=resign source=no_legal_moves");
+                        emit_bestmove("resign", None);
+                    }
+                }
+
+                state.bestmove_emitted = true;
+                state.notify_idle();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use engine_core::search::limits::SearchLimits;
+    use engine_core::time_management::TimeParameters;
+
+    #[test]
+    fn time_parameters_option_remains_after_unwrap() {
+        let params = TimeParameters {
+            network_delay2_ms: 1234,
+            ..TimeParameters::default()
+        };
+
+        let limits = SearchLimits {
+            time_parameters: Some(params),
+            ..SearchLimits::default()
+        };
+
+        let extracted = limits.time_parameters.unwrap_or_default();
+        assert_eq!(extracted.network_delay2_ms, 1234);
+        assert!(limits.time_parameters.is_some(), "time_parameters was unexpectedly moved out");
+        assert_eq!(limits.time_parameters.unwrap_or_default().network_delay2_ms, 1234);
     }
 }

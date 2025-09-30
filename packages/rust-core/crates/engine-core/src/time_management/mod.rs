@@ -332,12 +332,18 @@ impl TimeManager {
                 tm.inner.final_push_active.store(true, Ordering::Relaxed);
                 tm.inner.final_push_min_ms.store(min_ms, Ordering::Relaxed);
 
-                // In FinalPush, set opt_limit to match the calculated budgets
-                // This ensures we use the full available time
+                // In FinalPush, set opt_limit with earlier scheduling for pure-byoyomi.
+                // Pure-byoyomi (main_time==0) needs earlier scheduling to guarantee
+                // bestmove emission before strict GUI deadlines.
                 let current_hard = tm.inner.hard_limit_ms.load(Ordering::Relaxed);
-
-                // Set opt_limit to be close to hard limit in FinalPush mode
-                let target_opt = current_hard.saturating_sub(50); // Small margin for safety
+                let mut target_opt = current_hard.saturating_sub(50);
+                if *main_time_ms == 0 {
+                    // Prefer the computed soft limit as opt_limit to schedule rounding sooner.
+                    // This gives the stop scheduler ~1.2–1.5s of headroom with typical params.
+                    let soft = tm.inner.soft_limit_ms.load(Ordering::Relaxed);
+                    // Ensure ordering: soft < hard, but keep a small guard below hard
+                    target_opt = soft.min(current_hard.saturating_sub(200));
+                }
                 tm.inner.opt_limit_ms.store(target_opt, Ordering::Relaxed);
 
                 log::debug!(
@@ -351,9 +357,10 @@ impl TimeManager {
 
                 // Log the opt_limit after FinalPush update
                 log::debug!(
-                    "[FinalPush] Updated opt_limit to {}ms (was {}ms)",
+                    "[FinalPush] Updated opt_limit to {}ms (was {}ms) (pure_byoyomi={})",
                     target_opt,
-                    opt_limit
+                    opt_limit,
+                    *main_time_ms == 0
                 );
             }
         }
@@ -558,6 +565,12 @@ impl TimeManager {
     /// Get soft time limit in milliseconds
     pub fn soft_limit_ms(&self) -> u64 {
         self.inner.soft_limit_ms.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn override_limits_for_test(&self, soft_ms: u64, hard_ms: u64) {
+        self.inner.soft_limit_ms.store(soft_ms, Ordering::Relaxed);
+        self.inner.hard_limit_ms.store(hard_ms, Ordering::Relaxed);
     }
 
     /// Get hard time limit in milliseconds

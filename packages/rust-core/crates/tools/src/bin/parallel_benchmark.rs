@@ -6,7 +6,10 @@ use anyhow::Result;
 use clap::Parser;
 use engine_core::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
-    search::{parallel::ParallelSearcher, SearchLimitsBuilder, TranspositionTable},
+    search::{
+        parallel::{EngineStopBridge, ParallelSearcher},
+        SearchLimitsBuilder, TranspositionTable,
+    },
     shogi::{Move, Position},
     time_management::TimeControl,
 };
@@ -375,7 +378,12 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
         Arc::new(TranspositionTable::new(config.tt_size_mb))
     };
 
-    let mut searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), config.threads);
+    let mut searcher = ParallelSearcher::new(
+        evaluator.clone(),
+        tt.clone(),
+        config.threads,
+        Arc::new(EngineStopBridge::new()),
+    );
 
     let limits = if let Some(ms) = config.fixed_ms {
         SearchLimitsBuilder::default()

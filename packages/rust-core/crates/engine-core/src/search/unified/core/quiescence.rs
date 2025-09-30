@@ -22,6 +22,7 @@ use crate::{
 };
 use once_cell::sync::Lazy;
 use smallvec::SmallVec;
+use std::cell::Cell;
 use std::sync::atomic::Ordering;
 
 // Import victim_score from move_ordering module
@@ -40,6 +41,131 @@ const MAX_QS_PROMO_CHECKS: usize = 4; // Maximum number of non-capture promotion
 const QS_PROMO_QPLY_CAP: u8 = 4; // Limit relative depth for promotion checks in QS
                                  // Total budget across all check-like categories to prevent spikes
 const MAX_QS_TOTAL_CHECKS: usize = 6;
+
+// Runtime/compile-time toggle for enabling checking moves in quiescence search.
+// Priority (high → low):
+// 1) Compile-time features: `qs_checks_force_off` / `qs_checks_force_on`
+// 2) Runtime env var: `SHOGI_QS_DISABLE_CHECKS` ("1" disables checks)
+static QS_CHECKS_ENABLED: Lazy<bool> = Lazy::new(|| {
+    // Mutual exclusion guard (both features at once is invalid)
+    #[cfg(all(feature = "qs_checks_force_off", feature = "qs_checks_force_on"))]
+    compile_error!("qs_checks_force_off and qs_checks_force_on are mutually exclusive");
+
+    // Compile-time overrides
+    #[cfg(feature = "qs_checks_force_off")]
+    {
+        false
+    }
+    #[cfg(all(not(feature = "qs_checks_force_off"), feature = "qs_checks_force_on"))]
+    {
+        true
+    }
+    #[cfg(all(
+        not(feature = "qs_checks_force_off"),
+        not(feature = "qs_checks_force_on")
+    ))]
+    {
+        // Runtime default via env var
+        !std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false)
+    }
+});
+
+// Lightweight, time-based poll state for quiescence search.
+// We keep a thread-local last-poll timestamp (ms since search start) to avoid
+// relying solely on node-count based polling, which can be sparse on heavy paths.
+use super::time_control::NEAR_DEADLINE_MASK;
+use crate::search::constants::{LIGHT_POLL_INTERVAL_MS, NEAR_DEADLINE_WINDOW_MS};
+thread_local! {
+    static QS_LAST_LIGHT_POLL_MS: Cell<u64> = const { Cell::new(0) };
+    static QS_NEAR_DEADLINE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+// Diagnostics: one-time info logs for near-deadline and short-circuit events in QS
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    static QS_NEAR_DEADLINE_LOGGED: Cell<bool> = const { Cell::new(false) };
+    static QS_SHORT_CIRCUIT_LOGGED_ONCE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[inline(always)]
+fn qs_should_light_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+) -> bool
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    if let Some(tm) = &searcher.time_manager {
+        let elapsed_ms = tm.elapsed_ms();
+        let hard = tm.hard_limit_ms();
+        let planned = tm.scheduled_end_ms();
+        // Near-hard/planned window: always poll when within window of deadline
+        let near_hard = hard > 0
+            && hard < u64::MAX
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= hard;
+        let near_planned = planned > 0
+            && planned < u64::MAX
+            && elapsed_ms.saturating_add(NEAR_DEADLINE_WINDOW_MS) >= planned;
+        let near = near_hard || near_planned;
+
+        #[cfg(feature = "diagnostics")]
+        {
+            if near {
+                QS_NEAR_DEADLINE_LOGGED.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag near_deadline qs elapsed={}ms hard={}ms planned={}ms window={}ms",
+                            elapsed_ms,
+                            if hard == u64::MAX { 0 } else { hard },
+                            if planned == u64::MAX { 0 } else { planned },
+                            NEAR_DEADLINE_WINDOW_MS
+                        );
+                        flag.set(true);
+                    }
+                });
+            }
+        }
+
+        QS_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(near));
+        // Lightweight periodic poll: ~every QS_LIGHT_POLL_INTERVAL_MS; reset on elapsed rollback
+        let periodic = QS_LAST_LIGHT_POLL_MS.with(|c| {
+            let last = c.get();
+            let due = if elapsed_ms <= last {
+                true
+            } else {
+                elapsed_ms - last >= LIGHT_POLL_INTERVAL_MS
+            };
+            if due {
+                c.set(elapsed_ms);
+            }
+            due
+        });
+        return near || periodic;
+    }
+    false
+}
+
+#[inline(always)]
+fn qs_light_time_poll<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+) -> bool
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    if searcher.context.should_stop() || searcher.context.was_time_stopped() {
+        return true;
+    }
+
+    if qs_should_light_poll(searcher) {
+        // Process events and check time limit (unified path).
+        searcher.context.process_events(&searcher.time_manager);
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)
+            || searcher.context.should_stop()
+        {
+            return true;
+        }
+    }
+    false
+}
 
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
 ///
@@ -84,8 +210,52 @@ pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    QS_NEAR_DEADLINE_ACTIVE.with(|flag| flag.set(false));
+    #[cfg(feature = "diagnostics")]
+    QS_NEAR_DEADLINE_LOGGED.with(|flag| flag.set(false));
+
     searcher.stats.nodes += 1;
     searcher.stats.qnodes += 1;
+
+    // Hard-limit short-circuit: if we are past the hard deadline (or planned end), exit immediately.
+    if let Some(tm) = &searcher.time_manager {
+        let elapsed_ms = tm.elapsed_ms();
+        let hard = tm.hard_limit_ms();
+        if hard > 0 && hard < u64::MAX && elapsed_ms >= hard {
+            // Mirror alpha-beta: mark time stop so outer layers bail out immediately
+            #[cfg(feature = "diagnostics")]
+            QS_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                if !flag.get() {
+                    log::info!(
+                        "diag short_circuit qs reason=hard elapsed={}ms hard={}ms",
+                        elapsed_ms,
+                        hard
+                    );
+                    flag.set(true);
+                }
+            });
+            searcher.context.mark_time_stopped();
+            searcher.context.stop();
+            return alpha;
+        }
+        let planned = tm.scheduled_end_ms();
+        if planned > 0 && planned < u64::MAX && elapsed_ms >= planned {
+            #[cfg(feature = "diagnostics")]
+            QS_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                if !flag.get() {
+                    log::info!(
+                        "diag short_circuit qs reason=planned elapsed={}ms planned={}ms",
+                        elapsed_ms,
+                        planned
+                    );
+                    flag.set(true);
+                }
+            });
+            searcher.context.mark_time_stopped();
+            searcher.context.stop();
+            return alpha;
+        }
+    }
 
     // Extract qnodes limit and shared counter at function start for efficiency
     let qlimit = searcher.context.limits().qnodes_limit;
@@ -102,7 +272,11 @@ where
     }
 
     // Periodic time check (unified with alpha_beta and search_node)
-    let time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    let mut time_check_mask = super::time_control::get_event_poll_mask(searcher);
+    if QS_NEAR_DEADLINE_ACTIVE.with(|flag| flag.get()) {
+        time_check_mask = time_check_mask.min(NEAR_DEADLINE_MASK);
+    }
+
     if time_check_mask == 0 || (searcher.stats.nodes & time_check_mask) == 0 {
         // Process events
         searcher.context.process_events(&searcher.time_manager);
@@ -116,6 +290,11 @@ where
         if searcher.context.should_stop() {
             return alpha;
         }
+    }
+
+    // Lightweight time-based polling to cover paths where node-based polling is sparse
+    if qs_light_time_poll(searcher) {
+        return alpha;
     }
 
     // Check if in check first - this determines our search strategy
@@ -272,6 +451,9 @@ where
         // Search all legal moves to find check evasion
         let mut best = -SEARCH_INF;
         for &mv in moves.iter() {
+            if qs_light_time_poll(searcher) {
+                return if best == -SEARCH_INF { alpha } else { best };
+            }
             // Check QNodes budget before each move (important for strict limit enforcement)
             if let Some(limit) = qlimit {
                 let exceeded = if let Some(ref counter) = qnodes_counter {
@@ -413,6 +595,11 @@ where
             return alpha; // Return current alpha value
         }
 
+        // Lightweight time-based polling inside hot loop
+        if qs_light_time_poll(searcher) {
+            return alpha;
+        }
+
         // Check QNodes budget before each capture move
         if let Some(limit) = qlimit {
             let exceeded = if let Some(ref counter) = qnodes_counter {
@@ -489,6 +676,7 @@ where
     // === Add: non-drop, non-capture checking moves (limited) ===
     // Only enable with pruning profile to avoid blowing up basic search
     if USE_PRUNING
+        && *QS_CHECKS_ENABLED
         && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha
         && qply < QS_NONCAP_QPLY_CAP
         && checks_budget > 0
@@ -514,6 +702,10 @@ where
 
         for &mv in check_noncaptures.iter() {
             if searcher.context.should_stop() {
+                return alpha;
+            }
+
+            if qs_light_time_poll(searcher) {
                 return alpha;
             }
 
@@ -563,6 +755,7 @@ where
 
     // === Add: non-capture promotion moves that give check (limited) ===
     if USE_PRUNING
+        && *QS_CHECKS_ENABLED
         && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha
         && qply < QS_PROMO_QPLY_CAP
         && checks_budget > 0
@@ -587,6 +780,10 @@ where
 
         for &mv in promo_check_noncaptures.iter() {
             if searcher.context.should_stop() {
+                return alpha;
+            }
+
+            if qs_light_time_poll(searcher) {
                 return alpha;
             }
 
@@ -635,7 +832,7 @@ where
 
     // === Add: checking drops (limited) ===
     // First, skip generation if stand pat is too far below alpha
-    if stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha && checks_budget > 0 {
+    if *QS_CHECKS_ENABLED && stand_pat + QS_CHECK_ENABLE_MARGIN >= alpha && checks_budget > 0 {
         // all_moves already generated above (generate_all). Extract checking drops.
         let them = pos.side_to_move.opposite();
         let ksq_opt = pos.board.king_square(them);
@@ -677,6 +874,10 @@ where
             // Search checking drops
             for &mv in check_drops.iter() {
                 if searcher.context.should_stop() {
+                    return alpha;
+                }
+
+                if qs_light_time_poll(searcher) {
                     return alpha;
                 }
 

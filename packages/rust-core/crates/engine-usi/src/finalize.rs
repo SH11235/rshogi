@@ -1,11 +1,14 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
-use engine_core::search::SearchResult;
+use engine_core::search::{types::StopInfo, SearchResult};
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
 use crate::io::{info_string, usi_println};
 use crate::state::EngineState;
 use crate::util::{emit_bestmove, score_view_with_clamp};
+
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 #[inline]
 pub fn fmt_hash(h: u64) -> String {
@@ -23,6 +26,72 @@ fn source_to_str(src: FinalBestSource) -> &'static str {
     }
 }
 
+const TT_LOCK_BACKOFF_US: u64 = 100;
+
+/// StopInfo から "残り" 時間を見積もり、TT ロックに使ってよい猶予を ms で返す。
+/// 現状は soft/hard の最小値のみを参照する。将来 planned limit も StopInfo に
+/// 反映された場合には、ここで同様に最小値へ折り込む。
+fn compute_tt_probe_budget_ms(stop_info: Option<&StopInfo>, snapshot_elapsed_ms: u32) -> u64 {
+    let stop_info = match stop_info {
+        Some(si) => si,
+        None => return 0,
+    };
+
+    let mut limit = u64::MAX;
+    if stop_info.soft_limit_ms > 0 {
+        limit = limit.min(stop_info.soft_limit_ms);
+    }
+    if stop_info.hard_limit_ms > 0 {
+        limit = limit.min(stop_info.hard_limit_ms);
+    }
+    if limit == u64::MAX || limit == 0 {
+        return 0;
+    }
+
+    let elapsed = if snapshot_elapsed_ms > 0 {
+        snapshot_elapsed_ms as u64
+    } else {
+        stop_info.elapsed_ms
+    };
+    if elapsed >= limit {
+        return 0;
+    }
+
+    let remain = limit - elapsed;
+    if remain == 0 {
+        return 0;
+    }
+
+    let mut budget = (remain / 10).min(2);
+    if budget == 0 && remain > 0 {
+        budget = 1;
+    }
+    budget
+}
+
+fn try_lock_engine_with_budget<'a>(
+    engine: &'a Arc<Mutex<engine_core::engine::controller::Engine>>,
+    budget_ms: u64,
+) -> Option<(MutexGuard<'a, engine_core::engine::controller::Engine>, u64, u64)> {
+    let start = Instant::now();
+    if let Ok(guard) = engine.try_lock() {
+        let elapsed = start.elapsed();
+        return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
+    }
+    if budget_ms == 0 {
+        return None;
+    }
+    let deadline = start + Duration::from_millis(budget_ms);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_micros(TT_LOCK_BACKOFF_US));
+        if let Ok(guard) = engine.try_lock() {
+            let elapsed = start.elapsed();
+            return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
+        }
+    }
+    None
+}
+
 /// 中央集約された finalize 処理。
 pub fn finalize_and_send(
     state: &mut EngineState,
@@ -33,6 +102,15 @@ pub fn finalize_and_send(
     if stale {
         info_string(format!("{label}_stale=1 fallback=fast"));
         finalize_and_send_fast(state, label);
+        return;
+    }
+
+    if state.bestmove_emitted {
+        info_string(format!("{label}_skip already_emitted=1"));
+        return;
+    }
+    if !state.stop_bridge.try_claim_finalize() {
+        info_string(format!("{label}_skip claimed_by_other=1"));
         return;
     }
 
@@ -91,6 +169,14 @@ pub fn finalize_and_send(
             stop_reason
         ));
 
+        // 極小Byoyomi対策の可視化: ハード/ソフト上限と停止理由
+        if let Some(si) = res.stop_info.as_ref() {
+            info_string(format!(
+                "time_caps hard_ms={} soft_ms={} reason={:?}",
+                si.hard_limit_ms, si.soft_limit_ms, si.reason
+            ));
+        }
+
         #[cfg(feature = "diagnostics")]
         {
             let nodes = res.stats.nodes.max(1);
@@ -110,10 +196,58 @@ pub fn finalize_and_send(
                 .unwrap_or_else(|| "-".to_string());
             let rfhi = res.stats.root_fail_high_count.unwrap_or(0);
 
+            // Additional root snapshot (diagnostics)
+            let (root_in_check, root_legal_count, root_evasion_count) = {
+                // Work on a clone to avoid mutably borrowing shared state
+                let mut pos = state.position.clone();
+                let mg = MoveGenerator::new();
+                let in_check = pos.is_in_check();
+                let mut legal_count = 0usize;
+                let mut evasion_count = 0usize;
+                if let Ok(mvlist) = mg.generate_all(&pos) {
+                    legal_count = mvlist.len();
+                    if in_check {
+                        for &mv in mvlist.as_slice().iter() {
+                            let undo = pos.do_move(mv);
+                            let still = pos.is_in_check();
+                            pos.undo_move(mv, undo);
+                            if !still {
+                                evasion_count += 1;
+                            }
+                        }
+                    }
+                }
+                (in_check, legal_count, evasion_count)
+            };
+
+            // Report whether quiescence allows checking moves, honoring compile-time overrides first
+            let checks_in_q_allowed = {
+                #[cfg(feature = "qs_checks_force_off")]
+                {
+                    "Off"
+                }
+                #[cfg(all(not(feature = "qs_checks_force_off"), feature = "qs_checks_force_on"))]
+                {
+                    "On"
+                }
+                #[cfg(all(
+                    not(feature = "qs_checks_force_off"),
+                    not(feature = "qs_checks_force_on")
+                ))]
+                {
+                    if std::env::var("SHOGI_QS_DISABLE_CHECKS").map(|v| v == "1").unwrap_or(false) {
+                        "Off"
+                    } else {
+                        "On"
+                    }
+                }
+            };
+
             info_string(format!(
-                "finalize_diag seldepth={} qratio={:.3} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={}",
+                "finalize_diag seldepth={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
                 sel,
                 qratio,
+                nodes.saturating_sub(qnodes),
                 tt_hit_rate,
                 tt_hits,
                 asp_fail,
@@ -121,7 +255,11 @@ pub fn finalize_and_send(
                 rese,
                 pvchg,
                 dup,
-                rfhi
+                rfhi,
+                root_in_check as i32,
+                root_legal_count,
+                root_evasion_count,
+                checks_in_q_allowed
             ));
         }
     }
@@ -149,6 +287,29 @@ pub fn finalize_and_send(
             } else {
                 0
             };
+
+            // Emit TT diagnostics snapshot (address/size/hf/attempts)
+            {
+                let dbg = {
+                    let eng = state.engine.lock().unwrap();
+                    eng.tt_debug_info()
+                };
+                info_string(format!(
+                    "tt_debug addr={:#x} size_mb={} hf={} store_attempts={}",
+                    dbg.addr, dbg.size_mb, dbg.hf_permille, dbg.store_attempts
+                ));
+            }
+
+            // Optional: TT roundtrip smoke test at current root hash
+            #[cfg(all(feature = "diagnostics", feature = "tt_metrics"))]
+            {
+                let root_hash = state.position.zobrist_hash;
+                let ok = {
+                    let eng = state.engine.lock().unwrap();
+                    eng.tt_roundtrip_test(root_hash)
+                };
+                info_string(format!("tt_roundtrip root={}", ok));
+            }
 
             if state.opts.multipv > 1 {
                 if let Some(lines) = &res.lines {
@@ -185,7 +346,7 @@ pub fn finalize_and_send(
         }
     }
 
-    #[cfg(feature = "tt-metrics")]
+    #[cfg(feature = "tt_metrics")]
     {
         let summary_opt = {
             let eng = state.engine.lock().unwrap();
@@ -247,8 +408,117 @@ fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_
 }
 
 pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
-    if let Ok(eng) = state.engine.try_lock() {
-        let final_best = eng.choose_final_bestmove(&state.position, None);
+    if state.bestmove_emitted {
+        info_string(format!("{label}_fast_skip already_emitted=1"));
+        return;
+    }
+    if !state.stop_bridge.try_claim_finalize() {
+        info_string(format!("{label}_fast_skip claimed_by_other=1"));
+        return;
+    }
+
+    let stop_info_snapshot = state.stop_bridge.try_read_stop_info();
+
+    if let Some(si) = stop_info_snapshot.as_ref() {
+        info_string(format!(
+            "{label}_oob_stop_info sid={} reason={:?} elapsed_ms={} soft_ms={} hard_ms={}",
+            state.current_session_core_id.unwrap_or(0),
+            si.reason,
+            si.elapsed_ms,
+            si.soft_limit_ms,
+            si.hard_limit_ms
+        ));
+    }
+
+    let root_key_hex = fmt_hash(state.position.zobrist_hash());
+
+    // Try snapshot first to avoid engine lock when possible
+    if let Some(snap) = state.stop_bridge.try_read_snapshot() {
+        // SessionStart より先に Finalize が届く場合は root_key 側で裏取りする。
+        let sid_ok = state.current_session_core_id.map(|sid| sid == snap.search_id).unwrap_or(true);
+        let rk_ok = snap.root_key == state.position.zobrist_hash();
+        if sid_ok && rk_ok {
+            if let Some(best) = snap.best {
+                let shallow =
+                    snap.depth < FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT || snap.pv.is_empty();
+                let budget_ms =
+                    compute_tt_probe_budget_ms(stop_info_snapshot.as_ref(), snap.elapsed_ms);
+                if shallow {
+                    if let Some((eng_guard, spent_ms, spent_us)) =
+                        try_lock_engine_with_budget(&state.engine, budget_ms)
+                    {
+                        let final_best = eng_guard.choose_final_bestmove(&state.position, None);
+                        let final_usi = final_best
+                            .best_move
+                            .map(|m| move_to_usi(&m))
+                            .unwrap_or_else(|| move_to_usi(&best));
+                        let ponder_mv = if state.opts.ponder {
+                            final_best
+                                .pv
+                                .get(1)
+                                .map(move_to_usi)
+                                .or_else(|| snap.pv.get(1).map(move_to_usi))
+                        } else {
+                            None
+                        };
+                        drop(eng_guard);
+                        info_string(format!(
+                            "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=1 tt_probe_budget_ms={} tt_probe_spent_ms={}",
+                            label,
+                            snap.search_id,
+                            fmt_hash(snap.root_key),
+                            snap.depth,
+                            snap.nodes,
+                            snap.elapsed_ms,
+                            snap.pv.len(),
+                            budget_ms,
+                            spent_ms
+                        ));
+                        info_string(format!(
+                            "{}_fast_snapshot_tt sid={} root_key={} tt_probe_spent_us={}",
+                            label,
+                            snap.search_id,
+                            fmt_hash(snap.root_key),
+                            spent_us
+                        ));
+                        emit_bestmove(&final_usi, ponder_mv);
+                        state.bestmove_emitted = true;
+                        state.current_root_hash = None;
+                        return;
+                    }
+                }
+
+                let final_usi = move_to_usi(&best);
+                let ponder_mv = if state.opts.ponder {
+                    snap.pv.get(1).map(move_to_usi)
+                } else {
+                    None
+                };
+                info_string(format!(
+                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=0 tt_probe_budget_ms={} note=depth_sufficient",
+                    label,
+                    snap.search_id,
+                    fmt_hash(snap.root_key),
+                    snap.depth,
+                    snap.nodes,
+                    snap.elapsed_ms,
+                    snap.pv.len(),
+                    budget_ms
+                ));
+                emit_bestmove(&final_usi, ponder_mv);
+                state.bestmove_emitted = true;
+                state.current_root_hash = None;
+                return;
+            }
+        }
+    }
+
+    let fallback_budget_ms = compute_tt_probe_budget_ms(stop_info_snapshot.as_ref(), 0);
+    if let Some((eng_guard, spent_ms, spent_us)) =
+        try_lock_engine_with_budget(&state.engine, fallback_budget_ms)
+    {
+        let dbg = eng_guard.tt_debug_info();
+        let final_best = eng_guard.choose_final_bestmove(&state.position, None);
         let final_usi = final_best
             .best_move
             .map(|m| move_to_usi(&m))
@@ -256,15 +526,31 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         let ponder_mv = if state.opts.ponder {
             final_best.pv.get(1).map(move_to_usi).or_else(|| {
                 final_best.best_move.and_then(|bm| {
-                    eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
+                    eng_guard.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
                 })
             })
         } else {
             None
         };
+        drop(eng_guard);
         info_string(format!(
-            "{}_fast_select source={} move={} ponder={:?}",
+            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
+            state.current_session_core_id.unwrap_or(0),
+            root_key_hex,
+            dbg.addr,
+            dbg.size_mb,
+            dbg.hf_permille,
+            dbg.store_attempts,
+            fallback_budget_ms,
+            spent_ms,
+            spent_us
+        ));
+        info_string(format!(
+            "{}_fast_select sid={} root_key={} source={} move={} ponder={:?}",
+            label,
+            state.current_session_core_id.unwrap_or(0),
+            root_key_hex,
             source_to_str(final_best.source),
             final_usi,
             ponder_mv
@@ -275,13 +561,24 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         return;
     }
 
-    info_string(format!("{}_fast_path=legal_fallback", label));
+    info_string(format!(
+        "{}_fast_path=legal_fallback sid={} root_key={} tt_probe_budget_ms={}",
+        label,
+        state.current_session_core_id.unwrap_or(0),
+        root_key_hex,
+        fallback_budget_ms
+    ));
     let mg = MoveGenerator::new();
     match mg.generate_all(&state.position) {
         Ok(list) => {
             let slice = list.as_slice();
             if slice.is_empty() {
-                info_string(format!("{}_fast_select_resign", label));
+                info_string(format!(
+                    "{}_fast_select_resign sid={} root_key={}",
+                    label,
+                    state.current_session_core_id.unwrap_or(0),
+                    root_key_hex
+                ));
                 emit_bestmove("resign", None);
             } else {
                 let pos = &state.position;
@@ -302,29 +599,82 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                     slice.iter().copied().filter(|&m| pos.is_legal_move(m)).collect();
 
                 let chosen = if legal_moves.is_empty() {
-                    slice[0]
+                    None
                 } else if in_check {
-                    legal_moves[0]
+                    legal_moves.first().copied()
                 } else if let Some(mv) =
                     legal_moves.iter().find(|m| is_tactical(m) && !is_king_move(m)).copied()
                 {
-                    mv
+                    Some(mv)
                 } else if let Some(mv) = legal_moves.iter().find(|m| !is_king_move(m)).copied() {
-                    mv
+                    Some(mv)
                 } else {
-                    legal_moves[0]
+                    legal_moves.first().copied()
                 };
 
-                let final_usi = move_to_usi(&chosen);
-                info_string(format!("{}_fast_select_legal move={}", label, final_usi));
-                emit_bestmove(&final_usi, None);
+                if let Some(chosen) = chosen {
+                    let final_usi = move_to_usi(&chosen);
+                    info_string(format!(
+                        "{}_fast_select_legal sid={} root_key={} move={}",
+                        label,
+                        state.current_session_core_id.unwrap_or(0),
+                        root_key_hex,
+                        final_usi
+                    ));
+                    emit_bestmove(&final_usi, None);
+                } else {
+                    info_string(format!(
+                        "{}_fast_select_resign sid={} root_key={} no_legal_moves=1",
+                        label,
+                        state.current_session_core_id.unwrap_or(0),
+                        root_key_hex
+                    ));
+                    emit_bestmove("resign", None);
+                }
             }
         }
         Err(e) => {
-            info_string(format!("{}_fast_select_error resign_fallback=1 err={}", label, e));
+            info_string(format!(
+                "{}_fast_select_error sid={} root_key={} resign_fallback=1 err={}",
+                label,
+                state.current_session_core_id.unwrap_or(0),
+                root_key_hex,
+                e
+            ));
             emit_bestmove("resign", None);
         }
     }
     state.bestmove_emitted = true;
     state.current_root_hash = None;
+}
+const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 2;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tt_probe_budget_respects_stop_info_and_snapshot_elapsed() {
+        let si = StopInfo {
+            reason: engine_core::search::types::TerminationReason::TimeLimit,
+            elapsed_ms: 1_500,
+            nodes: 0,
+            depth_reached: 0,
+            hard_timeout: false,
+            soft_limit_ms: 2_000,
+            hard_limit_ms: 2_500,
+        };
+
+        assert_eq!(compute_tt_probe_budget_ms(Some(&si), 0), 2);
+        // Snapshot elapsed overrides StopInfo elapsed when provided
+        assert_eq!(compute_tt_probe_budget_ms(Some(&si), 1_995), 1);
+        // Remaining time less than 10ms still yields minimum 1ms budget
+        let si_close = StopInfo {
+            elapsed_ms: 1_999,
+            ..si
+        };
+        assert_eq!(compute_tt_probe_budget_ms(Some(&si_close), 0), 1);
+        // Missing StopInfo yields zero budget
+        assert_eq!(compute_tt_probe_budget_ms(None, 0), 0);
+    }
 }

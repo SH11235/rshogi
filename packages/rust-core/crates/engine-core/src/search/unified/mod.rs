@@ -243,9 +243,11 @@ where
             self.multi_pv
         };
 
-        // Create TimeManager if needed
-        self.time_manager =
-            time_management::create_time_manager(&limits, pos.side_to_move, pos.ply, pos);
+        // Create TimeManager if needed, unless an external/shared one is already attached
+        if self.time_manager.is_none() {
+            self.time_manager =
+                time_management::create_time_manager(&limits, pos.side_to_move, pos.ply, pos);
+        }
 
         // Shadow logging: expose core time budgets for observability
         if let Some(ref tm) = self.time_manager {
@@ -748,6 +750,14 @@ where
         let previous_pv = self.previous_pv.clone();
         // Implementation will be added in core module
         core::search_root_with_window(self, pos, depth, alpha, beta, &previous_pv)
+    }
+
+    /// Attach an external/shared TimeManager (e.g., from ParallelSearcher)
+    pub fn set_time_manager_external(
+        &mut self,
+        tm: std::sync::Arc<crate::time_management::TimeManager>,
+    ) {
+        self.time_manager = Some(tm);
     }
 
     /// Get current node count

@@ -18,15 +18,20 @@ engine-core = { path = "../engine-core" }
 nnue-telemetry = ["engine-core/nnue_telemetry"]
 fast-fma = ["engine-core/nnue_fast_fma"]
 diff-agg-hash = ["engine-core/diff_agg_hash"]
-tt-metrics = ["engine-core/tt_metrics"]
+tt_metrics = ["engine-core/tt_metrics"]
 ybwc = ["engine-core/ybwc"]
 nightly = ["engine-core/nightly"]
+
+# Quiescence QS checks compile-time overrides (pass-through)
+qs_checks_force_off = ["engine-core/qs_checks_force_off"]
+qs_checks_force_on  = ["engine-core/qs_checks_force_on"]
 
 # メタフィーチャー: 診断系を一括ON
 diagnostics = [
     "engine-core/tt_metrics",
     "engine-core/nnue_telemetry",
     "engine-core/pv_debug_logs",
+    "engine-core/diagnostics",
 ]
 
 # メタフィーチャー（任意）: 実験系を一括ON
