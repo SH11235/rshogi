@@ -1,9 +1,6 @@
-use crate::io::{info_string, usi_println};
+use crate::io::usi_println;
 use engine_core::search::constants::SEARCH_INF;
 use engine_core::usi::{score_view_from_internal, ScoreView};
-use log::warn;
-use std::thread;
-use std::time::{Duration, Instant};
 
 /// Clamp internal score to USI-friendly bounds while preserving mate information.
 pub fn sanitize_score_view(view: ScoreView) -> ScoreView {
@@ -25,26 +22,5 @@ pub fn emit_bestmove(final_usi: &str, ponder: Option<String>) {
         usi_println(&format!("bestmove {} ponder {}", final_usi, p));
     } else {
         usi_println(&format!("bestmove {}", final_usi));
-    }
-}
-
-/// Join the search thread and emit diagnostics if it takes noticeable time.
-pub fn join_search_handle(handle: thread::JoinHandle<()>, label: &str) {
-    let start = Instant::now();
-    match handle.join() {
-        Ok(()) => {
-            let elapsed = start.elapsed();
-            if elapsed >= Duration::from_millis(20) {
-                info_string(format!(
-                    "worker_join label={} waited_ms={}",
-                    label,
-                    elapsed.as_millis()
-                ));
-            }
-        }
-        Err(err) => {
-            warn!("search thread join failed label={} err={:?}", label, err);
-            info_string(format!("worker_join_error label={} err={:?}", label, err));
-        }
     }
 }
