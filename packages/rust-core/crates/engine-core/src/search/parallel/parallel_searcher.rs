@@ -992,11 +992,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let pre_shared_stop = self.shared_state.should_stop();
             let pre_queues_closed = self.shared_state.work_queues_closed();
             let needs_rewire = !Arc::ptr_eq(&self.shared_state.stop_flag, &ext_stop);
+            let searcher_addr = self as *const _ as usize;
             self.emit_info_string(
                 &limits,
                 format!(
-                    "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={} needs_rewire={}",
-                    limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed, needs_rewire as u8
+                    "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={} needs_rewire={} searcher_addr=0x{:x}",
+                    limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed, needs_rewire as u8, searcher_addr
                 ),
             );
 
