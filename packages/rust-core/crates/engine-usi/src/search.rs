@@ -1,20 +1,18 @@
 use std::sync::atomic::AtomicBool;
-use std::sync::{mpsc, Arc};
-use std::thread;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use engine_core::search::limits::{FallbackDeadlines, SearchLimits, SearchLimitsBuilder};
-use engine_core::search::types::{InfoCallback, InfoStringCallback};
-use engine_core::shogi::{Color, Position};
+use engine_core::shogi::Color;
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
-use engine_core::usi::{append_usi_score_and_bound, create_position, move_to_usi};
+use engine_core::usi::{create_position, move_to_usi};
 use log::info;
 
 use crate::finalize::{finalize_and_send, fmt_hash};
 use crate::io::info_string;
-use crate::state::{EngineState, GoParams, IdleStateSnapshot, UsiOptions};
-use crate::util::{emit_bestmove, score_view_with_clamp};
+use crate::state::{EngineState, GoParams, UsiOptions};
+use crate::util::emit_bestmove;
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     let mut tokens = cmd.split_whitespace().skip(1).peekable();
@@ -102,62 +100,6 @@ pub fn parse_go(cmd: &str) -> GoParams {
     gp
 }
 
-#[derive(Debug)]
-struct IdleWaitOutcome {
-    waited: Duration,
-    timed_out: bool,
-    final_status: IdleStateSnapshot,
-}
-
-fn compute_idle_wait_budget(gp: &GoParams, opts: &UsiOptions) -> Duration {
-    let stop_wait = Duration::from_millis(opts.stop_wait_ms.min(2_000));
-    let byoyomi = gp.byoyomi.unwrap_or(0);
-    if byoyomi == 0 {
-        return stop_wait.max(Duration::from_millis(50)).min(Duration::from_millis(1_000));
-    }
-    let byoyomi_quarter = Duration::from_millis((byoyomi / 4).min(1_000));
-    let cap = Duration::from_millis(1_000);
-    stop_wait
-        .checked_add(Duration::from_millis(100))
-        .unwrap_or(cap)
-        .max(Duration::from_millis(50))
-        .min(byoyomi_quarter.max(Duration::from_millis(100)))
-        .min(cap)
-}
-
-fn wait_for_engine_idle(state: &EngineState, max_wait: Duration) -> IdleWaitOutcome {
-    let check_interval = Duration::from_millis(50);
-    let start = Instant::now();
-    loop {
-        let status = state.idle_status();
-        if status.is_idle() {
-            return IdleWaitOutcome {
-                waited: start.elapsed(),
-                timed_out: false,
-                final_status: status,
-            };
-        }
-        let elapsed = start.elapsed();
-        if elapsed >= max_wait {
-            return IdleWaitOutcome {
-                waited: elapsed,
-                timed_out: true,
-                final_status: status,
-            };
-        }
-        let remaining = max_wait.saturating_sub(elapsed);
-        let wait_dur = if remaining < check_interval {
-            remaining
-        } else {
-            check_interval
-        };
-        if wait_dur.is_zero() {
-            continue;
-        }
-        state.idle_sync.wait_timeout(wait_dur);
-    }
-}
-
 pub fn limits_from_go(
     gp: &GoParams,
     side: Color,
@@ -165,6 +107,7 @@ pub fn limits_from_go(
     ponder_flag: Option<Arc<AtomicBool>>,
     stop_flag: Arc<AtomicBool>,
 ) -> SearchLimits {
+    use engine_core::search::types::{InfoCallback, InfoStringCallback};
     let builder = TimeParametersBuilder::new()
         .overhead_ms(opts.overhead_ms)
         .unwrap()
@@ -254,77 +197,47 @@ pub fn limits_from_go(
     } else {
         crate::io::info_string("ponder_wrapper=0");
     }
-    builder.multipv(opts.multipv).enable_fail_safe(opts.fail_safe_guard).build()
-}
 
-pub fn run_search_thread(
-    engine: Arc<std::sync::Mutex<engine_core::engine::controller::Engine>>,
-    mut position: Position,
-    mut limits: SearchLimits,
-    info_enabled: bool,
-    tx: mpsc::Sender<(u64, engine_core::search::SearchResult)>,
-    search_id: u64,
-    startup_signal: Option<mpsc::SyncSender<()>>,
-) {
-    if info_enabled {
-        use std::sync::Arc as StdArc;
+    // Set up info callback for search progress reporting
+    let info_callback: InfoCallback =
+        Arc::new(move |depth, score, nodes, elapsed, pv, node_type| {
+            use engine_core::search::NodeType;
+            use engine_core::usi::move_to_usi;
 
-        let multipv = limits.multipv;
-        let callback: InfoCallback =
-            StdArc::new(move |depth, score, nodes, elapsed, pv, node_type| {
-                let mut line = String::from("info");
-                line.push_str(&format!(" depth {}", depth));
-                if multipv > 1 {
-                    line.push_str(" multipv 1");
-                }
-                line.push_str(&format!(" time {}", elapsed.as_millis()));
-                line.push_str(&format!(" nodes {}", nodes));
-                if elapsed.as_millis() > 0 {
-                    let nps = (nodes as u128).saturating_mul(1000) / elapsed.as_millis();
-                    line.push_str(&format!(" nps {}", nps));
-                }
+            let elapsed_ms = elapsed.as_millis();
+            let nps = if elapsed_ms > 0 {
+                (nodes as u128 * 1000 / elapsed_ms) as u64
+            } else {
+                0
+            };
 
-                let view = score_view_with_clamp(score);
-                append_usi_score_and_bound(&mut line, view, node_type);
+            let node_type_str = match node_type {
+                NodeType::Exact => "",
+                NodeType::LowerBound => " lowerbound",
+                NodeType::UpperBound => " upperbound",
+            };
 
-                if !pv.is_empty() {
-                    line.push_str(" pv");
-                    for m in pv.iter() {
-                        line.push(' ');
-                        line.push_str(&move_to_usi(m));
-                    }
-                }
+            let pv_str = pv.iter().map(move_to_usi).collect::<Vec<_>>().join(" ");
 
-                crate::io::usi_println(&line);
-            });
+            let info_line = format!(
+                "info depth {} score cp {}{} nodes {} time {} nps {} pv {}",
+                depth, score, node_type_str, nodes, elapsed_ms, nps, pv_str
+            );
 
-        limits.info_callback = Some(callback);
-    }
+            println!("{info_line}");
+        });
 
-    let info_string_cb: InfoStringCallback = Arc::new(|msg: &str| crate::io::info_string(msg));
-    limits.info_string_callback = Some(info_string_cb);
+    // Set up info string callback for textual diagnostics
+    let info_string_callback: InfoStringCallback = Arc::new(|msg: &str| {
+        println!("info string {msg}");
+    });
 
-    let start_ts = Instant::now();
-    // search() now calls wait_for_completion() internally before returning.
-    // The Engine lock is held during result computation but released before hygiene wait,
-    // allowing concurrent access from the next go command.
-    let mut result = {
-        let mut eng = engine.lock().unwrap();
-
-        // Signal that engine lock acquired and search starting
-        if let Some(signal) = startup_signal {
-            let _ = signal.send(());
-        }
-
-        eng.search(&mut position, limits)
-        // Lock is released here
-    };
-
-    if result.stats.elapsed.as_millis() == 0 {
-        result.stats.elapsed = start_ts.elapsed();
-    }
-    // Send result immediately after search completes
-    let _ = tx.send((search_id, result));
+    builder
+        .multipv(opts.multipv)
+        .enable_fail_safe(opts.fail_safe_guard)
+        .info_callback(info_callback)
+        .info_string_callback(info_string_callback)
+        .build()
 }
 
 pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -353,96 +266,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     state.last_go_params = Some(gp.clone());
 
-    let wait_budget = compute_idle_wait_budget(&gp, &state.opts);
-    let idle_outcome = wait_for_engine_idle(state, wait_budget);
-    let mut waited_before_go_ms = idle_outcome.waited.as_millis() as u64;
-    if idle_outcome.timed_out {
-        let status = idle_outcome.final_status.clone();
-        info_string(format!(
-            "go_wait_for_idle_timeout=1 waited_ms={} worker_active={} reaper_pending={} pending_work={} active_workers={}",
-            waited_before_go_ms,
-            status.worker_active as u8,
-            status.reaper_pending,
-            status.pending_work_items,
-            status.active_workers
-        ));
-        // Reaper が残っているだけなら追加で待って衝突を避ける（Engine mutex 競合対策）
-        if !status.worker_active
-            && status.active_workers == 0
-            && status.pending_work_items == 0
-            && status.reaper_pending > 0
-        {
-            // 追加待機上限（可用時間に応じて自動調整）
-            let mut extra_cap_ms: u64 = 1200;
-            if let Some(ms) = gp.movetime {
-                extra_cap_ms = extra_cap_ms.min(ms.saturating_sub(300)).max(200);
-            } else if let Some(byo) = gp.byoyomi {
-                if gp.btime.unwrap_or(0) == 0 && gp.wtime.unwrap_or(0) == 0 {
-                    let safety = state
-                        .opts
-                        .byoyomi_safety_ms
-                        .saturating_add(state.opts.byoyomi_deadline_lead_ms)
-                        .saturating_add(state.opts.overhead_ms)
-                        .saturating_add(state.opts.network_delay2_ms);
-                    let est_hard = byo.saturating_sub(safety);
-                    extra_cap_ms = extra_cap_ms.min(est_hard).max(200);
-                }
-            }
-            let extra_cap = std::time::Duration::from_millis(extra_cap_ms);
-            let start2 = std::time::Instant::now();
-            let mut end_reason = "timeout";
-            loop {
-                // エンジンの Mutex が空なら即開始
-                if let Ok(g) = state.engine.try_lock() {
-                    drop(g);
-                    end_reason = "engine_free";
-                    break;
-                }
-                let s2 = state.idle_status();
-                if s2.reaper_pending == 0 {
-                    end_reason = "reaper_done";
-                    break;
-                }
-                if start2.elapsed() >= extra_cap {
-                    break;
-                }
-                state.idle_sync.wait_timeout(std::time::Duration::from_millis(50));
-            }
-            let extra = start2.elapsed().as_millis() as u64;
-            waited_before_go_ms = waited_before_go_ms.saturating_add(extra);
-            let s2 = state.idle_status();
-            let engine_free = state.engine.try_lock().is_ok();
-            info_string(format!(
-                "go_wait_for_reaper waited_ms={} reaper_pending_after={} worker_active={} active_workers={} engine_free={} end_reason={}",
-                extra,
-                s2.reaper_pending,
-                s2.worker_active as u8,
-                s2.active_workers,
-                if engine_free { 1 } else { 0 },
-                end_reason
-            ));
-        }
-        // 前セッションの stop 残骸を明示的に破棄（Reaper 待ちだけでなければ）
-        let post = state.idle_status();
-        let engine_free = state.engine.try_lock().is_ok();
-        if !engine_free
-            && (post.worker_active || post.active_workers > 0 || post.pending_work_items > 0)
-        {
-            state.stop_bridge.force_clear();
-        }
-        state.notify_idle();
-    } else if waited_before_go_ms > 0 {
-        let status = idle_outcome.final_status;
-        info_string(format!(
-            "go_wait_for_idle waited_ms={} worker_active={} reaper_pending={} pending_work={} active_workers={}",
-            waited_before_go_ms,
-            status.worker_active as u8,
-            status.reaper_pending,
-            status.pending_work_items,
-            status.active_workers
-        ));
-    }
-
+    // With start_search(), waiting is minimal since Engine lock releases immediately
+    let waited_before_go_ms = 0_u64;
     let mut search_position = state.position.clone();
     let current_is_stochastic_ponder = gp.ponder && state.opts.stochastic_ponder;
     if current_is_stochastic_ponder {
@@ -559,96 +384,19 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         }
     }
 
-    // Calculate startup handshake timeout based on time control
-    // Prevents wasting time in short byoyomi (e.g., 500-800ms)
-    let startup_timeout_ms = if let Some(ref params) = limits.time_parameters {
-        // Calculate safety budget (similar to go_wait_for_reaper logic)
-        let safety_budget = state.opts.byoyomi_safety_ms
-            + state.opts.byoyomi_deadline_lead_ms
-            + state.opts.overhead_ms
-            + params.network_delay2_ms;
-
-        match &limits.time_control {
-            TimeControl::Byoyomi {
-                main_time_ms: 0,
-                byoyomi_ms,
-                ..
-            } if *byoyomi_ms > 0 => {
-                // Pure byoyomi: min(1200ms, max(200ms, byo - safety_budget))
-                let max_wait = byoyomi_ms.saturating_sub(safety_budget);
-                max_wait.clamp(200, 1200)
-            }
-            TimeControl::FixedTime { ms_per_move } => {
-                // Fixed time: clamp(200ms, ms_per_move / 4, 1200ms)
-                (ms_per_move / 4).clamp(200, 1200)
-            }
-            TimeControl::Fischer {
-                increment_ms,
-                white_ms,
-                black_ms,
-            } => {
-                // Fischer: Use side-to-move residual instead of average for tighter bound
-                use engine_core::shogi::Color;
-                let stm = search_position.side_to_move;
-                let residual = match stm {
-                    Color::White => *white_ms,
-                    Color::Black => *black_ms,
-                };
-                // Heuristic: quarter of (inc + residual/10), clamped
-                ((increment_ms + residual / 10) / 4).clamp(200, 1200)
-            }
-            _ => 1200, // Default for other modes
-        }
-    } else {
-        1200 // Default when no time parameters
-    };
-
-    let (tx, rx) = mpsc::channel();
-    let (startup_tx, startup_rx) = mpsc::sync_channel(1);
-    let engine = Arc::clone(&state.engine);
-    let pos = search_position.clone();
-    let info_enabled = true;
+    // Use start_search() - non-blocking, Engine lock released immediately
     state.current_search_id = state.current_search_id.wrapping_add(1);
-    let sid = state.current_search_id;
-    let handle = thread::spawn(move || {
-        run_search_thread(engine, pos, limits, info_enabled, tx, sid, Some(startup_tx))
-    });
-
-    // Wait for worker to acquire engine lock and start TimeManager
-
-    let startup_timeout = Duration::from_millis(startup_timeout_ms);
-    let startup_wait_start = Instant::now();
-    let _startup_success = match startup_rx.recv_timeout(startup_timeout) {
-        Ok(()) => {
-            let waited_ms = startup_wait_start.elapsed().as_millis() as u64;
-            info_string(format!(
-                "go_startup_handshake waited_ms={} timeout_ms={} timeout=0",
-                waited_ms, startup_timeout_ms
-            ));
-            true
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            let waited_ms = startup_wait_start.elapsed().as_millis() as u64;
-            info_string(format!(
-                "go_startup_handshake_timeout waited_ms={} timeout_ms={} timeout=1",
-                waited_ms, startup_timeout_ms
-            ));
-            false
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            info_string(format!(
-                "go_startup_handshake_disconnected timeout_ms={}",
-                startup_timeout_ms
-            ));
-            false
-        }
-    };
+    let session = {
+        let mut engine_guard = state.engine.lock().unwrap();
+        engine_guard.start_search(search_position.clone(), limits)
+    }; // Engine lock released here immediately
 
     state.searching = true;
     state.stop_flag = Some(Arc::clone(&stop_flag));
     state.ponder_hit_flag = ponder_flag;
-    state.worker = Some(handle);
-    state.result_rx = Some(rx);
+    state.worker = None; // No manual worker thread
+    state.result_rx = None; // No manual channel
+    state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
     state.current_root_hash = Some(search_position.zobrist_hash());
@@ -678,24 +426,17 @@ pub fn poll_search_completion(state: &mut EngineState) {
     if !state.searching {
         return;
     }
-    if let Some(rx) = &state.result_rx {
-        match rx.try_recv() {
-            Ok((sid, result)) => {
-                if sid != state.current_search_id {
-                    info_string(format!(
-                        "ignore_result stale_sid={} current_sid={}",
-                        sid, state.current_search_id
-                    ));
-                    return;
-                }
-                if let Some(h) = state.worker.take() {
-                    let _ = h.join();
-                    state.notify_idle();
-                }
+
+    // Use SearchSession::try_recv_result() instead of manual channel
+    if let Some(session) = &state.search_session {
+        match session.try_recv_result() {
+            Some(result) => {
+                // Search completed, clean up state
                 state.searching = false;
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
-                state.result_rx = None;
+                state.search_session = None;
+                state.notify_idle();
 
                 let was_ponder = state.current_is_ponder;
                 state.current_is_ponder = false;
@@ -718,28 +459,18 @@ pub fn poll_search_completion(state: &mut EngineState) {
                             if let TimeControl::Ponder(inner) = tc_for_stop {
                                 tc_for_stop = *inner;
                             }
-                            let (tx2, rx2) = mpsc::channel();
-                            let engine = Arc::clone(&state.engine);
-                            let pos2 = state.position.clone();
-                            let info_enabled = true;
+
+                            // Phase 2: Use start_search() for re-search after ponder hit
                             state.current_search_id = state.current_search_id.wrapping_add(1);
-                            let sid2 = state.current_search_id;
-                            let handle = thread::spawn(move || {
-                                run_search_thread(
-                                    engine,
-                                    pos2,
-                                    limits,
-                                    info_enabled,
-                                    tx2,
-                                    sid2,
-                                    None,
-                                )
-                            });
+                            let session = {
+                                let mut engine_guard = state.engine.lock().unwrap();
+                                engine_guard.start_search(state.position.clone(), limits)
+                            };
+
                             state.searching = true;
                             state.stop_flag = Some(stop_flag);
                             state.ponder_hit_flag = None;
-                            state.worker = Some(handle);
-                            state.result_rx = Some(rx2);
+                            state.search_session = Some(session);
                             state.current_is_stochastic_ponder = false;
                             state.current_time_control = Some(tc_for_stop);
                             state.current_root_hash = Some(state.position.zobrist_hash());
@@ -762,19 +493,8 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     state.notify_idle();
                 }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                if let Some(h) = state.worker.take() {
-                    let _ = h.join();
-                    state.notify_idle();
-                }
-                state.searching = false;
-                state.stop_flag = None;
-                state.ponder_hit_flag = None;
-                state.result_rx = None;
-                state.current_time_control = None;
-                emit_bestmove("resign", None);
-                state.notify_idle();
+            None => {
+                // Still searching (no result yet)
             }
         }
     }
@@ -787,8 +507,10 @@ mod tests {
 
     #[test]
     fn time_parameters_option_remains_after_unwrap() {
-        let mut params = TimeParameters::default();
-        params.network_delay2_ms = 1234;
+        let params = TimeParameters {
+            network_delay2_ms: 1234,
+            ..TimeParameters::default()
+        };
 
         let limits = SearchLimits {
             time_parameters: Some(params),

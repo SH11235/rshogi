@@ -13,6 +13,7 @@ use crate::search::SearchResult;
 /// The search runs asynchronously in a background thread, and the caller
 /// can poll for results without blocking. This allows the Engine lock to be
 /// released immediately after starting the search, enabling concurrent operations.
+#[must_use = "SearchSession should be stored and polled for results"]
 pub struct SearchSession {
     /// Unique identifier for this search session
     session_id: u64,
