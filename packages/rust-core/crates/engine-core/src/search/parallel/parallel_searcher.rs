@@ -991,23 +991,28 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let pre_ext_stop = ext_stop.load(Ordering::Acquire);
             let pre_shared_stop = self.shared_state.should_stop();
             let pre_queues_closed = self.shared_state.work_queues_closed();
+            let needs_rewire = !Arc::ptr_eq(&self.shared_state.stop_flag, &ext_stop);
             self.emit_info_string(
                 &limits,
                 format!(
-                    "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={}",
-                    limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed
+                    "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={} needs_rewire={}",
+                    limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed, needs_rewire as u8
                 ),
             );
 
-            // IMPORTANT: Ensure ext_stop is false before creating new session
+            // IMPORTANT: Ensure ext_stop is false before resetting
             ext_stop.store(false, Ordering::Release);
 
-            // Recreate shared_state with the provided stop flag so that all workers
-            // and the TimeManager observe the same flag as the USI layer.
-            self.shared_state =
-                Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
-            // reset() increments generation (from 0 to 1) and clears counters
-            // Note: reset() will also reset stop_flag to false, which is redundant but harmless
+            // Only recreate SharedSearchState if we need to wire a different stop flag
+            // Otherwise, reuse existing SharedSearchState to keep workers alive
+            if needs_rewire {
+                // Recreate shared_state with the provided stop flag
+                self.shared_state =
+                    Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
+            }
+
+            // reset() increments generation and clears counters
+            // This will cause old workers (if any) to exit via generation mismatch
             self.shared_state.reset();
             self.shared_state.reopen_work_queues();
 
