@@ -89,9 +89,12 @@ impl EngineStopBridge {
     }
 
     /// Update only the external stop flag reference (used for non-parallel searches).
+    /// Also resets finalize_claimed to allow bestmove emission for the new session.
     pub fn update_external_stop_flag(&self, external_stop: Option<&Arc<AtomicBool>>) {
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
         *guard = external_stop.map(Arc::downgrade);
+        // Reset finalize_claimed so single-threaded searches can emit bestmove
+        self.inner.finalize_claimed.store(false, Ordering::Release);
     }
 
     /// Clear all handles (call after a search session finishes).
