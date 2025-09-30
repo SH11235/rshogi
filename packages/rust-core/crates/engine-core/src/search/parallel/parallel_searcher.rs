@@ -957,8 +957,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         if let Some(ext_stop) = limits.stop_flag.clone() {
             // Recreate shared_state with the provided stop flag so that all workers
             // and the TimeManager observe the same flag as the USI layer.
+
+            // IMPORTANT: Ensure ext_stop is false before creating new session
+            ext_stop.store(false, Ordering::Release);
+
             self.shared_state =
                 Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
+            // IMPORTANT: reset() increments generation and clears counters for new session
+            // Note: reset() will also reset stop_flag to false, which is correct since
+            // we just ensured ext_stop is false above
+            self.shared_state.reset();
             self.shared_state.reopen_work_queues();
             self.stop_bridge.publish_session(
                 &self.shared_state,
