@@ -486,7 +486,7 @@ mod tests {
         assert!(alpha < beta);
 
         // Verify best_score is within the window (if it's within valid range)
-        if extreme_mate <= SEARCH_INF && extreme_mate >= -SEARCH_INF {
+        if (-SEARCH_INF..=SEARCH_INF).contains(&extreme_mate) {
             assert!(alpha <= extreme_mate && extreme_mate <= beta);
         } else {
             // When best_score exceeds bounds, verify window is at boundary with minimum size
@@ -507,7 +507,7 @@ mod tests {
         assert!(alpha2 < beta2);
 
         // Verify best_score is within the window (if it's within valid range)
-        if extreme_losing <= SEARCH_INF && extreme_losing >= -SEARCH_INF {
+        if (-SEARCH_INF..=SEARCH_INF).contains(&extreme_losing) {
             assert!(alpha2 <= extreme_losing && extreme_losing <= beta2);
         } else {
             // When best_score exceeds bounds, verify window is at boundary with minimum size
@@ -743,8 +743,8 @@ mod tests {
         assert_eq!(hi - lo, MIN_ASPIRATION_WINDOW);
 
         // Window should contain best_score (if possible)
-        if best_score >= -SEARCH_INF + MIN_ASPIRATION_WINDOW / 2
-            && best_score <= SEARCH_INF - MIN_ASPIRATION_WINDOW / 2
+        if (-SEARCH_INF + MIN_ASPIRATION_WINDOW / 2..=SEARCH_INF - MIN_ASPIRATION_WINDOW / 2)
+            .contains(&best_score)
         {
             assert!(lo <= best_score && best_score <= hi);
         }

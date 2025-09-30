@@ -4,8 +4,13 @@
 //! before and after memory barrier optimization.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use engine_core::search::tt::TranspositionTable;
-use engine_core::search::NodeType;
+use engine_core::{
+    search::{
+        tt::{BucketSize, TTStoreArgs, TranspositionTable},
+        NodeType,
+    },
+    Color,
+};
 use rand::{rng, Rng};
 use std::hint::black_box;
 
@@ -33,18 +38,20 @@ fn bench_tt_probe(c: &mut Criterion) {
 
         // Store some entries
         for (i, &hash) in hashes.iter().enumerate().take(store_count) {
-            tt.store(
+            let node_type = match i % 3 {
+                0 => NodeType::Exact,
+                1 => NodeType::LowerBound,
+                _ => NodeType::UpperBound,
+            };
+            tt.store(TTStoreArgs::new(
                 hash,
                 None,
                 (i % 1000) as i16,
                 (i % 500) as i16,
                 (i % 20) as u8,
-                match i % 3 {
-                    0 => NodeType::Exact,
-                    1 => NodeType::LowerBound,
-                    _ => NodeType::UpperBound,
-                },
-            );
+                node_type,
+                Color::Black,
+            ));
         }
 
         // Benchmark probe operations - mix of hits and misses
@@ -55,7 +62,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 let mut idx = 0;
                 b.iter(|| {
                     let hash = hashes[idx % hashes.len()];
-                    let result = tt.probe_entry(hash);
+                    let result = tt.probe_entry(hash, Color::Black);
                     black_box(result);
                     idx += 1;
                 });
@@ -71,7 +78,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 let mut idx = 0;
                 b.iter(|| {
                     let hash = stored_hashes[idx % stored_hashes.len()];
-                    let result = tt.probe_entry(hash);
+                    let result = tt.probe_entry(hash, Color::Black);
                     black_box(result);
                     idx += 1;
                 });
@@ -87,7 +94,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 let mut idx = 0;
                 b.iter(|| {
                     let hash = miss_hashes[idx % miss_hashes.len()];
-                    let result = tt.probe_entry(hash);
+                    let result = tt.probe_entry(hash, Color::Black);
                     black_box(result);
                     idx += 1;
                 });
@@ -108,7 +115,15 @@ fn bench_tt_concurrent(c: &mut Criterion) {
     // Pre-populate with entries
     let hashes = generate_random_hashes(100000);
     for (i, &hash) in hashes.iter().enumerate().take(50000) {
-        tt.store(hash, None, (i % 1000) as i16, (i % 500) as i16, (i % 20) as u8, NodeType::Exact);
+        tt.store(TTStoreArgs::new(
+            hash,
+            None,
+            (i % 1000) as i16,
+            (i % 500) as i16,
+            (i % 20) as u8,
+            NodeType::Exact,
+            Color::Black,
+        ));
     }
 
     // Benchmark single-threaded baseline
@@ -117,7 +132,7 @@ fn bench_tt_concurrent(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..100 {
                 let hash = hashes[idx % hashes.len()];
-                let result = tt.probe_entry(hash);
+                let result = tt.probe_entry(hash, Color::Black);
                 black_box(result);
                 idx += 1;
             }
@@ -137,10 +152,8 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
 
     // Test with different bucket sizes
     let tt_small = TranspositionTable::new(8); // Will use 4-entry buckets
-    let tt_medium =
-        TranspositionTable::new_with_config(16, Some(engine_core::search::tt::BucketSize::Medium));
-    let tt_large =
-        TranspositionTable::new_with_config(64, Some(engine_core::search::tt::BucketSize::Large));
+    let tt_medium = TranspositionTable::new_with_config(16, Some(BucketSize::Medium));
+    let tt_large = TranspositionTable::new_with_config(64, Some(BucketSize::Large));
 
     let test_hashes = generate_random_hashes(10000);
 
@@ -151,9 +164,9 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         let depth = (i % 20) as u8;
         let node_type = NodeType::Exact;
 
-        tt_small.store(hash, None, score, eval, depth, node_type);
-        tt_medium.store(hash, None, score, eval, depth, node_type);
-        tt_large.store(hash, None, score, eval, depth, node_type);
+        tt_small.store(TTStoreArgs::new(hash, None, score, eval, depth, node_type, Color::Black));
+        tt_medium.store(TTStoreArgs::new(hash, None, score, eval, depth, node_type, Color::Black));
+        tt_large.store(TTStoreArgs::new(hash, None, score, eval, depth, node_type, Color::Black));
     }
 
     // Benchmark small buckets (4 entries)
@@ -161,7 +174,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt_small.probe_entry(hash);
+            let result = tt_small.probe_entry(hash, Color::Black);
             black_box(result);
             idx += 1;
         });
@@ -172,7 +185,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt_medium.probe_entry(hash);
+            let result = tt_medium.probe_entry(hash, Color::Black);
             black_box(result);
             idx += 1;
         });
@@ -183,7 +196,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt_large.probe_entry(hash);
+            let result = tt_large.probe_entry(hash, Color::Black);
             black_box(result);
             idx += 1;
         });

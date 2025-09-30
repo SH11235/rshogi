@@ -1,8 +1,13 @@
 //! Benchmark for TTBucket SIMD optimizations
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use engine_core::search::NodeType;
-use engine_core::search::TranspositionTable;
+use engine_core::{
+    search::{
+        tt::{TTStoreArgs, TranspositionTable},
+        NodeType,
+    },
+    Color,
+};
 use rand::Rng;
 use std::hint::black_box;
 
@@ -17,7 +22,7 @@ fn setup_filled_tt(size_mb: usize) -> TranspositionTable {
         let eval = rng.random_range(-500..500);
         let depth = rng.random_range(1..20);
 
-        tt.store(hash, None, score, eval, depth, NodeType::Exact);
+        tt.store(TTStoreArgs::new(hash, None, score, eval, depth, NodeType::Exact, Color::Black));
     }
 
     tt
@@ -39,7 +44,7 @@ fn bench_tt_probe(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt.probe_entry(black_box(hash));
+            let result = tt.probe_entry(black_box(hash), Color::Black);
             idx += 1;
             black_box(result)
         });
@@ -59,9 +64,9 @@ fn bench_tt_store(c: &mut Criterion) {
     for _ in 0..1000 {
         test_data.push((
             rng.random::<u64>(),
-            rng.random_range(-1000..1000),
-            rng.random_range(-500..500),
-            rng.random_range(1..20),
+            rng.random_range(-1000..1000) as i16,
+            rng.random_range(-500..500) as i16,
+            rng.random_range(1..20) as u8,
         ));
     }
 
@@ -69,14 +74,15 @@ fn bench_tt_store(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let (hash, score, eval, depth) = test_data[idx % test_data.len()];
-            tt.store(
+            tt.store(black_box(TTStoreArgs::new(
                 black_box(hash),
                 None,
                 black_box(score),
                 black_box(eval),
                 black_box(depth),
                 NodeType::Exact,
-            );
+                Color::Black,
+            )));
             idx += 1;
         });
     });
@@ -107,16 +113,17 @@ fn bench_tt_parallel(c: &mut Criterion) {
 
                                 // Mix of probes and stores
                                 if rng.random::<bool>() {
-                                    let _ = tt_clone.probe_entry(hash);
+                                    let _ = tt_clone.probe_entry(hash, Color::Black);
                                 } else {
-                                    tt_clone.store(
+                                    tt_clone.store(TTStoreArgs::new(
                                         hash,
                                         None,
-                                        rng.random_range(-1000..1000),
-                                        rng.random_range(-500..500),
-                                        rng.random_range(1..20),
+                                        rng.random_range(-1000..1000) as i16,
+                                        rng.random_range(-500..500) as i16,
+                                        rng.random_range(1..20) as u8,
                                         NodeType::Exact,
-                                    );
+                                        Color::Black,
+                                    ));
                                 }
                             }
                         });

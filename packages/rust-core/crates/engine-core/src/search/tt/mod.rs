@@ -1104,6 +1104,58 @@ impl TTProbe for TranspositionTable {
     }
 }
 
+// --- Integrated PV reconstruction (moved from pv_reconstruction.rs) ---
+pub trait TTProbe {
+    fn probe(&self, hash: u64, side_to_move: Color) -> Option<TTEntry>;
+}
+
+/// Generic PV reconstruction from transposition table
+pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth: u8) -> Vec<Move> {
+    use crate::movegen::MoveGenerator;
+    use crate::search::NodeType;
+    use std::collections::HashSet;
+
+    let mut pv = Vec::new();
+    let mut visited: HashSet<u64> = HashSet::new();
+    let max_len = max_depth.min(crate::search::constants::MAX_PLY as u8) as usize;
+
+    for _ in 0..max_len {
+        let hash = pos.zobrist_hash;
+        if !visited.insert(hash) {
+            break;
+        }
+        let entry = match tt.probe(hash, pos.side_to_move) {
+            Some(e) if e.matches(hash) => e,
+            _ => break,
+        };
+        if entry.node_type() != NodeType::Exact {
+            break;
+        }
+        const MIN_DEPTH_FOR_PV_TRUST: u8 = 4;
+        if entry.depth() < MIN_DEPTH_FOR_PV_TRUST && !pv.is_empty() {
+            break;
+        }
+        let Some(best) = entry.get_move() else { break };
+        let mg = MoveGenerator::new();
+        let Ok(legals) = mg.generate_all(pos) else {
+            break;
+        };
+        let Some(found) = legals.as_slice().iter().find(|m| m.equals_without_piece_type(&best))
+        else {
+            break;
+        };
+        let mv = *found;
+        pv.push(mv);
+        let _undo = pos.do_move(mv);
+        // terminal check
+        let mg2 = MoveGenerator::new();
+        if mg2.generate_all(pos).map(|v| v.is_empty()).unwrap_or(true) {
+            break;
+        }
+    }
+    pv
+}
+
 #[cfg(test)]
 mod pv_reconstruction_tests {
     use super::*;
@@ -1457,58 +1509,4 @@ mod pv_reconstruction_tests {
         // Compare USI strings since TT loses piece type info
         assert_eq!(move_to_usi(&pv[0]), "7g7f", "PV should contain the first legal move");
     }
-}
-
-// Helper functions and additional implementations are in utils.rs
-
-// --- Integrated PV reconstruction (moved from pv_reconstruction.rs) ---
-pub trait TTProbe {
-    fn probe(&self, hash: u64, side_to_move: Color) -> Option<TTEntry>;
-}
-
-/// Generic PV reconstruction from transposition table
-pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth: u8) -> Vec<Move> {
-    use crate::movegen::MoveGenerator;
-    use crate::search::NodeType;
-    use std::collections::HashSet;
-
-    let mut pv = Vec::new();
-    let mut visited: HashSet<u64> = HashSet::new();
-    let max_len = max_depth.min(crate::search::constants::MAX_PLY as u8) as usize;
-
-    for _ in 0..max_len {
-        let hash = pos.zobrist_hash;
-        if !visited.insert(hash) {
-            break;
-        }
-        let entry = match tt.probe(hash, pos.side_to_move) {
-            Some(e) if e.matches(hash) => e,
-            _ => break,
-        };
-        if entry.node_type() != NodeType::Exact {
-            break;
-        }
-        const MIN_DEPTH_FOR_PV_TRUST: u8 = 4;
-        if entry.depth() < MIN_DEPTH_FOR_PV_TRUST && !pv.is_empty() {
-            break;
-        }
-        let Some(best) = entry.get_move() else { break };
-        let mg = MoveGenerator::new();
-        let Ok(legals) = mg.generate_all(pos) else {
-            break;
-        };
-        let Some(found) = legals.as_slice().iter().find(|m| m.equals_without_piece_type(&best))
-        else {
-            break;
-        };
-        let mv = *found;
-        pv.push(mv);
-        let _undo = pos.do_move(mv);
-        // terminal check
-        let mg2 = MoveGenerator::new();
-        if mg2.generate_all(pos).map(|v| v.is_empty()).unwrap_or(true) {
-            break;
-        }
-    }
-    pv
 }
