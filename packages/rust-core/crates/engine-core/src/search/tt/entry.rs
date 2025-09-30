@@ -17,6 +17,7 @@ pub struct TTEntryParams {
     pub node_type: NodeType,
     pub age: u8,
     pub is_pv: bool,
+    pub side_to_move: crate::Color,
     // Extended flags (optional)
     pub singular_extension: bool,
     pub null_move: bool,
@@ -35,6 +36,7 @@ impl Default for TTEntryParams {
             node_type: NodeType::Exact,
             age: 0,
             is_pv: false,
+            side_to_move: crate::Color::Black,
             singular_extension: false,
             null_move: false,
             tt_move_tried: false,

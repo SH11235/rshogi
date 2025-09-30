@@ -304,7 +304,7 @@ where
     // Probe transposition table
     let hash = pos.zobrist_hash;
     if USE_TT {
-        if let Some(tt_entry) = searcher.probe_tt(hash) {
+        if let Some(tt_entry) = searcher.probe_tt(hash, pos.side_to_move) {
             // Verify key match before using entry
             if tt_entry.matches(hash) {
                 // Count TT hit for observability
