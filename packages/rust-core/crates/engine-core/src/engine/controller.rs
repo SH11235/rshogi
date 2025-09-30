@@ -694,7 +694,7 @@ impl Engine {
                 }
             };
             if guard.is_none() {
-                eprintln!("info string controller_create_searcher reason=guard_is_none");
+                println!("info string controller_create_searcher reason=guard_is_none");
                 let nnue_proxy = NNUEEvaluatorProxy {
                     evaluator: nnue_evaluator,
                     locals: thread_local::ThreadLocal::new(),
@@ -706,25 +706,33 @@ impl Engine {
                     args.stop_bridge.clone(),
                 ));
             } else {
-                eprintln!("info string controller_reuse_searcher guard_has_existing=1");
+                println!("info string controller_reuse_searcher guard_has_existing=1");
             }
-            guard.take().expect("searcher must be Some after initialization")
+            let searcher = guard.take().expect("searcher must be Some after initialization");
+            println!(
+                "info string controller_took_searcher addr=0x{:x}",
+                &searcher as *const _ as usize
+            );
+            searcher
         }; // Lock released here
 
         // Search without holding Mutex
+        println!("info string controller_before_adjust_threads target={}", args.active_threads);
         searcher.adjust_thread_count(args.active_threads);
+        println!("info string controller_before_search sid={}", limits.session_id);
         let result = searcher.search(pos, limits);
+        println!("info string controller_after_search nodes={}", result.stats.nodes);
 
         // Put searcher back (best effort - if fails, next search will recreate)
         if let Ok(mut guard) = nnue_parallel_searcher.lock() {
             if guard.is_none() {
-                eprintln!("info string controller_return_searcher status=success");
+                println!("info string controller_return_searcher status=success");
                 *guard = Some(searcher);
             } else {
-                eprintln!("info string controller_return_searcher status=already_filled");
+                println!("info string controller_return_searcher status=already_filled");
             }
         } else {
-            eprintln!("info string controller_return_searcher status=lock_failed");
+            println!("info string controller_return_searcher status=lock_failed");
         }
 
         result
