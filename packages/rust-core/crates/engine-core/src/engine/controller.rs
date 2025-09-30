@@ -1638,8 +1638,6 @@ mod tests {
 
     #[test]
     fn test_game_phase_detection() {
-        let engine = Engine::new(EngineType::Material);
-
         // Opening phase (by move count)
         let mut pos = Position::startpos();
         assert_eq!(detect_game_phase(&pos, pos.ply as u32, Profile::Search), GamePhase::Opening);
@@ -1846,8 +1844,6 @@ mod tests {
 
     #[test]
     fn test_game_phase_edge_cases() {
-        let engine = Engine::new(EngineType::Material);
-
         // Test 1: Empty board except kings
         let mut pos = Position::empty();
         pos.board.put_piece(
