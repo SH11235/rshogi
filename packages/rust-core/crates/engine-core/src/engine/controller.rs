@@ -705,8 +705,8 @@ impl Engine {
                     args.stop_bridge.clone(),
                 ));
             }
-            let searcher = guard.take().expect("searcher must be Some after initialization");
-            searcher
+            
+            guard.take().expect("searcher must be Some after initialization")
         }; // Lock released here
 
         // Search without holding Mutex
