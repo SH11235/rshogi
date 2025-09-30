@@ -108,7 +108,7 @@ fn main() -> Result<()> {
 
                     // Reset state before notifying idle
                     state.searching = false;
-                    state.stop_flag = None;
+                    // Keep stop_flag for reuse in next session (don't set to None)
                     state.ponder_hit_flag = None;
                     state.current_time_control = None;
                 }
