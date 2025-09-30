@@ -1007,8 +1007,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Otherwise, reuse existing SharedSearchState to keep workers alive
             if needs_rewire {
                 // Recreate shared_state with the provided stop flag
-                self.shared_state =
-                    Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
+                self.shared_state = Arc::new(SharedSearchState::with_threads(
+                    Arc::clone(&ext_stop),
+                    self.num_threads,
+                ));
             }
 
             // reset() increments generation and clears counters

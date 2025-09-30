@@ -145,7 +145,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if let Some(result) = finalize_candidate {
                     info_string(format!("oob_finalize_joined label={}", label));
                     state.searching = false;
-                    state.stop_flag = None;
+                    // Keep stop_flag for reuse in next session (don't set to None)
                     state.ponder_hit_flag = None;
                     state.search_session = None;
                     let stale = state
@@ -179,7 +179,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 /// Fast finalize without waiting for result (SearchSession will clean up automatically)
 fn fast_finalize_no_detach(state: &mut EngineState, label: &str) {
     state.searching = false;
-    state.stop_flag = None;
+    // Keep stop_flag for reuse in next session (don't set to None)
     state.ponder_hit_flag = None;
     state.search_session = None;
     finalize_and_send_fast(state, label);

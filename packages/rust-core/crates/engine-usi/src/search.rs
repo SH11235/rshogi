@@ -253,7 +253,14 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         return Ok(());
     }
 
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    // Reuse existing stop_flag to allow ParallelSearcher to detect rewiring needs
+    // Reset the flag value if reusing
+    let stop_flag = if let Some(existing) = &state.stop_flag {
+        existing.store(false, std::sync::atomic::Ordering::Release);
+        Arc::clone(existing)
+    } else {
+        Arc::new(AtomicBool::new(false))
+    };
     let ponder_flag = if state.opts.ponder {
         Some(Arc::new(AtomicBool::new(false)))
     } else {
@@ -446,7 +453,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
             TryResult::Ok(result) => {
                 // Search completed, clean up state
                 state.searching = false;
-                state.stop_flag = None;
+                // Keep stop_flag for reuse in next session (don't set to None)
                 state.ponder_hit_flag = None;
                 state.search_session = None;
                 state.notify_idle();
@@ -526,7 +533,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 ));
 
                 state.searching = false;
-                state.stop_flag = None;
+                // Keep stop_flag for reuse in next session (don't set to None)
                 state.ponder_hit_flag = None;
                 state.search_session = None;
                 state.current_time_control = None;
