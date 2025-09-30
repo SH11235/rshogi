@@ -705,7 +705,7 @@ impl Engine {
                     args.stop_bridge.clone(),
                 ));
             }
-            
+
             guard.take().expect("searcher must be Some after initialization")
         }; // Lock released here
 
