@@ -1006,7 +1006,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
 
             // reset() increments generation and clears counters
-            self.shared_state.reset();
+            // Pass session_id to ensure snapshot uses correct session ID
+            self.shared_state.reset(limits.session_id);
             self.shared_state.reopen_work_queues();
 
             // Log post-reset state
@@ -1044,7 +1045,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             );
 
             // Ensure clean state when no external flag is provided.
-            self.shared_state.reset();
+            // Pass session_id to ensure snapshot uses correct session ID
+            self.shared_state.reset(limits.session_id);
             self.shared_state.reopen_work_queues();
 
             // Log post-reset state
@@ -1359,7 +1361,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let fallback_deadlines = limits.fallback_deadlines;
 
         // Publish an initial minimal snapshot so USI can fast-finalize immediately if needed
-        self.shared_state.publish_minimal_snapshot(position.zobrist_hash(), 0);
+        self.shared_state
+            .publish_minimal_snapshot(limits.session_id, position.zobrist_hash(), 0);
 
         // Heartbeat tracking for periodic info callbacks
         let mut last_heartbeat = Instant::now();
@@ -1460,6 +1463,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     return self.finalize_time_limit(
                         position,
                         action,
+                        limits.session_id,
                         limits.info_string_callback.as_ref(),
                     );
                 }
@@ -1476,6 +1480,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         return self.finalize_time_limit(
                             position,
                             action,
+                            limits.session_id,
                             limits.info_string_callback.as_ref(),
                         );
                     }
@@ -1653,13 +1658,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     if let Some(bm) = best_result.best_move {
                         commit_pv.push(bm);
                     } else if let Some(prev) = self.shared_state.snapshot.try_read() {
-                        if prev.search_id == self.shared_state.generation() && !prev.pv.is_empty() {
+                        // IMPORTANT: Only reuse PV from the same session, not previous generation
+                        if prev.search_id == limits.session_id && !prev.pv.is_empty() {
                             commit_pv = prev.pv;
                         }
                     }
                 }
                 let snap = RootSnapshot {
-                    search_id: self.shared_state.generation(),
+                    // IMPORTANT: Use session_id (not generation) to identify snapshot
+                    search_id: limits.session_id,
                     root_key: position.zobrist_hash(),
                     best: best_result.best_move,
                     pv: commit_pv,
@@ -1671,8 +1678,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 self.emit_info_string(
                     &limits,
                     format!(
-                        "snapshot_publish kind=pv_commit sid={} root_key={:016x} depth={} nodes={} pv_len={}",
+                        "snapshot_publish kind=pv_commit sid={} gen={} root_key={:016x} depth={} nodes={} pv_len={}",
                         snap.search_id,
+                        self.shared_state.generation(),
                         snap.root_key,
                         snap.depth,
                         snap.nodes,
@@ -1695,7 +1703,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             self.emit_info_string(
                                 &limits,
                                 format!(
-                                    "snapshot_warn_pv_head_mismatch=1 sid={} best={} pv0={}",
+                                    "snapshot_warn_pv_head_mismatch=1 sid={} gen={} best={} pv0={}",
+                                    limits.session_id,
                                     self.shared_state.generation(),
                                     b_usi,
                                     pv0_usi
@@ -1708,14 +1717,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 self.emit_info_string(
                     &limits,
                     format!(
-                        "snapshot_publish kind=min_preserve sid={} root_key={:016x} elapsed_ms={}",
+                        "snapshot_publish kind=min_preserve sid={} gen={} root_key={:016x} elapsed_ms={}",
+                        limits.session_id,
                         self.shared_state.generation(),
                         position.zobrist_hash(),
                         elapsed_ms
                     ),
                 );
-                self.shared_state
-                    .publish_minimal_snapshot_preserve_pv(position.zobrist_hash(), elapsed_ms);
+                self.shared_state.publish_minimal_snapshot_preserve_pv(
+                    limits.session_id,
+                    position.zobrist_hash(),
+                    elapsed_ms,
+                );
             }
 
             // SearchThread internally handles node counting and reporting to shared_state
@@ -1806,6 +1819,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     return self.finalize_time_limit(
                         position,
                         action,
+                        limits.session_id,
                         limits.info_string_callback.as_ref(),
                     );
                 }
@@ -1844,10 +1858,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         &self,
         position: &mut Position,
         params: TimeLimitFinalization,
+        session_id: u64,
         info_cb: Option<&InfoStringCallback>,
     ) -> SearchResult {
         // Publish a minimal snapshot before stopping so that USI fast path can read it
         self.shared_state.publish_minimal_snapshot_preserve_pv(
+            session_id,
             position.zobrist_hash(),
             params.elapsed_ms as u32,
         );
@@ -2320,7 +2336,7 @@ mod tests_assess_time_and_finalize {
             label: "unit_test".to_string(),
         };
 
-        let _ = searcher.finalize_time_limit(&mut pos, params, None);
+        let _ = searcher.finalize_time_limit(&mut pos, params, 1, None); // session_id=1 for test
         assert!(searcher.shared_state.is_finalized_early());
         let info = searcher.shared_state.stop_info.get().cloned().expect("stop info set");
         assert!(matches!(info.reason, TerminationReason::TimeLimit));

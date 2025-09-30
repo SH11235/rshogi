@@ -60,6 +60,10 @@ fn test_parallel_search_node_counting() {
     let limits = SearchLimits::builder().depth(5).build();
 
     let result = engine.search(&mut pos, limits.clone());
+    eprintln!(
+        "First search completed: best_move={:?}, nodes={}, elapsed={:?}",
+        result.best_move, result.stats.nodes, result.stats.elapsed
+    );
 
     // Check that node count is reasonable
     assert!(result.stats.nodes > 100, "Should search many nodes at depth 5");
@@ -69,10 +73,16 @@ fn test_parallel_search_node_counting() {
     let nodes1 = result.stats.nodes;
 
     // Reset TT so the second search isn't affected by warmed entries and remains comparable.
+    eprintln!("Calling clear_hash before second search");
     engine.clear_hash();
     pos = Position::startpos();
 
+    eprintln!("Starting second search");
     let result2 = engine.search(&mut pos, limits.clone());
+    eprintln!(
+        "Second search completed: best_move={:?}, nodes={}, elapsed={:?}",
+        result2.best_move, result2.stats.nodes, result2.stats.elapsed
+    );
     let nodes2 = result2.stats.nodes;
 
     // Node counts should be similar (within 2x) for same position/depth

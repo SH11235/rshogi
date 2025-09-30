@@ -306,13 +306,13 @@ mod tests {
         // Prefetch multiple entries based on distance
         for i in 0..distance {
             let hash = pos.zobrist_hash() ^ (i as u64);
-            tt.prefetch_l1(hash);
+            tt.prefetch_l1(hash, pos.side_to_move);
         }
 
         // Record hits and misses
         for i in 0..distance {
             let hash = pos.zobrist_hash() ^ (i as u64);
-            if tt.probe_entry(hash).is_some() {
+            if tt.probe_entry(hash, pos.side_to_move).is_some() {
                 prefetcher.record_hit();
             } else {
                 prefetcher.record_miss();

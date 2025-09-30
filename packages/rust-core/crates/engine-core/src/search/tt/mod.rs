@@ -276,11 +276,10 @@ impl TranspositionTable {
     /// Get bucket index from hash
     #[inline(always)]
     fn bucket_index(&self, hash: u64, side_to_move: Color) -> usize {
-        // Use fast masking since num_buckets is always power of 2
-        let idx = (hash as usize) & (self.num_buckets - 1);
-        // Force LSB to match side_to_move for separation (YaneuraOu approach)
-        // This ensures different turn positions go to different buckets
-        (idx & !1) | (side_to_move as usize)
+        // YaneuraOu approach: Mix side_to_move into hash before indexing
+        // This separates positions that differ only in turn without biasing distribution
+        let adjusted_hash = (hash >> 1) ^ (side_to_move as u64);
+        (adjusted_hash as usize) & (self.num_buckets - 1)
     }
 
     /// Mark bucket as occupied in bitmap
@@ -1082,7 +1081,7 @@ mod pv_reconstruction_tests {
             50,
             10,
             NodeType::Exact,
-            Color::Black,
+            pos.side_to_move,
         ));
 
         // Verify the entry was stored
@@ -1140,17 +1139,41 @@ mod pv_reconstruction_tests {
 
         // Store some entries in TT
         let hash1 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash1, Some(move1), 100, 50, 10, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(
+            hash1,
+            Some(move1),
+            100,
+            50,
+            10,
+            NodeType::Exact,
+            pos.side_to_move,
+        ));
 
         // Make move1
         let undo1 = pos.do_move(move1);
         let hash2 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash2, Some(move2), -50, -25, 9, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(
+            hash2,
+            Some(move2),
+            -50,
+            -25,
+            9,
+            NodeType::Exact,
+            pos.side_to_move,
+        ));
 
         // Make move2
         let undo2 = pos.do_move(move2);
         let hash3 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash3, Some(move3), 25, 20, 8, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(
+            hash3,
+            Some(move3),
+            25,
+            20,
+            8,
+            NodeType::Exact,
+            pos.side_to_move,
+        ));
 
         // Undo moves to get back to root
         pos.undo_move(move2, undo2);
@@ -1206,7 +1229,15 @@ mod pv_reconstruction_tests {
 
         // Store first move as EXACT
         let hash1 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash1, Some(move1), 100, 50, 10, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(
+            hash1,
+            Some(move1),
+            100,
+            50,
+            10,
+            NodeType::Exact,
+            pos.side_to_move,
+        ));
 
         // Make move1
         let undo1 = pos.do_move(move1);
@@ -1220,7 +1251,7 @@ mod pv_reconstruction_tests {
             -25,
             9,
             NodeType::LowerBound,
-            Color::Black,
+            pos.side_to_move,
         ));
 
         // Undo to root
@@ -1266,19 +1297,27 @@ mod pv_reconstruction_tests {
 
         // Store entries that would create a cycle
         let hash1 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash1, Some(move1), 0, 0, 10, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(
+            hash1,
+            Some(move1),
+            0,
+            0,
+            10,
+            NodeType::Exact,
+            pos.side_to_move,
+        ));
 
         let undo1 = pos.do_move(move1);
         let hash2 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash2, Some(move2), 0, 0, 9, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(hash2, Some(move2), 0, 0, 9, NodeType::Exact, pos.side_to_move));
 
         let undo2 = pos.do_move(move2);
         let hash3 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash3, Some(move3), 0, 0, 8, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(hash3, Some(move3), 0, 0, 8, NodeType::Exact, pos.side_to_move));
 
         let undo3 = pos.do_move(move3);
         let hash4 = pos.zobrist_hash;
-        tt.store(TTStoreArgs::new(hash4, Some(move4), 0, 0, 7, NodeType::Exact, Color::Black));
+        tt.store(TTStoreArgs::new(hash4, Some(move4), 0, 0, 7, NodeType::Exact, pos.side_to_move));
 
         // Make move4 to complete the cycle
         let undo4 = pos.do_move(move4);
@@ -1291,7 +1330,7 @@ mod pv_reconstruction_tests {
             0,
             6,
             NodeType::Exact,
-            Color::Black,
+            pos.side_to_move,
         ));
 
         // Undo all moves to get back to start

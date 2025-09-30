@@ -7,6 +7,7 @@ use crate::search::NodeType;
 use crate::search::TranspositionTable;
 use crate::shogi::{Move, Square};
 use crate::usi::{parse_usi_move, parse_usi_square};
+use crate::Color;
 use crate::Position;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -114,21 +115,22 @@ fn test_tt_move_validation_in_search() {
     // Store an invalid move in TT
     let invalid_move = parse_usi_move("4b5b").expect("Valid USI move");
     if let Some(ref tt) = searcher.tt {
-        tt.store(
+        tt.store(crate::search::tt::TTStoreArgs::new(
             pos.zobrist_hash,
             Some(invalid_move),
-            100, // score
-            0,   // eval
-            10,  // depth
+            100,
+            0,
+            10,
             NodeType::Exact,
-        );
+            Color::Black,
+        ));
     }
 
     // The search should validate the TT move and reject it
     // This is tested implicitly through the move ordering logic
 
     // Verify TT entry exists but move would be invalid
-    let tt_entry = searcher.probe_tt(pos.zobrist_hash);
+    let tt_entry = searcher.probe_tt(pos.zobrist_hash, Color::Black);
     assert!(tt_entry.is_some(), "TT entry should exist");
 
     // The move validation happens in the search when legal moves are generated
@@ -205,11 +207,19 @@ fn test_hash_collision_move_validation() {
 
     if let Some(ref tt) = searcher.tt {
         // Store with pos2's hash but pos1's move
-        tt.store(pos2.zobrist_hash, Some(move_7g7f), 50, 0, 5, NodeType::Exact);
+        tt.store(crate::search::tt::TTStoreArgs::new(
+            pos2.zobrist_hash,
+            Some(move_7g7f),
+            50,
+            0,
+            5,
+            NodeType::Exact,
+            Color::Black,
+        ));
     }
 
     // When retrieving from TT for pos2, the move should be validated
-    let tt_entry = searcher.probe_tt(pos2.zobrist_hash);
+    let tt_entry = searcher.probe_tt(pos2.zobrist_hash, Color::Black);
     if let Some(entry) = tt_entry {
         if let Some(tt_move) = entry.get_move() {
             // The move validation happens when it's used in search

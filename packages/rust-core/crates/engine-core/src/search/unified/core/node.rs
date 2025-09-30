@@ -956,7 +956,7 @@ mod tests {
 
         // Simulate beta cutoff by setting exact cut flag
         if let Some(ref tt) = searcher.tt {
-            tt.set_exact_cut(hash);
+            tt.set_exact_cut(hash, crate::Color::Black); // 側は startpos の初期手番を仮定
         }
 
         // Reset node count
