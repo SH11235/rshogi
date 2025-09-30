@@ -954,19 +954,33 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Wire external stop_flag (from USI) into SharedSearchState for this search session.
         // Without this, GUI-issued `stop` does not propagate to parallel workers,
         // and the frontend may time out and fall back to fast finalize.
+
+        // IMPORTANT: Only create SharedSearchState with ext_stop on first search.
+        // For subsequent searches, reuse the existing SharedSearchState and reset it.
         if let Some(ext_stop) = limits.stop_flag.clone() {
-            // Recreate shared_state with the provided stop flag so that all workers
-            // and the TimeManager observe the same flag as the USI layer.
+            // Check if this is the first search (generation == 0) or if we need to wire ext_stop
+            // We detect first search by checking if shared_state.stop_flag is the same as ext_stop
+            let needs_rewire = !Arc::ptr_eq(&self.shared_state.stop_flag, &ext_stop);
 
-            // IMPORTANT: Ensure ext_stop is false before creating new session
-            ext_stop.store(false, Ordering::Release);
+            if needs_rewire {
+                // First search with ext_stop: create new SharedSearchState
+                // IMPORTANT: Ensure ext_stop is false before creating new session
+                ext_stop.store(false, Ordering::Release);
 
-            self.shared_state =
-                Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
-            // IMPORTANT: reset() increments generation and clears counters for new session
-            // Note: reset() will also reset stop_flag to false, which is correct since
-            // we just ensured ext_stop is false above
-            self.shared_state.reset();
+                self.shared_state = Arc::new(SharedSearchState::with_threads(
+                    Arc::clone(&ext_stop),
+                    self.num_threads,
+                ));
+                // reset() increments generation and clears counters
+                self.shared_state.reset();
+            } else {
+                // Subsequent search: reuse existing SharedSearchState
+                // IMPORTANT: Clear ext_stop before reset to ensure clean state
+                ext_stop.store(false, Ordering::Release);
+                // reset() increments generation and clears counters (including stop_flag)
+                self.shared_state.reset();
+            }
+
             self.shared_state.reopen_work_queues();
             self.stop_bridge.publish_session(
                 &self.shared_state,
