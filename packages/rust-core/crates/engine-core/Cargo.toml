@@ -2,6 +2,7 @@
 name = "engine-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.90.0"
 
 [features]
 # Default features
@@ -26,6 +27,15 @@ nnue_telemetry = []
 nnue_fast_fma = []
 # 差分集計をHashMapで行うA/B用（デフォルトは線形マップ）
 diff_agg_hash = []
+# 追加診断ログ（near-deadline/short-circuit の1回限りINFOなど）
+diagnostics = []
+
+# Quiescence-search checking-moves policy compile-time overrides
+# - qs_checks_force_off: disable checking moves in QS regardless of env/USI option
+# - qs_checks_force_on:  enable checking moves in QS regardless of env/USI option
+# If neither is set, runtime env var SHOGI_QS_DISABLE_CHECKS controls it (USI option QSearchChecks).
+qs_checks_force_off = []
+qs_checks_force_on = []
 
 [dependencies]
 serde = { workspace = true }

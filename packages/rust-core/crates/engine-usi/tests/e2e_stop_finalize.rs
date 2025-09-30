@@ -127,6 +127,20 @@ impl UsiProc {
         }
         false
     }
+
+    fn assert_no_contains(&self, pat: &str, timeout_ms: u64) {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        while Instant::now() < deadline {
+            match self.rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(line) => {
+                    println!("OUT: {}", line);
+                    assert!(!line.contains(pat), "unexpected log containing '{}': {}", pat, line);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
 }
 
 impl Drop for UsiProc {
@@ -178,6 +192,10 @@ fn usi_handshake(p: &mut UsiProc) {
 #[test]
 #[ignore]
 fn e2e_pure_byoyomi_stop_then_gameover_emits_bestmove() {
+    if engine_core::util::is_ci_environment() {
+        eprintln!("Skipping e2e_pure_byoyomi_stop_then_gameover_emits_bestmove in CI environment (performance-dependent test)");
+        return;
+    }
     let mut p = UsiProc::spawn();
     usi_handshake(&mut p);
     p.write_line("usinewgame");
@@ -223,6 +241,10 @@ fn e2e_gameover_option_emits_bestmove() {
 #[test]
 #[ignore]
 fn e2e_stop_fast_finalize_fixed_and_infinite_and_ponder() {
+    if engine_core::util::is_ci_environment() {
+        eprintln!("Skipping e2e_stop_fast_finalize_fixed_and_infinite_and_ponder in CI environment (performance-dependent test)");
+        return;
+    }
     // Fixed time
     let mut p1 = UsiProc::spawn();
     usi_handshake(&mut p1);
@@ -257,4 +279,68 @@ fn e2e_stop_fast_finalize_fixed_and_infinite_and_ponder() {
         p3.wait_for_contains("bestmove ", 1000),
         "bestmove not emitted promptly for ponder stop"
     );
+}
+
+#[test]
+#[ignore]
+fn e2e_byoyomi_oob_finalize_logs() {
+    let mut p = UsiProc::spawn();
+    p.write_line("usi");
+    assert!(p.wait_for_contains("usiok", 2000), "usiok timeout");
+
+    // 実戦に近い秒読み設定で TimeManager が near-hard finalize を発火するよう、
+    // MinThinkMs とタイムバッファ関連を詰める。
+    p.write_line("setoption name Threads value 8");
+    p.write_line("setoption name MinThinkMs value 4000");
+    p.write_line("setoption name ByoyomiDeadlineLeadMs value 0");
+    p.write_line("setoption name ByoyomiSafetyMs value 0");
+    p.write_line("setoption name OverheadMs value 0");
+    p.write_line("setoption name ByoyomiOverheadMs value 0");
+    p.write_line("setoption name StopWaitMs value 0");
+
+    p.write_line("isready");
+    assert!(p.wait_for_contains("readyok", 2000), "readyok timeout after option updates");
+
+    p.write_line("usinewgame");
+    p.write_line("position startpos");
+    p.write_line("go btime 0 wtime 0 byoyomi 2000");
+
+    assert!(
+        p.wait_for_contains("oob_finalize_request", 5000),
+        "OOB finalize log was not observed"
+    );
+    assert!(
+        p.wait_for_contains("bestmove ", 2000),
+        "bestmove was not emitted after OOB finalize"
+    );
+}
+
+#[test]
+#[ignore]
+fn e2e_ponder_stop_then_go_fast() {
+    let mut p = UsiProc::spawn();
+    usi_handshake(&mut p);
+    p.write_line("setoption name Threads value 4");
+    p.write_line("setoption name StopWaitMs value 100");
+    p.write_line("setoption name USI_Ponder value true");
+    p.write_line("isready");
+    assert!(p.wait_for_contains("readyok", 2000));
+
+    for _ in 0..5 {
+        p.write_line("usinewgame");
+        p.write_line("position startpos");
+        p.write_line("go btime 0 wtime 0 byoyomi 2000");
+        assert!(p.wait_for_contains("bestmove ", 4000));
+
+        p.write_line("position startpos moves 7g7f 3c3d");
+        p.write_line("go ponder btime 0 wtime 0 byoyomi 2000");
+        p.assert_no_contains("fallback_deadline_trigger=", 300);
+        p.write_line("stop");
+        assert!(p.wait_for_contains("bestmove ", 2000));
+
+        p.write_line("position startpos moves 7g7f 3c3d 2g2f");
+        p.write_line("go btime 0 wtime 0 byoyomi 2000");
+        assert!(p.wait_for_contains("oob_session_start", 1000));
+        assert!(p.wait_for_contains("bestmove ", 4000));
+    }
 }

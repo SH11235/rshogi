@@ -5,11 +5,11 @@
 #[cfg(feature = "ybwc")]
 use crate::shogi::Position;
 use crate::{
-    search::types::TerminationReason,
     shogi::{Move, PieceType, Square},
     Color,
 };
 use crossbeam_utils::CachePadded;
+use smallvec::SmallVec;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
@@ -443,6 +443,7 @@ impl SharedHistory {
 }
 
 use crate::search::common::SharedStopInfo;
+use crate::search::snapshot::{RootSnapshot, RootSnapshotPublisher};
 
 /// Shared search state for parallel threads
 pub struct SharedSearchState {
@@ -485,6 +486,15 @@ pub struct SharedSearchState {
 
     /// Total number of threads
     pub total_threads: usize,
+
+    /// Whether the search finalized early (for skipping worker joins)
+    finalized_early: AtomicBool,
+
+    /// Flag to prevent new work from being enqueued once stop is requested
+    work_closed: AtomicBool,
+
+    /// Root snapshot publisher for out-of-band finalize (read-only on USI side)
+    pub snapshot: Arc<RootSnapshotPublisher>,
 }
 
 impl SharedSearchState {
@@ -510,6 +520,9 @@ impl SharedSearchState {
             split_point_manager: Arc::new(SplitPointManager::new()),
             active_threads: AtomicUsize::new(0),
             total_threads: num_threads,
+            finalized_early: AtomicBool::new(false),
+            work_closed: AtomicBool::new(false),
+            snapshot: Arc::new(RootSnapshotPublisher::new()),
         }
     }
 
@@ -527,6 +540,57 @@ impl SharedSearchState {
         #[cfg(feature = "ybwc")]
         self.split_point_manager.clear();
         self.active_threads.store(0, Ordering::Relaxed);
+        self.finalized_early.store(false, Ordering::Release);
+        self.work_closed.store(false, Ordering::Release);
+        // Reset snapshot to a clean default for the new generation
+        let snap = RootSnapshot {
+            search_id: self.generation(),
+            // 他フィールドは初期化リセット目的でデフォルト (root_key=0, best=None, pv empty 等)
+            ..Default::default()
+        };
+        self.snapshot.publish(&snap);
+    }
+
+    /// Get current generation (epoch) for this search state.
+    pub fn generation(&self) -> u64 {
+        self.current_generation.load(Ordering::Acquire)
+    }
+
+    /// Publish a minimal snapshot from current shared state (best/depth/score/nodes only)
+    pub fn publish_minimal_snapshot(&self, root_key: u64, elapsed_ms: u32) {
+        let snap = RootSnapshot {
+            search_id: self.generation(),
+            root_key,
+            best: self.get_best_move(),
+            depth: self.get_best_depth(),
+            score_cp: self.get_best_score(),
+            nodes: self.get_nodes(),
+            elapsed_ms,
+            ..Default::default()
+        };
+        self.snapshot.publish(&snap);
+    }
+
+    /// Publish minimal fields while preserving previously published PV if any.
+    /// Only snapshots from the current generation are eligible; cross-generation
+    /// data is discarded to prevent stale PV leakage when a new search begins.
+    pub fn publish_minimal_snapshot_preserve_pv(&self, root_key: u64, elapsed_ms: u32) {
+        let current_generation = self.generation();
+        let preserved_pv = match self.snapshot.try_read() {
+            Some(prev) if prev.search_id == current_generation => prev.pv,
+            _ => SmallVec::new(),
+        };
+        let snap = RootSnapshot {
+            search_id: current_generation,
+            root_key,
+            best: self.get_best_move(),
+            depth: self.get_best_depth(),
+            score_cp: self.get_best_score(),
+            nodes: self.get_nodes(),
+            elapsed_ms,
+            pv: preserved_pv,
+        };
+        self.snapshot.publish(&snap);
     }
 
     /// Try to update best move/score if better (lock-free)
@@ -569,7 +633,7 @@ impl SharedSearchState {
 
     /// Get current best move
     pub fn get_best_move(&self) -> Option<Move> {
-        let encoded = self.best_move.load(Ordering::Relaxed);
+        let encoded = self.best_move.load(Ordering::Acquire);
         if encoded == 0 {
             None
         } else {
@@ -579,12 +643,12 @@ impl SharedSearchState {
 
     /// Get current best score
     pub fn get_best_score(&self) -> i32 {
-        self.best_score.load(Ordering::Relaxed)
+        self.best_score.load(Ordering::Acquire)
     }
 
     /// Get current best depth
     pub fn get_best_depth(&self) -> u8 {
-        self.best_depth.load(Ordering::Relaxed)
+        self.best_depth.load(Ordering::Acquire)
     }
 
     /// Add to node count
@@ -622,27 +686,20 @@ impl SharedSearchState {
         self.stop_flag.store(true, Ordering::Release);
     }
 
-    /// Set stop flag with reason
-    pub fn set_stop_with_reason(
-        &self,
-        reason: TerminationReason,
-        elapsed_ms: u64,
-        nodes: u64,
-        depth: u8,
-        hard_timeout: bool,
-    ) {
-        use crate::search::types::StopInfo;
+    /// Mark search as finalized early (main thread returning without worker join)
+    pub fn mark_finalized_early(&self) {
+        self.finalized_early.store(true, Ordering::Release);
+    }
 
+    /// Check whether search has finalized early.
+    pub fn is_finalized_early(&self) -> bool {
+        self.finalized_early.load(Ordering::Acquire)
+    }
+
+    /// Set stop flag with reason
+    pub fn set_stop_with_reason(&self, stop_info: crate::search::types::StopInfo) {
         // Try to set stop info first (only first call succeeds)
-        self.stop_info.try_set(StopInfo {
-            reason,
-            elapsed_ms,
-            nodes,
-            depth_reached: depth,
-            hard_timeout,
-            soft_limit_ms: 0,
-            hard_limit_ms: 0,
-        });
+        self.stop_info.try_set(stop_info);
 
         // Then set the stop flag
         self.stop_flag.store(true, Ordering::Release);
@@ -651,6 +708,21 @@ impl SharedSearchState {
     /// Reset stop flag (for ensuring clean state)
     pub fn reset_stop_flag(&self) {
         self.stop_flag.store(false, Ordering::Release);
+    }
+
+    /// Close work queues to prevent further enqueues (idempotent)
+    pub fn close_work_queues(&self) {
+        self.work_closed.store(true, Ordering::Release);
+    }
+
+    /// Re-open work queues for a fresh search session
+    pub fn reopen_work_queues(&self) {
+        self.work_closed.store(false, Ordering::Release);
+    }
+
+    /// Check if work queues are closed
+    pub fn work_queues_closed(&self) -> bool {
+        self.work_closed.load(Ordering::Acquire)
     }
 
     /// Increment active thread count
@@ -674,6 +746,11 @@ impl SharedSearchState {
         }
     }
 
+    /// Snapshot current active worker count
+    pub fn active_thread_count(&self) -> usize {
+        self.active_threads.load(Ordering::Acquire)
+    }
+
     /// Check if split point should be created based on current conditions
     #[cfg(feature = "ybwc")]
     pub fn should_create_split_point(&self, depth: u8, move_count: usize) -> bool {
@@ -685,7 +762,9 @@ impl SharedSearchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::snapshot::RootSnapshot;
     use crate::shogi::{Color, Move, PieceType, Square};
+    use smallvec::smallvec;
     use std::sync::{atomic::AtomicBool, Arc};
 
     #[test]
@@ -710,6 +789,54 @@ mod tests {
         // Test clear
         history.clear();
         assert_eq!(history.get(Color::Black, PieceType::Pawn, Square::new(5, 5)), 0);
+    }
+
+    #[test]
+    fn snapshot_preserve_pv_same_generation() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let state = SharedSearchState::with_threads(stop_flag, 1);
+        let current_gen = state.generation();
+        let base_snap = RootSnapshot {
+            search_id: current_gen,
+            root_key: 42,
+            best: Some(Move::null()),
+            pv: smallvec![Move::null()],
+            depth: 3,
+            score_cp: 120,
+            nodes: 10,
+            elapsed_ms: 5,
+        };
+        state.snapshot.publish(&base_snap);
+
+        state.publish_minimal_snapshot_preserve_pv(99, 12);
+        let snap = state.snapshot.try_read().expect("snapshot available");
+        assert_eq!(snap.search_id, current_gen);
+        assert_eq!(snap.pv.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_preserve_pv_discards_on_generation_mismatch() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let state = SharedSearchState::with_threads(stop_flag, 1);
+        let current_gen = state.generation();
+
+        // Publish snapshot from a future generation to simulate stale data
+        let mismatched_snap = RootSnapshot {
+            search_id: current_gen.wrapping_add(1),
+            root_key: 7,
+            best: Some(Move::null()),
+            pv: smallvec![Move::null()],
+            depth: 2,
+            score_cp: 50,
+            nodes: 4,
+            elapsed_ms: 3,
+        };
+        state.snapshot.publish(&mismatched_snap);
+
+        state.publish_minimal_snapshot_preserve_pv(13, 20);
+        let snap = state.snapshot.try_read().expect("snapshot available");
+        assert_eq!(snap.search_id, current_gen);
+        assert!(snap.pv.is_empty());
     }
 
     #[test]

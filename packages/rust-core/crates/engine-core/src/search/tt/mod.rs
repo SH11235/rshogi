@@ -2,9 +2,17 @@
 //!
 //! Overview
 //! - Single-table design with cache-friendly buckets (no sharding)
-//! - Lock-free writes via atomic publication order (value -> meta -> key/flag)
+//! - Lock-free writes via atomic publication order
 //! - Generation (age) management and incremental GC
 //! - EXACT-chain PV reconstruction integrated here
+//!
+//! Memory ordering invariants (reader/writer contract)
+//! - Reader (probe): `key.load(Acquire)` → if `key!=0` then `data.load(Relaxed)` and validate
+//! - Empty insert: publish `data.store(new, Release)` → then `key.store(new, Release)`
+//! - Replacement (worst entry): `data.store(0, Release)` → `key.compare_exchange(old, new, Release, Acquire)` →
+//!   on success `data.store(new, Release)`
+//! - Deletion/GC: `data.store(0, Release)` → `key.store(0, Release)`
+//!   These rules ensure readers never observe a "new key + old data(depth>0)" combination.
 //!
 //! Bucket structure
 //! This implementation uses a bucket structure to optimize cache performance:
@@ -59,6 +67,8 @@ pub use constants::BUCKET_SIZE;
 
 /// Transposition table implementation
 pub struct TranspositionTable {
+    /// Debug/diagnostic table id
+    id: u64,
     /// Buckets for the transposition table (legacy fixed-size)
     buckets: Vec<TTBucket>,
     /// Flexible buckets (new dynamic-size)
@@ -66,7 +76,7 @@ pub struct TranspositionTable {
     /// Number of buckets (always power of 2)
     num_buckets: usize,
     /// Current age (generation counter)
-    age: u8,
+    age: AtomicU8,
     /// Bucket size configuration
     #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
@@ -81,6 +91,8 @@ pub struct TranspositionTable {
     hashfull_estimate: AtomicU16,
     /// Node counter for periodic updates
     node_counter: AtomicU64,
+    /// Diagnostic: number of TT store attempts (filtered含む)
+    store_attempts: AtomicU64,
     /// GC flag - set when table is nearly full
     need_gc: AtomicBool,
     /// GC progress - next bucket to process
@@ -108,15 +120,17 @@ impl TranspositionTable {
         let bucket_size = std::mem::size_of::<TTBucket>();
         debug_assert_eq!(bucket_size, 64);
 
-        let num_buckets = if size_mb == 0 {
+        let mut num_buckets = if size_mb == 0 {
             // Minimum size: 64KB = 1024 buckets
             1024
         } else {
-            (size_mb * 1024 * 1024) / bucket_size
+            // 飽和乗算で極端なサイズ指定時のオーバーフローを防止
+            size_mb.saturating_mul(1024 * 1024) / bucket_size
         };
-
-        // Round to power of 2 for fast indexing
-        let num_buckets = num_buckets.next_power_of_two();
+        // Round up to next power of two for fast indexing
+        if !num_buckets.is_power_of_two() {
+            num_buckets = num_buckets.next_power_of_two();
+        }
 
         // Allocate buckets
         let mut buckets = Vec::with_capacity(num_buckets);
@@ -128,11 +142,27 @@ impl TranspositionTable {
         let bitmap_size = num_buckets.div_ceil(8); // Round up to nearest byte
         let occupied_bitmap = (0..bitmap_size).map(|_| AtomicU8::new(0)).collect();
 
+        // Assign unique TT id
+        static NEXT_TT_ID: AtomicU64 = AtomicU64::new(1);
+        let my_id = NEXT_TT_ID.fetch_add(1, Ordering::Relaxed);
+
+        // Basic health asserts and init log
+        debug_assert!(num_buckets.is_power_of_two(), "num_buckets must be power of two");
+        debug_assert_eq!(bitmap_size, num_buckets.div_ceil(8));
+        log::info!(
+            "TT init: size_mb={} num_buckets={} mask=0x{:x} fixed_bucket_size={}B",
+            size_mb,
+            num_buckets,
+            num_buckets - 1,
+            bucket_size
+        );
+
         TranspositionTable {
+            id: my_id,
             buckets,
             flexible_buckets: None,
             num_buckets,
-            age: 0,
+            age: AtomicU8::new(0),
             bucket_size: None,
             prefetcher: None,
             #[cfg(feature = "tt_metrics")]
@@ -140,6 +170,7 @@ impl TranspositionTable {
             occupied_bitmap,
             hashfull_estimate: AtomicU16::new(0),
             node_counter: AtomicU64::new(0),
+            store_attempts: AtomicU64::new(0),
             need_gc: AtomicBool::new(false),
             gc_progress: AtomicU64::new(0),
             gc_threshold_age_distance: 4, // Default: clear entries with age distance >= 4
@@ -158,7 +189,7 @@ impl TranspositionTable {
         let bucket_size = bucket_size.unwrap_or_else(|| BucketSize::optimal_for_size(size_mb));
         let bytes_per_bucket = bucket_size.bytes();
 
-        let num_buckets = if size_mb == 0 {
+        let mut num_buckets = if size_mb == 0 {
             // Minimum size depends on bucket size
             match bucket_size {
                 BucketSize::Small => 1024, // 64KB minimum
@@ -166,11 +197,13 @@ impl TranspositionTable {
                 BucketSize::Large => 256,  // 64KB minimum
             }
         } else {
-            (size_mb * 1024 * 1024) / bytes_per_bucket
+            // 飽和乗算で極端なサイズ指定時のオーバーフローを防止
+            size_mb.saturating_mul(1024 * 1024) / bytes_per_bucket
         };
-
         // Round to power of 2 for fast indexing
-        let num_buckets = num_buckets.next_power_of_two();
+        if !num_buckets.is_power_of_two() {
+            num_buckets = num_buckets.next_power_of_two();
+        }
 
         // Allocate flexible buckets
         let mut flexible_buckets = Vec::with_capacity(num_buckets);
@@ -182,11 +215,26 @@ impl TranspositionTable {
         let bitmap_size = num_buckets.div_ceil(8); // Round up to nearest byte
         let occupied_bitmap = (0..bitmap_size).map(|_| AtomicU8::new(0)).collect();
 
+        // Assign unique TT id
+        static NEXT_TT_ID: AtomicU64 = AtomicU64::new(1);
+        let my_id = NEXT_TT_ID.fetch_add(1, Ordering::Relaxed);
+
+        debug_assert!(num_buckets.is_power_of_two(), "num_buckets must be power of two");
+        debug_assert_eq!(bitmap_size, num_buckets.div_ceil(8));
+        log::info!(
+            "TT init(flex): size_mb={} num_buckets={} mask=0x{:x} bucket_size={:?} entry_bytes=16",
+            size_mb,
+            num_buckets,
+            num_buckets - 1,
+            bucket_size
+        );
+
         TranspositionTable {
+            id: my_id,
             buckets: Vec::new(),
             flexible_buckets: Some(flexible_buckets),
             num_buckets,
-            age: 0,
+            age: AtomicU8::new(0),
             bucket_size: Some(bucket_size),
             prefetcher: None,
             #[cfg(feature = "tt_metrics")]
@@ -194,6 +242,7 @@ impl TranspositionTable {
             occupied_bitmap,
             hashfull_estimate: AtomicU16::new(0),
             node_counter: AtomicU64::new(0),
+            store_attempts: AtomicU64::new(0),
             need_gc: AtomicBool::new(false),
             gc_progress: AtomicU64::new(0),
             gc_threshold_age_distance: 4,
@@ -243,6 +292,7 @@ impl TranspositionTable {
     }
 
     /// Check if bucket is occupied in bitmap
+    #[cfg(test)]
     #[inline]
     fn is_bucket_occupied(&self, bucket_idx: usize) -> bool {
         let byte_idx = bucket_idx / 8;
@@ -262,25 +312,43 @@ impl TranspositionTable {
         self.occupied_bitmap[byte_idx].fetch_and(mask, Ordering::Relaxed);
     }
 
-    /// Update hashfull estimate based on occupied bitmap sampling
+    /// Update hashfull estimate by sampling actual keys (key != 0) in buckets
+    ///
+    /// 以前は「占有ビットマップ」を用いてタッチ率を近似していたが、短時間で飽和するため
+    /// 実効占有率の推定精度を上げるべく、実キーの有無をサンプリングする方式に切り替える。
     fn update_hashfull_estimate(&self) {
-        // Sample ~1% of buckets (minimum 64, maximum 1024)
-        let sample_size = (self.num_buckets / 100).clamp(64, 1024);
-        let mut occupied_count = 0;
+        // Sample ~1% of buckets (minimum 64, maximum 1024), but never exceed num_buckets
+        let mut sample_size = (self.num_buckets / 100).clamp(64, 1024);
+        if sample_size > self.num_buckets {
+            sample_size = self.num_buckets;
+        }
+        let mut occupied_count = 0usize;
 
-        // Use deterministic sampling based on node counter for consistency
-        let start_idx = (self.node_counter.load(Ordering::Relaxed) as usize) % self.num_buckets;
+        // Deterministic sampling start based on node counter
+        let start_idx =
+            (self.node_counter.load(Ordering::Relaxed) as usize) & (self.num_buckets - 1);
 
         for i in 0..sample_size {
-            let bucket_idx = (start_idx + i * 97) % self.num_buckets; // 97 is prime for good distribution
-            if self.is_bucket_occupied(bucket_idx) {
+            let idx = (start_idx.wrapping_add(i * 97)) & (self.num_buckets - 1); // 97 is prime
+                                                                                 // Prefer fast occupancy bitmap; fall back to key check to avoid stale bitmap effects
+            let byte_idx = idx / 8;
+            let bit_idx = idx % 8;
+            let mask = 1u8 << bit_idx;
+            let occ = (self.occupied_bitmap[byte_idx].load(Ordering::Relaxed) & mask) != 0;
+            let any = if occ {
+                true
+            } else if let Some(ref flex) = self.flexible_buckets {
+                flex[idx].any_key_nonzero_acquire()
+            } else {
+                self.buckets[idx].any_key_nonzero_acquire()
+            };
+            if any {
                 occupied_count += 1;
             }
         }
 
-        // Calculate hashfull (permille)
-        let hashfull = (occupied_count * 1000) / sample_size;
-        self.hashfull_estimate.store(hashfull as u16, Ordering::Relaxed);
+        let hf = (occupied_count * 1000) / sample_size;
+        self.hashfull_estimate.store(hf as u16, Ordering::Relaxed);
     }
 
     /// Get current hashfull estimate
@@ -289,7 +357,7 @@ impl TranspositionTable {
     }
 
     /// Probe transposition table
-    pub fn probe(&self, hash: u64) -> Option<TTEntry> {
+    pub fn probe_entry(&self, hash: u64) -> Option<TTEntry> {
         debug_assert!(hash != 0, "Attempting to probe with zero hash");
 
         let idx = self.bucket_index(hash);
@@ -314,9 +382,23 @@ impl TranspositionTable {
         }
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
-            flexible_buckets[idx].probe(hash)
+            #[cfg(feature = "tt_metrics")]
+            {
+                flexible_buckets[idx].probe_with_metrics(hash, self.metrics.as_ref())
+            }
+            #[cfg(not(feature = "tt_metrics"))]
+            {
+                flexible_buckets[idx].probe(hash)
+            }
         } else {
-            self.buckets[idx].probe(hash)
+            #[cfg(feature = "tt_metrics")]
+            {
+                self.buckets[idx].probe_with_metrics(hash, self.metrics.as_ref())
+            }
+            #[cfg(not(feature = "tt_metrics"))]
+            {
+                self.buckets[idx].probe(hash)
+            }
         }
     }
 
@@ -338,9 +420,46 @@ impl TranspositionTable {
         }
 
         // Reset counters
-        self.age = 0;
+        self.age.store(0, Ordering::Relaxed);
         self.hashfull_estimate.store(0, Ordering::Relaxed);
         self.node_counter.store(0, Ordering::Relaxed);
+        self.store_attempts.store(0, Ordering::Relaxed);
+        self.need_gc.store(false, Ordering::Relaxed);
+        self.gc_progress.store(0, Ordering::Relaxed);
+        self.high_hashfull_counter.store(0, Ordering::Relaxed);
+        self.empty_slot_mode_enabled.store(false, Ordering::Relaxed);
+        self.empty_slot_mode_last_hf.store(0, Ordering::Relaxed);
+
+        #[cfg(feature = "tt_metrics")]
+        if let Some(ref metrics) = self.metrics {
+            metrics.reset();
+        }
+    }
+
+    /// Clear the entire table in-place without requiring exclusive ownership of Arc
+    /// This keeps the Arc identity stable so参照側と保存側の不一致を避けられる
+    pub fn clear_in_place(&self) {
+        // Buckets
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            for bucket in flexible_buckets.iter() {
+                bucket.clear_atomic();
+            }
+        } else {
+            for bucket in self.buckets.iter() {
+                bucket.clear_atomic();
+            }
+        }
+
+        // Occupied bitmap
+        for byte in self.occupied_bitmap.iter() {
+            byte.store(0, Ordering::Relaxed);
+        }
+
+        // Atomic counters/state (including age)
+        self.age.store(0, Ordering::Relaxed);
+        self.hashfull_estimate.store(0, Ordering::Relaxed);
+        self.node_counter.store(0, Ordering::Relaxed);
+        self.store_attempts.store(0, Ordering::Relaxed);
         self.need_gc.store(false, Ordering::Relaxed);
         self.gc_progress.store(0, Ordering::Relaxed);
         self.high_hashfull_counter.store(0, Ordering::Relaxed);
@@ -355,7 +474,8 @@ impl TranspositionTable {
 
     /// Increment age (called at the start of each search)
     pub fn increment_age(&mut self) {
-        self.age = self.age.wrapping_add(1) & AGE_MASK;
+        let next = (self.age.load(Ordering::Relaxed) & AGE_MASK).wrapping_add(1) & AGE_MASK;
+        self.age.store(next, Ordering::Relaxed);
 
         // Reset GC state for new search
         self.need_gc.store(false, Ordering::Relaxed);
@@ -365,7 +485,18 @@ impl TranspositionTable {
 
     /// Get current age
     pub fn current_age(&self) -> u8 {
-        self.age
+        self.age.load(Ordering::Relaxed) & AGE_MASK
+    }
+
+    /// Bump age with shared reference (for shared TT with Arc)
+    pub fn bump_age(&self) {
+        let _ = self.age.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.wrapping_add(1) & AGE_MASK)
+        });
+        // Reset GC state for new search
+        self.need_gc.store(false, Ordering::Relaxed);
+        self.gc_progress.store(0, Ordering::Relaxed);
+        self.high_hashfull_counter.store(0, Ordering::Relaxed);
     }
 
     /// Get hashfull in permille (0-1000)
@@ -386,6 +517,11 @@ impl TranspositionTable {
         } else {
             self.buckets.len() * std::mem::size_of::<TTBucket>()
         }
+    }
+
+    /// Diagnostic: store attempts counter（Relaxed）
+    pub fn store_attempts(&self) -> u64 {
+        self.store_attempts.load(Ordering::Relaxed)
     }
 
     /// Set ABDADA exact cut flag for the given hash
@@ -454,7 +590,7 @@ impl TranspositionTable {
                         #[cfg(feature = "tt_metrics")]
                         if let Some(ref m) = self.metrics {
                             use metrics::{record_metric, MetricType};
-                            record_metric(m, MetricType::CasAttempt);
+                            record_metric(m, MetricType::CasAttemptData);
                         }
 
                         match bucket.entries[data_idx].compare_exchange_weak(
@@ -467,7 +603,7 @@ impl TranspositionTable {
                                 #[cfg(feature = "tt_metrics")]
                                 if let Some(ref m) = self.metrics {
                                     use metrics::{record_metric, MetricType};
-                                    record_metric(m, MetricType::CasSuccess);
+                                    record_metric(m, MetricType::CasSuccessData);
                                 }
                                 return true;
                             }
@@ -505,7 +641,7 @@ impl TranspositionTable {
                         #[cfg(feature = "tt_metrics")]
                         if let Some(ref m) = self.metrics {
                             use metrics::{record_metric, MetricType};
-                            record_metric(m, MetricType::CasAttempt);
+                            record_metric(m, MetricType::CasAttemptData);
                         }
 
                         match bucket.entries[data_idx].compare_exchange_weak(
@@ -518,7 +654,7 @@ impl TranspositionTable {
                                 #[cfg(feature = "tt_metrics")]
                                 if let Some(ref m) = self.metrics {
                                     use metrics::{record_metric, MetricType};
-                                    record_metric(m, MetricType::CasSuccess);
+                                    record_metric(m, MetricType::CasSuccessData);
                                 }
                                 return true;
                             }
@@ -598,7 +734,7 @@ impl TranspositionTable {
             eval,
             depth,
             node_type,
-            age: self.age,
+            age: self.current_age(),
             is_pv: false,
             ..Default::default()
         };
@@ -622,7 +758,7 @@ impl TranspositionTable {
             eval,
             depth,
             node_type,
-            age: self.age,
+            age: self.current_age(),
             is_pv: false,
             ..Default::default()
         };
@@ -632,7 +768,7 @@ impl TranspositionTable {
     /// Store entry in transposition table with parameters
     pub fn store_with_params(&self, mut params: TTEntryParams) {
         // Override age with current table age
-        params.age = self.age;
+        params.age = self.current_age();
         self.store_entry(params);
     }
 
@@ -655,6 +791,8 @@ impl TranspositionTable {
 
     /// Store entry using parameters
     fn store_entry(&self, params: TTEntryParams) {
+        // Lightweight diagnostics: count store attempts even if filtered
+        self.store_attempts.fetch_add(1, Ordering::Relaxed);
         #[cfg(not(feature = "tt_metrics"))]
         let _metrics: Option<&()> = None;
         // Debug assertions to validate input values
@@ -700,7 +838,7 @@ impl TranspositionTable {
 
         // Update node counter and check if we need to update hashfull estimate
         let node_count = self.node_counter.fetch_add(1, Ordering::Relaxed);
-        if node_count.is_multiple_of(256) {
+        if (node_count & 255) == 0 {
             self.update_hashfull_estimate();
 
             // Check GC trigger conditions
@@ -730,7 +868,7 @@ impl TranspositionTable {
             let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
             flexible_buckets[idx].store_with_metrics_and_mode(
                 new_entry,
-                self.age,
+                self.current_age(),
                 empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 self.metrics.as_ref(),
@@ -742,7 +880,7 @@ impl TranspositionTable {
             let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
             self.buckets[idx].store_with_mode(
                 new_entry,
-                self.age,
+                self.current_age(),
                 empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 self.metrics.as_ref(),
@@ -810,6 +948,23 @@ impl TranspositionTable {
         self.metrics.as_ref()
     }
 
+    /// Debug helpers
+    #[cfg(any(debug_assertions, feature = "tt_metrics"))]
+    pub fn debug_roundtrip(&self, key: u64) -> bool {
+        use crate::shogi::Move;
+        // Store an EXACT entry at depth 10 and probe it back
+        self.store(key, None::<Move>, 0, 0, 10, NodeType::Exact);
+        match self.probe_entry(key) {
+            Some(e) => e.key == key && e.depth() >= 10,
+            None => false,
+        }
+    }
+
+    /// Get TT id for diagnostics
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Get prefetch statistics
     pub fn prefetch_stats(&self) -> Option<prefetch::PrefetchStats> {
         self.prefetcher.as_ref().map(|p| p.stats())
@@ -837,8 +992,10 @@ impl TranspositionTable {
 }
 
 impl TTProbe for TranspositionTable {
+    #[inline]
     fn probe(&self, hash: u64) -> Option<TTEntry> {
-        self.probe(hash)
+        // 明示的に固有メソッドを呼び出して可読性と誤解防止を図る
+        TranspositionTable::probe_entry(self, hash)
     }
 }
 
@@ -870,7 +1027,7 @@ mod pv_reconstruction_tests {
         tt.store(test_hash, Some(test_move), 100, 50, 10, NodeType::Exact);
 
         // Verify the entry was stored
-        let probe_result = tt.probe(test_hash);
+        let probe_result = tt.probe_entry(test_hash);
         assert!(probe_result.is_some(), "TT probe should find the entry");
         let entry = probe_result.unwrap();
         assert!(entry.matches(test_hash), "Entry should match the hash");

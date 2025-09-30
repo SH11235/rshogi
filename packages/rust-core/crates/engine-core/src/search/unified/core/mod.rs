@@ -28,7 +28,13 @@ use crate::{
     },
     shogi::Position,
 };
+#[cfg(feature = "diagnostics")]
+use std::cell::Cell;
 use std::sync::atomic::Ordering;
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    static AB_SHORT_CIRCUIT_LOGGED_ONCE: Cell<bool> = const { Cell::new(false) };
+}
 
 /// Compute repetition penalty based on static evaluation from the side-to-move perspective.
 ///
@@ -147,15 +153,58 @@ pub(super) fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool>(
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    node::reset_near_deadline_flags();
+
     // Increment node count here (not in search_node to avoid double counting)
     searcher.stats.nodes += 1;
+
+    // Hard-limit short-circuit: if we are past the hard deadline, exit immediately.
+    // This complements node-based/event-mask checks and the lightweight polls,
+    // and guarantees termination even on paths where node progress is sparse.
+    if let Some(tm) = &searcher.time_manager {
+        let hard = tm.hard_limit_ms();
+        if hard > 0 && hard < u64::MAX {
+            let elapsed_ms = tm.elapsed_ms();
+            if elapsed_ms >= hard {
+                // Mark time-based stop so outer layers (root/ID) exit immediately
+                #[cfg(feature = "diagnostics")]
+                AB_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag short_circuit ab reason=hard elapsed={}ms hard={}ms",
+                            elapsed_ms,
+                            hard
+                        );
+                        flag.set(true);
+                    }
+                });
+                searcher.context.mark_time_stopped();
+                searcher.context.stop();
+                return alpha;
+            }
+        }
+    }
 
     // Fast-path: if a planned rounded stop is set and we've reached it, exit immediately
     if let Some(tm) = &searcher.time_manager {
         let planned = tm.scheduled_end_ms();
-        if planned != u64::MAX {
-            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        if planned > 0 && planned < u64::MAX {
+            let elapsed_ms = tm.elapsed_ms();
             if elapsed_ms >= planned {
+                // Planned rounded stop reached – signal stop for consistent unwind
+                #[cfg(feature = "diagnostics")]
+                AB_SHORT_CIRCUIT_LOGGED_ONCE.with(|flag| {
+                    if !flag.get() {
+                        log::info!(
+                            "diag short_circuit ab reason=planned elapsed={}ms planned={}ms",
+                            elapsed_ms,
+                            planned
+                        );
+                        flag.set(true);
+                    }
+                });
+                searcher.context.mark_time_stopped();
+                searcher.context.stop();
                 return alpha;
             }
         }

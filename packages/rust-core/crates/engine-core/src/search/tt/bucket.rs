@@ -5,7 +5,9 @@ use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::DetailedTTMetrics;
 use super::prefetch::prefetch_memory;
-use super::utils::{try_update_entry_generic, UpdateResult};
+use super::utils::{
+    attempt_replace_worst, try_update_entry_generic, ReplaceAttemptResult, UpdateResult,
+};
 use crate::search::tt::simd::simd_enabled;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -57,10 +59,33 @@ impl TTBucket {
         }
     }
 
+    /// Any key present in this bucket? (Acquire)
+    #[inline]
+    pub(crate) fn any_key_nonzero_acquire(&self) -> bool {
+        for i in 0..BUCKET_SIZE {
+            let key = self.entries[i * 2].load(Ordering::Acquire);
+            if key != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Clear all entries in the bucket
     pub(crate) fn clear(&mut self) {
         for e in &self.entries {
             e.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Clear all entries using only shared reference (in-place via atomics)
+    pub(crate) fn clear_atomic(&self) {
+        // Clear per entry with data->key order to respect publication invariants
+        for i in 0..BUCKET_SIZE {
+            let key_idx = i * 2;
+            let data_idx = key_idx + 1;
+            self.entries[data_idx].store(0, Ordering::Release);
+            self.entries[key_idx].store(0, Ordering::Release);
         }
     }
 
@@ -75,6 +100,32 @@ impl TTBucket {
         self.probe_scalar(key)
     }
 
+    /// Probe with optional metrics (counts key-match-but-depth0 drops when enabled)
+    #[cfg(feature = "tt_metrics")]
+    pub(crate) fn probe_with_metrics(
+        &self,
+        key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        if self.probe_simd_available() {
+            return self.probe_simd_impl_with_metrics(
+                key,
+                #[cfg(feature = "tt_metrics")]
+                metrics,
+                #[cfg(not(feature = "tt_metrics"))]
+                None,
+            );
+        }
+        self.probe_scalar_with_metrics(
+            key,
+            #[cfg(feature = "tt_metrics")]
+            metrics,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        )
+    }
+
     /// Check if SIMD probe is available
     /// This is inlined and the feature detection is cached by the CPU
     #[inline(always)]
@@ -84,7 +135,32 @@ impl TTBucket {
 
     /// SIMD-optimized probe implementation
     fn probe_simd_impl(&self, target_key: u64) -> Option<TTEntry> {
-        bucket_simd::probe_simd(&self.entries, target_key)
+        bucket_simd::probe_simd(
+            &self.entries,
+            target_key,
+            #[cfg(feature = "tt_metrics")]
+            None,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        )
+    }
+
+    /// SIMD probe with metrics
+    #[cfg(feature = "tt_metrics")]
+    fn probe_simd_impl_with_metrics(
+        &self,
+        target_key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        bucket_simd::probe_simd(
+            &self.entries,
+            target_key,
+            #[cfg(feature = "tt_metrics")]
+            metrics,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        )
     }
 
     /// Scalar fallback probe implementation with early termination
@@ -104,10 +180,12 @@ impl TTBucket {
 
         // If we found a match, load data with Relaxed ordering
         if let Some(idx) = matching_idx {
-            // Design note: We use Relaxed for data load because the key's Acquire ordering
-            // already provides the necessary synchronization. The writer uses Release ordering
-            // when storing key, which ensures all prior writes (including data) are visible
-            // when we read the key with Acquire.
+            // Design note: We use Relaxed for data because the key's Acquire load already
+            // synchronizes with writers. Writers publish either:
+            // - empty-slot path: data(Release) -> key(Release)
+            // - replacement path: data=0(Release) -> key CAS(AcqRel/Acquire) -> data(Release)
+            // Thus, once key==target is observed with Acquire, the corresponding data is
+            // consistently visible.
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: target_key,
@@ -116,6 +194,45 @@ impl TTBucket {
 
             if entry.depth() > 0 {
                 return Some(entry);
+            }
+        }
+
+        None
+    }
+
+    /// Scalar probe with metrics
+    #[cfg(feature = "tt_metrics")]
+    fn probe_scalar_with_metrics(
+        &self,
+        target_key: u64,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> Option<TTEntry> {
+        // Hybrid approach: early termination to minimize memory access
+        let mut matching_idx = None;
+
+        for i in 0..BUCKET_SIZE {
+            let key = self.entries[i * 2].load(Ordering::Acquire);
+            if key == target_key {
+                matching_idx = Some(i);
+                break;
+            }
+        }
+
+        if let Some(idx) = matching_idx {
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            let entry = TTEntry {
+                key: target_key,
+                data,
+            };
+            if entry.depth() > 0 {
+                return Some(entry);
+            } else {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    use super::metrics::{record_metric, MetricType};
+                    record_metric(m, MetricType::ProbeKeyMatchDepth0);
+                }
             }
         }
 
@@ -209,16 +326,14 @@ impl TTBucket {
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
-        let _target_key = new_entry.key;
-
         // First pass: look for exact match or empty slot
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
 
             // We no longer use CAS for empty slots - direct store with proper ordering
             {
-                // Use Relaxed for empty slot detection
-                let old_key = self.entries[idx].load(Ordering::Relaxed);
+                // Use Acquire for key load when attempting potential updates
+                let old_key = self.entries[idx].load(Ordering::Acquire);
 
                 // Record atomic load
                 #[cfg(feature = "tt_metrics")]
@@ -249,6 +364,12 @@ impl TTBucket {
                     if let Some(m) = metrics {
                         m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
                         m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        use super::metrics::{record_metric, MetricType};
+                        if new_entry.depth() > 0 {
+                            record_metric(m, MetricType::StoreDepthGT0);
+                        } else {
+                            record_metric(m, MetricType::StoreDepthEQ0);
+                        }
                     }
                     return;
                 } else {
@@ -263,83 +384,50 @@ impl TTBucket {
             return;
         }
 
-        // Second pass: find least valuable entry to replace using SIMD if available
-        let (worst_idx, worst_score) = if self.store_simd_available() {
-            self.find_worst_entry_simd(current_age)
-        } else {
-            self.find_worst_entry_scalar(current_age)
-        };
+        // Second pass: replace worst entry if beneficial.
+        // 早期 skip により置換が流れてしまうケースを減らすため、
+        // バケット内で最大1回だけ再評価・再試行を行う。
+        let mut attempted_retry = false;
+        'replace_attempt: loop {
+            // 1) 最悪エントリの選定（SIMD/Scalar）
+            let (worst_idx, worst_score) = if self.store_simd_available() {
+                self.find_worst_entry_simd(current_age)
+            } else {
+                self.find_worst_entry_scalar(current_age)
+            };
 
-        // Check if new entry is more valuable than the worst existing entry
-        if new_entry.priority_score(current_age) > worst_score {
-            let idx = worst_idx * 2;
+            // 2) 新規の方が価値が高いなら置換へ
+            if new_entry.priority_score(current_age) > worst_score {
+                let idx = worst_idx * 2;
+                let old_key = self.entries[idx].load(Ordering::Relaxed);
 
-            // Use CAS to ensure atomic replacement
-            // Note: We don't retry here as we've already determined this is the best slot to replace
-            let old_key = self.entries[idx].load(Ordering::Relaxed);
-
-            // Record CAS attempt
-            #[cfg(feature = "tt_metrics")]
-            if let Some(m) = metrics {
-                use super::metrics::{record_metric, MetricType};
-                record_metric(m, MetricType::CasAttempt);
-            }
-
-            // Design note: CAS replacement creates a brief window where readers might see
-            // new key with old data. This is a known and acceptable race condition in TT:
-            // 1. We update key first (with Release) to claim the slot
-            // 2. Then update data (with Release)
-            // Readers using Acquire on key will either see old key+old data or new key+new data
-            // in most cases. The brief inconsistency window is tolerable for TT's approximate nature.
-            match self.entries[idx].compare_exchange(
-                old_key,
-                new_entry.key,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    // CAS succeeded - use two-phase publish to minimize race window
-                    // First, clear old data to ensure readers see depth=0 during the window
-                    self.entries[idx + 1].store(0, Ordering::Release);
-                    // Then store the actual new data
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-
-                    // Record metrics
+                let result = {
                     #[cfg(feature = "tt_metrics")]
-                    if let Some(m) = metrics {
-                        use super::metrics::{record_metric, MetricType};
-                        record_metric(m, MetricType::CasSuccess);
-                        // AtomicStore counts pure store operations only (not CAS)
-                        // Here we have 2 stores: first to clear (data=0), then actual data
-                        record_metric(m, MetricType::AtomicStore(2));
-                        record_metric(m, MetricType::ReplaceWorst);
+                    {
+                        attempt_replace_worst(&self.entries, idx, old_key, &new_entry, metrics)
                     }
-                }
-                Err(current) => {
-                    // Phase 5 optimization: Check if another thread wrote the same key
-                    if current == new_entry.key {
-                        // Same key - just update the data
-                        // Use Release ordering to ensure reader sees the updated data
-                        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                    #[cfg(not(feature = "tt_metrics"))]
+                    {
+                        attempt_replace_worst(&self.entries, idx, old_key, &new_entry, None)
+                    }
+                };
 
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            m.cas_key_match.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    } else {
-                        // CAS failed with different key
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            use super::metrics::{record_metric, MetricType};
-                            record_metric(m, MetricType::CasFailure);
+                match result {
+                    ReplaceAttemptResult::Replaced | ReplaceAttemptResult::UpdatedExisting => {
+                        break 'replace_attempt;
+                    }
+                    ReplaceAttemptResult::ObservedMismatch | ReplaceAttemptResult::CasFailed => {
+                        if !attempted_retry {
+                            attempted_retry = true;
+                            continue 'replace_attempt;
+                        } else {
+                            break 'replace_attempt;
                         }
                     }
-                    // If CAS failed, another thread updated this entry - we accept this race
-                    // as it's not critical (both threads are storing valid entries)
                 }
             }
+            // 新規エントリが十分価値が高くない or 完了
+            break 'replace_attempt;
         }
     }
 

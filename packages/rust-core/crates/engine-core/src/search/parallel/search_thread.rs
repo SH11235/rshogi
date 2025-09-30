@@ -177,6 +177,11 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         }
     }
 
+    /// Attach a shared TimeManager so that this thread uses the same clock/budgets
+    pub fn attach_time_manager(&mut self, tm: std::sync::Arc<crate::time_management::TimeManager>) {
+        self.searcher.set_time_manager_external(tm);
+    }
+
     /// Get start depth for this thread based on iteration
     pub fn get_start_depth(&self, iteration: usize) -> u8 {
         if self.id == 0 {

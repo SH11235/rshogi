@@ -39,7 +39,7 @@ fn bench_tt_probe(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt.probe(black_box(hash));
+            let result = tt.probe_entry(black_box(hash));
             idx += 1;
             black_box(result)
         });
@@ -107,7 +107,7 @@ fn bench_tt_parallel(c: &mut Criterion) {
 
                                 // Mix of probes and stores
                                 if rng.random::<bool>() {
-                                    let _ = tt_clone.probe(hash);
+                                    let _ = tt_clone.probe_entry(hash);
                                 } else {
                                     tt_clone.store(
                                         hash,

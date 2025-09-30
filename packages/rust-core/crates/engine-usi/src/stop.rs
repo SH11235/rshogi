@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use engine_core::time_management::TimeControl;
@@ -12,7 +12,9 @@ pub fn handle_stop(state: &mut EngineState) {
     if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
         flag.store(true, Ordering::SeqCst);
         info_string("stop_requested");
-        if let Some(rx) = state.result_rx.take() {
+
+        // Use SearchSession API instead of manual channel
+        if let Some(session) = state.search_session.take() {
             let mut wait_ms = state.opts.stop_wait_ms;
             if let Some(tc) = &state.current_time_control {
                 match tc {
@@ -30,8 +32,10 @@ pub fn handle_stop(state: &mut EngineState) {
                 }
             }
 
+            // Wait for result with timeout using SearchSession API
             let deadline = Instant::now() + Duration::from_millis(wait_ms);
             let mut finalized = false;
+
             while Instant::now() < deadline && !finalized {
                 let now = Instant::now();
                 let remain = if deadline > now {
@@ -44,18 +48,12 @@ pub fn handle_stop(state: &mut EngineState) {
                 } else {
                     remain
                 };
-                match rx.recv_timeout(slice) {
-                    Ok((sid, result)) => {
-                        if sid != state.current_search_id {
-                            info_string(format!(
-                                "ignore_result stale_sid={} current_sid={}",
-                                sid, state.current_search_id
-                            ));
-                            continue;
-                        }
-                        if let Some(h) = state.worker.take() {
-                            let _ = h.join();
-                        }
+
+                // Use SearchSession::recv_result_timeout() instead of manual channel
+                match session.recv_result_timeout(slice) {
+                    Some(result) => {
+                        // No session_id check needed - SearchSession manages this internally
+                        // No worker join needed - SearchSession manages thread lifecycle
                         state.searching = false;
                         state.stop_flag = None;
                         state.ponder_hit_flag = None;
@@ -68,50 +66,79 @@ pub fn handle_stop(state: &mut EngineState) {
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
                         state.current_time_control = None;
+                        state.notify_idle();
                         finalized = true;
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    None => {
+                        // Timeout or disconnected - continue waiting
+                    }
                 }
             }
+            // Timeout expired - try immediate stop and quick polling
             if !finalized {
-                if let Ok((sid, result)) = rx.try_recv() {
-                    if sid == state.current_search_id {
-                        if let Some(h) = state.worker.take() {
-                            let _ = h.join();
-                        }
-                        state.searching = false;
-                        state.stop_flag = None;
-                        state.ponder_hit_flag = None;
+                state.stop_bridge.request_stop_immediate();
 
-                        let stale = state
-                            .current_root_hash
-                            .map(|h| h != state.position.zobrist_hash())
-                            .unwrap_or(false);
-                        finalize_and_send(state, "stop_finalize", Some(&result), stale);
-                        state.current_is_ponder = false;
-                        state.current_root_hash = None;
-                        state.current_time_control = None;
-                        return;
-                    } else {
-                        info_string(format!(
-                            "ignore_result stale_sid={} current_sid={}",
-                            sid, state.current_search_id
-                        ));
-                    }
-                }
-                if let Some(h) = state.worker.take() {
-                    if let Some(tx) = &state.reaper_tx {
-                        let q = state.reaper_queue_len.fetch_add(1, Ordering::SeqCst) + 1;
-                        let _ = tx.send(h);
-                        const REAPER_QUEUE_SOFT_MAX: usize = 128;
-                        if q > REAPER_QUEUE_SOFT_MAX {
-                            info_string(format!("reaper_queue_len_high len={}", q));
-                        } else {
-                            info_string(format!("reaper_detach queued len={}", q));
+                let mut waited_after_stop_ms = 0u64;
+                let mut finalize_candidate: Option<engine_core::search::SearchResult> = None;
+
+                // Try a few quick polls with backoff
+                for backoff in [5u64, 10, 20, 40] {
+                    use engine_core::engine::TryResult;
+                    match session.try_poll() {
+                        TryResult::Ok(result) => {
+                            finalize_candidate = Some(result);
+                            break;
+                        }
+                        TryResult::Pending => {
+                            thread::sleep(Duration::from_millis(backoff));
+                            waited_after_stop_ms += backoff;
+                        }
+                        TryResult::Disconnected => {
+                            // Thread died - will use fallback
+                            break;
                         }
                     }
                 }
+
+                // One final check
+                if finalize_candidate.is_none() {
+                    use engine_core::engine::TryResult;
+                    if let TryResult::Ok(result) = session.try_poll() {
+                        finalize_candidate = Some(result);
+                    }
+                }
+
+                let snapshot = state.stop_bridge.snapshot();
+                let has_result = finalize_candidate.is_some();
+
+                info_string(format!(
+                    "fast_finalize active_threads={} pending={} waited_ms={} has_result={}",
+                    snapshot.active_workers,
+                    snapshot.pending_work_items,
+                    waited_after_stop_ms,
+                    if has_result { 1 } else { 0 }
+                ));
+
+                // Finalize with result if available
+                if let Some(result) = finalize_candidate {
+                    state.searching = false;
+                    state.stop_flag = None;
+                    state.ponder_hit_flag = None;
+
+                    let stale = state
+                        .current_root_hash
+                        .map(|h| h != state.position.zobrist_hash())
+                        .unwrap_or(false);
+                    finalize_and_send(state, "stop_finalize", Some(&result), stale);
+                    state.current_is_ponder = false;
+                    state.current_root_hash = None;
+                    state.current_time_control = None;
+                    state.notify_idle();
+                    return;
+                }
+
+                // No result available - use fast finalize
+                // SearchSession will clean up automatically on drop
                 state.searching = false;
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
@@ -119,6 +146,7 @@ pub fn handle_stop(state: &mut EngineState) {
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
                 state.current_time_control = None;
+                state.notify_idle();
             }
         }
     }
@@ -145,20 +173,20 @@ pub fn handle_gameover(state: &mut EngineState) {
             if let Some(flag) = &state.stop_flag {
                 flag.store(true, Ordering::SeqCst);
             }
-            if let Some(h) = state.worker.take() {
-                let _ = h.join();
-            }
+            // No worker to clean up - SearchSession handles this automatically
             state.searching = false;
             state.stop_flag = None;
             state.ponder_hit_flag = None;
             state.current_time_control = None;
+            state.notify_idle();
             return;
         }
         if let Some(flag) = &state.stop_flag {
             flag.store(true, Ordering::SeqCst);
         }
         if state.searching {
-            if let Some(rx) = state.result_rx.take() {
+            // Use SearchSession API instead of manual channel
+            if let Some(session) = state.search_session.take() {
                 let mut wait_ms = state.opts.stop_wait_ms;
                 if let Some(tc) = &state.current_time_control {
                     match tc {
@@ -178,6 +206,7 @@ pub fn handle_gameover(state: &mut EngineState) {
 
                 let deadline = Instant::now() + Duration::from_millis(wait_ms);
                 let mut finalized = false;
+
                 while Instant::now() < deadline && !finalized {
                     let now = Instant::now();
                     let remain = if deadline > now {
@@ -190,21 +219,16 @@ pub fn handle_gameover(state: &mut EngineState) {
                     } else {
                         remain
                     };
-                    match rx.recv_timeout(slice) {
-                        Ok((sid, result)) => {
-                            if sid != state.current_search_id {
-                                info_string(format!(
-                                    "ignore_result stale_sid={} current_sid={}",
-                                    sid, state.current_search_id
-                                ));
-                                continue;
-                            }
-                            if let Some(h) = state.worker.take() {
-                                let _ = h.join();
-                            }
+
+                    // Use SearchSession::recv_result_timeout() instead of manual channel
+                    match session.recv_result_timeout(slice) {
+                        Some(result) => {
+                            // No session_id check needed - SearchSession manages this internally
+                            // No worker join needed - SearchSession manages thread lifecycle
                             state.searching = false;
                             state.stop_flag = None;
                             state.ponder_hit_flag = None;
+
                             let stale = state
                                 .current_root_hash
                                 .map(|h| h != state.position.zobrist_hash())
@@ -213,49 +237,37 @@ pub fn handle_gameover(state: &mut EngineState) {
                             state.current_is_ponder = false;
                             state.current_root_hash = None;
                             state.current_time_control = None;
+                            state.notify_idle();
                             finalized = true;
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        None => {
+                            // Timeout or disconnected - continue waiting
+                        }
                     }
                 }
+
+                // Timeout expired - try quick polling
                 if !finalized {
-                    if let Ok((sid, result)) = rx.try_recv() {
-                        if sid == state.current_search_id {
-                            if let Some(h) = state.worker.take() {
-                                let _ = h.join();
-                            }
-                            state.searching = false;
-                            state.stop_flag = None;
-                            state.ponder_hit_flag = None;
-                            let stale = state
-                                .current_root_hash
-                                .map(|h| h != state.position.zobrist_hash())
-                                .unwrap_or(false);
-                            finalize_and_send(state, "gameover_finalize", Some(&result), stale);
-                            state.current_is_ponder = false;
-                            state.current_root_hash = None;
-                            state.current_time_control = None;
-                            return;
-                        } else {
-                            info_string(format!(
-                                "ignore_result stale_sid={} current_sid={}",
-                                sid, state.current_search_id
-                            ));
-                        }
+                    use engine_core::engine::TryResult;
+                    if let TryResult::Ok(result) = session.try_poll() {
+                        state.searching = false;
+                        state.stop_flag = None;
+                        state.ponder_hit_flag = None;
+
+                        let stale = state
+                            .current_root_hash
+                            .map(|h| h != state.position.zobrist_hash())
+                            .unwrap_or(false);
+                        finalize_and_send(state, "gameover_finalize", Some(&result), stale);
+                        state.current_is_ponder = false;
+                        state.current_root_hash = None;
+                        state.current_time_control = None;
+                        state.notify_idle();
+                        return;
                     }
-                    if let Some(h) = state.worker.take() {
-                        if let Some(tx) = &state.reaper_tx {
-                            let q = state.reaper_queue_len.fetch_add(1, Ordering::SeqCst) + 1;
-                            let _ = tx.send(h);
-                            const REAPER_QUEUE_SOFT_MAX: usize = 128;
-                            if q > REAPER_QUEUE_SOFT_MAX {
-                                info_string(format!("reaper_queue_len_high len={}", q));
-                            } else {
-                                info_string(format!("reaper_detach queued len={}", q));
-                            }
-                        }
-                    }
+
+                    // No result available - use fast finalize
+                    // SearchSession will clean up automatically on drop
                     state.searching = false;
                     state.stop_flag = None;
                     state.ponder_hit_flag = None;
@@ -263,6 +275,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
                     state.current_time_control = None;
+                    state.notify_idle();
                 }
             } else {
                 state.searching = false;
@@ -272,6 +285,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
                 state.current_time_control = None;
+                state.notify_idle();
             }
         } else {
             state.searching = false;
@@ -281,17 +295,18 @@ pub fn handle_gameover(state: &mut EngineState) {
             state.current_is_ponder = false;
             state.current_root_hash = None;
             state.current_time_control = None;
+            state.notify_idle();
         }
     } else {
         if let Some(flag) = &state.stop_flag {
             flag.store(true, Ordering::SeqCst);
         }
-        if let Some(h) = state.worker.take() {
-            let _ = h.join();
-        }
+        // SearchSession will clean up automatically on drop
+        state.search_session = None;
         state.searching = false;
         state.stop_flag = None;
         state.ponder_hit_flag = None;
         state.current_time_control = None;
+        state.notify_idle();
     }
 }

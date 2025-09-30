@@ -6,11 +6,13 @@
 pub mod lazy_smp;
 pub mod search_thread;
 pub mod shared;
+mod stop_bridge;
 
 mod parallel_searcher;
 #[cfg(test)]
 mod tests;
 mod time_manager;
+mod util;
 mod work_queue;
 mod worker;
 
@@ -20,3 +22,4 @@ pub use search_thread::SearchThread;
 pub use shared::{SharedHistory, SharedSearchState};
 #[cfg(feature = "ybwc")]
 pub use shared::{SplitPoint, SplitPointManager};
+pub use stop_bridge::{EngineStopBridge, FinalizeReason, FinalizerMsg, StopSnapshot};

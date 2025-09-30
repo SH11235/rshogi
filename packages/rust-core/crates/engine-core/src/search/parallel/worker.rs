@@ -25,6 +25,7 @@ pub struct WorkerConfig<E: Evaluator + Send + Sync + 'static> {
     pub limits: SearchLimits,
     pub evaluator: Arc<E>,
     pub tt: Arc<TranspositionTable>,
+    pub time_manager: Option<Arc<crate::time_management::TimeManager>>,
     pub shared_state: Arc<SharedSearchState>,
     pub queues: Arc<Queues>,
     pub active_workers: Arc<AtomicUsize>,
@@ -74,18 +75,19 @@ impl PendingWorkGuard {
             active: true,
         }
     }
-
-    /// Prevent decrement (if ownership of accounting was transferred)
-    #[allow(dead_code)]
-    fn disarm(mut self) {
-        self.active = false;
-    }
 }
 
 impl Drop for PendingWorkGuard {
     fn drop(&mut self) {
         if self.active {
-            self.counter.fetch_sub(1, Ordering::AcqRel);
+            // Safety decrement: avoid underflow when another thread has already zeroed it.
+            let _ = self.counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                if cur > 0 {
+                    Some(cur - 1)
+                } else {
+                    None
+                }
+            });
             if log::log_enabled!(log::Level::Trace) {
                 log::trace!("PendingWorkGuard: pending work decremented");
             }
@@ -114,6 +116,7 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
     let steal_success = config.steal_success;
     let steal_failure = config.steal_failure;
     let pending_work_items = config.pending_work_items;
+    let shared_tm = config.time_manager;
 
     thread::spawn(move || {
         use std::panic::{self, AssertUnwindSafe};
@@ -125,9 +128,31 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
 
             // Create search thread
             let mut search_thread = SearchThread::new(log_id, evaluator, tt, shared_state.clone());
+            search_thread.generation = shared_state.generation();
+            if let Some(tm) = &shared_tm {
+                search_thread.attach_time_manager(tm.clone());
+            }
 
             // Simple work loop
             while !shared_state.should_stop() {
+                let current_generation = shared_state.generation();
+                if search_thread.generation != current_generation {
+                    log::warn!(
+                        "worker_epoch_mismatch id={} old={} current={}",
+                        log_id,
+                        search_thread.generation,
+                        current_generation
+                    );
+                    debug_assert!(
+                        search_thread.generation == current_generation,
+                        "worker {} observed generation change from {} to {}",
+                        log_id,
+                        search_thread.generation,
+                        current_generation
+                    );
+                    break;
+                }
+
                 // Try to get work using truly lock-free work stealing
                 let work =
                     get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure);
@@ -149,6 +174,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                             moves,
                             start_index,
                         } => {
+                            if shared_state.should_stop() {
+                                break;
+                            }
                             // Skip debug logging in hot path unless explicitly enabled
                             if log::log_enabled!(log::Level::Debug) {
                                 debug!(
@@ -162,6 +190,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
 
                             // Process all moves in the batch
                             for move_to_search in moves.iter() {
+                                if shared_state.should_stop() {
+                                    break;
+                                }
                                 // Search the specific root move (reusing the same position)
                                 let _result = search_thread.search_root_move(
                                     &mut pos,
@@ -181,6 +212,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                             depth,
                             position,
                         } => {
+                            if shared_state.should_stop() {
+                                break;
+                            }
                             // Skip debug logging in hot path unless explicitly enabled
                             if log::log_enabled!(log::Level::Debug) {
                                 debug!(
@@ -191,6 +225,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                             // Clone position from Arc for this search
                             let mut pos = (*position).clone();
 
+                            if shared_state.should_stop() {
+                                continue;
+                            }
                             // Do the search
                             let _result =
                                 search_thread.search_iteration(&mut pos, &worker_limits, depth);
@@ -237,27 +274,10 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
             // SearchThread automatically flushes nodes when work is completed
             // No need for manual node reporting here
 
-            // After stop or normal loop exit, drain any remaining enqueued work items
-            // without processing them to keep pending_work_items consistent.
-            // This prevents leftover pending counts when stop is requested while work remains queued.
-            loop {
-                let pending_left = pending_work_items.load(Ordering::Acquire);
-                if pending_left == 0 {
-                    break;
-                }
-                match get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure) {
-                    Some(_item) => {
-                        // Cancel the work item by accounting only
-                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
-                        if log::log_enabled!(log::Level::Trace) {
-                            log::trace!("Worker {log_id} drained one pending work item (remaining before: {pending_left})");
-                        }
-                        // Continue draining until queues appear empty or counter reaches zero
-                        continue;
-                    }
-                    None => break,
-                }
-            }
+            // メインスレッドが stop をブロードキャストした直後に pending を 0 にする設計へ統一。
+            // ここ（ワーカー終端）では pending を変更しない。
+            // 将来的に“通常終了での早期 break”を導入した場合に備えた最小限のドレインは
+            // 必要時に復活させる。
 
             if log::log_enabled!(log::Level::Debug) {
                 debug!("Worker {log_id} stopped");
@@ -270,4 +290,34 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
             shared_state.set_stop();
         }
     })
+}
+
+#[cfg(test)]
+mod tests_pending_guard {
+    use super::PendingWorkGuard;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn drop_decrements_when_positive() {
+        let c = Arc::new(AtomicU64::new(3));
+        {
+            let _g = PendingWorkGuard::new(c.clone());
+            // on drop, should decrement by 1
+        }
+        assert_eq!(c.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn drop_does_not_underflow_after_store_zero() {
+        let c = Arc::new(AtomicU64::new(1));
+        let g = PendingWorkGuard::new(c.clone());
+        // Simulate another thread zeroing the counter (e.g., stop path)
+        c.store(0, Ordering::Release);
+        drop(g);
+        // Should remain 0, not wrap to u64::MAX
+        assert_eq!(c.load(Ordering::Acquire), 0);
+    }
 }

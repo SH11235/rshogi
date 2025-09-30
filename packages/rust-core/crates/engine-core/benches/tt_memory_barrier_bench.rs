@@ -55,7 +55,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 let mut idx = 0;
                 b.iter(|| {
                     let hash = hashes[idx % hashes.len()];
-                    let result = tt.probe(hash);
+                    let result = tt.probe_entry(hash);
                     black_box(result);
                     idx += 1;
                 });
@@ -71,7 +71,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 let mut idx = 0;
                 b.iter(|| {
                     let hash = stored_hashes[idx % stored_hashes.len()];
-                    let result = tt.probe(hash);
+                    let result = tt.probe_entry(hash);
                     black_box(result);
                     idx += 1;
                 });
@@ -87,7 +87,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 let mut idx = 0;
                 b.iter(|| {
                     let hash = miss_hashes[idx % miss_hashes.len()];
-                    let result = tt.probe(hash);
+                    let result = tt.probe_entry(hash);
                     black_box(result);
                     idx += 1;
                 });
@@ -117,7 +117,7 @@ fn bench_tt_concurrent(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..100 {
                 let hash = hashes[idx % hashes.len()];
-                let result = tt.probe(hash);
+                let result = tt.probe_entry(hash);
                 black_box(result);
                 idx += 1;
             }
@@ -161,7 +161,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt_small.probe(hash);
+            let result = tt_small.probe_entry(hash);
             black_box(result);
             idx += 1;
         });
@@ -172,7 +172,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt_medium.probe(hash);
+            let result = tt_medium.probe_entry(hash);
             black_box(result);
             idx += 1;
         });
@@ -183,7 +183,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         let mut idx = 0;
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
-            let result = tt_large.probe(hash);
+            let result = tt_large.probe_entry(hash);
             black_box(result);
             idx += 1;
         });

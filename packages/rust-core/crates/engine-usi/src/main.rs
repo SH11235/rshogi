@@ -1,5 +1,6 @@
 mod finalize;
 mod io;
+mod oob;
 mod options;
 mod search;
 mod state;
@@ -11,11 +12,12 @@ use engine_core::evaluation::nnue;
 use log::info;
 use std::io::{self as stdio, BufRead};
 use std::sync::atomic::Ordering;
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use io::{info_string, usi_println};
+use oob::poll_oob_finalize;
 use options::{apply_options_to_engine, handle_setoption, send_id_and_options};
 use search::{handle_go, parse_position, poll_search_completion};
 use state::EngineState;
@@ -37,31 +39,6 @@ fn main() -> Result<()> {
         Err(_) => info_string("nnue_simd_clamp=auto"),
     }
 
-    let (reaper_tx, reaper_rx) = mpsc::channel::<thread::JoinHandle<()>>();
-    let reaper_queue_len = Arc::clone(&state.reaper_queue_len);
-    let reaper_handle = thread::Builder::new()
-        .name("usi-reaper".to_string())
-        .spawn(move || {
-            let mut cum_ms: u128 = 0;
-            for h in reaper_rx {
-                let start = Instant::now();
-                let _ = h.join();
-                let dur = start.elapsed().as_millis();
-                reaper_queue_len.fetch_sub(1, Ordering::SeqCst);
-                if dur > 50 {
-                    usi_println(&format!("info string reaper_join_ms={dur}"));
-                }
-                cum_ms += dur;
-                if cum_ms >= 1000 {
-                    usi_println(&format!("info string reaper_cum_join_ms={cum_ms}"));
-                    cum_ms = 0;
-                }
-            }
-        })
-        .expect("failed to spawn reaper thread");
-    state.reaper_tx = Some(reaper_tx);
-    state.reaper_handle = Some(reaper_handle);
-
     let (line_tx, line_rx) = mpsc::channel::<String>();
     thread::spawn(move || {
         for line in stdin.lock().lines() {
@@ -78,6 +55,8 @@ fn main() -> Result<()> {
 
     loop {
         poll_search_completion(&mut state);
+        // Handle out-of-band finalize requests emitted by time manager
+        poll_oob_finalize(&mut state);
 
         if let Ok(line) = line_rx.try_recv() {
             let cmd = line.trim();
@@ -92,6 +71,48 @@ fn main() -> Result<()> {
             }
 
             if cmd == "isready" {
+                // Ensure any ongoing search completes before readyok
+                if state.searching {
+                    if let Some(flag) = &state.stop_flag {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+
+                    if let Some(session) = state.search_session.take() {
+                        let bridge = {
+                            let engine = state.engine.lock().unwrap();
+                            engine.stop_bridge_handle()
+                        };
+
+                        // Try to get result with 1200ms timeout
+                        let got_result =
+                            session.request_stop_and_wait(&bridge, Duration::from_millis(1200));
+
+                        // Join only if search completed or disconnected; detach if still pending
+                        if got_result.is_some() {
+                            session.join_blocking();
+                        } else {
+                            use engine_core::engine::TryResult;
+                            match session.try_poll() {
+                                TryResult::Pending => {
+                                    // Detach: drop session without joining to avoid hang
+                                    info_string("isready_join_skipped pending=1");
+                                    state.notify_idle(); // Notify even when detaching
+                                                         // session drops here, JoinHandle detaches
+                                }
+                                _ => {
+                                    // Disconnected or late result: safe to join
+                                    session.join_blocking();
+                                }
+                            }
+                        }
+                    }
+
+                    state.searching = false;
+                    state.stop_flag = None;
+                    state.ponder_hit_flag = None;
+                    state.current_time_control = None;
+                }
+
                 apply_options_to_engine(&mut state);
                 usi_println("readyok");
                 continue;
@@ -115,13 +136,39 @@ fn main() -> Result<()> {
                 if let Some(flag) = &state.stop_flag {
                     flag.store(true, Ordering::SeqCst);
                 }
-                if let Some(h) = state.worker.take() {
-                    let _ = h.join();
+
+                // Ensure any ongoing search completes before quit
+                if let Some(session) = state.search_session.take() {
+                    let bridge = {
+                        let engine = state.engine.lock().unwrap();
+                        engine.stop_bridge_handle()
+                    };
+
+                    // Try to get result with 1500ms timeout
+                    let got_result =
+                        session.request_stop_and_wait(&bridge, Duration::from_millis(1500));
+
+                    // Join only if search completed or disconnected; detach if still pending
+                    if got_result.is_some() {
+                        session.join_blocking();
+                    } else {
+                        use engine_core::engine::TryResult;
+                        match session.try_poll() {
+                            TryResult::Pending => {
+                                // Detach: drop session without joining to avoid hang
+                                info_string("quit_join_skipped pending=1");
+                                state.notify_idle(); // Notify even when detaching
+                                                     // session drops here, JoinHandle detaches
+                            }
+                            _ => {
+                                // Disconnected or late result: safe to join
+                                session.join_blocking();
+                            }
+                        }
+                    }
                 }
-                state.reaper_tx.take();
-                if let Some(h) = state.reaper_handle.take() {
-                    let _ = h.join();
-                }
+
+                state.notify_idle();
                 break;
             }
 

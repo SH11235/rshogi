@@ -1,8 +1,11 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
+use std::sync::Condvar;
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
 
 use engine_core::engine::controller::{Engine, EngineType};
+use engine_core::engine::session::SearchSession;
+use engine_core::search::parallel::EngineStopBridge;
+use engine_core::search::parallel::FinalizerMsg;
 use engine_core::shogi::Position;
 use engine_core::time_management::TimeControl;
 
@@ -38,6 +41,9 @@ pub struct UsiOptions {
     pub mate_early_stop: bool,
     // Stop bounded wait time
     pub stop_wait_ms: u64,
+    // 純秒読みでGUIの厳格締切より少し手前で確実に返すための追加リード（ms）
+    // network_delay2_ms に加算して最終化を前倒しする。既定: 300ms
+    pub byoyomi_deadline_lead_ms: u64,
     // MultiPV lines
     pub multipv: u8,
     // Policy: gameover時にもbestmoveを送るか
@@ -75,6 +81,7 @@ impl Default for UsiOptions {
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
             stop_wait_ms: 0,
+            byoyomi_deadline_lead_ms: 300,
             multipv: 1,
             gameover_sends_bestmove: false,
             fail_safe_guard: false,
@@ -112,8 +119,8 @@ pub struct EngineState {
     pub searching: bool,
     pub stop_flag: Option<Arc<AtomicBool>>,
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
-    pub worker: Option<thread::JoinHandle<()>>,
-    pub result_rx: Option<mpsc::Receiver<(u64, engine_core::search::SearchResult)>>,
+    // Async search session (non-blocking)
+    pub search_session: Option<SearchSession>,
     // Stochastic Ponder control
     pub current_is_stochastic_ponder: bool,
     pub current_is_ponder: bool,
@@ -127,10 +134,12 @@ pub struct EngineState {
     pub bestmove_emitted: bool,
     // Current (inner) time control for stop/gameover policy decisions
     pub current_time_control: Option<TimeControl>,
-    // Reaper: background joiner for detached worker threads
-    pub reaper_tx: Option<mpsc::Sender<std::thread::JoinHandle<()>>>,
-    pub reaper_handle: Option<std::thread::JoinHandle<()>>,
-    pub reaper_queue_len: Arc<AtomicUsize>,
+    pub stop_bridge: Arc<EngineStopBridge>,
+    // OOB finalize channel (from engine-core time manager via StopBridge)
+    pub finalizer_rx: Option<mpsc::Receiver<FinalizerMsg>>,
+    // Current engine-core session id (epoch) for matching finalize requests
+    pub current_session_core_id: Option<u64>,
+    pub idle_sync: Arc<IdleSync>,
 }
 
 impl EngineState {
@@ -141,6 +150,12 @@ impl EngineState {
         let mut engine = Engine::new(EngineType::Material);
         engine.set_threads(1);
         engine.set_hash_size(1024);
+        let stop_bridge = engine.stop_bridge_handle();
+        // Register OOB finalizer channel
+        let (fin_tx, fin_rx) = mpsc::channel();
+        stop_bridge.register_finalizer(fin_tx);
+
+        let idle_sync = Arc::new(IdleSync::default());
 
         Self {
             engine: Arc::new(Mutex::new(engine)),
@@ -152,8 +167,7 @@ impl EngineState {
             searching: false,
             stop_flag: None,
             ponder_hit_flag: None,
-            worker: None,
-            result_rx: None,
+            search_session: None,
             current_is_stochastic_ponder: false,
             current_is_ponder: false,
             stoch_suppress_result: false,
@@ -163,9 +177,26 @@ impl EngineState {
             current_search_id: 0,
             bestmove_emitted: false,
             current_time_control: None,
-            reaper_tx: None,
-            reaper_handle: None,
-            reaper_queue_len: Arc::new(AtomicUsize::new(0)),
+            stop_bridge,
+            finalizer_rx: Some(fin_rx),
+            current_session_core_id: None,
+            idle_sync,
         }
+    }
+
+    #[inline]
+    pub fn notify_idle(&self) {
+        self.idle_sync.notify_all();
+    }
+}
+
+#[derive(Default)]
+pub struct IdleSync {
+    condvar: Condvar,
+}
+
+impl IdleSync {
+    pub fn notify_all(&self) {
+        self.condvar.notify_all();
     }
 }

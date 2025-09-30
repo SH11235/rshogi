@@ -3,10 +3,10 @@
 use crate::time_management::{TimeControl, TimeParameters};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
-use super::types::{InfoCallback, IterationCallback};
+use super::types::{InfoCallback, InfoStringCallback, IterationCallback};
 
 /// Unified search limits combining time control with other constraints
 pub struct SearchLimits {
@@ -20,6 +20,8 @@ pub struct SearchLimits {
     pub stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress (temporarily kept for compatibility)
     pub info_callback: Option<InfoCallback>,
+    /// Callback for textual diagnostics routed as `info string`
+    pub info_string_callback: Option<InfoStringCallback>,
     /// Iteration callback for committed iteration results
     pub iteration_callback: Option<IterationCallback>,
     /// Ponder hit flag for converting ponder search to normal search
@@ -36,6 +38,8 @@ pub struct SearchLimits {
     pub multipv: u8,
     /// Enable fail-safe guard (parallel searchのみ). 既定: false
     pub enable_fail_safe: bool,
+    /// Local deadlines used as a fallback when time manager / OOB finalize is unavailable
+    pub fallback_deadlines: Option<FallbackDeadlines>,
 }
 
 impl Default for SearchLimits {
@@ -49,12 +53,14 @@ impl Default for SearchLimits {
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
+            info_string_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
+            fallback_deadlines: None,
         }
     }
 }
@@ -118,11 +124,13 @@ pub struct SearchLimitsBuilder {
     time_parameters: Option<TimeParameters>,
     stop_flag: Option<Arc<AtomicBool>>,
     info_callback: Option<InfoCallback>,
+    info_string_callback: Option<InfoStringCallback>,
     iteration_callback: Option<IterationCallback>,
     ponder_hit_flag: Option<Arc<AtomicBool>>,
     immediate_eval_at_depth_zero: bool,
     multipv: u8,
     enable_fail_safe: bool,
+    fallback_deadlines: Option<FallbackDeadlines>,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -136,11 +144,13 @@ impl Default for SearchLimitsBuilder {
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
+            info_string_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
+            fallback_deadlines: None,
         }
     }
 }
@@ -266,6 +276,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set callback for `info string` diagnostics.
+    pub fn info_string_callback(mut self, callback: InfoStringCallback) -> Self {
+        self.info_string_callback = Some(callback);
+        self
+    }
+
     /// Set iteration callback
     pub fn iteration_callback(mut self, callback: IterationCallback) -> Self {
         self.iteration_callback = Some(callback);
@@ -309,6 +325,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set fallback deadlines for local deadline enforcement
+    pub fn fallback_deadlines(mut self, deadlines: FallbackDeadlines) -> Self {
+        self.fallback_deadlines = Some(deadlines);
+        self
+    }
+
     /// Enable/disable fail-safe guard (parallel search only)
     pub fn enable_fail_safe(mut self, enable: bool) -> Self {
         self.enable_fail_safe = enable;
@@ -345,12 +367,14 @@ impl SearchLimitsBuilder {
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
+            info_string_callback: self.info_string_callback,
             iteration_callback: self.iteration_callback,
             ponder_hit_flag: self.ponder_hit_flag,
             qnodes_counter: None,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
+            fallback_deadlines: self.fallback_deadlines,
         }
     }
 }
@@ -374,12 +398,14 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             time_parameters: tm.time_parameters,
             stop_flag: None,
             info_callback: None,
+            info_string_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
+            fallback_deadlines: None,
         }
     }
 }
@@ -422,12 +448,14 @@ impl Clone for SearchLimits {
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag.clone(),
             info_callback: self.info_callback.clone(), // Arc can be cloned
+            info_string_callback: self.info_string_callback.clone(),
             iteration_callback: self.iteration_callback.clone(),
             ponder_hit_flag: self.ponder_hit_flag.clone(),
             qnodes_counter: self.qnodes_counter.clone(),
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
+            fallback_deadlines: self.fallback_deadlines,
         }
     }
 }
@@ -447,14 +475,24 @@ impl std::fmt::Debug for SearchLimits {
             .field("time_parameters", &self.time_parameters)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
+            .field("info_string_callback", &self.info_string_callback.is_some())
             .field("iteration_callback", &self.iteration_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
             .field("qnodes_counter", &self.qnodes_counter.is_some())
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .field("multipv", &self.multipv)
             .field("enable_fail_safe", &self.enable_fail_safe)
+            .field("fallback_deadlines", &self.fallback_deadlines.is_some())
             .finish()
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FallbackDeadlines {
+    pub soft_deadline: Option<Instant>,
+    pub hard_deadline: Instant,
+    pub soft_limit_ms: u64,
+    pub hard_limit_ms: u64,
 }
 
 #[cfg(test)]
