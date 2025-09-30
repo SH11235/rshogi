@@ -522,10 +522,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     if batch_idx > 0 {
                         let pending_now = self.pending_work_items.load(Ordering::Acquire);
                         let gen = self.shared_state.generation();
-                        info!(
-                            "enqueue_root_batches gen={} iter={} batch_count={} pending={}",
-                            gen, iteration, batch_idx, pending_now
-                        );
+                        if log::log_enabled!(log::Level::Debug) {
+                            debug!(
+                                "enqueue_root_batches gen={} iter={} batch_count={} pending={}",
+                                gen, iteration, batch_idx, pending_now
+                            );
+                        }
                     }
                 }
             }
@@ -989,9 +991,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let pre_ext_stop = ext_stop.load(Ordering::Acquire);
             let pre_shared_stop = self.shared_state.should_stop();
             let pre_queues_closed = self.shared_state.work_queues_closed();
-            info!(
-                "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={}",
-                limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={}",
+                    limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed
+                ),
             );
 
             // IMPORTANT: Ensure ext_stop is false before creating new session
@@ -1011,9 +1016,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let post_shared_stop = self.shared_state.should_stop();
             let post_queues_closed = self.shared_state.work_queues_closed();
             let arc_eq = Arc::ptr_eq(&ext_stop, &self.shared_state.stop_flag) as u8;
-            info!(
-                "post_reset sid={} gen={} shared_stop={} queues_closed={} arc_eq={}",
-                limits.session_id, post_gen, post_shared_stop, post_queues_closed, arc_eq
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "post_reset sid={} gen={} shared_stop={} queues_closed={} arc_eq={}",
+                    limits.session_id, post_gen, post_shared_stop, post_queues_closed, arc_eq
+                ),
             );
 
             self.stop_bridge.publish_session(
@@ -1023,18 +1031,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 limits.session_id, // Use session_id from limits (set by Engine)
             );
 
-            info!(
-                "session_published sid={} gen={} finalizer_present=1",
-                limits.session_id, post_gen
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "session_published sid={} gen={} finalizer_present=1",
+                    limits.session_id, post_gen
+                ),
             );
         } else {
             // Log pre-reset state
             let pre_gen = self.shared_state.generation();
             let pre_shared_stop = self.shared_state.should_stop();
             let pre_queues_closed = self.shared_state.work_queues_closed();
-            info!(
-                "pre_reset sid={} gen={} shared_stop={} queues_closed={} no_ext_stop=1",
-                limits.session_id, pre_gen, pre_shared_stop, pre_queues_closed
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "pre_reset sid={} gen={} shared_stop={} queues_closed={} no_ext_stop=1",
+                    limits.session_id, pre_gen, pre_shared_stop, pre_queues_closed
+                ),
             );
 
             // Ensure clean state when no external flag is provided.
@@ -1045,9 +1059,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let post_gen = self.shared_state.generation();
             let post_shared_stop = self.shared_state.should_stop();
             let post_queues_closed = self.shared_state.work_queues_closed();
-            info!(
-                "post_reset sid={} gen={} shared_stop={} queues_closed={} no_ext_stop=1",
-                limits.session_id, post_gen, post_shared_stop, post_queues_closed
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "post_reset sid={} gen={} shared_stop={} queues_closed={} no_ext_stop=1",
+                    limits.session_id, post_gen, post_shared_stop, post_queues_closed
+                ),
             );
 
             self.stop_bridge.publish_session(
@@ -1057,9 +1074,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 limits.session_id, // Use session_id from limits (set by Engine)
             );
 
-            info!(
-                "session_published sid={} gen={} finalizer_present=0",
-                limits.session_id, post_gen
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "session_published sid={} gen={} finalizer_present=0",
+                    limits.session_id, post_gen
+                ),
             );
         }
 
@@ -1154,6 +1174,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             };
             handles.push(start_worker_with(config));
         }
+
+        // Log worker spawn completion
+        self.emit_info_string(
+            &limits,
+            format!(
+                "workers_spawned sid={} gen={} count={} should_stop={}",
+                limits.session_id,
+                self.shared_state.generation(),
+                handles.len(),
+                self.shared_state.should_stop()
+            ),
+        );
 
         // Start time management if needed
         let mut time_handle = {
@@ -1353,14 +1385,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 let shared_stop = self.shared_state.should_stop();
                 let pending = self.pending_work_items.load(Ordering::Acquire);
                 let active = self.active_workers.load(Ordering::Acquire);
-                info!(
-                    "id_loop_start sid={} gen={} stop_flag={} shared_stop={} pending={} active={}",
-                    limits.session_id,
-                    self.shared_state.generation(),
-                    stop_flag_value,
-                    shared_stop,
-                    pending,
-                    active
+                self.emit_info_string(
+                    &limits,
+                    format!(
+                        "id_loop_start sid={} gen={} stop_flag={} shared_stop={} pending={} active={}",
+                        limits.session_id,
+                        self.shared_state.generation(),
+                        stop_flag_value,
+                        shared_stop,
+                        pending,
+                        active
+                    ),
                 );
             }
             if limits
