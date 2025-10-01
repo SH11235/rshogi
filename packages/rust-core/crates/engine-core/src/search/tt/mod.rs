@@ -32,6 +32,7 @@ pub mod metrics;
 pub mod prefetch;
 // pub mod pv_reconstruction; // merged into this module
 pub mod utils;
+use crate::search::tt::filter::{boost_pv_depth, boost_tt_depth, should_skip_tt_store_dyn};
 
 use crate::Position;
 use crate::{search::SEARCH_INF, shogi::Move, Color};
@@ -43,9 +44,6 @@ use prefetch::PrefetchStatsTracker;
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
-use utils::*;
-
-// No need to import entry module since it's already defined
 
 // Re-export main types for backward compatibility
 use crate::search::NodeType;
@@ -321,8 +319,11 @@ impl TranspositionTable {
 
     /// Update hashfull estimate by sampling actual keys (key != 0) in buckets
     ///
-    /// 以前は「占有ビットマップ」を用いてタッチ率を近似していたが、短時間で飽和するため
-    /// 実効占有率の推定精度を上げるべく、実キーの有無をサンプリングする方式に切り替える。
+    /// 本実装の hashfull は「物理占有率（キー非ゼロのバケット割合）」の推定値です。
+    /// YaneuraOu/Stockfish系の `hashfull(maxAge)` は「現行世代（相対年齢が閾値以下）の活性度」を
+    /// 意味し設計上の解釈が異なります。そのため YYO 想定のしきい値(例: 600/800/900/950)を
+    /// 直接流用すると意図とズレる可能性があります。本実装側のフィルタはこの“物理占有率”に
+    /// 前提を置いて較正してあります。
     fn update_hashfull_estimate(&self) {
         // Sample ~1% of buckets (minimum 64, maximum 1024), but never exceed num_buckets
         let mut sample_size = (self.num_buckets / 100).clamp(64, 1024);
@@ -826,7 +827,7 @@ impl TranspositionTable {
     }
 
     /// Store entry using parameters
-    fn store_entry(&self, params: TTEntryParams) {
+    fn store_entry(&self, mut params: TTEntryParams) {
         // Lightweight diagnostics: count store attempts even if filtered
         self.store_attempts.fetch_add(1, Ordering::Relaxed);
         #[cfg(not(feature = "tt_metrics"))]
@@ -840,31 +841,23 @@ impl TranspositionTable {
             params.score
         );
 
-        // Hashfull-based filtering with dynamic depth LUT
-        #[cfg(feature = "hashfull_filter")]
-        {
-            let hf = self.hashfull_estimate();
-
-            // Get depth threshold using optimized branch
-            let depth_threshold = get_depth_threshold(hf);
-
-            // Filter based on dynamic depth threshold
-            if depth_threshold > 0 && params.depth < depth_threshold {
-                #[cfg(feature = "tt_metrics")]
-                if let Some(ref metrics) = self.metrics {
-                    metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                return;
+        // Unified, always-on filtering based on current hashfull estimate
+        // Note: Our hashfull is a physical occupancy estimate (see above doc).
+        let hf = self.hashfull_estimate();
+        if should_skip_tt_store_dyn(params.depth, params.is_pv, params.node_type, hf) {
+            #[cfg(feature = "tt_metrics")]
+            if let Some(ref metrics) = self.metrics {
+                metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            return;
+        }
 
-            // Additional filtering for non-exact entries at high hashfull
-            if hf >= 850 && params.node_type != NodeType::Exact {
-                #[cfg(feature = "tt_metrics")]
-                if let Some(ref metrics) = self.metrics {
-                    metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                return;
-            }
+        // Depth boosting for important nodes (EXACT / PV)
+        let mut eff_depth = params.depth;
+        eff_depth = boost_tt_depth(eff_depth, params.node_type);
+        eff_depth = boost_pv_depth(eff_depth, params.is_pv);
+        if eff_depth != params.depth {
+            params.depth = eff_depth.min(127);
         }
 
         let idx = self.bucket_index(params.key, params.side_to_move);

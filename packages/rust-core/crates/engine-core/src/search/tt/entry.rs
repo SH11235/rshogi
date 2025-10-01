@@ -182,24 +182,29 @@ impl TTEntry {
     /// Check if Singular Extension was applied
     #[inline]
     pub fn has_singular_extension(&self) -> bool {
+        // Not implemented: reserved bit(s) are not allocated yet.
+        // Kept as stub for future diagnostics. Always returns false.
         false
     }
 
     /// Check if Null Move Pruning was applied
     #[inline]
     pub fn has_null_move(&self) -> bool {
+        // Not implemented: reserved bit(s) are not allocated yet.
         false
     }
 
     /// Check if TT move was tried
     #[inline]
     pub fn tt_move_tried(&self) -> bool {
+        // Not implemented: reserved bit(s) are not allocated yet.
         false
     }
 
     /// Check if position has mate threat
     #[inline]
     pub fn has_mate_threat(&self) -> bool {
+        // Not implemented: reserved bit(s) are not allocated yet.
         false
     }
 
