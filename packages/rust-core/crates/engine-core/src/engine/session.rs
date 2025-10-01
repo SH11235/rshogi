@@ -3,7 +3,7 @@
 //! This module provides `SearchSession`, which represents an ongoing search
 //! that runs asynchronously without holding the Engine lock.
 
-use std::sync::{atomic::AtomicUsize, atomic::Ordering, mpsc, Arc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -45,7 +45,6 @@ pub struct SearchSession {
     handle: Option<thread::JoinHandle<()>>,
 
     stop_handle: StopHandle,
-    active_counter: Arc<AtomicUsize>,
 }
 
 impl SearchSession {
@@ -55,14 +54,12 @@ impl SearchSession {
         result_rx: mpsc::Receiver<SearchResult>,
         handle: Option<thread::JoinHandle<()>>,
         stop_handle: StopHandle,
-        active_counter: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             session_id,
             result_rx,
             handle,
             stop_handle,
-            active_counter,
         }
     }
 
@@ -139,6 +136,11 @@ impl SearchSession {
         self.recv_result_timeout(timeout)
     }
 
+    /// Request backend stop without waiting for result.
+    pub fn request_stop(&self) {
+        self.stop_handle.request_stop();
+    }
+
     /// Join the background thread, blocking until it completes.
     ///
     /// This consumes the session and should only be used during isready/quit
@@ -150,11 +152,5 @@ impl SearchSession {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-    }
-}
-
-impl Drop for SearchSession {
-    fn drop(&mut self) {
-        self.active_counter.fetch_sub(1, Ordering::SeqCst);
     }
 }
