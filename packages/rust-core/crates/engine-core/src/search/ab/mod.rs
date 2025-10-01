@@ -1,8 +1,13 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
 
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
-use crate::search::api::{InfoEvent, InfoEventCallback, SearcherBackend};
+use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
 use crate::search::history::{ButterflyHistory, CounterMoveHistory};
 use crate::search::params as dynp;
 use crate::search::params::{
@@ -1178,7 +1183,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                     // 可能ならTTからPVを復元し、だめなら軽量再探索へフォールバック
                     let mut pv =
-                        self.reconstruct_root_pv_from_tt(root, d, m).unwrap_or_else(SmallVec::new);
+                        self.reconstruct_root_pv_from_tt(root, d, m).unwrap_or_default();
                     if pv.is_empty() {
                         let pv_ex = self.extract_pv(root, d, m, limits, &mut nodes);
                         if pv_ex.is_empty() {
@@ -1293,6 +1298,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E> {
+    fn start_async(
+        self: Arc<Self>,
+        root: Position,
+        mut limits: SearchLimits,
+        info: Option<InfoEventCallback>,
+    ) -> BackendSearchTask {
+        let stop_flag =
+            limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
+        let (tx, rx) = mpsc::channel();
+        let backend = self;
+        let info_cb = info;
+        let handle = thread::Builder::new()
+            .name("classic-backend-search".into())
+            .spawn(move || {
+                let result = backend.think_blocking(&root, &limits, info_cb.clone());
+                let _ = tx.send(result);
+            })
+            .expect("spawn classic backend search thread");
+        BackendSearchTask::new(stop_flag, rx, handle)
+    }
+
     fn think_blocking(
         &self,
         root: &Position,
