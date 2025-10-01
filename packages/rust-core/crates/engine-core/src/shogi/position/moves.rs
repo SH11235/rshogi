@@ -204,6 +204,13 @@ impl Position {
                 self.hands[self.side_to_move as usize][hand_idx] -= 1;
             }
         }
+
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.hash, self.zobrist_hash,
+            "Hash fields out of sync after undo_move: hash={:016x} zobrist={:016x}",
+            self.hash, self.zobrist_hash
+        );
     }
 
     /// Do null move - switches side to move without making any actual move
@@ -231,6 +238,13 @@ impl Position {
         // Increment ply
         self.ply += 1;
 
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.hash, self.zobrist_hash,
+            "Hash fields out of sync after do_null_move: hash={:016x} zobrist={:016x}",
+            self.hash, self.zobrist_hash
+        );
+
         undo_info
     }
 
@@ -246,5 +260,12 @@ impl Position {
         // Restore side to move and ply
         self.side_to_move = self.side_to_move.opposite();
         self.ply = undo_info.previous_ply;
+
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.hash, self.zobrist_hash,
+            "Hash fields out of sync after undo_null_move: hash={:016x} zobrist={:016x}",
+            self.hash, self.zobrist_hash
+        );
     }
 }

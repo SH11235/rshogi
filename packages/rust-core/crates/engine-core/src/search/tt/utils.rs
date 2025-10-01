@@ -144,6 +144,21 @@ pub(crate) fn extract_depth(data: u64) -> u8 {
     ((data >> DEPTH_SHIFT) & DEPTH_MASK as u64) as u8
 }
 
+/// Extract node type from packed data (2 bits)
+#[inline(always)]
+fn extract_node_type(data: u64) -> crate::search::NodeType {
+    use super::constants::{NODE_TYPE_MASK, NODE_TYPE_SHIFT};
+    use crate::search::NodeType;
+
+    let raw = ((data >> NODE_TYPE_SHIFT) & NODE_TYPE_MASK as u64) as u8;
+    match raw {
+        0 => NodeType::Exact,
+        1 => NodeType::LowerBound,
+        2 => NodeType::UpperBound,
+        _ => NodeType::Exact, // Fallback
+    }
+}
+
 /// Generic helper to try updating an existing entry with depth filtering using CAS
 #[inline(always)]
 pub(crate) fn try_update_entry_generic(
@@ -184,6 +199,26 @@ pub(crate) fn try_update_entry_generic(
             record_metric(m, MetricType::DepthFiltered);
         }
         return UpdateResult::Filtered;
+    }
+
+    // For same depth, prioritize node type quality (Exact > Lower/Upper)
+    // This follows YaneuraOu's replacement policy
+    if new_entry.depth() == old_depth {
+        use crate::search::NodeType;
+        let old_node_type = extract_node_type(old_data);
+        let new_node_type = new_entry.node_type();
+
+        // Prioritize Exact nodes - don't replace Exact with bounds
+        if old_node_type == NodeType::Exact && new_node_type != NodeType::Exact {
+            #[cfg(feature = "tt_metrics")]
+            if let Some(m) = metrics {
+                record_metric(m, MetricType::DepthFiltered); // Reuse existing metric
+            }
+            return UpdateResult::Filtered;
+        }
+
+        // For Lower/Upper bounds at same depth, allow replacement
+        // (future enhancement: could prioritize tighter bounds)
     }
 
     // Use CAS to update data atomically

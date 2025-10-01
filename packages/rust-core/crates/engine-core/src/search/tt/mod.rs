@@ -426,17 +426,42 @@ impl TranspositionTable {
         #[cfg(feature = "diagnostics")]
         {
             use std::sync::atomic::{AtomicU64, Ordering};
+
+            const PROBE_LOG_LIMIT: u64 = 200;
+
             static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
             static HIT_COUNT: AtomicU64 = AtomicU64::new(0);
-            let count = PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
-            if result.is_some() {
-                let hits = HIT_COUNT.fetch_add(1, Ordering::Relaxed);
-                // HIT は常にログ出力（最初の200回）
-                if hits < 200 {
-                    eprintln!("[TT_DIAG] PROBE #{count}: hash={hash:016x} side={side_to_move:?} HIT (hits={hits})");
+
+            let seq = PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if seq < PROBE_LOG_LIMIT {
+                match result {
+                    Some(entry) => {
+                        let hit_seq = HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!(
+                            "[TT_TRACE] probe#{seq} hit#{hit_seq} idx={idx} hash={hash:016x} side={side_to_move:?} depth={} node_type={:?} mv={:?}",
+                            entry.depth(),
+                            entry.node_type(),
+                            entry.get_move()
+                        );
+                    }
+                    None => {
+                        eprintln!(
+                            "[TT_TRACE] probe#{seq} miss    idx={idx} hash={hash:016x} side={side_to_move:?}"
+                        );
+                    }
                 }
-            } else if count < 100 {
-                eprintln!("[TT_DIAG] PROBE #{count}: hash={hash:016x} side={side_to_move:?} MISS");
+            } else if result.is_some() {
+                let hit_seq = HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if hit_seq <= PROBE_LOG_LIMIT {
+                    if let Some(entry) = result {
+                        eprintln!(
+                            "[TT_TRACE] probe-hit(extra) hit#{hit_seq} idx={idx} hash={hash:016x} side={side_to_move:?} depth={} node_type={:?} mv={:?}",
+                            entry.depth(),
+                            entry.node_type(),
+                            entry.get_move()
+                        );
+                    }
+                }
             }
         }
 
@@ -766,13 +791,18 @@ impl TranspositionTable {
         #[cfg(feature = "diagnostics")]
         {
             use std::sync::atomic::{AtomicU64, Ordering};
+            const STORE_LOG_LIMIT: u64 = 200;
             static STORE_COUNT: AtomicU64 = AtomicU64::new(0);
-            let count = STORE_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count < 100 {
-                // 最初の100回だけログ
+            let log_seq = STORE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if log_seq < STORE_LOG_LIMIT {
+                let bucket_idx = self.bucket_index(params.key, params.side_to_move);
                 eprintln!(
-                    "[TT_DIAG] STORE #{count}: hash={:016x} side={:?} depth={} move={:?}",
-                    params.key, params.side_to_move, params.depth, params.mv
+                    "[TT_TRACE] store#{log_seq} idx={bucket_idx} hash={:016x} side={:?} depth={} node_type={:?} mv={:?}",
+                    params.key,
+                    params.side_to_move,
+                    params.depth,
+                    params.node_type,
+                    params.mv
                 );
             }
         }
@@ -901,6 +931,8 @@ impl TranspositionTable {
                 #[cfg(not(feature = "tt_metrics"))]
                 _metrics,
             );
+            // Note: Debug assertion removed because store_internal may skip replacement
+            // if new entry has lower priority than worst entry in bucket (normal behavior)
         } else {
             // Propagate empty_slot_mode to bucket store
             let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
@@ -913,6 +945,8 @@ impl TranspositionTable {
                 #[cfg(not(feature = "tt_metrics"))]
                 _metrics,
             );
+            // Note: Debug assertion removed because store_internal may skip replacement
+            // if new entry has lower priority than worst entry in bucket (normal behavior)
         }
     }
 

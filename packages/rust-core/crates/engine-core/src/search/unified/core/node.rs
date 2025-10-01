@@ -121,6 +121,19 @@ where
     // Note: Node count is incremented in alpha_beta() to avoid double counting
     // searcher.stats.nodes += 1; // Removed to prevent double counting
 
+    #[cfg(feature = "diagnostics")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NODE_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
+        let seq = NODE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if seq < 200 {
+            eprintln!(
+                "[TT_TRACE] node_enter#{seq} side={:?} depth={} alpha={} beta={} ply={}",
+                pos.side_to_move, depth, alpha, beta, ply
+            );
+        }
+    }
+
     // Clear PV at this ply on entry (stack-based PV)
     if crate::search::types::SearchStack::is_valid_ply(ply) {
         searcher.search_stack[ply as usize].pv_line.clear();
@@ -817,7 +830,29 @@ where
 
         // Simple optimization: skip shallow nodes（dynamic policy with hashfull）
         let hf = searcher.tt.as_ref().map(|tt| tt.hashfull()).unwrap_or(0);
-        if !crate::search::tt::filter::should_skip_tt_store_dyn(depth, is_pv, node_type, hf) {
+        let skip_store =
+            crate::search::tt::filter::should_skip_tt_store_dyn(depth, is_pv, node_type, hf);
+
+        #[cfg(feature = "diagnostics")]
+        if skip_store {
+            let reason = if depth < 1 {
+                "depth_lt_1"
+            } else if hf >= 900 && depth <= 2 && node_type != NodeType::Exact {
+                "hashfull_non_exact"
+            } else {
+                "other"
+            };
+            eprintln!(
+                "[TT_TRACE] store_skip hash={hash:016x} side={:?} depth={} node_type={:?} is_pv={} hf={} reason={reason}",
+                pos.side_to_move,
+                depth,
+                node_type,
+                is_pv,
+                hf
+            );
+        }
+
+        if !skip_store {
             // 防御策: 停止が確定した局面では TT を汚さない
             if searcher.context.should_stop() || searcher.context.was_time_stopped() {
                 return best_score;
@@ -826,6 +861,18 @@ where
             let mut boosted_depth = crate::search::tt::filter::boost_tt_depth(depth, node_type);
             // Apply additional boost for PV nodes
             boosted_depth = crate::search::tt::filter::boost_pv_depth(boosted_depth, is_pv);
+
+            #[cfg(feature = "diagnostics")]
+            eprintln!(
+                "[TT_TRACE] store_commit hash={hash:016x} side={:?} depth={} boosted_depth={} node_type={:?} is_pv={} score={}",
+                pos.side_to_move,
+                depth,
+                boosted_depth,
+                node_type,
+                is_pv,
+                best_score
+            );
+
             searcher.store_tt(crate::search::unified::tt_operations::TTStoreParams {
                 hash,
                 depth: boosted_depth,

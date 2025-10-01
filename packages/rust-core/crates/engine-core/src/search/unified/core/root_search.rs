@@ -174,6 +174,22 @@ where
         let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
         let undo_info = pos.do_move(mv);
 
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static ROOT_TRACE_PRIMARY: AtomicU64 = AtomicU64::new(0);
+            let seq = ROOT_TRACE_PRIMARY.fetch_add(1, Ordering::Relaxed);
+            if seq < 64 {
+                eprintln!(
+                    "[TT_TRACE] root_after_do_move#{seq} mv={} side={:?} depth={} hash={:016x}",
+                    crate::usi::move_to_usi(&mv),
+                    pos.side_to_move,
+                    depth,
+                    pos.zobrist_hash
+                );
+            }
+        }
+
         // Note: Node counting is done in alpha_beta() to avoid double counting
 
         // Save child hash for PV owner validation
@@ -445,6 +461,22 @@ where
         let eval_arc = searcher.evaluator.clone();
         let mut eval_guard = crate::search::unified::EvalMoveGuard::new(&*eval_arc, pos, mv);
         let undo = pos.do_move(mv);
+
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static ROOT_MOVE_TRACE: AtomicU64 = AtomicU64::new(0);
+            let seq = ROOT_MOVE_TRACE.fetch_add(1, Ordering::Relaxed);
+            if seq < 32 {
+                eprintln!(
+                    "[TT_TRACE] root_after_do_move#{seq} mv={} side={:?} depth={} hash={:016x}",
+                    crate::usi::move_to_usi(&mv),
+                    pos.side_to_move,
+                    depth,
+                    pos.zobrist_hash
+                );
+            }
+        }
 
         // Optional prefetch
         if USE_TT && !searcher.is_prefetch_disabled() {

@@ -2047,6 +2047,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         best_result.stats.nodes = self.shared_state.get_nodes();
         best_result.stats.qnodes = self.shared_state.get_qnodes();
 
+        // Update TT hits and duplication stats from shared state
+        let shared_tt_hits = self
+            .shared_state
+            .duplication_stats
+            .tt_hits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        best_result.stats.tt_hits = Some(shared_tt_hits);
+        best_result.stats.duplication_percentage =
+            Some(self.shared_state.duplication_stats.duplication_percentage());
+
         if let Some(info) = self.shared_state.stop_info.get() {
             best_result = SearchResult::with_stop_info(
                 best_result.best_move,
