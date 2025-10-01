@@ -9,11 +9,10 @@ use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::api::{InfoEventCallback, SearcherBackend, StubBackend},
-    search::parallel::{EngineStopBridge, FinalizeReason, StopController},
+    search::parallel::{EngineStopBridge, StopController},
     search::stub::run_stub_search,
     search::unified::UnifiedSearcher,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
-    time_management::{TimeControl, TimeLimits, TimeManager},
     Position,
 };
 use log::{debug, error, info, warn};
@@ -23,7 +22,6 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
 
 use crate::game_phase::{detect_game_phase, GamePhase, Profile};
 
@@ -451,35 +449,15 @@ impl Engine {
         let session_id = self.next_session_id();
         debug!("Starting async search session {session_id}");
 
-        let time_manager = Self::create_time_manager_for_session(&pos, &limits);
-
         // Prime StopInfo snapshot with static limits if available
         let mut base_stop_info = StopInfo::default();
-        if let Some(ref tm) = time_manager {
-            let soft = Self::normalize_limit_value(tm.soft_limit_ms());
-            let hard = Self::normalize_limit_value(tm.hard_limit_ms());
-            if soft != 0 {
-                base_stop_info.soft_limit_ms = soft;
-            }
-            if hard != 0 {
-                base_stop_info.hard_limit_ms = hard;
-            }
-        }
-        if base_stop_info.soft_limit_ms == 0 || base_stop_info.hard_limit_ms == 0 {
-            if let Some(deadlines) = limits.fallback_deadlines {
-                if base_stop_info.soft_limit_ms == 0 {
-                    base_stop_info.soft_limit_ms = deadlines.soft_limit_ms;
-                }
-                if base_stop_info.hard_limit_ms == 0 {
-                    base_stop_info.hard_limit_ms = deadlines.hard_limit_ms;
-                }
-            } else if base_stop_info.soft_limit_ms == 0 && base_stop_info.hard_limit_ms == 0 {
-                if let Some(limit) = limits.time_limit() {
-                    let ms = limit.as_millis() as u64;
-                    base_stop_info.soft_limit_ms = ms;
-                    base_stop_info.hard_limit_ms = ms;
-                }
-            }
+        if let Some(deadlines) = limits.fallback_deadlines {
+            base_stop_info.soft_limit_ms = deadlines.soft_limit_ms;
+            base_stop_info.hard_limit_ms = deadlines.hard_limit_ms;
+        } else if let Some(limit) = limits.time_limit() {
+            let ms = limit.as_millis() as u64;
+            base_stop_info.soft_limit_ms = ms;
+            base_stop_info.hard_limit_ms = ms;
         }
         self._stop_ctrl.prime_stop_info(base_stop_info.clone());
         self.stop_bridge.prime_stop_info(base_stop_info.clone());
@@ -488,15 +466,6 @@ impl Engine {
         limits.session_id = session_id;
         // Publish via new stop controller（外部停止フラグを合わせて登録）
         self._stop_ctrl.publish_session(limits.stop_flag.as_ref(), session_id);
-
-        if let Some(tm) = time_manager.clone() {
-            Self::spawn_time_manager_watchdog(
-                Arc::clone(&self.stop_bridge),
-                self._stop_ctrl.clone(),
-                tm,
-                session_id,
-            );
-        }
 
         // Apply pending configuration
         self.apply_pending_thread_count();
@@ -715,113 +684,6 @@ impl Engine {
 
         // Return session handle immediately (with JoinHandle for isready/quit)
         SearchSession::new(session_id, rx, Some(handle))
-    }
-
-    fn create_time_manager_for_session(
-        pos: &Position,
-        limits: &SearchLimits,
-    ) -> Option<Arc<TimeManager>> {
-        let time_limits: TimeLimits = limits.clone().into();
-        match &time_limits.time_control {
-            TimeControl::Infinite | TimeControl::Ponder(_) => return None,
-            _ => {}
-        }
-
-        let phase = detect_game_phase(pos, pos.ply as u32, Profile::Search);
-        let tm = TimeManager::new(&time_limits, pos.side_to_move, pos.ply as u32, phase);
-        let soft = Self::normalize_limit_value(tm.soft_limit_ms());
-        let hard = Self::normalize_limit_value(tm.hard_limit_ms());
-        if soft == 0 && hard == 0 {
-            None
-        } else {
-            Some(Arc::new(tm))
-        }
-    }
-
-    fn normalize_limit_value(value: u64) -> u64 {
-        if value == 0 || value == u64::MAX {
-            0
-        } else {
-            value
-        }
-    }
-
-    fn spawn_time_manager_watchdog(
-        bridge: Arc<EngineStopBridge>,
-        ctrl: StopController,
-        tm: Arc<TimeManager>,
-        session_id: u64,
-    ) {
-        if let Err(err) =
-            thread::Builder::new().name(format!("tm-watch-{}", session_id)).spawn(move || {
-                let mut soft_dispatched = false;
-
-                loop {
-                    let soft_limit_raw = tm.soft_limit_ms();
-                    let hard_limit_raw = tm.hard_limit_ms();
-                    let soft_limit = Self::normalize_limit_value(soft_limit_raw);
-                    let hard_limit = Self::normalize_limit_value(hard_limit_raw);
-
-                    if soft_limit == 0 && hard_limit == 0 {
-                        return;
-                    }
-
-                    if soft_limit == 0 {
-                        soft_dispatched = true;
-                    }
-
-                    let elapsed = tm.elapsed_ms();
-
-                    if !soft_dispatched && soft_limit != 0 && elapsed >= soft_limit {
-                        bridge.update_elapsed_ms(elapsed);
-                        ctrl.update_elapsed_ms(elapsed);
-                        ctrl.request_finalize(FinalizeReason::Planned);
-                        bridge.request_finalize(FinalizeReason::Planned);
-                        info!(
-                            "time_watchdog session={} event=planned elapsed_ms={}",
-                            session_id, elapsed
-                        );
-                        soft_dispatched = true;
-                        if hard_limit == 0 {
-                            break;
-                        }
-                    }
-
-                    if hard_limit != 0 && elapsed >= hard_limit {
-                        bridge.update_elapsed_ms(elapsed);
-                        ctrl.update_elapsed_ms(elapsed);
-                        ctrl.request_finalize(FinalizeReason::Hard);
-                        bridge.request_finalize(FinalizeReason::Hard);
-                        ctrl.request_stop();
-                        bridge.request_stop();
-                        info!(
-                            "time_watchdog session={} event=hard elapsed_ms={}",
-                            session_id, elapsed
-                        );
-                        break;
-                    }
-
-                    let next_target = if !soft_dispatched && soft_limit != 0 {
-                        soft_limit
-                    } else if hard_limit != 0 {
-                        hard_limit
-                    } else {
-                        break;
-                    };
-
-                    if next_target <= elapsed {
-                        thread::sleep(Duration::from_millis(10));
-                        continue;
-                    }
-
-                    let remaining = next_target - elapsed;
-                    let sleep_ms = remaining.clamp(10, 100);
-                    thread::sleep(Duration::from_millis(sleep_ms));
-                }
-            })
-        {
-            warn!("failed to spawn time watchdog for session {}: {}", session_id, err);
-        }
     }
 
     /// Internal helper to run search in a background thread.
@@ -1627,7 +1489,24 @@ impl Engine {
                 }
             }
             EngineType::Stub => {
-                todo!();
+                if let Ok(mut guard) = self.material_searcher.lock() {
+                    *guard = None;
+                }
+                if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+                    *guard = None;
+                }
+                if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+                    *guard = None;
+                }
+                if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+                    *guard = None;
+                }
+                if let Ok(mut guard) = self.material_parallel_searcher.lock() {
+                    *guard = None;
+                }
+                if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
+                    *guard = None;
+                }
             }
         }
         // Ensure new or existing searchers reflect the desired MultiPV setting

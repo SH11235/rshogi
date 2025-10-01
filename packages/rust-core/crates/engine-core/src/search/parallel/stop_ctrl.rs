@@ -92,14 +92,6 @@ impl StopController {
         *guard = Some(info);
     }
 
-    /// Update elapsed time in the StopInfo snapshot (monotonic milliseconds).
-    pub fn update_elapsed_ms(&self, elapsed_ms: u64) {
-        let mut guard = self.inner.stop_info.lock().unwrap();
-        let mut si = guard.take().unwrap_or_default();
-        si.elapsed_ms = si.elapsed_ms.max(elapsed_ms);
-        *guard = Some(si);
-    }
-
     /// Update only the external stop flag reference.
     pub fn update_external_stop_flag(&self, external_stop: Option<&Arc<AtomicBool>>) {
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
@@ -229,10 +221,12 @@ impl StopController {
         if line.multipv_index != 1 {
             return;
         }
-        let mut snap = RootSnapshot::default();
-        snap.search_id = session_id;
-        snap.root_key = root_key;
-        snap.best = Some(line.root_move);
+        let mut snap = RootSnapshot {
+            search_id: session_id,
+            root_key,
+            best: Some(line.root_move),
+            ..Default::default()
+        };
         // Copy PV (SmallVec expected)
         let mut pv_copy: SmallVec<[crate::shogi::Move; 64]> = SmallVec::new();
         pv_copy.extend_from_slice(&line.pv);
