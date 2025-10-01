@@ -37,6 +37,8 @@ pub struct SearchStats {
     pub null_cuts: Option<u64>,
     /// Number of late move reductions (optional)
     pub lmr_count: Option<u64>,
+    /// Number of late move reduction trials (optional)
+    pub lmr_trials: Option<u64>,
     /// Aspiration window success count
     pub aspiration_hits: Option<u32>,
     /// Total re-searches performed

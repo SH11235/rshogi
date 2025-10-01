@@ -309,17 +309,6 @@ impl TranspositionTable {
         self.occupied_bitmap[byte_idx].fetch_or(mask, Ordering::Relaxed);
     }
 
-    /// Check if bucket is occupied in bitmap
-    #[cfg(test)]
-    #[inline]
-    fn is_bucket_occupied(&self, bucket_idx: usize) -> bool {
-        let byte_idx = bucket_idx / 8;
-        let bit_idx = bucket_idx % 8;
-        let mask = 1u8 << bit_idx;
-
-        (self.occupied_bitmap[byte_idx].load(Ordering::Relaxed) & mask) != 0
-    }
-
     /// Clear bucket occupied bit
     #[inline]
     fn clear_bucket_occupied(&self, bucket_idx: usize) {
@@ -348,14 +337,8 @@ impl TranspositionTable {
 
         for i in 0..sample_size {
             let idx = (start_idx.wrapping_add(i * 97)) & (self.num_buckets - 1); // 97 is prime
-                                                                                 // Prefer fast occupancy bitmap; fall back to key check to avoid stale bitmap effects
-            let byte_idx = idx / 8;
-            let bit_idx = idx % 8;
-            let mask = 1u8 << bit_idx;
-            let occ = (self.occupied_bitmap[byte_idx].load(Ordering::Relaxed) & mask) != 0;
-            let any = if occ {
-                true
-            } else if let Some(ref flex) = self.flexible_buckets {
+                                                                                 // Always compute from actual keys (bitmapを使わない)
+            let any = if let Some(ref flex) = self.flexible_buckets {
                 flex[idx].any_key_nonzero_acquire()
             } else {
                 self.buckets[idx].any_key_nonzero_acquire()

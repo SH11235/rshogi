@@ -14,9 +14,6 @@ pub mod tt;
 pub mod types;
 pub mod unified;
 
-#[cfg(test)]
-mod test_utils;
-
 // Re-export commonly used items
 pub use crate::game_phase::GamePhase;
 pub use common::{is_mate_score, mate_distance_pruning, mate_score, LimitChecker};

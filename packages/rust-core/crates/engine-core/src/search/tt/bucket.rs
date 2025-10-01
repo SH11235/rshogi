@@ -239,26 +239,6 @@ impl TTBucket {
         None
     }
 
-    /// Store entry in bucket with metrics tracking
-    #[cfg(test)]
-    pub(crate) fn store_with_metrics(
-        &self,
-        new_entry: TTEntry,
-        current_age: u8,
-        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
-        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
-    ) {
-        self.store_with_metrics_and_mode(
-            new_entry,
-            current_age,
-            false, // empty_slot_mode = false
-            #[cfg(feature = "tt_metrics")]
-            metrics,
-            #[cfg(not(feature = "tt_metrics"))]
-            None,
-        );
-    }
-
     /// Store entry in bucket with explicit empty_slot_mode control
     pub(crate) fn store_with_mode(
         &self,
@@ -292,12 +272,6 @@ impl TTBucket {
         self.store_internal(new_entry, current_age, empty_slot_mode, metrics);
         #[cfg(not(feature = "tt_metrics"))]
         self.store_internal(new_entry, current_age, empty_slot_mode, None)
-    }
-
-    /// Store entry in bucket (used in tests)
-    #[cfg(test)]
-    pub(crate) fn store(&self, new_entry: TTEntry, current_age: u8) {
-        self.store_internal(new_entry, current_age, false, None)
     }
 
     /// Try to update an existing entry with depth filtering

@@ -188,7 +188,7 @@ pub struct Engine {
     // Session ID counter for async search
     session_counter: u64,
     // Optional new backend (Phase 1). When Some, Engine will delegate search to backend.
-    backend: Option<Box<dyn SearcherBackend>>,
+    backend: Option<Arc<dyn SearcherBackend + Send + Sync>>,
 }
 
 impl Engine {
@@ -268,11 +268,10 @@ impl Engine {
             Arc::new(Mutex::new(None))
         };
 
-        let backend: Option<Box<dyn SearcherBackend>> = match engine_type {
-            EngineType::Stub => Some(Box::new(StubBackend::new())),
+        let backend: Option<Arc<dyn SearcherBackend + Send + Sync>> = match engine_type {
+            EngineType::Stub => Some(Arc::new(StubBackend::new())),
             EngineType::Material | EngineType::Enhanced => {
-                // ClassicAB backend + shared TT を紐付け
-                Some(Box::new(crate::search::ab::ClassicBackend::with_tt(
+                Some(Arc::new(crate::search::ab::ClassicBackend::with_tt(
                     material_evaluator.clone(),
                     shared_tt.clone(),
                 )))
@@ -424,19 +423,6 @@ impl Engine {
         self.num_threads = 1;
     }
 
-    /// Calculate active threads based on game phase
-    #[cfg(test)]
-    fn calculate_active_threads(&self, position: &Position) -> usize {
-        let phase = detect_game_phase(position, position.ply as u32, Profile::Search);
-        let base_threads = self.num_threads;
-
-        match phase {
-            GamePhase::Opening => base_threads,             // All threads
-            GamePhase::MiddleGame => base_threads,          // All threads
-            GamePhase::EndGame => base_threads.div_ceil(2), // Half threads (rounded up)
-        }
-    }
-
     /// Helper to generate next session ID
     fn next_session_id(&mut self) -> u64 {
         self.session_counter = self.session_counter.wrapping_add(1);
@@ -478,11 +464,7 @@ impl Engine {
             let active_searches = self.active_searches.clone();
             let pos_clone = pos.clone();
             let limits_clone = limits.clone();
-            let backend_ref: &'static dyn SearcherBackend = unsafe {
-                std::mem::transmute::<&dyn SearcherBackend, &'static dyn SearcherBackend>(
-                    &**backend,
-                )
-            };
+            let backend_arc = Arc::clone(backend);
 
             // Build InfoEvent adapter from legacy callbacks in limits
             let legacy_info = limits.info_callback.clone();
@@ -552,7 +534,7 @@ impl Engine {
                 .name(format!("engine-backend-search-{}", session_id))
                 .spawn(move || {
                     let _guard = ActiveSearchGuard(active_searches);
-                    let result = backend_ref.think_blocking(&pos_clone, &limits_clone, event_cb);
+                    let result = backend_arc.think_blocking(&pos_clone, &limits_clone, event_cb);
                     let _ = tx.send(result);
                 })
                 .expect("spawn backend search thread");
@@ -1234,7 +1216,19 @@ impl Engine {
                     arc0
                 }
             };
-            self.shared_tt = new_tt_arc;
+            self.shared_tt = new_tt_arc.clone();
+
+            // Rebind backend (ClassicAB/Stub) to the new shared TT so that probe/store/hashfull are consistent
+            self.backend = match self.engine_type {
+                EngineType::Stub => Some(Arc::new(StubBackend::new())),
+                EngineType::Material | EngineType::Enhanced => {
+                    Some(Arc::new(crate::search::ab::ClassicBackend::with_tt(
+                        self.material_evaluator.clone(),
+                        new_tt_arc.clone(),
+                    )))
+                }
+                _ => self.backend.take(),
+            };
 
             // Recreate the single-threaded searcher for the current engine type using shared_tt
             match self.engine_type {
@@ -1348,10 +1342,13 @@ impl Engine {
         self.engine_type = engine_type;
         // Backend assignment for Phase 1
         self.backend = match engine_type {
-            EngineType::Stub => Some(Box::new(StubBackend::new())),
-            EngineType::Material | EngineType::Enhanced => Some(Box::new(
-                crate::search::ab::ClassicBackend::new(self.material_evaluator.clone()),
-            )),
+            EngineType::Stub => Some(Arc::new(StubBackend::new())),
+            EngineType::Material | EngineType::Enhanced => {
+                Some(Arc::new(crate::search::ab::ClassicBackend::with_tt(
+                    self.material_evaluator.clone(),
+                    self.shared_tt.clone(),
+                )))
+            }
             _ => None,
         };
 

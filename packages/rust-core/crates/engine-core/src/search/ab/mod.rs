@@ -6,7 +6,8 @@ use crate::search::api::{InfoEvent, InfoEventCallback, SearcherBackend, StopHand
 use crate::search::history::{ButterflyHistory, CounterMoveHistory};
 use crate::search::params::{
     LMP_LIMIT_D1, LMP_LIMIT_D2, LMP_LIMIT_D3, NMP_BASE_R, NMP_BONUS_DELTA_BETA,
-    NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH, RAZOR_ENABLED, SBP_MARGIN_D1, SBP_MARGIN_D2,
+    NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH, QS_MARGIN_CAPTURE, QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS,
+    RAZOR_ENABLED, SBP_MARGIN_D1, SBP_MARGIN_D2,
 };
 use crate::search::tt::TTProbe;
 use crate::search::types::SearchStack;
@@ -49,12 +50,31 @@ struct ABArgs<'a> {
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     evaluator: Arc<E>,
     tt: Option<Arc<TranspositionTable>>, // 共有TT（Hashfull出力用、将来はprobe/storeでも使用）
+    toggles: PruneToggles,
 }
 
 #[derive(Default)]
 struct Heuristics {
     history: ButterflyHistory,
     counter: CounterMoveHistory,
+    // diagnostics counters
+    lmr_trials: u64,
+    lmr_applied: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct PruneToggles {
+    pub enable_iid: bool,
+    pub enable_nmp: bool,
+}
+
+impl Default for PruneToggles {
+    fn default() -> Self {
+        Self {
+            enable_iid: true,
+            enable_nmp: true,
+        }
+    }
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
@@ -62,6 +82,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         Self {
             evaluator,
             tt: None,
+            toggles: PruneToggles::default(),
         }
     }
 
@@ -69,6 +90,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         Self {
             evaluator,
             tt: Some(tt),
+            toggles: PruneToggles::default(),
+        }
+    }
+
+    pub fn with_tt_and_toggles(
+        evaluator: Arc<E>,
+        tt: Arc<TranspositionTable>,
+        toggles: PruneToggles,
+    ) -> Self {
+        Self {
+            evaluator,
+            tt: Some(tt),
+            toggles,
         }
     }
 
@@ -157,10 +191,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return alpha;
         };
 
-        // Basic delta pruning for captures
-        // margin and promotion bonus are conservative初期値（docs準拠）
-        const MARGIN_CAPTURE: i32 = 100; // cp
-        const PROMOTE_BONUS: i32 = 50; // cp
+        // Basic delta pruning for captures（params管理）
+        // QS_MARGIN_CAPTURE / QS_PROMOTE_BONUS を利用
 
         // Score captures by SEE (descending)
         let mut caps: Vec<(crate::shogi::Move, i32)> =
@@ -174,7 +206,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 .captured_piece_type()
                 .map(|pt| crate::shogi::piece_constants::SEE_PIECE_VALUES[0][pt as usize])
                 .unwrap_or(0);
-            let best_gain = stand_pat + captured_val + PROMOTE_BONUS + MARGIN_CAPTURE;
+            let best_gain = stand_pat + captured_val + QS_PROMOTE_BONUS + QS_MARGIN_CAPTURE;
             if best_gain <= alpha {
                 continue;
             }
@@ -204,9 +236,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return alpha;
         };
         let mut tried_checks = 0usize;
-        const MAX_QUIET_CHECKS: usize = 16;
         for mv in quiet.as_slice().iter().copied() {
-            if tried_checks >= MAX_QUIET_CHECKS {
+            if tried_checks >= QS_MAX_QUIET_CHECKS {
                 break;
             }
             if pos.gives_check(mv) {
@@ -328,7 +359,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (a_md, None);
         }
         alpha = a_md;
-        // beta = b_md;
 
         // Static Beta Pruning (non-PV shallow)
         if depth <= 2 && !pos.is_in_check() {
@@ -361,7 +391,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         // Null Move Pruning (NMP): 非PV相当、チェックなし、prev_nullでない、深さ≥3、手駒多すぎない
         // R = 2 + depth/4 (+1 if static_eval - beta > 150)
-        {
+        if self.toggles.enable_nmp {
             // prev null guard
             let prev_null = if ply > 0 {
                 stack[(ply - 1) as usize].null_move
@@ -443,7 +473,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         // Internal Iterative Deepening (IID): depth≥6・非王手・TT手不在 or TTが浅い
-        if depth >= 6 && !pos.is_in_check() && (!tt_depth_ok || tt_hint.is_none()) {
+        if self.toggles.enable_iid
+            && depth >= 6
+            && !pos.is_in_check()
+            && (!tt_depth_ok || tt_hint.is_none())
+        {
             let iid_depth = depth - 2;
             let (_s, _mv) = self.alphabeta(ABArgs {
                 pos,
@@ -619,10 +653,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // LMR: 非王手・非良捕獲・moveno>=3 の静止手を減深
             let mut next_depth = depth - 1;
             if depth >= 3 && moveno >= 3 && is_quiet && !is_good_capture {
+                heur.lmr_trials = heur.lmr_trials.saturating_add(1);
                 let rd = ((depth as f32).ln() * (moveno as f32).ln() / 1.7).floor() as i32;
                 let r = rd.max(1).min(depth - 1);
-                next_depth -= r;
-                *lmr_counter += 1;
+                if r > 0 {
+                    next_depth -= r;
+                    *lmr_counter += 1;
+                    heur.lmr_applied = heur.lmr_applied.saturating_add(1);
+                }
             }
             // 内部PVS: 先頭手フル、以降はnull-window→必要時フル再探索
             let score = if !first_move_done {
@@ -828,6 +866,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_tt_hits: u64 = 0;
         let mut cum_beta_cuts: u64 = 0;
         let mut cum_lmr_counter: u64 = 0;
+        let mut cum_lmr_trials: u64 = 0;
 
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
@@ -996,6 +1035,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             cum_tt_hits = cum_tt_hits.saturating_add(tt_hits);
             cum_beta_cuts = cum_beta_cuts.saturating_add(beta_cuts);
             cum_lmr_counter = cum_lmr_counter.saturating_add(lmr_counter);
+            cum_lmr_trials = cum_lmr_trials.saturating_add(heur.lmr_trials);
 
             if let Some(cb) = info {
                 // Depth event
@@ -1045,6 +1085,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         };
         stats.tt_hits = Some(cum_tt_hits);
         stats.lmr_count = Some(cum_lmr_counter);
+        stats.lmr_trials = Some(cum_lmr_trials);
         stats.root_fail_high_count = Some(cum_beta_cuts);
         SearchResult::new(best, best_score, stats)
     }
