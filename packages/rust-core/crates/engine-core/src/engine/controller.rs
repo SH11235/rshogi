@@ -25,6 +25,14 @@ use std::thread;
 
 use crate::game_phase::{detect_game_phase, GamePhase, Profile};
 
+struct ActiveCounterGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveCounterGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// The source used for final bestmove decision
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalBestSource {
@@ -433,7 +441,7 @@ impl Engine {
     /// allowing concurrent operations. The caller can poll the returned `SearchSession`
     /// for results without blocking.
     ///
-    /// This is the preferred method for normal game play, as it follows the yanerau-o
+    /// This is the preferred method for normal game play, as it follows the yaneura-ou
     /// design pattern of non-blocking search initiation.
     pub fn start_search(&mut self, pos: Position, mut limits: SearchLimits) -> SearchSession {
         // Generate unique session ID
@@ -539,17 +547,11 @@ impl Engine {
                     }
                 }) as InfoEventCallback
             });
-            self.active_searches.fetch_add(1, Ordering::SeqCst);
             let active_counter = Arc::clone(&self.active_searches);
-            let backend_task = Arc::clone(backend).start_async(pos, limits, event_cb);
+            let backend_task =
+                Arc::clone(backend).start_async(pos, limits, event_cb, Arc::clone(&active_counter));
             let (stop_handle, result_rx, join_handle) = backend_task.into_parts();
-            return SearchSession::new(
-                session_id,
-                result_rx,
-                join_handle,
-                stop_handle,
-                active_counter,
-            );
+            return SearchSession::new(session_id, result_rx, join_handle, stop_handle);
         }
 
         let (tx, rx) = mpsc::channel();
@@ -577,10 +579,6 @@ impl Engine {
         self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
         self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
 
-        // Increment active searches before spawning thread
-        self.active_searches.fetch_add(1, Ordering::SeqCst);
-        let active_counter = Arc::clone(&self.active_searches);
-
         let stop_flag_arc =
             limits.stop_flag.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         if limits.stop_flag.is_none() {
@@ -588,68 +586,64 @@ impl Engine {
         }
 
         let stop_handle = StopHandle::new(Arc::clone(&stop_flag_arc));
-
-        // Publish session to stop bridge immediately before spawning thread.
-        // This ensures that request_stop_immediate() can reach the search session
-        // even if called right after start_search() returns.
-        // For single-threaded searches, the internal stop flag will be published later
-        // by the search thread, but the external stop flag is already registered above.
-        if limits.stop_flag.is_some() {
-            // External stop flag is already registered via update_external_stop_flag() above.
-            // The search thread will call publish_session/update again with full handles.
-            debug!("Pre-publishing external stop flag for session {session_id}");
-        }
+        let active_counter = Arc::clone(&self.active_searches);
+        active_counter.fetch_add(1, Ordering::SeqCst);
 
         // Spawn search in background thread with named thread for debugging
         let handle = thread::Builder::new()
             .name(format!("engine-search-{}", session_id))
-            .spawn(move || {
-                // Build search arguments
-                let args = SearchThreadArgs {
-                    engine_type,
-                    use_parallel,
-                    num_threads,
-                    material_evaluator,
-                    nnue_evaluator,
-                    shared_tt,
-                    stop_bridge,
-                    material_parallel_searcher,
-                    nnue_parallel_searcher,
-                    material_searcher,
-                    nnue_basic_searcher,
-                    material_enhanced_searcher,
-                    nnue_enhanced_searcher,
-                };
+            .spawn({
+                let counter = Arc::clone(&active_counter);
+                move || {
+                    let _guard = ActiveCounterGuard(counter);
 
-                // Catch panics to ensure we don't send on a disconnected channel
-                let search_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    Self::search_in_thread(&mut pos_clone, limits, args)
-                }));
+                    // Build search arguments
+                    let args = SearchThreadArgs {
+                        engine_type,
+                        use_parallel,
+                        num_threads,
+                        material_evaluator,
+                        nnue_evaluator,
+                        shared_tt,
+                        stop_bridge,
+                        material_parallel_searcher,
+                        nnue_parallel_searcher,
+                        material_searcher,
+                        nnue_basic_searcher,
+                        material_enhanced_searcher,
+                        nnue_enhanced_searcher,
+                    };
 
-                match search_result {
-                    Ok(result) => {
-                        // Send result back (ignore send error if receiver dropped)
-                        let _ = tx.send(result);
-                    }
-                    Err(panic_err) => {
-                        // Extract panic message safely via downcast
-                        let msg = if let Some(s) = panic_err.downcast_ref::<String>() {
-                            s.clone()
-                        } else if let Some(s) = panic_err.downcast_ref::<&'static str>() {
-                            s.to_string()
-                        } else {
-                            "non-string panic payload".to_string()
-                        };
-                        error!("search_in_thread session={} panicked: {}", session_id, msg);
-                        // Don't send result - USI layer will detect Disconnected via TryResult
+                    // Catch panics to ensure we don't send on a disconnected channel
+                    let search_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            Self::search_in_thread(&mut pos_clone, limits, args)
+                        }));
+
+                    match search_result {
+                        Ok(result) => {
+                            // Send result back (ignore send error if receiver dropped)
+                            let _ = tx.send(result);
+                        }
+                        Err(panic_err) => {
+                            // Extract panic message safely via downcast
+                            let msg = if let Some(s) = panic_err.downcast_ref::<String>() {
+                                s.clone()
+                            } else if let Some(s) = panic_err.downcast_ref::<&'static str>() {
+                                s.to_string()
+                            } else {
+                                "non-string panic payload".to_string()
+                            };
+                            error!("search_in_thread session={} panicked: {}", session_id, msg);
+                            // Don't send result - USI layer will detect Disconnected via TryResult
+                        }
                     }
                 }
-                // _guard is dropped here, ensuring active_searches is decremented
             })
             .expect("failed to spawn search thread");
 
         // Return session handle immediately (with JoinHandle for isready/quit)
-        SearchSession::new(session_id, rx, Some(handle), stop_handle, active_counter)
+        SearchSession::new(session_id, rx, Some(handle), stop_handle)
     }
 
     /// Internal helper to run search in a background thread.
@@ -1452,26 +1446,6 @@ impl Engine {
                             e
                         );
                     }
-                }
-            }
-            EngineType::Stub => {
-                if let Ok(mut guard) = self.material_searcher.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut guard) = self.material_parallel_searcher.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
-                    *guard = None;
                 }
             }
         }
