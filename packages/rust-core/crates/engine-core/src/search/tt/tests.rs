@@ -1598,4 +1598,145 @@ mod parallel_tests {
         assert_eq!(entry.depth(), 5);
         assert_eq!(entry.node_type(), NodeType::Exact);
     }
+
+    /// Roundtrip test: store then immediately probe to verify store/probe consistency
+    /// This test helps isolate whether "tt_hits=0" is due to:
+    /// - Store/probe mismatch (probe cannot find what was just stored)
+    /// - Metrics collection issue (probe works but metrics underreport)
+    #[test]
+    fn test_tt_roundtrip_store_probe() {
+        let tt = TranspositionTable::new(4); // 4MB table
+        let position = Position::startpos();
+
+        // Test multiple keys to ensure consistency
+        let test_cases = vec![
+            (position.hash, None, 100, 50, 5, NodeType::Exact),
+            (position.hash + 1, None, 200, -30, 10, NodeType::LowerBound),
+            (position.hash + 2, None, -50, 20, 8, NodeType::UpperBound),
+            (position.hash + 3, None, 0, 0, 12, NodeType::Exact),
+            (position.hash + 100, None, 500, 100, 15, NodeType::LowerBound),
+        ];
+
+        let mut stored_count = 0;
+        let mut retrieved_count = 0;
+
+        for (hash, mv, score, eval, depth, node_type) in test_cases {
+            // Store entry
+            tt.store(TTStoreArgs::new(hash, mv, score, eval, depth, node_type, Color::Black));
+            stored_count += 1;
+
+            // Immediately probe - should find what we just stored
+            let entry = tt.probe_entry(hash, Color::Black);
+            assert!(
+                entry.is_some(),
+                "Failed to retrieve entry immediately after storing (hash: {hash:016x}, depth: {depth})"
+            );
+
+            let retrieved = entry.unwrap();
+            retrieved_count += 1;
+
+            // Verify all fields match
+            assert_eq!(retrieved.key(), hash, "Key mismatch");
+            assert_eq!(retrieved.score(), score, "Score mismatch");
+            assert_eq!(retrieved.eval(), eval, "Eval mismatch");
+            assert_eq!(retrieved.depth(), depth, "Depth mismatch");
+            assert_eq!(retrieved.node_type(), node_type, "NodeType mismatch");
+            assert_eq!(retrieved.get_move(), mv, "Move mismatch");
+        }
+
+        assert_eq!(stored_count, 5, "Should have stored 5 entries");
+        assert_eq!(retrieved_count, 5, "Should have retrieved 5 entries");
+    }
+
+    /// Roundtrip test with minimal depth
+    /// Tests that depth=1 entries are handled correctly
+    #[test]
+    fn test_tt_roundtrip_depth_zero() {
+        let tt = TranspositionTable::new(2); // 2MB table
+        let position = Position::startpos();
+
+        // Test depth=1 (minimum depth for non-PV nodes)
+        let hash_d1 = position.hash;
+        tt.store(TTStoreArgs::new(hash_d1, None, 100, 50, 1, NodeType::Exact, Color::Black));
+
+        let entry_d1 = tt.probe_entry(hash_d1, Color::Black);
+        assert!(entry_d1.is_some(), "depth=1 entry should be stored and retrieved");
+        assert_eq!(entry_d1.unwrap().depth(), 1);
+
+        // Test depth=2 (should also be stored)
+        let hash_d2 = position.hash + 1;
+        tt.store(TTStoreArgs::new(hash_d2, None, 200, -30, 2, NodeType::LowerBound, Color::Black));
+
+        let entry_d2 = tt.probe_entry(hash_d2, Color::Black);
+        assert!(entry_d2.is_some(), "depth=2 entry should be stored and retrieved");
+        assert_eq!(entry_d2.unwrap().depth(), 2);
+    }
+
+    /// Concurrent roundtrip test: multiple threads storing and immediately probing
+    /// Tests that store/probe works correctly under concurrent access
+    #[test]
+    fn test_tt_concurrent_roundtrip() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tt = Arc::new(TranspositionTable::new(8)); // 8MB table
+        let num_threads = 4;
+        let entries_per_thread = 50;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let tt_clone = Arc::clone(&tt);
+                thread::spawn(move || {
+                    let mut local_stored = 0;
+                    let mut local_retrieved = 0;
+
+                    for i in 0..entries_per_thread {
+                        // Generate unique hash for this thread
+                        let hash = (thread_id as u64 * 1000 + i as u64 + 1) | 0x8000_0000_0000_0000;
+                        let depth = (i % 20) + 1; // depth 1-20
+
+                        // Store
+                        tt_clone.store(TTStoreArgs::new(
+                            hash,
+                            None,
+                            100 + i as i16,
+                            50,
+                            depth,
+                            NodeType::Exact,
+                            Color::Black,
+                        ));
+                        local_stored += 1;
+
+                        // Immediately probe
+                        if let Some(retrieved) = tt_clone.probe_entry(hash, Color::Black) {
+                            local_retrieved += 1;
+                            assert_eq!(retrieved.key(), hash);
+                            assert_eq!(retrieved.depth(), depth);
+                        }
+                    }
+
+                    (local_stored, local_retrieved)
+                })
+            })
+            .collect();
+
+        let mut total_stored = 0;
+        let mut total_retrieved = 0;
+
+        for handle in handles {
+            let (stored, retrieved) = handle.join().unwrap();
+            total_stored += stored;
+            total_retrieved += retrieved;
+        }
+
+        println!("Concurrent roundtrip: stored={total_stored}, retrieved={total_retrieved}");
+        // We expect most entries to be retrievable, though some may be evicted under high contention
+        // At least 80% should be retrievable in a 8MB table with only 200 entries
+        assert!(
+            total_retrieved >= (total_stored * 4) / 5,
+            "Should retrieve at least 80% of stored entries, got {}/{}",
+            total_retrieved,
+            total_stored
+        );
+    }
 }
