@@ -4,10 +4,10 @@ use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{InfoEvent, InfoEventCallback, SearcherBackend};
 use crate::search::history::{ButterflyHistory, CounterMoveHistory};
+use crate::search::params as dynp;
 use crate::search::params::{
-    LMP_LIMIT_D1, LMP_LIMIT_D2, LMP_LIMIT_D3, NMP_BASE_R, NMP_BONUS_DELTA_BETA,
-    NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH, QS_MARGIN_CAPTURE, QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS,
-    RAZOR_ENABLED, SBP_MARGIN_D1, SBP_MARGIN_D2,
+    NMP_BASE_R, NMP_BONUS_DELTA_BETA, NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH, QS_MARGIN_CAPTURE,
+    QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS,
 };
 use crate::search::tt::TTProbe;
 use crate::search::types::SearchStack;
@@ -367,9 +367,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // Static Beta Pruning (non-PV shallow)
         if depth <= 2 && !pos.is_in_check() {
             let margin = if depth == 1 {
-                SBP_MARGIN_D1
+                dynp::sbp_margin_d1()
             } else {
-                SBP_MARGIN_D2
+                dynp::sbp_margin_d2()
             };
             if static_eval - margin >= beta {
                 return (static_eval, None);
@@ -377,7 +377,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         // Razor: depth==1 quick qsearch probe
-        if RAZOR_ENABLED && depth == 1 && !pos.is_in_check() {
+        if dynp::razor_enabled() && depth == 1 && !pos.is_in_check() {
             let r = self.qsearch(QSearchArgs {
                 pos,
                 alpha,
@@ -453,6 +453,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut tt_hint: Option<crate::shogi::Move> = None;
         let mut tt_depth_ok = false;
         if let Some(tt) = &self.tt {
+            // Lightweight prefetch before probe
+            if depth >= 3 {
+                tt.prefetch_l2(pos.zobrist_hash, pos.side_to_move);
+            }
             if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
                 *tt_hits += 1;
                 // Adjust mate score from root-relative to current ply
@@ -479,7 +483,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         // Internal Iterative Deepening (IID): depth≥6・非王手・TT手不在 or TTが浅い
         if self.toggles.enable_iid
-            && depth >= 6
+            && depth >= dynp::iid_min_depth()
             && !pos.is_in_check()
             && (!tt_depth_ok || tt_hint.is_none())
         {
@@ -511,7 +515,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         // ProbCut: try shallow cut above beta with promising captures
         if depth >= 5 && !pos.is_in_check() {
-            let threshold = beta + if depth >= 6 { 300 } else { 250 };
+            let threshold = beta + dynp::probcut_margin(depth);
             let mgp = MoveGenerator::new();
             if let Ok(caps) = mgp.generate_captures(pos) {
                 for mv in caps.as_slice().iter().copied() {
@@ -640,17 +644,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                 }
-                if h < -2000 && !stack[ply as usize].is_killer(mv) && !is_counter {
+                if h < dynp::hp_threshold() && !stack[ply as usize].is_killer(mv) && !is_counter {
                     continue;
                 }
             }
 
             if depth <= 3 && is_quiet {
-                let limit = match depth {
-                    1 => LMP_LIMIT_D1,
-                    2 => LMP_LIMIT_D2,
-                    _ => LMP_LIMIT_D3,
-                };
+                let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
                 }
@@ -661,7 +661,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut next_depth = depth - 1;
             if depth >= 3 && moveno >= 3 && is_quiet && !is_good_capture {
                 heur.lmr_trials = heur.lmr_trials.saturating_add(1);
-                let rd = ((depth as f32).ln() * (moveno as f32).ln() / 1.7).floor() as i32;
+                let rd = ((depth as f32).ln() * (moveno as f32).ln() / dynp::lmr_k_coeff()).floor()
+                    as i32;
                 let r = rd.max(1).min(depth - 1);
                 if r > 0 {
                     next_depth -= r;
@@ -907,6 +908,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // Root TT hint boost（存在すれば大ボーナス）
             let mut root_tt_hint_mv: Option<crate::shogi::Move> = None;
             if let Some(tt) = &self.tt {
+                tt.prefetch_l2(root.zobrist_hash, root.side_to_move);
                 if let Some(entry) = tt.probe(root.zobrist_hash, root.side_to_move) {
                     if let Some(ttm) = entry.get_move() {
                         root_tt_hint_mv = Some(ttm);

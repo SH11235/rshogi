@@ -35,6 +35,20 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name MateEarlyStop type check default true");
     // Diagnostics / policy knobs
     usi_println("option name QSearchChecks type combo default On var On var Off");
+    // Search parameter knobs (runtime-adjustable)
+    usi_println("option name SearchParams.LMR_K_x100 type spin default 170 min 80 max 400");
+    usi_println("option name SearchParams.LMP_D1 type spin default 6 min 0 max 64");
+    usi_println("option name SearchParams.LMP_D2 type spin default 12 min 0 max 64");
+    usi_println("option name SearchParams.LMP_D3 type spin default 18 min 0 max 64");
+    usi_println(
+        "option name SearchParams.HP_Threshold type spin default -2000 min -10000 max 10000",
+    );
+    usi_println("option name SearchParams.SBP_D1 type spin default 200 min 0 max 2000");
+    usi_println("option name SearchParams.SBP_D2 type spin default 300 min 0 max 2000");
+    usi_println("option name SearchParams.ProbCut_D5 type spin default 250 min 0 max 2000");
+    usi_println("option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000");
+    usi_println("option name SearchParams.IID_MinDepth type spin default 6 min 0 max 20");
+    usi_println("option name SearchParams.Razor type check default true");
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -179,6 +193,83 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Ok(mut eng) = state.engine.lock() {
                 eng.set_multipv_persistent(state.opts.multipv);
                 eng.clear_hash();
+            }
+        }
+        // --- Search parameters (runtime) ---
+        "SearchParams.LMR_K_x100" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u32>() {
+                    engine_core::search::params::set_lmr_k_x100(x);
+                }
+            }
+        }
+        "SearchParams.LMP_D1" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<usize>() {
+                    engine_core::search::params::set_lmp_d1(x);
+                }
+            }
+        }
+        "SearchParams.LMP_D2" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<usize>() {
+                    engine_core::search::params::set_lmp_d2(x);
+                }
+            }
+        }
+        "SearchParams.LMP_D3" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<usize>() {
+                    engine_core::search::params::set_lmp_d3(x);
+                }
+            }
+        }
+        "SearchParams.HP_Threshold" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_hp_threshold(x);
+                }
+            }
+        }
+        "SearchParams.SBP_D1" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_sbp_d1(x);
+                }
+            }
+        }
+        "SearchParams.SBP_D2" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_sbp_d2(x);
+                }
+            }
+        }
+        "SearchParams.ProbCut_D5" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_probcut_d5(x);
+                }
+            }
+        }
+        "SearchParams.ProbCut_D6P" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_probcut_d6p(x);
+                }
+            }
+        }
+        "SearchParams.IID_MinDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_iid_min_depth(x);
+                }
+            }
+        }
+        "SearchParams.Razor" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_razor_enabled(on);
             }
         }
         "OverheadMs" => {
