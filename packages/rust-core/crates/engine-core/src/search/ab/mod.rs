@@ -16,7 +16,7 @@ use crate::search::TranspositionTable;
 use crate::search::{SearchLimits, SearchResult, SearchStats};
 use crate::Position;
 use smallvec::SmallVec;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // 引数過多関数 (qsearch / alphabeta) の Clippy 警告回避用に集約構造体をモジュールスコープで定義
 struct QSearchArgs<'a> {
@@ -1253,6 +1253,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stats_hint_used = depth_hint_used;
             // この深さのMultiPV行を最終結果候補として保持
             final_lines = Some(depth_lines);
+
+            if let Some(limit) = limits.time_limit() {
+                if t0.elapsed() + Duration::from_millis(10) >= limit {
+                    break;
+                }
+            }
         }
         // stats は最終反復の集計値を使う
         let mut stats = SearchStats {
