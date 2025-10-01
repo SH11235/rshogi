@@ -92,6 +92,14 @@ impl StopController {
         *guard = Some(info);
     }
 
+    /// Update elapsed time in the StopInfo snapshot (monotonic milliseconds).
+    pub fn update_elapsed_ms(&self, elapsed_ms: u64) {
+        let mut guard = self.inner.stop_info.lock().unwrap();
+        let mut si = guard.take().unwrap_or_default();
+        si.elapsed_ms = si.elapsed_ms.max(elapsed_ms);
+        *guard = Some(si);
+    }
+
     /// Update only the external stop flag reference.
     pub fn update_external_stop_flag(&self, external_stop: Option<&Arc<AtomicBool>>) {
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
