@@ -2901,6 +2901,7 @@ mod tests {
             pv: smallvec![],
             nodes: None,
             time_ms: None,
+            nps: None,
             exact_exhausted: false,
             exhaust_reason: None,
             mate_distance: None,

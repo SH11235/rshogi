@@ -22,6 +22,7 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::thread;
+use std::time::Instant;
 
 use crate::game_phase::{detect_game_phase, GamePhase, Profile};
 
@@ -448,6 +449,9 @@ impl Engine {
         let session_id = self.next_session_id();
         debug!("Starting async search session {session_id}");
 
+        // Record wall-clock start time for diagnostics
+        limits.start_time = Instant::now();
+
         // Prime StopInfo snapshot with static limits if available
         let mut base_stop_info = StopInfo::default();
         if let Some(deadlines) = limits.fallback_deadlines {
@@ -736,9 +740,10 @@ impl Engine {
         };
 
         if let Some(si) = args.stop_bridge.try_read_stop_info() {
-            result.stop_info = Some(si);
+            result.stop_info = Some(si.clone());
+            result.end_reason = si.reason;
         }
-
+        result.refresh_summary();
         result
     }
 

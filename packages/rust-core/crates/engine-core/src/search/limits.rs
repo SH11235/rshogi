@@ -20,6 +20,14 @@ pub struct SearchLimits {
     /// This must match the Engine's session_id for proper snapshot reception
     /// Default: 0 (tests and legacy code), should be set by Engine::start_search()
     pub session_id: u64,
+    /// Wall-clock instant when search started (used for diagnostics / elapsed derivations)
+    pub start_time: Instant,
+    /// Optional panic time scale for extending soft deadlines after aspiration failures etc.
+    pub panic_time_scale: Option<f64>,
+    /// Optional contempt value in centipawns (positive favors side to move)
+    pub contempt: Option<i32>,
+    /// Whether this search is running in ponder mode (go ponder)
+    pub is_ponder: bool,
     /// Stop flag for interrupting search (temporarily kept for compatibility)
     pub stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress (temporarily kept for compatibility)
@@ -56,6 +64,10 @@ impl Default for SearchLimits {
             qnodes_limit: None,
             time_parameters: None,
             session_id: 0, // Default for tests, should be set by Engine::start_search()
+            start_time: Instant::now(),
+            panic_time_scale: None,
+            contempt: None,
+            is_ponder: false,
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -128,6 +140,10 @@ pub struct SearchLimitsBuilder {
     qnodes_limit: Option<u64>,
     time_parameters: Option<TimeParameters>,
     session_id: u64,
+    start_time: Instant,
+    panic_time_scale: Option<f64>,
+    contempt: Option<i32>,
+    is_ponder: bool,
     stop_flag: Option<Arc<AtomicBool>>,
     info_callback: Option<InfoCallback>,
     info_string_callback: Option<InfoStringCallback>,
@@ -149,6 +165,10 @@ impl Default for SearchLimitsBuilder {
             qnodes_limit: None,
             time_parameters: None,
             session_id: 0, // Default for tests, should be overridden by Engine
+            start_time: Instant::now(),
+            panic_time_scale: None,
+            contempt: None,
+            is_ponder: false,
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -218,11 +238,30 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Override search start time (defaults to Instant::now() during build)
+    pub fn start_time(mut self, instant: Instant) -> Self {
+        self.start_time = instant;
+        self
+    }
+
+    /// Set panic time scale for soft deadline extension (1.0 = no change)
+    pub fn panic_time_scale(mut self, scale: f64) -> Self {
+        self.panic_time_scale = Some(scale);
+        self
+    }
+
+    /// Set contempt value in centipawns (positive favors side to move)
+    pub fn contempt(mut self, cp: i32) -> Self {
+        self.contempt = Some(cp);
+        self
+    }
+
     /// Set Ponder mode (legacy - loses time control information)
     pub fn ponder(mut self) -> Self {
         // Create a dummy inner time control for backward compatibility
         let inner = Box::new(TimeControl::Infinite);
         self.time_control = TimeControl::Ponder(inner);
+        self.is_ponder = true;
         self
     }
 
@@ -232,12 +271,14 @@ impl SearchLimitsBuilder {
         // Take the current time control and wrap it in Ponder
         let inner = Box::new(self.time_control.clone());
         self.time_control = TimeControl::Ponder(inner);
+        self.is_ponder = true;
         self
     }
 
     /// Set Infinite time control
     pub fn infinite(mut self) -> Self {
         self.time_control = TimeControl::Infinite;
+        self.is_ponder = false;
         self
     }
 
@@ -382,6 +423,10 @@ impl SearchLimitsBuilder {
             qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
             session_id: self.session_id,
+            start_time: self.start_time,
+            panic_time_scale: self.panic_time_scale,
+            contempt: self.contempt,
+            is_ponder: self.is_ponder,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
             info_string_callback: self.info_string_callback,
@@ -406,6 +451,8 @@ impl SearchLimitsBuilder {
 /// set separately if needed for search control.
 impl From<crate::time_management::TimeLimits> for SearchLimits {
     fn from(tm: crate::time_management::TimeLimits) -> Self {
+        let is_ponder = matches!(tm.time_control, TimeControl::Ponder(_));
+
         SearchLimits {
             time_control: tm.time_control,
             moves_to_go: tm.moves_to_go,
@@ -414,6 +461,10 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             qnodes_limit: None,
             time_parameters: tm.time_parameters,
             session_id: 0, // Default, should be set by Engine
+            start_time: Instant::now(),
+            panic_time_scale: None,
+            contempt: None,
+            is_ponder,
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -465,6 +516,10 @@ impl Clone for SearchLimits {
             qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
             session_id: self.session_id,
+            start_time: self.start_time,
+            panic_time_scale: self.panic_time_scale,
+            contempt: self.contempt,
+            is_ponder: self.is_ponder,
             stop_flag: self.stop_flag.clone(),
             info_callback: self.info_callback.clone(), // Arc can be cloned
             info_string_callback: self.info_string_callback.clone(),
@@ -493,6 +548,10 @@ impl std::fmt::Debug for SearchLimits {
             .field("qnodes_limit", &self.qnodes_limit)
             .field("time_parameters", &self.time_parameters)
             .field("session_id", &self.session_id)
+            .field("start_time", &self.start_time)
+            .field("panic_time_scale", &self.panic_time_scale)
+            .field("contempt", &self.contempt)
+            .field("is_ponder", &self.is_ponder)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
             .field("info_string_callback", &self.info_string_callback.is_some())
