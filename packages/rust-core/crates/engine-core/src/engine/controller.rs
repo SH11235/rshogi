@@ -707,7 +707,7 @@ impl Engine {
                     pos,
                     limits,
                     args.material_evaluator,
-                    args.shared_tt,
+                    Arc::clone(&args.shared_tt),
                     args.material_searcher,
                     args.stop_bridge.clone(),
                 ),
@@ -715,7 +715,7 @@ impl Engine {
                     pos,
                     limits,
                     args.nnue_evaluator,
-                    args.shared_tt,
+                    Arc::clone(&args.shared_tt),
                     args.nnue_basic_searcher,
                     args.stop_bridge.clone(),
                 ),
@@ -723,7 +723,7 @@ impl Engine {
                     pos,
                     limits,
                     args.material_evaluator,
-                    args.shared_tt,
+                    Arc::clone(&args.shared_tt),
                     args.material_enhanced_searcher,
                     args.stop_bridge.clone(),
                 ),
@@ -731,7 +731,7 @@ impl Engine {
                     pos,
                     limits,
                     args.nnue_evaluator,
-                    args.shared_tt,
+                    Arc::clone(&args.shared_tt),
                     args.nnue_enhanced_searcher,
                     args.stop_bridge.clone(),
                 ),
@@ -742,6 +742,9 @@ impl Engine {
         if let Some(si) = args.stop_bridge.try_read_stop_info() {
             result.stop_info = Some(si.clone());
             result.end_reason = si.reason;
+        }
+        if result.hashfull == 0 {
+            result.hashfull = args.shared_tt.hashfull_permille() as u32;
         }
         result.refresh_summary();
         result
