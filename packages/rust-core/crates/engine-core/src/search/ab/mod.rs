@@ -158,10 +158,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let Ok(list) = mg.generate_all(pos) else {
                 return self.evaluator.evaluate(pos);
             };
+            let mut has_legal = false;
             for mv in list.as_slice().iter().copied() {
                 if !pos.is_legal_move(mv) {
                     continue;
                 }
+                has_legal = true;
                 let mut child = pos.clone();
                 child.do_move(mv);
                 let sc = -self.qsearch(QSearchArgs {
@@ -180,6 +182,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if sc > alpha {
                     alpha = sc;
                 }
+            }
+            if !has_legal {
+                return crate::search::mate_score(ply as u8, false);
             }
             return alpha;
         }
