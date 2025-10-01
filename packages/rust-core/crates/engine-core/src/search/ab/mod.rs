@@ -946,6 +946,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut stats_hint_used: u64 = 0;
 
         let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
+        let mut last_nodes_for_line: u64 = 0;
+        let mut last_time_for_line: u64 = 0;
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
                 break;
@@ -1196,11 +1198,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             pv = pv_ex;
                         }
                     }
-                    let elapsed_ms = t0.elapsed().as_millis() as u64;
-                    let nps = if elapsed_ms == 0 {
+                    let elapsed_ms_total = t0.elapsed().as_millis() as u64;
+                    let line_nodes = nodes.saturating_sub(last_nodes_for_line);
+                    let line_time_ms = elapsed_ms_total.saturating_sub(last_time_for_line);
+                    let nps = if line_time_ms == 0 {
                         0
                     } else {
-                        nodes.saturating_mul(1000).saturating_div(elapsed_ms.max(1))
+                        line_nodes.saturating_mul(1000).saturating_div(line_time_ms.max(1))
                     };
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
@@ -1211,8 +1215,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         depth: d as u32,
                         seldepth: Some(seldepth as u8),
                         pv,
-                        nodes: Some(nodes),
-                        time_ms: Some(elapsed_ms),
+                        nodes: Some(line_nodes),
+                        time_ms: Some(line_time_ms),
                         nps: Some(nps),
                         exact_exhausted: false,
                         exhaust_reason: None,
@@ -1222,6 +1226,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         cb(InfoEvent::PV { line: line.clone() });
                     }
                     depth_lines.push(line);
+                    last_nodes_for_line = nodes;
+                    last_time_for_line = elapsed_ms_total;
                     // TT保存は 1行目のみ（Exact, PV=true）
                     if pv_idx == 1 {
                         if let (Some(tt), Some(best_mv_root)) = (&self.tt, best) {
@@ -1358,5 +1364,60 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
     fn update_threads(&self, _n: usize) {}
     fn update_hash(&self, _mb: usize) {
         // Engine側でshared_tt再生成＋Backend再バインド方針のため未使用
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::constants::SEARCH_INF;
+    use crate::search::mate_score;
+    use crate::shogi::{Color, Piece, PieceType};
+    use crate::usi::parse_usi_square;
+    use crate::Position;
+
+    #[test]
+    fn qsearch_detects_mate_when_evasion_missing() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let backend = ClassicBackend::new(evaluator);
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+        pos.board
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("9h").unwrap(), Piece::new(PieceType::Gold, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("8i").unwrap(), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("8h").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+        pos.board.put_piece(
+            parse_usi_square("8g").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+        pos.board
+            .put_piece(parse_usi_square("7h").unwrap(), Piece::new(PieceType::Gold, Color::White));
+
+        let limits = SearchLimits::default();
+        let start_time = Instant::now();
+        let mut nodes = 0_u64;
+        let mut seldepth = 0_u32;
+
+        let score = backend.qsearch(QSearchArgs {
+            pos: &pos,
+            alpha: -SEARCH_INF,
+            beta: SEARCH_INF,
+            limits: &limits,
+            start_time: &start_time,
+            nodes: &mut nodes,
+            seldepth: &mut seldepth,
+            ply: 0,
+        });
+
+        assert_eq!(score, mate_score(0, false));
     }
 }

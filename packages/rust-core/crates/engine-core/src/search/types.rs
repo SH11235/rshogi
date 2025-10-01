@@ -163,7 +163,7 @@ pub struct SearchResult {
 impl SearchResult {
     /// Create a new search result
     pub fn new(best_move: Option<Move>, score: i32, stats: SearchStats) -> Self {
-        let mut result = Self {
+        Self {
             best_move,
             ponder: None,
             depth: stats.depth as u32,
@@ -175,13 +175,9 @@ impl SearchResult {
             score,
             stats,
             node_type: NodeType::Exact, // Default to Exact for backward compatibility
-            stop_info: Some(StopInfo::default()), // Default stop info instead of None
+            stop_info: None,
             lines: None,
-        };
-        if let Some(ref info) = result.stop_info {
-            result.end_reason = info.reason;
         }
-        result
     }
 
     /// Create a new search result with node type
@@ -226,19 +222,7 @@ impl SearchResult {
             depth,
             ..Default::default()
         };
-        let mut result = Self::new(move_score.0, move_score.1, stats);
-        result.stop_info = Some(StopInfo {
-            // Construct from available data
-            reason: TerminationReason::Completed,
-            elapsed_ms: elapsed.as_millis() as u64,
-            nodes,
-            depth_reached: depth,
-            hard_timeout: false,
-            soft_limit_ms: 0,
-            hard_limit_ms: 0,
-        });
-        result.end_reason = TerminationReason::Completed;
-        result
+        Self::new(move_score.0, move_score.1, stats)
     }
 
     /// Create a search result from MultiPV lines (index 0 is best)
@@ -285,6 +269,8 @@ impl SearchResult {
             if let Some(first) = lines.first() {
                 self.ponder = first.pv.get(1).copied();
             }
+        } else if self.ponder.is_none() {
+            self.ponder = self.stats.pv.get(1).copied();
         }
         // depth/seldepth/nodes were already set from stats but keep them in sync in case stats mutated
         self.depth = self.stats.depth as u32;
