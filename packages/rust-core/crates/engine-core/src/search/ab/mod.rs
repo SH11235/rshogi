@@ -946,8 +946,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut stats_hint_used: u64 = 0;
 
         let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
-        let mut last_nodes_for_line: u64 = 0;
-        let mut last_time_for_line: u64 = 0;
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
                 break;
@@ -1001,6 +999,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut _local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
             let mut depth_hint_exists: u64 = 0;
             let mut depth_hint_used: u64 = 0;
+            let mut last_nodes_for_line = nodes;
+            let mut last_time_for_line = t0.elapsed().as_millis() as u64;
 
             for pv_idx in 1..=k {
                 // Aspiration window per PV head
@@ -1372,6 +1372,7 @@ mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
     use crate::search::constants::SEARCH_INF;
+    use crate::search::limits::SearchLimitsBuilder;
     use crate::search::mate_score;
     use crate::shogi::{Color, Piece, PieceType};
     use crate::usi::parse_usi_square;
@@ -1419,5 +1420,34 @@ mod tests {
         });
 
         assert_eq!(score, mate_score(0, false));
+    }
+
+    #[test]
+    fn multipv_line_nodes_are_per_line() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let backend = ClassicBackend::new(evaluator);
+        let pos = Position::startpos();
+        let limits = SearchLimitsBuilder::default().depth(2).multipv(2).build();
+
+        let result = backend.think_blocking(&pos, &limits, None);
+        let lines = result.lines.as_ref().expect("expected multipv lines to be present");
+        assert!(lines.len() >= 2);
+
+        let total_line_nodes: u64 = lines.iter().filter_map(|l| l.nodes).sum();
+        assert!(total_line_nodes > 0, "line nodes should accumulate positive work");
+        assert!(
+            total_line_nodes <= result.stats.nodes,
+            "line nodes should not exceed total nodes"
+        );
+
+        for line in lines.iter() {
+            if let Some(n) = line.nodes {
+                assert!(n > 0, "each line should report positive nodes");
+                assert!(n <= result.stats.nodes);
+            }
+            if let Some(ms) = line.time_ms {
+                assert!(ms <= result.stats.elapsed.as_millis() as u64);
+            }
+        }
     }
 }
