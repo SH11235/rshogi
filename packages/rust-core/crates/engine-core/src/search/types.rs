@@ -67,6 +67,10 @@ pub struct SearchStats {
     pub pv_trim_cuts: Option<u64>,
     /// Root-level fail-high occurrences (for diagnostics)
     pub root_fail_high_count: Option<u64>,
+    /// Root TT hint existed at the start of the final iteration (diagnostic 0/1)
+    pub root_tt_hint_exists: Option<u64>,
+    /// Root TT hint was used as the final best move in the final iteration (diagnostic 0/1)
+    pub root_tt_hint_used: Option<u64>,
 }
 
 impl SearchStats {

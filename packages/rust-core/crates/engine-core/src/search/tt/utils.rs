@@ -122,22 +122,6 @@ pub(crate) fn attempt_replace_worst(
     }
 }
 
-/// Get depth threshold based on hashfull - optimized branch version
-#[inline(always)]
-pub(crate) fn get_depth_threshold(hf: u16) -> u8 {
-    // Early return for most common case
-    if hf < 600 {
-        return 0;
-    }
-
-    match hf {
-        600..=800 => 2,
-        801..=900 => 3,
-        901..=950 => 4,
-        _ => 5,
-    }
-}
-
 /// Extract depth from packed data (7 bits)
 #[inline(always)]
 pub(crate) fn extract_depth(data: u64) -> u8 {

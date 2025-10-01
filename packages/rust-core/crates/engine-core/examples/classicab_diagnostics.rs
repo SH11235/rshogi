@@ -61,10 +61,17 @@ struct Args {
     /// 各depthを独立プロセスで実行（time固定の相互影響を排除）
     #[arg(long = "per-depth-process", default_value_t = false)]
     per_depth_process: bool,
+    /// IIDのA/B比較（ON vs OFF）を同条件で実行し、差分サマリを表示
+    #[arg(long = "compare-iid", default_value_t = false)]
+    compare_iid: bool,
 }
 
 fn main() {
     let args = Args::parse();
+    if args.compare_iid {
+        run_compare_iid(&args);
+        return;
+    }
     let tests = vec![
         ("Initial", "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"),
         (
@@ -110,6 +117,8 @@ fn main() {
         asp_fail_low: u32,
         tt_root_match: u8,
         tt_root_depth: u8,
+        root_tt_hint_exists: u64,
+        root_tt_hint_used: u64,
     }
     let mut rows: Vec<Row> = Vec::new();
     for (name, sfen) in tests {
@@ -242,8 +251,22 @@ fn main() {
             };
             if args.format == "text" {
                 println!(
-                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  tt_root_match {:>1}  tt_root_depth {:>2}",
-                    depth, res.stats.nodes, nps, hf, res.score, tt_hits, lmr, lmr_trials, beta, asp_fail_high, asp_fail_low, tt_root_match, tt_root_depth
+                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}",
+                    depth,
+                    res.stats.nodes,
+                    nps,
+                    hf,
+                    res.score,
+                    tt_hits,
+                    lmr,
+                    lmr_trials,
+                    beta,
+                    asp_fail_high,
+                    asp_fail_low,
+                    res.stats.root_tt_hint_exists.unwrap_or(0),
+                    res.stats.root_tt_hint_used.unwrap_or(0),
+                    tt_root_match,
+                    tt_root_depth
                 );
             } else {
                 rows.push(Row {
@@ -262,6 +285,8 @@ fn main() {
                     asp_fail_low,
                     tt_root_match,
                     tt_root_depth,
+                    root_tt_hint_exists: res.stats.root_tt_hint_exists.unwrap_or(0),
+                    root_tt_hint_used: res.stats.root_tt_hint_used.unwrap_or(0),
                 });
             }
         }
@@ -271,10 +296,10 @@ fn main() {
     if args.format == "csv" || args.format == "json" {
         if args.format == "csv" {
             let mut out = String::new();
-            out.push_str("name,sfen,depth,nodes,nps,hashfull,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,tt_root_match,tt_root_depth\n");
+            out.push_str("name,sfen,depth,nodes,nps,hashfull,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth\n");
             for r in &rows {
                 out.push_str(&format!(
-                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                     r.name,
                     r.sfen,
                     r.depth,
@@ -288,6 +313,8 @@ fn main() {
                     r.beta_cuts,
                     r.asp_fail_high,
                     r.asp_fail_low,
+                    r.root_tt_hint_exists,
+                    r.root_tt_hint_used,
                     r.tt_root_match,
                     r.tt_root_depth
                 ));
@@ -305,5 +332,166 @@ fn main() {
                 println!("{}", s);
             }
         }
+    }
+}
+
+fn run_compare_iid(args: &Args) {
+    // 子プロセスで同一条件（format=csv, per-depth）を baseline(ON) と OFF の2回実行
+    fn run_once(args: &Args, disable_iid: bool) -> String {
+        let mut child_args: Vec<String> = vec![
+            "--depth-min".into(),
+            args.depth_min.to_string(),
+            "--depth-max".into(),
+            args.depth_max.to_string(),
+            "--tt-mb".into(),
+            args.tt_mb.to_string(),
+            "--sample-every".into(),
+            args.sample_every.to_string(),
+            "--format".into(),
+            "csv".into(),
+            "--per-depth-process".into(),
+        ];
+        if !args.no_time_limit {
+            child_args.push("--time-ms".into());
+            child_args.push(args.time_ms.to_string());
+        } else {
+            child_args.push("--no-time-limit".into());
+        }
+        if args.clear_tt_per_depth {
+            child_args.push("--clear-tt-per-depth".into());
+        }
+        if args.disable_nmp {
+            child_args.push("--disable-nmp".into());
+        }
+        for f in &args.only {
+            child_args.push("--only".into());
+            child_args.push(f.clone());
+        }
+        if disable_iid {
+            child_args.push("--disable-iid".into());
+        }
+        let exe = std::env::current_exe().expect("exe");
+        let out = std::process::Command::new(exe)
+            .args(child_args)
+            .output()
+            .expect("spawn compare child");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    let on = run_once(args, false);
+    let off = run_once(args, true);
+    // 簡易CSVパーサ（ヘッダ名に依存）
+    fn parse_csv(s: &str) -> Vec<std::collections::HashMap<String, String>> {
+        let mut lines = s.lines();
+        // skip leading empties
+        let mut header_opt = None;
+        while let Some(l) = lines.next() {
+            if !l.trim().is_empty() {
+                header_opt = Some(l.to_string());
+                break;
+            }
+        }
+        let header = match header_opt {
+            Some(h) => h,
+            None => return vec![],
+        };
+        let cols: Vec<String> = header.split(',').map(|x| x.trim().to_string()).collect();
+        lines
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let vals: Vec<String> = l.split(',').map(|x| x.trim().to_string()).collect();
+                let mut m = std::collections::HashMap::new();
+                for (i, k) in cols.iter().enumerate() {
+                    if let Some(v) = vals.get(i) {
+                        m.insert(k.clone(), v.clone());
+                    }
+                }
+                m
+            })
+            .collect()
+    }
+    let on_rows = parse_csv(&on);
+    let off_rows = parse_csv(&off);
+    use std::collections::HashMap;
+    let mut off_map: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
+    for r in off_rows {
+        off_map.insert(
+            (
+                r.get("name").cloned().unwrap_or_default(),
+                r.get("depth").cloned().unwrap_or_default(),
+            ),
+            r,
+        );
+    }
+    // サマリ出力（CSV）
+    println!("name,depth,tt_hits_on,tt_hits_off,delta_hits,beta_on,beta_off,delta_beta,nodes_on,nodes_off,nodes_ratio,root_hint_used_on,root_hint_used_off");
+    let mut sum_hits_on: u64 = 0;
+    let mut sum_hits_off: u64 = 0;
+    let mut sum_beta_on: u64 = 0;
+    let mut sum_beta_off: u64 = 0;
+    let mut sum_nodes_on: u128 = 0;
+    let mut sum_nodes_off: u128 = 0;
+    for r in on_rows {
+        let key = (
+            r.get("name").cloned().unwrap_or_default(),
+            r.get("depth").cloned().unwrap_or_default(),
+        );
+        if let Some(offr) = off_map.get(&key) {
+            let g = |m: &HashMap<String, String>, k: &str| -> u64 {
+                m.get(k).and_then(|v| v.parse().ok()).unwrap_or(0)
+            };
+            let name = &key.0;
+            let depth = &key.1;
+            let tt_on = g(&r, "tt_hits");
+            let tt_off = g(offr, "tt_hits");
+            let b_on = g(&r, "beta_cuts");
+            let b_off = g(offr, "beta_cuts");
+            let n_on = g(&r, "nodes");
+            let n_off = g(offr, "nodes");
+            let used_on = g(&r, "root_hint_used");
+            let used_off = g(offr, "root_hint_used");
+            let ratio = if n_off > 0 {
+                (n_on as f64) / (n_off as f64)
+            } else {
+                0.0
+            };
+            println!(
+                "{},{},{},{},{},{},{},{},{},{},{:.3},{},{}",
+                name,
+                depth,
+                tt_on,
+                tt_off,
+                tt_on as i64 - tt_off as i64,
+                b_on,
+                b_off,
+                b_on as i64 - b_off as i64,
+                n_on,
+                n_off,
+                ratio,
+                used_on,
+                used_off
+            );
+            sum_hits_on += tt_on;
+            sum_hits_off += tt_off;
+            sum_beta_on += b_on;
+            sum_beta_off += b_off;
+            sum_nodes_on += n_on as u128;
+            sum_nodes_off += n_off as u128;
+        }
+    }
+    if sum_nodes_off > 0 {
+        let ratio = (sum_nodes_on as f64) / (sum_nodes_off as f64);
+        println!(
+            "TOTAL,,{},{},{},{},{},{},{},{},{:.3},,",
+            sum_hits_on,
+            sum_hits_off,
+            sum_hits_on as i64 - sum_hits_off as i64,
+            sum_beta_on,
+            sum_beta_off,
+            sum_beta_on as i64 - sum_beta_off as i64,
+            sum_nodes_on,
+            sum_nodes_off,
+            ratio
+        );
     }
 }

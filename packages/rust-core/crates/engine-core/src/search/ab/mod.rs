@@ -2,7 +2,7 @@ use std::sync::{atomic::Ordering, Arc};
 
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
-use crate::search::api::{InfoEvent, InfoEventCallback, SearcherBackend, StopHandle};
+use crate::search::api::{InfoEvent, InfoEventCallback, SearcherBackend};
 use crate::search::history::{ButterflyHistory, CounterMoveHistory};
 use crate::search::params::{
     LMP_LIMIT_D1, LMP_LIMIT_D2, LMP_LIMIT_D3, NMP_BASE_R, NMP_BONUS_DELTA_BETA,
@@ -40,6 +40,8 @@ struct ABArgs<'a> {
     nodes: &'a mut u64,
     seldepth: &'a mut u32,
     ply: u32,
+    // フル窓で探索されたPVノードかどうか（TT保存の優遇に使用）
+    is_pv: bool,
     stack: &'a mut [SearchStack],
     heur: &'a mut Heuristics,
     tt_hits: &'a mut u64,
@@ -47,6 +49,7 @@ struct ABArgs<'a> {
     lmr_counter: &'a mut u64,
 }
 
+#[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     evaluator: Arc<E>,
     tt: Option<Arc<TranspositionTable>>, // 共有TT（Hashfull出力用、将来はprobe/storeでも使用）
@@ -308,6 +311,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             nodes,
             seldepth,
             ply,
+            is_pv,
             stack,
             heur,
             tt_hits,
@@ -426,6 +430,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nodes,
                         seldepth,
                         ply: ply + 1,
+                        is_pv: false,
                         stack,
                         heur,
                         tt_hits,
@@ -489,6 +494,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 nodes,
                 seldepth,
                 ply,
+                is_pv: false,
                 stack,
                 heur,
                 tt_hits,
@@ -524,6 +530,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nodes,
                         seldepth,
                         ply: ply + 1,
+                        is_pv: false,
                         stack,
                         heur,
                         tt_hits,
@@ -674,6 +681,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     nodes,
                     seldepth,
                     ply: ply + 1,
+                    is_pv: true,
                     stack,
                     heur,
                     tt_hits,
@@ -693,6 +701,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     nodes,
                     seldepth,
                     ply: ply + 1,
+                    is_pv: false,
                     stack,
                     heur,
                     tt_hits,
@@ -711,6 +720,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nodes,
                         seldepth,
                         ply: ply + 1,
+                        is_pv: true,
                         stack,
                         heur,
                         tt_hits,
@@ -759,7 +769,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // 深さ0扱いのためTT保存は行わない
             (qs, None)
         } else {
-            // TT保存
+            // TT保存（PV/非PV情報を付与）
             if let Some(tt) = &self.tt {
                 let node_type = if best <= orig_alpha {
                     NodeType::UpperBound
@@ -769,7 +779,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     NodeType::Exact
                 };
                 let store_score = crate::search::common::adjust_mate_score_for_tt(best, ply as u8);
-                let args = crate::search::tt::TTStoreArgs::new(
+                let mut args = crate::search::tt::TTStoreArgs::new(
                     pos.zobrist_hash,
                     best_mv,
                     store_score as i16,
@@ -778,6 +788,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     node_type,
                     pos.side_to_move,
                 );
+                args.is_pv = is_pv;
                 tt.store(args);
             }
             // Apply history penalties for quiets that didn't cut
@@ -826,6 +837,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     nodes,
                     seldepth: &mut seldepth_dummy,
                     ply: 0,
+                    is_pv: true,
                     stack: &mut stack,
                     heur: &mut heur,
                     tt_hits: &mut _tt_hits,
@@ -867,6 +879,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_beta_cuts: u64 = 0;
         let mut cum_lmr_counter: u64 = 0;
         let mut cum_lmr_trials: u64 = 0;
+        let mut stats_hint_exists: u64 = 0;
+        let mut stats_hint_used: u64 = 0;
 
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
@@ -890,6 +904,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     (m, key)
                 })
                 .collect();
+            // Root TT hint boost（存在すれば大ボーナス）
+            let mut root_tt_hint_mv: Option<crate::shogi::Move> = None;
+            if let Some(tt) = &self.tt {
+                if let Some(entry) = tt.probe(root.zobrist_hash, root.side_to_move) {
+                    if let Some(ttm) = entry.get_move() {
+                        root_tt_hint_mv = Some(ttm);
+                        for (m, key) in &mut root_moves {
+                            if m.equals_without_piece_type(&ttm) {
+                                *key += 1_000_000;
+                            }
+                        }
+                    }
+                }
+            }
             root_moves.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
             // Aspiration window
@@ -911,6 +939,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut tt_hits: u64 = 0;
             let mut beta_cuts: u64 = 0;
             let mut lmr_counter: u64 = 0;
+            let mut root_tt_hint_exists: u64 = 0;
+            let mut root_tt_hint_used: u64 = 0;
             loop {
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
@@ -941,6 +971,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             nodes: &mut nodes,
                             seldepth: &mut seldepth,
                             ply: 1,
+                            is_pv: true,
                             stack: &mut stack,
                             heur: &mut heur,
                             tt_hits: &mut tt_hits,
@@ -959,6 +990,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             nodes: &mut nodes,
                             seldepth: &mut seldepth,
                             ply: 1,
+                            is_pv: false,
                             stack: &mut stack,
                             heur: &mut heur,
                             tt_hits: &mut tt_hits,
@@ -977,6 +1009,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 nodes: &mut nodes,
                                 seldepth: &mut seldepth,
                                 ply: 1,
+                                is_pv: true,
                                 stack: &mut stack,
                                 heur: &mut heur,
                                 tt_hits: &mut tt_hits,
@@ -1005,6 +1038,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         best = Some(m);
                         best_score = local_best;
                         prev_score = local_best;
+                        if let Some(hint) = root_tt_hint_mv {
+                            root_tt_hint_exists = 1;
+                            if m.equals_without_piece_type(&hint) {
+                                root_tt_hint_used = 1;
+                            }
+                        }
                     }
                     break;
                 }
@@ -1077,8 +1116,31 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 };
                 cb(InfoEvent::PV { line });
             }
+
+            // RootをTTに保存（Exact, PV=true）し、次反復のヒントにする
+            if let (Some(tt), Some(bm)) = (&self.tt, best) {
+                let node_type = NodeType::Exact;
+                let store_score = crate::search::common::adjust_mate_score_for_tt(best_score, 0);
+                let mut args = crate::search::tt::TTStoreArgs::new(
+                    root.zobrist_hash,
+                    Some(bm),
+                    store_score as i16,
+                    self.evaluator.evaluate(root) as i16,
+                    d as u8,
+                    node_type,
+                    root.side_to_move,
+                );
+                args.is_pv = true; // RootはPVとして保存
+                tt.store(args);
+            }
+
+            // 反復ごとのrootヒント統計（最終反復で掲載）
+            // 一時格納: statsはループ後に生成
+            // ここでは変数に最後の値が残るだけで十分（診断目的）
+            stats_hint_exists = root_tt_hint_exists;
+            stats_hint_used = root_tt_hint_used;
         }
-        // stats はループ外で定義されていないため、ここでは最終反復の集計値を使う
+        // stats は最終反復の集計値を使う
         let mut stats = SearchStats {
             nodes,
             ..Default::default()
@@ -1087,6 +1149,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);
         stats.root_fail_high_count = Some(cum_beta_cuts);
+        stats.root_tt_hint_exists = Some(stats_hint_exists);
+        stats.root_tt_hint_used = Some(stats_hint_used);
         SearchResult::new(best, best_score, stats)
     }
 }
@@ -1101,23 +1165,8 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
         self.iterative(root, limits, info.as_ref())
     }
 
-    fn start_async(
-        &self,
-        root: &Position,
-        limits: &SearchLimits,
-        info: Option<InfoEventCallback>,
-    ) -> StopHandle {
-        let pos = root.clone();
-        let lim = limits.clone();
-        let sid = lim.session_id;
-        let me: &'static Self = unsafe { std::mem::transmute::<&Self, &'static Self>(self) };
-        std::thread::spawn(move || {
-            let _ = me.think_blocking(&pos, &lim, info);
-        });
-        StopHandle { session_id: sid }
-    }
-
-    fn stop(&self, _handle: &StopHandle) {}
     fn update_threads(&self, _n: usize) {}
-    fn update_hash(&self, _mb: usize) {}
+    fn update_hash(&self, _mb: usize) {
+        // Engine側でshared_tt再生成＋Backend再バインド方針のため未使用
+    }
 }

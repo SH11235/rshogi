@@ -1448,7 +1448,9 @@ impl Engine {
                     }
                 }
             }
-            EngineType::Stub => {}
+            EngineType::Stub => {
+                todo!();
+            }
         }
         // Ensure new or existing searchers reflect the desired MultiPV setting
         self.set_multipv(self.desired_multi_pv);

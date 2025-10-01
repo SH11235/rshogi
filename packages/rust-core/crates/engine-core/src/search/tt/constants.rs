@@ -7,9 +7,10 @@
 // [63:48] move16
 // [47:32] score16 (i16, fail-soft, mate is distance-normalized)
 // [31:16] eval16  (i16, static evaluate(pos))
-// [15:11] gen5    (search generation, 0..31, wrap)
-// [10]    pv1     (PV flag)
-// [9:8]   bound2  (0=Exact,1=Lower,2=Upper)
+// [15:9]  depth7  (search depth, 0..127)
+// [8:4]   gen5    (search generation, 0..31, wrap)
+// [3]     pv1     (PV flag)
+// [2:1]   bound2  (0=Exact,1=Lower,2=Upper)
 // [0]     abdada1 (ABDADA exact-cut flag)
 
 pub const MOVE_SHIFT: u8 = 48;
