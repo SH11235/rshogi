@@ -1196,6 +1196,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             pv = pv_ex;
                         }
                     }
+                    let elapsed_ms = t0.elapsed().as_millis() as u64;
+                    let nps = if elapsed_ms == 0 {
+                        0
+                    } else {
+                        nodes.saturating_mul(1000).saturating_div(elapsed_ms.max(1))
+                    };
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
@@ -1206,7 +1212,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         seldepth: Some(seldepth as u8),
                         pv,
                         nodes: Some(nodes),
-                        time_ms: Some(t0.elapsed().as_millis() as u64),
+                        time_ms: Some(elapsed_ms),
+                        nps: Some(nps),
                         exact_exhausted: false,
                         exhaust_reason: None,
                         mate_distance: None,
@@ -1296,6 +1303,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut result = SearchResult::new(best, best_score, stats);
         if let Some(lines) = final_lines {
             result.lines = Some(lines);
+        }
+        result.refresh_summary();
+        if let Some(tt) = &self.tt {
+            result.hashfull = tt.hashfull_permille() as u32;
         }
         result
     }

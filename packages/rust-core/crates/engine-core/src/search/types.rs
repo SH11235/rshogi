@@ -119,6 +119,8 @@ pub struct RootLine {
     pub nodes: Option<u64>,
     /// Optional meta: time in milliseconds spent on this line
     pub time_ms: Option<u64>,
+    /// Optional meta: nodes per second for this line (permits logging without recompute)
+    pub nps: Option<u64>,
     /// If true, we failed to exactify due to budget/time limits
     pub exact_exhausted: bool,
     /// Reason for exhaustion (e.g., "budget", "timeout")
@@ -132,6 +134,20 @@ pub struct RootLine {
 pub struct SearchResult {
     /// Best move found
     pub best_move: Option<Move>,
+    /// Optional ponder move (second move of best PV)
+    pub ponder: Option<Move>,
+    /// Final depth reached (aggregated from stats)
+    pub depth: u32,
+    /// Final selective depth (aggregated from stats, falls back to depth)
+    pub seldepth: u32,
+    /// Total nodes searched (aggregated from stats)
+    pub nodes: u64,
+    /// Nodes per second (derived from stats.elapsed/nodes)
+    pub nps: u64,
+    /// Hash table occupancy estimate (permille)
+    pub hashfull: u32,
+    /// Termination reason (mirrors stop_info.reason when available)
+    pub end_reason: TerminationReason,
     /// Evaluation score (from side to move perspective)
     pub score: i32,
     /// Search statistics
@@ -147,14 +163,25 @@ pub struct SearchResult {
 impl SearchResult {
     /// Create a new search result
     pub fn new(best_move: Option<Move>, score: i32, stats: SearchStats) -> Self {
-        Self {
+        let mut result = Self {
             best_move,
+            ponder: None,
+            depth: stats.depth as u32,
+            seldepth: stats.seldepth.map(|v| v as u32).unwrap_or(stats.depth as u32),
+            nodes: stats.nodes,
+            nps: compute_nps(stats.nodes, stats.elapsed),
+            hashfull: 0,
+            end_reason: TerminationReason::Completed,
             score,
             stats,
             node_type: NodeType::Exact, // Default to Exact for backward compatibility
             stop_info: Some(StopInfo::default()), // Default stop info instead of None
             lines: None,
+        };
+        if let Some(ref info) = result.stop_info {
+            result.end_reason = info.reason;
         }
+        result
     }
 
     /// Create a new search result with node type
@@ -164,14 +191,9 @@ impl SearchResult {
         stats: SearchStats,
         node_type: NodeType,
     ) -> Self {
-        Self {
-            best_move,
-            score,
-            stats,
-            node_type,
-            stop_info: Some(StopInfo::default()), // Default stop info instead of None
-            lines: None,
-        }
+        let mut result = Self::new(best_move, score, stats);
+        result.node_type = node_type;
+        result
     }
 
     /// Create a new search result with node type and stop info
@@ -182,14 +204,10 @@ impl SearchResult {
         node_type: NodeType,
         stop_info: StopInfo,
     ) -> Self {
-        Self {
-            best_move,
-            score,
-            stats,
-            node_type,
-            stop_info: Some(stop_info),
-            lines: None,
-        }
+        let mut result = Self::with_node_type(best_move, score, stats, node_type);
+        result.stop_info = Some(stop_info.clone());
+        result.end_reason = stop_info.reason;
+        result
     }
 
     /// Create a search result from legacy format (Option<Move>, i32)
@@ -200,30 +218,27 @@ impl SearchResult {
         pv: Vec<Move>,
         depth: u8,
     ) -> Self {
-        Self {
-            best_move: move_score.0,
-            score: move_score.1,
-            stats: SearchStats {
-                nodes,
-                qnodes: 0,
-                elapsed,
-                pv,
-                depth,
-                ..Default::default()
-            },
-            node_type: NodeType::Exact, // Default to Exact for legacy format
-            stop_info: Some(StopInfo {
-                // Construct from available data
-                reason: TerminationReason::Completed,
-                elapsed_ms: elapsed.as_millis() as u64,
-                nodes,
-                depth_reached: depth,
-                hard_timeout: false,
-                soft_limit_ms: 0,
-                hard_limit_ms: 0,
-            }),
-            lines: None,
-        }
+        let stats = SearchStats {
+            nodes,
+            qnodes: 0,
+            elapsed,
+            pv,
+            depth,
+            ..Default::default()
+        };
+        let mut result = Self::new(move_score.0, move_score.1, stats);
+        result.stop_info = Some(StopInfo {
+            // Construct from available data
+            reason: TerminationReason::Completed,
+            elapsed_ms: elapsed.as_millis() as u64,
+            nodes,
+            depth_reached: depth,
+            hard_timeout: false,
+            soft_limit_ms: 0,
+            hard_limit_ms: 0,
+        });
+        result.end_reason = TerminationReason::Completed;
+        result
     }
 
     /// Create a search result from MultiPV lines (index 0 is best)
@@ -238,14 +253,10 @@ impl SearchResult {
             (None, 0, NodeType::Exact)
         };
 
-        Self {
-            best_move,
-            score,
-            stats,
-            node_type,
-            stop_info: Some(StopInfo::default()),
-            lines: Some(lines),
-        }
+        let mut result = Self::with_node_type(best_move, score, stats, node_type);
+        result.lines = Some(lines);
+        result.refresh_summary();
+        result
     }
 
     /// Compose a SearchResult with all primary fields and optional lines.
@@ -258,14 +269,40 @@ impl SearchResult {
         stop_info: Option<StopInfo>,
         lines: Option<SmallVec<[RootLine; 4]>>,
     ) -> Self {
-        Self {
-            best_move,
-            score,
-            stats,
-            node_type,
-            stop_info,
-            lines,
+        let mut result = Self::with_node_type(best_move, score, stats, node_type);
+        result.stop_info = stop_info.clone();
+        if let Some(info) = stop_info {
+            result.end_reason = info.reason;
         }
+        result.lines = lines;
+        result.refresh_summary();
+        result
+    }
+
+    /// Recompute derived summary fields (ponder, depth, seldepth, nps, end_reason).
+    pub fn refresh_summary(&mut self) {
+        if let Some(lines) = self.lines.as_ref() {
+            if let Some(first) = lines.first() {
+                self.ponder = first.pv.get(1).copied();
+            }
+        }
+        // depth/seldepth/nodes were already set from stats but keep them in sync in case stats mutated
+        self.depth = self.stats.depth as u32;
+        self.seldepth = self.stats.seldepth.map(|v| v as u32).unwrap_or(self.depth);
+        self.nodes = self.stats.nodes;
+        self.nps = compute_nps(self.stats.nodes, self.stats.elapsed);
+        if let Some(ref info) = self.stop_info {
+            self.end_reason = info.reason;
+        }
+    }
+}
+
+fn compute_nps(nodes: u64, elapsed: Duration) -> u64 {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    if elapsed_ms == 0 {
+        0
+    } else {
+        nodes.saturating_mul(1000).saturating_div(elapsed_ms.max(1))
     }
 }
 
@@ -527,6 +564,12 @@ mod tests {
         assert_eq!(result.score, 42);
         assert_eq!(result.stats.nodes, 1000);
         assert_eq!(result.stats.depth, 5);
+        assert_eq!(result.depth, 5);
+        assert_eq!(result.seldepth, 5);
+        assert_eq!(result.nodes, 1000);
+        assert_eq!(result.nps, 10_000);
+        assert_eq!(result.hashfull, 0);
+        assert_eq!(result.end_reason, TerminationReason::Completed);
     }
 
     #[test]

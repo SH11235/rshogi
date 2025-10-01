@@ -218,6 +218,7 @@ pub fn limits_from_go(
         .enable_fail_safe(opts.fail_safe_guard)
         .info_callback(info_callback)
         .info_string_callback(info_string_callback)
+        .start_time(Instant::now())
         .build()
 }
 
