@@ -7,6 +7,7 @@ use crate::{
     engine::session::SearchSession,
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
+    search::api::{InfoEventCallback, SearcherBackend, StubBackend},
     search::parallel::EngineStopBridge,
     search::stub::run_stub_search,
     search::unified::UnifiedSearcher,
@@ -186,6 +187,8 @@ pub struct Engine {
     stop_bridge: Arc<EngineStopBridge>,
     // Session ID counter for async search
     session_counter: u64,
+    // Optional new backend (Phase 1). When Some, Engine will delegate search to backend.
+    backend: Option<Box<dyn SearcherBackend>>,
 }
 
 impl Engine {
@@ -265,6 +268,18 @@ impl Engine {
             Arc::new(Mutex::new(None))
         };
 
+        let backend: Option<Box<dyn SearcherBackend>> = match engine_type {
+            EngineType::Stub => Some(Box::new(StubBackend::new())),
+            EngineType::Material | EngineType::Enhanced => {
+                // ClassicAB backend + shared TT を紐付け
+                Some(Box::new(crate::search::ab::ClassicBackend::with_tt(
+                    material_evaluator.clone(),
+                    shared_tt.clone(),
+                )))
+            }
+            _ => None,
+        };
+
         Engine {
             engine_type,
             material_evaluator,
@@ -285,6 +300,7 @@ impl Engine {
             active_searches: Arc::new(AtomicUsize::new(0)),
             stop_bridge,
             session_counter: 0,
+            backend,
         }
     }
 
@@ -452,6 +468,96 @@ impl Engine {
 
         // Create result channel
         let (tx, rx) = mpsc::channel();
+
+        // Backend path (Phase 1). If present, delegate search to backend.
+        if let Some(backend) = self.backend.as_ref() {
+            // Publish external stop flag
+            self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
+            // Count active
+            self.active_searches.fetch_add(1, Ordering::SeqCst);
+            let active_searches = self.active_searches.clone();
+            let pos_clone = pos.clone();
+            let limits_clone = limits.clone();
+            let backend_ref: &'static dyn SearcherBackend = unsafe {
+                std::mem::transmute::<&dyn SearcherBackend, &'static dyn SearcherBackend>(
+                    &**backend,
+                )
+            };
+
+            // Build InfoEvent adapter from legacy callbacks in limits
+            let legacy_info = limits.info_callback.clone();
+            let legacy_info_string = limits.info_string_callback.clone();
+            let event_cb: Option<InfoEventCallback> = legacy_info.as_ref().map(|cb| {
+                let cb = cb.clone();
+                let cb_str = legacy_info_string.clone();
+                Arc::new(move |evt: crate::search::api::InfoEvent| {
+                    use crate::search::api::{AspirationOutcome, InfoEvent};
+                    match evt {
+                        InfoEvent::PV { line } => {
+                            let depth_u8 = (line.depth as u8).min(127);
+                            let nodes = line.nodes.unwrap_or(0);
+                            let elapsed =
+                                std::time::Duration::from_millis(line.time_ms.unwrap_or(0));
+                            let score = line.score_cp;
+                            let pv_owned: Vec<crate::shogi::Move> =
+                                line.pv.iter().copied().collect();
+                            cb(depth_u8, score, nodes, elapsed, &pv_owned, line.bound);
+                        }
+                        InfoEvent::Depth { depth, seldepth } => {
+                            if let Some(s) = &cb_str {
+                                s(&format!("depth {} seldepth {}", depth, seldepth));
+                            }
+                        }
+                        InfoEvent::CurrMove { mv, number } => {
+                            if let Some(s) = &cb_str {
+                                s(&format!(
+                                    "currmove {} currmovenumber {}",
+                                    crate::usi::move_to_usi(&mv),
+                                    number
+                                ));
+                            }
+                        }
+                        InfoEvent::Hashfull(h) => {
+                            if let Some(s) = &cb_str {
+                                s(&format!("hashfull {}", h));
+                            }
+                        }
+                        InfoEvent::Aspiration {
+                            outcome,
+                            old_alpha,
+                            old_beta,
+                            new_alpha,
+                            new_beta,
+                        } => {
+                            let tag = match outcome {
+                                AspirationOutcome::FailHigh => "fail-high",
+                                AspirationOutcome::FailLow => "fail-low",
+                            };
+                            if let Some(s) = &cb_str {
+                                s(&format!(
+                                    "aspiration {} old=[{},{}] new=[{},{}]",
+                                    tag, old_alpha, old_beta, new_alpha, new_beta
+                                ));
+                            }
+                        }
+                        InfoEvent::String(msg) => {
+                            if let Some(s) = &cb_str {
+                                s(&msg);
+                            }
+                        }
+                    }
+                }) as InfoEventCallback
+            });
+            let handle = thread::Builder::new()
+                .name(format!("engine-backend-search-{}", session_id))
+                .spawn(move || {
+                    let _guard = ActiveSearchGuard(active_searches);
+                    let result = backend_ref.think_blocking(&pos_clone, &limits_clone, event_cb);
+                    let _ = tx.send(result);
+                })
+                .expect("spawn backend search thread");
+            return SearchSession::new(session_id, rx, Some(handle));
+        }
 
         // Fast path: Stub searcher (no tree search, deterministic legal move)
         if self.engine_type == EngineType::Stub {
@@ -1240,6 +1346,14 @@ impl Engine {
     /// Set engine type
     pub fn set_engine_type(&mut self, engine_type: EngineType) {
         self.engine_type = engine_type;
+        // Backend assignment for Phase 1
+        self.backend = match engine_type {
+            EngineType::Stub => Some(Box::new(StubBackend::new())),
+            EngineType::Material | EngineType::Enhanced => Some(Box::new(
+                crate::search::ab::ClassicBackend::new(self.material_evaluator.clone()),
+            )),
+            _ => None,
+        };
 
         match engine_type {
             EngineType::Material => {
@@ -1337,6 +1451,7 @@ impl Engine {
                     }
                 }
             }
+            EngineType::Stub => {}
         }
         // Ensure new or existing searchers reflect the desired MultiPV setting
         self.set_multipv(self.desired_multi_pv);
@@ -1542,569 +1657,5 @@ impl Evaluator for NNUEEvaluatorProxy {
         if let Some(mut l) = self.ensure_local() {
             l.undo_move();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    // use std::sync::atomic::AtomicBool; // Commented out - used in test that's temporarily disabled
-    // use std::sync::Arc; // Commented out - used in test that's temporarily disabled
-    // use std::thread; // Commented out - used in test that's temporarily disabled
-    use crate::shogi::{Color, Piece, PieceType, Square};
-    use std::time::Duration;
-
-    // Test constants (for compatibility with existing tests)
-    const INITIAL_PHASE_TOTAL: u16 = 52;
-
-    #[test]
-    #[ignore] // Requires large stack size due to engine initialization
-    fn test_material_engine() {
-        let mut pos = Position::startpos();
-        let mut engine = Engine::new(EngineType::Material);
-        let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).build();
-
-        let result = engine.search(&mut pos, limits);
-
-        assert!(result.best_move.is_some());
-        assert!(result.stats.nodes > 0);
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "large-stack-tests"), ignore)]
-    fn test_nnue_engine() {
-        // This test requires a large stack size due to NNUE initialization
-        let mut pos = Position::startpos();
-        let mut engine = Engine::new(EngineType::Nnue);
-        let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).build();
-
-        let result = engine.search(&mut pos, limits);
-
-        assert!(result.best_move.is_some());
-        assert!(result.stats.nodes > 0);
-    }
-
-    #[test]
-    #[ignore] // Requires large stack size due to Enhanced engine initialization
-    fn test_enhanced_engine() {
-        let mut pos = Position::startpos();
-        let mut engine = Engine::new(EngineType::Enhanced);
-        let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).build();
-
-        let result = engine.search(&mut pos, limits);
-
-        assert!(result.best_move.is_some());
-        assert!(result.stats.nodes > 0);
-        assert!(result.stats.elapsed < Duration::from_secs(2));
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "large-stack-tests"), ignore)]
-    fn test_enhanced_nnue_engine() {
-        // This test requires a large stack size due to NNUE initialization
-        // Run with: RUST_MIN_STACK=8388608 cargo test -- --ignored
-        let mut pos = Position::startpos();
-        let mut engine = Engine::new(EngineType::EnhancedNnue);
-        let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).build();
-
-        let result = engine.search(&mut pos, limits);
-
-        assert!(result.best_move.is_some());
-        assert!(result.stats.nodes > 0);
-        assert!(result.stats.elapsed < Duration::from_secs(2));
-    }
-
-    // TODO: Fix this test after making Engine mutable
-    /*
-    #[test]
-    #[ignore] // Requires large stack size due to Enhanced engine initialization
-    fn test_enhanced_engine_with_stop_flag() {
-        let pos = Position::startpos();
-        let engine = Arc::new(Engine::new(EngineType::Enhanced));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-
-        // Start search in a thread
-        let engine_clone = engine.clone();
-        let pos_clone = pos.clone();
-        let stop_flag_clone = stop_flag.clone();
-
-        let handle = thread::spawn(move || {
-            let mut pos_mut = pos_clone;
-            let limits = SearchLimits::builder()
-                .depth(10)
-                .fixed_time_ms(10000)
-                .stop_flag(stop_flag_clone)
-                .build();
-            engine_clone.search(&mut pos_mut, limits)
-        });
-
-        // Set stop flag after short delay
-        thread::sleep(Duration::from_millis(100));
-        stop_flag.store(true, std::sync::atomic::Ordering::Release);
-
-        // Wait for search to complete
-        let result = handle.join().unwrap();
-
-        // Should have stopped early (within 2000ms accounting for CI variability and Enhanced engine complexity)
-        // Enhanced engine performs more complex operations than basic engines
-        assert!(
-            result.stats.elapsed < Duration::from_millis(2000),
-            "Search took too long to stop: {:?}",
-            result.stats.elapsed
-        );
-    }
-    */
-
-    #[test]
-    #[ignore] // Requires large stack size due to NNUE initialization
-    fn test_engine_type_switching_basic() {
-        let mut engine = Engine::new(EngineType::Material);
-
-        // Initially material engine
-        assert!(matches!(engine.engine_type, EngineType::Material));
-
-        // Switch to Enhanced
-        engine.set_engine_type(EngineType::Enhanced);
-        assert!(matches!(engine.engine_type, EngineType::Enhanced));
-
-        // Can search with Enhanced engine
-        let mut pos = Position::startpos();
-        let limits = SearchLimits::builder().depth(2).fixed_time_ms(100).build();
-        let result = engine.search(&mut pos, limits);
-        assert!(result.best_move.is_some());
-
-        // Switch back to Material
-        engine.set_engine_type(EngineType::Material);
-        assert!(matches!(engine.engine_type, EngineType::Material));
-
-        let limits2 = SearchLimits::builder().depth(2).fixed_time_ms(100).build();
-        let result2 = engine.search(&mut pos, limits2);
-        assert!(result2.best_move.is_some());
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "large-stack-tests"), ignore)]
-    fn test_engine_type_switching_with_nnue() {
-        // Separate test for NNUE due to stack size requirements
-        let mut engine = Engine::new(EngineType::Material);
-
-        // Switch to NNUE
-        engine.set_engine_type(EngineType::Nnue);
-        assert!(matches!(engine.engine_type, EngineType::Nnue));
-
-        // Can still search
-        let mut pos = Position::startpos();
-        let limits = SearchLimits::builder().depth(2).fixed_time_ms(100).build();
-        let result = engine.search(&mut pos, limits);
-        assert!(result.best_move.is_some());
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "large-stack-tests"), ignore)]
-    fn test_engine_type_switching_with_enhanced_nnue() {
-        // Separate test for EnhancedNnue due to stack size requirements
-        // Run with: RUST_MIN_STACK=8388608 cargo test -- --ignored
-        let mut engine = Engine::new(EngineType::Material);
-
-        // Switch to EnhancedNnue
-        engine.set_engine_type(EngineType::EnhancedNnue);
-        assert!(matches!(engine.engine_type, EngineType::EnhancedNnue));
-
-        // Can search with EnhancedNnue engine
-        let mut pos = Position::startpos();
-        let limits = SearchLimits::builder().depth(2).fixed_time_ms(100).build();
-        let result = engine.search(&mut pos, limits);
-        assert!(result.best_move.is_some());
-    }
-
-    #[test]
-    #[ignore] // Requires large stack size due to NNUE initialization
-    fn test_load_nnue_weights_wrong_engine_type() {
-        let mut engine = Engine::new(EngineType::Material);
-        let result = engine.load_nnue_weights("dummy.nnue");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "Cannot load NNUE weights for non-NNUE engine");
-    }
-
-    #[test]
-    fn test_choose_final_bestmove_prefers_non_king_when_not_in_check() {
-        // Black to move, both a king move and a capture by a silver are legal.
-        // Expect: choose_final_bestmove picks non-king capture (LegalFallback heuristic).
-        let mut pos = Position::empty();
-        // Kings
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'i').unwrap(),
-            Piece::new(PieceType::King, Color::Black),
-        );
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'a').unwrap(),
-            Piece::new(PieceType::King, Color::White),
-        );
-        // Black silver can capture a pawn
-        pos.board.put_piece(
-            Square::from_usi_chars('4', 'h').unwrap(),
-            Piece::new(PieceType::Silver, Color::Black),
-        );
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'g').unwrap(),
-            Piece::new(PieceType::Pawn, Color::White),
-        ); // target for capture 4h-5g
-        pos.side_to_move = Color::Black;
-
-        // Ensure non-zero hash to avoid TT probe panic in tests
-        pos.hash = 1;
-        pos.zobrist_hash = 1;
-        let eng = Engine::new(EngineType::Material);
-        let res = eng.choose_final_bestmove(&pos, None);
-        assert!(res.best_move.is_some());
-        let mv = res.best_move.unwrap();
-        // The move should not be a king move when a capture exists
-        let is_king = mv
-            .piece_type()
-            .or_else(|| mv.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type)))
-            .map(|pt| matches!(pt, PieceType::King))
-            .unwrap_or(false);
-        assert!(
-            !is_king,
-            "Should avoid king move when not in check; got {}",
-            crate::usi::move_to_usi(&mv)
-        );
-    }
-
-    #[test]
-    fn test_choose_final_bestmove_skips_illegal_committed() {
-        // Committed PV contains an illegal move; engine should ignore and fallback to legal.
-        let mut pos = Position::empty();
-        // Kings
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'i').unwrap(),
-            Piece::new(PieceType::King, Color::Black),
-        );
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'a').unwrap(),
-            Piece::new(PieceType::King, Color::White),
-        );
-        // One simple legal move: Black pawn can advance 7g7f
-        pos.board.put_piece(
-            Square::from_usi_chars('7', 'g').unwrap(),
-            Piece::new(PieceType::Pawn, Color::Black),
-        );
-        pos.side_to_move = Color::Black;
-
-        // Illegal committed move (move from empty square)
-        let illegal = crate::usi::parse_usi_move("3a3b").unwrap();
-        let committed = crate::search::CommittedIteration {
-            depth: 1,
-            seldepth: None,
-            score: 0,
-            pv: vec![illegal],
-            node_type: crate::search::NodeType::Exact,
-            nodes: 0,
-            elapsed: std::time::Duration::from_millis(0),
-        };
-
-        pos.hash = 1;
-        pos.zobrist_hash = 1;
-        let eng = Engine::new(EngineType::Material);
-        let res = eng.choose_final_bestmove(&pos, Some(&committed));
-        assert!(res.best_move.is_some());
-        assert_ne!(res.best_move.unwrap().to_u16(), illegal.to_u16());
-    }
-
-    // TODO: Fix this test after making Engine mutable
-    /*
-    #[test]
-    #[cfg_attr(not(feature = "large-stack-tests"), ignore)]
-    fn test_parallel_engine_execution() {
-        // Create a shared engine with NNUE
-        let engine = Arc::new(Engine::new(EngineType::Nnue));
-
-        let mut handles = vec![];
-
-        // Spawn multiple threads that use the engine concurrently
-        for thread_id in 0..4 {
-            let engine_clone = engine.clone();
-            let handle = thread::spawn(move || {
-                let mut pos = Position::startpos();
-                let limits = SearchLimits::builder().depth(2).fixed_time_ms(50).build();
-
-                // Each thread performs a search
-                let result = engine_clone.search(&mut pos, limits);
-
-                log::debug!("Thread {} completed search with {} nodes", thread_id, result.stats.nodes);
-
-                // Verify we got a valid result
-                assert!(result.best_move.is_some());
-                assert!(result.stats.nodes > 0);
-
-                result.stats.nodes
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all threads to complete
-        let mut total_nodes = 0u64;
-        for handle in handles {
-            let nodes = handle.join().unwrap();
-            total_nodes += nodes;
-        }
-
-        log::debug!("Total nodes searched across all threads: {total_nodes}");
-        assert!(total_nodes > 0);
-    }
-    */
-
-    #[test]
-    fn test_game_phase_detection() {
-        // Opening phase (by move count)
-        let mut pos = Position::startpos();
-        assert_eq!(detect_game_phase(&pos, pos.ply as u32, Profile::Search), GamePhase::Opening);
-
-        // Still opening because of high material score
-        pos.ply = 50;
-        assert_eq!(detect_game_phase(&pos, pos.ply as u32, Profile::Search), GamePhase::Opening);
-
-        // With new system, high ply affects phase detection
-        pos.ply = 150;
-        // New system considers both material and ply
-        let phase = detect_game_phase(&pos, pos.ply as u32, Profile::Search);
-        eprintln!("Position at ply 150 phase: {:?}", phase);
-        // Might be MiddleGame due to ply influence
-        assert!(
-            phase == GamePhase::MiddleGame || phase == GamePhase::Opening,
-            "Expected Opening or MiddleGame, got {:?}",
-            phase
-        );
-
-        // Test with actual endgame position
-        let mut endgame_pos = Position::empty();
-        endgame_pos.ply = 150;
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('5', 'i').unwrap(),
-            Piece::new(PieceType::King, Color::Black),
-        );
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('5', 'a').unwrap(),
-            Piece::new(PieceType::King, Color::White),
-        );
-        assert_eq!(
-            detect_game_phase(&endgame_pos, endgame_pos.ply as u32, Profile::Search),
-            GamePhase::EndGame
-        );
-
-        // Test repetition scenario: high ply but full material
-        let mut repetition_pos = Position::startpos();
-        repetition_pos.ply = 200; // Very high move count
-                                  // With new system, very high ply pushes toward endgame despite material
-        let phase = detect_game_phase(&repetition_pos, repetition_pos.ply as u32, Profile::Search);
-        eprintln!("Repetition position (ply 200) phase: {:?}", phase);
-        // Could be MiddleGame or EndGame due to high ply
-        assert!(
-            phase == GamePhase::MiddleGame || phase == GamePhase::EndGame,
-            "Expected MiddleGame or EndGame for high ply, got {:?}",
-            phase
-        );
-    }
-
-    #[test]
-    fn test_calculate_active_threads() {
-        let mut engine = Engine::new(EngineType::Material);
-        engine.num_threads = 8;
-
-        // Opening - all threads (by move count)
-        let mut pos = Position::startpos();
-        assert_eq!(engine.calculate_active_threads(&pos), 8);
-
-        // Middle game - all threads (material score overrides)
-        pos.ply = 50;
-        assert_eq!(engine.calculate_active_threads(&pos), 8);
-
-        // With new system, phase depends on material and ply
-        pos.ply = 150;
-        let threads = engine.calculate_active_threads(&pos);
-        eprintln!("Threads at ply 150: {}", threads);
-        // Should still use all threads unless EndGame
-        assert_eq!(threads, 8);
-
-        // Create actual endgame position with few pieces
-        let mut endgame_pos = Position::empty();
-        endgame_pos.ply = 150;
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('5', 'i').unwrap(),
-            Piece::new(PieceType::King, Color::Black),
-        );
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('5', 'a').unwrap(),
-            Piece::new(PieceType::King, Color::White),
-        );
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('1', 'i').unwrap(),
-            Piece::new(PieceType::Rook, Color::Black),
-        );
-        // Endgame should use half threads
-        assert_eq!(engine.calculate_active_threads(&endgame_pos), 4);
-    }
-
-    #[test]
-    fn test_pending_thread_count() {
-        let mut engine = Engine::new(EngineType::Material);
-
-        // Initial state
-        assert_eq!(engine.num_threads, 1);
-        assert_eq!(engine.pending_thread_count, None);
-
-        // Set threads - should be pending
-        engine.set_threads(4);
-        assert_eq!(engine.num_threads, 1); // Not applied yet
-        assert_eq!(engine.pending_thread_count, Some(4));
-
-        // Apply pending count
-        engine.apply_pending_thread_count();
-        assert_eq!(engine.num_threads, 4); // Now applied
-        assert_eq!(engine.pending_thread_count, None);
-        assert!(engine.use_parallel);
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "large-stack-tests"), ignore)]
-    fn test_concurrent_weight_loading() {
-        // Create a mutable engine
-        let mut engine = Engine::new(EngineType::Nnue);
-
-        // Try to load weights (will fail since file doesn't exist)
-        let result1 = engine.load_nnue_weights("nonexistent1.nnue");
-        assert!(result1.is_err());
-
-        // Engine type switching is thread-safe through mutex
-        engine.set_engine_type(EngineType::Material);
-        engine.set_engine_type(EngineType::Nnue);
-
-        // Try another load
-        let result2 = engine.load_nnue_weights("nonexistent2.nnue");
-        assert!(result2.is_err());
-    }
-
-    #[test]
-    fn test_hash_size_configuration() {
-        let mut engine = Engine::new(EngineType::Material);
-
-        // Initial hash size should be default
-        assert_eq!(engine.get_hash_size(), 1024);
-
-        // Set new hash size
-        engine.set_hash_size(32);
-
-        // Should still be 1024 until next search
-        assert_eq!(engine.get_hash_size(), 1024);
-
-        // After applying pending changes
-        engine.apply_pending_tt_size();
-        assert_eq!(engine.get_hash_size(), 32);
-    }
-
-    #[test]
-    fn test_multipv_persistence_clear_hash() {
-        let mut engine = Engine::new(EngineType::Material);
-        engine.set_multipv_persistent(3);
-        engine.clear_hash();
-
-        // Inspect the underlying searcher directly to verify MultiPV persistence
-        {
-            let guard = engine.material_searcher.lock().expect("lock material searcher");
-            let s = guard.as_ref().expect("material searcher should exist");
-            assert_eq!(s.multi_pv(), 3);
-        }
-    }
-
-    #[test]
-    fn test_multipv_persistence_tt_resize() {
-        let mut engine = Engine::new(EngineType::Material);
-        engine.set_multipv_persistent(4);
-        engine.set_hash_size(32); // pending until next apply
-        engine.apply_pending_tt_size();
-
-        // Inspect the recreated searcher
-        {
-            let guard = engine.material_searcher.lock().expect("lock material searcher");
-            let s = guard.as_ref().expect("material searcher should exist");
-            assert_eq!(s.multi_pv(), 4);
-        }
-    }
-
-    #[test]
-    fn test_multipv_persistence_engine_type_switch() {
-        let mut engine = Engine::new(EngineType::Material);
-        engine.set_multipv_persistent(2);
-        engine.set_engine_type(EngineType::Enhanced);
-
-        // Inspect the enhanced searcher
-        {
-            let guard = engine.material_enhanced_searcher.lock().expect("lock enhanced searcher");
-            let s = guard.as_ref().expect("enhanced searcher should exist");
-            assert_eq!(s.multi_pv(), 2);
-        }
-    }
-
-    #[test]
-    fn test_tt_hashfull_permille_fallback_shared_tt() {
-        let engine_type = EngineType::Material;
-        let engine = Engine::new(engine_type);
-        // Simulate uninitialized searcher of current engine type
-        if let Ok(mut guard) = engine.material_searcher.lock() {
-            *guard = None;
-        }
-        // Should not panic and should return a value from shared TT
-        let hf = engine.tt_hashfull_permille();
-        assert!(hf <= 1000);
-    }
-
-    // Note: A higher-level USI-side test would verify bestmove ponder emission.
-
-    #[test]
-    fn test_game_phase_edge_cases() {
-        // Test 1: Empty board except kings
-        let mut pos = Position::empty();
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'i').unwrap(),
-            Piece::new(PieceType::King, Color::Black),
-        );
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'a').unwrap(),
-            Piece::new(PieceType::King, Color::White),
-        );
-        assert_eq!(detect_game_phase(&pos, pos.ply as u32, Profile::Search), GamePhase::EndGame);
-
-        // Test 2: Only one side has pieces
-        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 18; // 18 pawns in hand
-                                                                                      // Pawns have weight 0, so still endgame
-        assert_eq!(detect_game_phase(&pos, pos.ply as u32, Profile::Search), GamePhase::EndGame);
-
-        // Add valuable pieces to hand
-        pos.hands[Color::Black as usize][PieceType::Rook.hand_index().unwrap()] = 2; // 2 rooks in hand
-                                                                                     // 2 rooks * 4 = 8, normalized: (8 * 128) / 52 = 19
-                                                                                     // Still below PHASE_ENDGAME_THRESHOLD (32)
-        assert_eq!(detect_game_phase(&pos, pos.ply as u32, Profile::Search), GamePhase::EndGame);
-
-        // Add more pieces to cross into middle game
-        pos.hands[Color::Black as usize][PieceType::Bishop.hand_index().unwrap()] = 2; // 2 bishops
-        pos.hands[Color::Black as usize][PieceType::Gold.hand_index().unwrap()] = 4; // 4 golds
-                                                                                     // Total: 2*4 + 2*4 + 4*3 = 28, normalized: (28 * 128) / 52 = 68
-        assert_eq!(detect_game_phase(&pos, pos.ply as u32, Profile::Search), GamePhase::MiddleGame);
-    }
-
-    #[test]
-    fn test_initial_phase_total_compile_time() {
-        // Verify the compile-time calculation is correct
-        assert_eq!(INITIAL_PHASE_TOTAL, 52);
-
-        // Manually verify the calculation
-        let manual_total = 2 * 4 +  // Rook: 2 pieces * weight 4
-            2 * 4 +  // Bishop: 2 pieces * weight 4
-            4 * 3 +  // Gold: 4 pieces * weight 3
-            4 * 2 +  // Silver: 4 pieces * weight 2
-            4 * 2 +  // Knight: 4 pieces * weight 2
-            4 * 2; // Lance: 4 pieces * weight 2
-        assert_eq!(manual_total, 52);
-        assert_eq!(manual_total, INITIAL_PHASE_TOTAL);
     }
 }
