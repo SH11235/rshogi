@@ -355,6 +355,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let orig_beta = beta;
         // Optional: static eval for pruning/TT store
         let static_eval = self.evaluator.evaluate(pos);
+        // Keep static eval on stack for improving判定などに利用
+        stack[ply as usize].static_eval = Some(static_eval);
 
         // Mate Distance Pruning (conservative)
         let mut a_md = alpha;
@@ -513,7 +515,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        // ProbCut: try shallow cut above beta with promising captures
+        // ProbCut: try shallow cut above beta with promising captures (negamax window)
         if depth >= 5 && !pos.is_in_check() {
             let threshold = beta + dynp::probcut_margin(depth);
             let mgp = MoveGenerator::new();
@@ -524,11 +526,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                     let mut child = pos.clone();
                     child.do_move(mv);
+                    // 子は [-T, -T+1] のナロウ窓で叩く
                     let (sc, _) = self.alphabeta(ABArgs {
                         pos: &child,
                         depth: depth - 2,
-                        alpha: threshold - 1,
-                        beta: threshold,
+                        alpha: -threshold,
+                        beta: -threshold + 1,
                         limits,
                         start_time,
                         nodes,
@@ -541,8 +544,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         beta_cuts,
                         lmr_counter,
                     });
-                    if sc >= threshold {
-                        return (sc, Some(mv));
+                    let parent_sc = -sc;
+                    if parent_sc >= threshold {
+                        return (parent_sc, Some(mv));
                     }
                 }
             }
@@ -657,13 +661,33 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             let mut child = pos.clone();
             child.do_move(mv);
-            // LMR: 非王手・非良捕獲・moveno>=3 の静止手を減深
+            // LMR: 非王手・非良捕獲・moveno>=3 の静止手を減深（PV/王手/improvingで調整）
             let mut next_depth = depth - 1;
             if depth >= 3 && moveno >= 3 && is_quiet && !is_good_capture {
                 heur.lmr_trials = heur.lmr_trials.saturating_add(1);
                 let rd = ((depth as f32).ln() * (moveno as f32).ln() / dynp::lmr_k_coeff()).floor()
                     as i32;
-                let r = rd.max(1).min(depth - 1);
+                let mut r = rd.max(1);
+                if is_pv {
+                    r -= 1;
+                } // PVは控えめ
+                if gives_check {
+                    r = 0;
+                } // 王手は減深しない
+                  // improving: ply>=2 かつ current_eval >= prev2_eval - 10cp
+                let improving = if ply >= 2 {
+                    if let Some(prev2) = stack[ply as usize - 2].static_eval {
+                        static_eval >= prev2 - 10
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if improving {
+                    r -= 1;
+                }
+                r = r.clamp(0, depth - 1);
                 if r > 0 {
                     next_depth -= r;
                     *lmr_counter += 1;
@@ -802,6 +826,34 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
     }
 
+    /// TTに格納されたEXACTエントリからPVを復元できる場合は優先的に返す。
+    /// 先頭手が `first` と一致しない場合や鎖が途切れた場合は `None` を返す。
+    fn reconstruct_root_pv_from_tt(
+        &self,
+        root: &Position,
+        depth: i32,
+        first: crate::shogi::Move,
+    ) -> Option<SmallVec<[crate::shogi::Move; 32]>> {
+        let tt = self.tt.as_ref()?;
+        if depth <= 0 {
+            return None;
+        }
+
+        let mut pos = root.clone();
+        let max_depth = depth.clamp(0, crate::search::constants::MAX_PLY as i32) as u8;
+        let mut pv_vec = tt.reconstruct_pv_from_tt(&mut pos, max_depth);
+        if pv_vec.is_empty() {
+            return None;
+        }
+
+        if !pv_vec[0].equals_without_piece_type(&first) {
+            return None;
+        }
+
+        pv_vec.truncate(32);
+        Some(SmallVec::from_vec(pv_vec))
+    }
+
     /// 既知のbest手からPVを構築するための軽量再探索（fail-soft）。
     /// 速度優先のため、各手でフル窓で1回だけ探索してbest手を辿る。
     fn extract_pv(
@@ -883,6 +935,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut stats_hint_exists: u64 = 0;
         let mut stats_hint_used: u64 = 0;
 
+        let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
                 break;
@@ -921,87 +974,78 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             root_moves.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
 
-            // Aspiration window
-            let mut alpha = if d == 1 {
-                i32::MIN / 2
-            } else {
-                prev_score - ASP_DELTA0
-            };
-            let mut beta = if d == 1 {
-                i32::MAX / 2
-            } else {
-                prev_score + ASP_DELTA0
-            };
-            let mut delta = ASP_DELTA0;
+            // MultiPV（逐次選抜）
+            let k = limits.multipv.max(1) as usize;
+            let mut excluded: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+            let mut depth_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
 
-            // 検索用stack/heuristicsを初期化
-            let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
-            let mut heur = Heuristics::default();
-            let mut tt_hits: u64 = 0;
-            let mut beta_cuts: u64 = 0;
-            let mut lmr_counter: u64 = 0;
-            let mut root_tt_hint_exists: u64 = 0;
-            let mut root_tt_hint_used: u64 = 0;
-            loop {
+            // Counters aggregate across PVs at this depth
+            let mut depth_tt_hits: u64 = 0;
+            let mut depth_beta_cuts: u64 = 0;
+            let mut depth_lmr_counter: u64 = 0;
+            let mut depth_lmr_trials: u64 = 0;
+            let mut _local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
+            let mut depth_hint_exists: u64 = 0;
+            let mut depth_hint_used: u64 = 0;
+
+            for pv_idx in 1..=k {
+                // Aspiration window per PV head
+                let mut alpha = if d == 1 {
+                    i32::MIN / 2
+                } else {
+                    prev_score - ASP_DELTA0
+                };
+                let mut beta = if d == 1 {
+                    i32::MAX / 2
+                } else {
+                    prev_score + ASP_DELTA0
+                };
+                let mut delta = ASP_DELTA0;
+                let alpha0 = alpha;
+                let beta0 = beta;
+
+                // 検索用stack/heuristicsを初期化
+                let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+                let mut heur = Heuristics::default();
+                let mut tt_hits: u64 = 0;
+                let mut beta_cuts: u64 = 0;
+                let mut lmr_counter: u64 = 0;
+                let mut root_tt_hint_exists: u64 = 0;
+                let mut root_tt_hint_used: u64 = 0;
+
+                // 作業用root move配列（excludedを除外）
+                let active_moves: Vec<(crate::shogi::Move, i32)> = root_moves
+                    .iter()
+                    .copied()
+                    .filter(|(m, _)| !excluded.iter().any(|e| m.equals_without_piece_type(e)))
+                    .collect();
+
+                // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
-                // Root move loop with CurrMove events
-                for (idx, (mv, _)) in root_moves.iter().copied().enumerate() {
-                    if let Some(limit) = limits.time_limit() {
-                        if t0.elapsed() >= limit {
-                            break;
+                loop {
+                    // Root move loop with CurrMove events
+                    for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
+                        if let Some(limit) = limits.time_limit() {
+                            if t0.elapsed() >= limit {
+                                break;
+                            }
                         }
-                    }
-                    if let Some(cb) = info {
-                        cb(InfoEvent::CurrMove {
-                            mv,
-                            number: (idx as u32) + 1,
-                        });
-                    }
-                    let mut child = root.clone();
-                    child.do_move(mv);
-                    // Root-level PVS: first move full window, others null-window then re-search if needed
-                    let score = if idx == 0 {
-                        let (sc, _) = self.alphabeta(ABArgs {
-                            pos: &child,
-                            depth: d - 1,
-                            alpha: -beta,
-                            beta: -alpha,
-                            limits,
-                            start_time: &t0,
-                            nodes: &mut nodes,
-                            seldepth: &mut seldepth,
-                            ply: 1,
-                            is_pv: true,
-                            stack: &mut stack,
-                            heur: &mut heur,
-                            tt_hits: &mut tt_hits,
-                            beta_cuts: &mut beta_cuts,
-                            lmr_counter: &mut lmr_counter,
-                        });
-                        -sc
-                    } else {
-                        let (sc_nw, _) = self.alphabeta(ABArgs {
-                            pos: &child,
-                            depth: d - 1,
-                            alpha: -(alpha + 1),
-                            beta: -alpha,
-                            limits,
-                            start_time: &t0,
-                            nodes: &mut nodes,
-                            seldepth: &mut seldepth,
-                            ply: 1,
-                            is_pv: false,
-                            stack: &mut stack,
-                            heur: &mut heur,
-                            tt_hits: &mut tt_hits,
-                            beta_cuts: &mut beta_cuts,
-                            lmr_counter: &mut lmr_counter,
-                        });
-                        let mut s = -sc_nw;
-                        if s > alpha && s < beta {
-                            let (sc_fw, _) = self.alphabeta(ABArgs {
+                        if let Some(cb) = info {
+                            let number = root_rank
+                                .iter()
+                                .position(|x| x.equals_without_piece_type(&mv))
+                                .map(|pos| (pos as u32) + 1)
+                                .unwrap_or((idx as u32) + 1);
+                            cb(InfoEvent::CurrMove { mv, number });
+                        }
+                        let mut child = root.clone();
+                        child.do_move(mv);
+                        // Root-level PVS: first move full window, others null-window then re-search if needed
+                        let score = if idx == 0 {
+                            let (sc, _) = self.alphabeta(ABArgs {
                                 pos: &child,
                                 depth: d - 1,
                                 alpha: -beta,
@@ -1018,25 +1062,109 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 beta_cuts: &mut beta_cuts,
                                 lmr_counter: &mut lmr_counter,
                             });
-                            s = -sc_fw;
+                            -sc
+                        } else {
+                            let (sc_nw, _) = self.alphabeta(ABArgs {
+                                pos: &child,
+                                depth: d - 1,
+                                alpha: -(alpha + 1),
+                                beta: -alpha,
+                                limits,
+                                start_time: &t0,
+                                nodes: &mut nodes,
+                                seldepth: &mut seldepth,
+                                ply: 1,
+                                is_pv: false,
+                                stack: &mut stack,
+                                heur: &mut heur,
+                                tt_hits: &mut tt_hits,
+                                beta_cuts: &mut beta_cuts,
+                                lmr_counter: &mut lmr_counter,
+                            });
+                            let mut s = -sc_nw;
+                            if s > alpha && s < beta {
+                                let (sc_fw, _) = self.alphabeta(ABArgs {
+                                    pos: &child,
+                                    depth: d - 1,
+                                    alpha: -beta,
+                                    beta: -alpha,
+                                    limits,
+                                    start_time: &t0,
+                                    nodes: &mut nodes,
+                                    seldepth: &mut seldepth,
+                                    ply: 1,
+                                    is_pv: true,
+                                    stack: &mut stack,
+                                    heur: &mut heur,
+                                    tt_hits: &mut tt_hits,
+                                    beta_cuts: &mut beta_cuts,
+                                    lmr_counter: &mut lmr_counter,
+                                });
+                                s = -sc_fw;
+                            }
+                            s
+                        };
+                        if score > local_best {
+                            local_best = score;
+                            local_best_mv = Some(mv);
                         }
-                        s
-                    };
-                    if score > local_best {
-                        local_best = score;
-                        local_best_mv = Some(mv);
+                        if score > alpha {
+                            alpha = score;
+                        }
+                        if alpha >= beta {
+                            break; // fail-high
+                        }
                     }
-                    if score > alpha {
-                        alpha = score;
+
+                    if alpha < beta {
+                        break; // success
                     }
-                    if alpha >= beta {
-                        break; // fail-high
+                    // Aspiration failed → widen window and emit event
+                    if let Some(cb) = info {
+                        let outcome = if prev_score >= beta {
+                            crate::search::api::AspirationOutcome::FailHigh
+                        } else {
+                            crate::search::api::AspirationOutcome::FailLow
+                        };
+                        cb(InfoEvent::Aspiration {
+                            outcome,
+                            old_alpha: alpha,
+                            old_beta: beta,
+                            new_alpha: alpha.saturating_sub(2 * delta),
+                            new_beta: beta.saturating_add(2 * delta),
+                        });
+                    }
+                    let new_alpha = alpha.saturating_sub(2 * delta);
+                    let new_beta = beta.saturating_add(2 * delta);
+                    alpha = new_alpha.max(i32::MIN / 2);
+                    beta = new_beta.min(i32::MAX / 2);
+                    delta = (delta * 2).min(ASP_DELTA_MAX);
+                }
+
+                // Counters aggregate
+                depth_tt_hits = depth_tt_hits.saturating_add(tt_hits);
+                depth_beta_cuts = depth_beta_cuts.saturating_add(beta_cuts);
+                depth_lmr_counter = depth_lmr_counter.saturating_add(lmr_counter);
+                depth_lmr_trials = depth_lmr_trials.saturating_add(heur.lmr_trials);
+
+                // 発火: Depth / Hashfull（深さ1回の発火で十分）
+                if pv_idx == 1 {
+                    if let Some(cb) = info {
+                        cb(InfoEvent::Depth {
+                            depth: d as u32,
+                            seldepth,
+                        });
+                        if let Some(tt) = &self.tt {
+                            let hf = tt.hashfull_permille() as u32;
+                            cb(InfoEvent::Hashfull(hf));
+                        }
                     }
                 }
 
-                // Success in window
-                if alpha < beta {
-                    if let Some(m) = local_best_mv {
+                // PV 行の生成と発火
+                if let Some(m) = local_best_mv {
+                    // 次反復のAspiration用に pv_idx==1 を採用
+                    if pv_idx == 1 {
                         best = Some(m);
                         best_score = local_best;
                         prev_score = local_best;
@@ -1046,114 +1174,103 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 root_tt_hint_used = 1;
                             }
                         }
+                        depth_hint_exists = root_tt_hint_exists;
+                        depth_hint_used = root_tt_hint_used;
+                        _local_best_for_next_iter = Some((m, local_best));
                     }
+                    // 可能ならTTからPVを復元し、だめなら軽量再探索へフォールバック
+                    let mut pv =
+                        self.reconstruct_root_pv_from_tt(root, d, m).unwrap_or_else(SmallVec::new);
+                    if pv.is_empty() {
+                        let pv_ex = self.extract_pv(root, d, m, limits, &mut nodes);
+                        if pv_ex.is_empty() {
+                            pv.push(m);
+                        } else {
+                            pv = pv_ex;
+                        }
+                    }
+                    let bound = if local_best <= alpha0 {
+                        NodeType::UpperBound
+                    } else if local_best >= beta0 {
+                        NodeType::LowerBound
+                    } else {
+                        NodeType::Exact
+                    };
+                    let line = RootLine {
+                        multipv_index: pv_idx as u8,
+                        root_move: m,
+                        score_internal: local_best,
+                        score_cp: local_best,
+                        bound,
+                        depth: d as u32,
+                        seldepth: Some(seldepth as u8),
+                        pv,
+                        nodes: Some(nodes),
+                        time_ms: Some(t0.elapsed().as_millis() as u64),
+                        exact_exhausted: false,
+                        exhaust_reason: None,
+                        mate_distance: None,
+                    };
+                    if let Some(cb) = info {
+                        cb(InfoEvent::PV { line: line.clone() });
+                    }
+                    depth_lines.push(line);
+                    // TT保存は 1行目のみ（Exact, PV=true）
+                    if pv_idx == 1 {
+                        if let (Some(tt), Some(best_mv_root)) = (&self.tt, best) {
+                            let node_type = NodeType::Exact;
+                            let store_score =
+                                crate::search::common::adjust_mate_score_for_tt(best_score, 0);
+                            let mut args = crate::search::tt::TTStoreArgs::new(
+                                root.zobrist_hash,
+                                Some(best_mv_root),
+                                store_score as i16,
+                                self.evaluator.evaluate(root) as i16,
+                                d as u8,
+                                node_type,
+                                root.side_to_move,
+                            );
+                            args.is_pv = true;
+                            tt.store(args);
+                        }
+                    }
+                    // 除外へ追加
+                    excluded.push(m);
+                } else {
+                    // 局面が詰み/手なし等でPVが取れない → 打ち切り
                     break;
                 }
-
-                // Aspiration failed → widen window and emit event
-                if let Some(cb) = info {
-                    let outcome = if prev_score >= beta {
-                        crate::search::api::AspirationOutcome::FailHigh
-                    } else {
-                        crate::search::api::AspirationOutcome::FailLow
-                    };
-                    cb(InfoEvent::Aspiration {
-                        outcome,
-                        old_alpha: alpha,
-                        old_beta: beta,
-                        new_alpha: alpha.saturating_sub(2 * delta),
-                        new_beta: beta.saturating_add(2 * delta),
-                    });
-                }
-                let new_alpha = alpha.saturating_sub(2 * delta);
-                let new_beta = beta.saturating_add(2 * delta);
-                alpha = new_alpha.max(i32::MIN / 2);
-                beta = new_beta.min(i32::MAX / 2);
-                delta = (delta * 2).min(ASP_DELTA_MAX);
             }
 
-            // Accumulate counters for this depth
-            cum_tt_hits = cum_tt_hits.saturating_add(tt_hits);
-            cum_beta_cuts = cum_beta_cuts.saturating_add(beta_cuts);
-            cum_lmr_counter = cum_lmr_counter.saturating_add(lmr_counter);
-            cum_lmr_trials = cum_lmr_trials.saturating_add(heur.lmr_trials);
-
-            if let Some(cb) = info {
-                // Depth event
-                cb(InfoEvent::Depth {
-                    depth: d as u32,
-                    seldepth,
-                });
-                // Hashfull (深さ更新時): 0..1000 permill
-                if let Some(tt) = &self.tt {
-                    let hf = tt.hashfull_permille() as u32;
-                    // スパム抑制: 1秒ごと or 深さ更新時のみ。ここは深さ更新時なので常に可。
-                    cb(InfoEvent::Hashfull(hf));
-                }
-                // PV event (minimal: 1手のみ)
-                let mut pv: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
-                if let Some(m) = best {
-                    // 可能なら簡易PV抽出で複数手
-                    let pv_ex = self.extract_pv(root, d, m, limits, &mut nodes);
-                    if pv_ex.is_empty() {
-                        pv.push(m);
-                    } else {
-                        pv = pv_ex;
-                    }
-                }
-                let line = RootLine {
-                    multipv_index: 1,
-                    root_move: best.unwrap_or_default(),
-                    score_internal: best_score,
-                    score_cp: best_score,
-                    bound: NodeType::Exact, // fail-soft値をそのまま出す（根はfail-soft推奨）
-                    depth: d as u32,
-                    seldepth: Some(seldepth as u8),
-                    pv,
-                    nodes: Some(nodes),
-                    time_ms: Some(t0.elapsed().as_millis() as u64),
-                    exact_exhausted: false,
-                    exhaust_reason: None,
-                    mate_distance: None,
-                };
-                cb(InfoEvent::PV { line });
-            }
-
-            // RootをTTに保存（Exact, PV=true）し、次反復のヒントにする
-            if let (Some(tt), Some(bm)) = (&self.tt, best) {
-                let node_type = NodeType::Exact;
-                let store_score = crate::search::common::adjust_mate_score_for_tt(best_score, 0);
-                let mut args = crate::search::tt::TTStoreArgs::new(
-                    root.zobrist_hash,
-                    Some(bm),
-                    store_score as i16,
-                    self.evaluator.evaluate(root) as i16,
-                    d as u8,
-                    node_type,
-                    root.side_to_move,
-                );
-                args.is_pv = true; // RootはPVとして保存
-                tt.store(args);
-            }
+            // 深さ集計を累積
+            cum_tt_hits = cum_tt_hits.saturating_add(depth_tt_hits);
+            cum_beta_cuts = cum_beta_cuts.saturating_add(depth_beta_cuts);
+            cum_lmr_counter = cum_lmr_counter.saturating_add(depth_lmr_counter);
+            cum_lmr_trials = cum_lmr_trials.saturating_add(depth_lmr_trials);
 
             // 反復ごとのrootヒント統計（最終反復で掲載）
-            // 一時格納: statsはループ後に生成
-            // ここでは変数に最後の値が残るだけで十分（診断目的）
-            stats_hint_exists = root_tt_hint_exists;
-            stats_hint_used = root_tt_hint_used;
+            stats_hint_exists = depth_hint_exists;
+            stats_hint_used = depth_hint_used;
+            // この深さのMultiPV行を最終結果候補として保持
+            final_lines = Some(depth_lines);
         }
         // stats は最終反復の集計値を使う
         let mut stats = SearchStats {
             nodes,
             ..Default::default()
         };
+        stats.elapsed = t0.elapsed();
         stats.tt_hits = Some(cum_tt_hits);
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);
         stats.root_fail_high_count = Some(cum_beta_cuts);
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
-        SearchResult::new(best, best_score, stats)
+        let mut result = SearchResult::new(best, best_score, stats);
+        if let Some(lines) = final_lines {
+            result.lines = Some(lines);
+        }
+        result
     }
 }
 

@@ -3,15 +3,17 @@
 //! Provides a simple interface for using different evaluators with the search engine
 
 use crate::search::parallel::ParallelSearcher;
+use crate::search::types::StopInfo;
 use crate::{
     engine::session::SearchSession,
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::api::{InfoEventCallback, SearcherBackend, StubBackend},
-    search::parallel::EngineStopBridge,
+    search::parallel::{EngineStopBridge, FinalizeReason, StopController},
     search::stub::run_stub_search,
     search::unified::UnifiedSearcher,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
+    time_management::{TimeControl, TimeLimits, TimeManager},
     Position,
 };
 use log::{debug, error, info, warn};
@@ -21,6 +23,7 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::thread;
+use std::time::Duration;
 
 use crate::game_phase::{detect_game_phase, GamePhase, Profile};
 
@@ -185,6 +188,8 @@ pub struct Engine {
     active_searches: Arc<AtomicUsize>,
     // Bridge to issue immediate stop requests without locking Engine mutex
     stop_bridge: Arc<EngineStopBridge>,
+    // New stop controller facade（移行期間は併用）
+    _stop_ctrl: StopController,
     // Session ID counter for async search
     session_counter: u64,
     // Optional new backend (Phase 1). When Some, Engine will delegate search to backend.
@@ -198,6 +203,7 @@ impl Engine {
         let default_tt_size = 1024; // Default TT size in MB
 
         let stop_bridge = Arc::new(EngineStopBridge::new());
+        let stop_ctrl = StopController::new();
 
         let nnue_evaluator = if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
             // Initialize with zero weights for NNUE engine
@@ -298,6 +304,7 @@ impl Engine {
             desired_multi_pv: 1,
             active_searches: Arc::new(AtomicUsize::new(0)),
             stop_bridge,
+            _stop_ctrl: stop_ctrl,
             session_counter: 0,
             backend,
         }
@@ -305,7 +312,9 @@ impl Engine {
 
     /// Issue an immediate stop request to the currently running search without acquiring locks.
     pub fn request_stop_immediate(&self) {
-        self.stop_bridge.request_stop_immediate();
+        self.stop_bridge.request_stop();
+        // Mirror via new controller (安全に重ね打ち)
+        self._stop_ctrl.request_stop();
     }
 
     /// Obtain a clone of the stop bridge for out-of-engine coordination (USI layer).
@@ -442,8 +451,52 @@ impl Engine {
         let session_id = self.next_session_id();
         debug!("Starting async search session {session_id}");
 
+        let time_manager = Self::create_time_manager_for_session(&pos, &limits);
+
+        // Prime StopInfo snapshot with static limits if available
+        let mut base_stop_info = StopInfo::default();
+        if let Some(ref tm) = time_manager {
+            let soft = Self::normalize_limit_value(tm.soft_limit_ms());
+            let hard = Self::normalize_limit_value(tm.hard_limit_ms());
+            if soft != 0 {
+                base_stop_info.soft_limit_ms = soft;
+            }
+            if hard != 0 {
+                base_stop_info.hard_limit_ms = hard;
+            }
+        }
+        if base_stop_info.soft_limit_ms == 0 || base_stop_info.hard_limit_ms == 0 {
+            if let Some(deadlines) = limits.fallback_deadlines {
+                if base_stop_info.soft_limit_ms == 0 {
+                    base_stop_info.soft_limit_ms = deadlines.soft_limit_ms;
+                }
+                if base_stop_info.hard_limit_ms == 0 {
+                    base_stop_info.hard_limit_ms = deadlines.hard_limit_ms;
+                }
+            } else if base_stop_info.soft_limit_ms == 0 && base_stop_info.hard_limit_ms == 0 {
+                if let Some(limit) = limits.time_limit() {
+                    let ms = limit.as_millis() as u64;
+                    base_stop_info.soft_limit_ms = ms;
+                    base_stop_info.hard_limit_ms = ms;
+                }
+            }
+        }
+        self._stop_ctrl.prime_stop_info(base_stop_info.clone());
+        self.stop_bridge.prime_stop_info(base_stop_info.clone());
+
         // Set session ID in limits for OOB coordination
         limits.session_id = session_id;
+        // Publish via new stop controller（外部停止フラグを合わせて登録）
+        self._stop_ctrl.publish_session(limits.stop_flag.as_ref(), session_id);
+
+        if let Some(tm) = time_manager.clone() {
+            Self::spawn_time_manager_watchdog(
+                Arc::clone(&self.stop_bridge),
+                self._stop_ctrl.clone(),
+                tm,
+                session_id,
+            );
+        }
 
         // Apply pending configuration
         self.apply_pending_thread_count();
@@ -459,6 +512,7 @@ impl Engine {
         if let Some(backend) = self.backend.as_ref() {
             // Publish external stop flag
             self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
+            self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
             // Count active
             self.active_searches.fetch_add(1, Ordering::SeqCst);
             let active_searches = self.active_searches.clone();
@@ -469,6 +523,9 @@ impl Engine {
             // Build InfoEvent adapter from legacy callbacks in limits
             let legacy_info = limits.info_callback.clone();
             let legacy_info_string = limits.info_string_callback.clone();
+            let stop_ctrl = self._stop_ctrl.clone();
+            let root_hash = pos_clone.zobrist_hash();
+            let sid = session_id;
             let event_cb: Option<InfoEventCallback> = legacy_info.as_ref().map(|cb| {
                 let cb = cb.clone();
                 let cb_str = legacy_info_string.clone();
@@ -476,6 +533,8 @@ impl Engine {
                     use crate::search::api::{AspirationOutcome, InfoEvent};
                     match evt {
                         InfoEvent::PV { line } => {
+                            // Publish snapshot via StopController (best line only)
+                            stop_ctrl.publish_root_line(sid, root_hash, &line);
                             let depth_u8 = (line.depth as u8).min(127);
                             let nodes = line.nodes.unwrap_or(0);
                             let elapsed =
@@ -548,6 +607,7 @@ impl Engine {
             let tx2 = tx.clone();
             // Publish external stop flag (if provided)
             self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
+            self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
             self.active_searches.fetch_add(1, Ordering::SeqCst);
             let active_searches = self.active_searches.clone();
             let handle = thread::Builder::new()
@@ -585,6 +645,7 @@ impl Engine {
 
         // Update external stop flag in bridge before spawning thread
         self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
+        self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
 
         // Increment active searches before spawning thread
         self.active_searches.fetch_add(1, Ordering::SeqCst);
@@ -656,6 +717,113 @@ impl Engine {
         SearchSession::new(session_id, rx, Some(handle))
     }
 
+    fn create_time_manager_for_session(
+        pos: &Position,
+        limits: &SearchLimits,
+    ) -> Option<Arc<TimeManager>> {
+        let time_limits: TimeLimits = limits.clone().into();
+        match &time_limits.time_control {
+            TimeControl::Infinite | TimeControl::Ponder(_) => return None,
+            _ => {}
+        }
+
+        let phase = detect_game_phase(pos, pos.ply as u32, Profile::Search);
+        let tm = TimeManager::new(&time_limits, pos.side_to_move, pos.ply as u32, phase);
+        let soft = Self::normalize_limit_value(tm.soft_limit_ms());
+        let hard = Self::normalize_limit_value(tm.hard_limit_ms());
+        if soft == 0 && hard == 0 {
+            None
+        } else {
+            Some(Arc::new(tm))
+        }
+    }
+
+    fn normalize_limit_value(value: u64) -> u64 {
+        if value == 0 || value == u64::MAX {
+            0
+        } else {
+            value
+        }
+    }
+
+    fn spawn_time_manager_watchdog(
+        bridge: Arc<EngineStopBridge>,
+        ctrl: StopController,
+        tm: Arc<TimeManager>,
+        session_id: u64,
+    ) {
+        if let Err(err) =
+            thread::Builder::new().name(format!("tm-watch-{}", session_id)).spawn(move || {
+                let mut soft_dispatched = false;
+
+                loop {
+                    let soft_limit_raw = tm.soft_limit_ms();
+                    let hard_limit_raw = tm.hard_limit_ms();
+                    let soft_limit = Self::normalize_limit_value(soft_limit_raw);
+                    let hard_limit = Self::normalize_limit_value(hard_limit_raw);
+
+                    if soft_limit == 0 && hard_limit == 0 {
+                        return;
+                    }
+
+                    if soft_limit == 0 {
+                        soft_dispatched = true;
+                    }
+
+                    let elapsed = tm.elapsed_ms();
+
+                    if !soft_dispatched && soft_limit != 0 && elapsed >= soft_limit {
+                        bridge.update_elapsed_ms(elapsed);
+                        ctrl.update_elapsed_ms(elapsed);
+                        ctrl.request_finalize(FinalizeReason::Planned);
+                        bridge.request_finalize(FinalizeReason::Planned);
+                        info!(
+                            "time_watchdog session={} event=planned elapsed_ms={}",
+                            session_id, elapsed
+                        );
+                        soft_dispatched = true;
+                        if hard_limit == 0 {
+                            break;
+                        }
+                    }
+
+                    if hard_limit != 0 && elapsed >= hard_limit {
+                        bridge.update_elapsed_ms(elapsed);
+                        ctrl.update_elapsed_ms(elapsed);
+                        ctrl.request_finalize(FinalizeReason::Hard);
+                        bridge.request_finalize(FinalizeReason::Hard);
+                        ctrl.request_stop();
+                        bridge.request_stop();
+                        info!(
+                            "time_watchdog session={} event=hard elapsed_ms={}",
+                            session_id, elapsed
+                        );
+                        break;
+                    }
+
+                    let next_target = if !soft_dispatched && soft_limit != 0 {
+                        soft_limit
+                    } else if hard_limit != 0 {
+                        hard_limit
+                    } else {
+                        break;
+                    };
+
+                    if next_target <= elapsed {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+
+                    let remaining = next_target - elapsed;
+                    let sleep_ms = remaining.clamp(10, 100);
+                    thread::sleep(Duration::from_millis(sleep_ms));
+                }
+            })
+        {
+            warn!("failed to spawn time watchdog for session {}: {}", session_id, err);
+        }
+    }
+
     /// Internal helper to run search in a background thread.
     ///
     /// This is called by `start_search()` in a spawned thread and performs
@@ -686,7 +854,7 @@ impl Engine {
         };
 
         // Execute search based on engine type and parallelism
-        if args.use_parallel {
+        let mut result = if args.use_parallel {
             match args.engine_type {
                 EngineType::Material | EngineType::Enhanced => {
                     Self::search_parallel_material_static(
@@ -715,7 +883,7 @@ impl Engine {
                     args.material_evaluator,
                     args.shared_tt,
                     args.material_searcher,
-                    args.stop_bridge,
+                    args.stop_bridge.clone(),
                 ),
                 EngineType::Nnue => Self::search_single_nnue_static(
                     pos,
@@ -723,7 +891,7 @@ impl Engine {
                     args.nnue_evaluator,
                     args.shared_tt,
                     args.nnue_basic_searcher,
-                    args.stop_bridge,
+                    args.stop_bridge.clone(),
                 ),
                 EngineType::Enhanced => Self::search_single_enhanced_material_static(
                     pos,
@@ -731,7 +899,7 @@ impl Engine {
                     args.material_evaluator,
                     args.shared_tt,
                     args.material_enhanced_searcher,
-                    args.stop_bridge,
+                    args.stop_bridge.clone(),
                 ),
                 EngineType::EnhancedNnue => Self::search_single_enhanced_nnue_static(
                     pos,
@@ -739,11 +907,17 @@ impl Engine {
                     args.nnue_evaluator,
                     args.shared_tt,
                     args.nnue_enhanced_searcher,
-                    args.stop_bridge,
+                    args.stop_bridge.clone(),
                 ),
                 EngineType::Stub => run_stub_search(pos, &limits),
             }
+        };
+
+        if let Some(si) = args.stop_bridge.try_read_stop_info() {
+            result.stop_info = Some(si);
         }
+
+        result
     }
 
     // ===== Static helper methods for background search thread =====
@@ -879,6 +1053,8 @@ impl Engine {
             // but we can still register the external stop flag
             debug!("Publishing external stop flag for single-threaded material search");
             stop_bridge.update_external_stop_flag(Some(ext_stop));
+            // New controller mirrors the registration
+            // (stop_ctrl is not passed through to keep signature stable during migration)
         }
 
         // Search without holding Mutex
@@ -927,6 +1103,7 @@ impl Engine {
         if let Some(ext_stop) = limits.stop_flag.as_ref() {
             debug!("Publishing external stop flag for single-threaded NNUE search");
             stop_bridge.update_external_stop_flag(Some(ext_stop));
+            // mirrored via StopController at engine level
         }
 
         // Perform search without holding Mutex
@@ -976,6 +1153,7 @@ impl Engine {
         if let Some(ext_stop) = limits.stop_flag.as_ref() {
             debug!("Publishing external stop flag for single-threaded enhanced material search");
             stop_bridge.update_external_stop_flag(Some(ext_stop));
+            // mirrored via StopController at engine level
         }
 
         // Perform search without holding Mutex
