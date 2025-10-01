@@ -128,14 +128,14 @@ impl TTEntry {
         Some(Move::from_u16(move_data))
     }
 
-    /// Get score from entry (14-bit signed value)
+    /// Get score from entry (16-bit signed value)
     #[inline]
     pub fn score(&self) -> i16 {
         let raw = ((self.data >> SCORE_SHIFT) & SCORE_MASK) as u16;
         raw as i16
     }
 
-    /// Get static evaluation from entry (14-bit signed value)
+    /// Get static evaluation from entry (16-bit signed value)
     #[inline]
     pub fn eval(&self) -> i16 {
         let raw = ((self.data >> EVAL_SHIFT) & EVAL_MASK) as u16;

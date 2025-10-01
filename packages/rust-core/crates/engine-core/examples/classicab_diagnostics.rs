@@ -11,6 +11,7 @@
 
 use engine_core::evaluation::evaluate::MaterialEvaluator;
 use engine_core::search::api::{InfoEvent, InfoEventCallback, SearcherBackend};
+use engine_core::search::tt::TTProbe;
 use engine_core::search::{SearchLimitsBuilder, TranspositionTable};
 use engine_core::shogi::Position;
 use std::sync::Arc;
@@ -39,6 +40,27 @@ struct Args {
     /// 時間制限なし（depthのみ）
     #[arg(long = "no-time-limit", default_value_t = false)]
     no_time_limit: bool,
+    /// 対象局面フィルタ（部分一致）。複数指定可。
+    #[arg(long = "only", value_name = "NAME", num_args = 0..)]
+    only: Vec<String>,
+    /// 各depthの計測前にTTをクリア
+    #[arg(long = "clear-tt-per-depth", default_value_t = false)]
+    clear_tt_per_depth: bool,
+    /// 出力フォーマット: text|csv|json
+    #[arg(long = "format", default_value = "text")]
+    format: String,
+    /// 出力ファイル（未指定なら標準出力）。text時は無視。
+    #[arg(long = "out")]
+    out: Option<std::path::PathBuf>,
+    /// IID無効化
+    #[arg(long = "disable-iid", default_value_t = false)]
+    disable_iid: bool,
+    /// NMP無効化
+    #[arg(long = "disable-nmp", default_value_t = false)]
+    disable_nmp: bool,
+    /// 各depthを独立プロセスで実行（time固定の相互影響を排除）
+    #[arg(long = "per-depth-process", default_value_t = false)]
+    per_depth_process: bool,
 }
 
 fn main() {
@@ -57,14 +79,104 @@ fn main() {
     ];
 
     let tt = Arc::new(TranspositionTable::new(args.tt_mb));
-    let backend =
-        engine_core::search::ab::ClassicBackend::with_tt(Arc::new(MaterialEvaluator), tt.clone());
+    let toggles = engine_core::search::ab::PruneToggles {
+        enable_iid: !args.disable_iid,
+        enable_nmp: !args.disable_nmp,
+    };
+    let backend = engine_core::search::ab::ClassicBackend::with_tt_and_toggles(
+        Arc::new(MaterialEvaluator),
+        tt.clone(),
+        toggles,
+    );
 
-    println!("ClassicAB Diagnostics (depth 4..6)\n");
+    let text_mode = args.format == "text";
+    if text_mode {
+        println!("ClassicAB Diagnostics (depth {}..{})\n", args.depth_min, args.depth_max);
+    }
+    #[derive(serde::Serialize)]
+    struct Row<'a> {
+        name: &'a str,
+        sfen: &'a str,
+        depth: u8,
+        nodes: u64,
+        nps: u64,
+        hashfull: u16,
+        score: i32,
+        tt_hits: u64,
+        lmr: u64,
+        lmr_trials: u64,
+        beta_cuts: u64,
+        asp_fail_high: u32,
+        asp_fail_low: u32,
+        tt_root_match: u8,
+        tt_root_depth: u8,
+    }
+    let mut rows: Vec<Row> = Vec::new();
     for (name, sfen) in tests {
+        if !args.only.is_empty() && !args.only.iter().any(|f| name.contains(f)) {
+            continue;
+        }
         let pos = Position::from_sfen(sfen).expect("valid sfen");
-        println!("[{name}] {sfen}");
+        if text_mode {
+            println!("[{name}] {sfen}");
+        }
         for depth in args.depth_min..=args.depth_max {
+            if args.per_depth_process {
+                // 再帰起動（独立プロセス）
+                let mut child_args: Vec<String> = vec![
+                    "--depth-min".into(),
+                    depth.to_string(),
+                    "--depth-max".into(),
+                    depth.to_string(),
+                    "--time-ms".into(),
+                    args.time_ms.to_string(),
+                    "--tt-mb".into(),
+                    args.tt_mb.to_string(),
+                    "--sample-every".into(),
+                    args.sample_every.to_string(),
+                    "--format".into(),
+                    args.format.clone(),
+                ];
+                if args.no_time_limit {
+                    child_args.push("--no-time-limit".into());
+                }
+                if args.clear_tt_per_depth {
+                    child_args.push("--clear-tt-per-depth".into());
+                }
+                if args.disable_iid {
+                    child_args.push("--disable-iid".into());
+                }
+                if args.disable_nmp {
+                    child_args.push("--disable-nmp".into());
+                }
+                for f in &args.only {
+                    child_args.push("--only".into());
+                    child_args.push(f.clone());
+                }
+                let exe = std::env::current_exe().expect("exe");
+                let out = std::process::Command::new(exe).args(child_args).output().expect("spawn");
+                if args.format == "text" {
+                    print!("{}", String::from_utf8_lossy(&out.stdout));
+                } else if args.format == "csv" {
+                    // ヘッダ重複を避けて2行目以降を連結
+                    let s = String::from_utf8_lossy(&out.stdout);
+                    let mut lines = s.lines();
+                    let header = lines.next().unwrap_or("");
+                    if rows.is_empty() {
+                        // 初回のみヘッダを出す
+                        println!("{}", header);
+                    }
+                    for line in lines {
+                        if !line.trim().is_empty() {
+                            println!("{}", line);
+                        }
+                    }
+                } else {
+                    // jsonは子のstdoutをそのまま出力（複数depthなら親側での集約を推奨）
+                    print!("{}", String::from_utf8_lossy(&out.stdout));
+                }
+                continue;
+            }
             let mut builder = SearchLimitsBuilder::default().depth(depth);
             if !args.no_time_limit {
                 builder = builder.fixed_time_ms(args.time_ms);
@@ -82,11 +194,12 @@ fn main() {
             let asp_fl_cb = asp_fail_low.clone();
             let info: InfoEventCallback = Arc::new(move |evt| match evt {
                 InfoEvent::Hashfull(h) => {
-                    eprintln!("  [event] hashfull {h}");
+                    if text_mode {
+                        eprintln!("  [event] hashfull {h}");
+                    }
                 }
                 InfoEvent::CurrMove { mv, number } => {
-                    if number % sample_every == 1 {
-                        // sample to avoid spam
+                    if text_mode && number % sample_every == 1 {
                         eprintln!(
                             "  [event] currmove {} #{number}",
                             engine_core::usi::move_to_usi(&mv)
@@ -103,20 +216,94 @@ fn main() {
                 },
                 _ => {}
             });
+            if args.clear_tt_per_depth {
+                tt.clear_in_place();
+            }
             let res = backend.think_blocking(&pos, &limits, Some(info));
             let elapsed = start.elapsed();
             let nps = (res.stats.nodes as f64 / elapsed.as_secs_f64()) as u64;
             let hf = tt.hashfull_permille();
             let tt_hits = res.stats.tt_hits.unwrap_or(0);
             let lmr = res.stats.lmr_count.unwrap_or(0);
+            let lmr_trials = res.stats.lmr_trials.unwrap_or(lmr);
             let beta = res.stats.root_fail_high_count.unwrap_or(0);
             let asp_fail_high = asp_fail_high.load(Ordering::Relaxed);
             let asp_fail_low = asp_fail_low.load(Ordering::Relaxed);
-            println!(
-                "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  score {:>6}  tt_hits {:>8}  lmr {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}",
-                depth, res.stats.nodes, nps, hf, res.score, tt_hits, lmr, beta, asp_fail_high, asp_fail_low
-            );
+            // Probe TT at root to check adoption
+            let (tt_root_match, tt_root_depth) = {
+                let entry = tt.probe(pos.zobrist_hash, pos.side_to_move);
+                match (entry, res.best_move) {
+                    (Some(e), Some(bm)) => {
+                        let tt_mv = e.get_move();
+                        ((tt_mv == Some(bm)) as u8, e.depth())
+                    }
+                    _ => (0, 0),
+                }
+            };
+            if args.format == "text" {
+                println!(
+                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  tt_root_match {:>1}  tt_root_depth {:>2}",
+                    depth, res.stats.nodes, nps, hf, res.score, tt_hits, lmr, lmr_trials, beta, asp_fail_high, asp_fail_low, tt_root_match, tt_root_depth
+                );
+            } else {
+                rows.push(Row {
+                    name,
+                    sfen,
+                    depth,
+                    nodes: res.stats.nodes,
+                    nps,
+                    hashfull: hf,
+                    score: res.score,
+                    tt_hits,
+                    lmr,
+                    lmr_trials,
+                    beta_cuts: beta,
+                    asp_fail_high,
+                    asp_fail_low,
+                    tt_root_match,
+                    tt_root_depth,
+                });
+            }
         }
         println!();
+    }
+
+    if args.format == "csv" || args.format == "json" {
+        if args.format == "csv" {
+            let mut out = String::new();
+            out.push_str("name,sfen,depth,nodes,nps,hashfull,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,tt_root_match,tt_root_depth\n");
+            for r in &rows {
+                out.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    r.name,
+                    r.sfen,
+                    r.depth,
+                    r.nodes,
+                    r.nps,
+                    r.hashfull,
+                    r.score,
+                    r.tt_hits,
+                    r.lmr,
+                    r.lmr_trials,
+                    r.beta_cuts,
+                    r.asp_fail_high,
+                    r.asp_fail_low,
+                    r.tt_root_match,
+                    r.tt_root_depth
+                ));
+            }
+            if let Some(p) = args.out {
+                std::fs::write(p, out).expect("write csv");
+            } else {
+                print!("{}", out);
+            }
+        } else {
+            let s = serde_json::to_string_pretty(&rows).expect("json");
+            if let Some(p) = args.out {
+                std::fs::write(p, s).expect("write json");
+            } else {
+                println!("{}", s);
+            }
+        }
     }
 }

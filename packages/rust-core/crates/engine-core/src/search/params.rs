@@ -27,3 +27,8 @@ pub const NMP_MIN_DEPTH: i32 = 3;
 pub const NMP_BASE_R: i32 = 2; // R = BASE + depth/4 + bonus
 pub const NMP_BONUS_DELTA_BETA: i32 = 150; // if static_eval - beta > this, R += 1
 pub const NMP_HAND_SUM_DISABLE: i32 = 6; // disable when hand pieces sum >= this
+
+// QSearch parameters
+pub const QS_MARGIN_CAPTURE: i32 = 100; // cp, delta pruning margin for captures
+pub const QS_PROMOTE_BONUS: i32 = 50; // cp, small promote bonus in delta estimate
+pub const QS_MAX_QUIET_CHECKS: usize = 16; // cap quiet-check searches to bound qsearch
