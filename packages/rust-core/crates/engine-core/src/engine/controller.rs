@@ -8,7 +8,7 @@ use crate::{
     engine::session::SearchSession,
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
-    search::api::{InfoEventCallback, SearcherBackend, StubBackend},
+    search::api::{InfoEventCallback, SearcherBackend, StopHandle, StubBackend},
     search::parallel::{EngineStopBridge, StopController},
     search::stub::run_stub_search,
     search::unified::UnifiedSearcher,
@@ -18,7 +18,7 @@ use crate::{
 use log::{debug, error, info, warn};
 use parking_lot::RwLock;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;
@@ -73,15 +73,6 @@ struct ParallelSearchArgs {
     active_threads: usize,
     shared_tt: Arc<TranspositionTable>,
     stop_bridge: Arc<EngineStopBridge>,
-}
-
-/// RAII guard to ensure active_searches counter is decremented even on panic
-struct ActiveSearchGuard(Arc<AtomicUsize>);
-
-impl Drop for ActiveSearchGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 // Game phase detection is now handled by the game_phase module
@@ -474,26 +465,16 @@ impl Engine {
         // Bump TT age for new search epoch
         self.shared_tt.bump_age();
 
-        // Create result channel
-        let (tx, rx) = mpsc::channel();
-
         // Backend path (Phase 1). If present, delegate search to backend.
         if let Some(backend) = self.backend.as_ref() {
             // Publish external stop flag
             self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
             self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
-            // Count active
-            self.active_searches.fetch_add(1, Ordering::SeqCst);
-            let active_searches = self.active_searches.clone();
-            let pos_clone = pos.clone();
-            let limits_clone = limits.clone();
-            let backend_arc = Arc::clone(backend);
-
             // Build InfoEvent adapter from legacy callbacks in limits
             let legacy_info = limits.info_callback.clone();
             let legacy_info_string = limits.info_string_callback.clone();
             let stop_ctrl = self._stop_ctrl.clone();
-            let root_hash = pos_clone.zobrist_hash();
+            let root_hash = pos.zobrist_hash();
             let sid = session_id;
             let event_cb: Option<InfoEventCallback> = legacy_info.as_ref().map(|cb| {
                 let cb = cb.clone();
@@ -558,40 +539,20 @@ impl Engine {
                     }
                 }) as InfoEventCallback
             });
-            let handle = thread::Builder::new()
-                .name(format!("engine-backend-search-{}", session_id))
-                .spawn(move || {
-                    let _guard = ActiveSearchGuard(active_searches);
-                    let result = backend_arc.think_blocking(&pos_clone, &limits_clone, event_cb);
-                    let _ = tx.send(result);
-                })
-                .expect("spawn backend search thread");
-            return SearchSession::new(session_id, rx, Some(handle));
+            self.active_searches.fetch_add(1, Ordering::SeqCst);
+            let active_counter = Arc::clone(&self.active_searches);
+            let backend_task = Arc::clone(backend).start_async(pos, limits, event_cb);
+            let (stop_handle, result_rx, join_handle) = backend_task.into_parts();
+            return SearchSession::new(
+                session_id,
+                result_rx,
+                join_handle,
+                stop_handle,
+                active_counter,
+            );
         }
 
-        // Fast path: Stub searcher (no tree search, deterministic legal move)
-        if self.engine_type == EngineType::Stub {
-            let stop_bridge = self.stop_bridge.clone();
-            let pos_clone = pos.clone();
-            let tx2 = tx.clone();
-            // Publish external stop flag (if provided)
-            self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
-            self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
-            self.active_searches.fetch_add(1, Ordering::SeqCst);
-            let active_searches = self.active_searches.clone();
-            let handle = thread::Builder::new()
-                .name(format!("engine-stub-search-{}", session_id))
-                .spawn(move || {
-                    let _guard = ActiveSearchGuard(active_searches);
-                    if let Some(ext) = limits.stop_flag.as_ref() {
-                        stop_bridge.update_external_stop_flag(Some(ext));
-                    }
-                    let result = run_stub_search(&pos_clone, &limits);
-                    let _ = tx2.send(result);
-                })
-                .expect("spawn stub search thread");
-            return SearchSession::new(session_id, rx, Some(handle));
-        }
+        let (tx, rx) = mpsc::channel();
 
         // Clone necessary data for the background thread
         let mut pos_clone = pos;
@@ -618,7 +579,15 @@ impl Engine {
 
         // Increment active searches before spawning thread
         self.active_searches.fetch_add(1, Ordering::SeqCst);
-        let active_searches = self.active_searches.clone();
+        let active_counter = Arc::clone(&self.active_searches);
+
+        let stop_flag_arc =
+            limits.stop_flag.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        if limits.stop_flag.is_none() {
+            limits.stop_flag = Some(Arc::clone(&stop_flag_arc));
+        }
+
+        let stop_handle = StopHandle::new(Arc::clone(&stop_flag_arc));
 
         // Publish session to stop bridge immediately before spawning thread.
         // This ensures that request_stop_immediate() can reach the search session
@@ -635,9 +604,6 @@ impl Engine {
         let handle = thread::Builder::new()
             .name(format!("engine-search-{}", session_id))
             .spawn(move || {
-                // RAII guard ensures active_searches is decremented even on panic
-                let _guard = ActiveSearchGuard(active_searches);
-
                 // Build search arguments
                 let args = SearchThreadArgs {
                     engine_type,
@@ -683,7 +649,7 @@ impl Engine {
             .expect("failed to spawn search thread");
 
         // Return session handle immediately (with JoinHandle for isready/quit)
-        SearchSession::new(session_id, rx, Some(handle))
+        SearchSession::new(session_id, rx, Some(handle), stop_handle, active_counter)
     }
 
     /// Internal helper to run search in a background thread.

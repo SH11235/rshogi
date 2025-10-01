@@ -191,13 +191,13 @@ pub fn enforce_deadline(state: &mut EngineState) {
     if let Some(nh) = state.deadline_near {
         if now >= nh {
             // 近傍警告のみ（様子見）。必要なら fast finalize に切り替え可能。
-            info_string("oob_deadline_nearhard_reached".to_string());
+            info_string("oob_deadline_nearhard_reached");
         }
     }
 
     if let Some(hard) = state.deadline_hard {
         if now >= hard {
-            info_string("oob_finalize_request reason=Hard".to_string());
+            info_string("oob_finalize_request reason=Hard");
             // Stop broadcast then fast finalize without detach
             state.stop_bridge.request_stop();
             // Mark StopInfo as TimeLimit/Hard for logging consistency
