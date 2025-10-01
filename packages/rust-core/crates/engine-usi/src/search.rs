@@ -12,6 +12,7 @@ use log::info;
 use crate::finalize::{finalize_and_send, fmt_hash};
 use crate::io::info_string;
 use crate::state::{EngineState, GoParams, UsiOptions};
+use crate::usi_adapter;
 use crate::util::emit_bestmove;
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -202,36 +203,9 @@ pub fn limits_from_go(
     let multipv = opts.multipv.max(1);
     let info_callback: InfoCallback =
         Arc::new(move |depth, score, nodes, elapsed, pv, node_type| {
-            use crate::util::score_view_with_clamp;
-            use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
-
-            let elapsed_ms = elapsed.as_millis();
-            let nps = if elapsed_ms > 0 {
-                (nodes as u128 * 1000 / elapsed_ms) as u64
-            } else {
-                0
-            };
-
-            let mut info_line =
-                format!("info depth {depth} time {elapsed_ms} nodes {nodes} nps {nps}");
-
-            // Add MultiPV line number if multipv > 1
-            // Future improvement: callback should receive line index from engine
-            if multipv > 1 {
-                info_line.push_str(" multipv 1");
-            }
-
-            // Append score (cp or mate) with bound using standard USI format
-            let score_view = score_view_with_clamp(score);
-            append_usi_score_and_bound(&mut info_line, score_view, node_type);
-
-            // Append PV if available
-            if !pv.is_empty() {
-                info_line.push_str(" pv ");
-                info_line.push_str(&pv.iter().map(move_to_usi).collect::<Vec<_>>().join(" "));
-            }
-
-            println!("{info_line}");
+            // Emit a unified PV info line via the adapter. We pass multipv>1 to
+            // decide whether to include "multipv 1" in the output for compatibility.
+            usi_adapter::emit_pv_line(depth, score, nodes, elapsed, pv, node_type, multipv > 1);
         });
 
     // Set up info string callback for textual diagnostics

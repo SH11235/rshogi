@@ -2,11 +2,13 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
+use crate::search::parallel::ParallelSearcher;
 use crate::{
     engine::session::SearchSession,
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
-    search::parallel::{EngineStopBridge, ParallelSearcher},
+    search::parallel::EngineStopBridge,
+    search::stub::run_stub_search,
     search::unified::UnifiedSearcher,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
@@ -121,6 +123,9 @@ type NnueParallelSearcher = ParallelSearcher<NNUEEvaluatorProxy>;
 /// - **For debugging**: Use `Material`
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EngineType {
+    /// Minimal stub searcher that returns a deterministic legal move without tree search
+    /// Useful during Phase 0 (migration) to keep USI responsive while replacing search core
+    Stub,
     /// Simple material-based evaluation with basic alpha-beta search
     /// - Simplest implementation
     /// - Best for debugging and testing
@@ -448,6 +453,29 @@ impl Engine {
         // Create result channel
         let (tx, rx) = mpsc::channel();
 
+        // Fast path: Stub searcher (no tree search, deterministic legal move)
+        if self.engine_type == EngineType::Stub {
+            let stop_bridge = self.stop_bridge.clone();
+            let pos_clone = pos.clone();
+            let tx2 = tx.clone();
+            // Publish external stop flag (if provided)
+            self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
+            self.active_searches.fetch_add(1, Ordering::SeqCst);
+            let active_searches = self.active_searches.clone();
+            let handle = thread::Builder::new()
+                .name(format!("engine-stub-search-{}", session_id))
+                .spawn(move || {
+                    let _guard = ActiveSearchGuard(active_searches);
+                    if let Some(ext) = limits.stop_flag.as_ref() {
+                        stop_bridge.update_external_stop_flag(Some(ext));
+                    }
+                    let result = run_stub_search(&pos_clone, &limits);
+                    let _ = tx2.send(result);
+                })
+                .expect("spawn stub search thread");
+            return SearchSession::new(session_id, rx, Some(handle));
+        }
+
         // Clone necessary data for the background thread
         let mut pos_clone = pos;
         let engine_type = self.engine_type;
@@ -588,6 +616,7 @@ impl Engine {
                     args.nnue_evaluator,
                     args.nnue_parallel_searcher,
                 ),
+                EngineType::Stub => SearchResult::new(None, 0, SearchStats::default()),
             }
         } else {
             // Single-threaded search
@@ -624,6 +653,7 @@ impl Engine {
                     args.nnue_enhanced_searcher,
                     args.stop_bridge,
                 ),
+                EngineType::Stub => run_stub_search(pos, &limits),
             }
         }
     }
@@ -1150,6 +1180,7 @@ impl Engine {
                         *guard = Some(s);
                     }
                 }
+                EngineType::Stub => {}
             }
 
             info!(
@@ -1227,6 +1258,7 @@ impl Engine {
                     }
                 }
             }
+            EngineType::Stub => {}
             EngineType::Nnue => {
                 // Initialize NNUE evaluator if needed
                 {

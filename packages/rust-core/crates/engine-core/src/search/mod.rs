@@ -5,9 +5,8 @@ pub mod constants;
 pub mod history;
 pub mod limits;
 pub mod parallel;
-pub mod search_basic;
-pub mod search_enhanced;
 pub mod snapshot;
+pub mod stub;
 pub mod tt;
 pub mod types;
 pub mod unified;
@@ -25,4 +24,3 @@ pub use types::{
     CommittedIteration, InfoCallback, IterationCallback, NodeType, SearchResult, SearchStack,
     SearchState, SearchStats,
 };
-pub use unified::context::SearchContext;
