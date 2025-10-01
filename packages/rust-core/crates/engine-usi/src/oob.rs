@@ -64,7 +64,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 info_string(format!("oob_finalize_request reason={:?} sid={}", reason, session_id));
 
                 // Step 1: broadcast immediate stop to search threads
-                state.stop_bridge.request_stop_immediate();
+                state.stop_bridge.request_stop();
 
                 // compute wait budget based on time control and StopWaitMs
                 // Prefer in-place join with extended waiting

@@ -126,7 +126,7 @@ impl SearchSession {
         bridge: &EngineStopBridge,
         timeout: Duration,
     ) -> Option<SearchResult> {
-        bridge.request_stop_immediate();
+        bridge.request_stop();
         self.recv_result_timeout(timeout)
     }
 
