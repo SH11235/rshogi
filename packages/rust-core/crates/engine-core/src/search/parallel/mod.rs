@@ -1,5 +1,7 @@
-mod stop_bridge;
-pub use stop_bridge::{EngineStopBridge, FinalizeReason, FinalizerMsg, StopSnapshot};
+pub mod stop_ctrl;
+pub use stop_ctrl::{FinalizeReason, FinalizerMsg, StopController, StopSnapshot};
+// Backward-compat alias while removing legacy bridge
+pub type EngineStopBridge = StopController;
 
 // Temporary dummy types to satisfy old references while migrating
 use crate::evaluation::evaluate::Evaluator;

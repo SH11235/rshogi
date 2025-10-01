@@ -198,6 +198,10 @@ pub fn finalize_and_send(
                 .map(|d| format!("{:.1}", d))
                 .unwrap_or_else(|| "-".to_string());
             let rfhi = res.stats.root_fail_high_count.unwrap_or(0);
+            let lmr_count = res.stats.lmr_count.unwrap_or(0);
+            let lmr_trials = res.stats.lmr_trials.unwrap_or(lmr_count);
+            let root_hint_exist = res.stats.root_tt_hint_exists.unwrap_or(0);
+            let root_hint_used = res.stats.root_tt_hint_used.unwrap_or(0);
 
             // Additional root snapshot (diagnostics)
             let (root_in_check, root_legal_count, root_evasion_count) = {
@@ -247,7 +251,7 @@ pub fn finalize_and_send(
             };
 
             info_string(format!(
-                "finalize_diag seldepth={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
+                "finalize_diag seldepth={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} lmr={} lmr_trials={} root_hint_exist={} root_hint_used={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
                 sel,
                 qratio,
                 nodes.saturating_sub(qnodes),
@@ -259,6 +263,10 @@ pub fn finalize_and_send(
                 pvchg,
                 dup,
                 rfhi,
+                lmr_count,
+                lmr_trials,
+                root_hint_exist,
+                root_hint_used,
                 root_in_check as i32,
                 root_legal_count,
                 root_evasion_count,
