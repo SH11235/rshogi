@@ -89,36 +89,20 @@ impl TTEntry {
             None => 0,
         };
 
-        // Clamp score and eval to 14-bit range
+        // Clamp score and eval to 16-bit range (i16)
         let score = params.score.clamp(SCORE_MIN, SCORE_MAX);
         let eval = params.eval.clamp(EVAL_MIN, EVAL_MAX);
-
-        // Encode score and eval as 14-bit values (with sign bit)
-        let score_encoded = ((score as u16) & SCORE_MASK as u16) as u64;
-        let eval_encoded = ((eval as u16) & EVAL_MASK as u16) as u64;
+        let score_encoded = (score as u16) as u64; // two's complement bitcast
+        let eval_encoded = (eval as u16) as u64; // two's complement bitcast
 
         // Pack all data into 64 bits with optimized layout:
-        let mut data = ((move_data as u64) << MOVE_SHIFT)
+        let data = ((move_data as u64) << MOVE_SHIFT)
             | (score_encoded << SCORE_SHIFT)
-            | (((params.depth & DEPTH_MASK) as u64) << DEPTH_SHIFT)
-            | ((params.node_type as u64) << NODE_TYPE_SHIFT)
-            | (((params.age & AGE_MASK) as u64) << AGE_SHIFT)
-            | ((params.is_pv as u64) << PV_FLAG_SHIFT)
-            | (eval_encoded << EVAL_SHIFT);
-
-        // Set extended flags
-        if params.singular_extension {
-            data |= SINGULAR_EXTENSION_FLAG;
-        }
-        if params.null_move {
-            data |= NULL_MOVE_FLAG;
-        }
-        if params.tt_move_tried {
-            data |= TT_MOVE_TRIED_FLAG;
-        }
-        if params.mate_threat {
-            data |= MATE_THREAT_FLAG;
-        }
+            | (eval_encoded << EVAL_SHIFT)
+            | (((params.depth & DEPTH_MASK) as u64) << 9)
+            | (((params.age & GEN_MASK) as u64) << GEN_SHIFT)
+            | (((params.is_pv as u64) & 1) << PV_FLAG_SHIFT)
+            | (((params.node_type as u64) & NODE_TYPE_MASK as u64) << NODE_TYPE_SHIFT);
 
         TTEntry { key, data }
     }
@@ -148,24 +132,20 @@ impl TTEntry {
     #[inline]
     pub fn score(&self) -> i16 {
         let raw = ((self.data >> SCORE_SHIFT) & SCORE_MASK) as u16;
-        // Efficient sign-extension from 14-bit to 16-bit
-        // Left shift to align sign bit, then arithmetic right shift to extend
-        ((raw as i16) << (16 - SCORE_BITS)) >> (16 - SCORE_BITS)
+        raw as i16
     }
 
     /// Get static evaluation from entry (14-bit signed value)
     #[inline]
     pub fn eval(&self) -> i16 {
         let raw = ((self.data >> EVAL_SHIFT) & EVAL_MASK) as u16;
-        // Efficient sign-extension from 14-bit to 16-bit
-        // Left shift to align sign bit, then arithmetic right shift to extend
-        ((raw as i16) << (16 - EVAL_BITS)) >> (16 - EVAL_BITS)
+        raw as i16
     }
 
     /// Get search depth
     #[inline]
     pub fn depth(&self) -> u8 {
-        ((self.data >> DEPTH_SHIFT) & DEPTH_MASK as u64) as u8
+        ((self.data >> 9) & DEPTH_MASK as u64) as u8
     }
 
     /// Get node type
@@ -187,9 +167,9 @@ impl TTEntry {
     /// Get age
     #[inline]
     pub fn age(&self) -> u8 {
-        let age = ((self.data >> AGE_SHIFT) & AGE_MASK as u64) as u8;
+        let age = ((self.data >> GEN_SHIFT) & GEN_MASK as u64) as u8;
         // Debug assertion to validate age is within expected range
-        debug_assert!(age <= AGE_MASK, "Age value out of range: {age} (max: {AGE_MASK})");
+        debug_assert!(age <= GEN_MASK, "Age value out of range: {age} (max: {GEN_MASK})");
         age
     }
 
@@ -202,25 +182,25 @@ impl TTEntry {
     /// Check if Singular Extension was applied
     #[inline]
     pub fn has_singular_extension(&self) -> bool {
-        (self.data & SINGULAR_EXTENSION_FLAG) != 0
+        false
     }
 
     /// Check if Null Move Pruning was applied
     #[inline]
     pub fn has_null_move(&self) -> bool {
-        (self.data & NULL_MOVE_FLAG) != 0
+        false
     }
 
     /// Check if TT move was tried
     #[inline]
     pub fn tt_move_tried(&self) -> bool {
-        (self.data & TT_MOVE_TRIED_FLAG) != 0
+        false
     }
 
     /// Check if position has mate threat
     #[inline]
     pub fn has_mate_threat(&self) -> bool {
-        (self.data & MATE_THREAT_FLAG) != 0
+        false
     }
 
     /// Check if ABDADA exact cut flag is set
