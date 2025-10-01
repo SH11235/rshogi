@@ -64,7 +64,10 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 
                 info_string(format!("oob_finalize_request reason={:?} sid={}", reason, session_id));
 
-                // Step 1: broadcast immediate stop to search threads
+                // Step 1: broadcast immediate stop to backend/search threads
+                if let Some(session) = &state.search_session {
+                    session.request_stop();
+                }
                 state.stop_bridge.request_stop();
 
                 // compute wait budget based on time control and StopWaitMs
@@ -199,6 +202,9 @@ pub fn enforce_deadline(state: &mut EngineState) {
         if now >= hard {
             info_string("oob_finalize_request reason=Hard");
             // Stop broadcast then fast finalize without detach
+            if let Some(session) = &state.search_session {
+                session.request_stop();
+            }
             state.stop_bridge.request_stop();
             // Mark StopInfo as TimeLimit/Hard for logging consistency
             state.stop_bridge.request_finalize(FinalizeReason::Hard);
