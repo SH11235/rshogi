@@ -148,6 +148,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "EngineType" => {
             if let Some(val) = value_ref {
                 let et = match val.trim() {
+                    "Stub" => EngineType::Stub,
                     "Material" => EngineType::Material,
                     "Enhanced" => EngineType::Enhanced,
                     "Nnue" => EngineType::Nnue,
@@ -394,7 +395,7 @@ fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {
 }
 
 fn print_engine_type_options() {
-    usi_println("option name EngineType type combo default Material var Material var Enhanced var Nnue var EnhancedNnue");
+    usi_println("option name EngineType type combo default Material var Stub var Material var Enhanced var Nnue var EnhancedNnue");
 }
 
 fn print_time_policy_options(opts: &UsiOptions) {

@@ -5,6 +5,7 @@ mod options;
 mod search;
 mod state;
 mod stop;
+mod usi_adapter;
 mod util;
 
 use anyhow::Result;

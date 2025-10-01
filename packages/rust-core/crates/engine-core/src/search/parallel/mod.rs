@@ -1,25 +1,34 @@
-//! Parallel search implementation using Lazy SMP
-//!
-//! This module implements a parallel search algorithm based on Lazy SMP (Symmetric MultiProcessing).
-//! Each thread searches the same position from different depths to reduce duplicate work.
-
-pub mod lazy_smp;
-pub mod search_thread;
-pub mod shared;
 mod stop_bridge;
-
-mod parallel_searcher;
-#[cfg(test)]
-mod tests;
-mod time_manager;
-mod util;
-mod work_queue;
-mod worker;
-
-pub use lazy_smp::LazySmpSearcher;
-pub use parallel_searcher::ParallelSearcher;
-pub use search_thread::SearchThread;
-pub use shared::{SharedHistory, SharedSearchState};
-#[cfg(feature = "ybwc")]
-pub use shared::{SplitPoint, SplitPointManager};
 pub use stop_bridge::{EngineStopBridge, FinalizeReason, FinalizerMsg, StopSnapshot};
+
+// Temporary dummy types to satisfy old references while migrating
+use crate::evaluation::evaluate::Evaluator;
+use crate::search::tt::TranspositionTable;
+use crate::search::{SearchLimits, SearchResult, SearchStats};
+use crate::Position;
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+pub struct SharedSearchState; // placeholder
+
+pub struct ParallelSearcher<E> {
+    _e: PhantomData<E>,
+}
+
+impl<E> ParallelSearcher<E>
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    pub fn new<T>(
+        _evaluator: T,
+        _tt: Arc<TranspositionTable>,
+        _threads: usize,
+        _bridge: Arc<EngineStopBridge>,
+    ) -> Self {
+        Self { _e: PhantomData }
+    }
+    pub fn adjust_thread_count(&mut self, _threads: usize) {}
+    pub fn search(&mut self, _pos: &mut Position, _limits: SearchLimits) -> SearchResult {
+        SearchResult::new(None, 0, SearchStats::default())
+    }
+}
