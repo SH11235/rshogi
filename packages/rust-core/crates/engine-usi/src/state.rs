@@ -1,6 +1,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Condvar;
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Instant;
 
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::engine::session::SearchSession;
@@ -140,6 +141,9 @@ pub struct EngineState {
     // Current engine-core session id (epoch) for matching finalize requests
     pub current_session_core_id: Option<u64>,
     pub idle_sync: Arc<IdleSync>,
+    // Deadlines for OOB finalize enforcement (computed at search start)
+    pub deadline_hard: Option<Instant>,
+    pub deadline_near: Option<Instant>,
 }
 
 impl EngineState {
@@ -181,6 +185,8 @@ impl EngineState {
             finalizer_rx: Some(fin_rx),
             current_session_core_id: None,
             idle_sync,
+            deadline_hard: None,
+            deadline_near: None,
         }
     }
 

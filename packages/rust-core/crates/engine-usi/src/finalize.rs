@@ -387,6 +387,8 @@ pub fn finalize_and_send(
     emit_bestmove(&final_usi, ponder_mv);
     state.bestmove_emitted = true;
     state.current_root_hash = None;
+    state.deadline_hard = None;
+    state.deadline_near = None;
 }
 
 fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_permille: u16) {
@@ -494,6 +496,8 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                         ));
                         emit_bestmove(&final_usi, ponder_mv);
                         state.bestmove_emitted = true;
+                        state.deadline_hard = None;
+                        state.deadline_near = None;
                         state.current_root_hash = None;
                         return;
                     }
@@ -518,6 +522,8 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 ));
                 emit_bestmove(&final_usi, ponder_mv);
                 state.bestmove_emitted = true;
+                state.deadline_hard = None;
+                state.deadline_near = None;
                 state.current_root_hash = None;
                 return;
             }
@@ -568,6 +574,8 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         ));
         emit_bestmove(&final_usi, ponder_mv);
         state.bestmove_emitted = true;
+        state.deadline_hard = None;
+        state.deadline_near = None;
         state.current_root_hash = None;
         return;
     }
@@ -657,6 +665,8 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     }
     state.bestmove_emitted = true;
     state.current_root_hash = None;
+    state.deadline_hard = None;
+    state.deadline_near = None;
 }
 const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 2;
 

@@ -1003,8 +1003,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     prev_score + ASP_DELTA0
                 };
                 let mut delta = ASP_DELTA0;
-                let alpha0 = alpha;
-                let beta0 = beta;
 
                 // 検索用stack/heuristicsを初期化
                 let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
@@ -1189,19 +1187,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             pv = pv_ex;
                         }
                     }
-                    let bound = if local_best <= alpha0 {
-                        NodeType::UpperBound
-                    } else if local_best >= beta0 {
-                        NodeType::LowerBound
-                    } else {
-                        NodeType::Exact
-                    };
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
                         score_internal: local_best,
                         score_cp: local_best,
-                        bound,
+                        bound: NodeType::Exact,
                         depth: d as u32,
                         seldepth: Some(seldepth as u8),
                         pv,
@@ -1254,8 +1245,29 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // この深さのMultiPV行を最終結果候補として保持
             final_lines = Some(depth_lines);
 
+            let mut lead_ms = 10u64;
+            if let Some(deadlines) = limits.fallback_deadlines {
+                if deadlines.hard_limit_ms > 0 {
+                    if deadlines.soft_limit_ms > 0
+                        && deadlines.soft_limit_ms < deadlines.hard_limit_ms
+                    {
+                        let diff = deadlines.hard_limit_ms - deadlines.soft_limit_ms;
+                        if diff > 0 {
+                            lead_ms = lead_ms.max(diff);
+                        }
+                    }
+
+                    let hard = Duration::from_millis(deadlines.hard_limit_ms);
+                    if t0.elapsed() + Duration::from_millis(lead_ms) >= hard {
+                        break;
+                    }
+
+                    continue;
+                }
+            }
+
             if let Some(limit) = limits.time_limit() {
-                if t0.elapsed() + Duration::from_millis(10) >= limit {
+                if t0.elapsed() + Duration::from_millis(lead_ms) >= limit {
                     break;
                 }
             }

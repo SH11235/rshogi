@@ -6,6 +6,7 @@ use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
+use std::time::Instant;
 
 /// Poll and handle out-of-band finalize requests coming from engine-core.
 ///
@@ -176,6 +177,39 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
     state.finalizer_rx = Some(rx);
 }
 
+/// Enforce locally computed deadlines (USI層のみで完結するOOB finalize)
+///
+/// - hard 期限を過ぎたら探索合流を待たずに fast finalize を発火
+/// - near-hard は現時点ではログのみ（必要なら hard の前に同様に発火可能）
+pub fn enforce_deadline(state: &mut EngineState) {
+    if !state.searching || state.bestmove_emitted {
+        return;
+    }
+
+    let now = Instant::now();
+
+    if let Some(nh) = state.deadline_near {
+        if now >= nh {
+            // 近傍警告のみ（様子見）。必要なら fast finalize に切り替え可能。
+            info_string("oob_deadline_nearhard_reached".to_string());
+        }
+    }
+
+    if let Some(hard) = state.deadline_hard {
+        if now >= hard {
+            info_string("oob_finalize_request reason=Hard".to_string());
+            // Stop broadcast then fast finalize without detach
+            state.stop_bridge.request_stop();
+            // Mark StopInfo as TimeLimit/Hard for logging consistency
+            state.stop_bridge.request_finalize(FinalizeReason::Hard);
+            fast_finalize_no_detach(state, "oob_hard_finalize");
+            // Clear deadlines
+            state.deadline_hard = None;
+            state.deadline_near = None;
+        }
+    }
+}
+
 /// Fast finalize without waiting for result (SearchSession will clean up automatically)
 fn fast_finalize_no_detach(state: &mut EngineState, label: &str) {
     state.searching = false;
@@ -186,5 +220,7 @@ fn fast_finalize_no_detach(state: &mut EngineState, label: &str) {
     state.current_is_ponder = false;
     state.current_root_hash = None;
     state.current_time_control = None;
+    state.deadline_hard = None;
+    state.deadline_near = None;
     state.notify_idle();
 }

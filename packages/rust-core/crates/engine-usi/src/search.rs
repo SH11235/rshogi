@@ -376,6 +376,20 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                 soft_limit_ms: if soft != u64::MAX { soft } else { 0 },
                 hard_limit_ms: hard,
             });
+
+            // Record deadlines into EngineState for USI-side OOB finalize enforcement
+            state.deadline_hard = Some(hard_deadline);
+            // Conservative: near-hard is optional; if desired, compute as (hard - lead)
+            let lead = state.opts.byoyomi_deadline_lead_ms;
+            state.deadline_near = if lead > 0 {
+                hard_deadline.checked_sub(Duration::from_millis(lead))
+            } else {
+                None
+            };
+        } else {
+            // No meaningful time budget → clear deadlines
+            state.deadline_hard = None;
+            state.deadline_near = None;
         }
     }
 
