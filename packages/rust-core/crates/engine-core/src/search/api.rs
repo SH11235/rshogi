@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 
@@ -94,6 +94,7 @@ pub trait SearcherBackend: Send + Sync {
         root: Position,
         limits: SearchLimits,
         info: Option<InfoEventCallback>,
+        active_counter: Arc<AtomicUsize>,
     ) -> BackendSearchTask;
 
     fn request_stop(&self, task: &BackendSearchTask) {
@@ -137,16 +138,27 @@ impl SearcherBackend for StubBackend {
         root: Position,
         mut limits: SearchLimits,
         _info: Option<InfoEventCallback>,
+        active_counter: Arc<AtomicUsize>,
     ) -> BackendSearchTask {
         let stop_flag =
             limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
-        let _ = self;
+        active_counter.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
         let handle = std::thread::Builder::new()
             .name("stub-backend-search".into())
-            .spawn(move || {
-                let result = crate::search::stub::run_stub_search(&root, &limits);
-                let _ = tx.send(result);
+            .spawn({
+                let counter = Arc::clone(&active_counter);
+                move || {
+                    struct Guard(Arc<AtomicUsize>);
+                    impl Drop for Guard {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _guard = Guard(counter);
+                    let result = crate::search::stub::run_stub_search(&root, &limits);
+                    let _ = tx.send(result);
+                }
             })
             .expect("spawn stub backend search thread");
         BackendSearchTask::new(stop_flag, rx, handle)

@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::thread;
@@ -1182,8 +1182,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         _local_best_for_next_iter = Some((m, local_best));
                     }
                     // 可能ならTTからPVを復元し、だめなら軽量再探索へフォールバック
-                    let mut pv =
-                        self.reconstruct_root_pv_from_tt(root, d, m).unwrap_or_default();
+                    let mut pv = self.reconstruct_root_pv_from_tt(root, d, m).unwrap_or_default();
                     if pv.is_empty() {
                         let pv_ex = self.extract_pv(root, d, m, limits, &mut nodes);
                         if pv_ex.is_empty() {
@@ -1303,17 +1302,29 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
         root: Position,
         mut limits: SearchLimits,
         info: Option<InfoEventCallback>,
+        active_counter: Arc<AtomicUsize>,
     ) -> BackendSearchTask {
         let stop_flag =
             limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
+        active_counter.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
         let backend = self;
         let info_cb = info;
         let handle = thread::Builder::new()
             .name("classic-backend-search".into())
-            .spawn(move || {
-                let result = backend.think_blocking(&root, &limits, info_cb.clone());
-                let _ = tx.send(result);
+            .spawn({
+                let counter = Arc::clone(&active_counter);
+                move || {
+                    struct Guard(Arc<AtomicUsize>);
+                    impl Drop for Guard {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _guard = Guard(counter);
+                    let result = backend.think_blocking(&root, &limits, info_cb.clone());
+                    let _ = tx.send(result);
+                }
             })
             .expect("spawn classic backend search thread");
         BackendSearchTask::new(stop_flag, rx, handle)
