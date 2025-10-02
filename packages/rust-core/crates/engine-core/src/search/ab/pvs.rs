@@ -94,6 +94,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (a_md, None);
         }
         alpha = a_md;
+        // Use MDP-shrunk beta for the remainder of this node (orig_beta stays for TT classification).
         let beta = b_md;
 
         if self.should_static_beta_prune(&self.profile.prune, depth, pos, beta, static_eval) {

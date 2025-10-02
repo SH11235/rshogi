@@ -42,6 +42,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         Self::with_profile_and_tt(evaluator, tt, profile)
     }
 
+    pub fn with_tt_and_toggles_apply_defaults(
+        evaluator: Arc<E>,
+        tt: Arc<TranspositionTable>,
+        toggles: PruneToggles,
+    ) -> Self {
+        let mut profile = SearchProfile::enhanced_material();
+        profile.prune = toggles;
+        profile.apply_runtime_defaults();
+        Self::with_profile_and_tt(evaluator, tt, profile)
+    }
+
     pub fn with_profile(evaluator: Arc<E>, profile: SearchProfile) -> Self {
         Self {
             evaluator,
