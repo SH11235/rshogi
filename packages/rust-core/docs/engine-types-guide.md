@@ -35,6 +35,8 @@
 
 Runtime で枝刈りを止めたいときは、例として `setoption name SearchParams.EnableNMP value false` を送信します。プロファイルを切り替えると再び既定値に戻る点に注意してください。
 
+> **メモ:** SearchProfile が無効化している枝刈りをランタイムで `On` にしても有効にならない場合があります。その際は USI `info string pruning_note=...` が通知されます。基本プロファイルは `EnableIID/ProbCut/Razor` を `false` にしているため、ランタイムで `On` にしても警告が出るのが正常です。
+
 ---
 
 ## 3. 各エンジンタイプの詳細

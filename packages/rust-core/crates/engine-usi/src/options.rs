@@ -34,11 +34,15 @@ fn profile_allows_probcut(state: &EngineState) -> bool {
 }
 
 fn profile_allows_razor(state: &EngineState) -> bool {
-    current_profile(state).map(|p| p.tuning.enable_razor).unwrap_or(true)
+    current_profile(state).map(|p| p.prune.enable_razor).unwrap_or(true)
 }
 
 fn profile_allows_qs_checks(state: &EngineState) -> bool {
     current_profile(state).map(|p| p.tuning.enable_qs_checks).unwrap_or(true)
+}
+
+fn profile_allows_nmp(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.prune.enable_nmp).unwrap_or(true)
 }
 
 pub fn send_id_and_options(opts: &UsiOptions) {
@@ -219,7 +223,9 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_qs_checks(state) {
-                    info_string("qsearch_note=Quiet-check extensions are disabled by the active SearchProfile");
+                    info_string(
+                        "qsearch_note=Profile defaults suppress quiet-check extensions; runtime On may still be limited",
+                    );
                 }
                 engine_core::search::params::set_qs_checks_enabled(on);
                 info_string(if on {
@@ -320,6 +326,9 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "SearchParams.EnableNMP" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_nmp(state) {
+                    info_string("pruning_note=NMP is disabled by the active SearchProfile");
+                }
                 engine_core::search::params::set_nmp_enabled(on);
             }
         }
