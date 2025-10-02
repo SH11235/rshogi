@@ -148,7 +148,7 @@ RAYON_NUM_THREADS=1 cargo run -p tools --bin gauntlet -- \
   --time "0/1+0.1" --games 20 --threads 1 --hash-mb 256 \
   --book docs/reports/fixtures/opening/representative.epd --multipv 1 \
   --json runs/gauntlet/out.json --report runs/gauntlet/report.md \
-  --stub > runs/gauntlet/structured.jsonl
+  > runs/gauntlet/structured.jsonl
 ```
 
 実走（学習出力の重みで比較）
