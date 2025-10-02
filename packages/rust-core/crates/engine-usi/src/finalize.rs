@@ -1,5 +1,8 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
-use engine_core::search::{types::StopInfo, SearchResult};
+use engine_core::search::{
+    types::{NodeType, StopInfo},
+    SearchResult,
+};
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
@@ -143,9 +146,43 @@ pub fn finalize_and_send(
         None
     };
 
+    let snapshot_valid = state.stop_controller.try_read_snapshot().filter(|snap| {
+        let sid_ok = state.current_session_core_id.map(|sid| sid == snap.search_id).unwrap_or(true);
+        let root_ok = snap.root_key == state.position.zobrist_hash();
+        sid_ok && root_ok
+    });
+    let snapshot_committed = snapshot_valid.as_ref().and_then(|snap| {
+        snap.best.map(|best| {
+            let mut pv: Vec<_> = snap.pv.iter().copied().collect();
+            if pv.first().is_none_or(|mv| !mv.equals_without_piece_type(&best)) {
+                pv.insert(0, best);
+            }
+            engine_core::search::CommittedIteration {
+                depth: snap.depth,
+                seldepth: None,
+                score: snap.score_cp,
+                pv,
+                node_type: NodeType::Exact,
+                nodes: snap.nodes,
+                elapsed: Duration::from_millis(snap.elapsed_ms as u64),
+            }
+        })
+    });
+    if let Some(snap) = snapshot_valid.as_ref() {
+        if snapshot_committed.is_some() {
+            info_string(format!(
+                "{label}_snapshot_pref sid={} depth={} nodes={} elapsed_ms={}",
+                snap.search_id, snap.depth, snap.nodes, snap.elapsed_ms
+            ));
+        }
+    }
     let final_best = {
         let eng = state.engine.lock().unwrap();
-        eng.choose_final_bestmove(&state.position, committed.as_ref())
+        if let Some(ci) = snapshot_committed.as_ref() {
+            eng.choose_final_bestmove(&state.position, Some(ci))
+        } else {
+            eng.choose_final_bestmove(&state.position, committed.as_ref())
+        }
     };
 
     let (soft_ms, hard_ms) = result
@@ -177,6 +214,19 @@ pub fn finalize_and_send(
             info_string(format!(
                 "time_caps hard_ms={} soft_ms={} reason={:?}",
                 si.hard_limit_ms, si.soft_limit_ms, si.reason
+            ));
+        }
+
+        if let Some(tt_hits) = res.stats.tt_hits {
+            let nodes = res.stats.nodes;
+            let hit_pct = if nodes > 0 {
+                (tt_hits as f64 * 100.0) / (nodes as f64)
+            } else {
+                0.0
+            };
+            info_string(format!(
+                "tt_summary nodes={} hits={} hit_pct={:.2}",
+                nodes, tt_hits, hit_pct
             ));
         }
 
@@ -431,7 +481,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         return;
     }
 
-    let stop_info_snapshot = state.stop_bridge.try_read_stop_info();
+    let stop_info_snapshot = state.stop_controller.try_read_stop_info();
 
     if let Some(si) = stop_info_snapshot.as_ref() {
         info_string(format!(
@@ -447,7 +497,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     let root_key_hex = fmt_hash(state.position.zobrist_hash());
 
     // Try snapshot first to avoid engine lock when possible
-    if let Some(snap) = state.stop_bridge.try_read_snapshot() {
+    if let Some(snap) = state.stop_controller.try_read_snapshot() {
         // SessionStart より先に Finalize が届く場合は root_key 側で裏取りする。
         let sid_ok = state.current_session_core_id.map(|sid| sid == snap.search_id).unwrap_or(true);
         let rk_ok = snap.root_key == state.position.zobrist_hash();

@@ -248,6 +248,11 @@ impl Engine {
         Arc::clone(&self.stop_bridge)
     }
 
+    /// Obtain a clone of the StopController for snapshot/stop-info consumers.
+    pub fn stop_controller_handle(&self) -> StopController {
+        self._stop_ctrl.clone()
+    }
+
     /// Return TT metrics summary string if available (tt_metrics feature only)
     #[cfg(feature = "tt_metrics")]
     pub fn tt_metrics_summary(&self) -> Option<String> {
