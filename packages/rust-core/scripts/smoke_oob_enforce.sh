@@ -31,4 +31,3 @@ bcount=$(rg -n "^bestmove " "$LOG" | wc -l | tr -d ' ')
 [[ "$bcount" == 1 ]] || { echo "[oob] NG: bestmove=$bcount" >&2; exit 1; }
 
 echo "[oob] OK"
-
