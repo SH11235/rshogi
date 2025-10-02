@@ -49,6 +49,10 @@ static RUNTIME_SBP_D1: AtomicI32 = AtomicI32::new(SBP_MARGIN_D1);
 static RUNTIME_SBP_D2: AtomicI32 = AtomicI32::new(SBP_MARGIN_D2);
 static RUNTIME_PROBCUT_D5: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D5);
 static RUNTIME_PROBCUT_D6P: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D6P);
+static RUNTIME_ENABLE_NMP: AtomicBool = AtomicBool::new(true);
+static RUNTIME_ENABLE_IID: AtomicBool = AtomicBool::new(true);
+static RUNTIME_ENABLE_PROBCUT: AtomicBool = AtomicBool::new(true);
+static RUNTIME_ENABLE_STATIC_BETA: AtomicBool = AtomicBool::new(true);
 static RUNTIME_RAZOR: AtomicBool = AtomicBool::new(RAZOR_ENABLED);
 static RUNTIME_IID_MIN_DEPTH: AtomicI32 = AtomicI32::new(6); // 既定: 6ply
 
@@ -91,6 +95,26 @@ pub fn probcut_margin(depth: i32) -> i32 {
 }
 
 #[inline]
+pub fn nmp_enabled() -> bool {
+    RUNTIME_ENABLE_NMP.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn iid_enabled() -> bool {
+    RUNTIME_ENABLE_IID.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn probcut_enabled() -> bool {
+    RUNTIME_ENABLE_PROBCUT.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn static_beta_enabled() -> bool {
+    RUNTIME_ENABLE_STATIC_BETA.load(Ordering::Relaxed)
+}
+
+#[inline]
 pub fn razor_enabled() -> bool {
     RUNTIME_RAZOR.load(Ordering::Relaxed)
 }
@@ -127,6 +151,18 @@ pub fn set_probcut_d5(v: i32) {
 }
 pub fn set_probcut_d6p(v: i32) {
     RUNTIME_PROBCUT_D6P.store(v, Ordering::Relaxed);
+}
+pub fn set_nmp_enabled(b: bool) {
+    RUNTIME_ENABLE_NMP.store(b, Ordering::Relaxed);
+}
+pub fn set_iid_enabled(b: bool) {
+    RUNTIME_ENABLE_IID.store(b, Ordering::Relaxed);
+}
+pub fn set_probcut_enabled(b: bool) {
+    RUNTIME_ENABLE_PROBCUT.store(b, Ordering::Relaxed);
+}
+pub fn set_static_beta_enabled(b: bool) {
+    RUNTIME_ENABLE_STATIC_BETA.store(b, Ordering::Relaxed);
 }
 pub fn set_razor_enabled(b: bool) {
     RUNTIME_RAZOR.store(b, Ordering::Relaxed);

@@ -139,7 +139,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         alpha = a_md;
 
-        if self.profile.prune.enable_static_beta_pruning && depth <= 2 && !pos.is_in_check() {
+        if self.profile.prune.enable_static_beta_pruning
+            && dynp::static_beta_enabled()
+            && depth <= 2
+            && !pos.is_in_check()
+        {
             let margin = if depth == 1 {
                 dynp::sbp_margin_d1()
             } else {
@@ -161,7 +165,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if self.profile.prune.enable_nmp {
+        if self.profile.prune.enable_nmp && dynp::nmp_enabled() {
             let prev_null = if ply > 0 {
                 stack[(ply - 1) as usize].null_move
             } else {
@@ -199,8 +203,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             },
                             ctx,
                         );
-                        let mut child2 = child;
-                        child2.undo_null_move(undo_null);
+                        child.undo_null_move(undo_null);
                         stack[ply as usize].null_move = false;
                         -sc
                     };
@@ -241,6 +244,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         if self.profile.prune.enable_iid
+            && dynp::iid_enabled()
             && depth >= dynp::iid_min_depth()
             && !pos.is_in_check()
             && (!tt_depth_ok || tt_hint.is_none())
@@ -269,7 +273,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if self.profile.prune.enable_probcut && depth >= 5 && !pos.is_in_check() {
+        if self.profile.prune.enable_probcut
+            && dynp::probcut_enabled()
+            && depth >= 5
+            && !pos.is_in_check()
+        {
             let threshold = beta + dynp::probcut_margin(depth);
             let mgp = MoveGenerator::new();
             if let Ok(caps) = mgp.generate_captures(pos) {
@@ -277,9 +285,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if pos.see(mv) < 0 {
                         continue;
                     }
-                    let mut child = pos.clone();
                     let parent_sc = {
                         let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                        let mut child = pos.clone();
                         child.do_move(mv);
                         let (sc, _) = self.alphabeta(
                             ABArgs {
@@ -395,8 +403,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     continue;
                 }
             }
-            let mut child = pos.clone();
-            child.do_move(mv);
             let mut next_depth = depth - 1;
             if depth >= 3 && moveno >= 3 && is_quiet && !is_good_capture {
                 heur.lmr_trials = heur.lmr_trials.saturating_add(1);
@@ -430,6 +436,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let pv_move = !first_move_done;
             let score = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                let mut child = pos.clone();
+                child.do_move(mv);
                 if pv_move {
                     let (sc, _) = self.alphabeta(
                         ABArgs {

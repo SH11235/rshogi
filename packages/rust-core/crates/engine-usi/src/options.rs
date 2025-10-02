@@ -49,6 +49,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000");
     usi_println("option name SearchParams.IID_MinDepth type spin default 6 min 0 max 20");
     usi_println("option name SearchParams.Razor type check default true");
+    usi_println("option name SearchParams.EnableNMP type check default true");
+    usi_println("option name SearchParams.EnableIID type check default true");
+    usi_println("option name SearchParams.EnableProbCut type check default true");
+    usi_println("option name SearchParams.EnableStaticBeta type check default true");
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -270,6 +274,30 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 engine_core::search::params::set_razor_enabled(on);
+            }
+        }
+        "SearchParams.EnableNMP" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_nmp_enabled(on);
+            }
+        }
+        "SearchParams.EnableIID" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_iid_enabled(on);
+            }
+        }
+        "SearchParams.EnableProbCut" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_probcut_enabled(on);
+            }
+        }
+        "SearchParams.EnableStaticBeta" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_static_beta_enabled(on);
             }
         }
         "OverheadMs" => {

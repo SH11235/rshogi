@@ -187,6 +187,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
                 loop {
+                    if active_moves.is_empty() {
+                        break;
+                    }
                     let (old_alpha, old_beta) = (alpha, beta);
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
