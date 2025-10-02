@@ -144,6 +144,7 @@ pub struct EngineState {
     // Deadlines for OOB finalize enforcement (computed at search start)
     pub deadline_hard: Option<Instant>,
     pub deadline_near: Option<Instant>,
+    pub deadline_near_notified: bool,
 }
 
 impl EngineState {
@@ -187,6 +188,7 @@ impl EngineState {
             idle_sync,
             deadline_hard: None,
             deadline_near: None,
+            deadline_near_notified: false,
         }
     }
 

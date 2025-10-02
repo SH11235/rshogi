@@ -40,3 +40,6 @@ pv_debug_logs = ["engine-core/pv_debug_logs"]
 experiments = [
     "engine-core/diff_agg_hash",
 ]
+
+[dev-dependencies]
+assert_cmd = "2.0"

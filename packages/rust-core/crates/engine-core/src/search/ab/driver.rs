@@ -410,10 +410,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     let elapsed_ms_total = t0.elapsed().as_millis() as u64;
                     let line_nodes = nodes.saturating_sub(last_nodes_for_line);
                     let line_time_ms = elapsed_ms_total.saturating_sub(last_time_for_line);
-                    let nps = if line_time_ms == 0 {
-                        0
+                    let line_nodes_opt = if line_nodes == 0 {
+                        None
                     } else {
-                        line_nodes.saturating_mul(1000).saturating_div(line_time_ms.max(1))
+                        Some(line_nodes)
+                    };
+                    let line_time_opt = if line_time_ms == 0 {
+                        None
+                    } else {
+                        Some(line_time_ms)
+                    };
+                    let nps_opt = match (line_nodes_opt, line_time_opt) {
+                        (Some(nodes_delta), Some(time_delta)) => {
+                            Some(nodes_delta.saturating_mul(1000).saturating_div(time_delta.max(1)))
+                        }
+                        _ => None,
                     };
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
@@ -424,9 +435,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         depth: d as u32,
                         seldepth: Some(seldepth.min(u8::MAX as u32) as u8),
                         pv,
-                        nodes: Some(line_nodes),
-                        time_ms: Some(line_time_ms),
-                        nps: Some(nps),
+                        nodes: line_nodes_opt,
+                        time_ms: line_time_opt,
+                        nps: nps_opt,
                         exact_exhausted: false,
                         exhaust_reason: None,
                         mate_distance: None,

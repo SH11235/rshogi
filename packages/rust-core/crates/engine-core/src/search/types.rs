@@ -5,8 +5,8 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Info callback type for search progress reporting
-pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move], NodeType) + Send + Sync>;
+/// Info callback type for search progress reporting (legacy bridge for USI layer)
+pub type InfoCallback = Arc<dyn Fn(RootLine) + Send + Sync>;
 
 /// Iteration callback type for committed iteration results
 pub type IterationCallback = Arc<dyn Fn(&CommittedIteration) + Send + Sync>;

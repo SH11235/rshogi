@@ -358,22 +358,21 @@ impl Engine {
                 match evt {
                     InfoEvent::PV { line } => {
                         stop_ctrl.publish_root_line(sid, root_hash, &line);
-                        let depth_u8 = (line.depth as u8).min(127);
-                        let elapsed = std::time::Duration::from_millis(line.time_ms.unwrap_or(0));
-                        let nodes = line.nodes.unwrap_or(0);
                         let seldepth = line.seldepth.unwrap_or(0);
-                        let score = line.score_cp;
                         if let Some(cb) = &legacy_cb {
-                            cb(depth_u8, score, nodes, elapsed, line.pv.as_slice(), line.bound);
+                            cb(line.clone());
                         }
                         if let Some(s) = &cb_str {
-                            if let Some(nodes) = line.nodes {
-                                s(&format!(
+                            match (line.nodes, line.time_ms) {
+                                (Some(nodes), Some(time_ms)) => s(&format!(
+                                    "depth {} seldepth {} nodes {} time {}",
+                                    line.depth, seldepth, nodes, time_ms
+                                )),
+                                (Some(nodes), None) => s(&format!(
                                     "depth {} seldepth {} nodes {}",
                                     line.depth, seldepth, nodes
-                                ));
-                            } else {
-                                s(&format!("depth {} seldepth {}", line.depth, seldepth));
+                                )),
+                                _ => s(&format!("depth {} seldepth {}", line.depth, seldepth)),
                             }
                         }
                     }
