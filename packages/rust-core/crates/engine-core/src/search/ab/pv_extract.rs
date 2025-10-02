@@ -7,7 +7,7 @@ use crate::search::SearchLimits;
 use crate::Position;
 
 use super::driver::ClassicBackend;
-use super::pvs::{ABArgs, Heuristics, SearchContext};
+use super::pvs::{ABArgs, EvalMoveGuard, Heuristics, SearchContext};
 
 impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     pub(crate) fn reconstruct_root_pv_from_tt(
@@ -56,7 +56,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
 
         let mut first_used = false;
         let t0 = Instant::now();
-        let mut applied_moves: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+        let mut guard_stack: SmallVec<[EvalMoveGuard<'_, E>; 32]> = SmallVec::new();
         while d > 0 {
             if ClassicBackend::<E>::should_stop(limits) {
                 break;
@@ -98,14 +98,12 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             };
             first_used = true;
             pv.push(mv);
-            self.evaluator.on_do_move(&pos, mv);
-            applied_moves.push(mv);
+            let guard = EvalMoveGuard::new(self.evaluator.as_ref(), &pos, mv);
+            guard_stack.push(guard);
             pos.do_move(mv);
             d -= 1;
         }
-        for _ in applied_moves.iter() {
-            self.evaluator.on_undo_move();
-        }
+        drop(guard_stack);
         pv
     }
 }
