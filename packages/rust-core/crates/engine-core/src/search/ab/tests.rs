@@ -14,6 +14,7 @@ use crate::Position;
 
 use super::driver::ClassicBackend;
 use super::pvs::SearchContext;
+use super::SearchProfile;
 
 #[test]
 fn qsearch_detects_mate_when_evasion_missing() {
@@ -79,6 +80,33 @@ fn multipv_line_nodes_are_per_line() {
             assert!(ms <= result.stats.elapsed.as_millis() as u64);
         }
     }
+}
+
+#[test]
+fn extract_pv_returns_consistent_line() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator);
+    let pos = Position::startpos();
+    let limits = SearchLimitsBuilder::default().depth(2).build();
+
+    let result = backend.think_blocking(&pos, &limits, None);
+    let best_move = result.best_move.expect("backend should find a best move");
+    let depth = result.stats.depth as i32;
+    let mut nodes = 0_u64;
+    let pv = backend.extract_pv(&pos, depth, best_move, &limits, &mut nodes);
+
+    assert!(!pv.is_empty(), "extract_pv should return a non-empty PV");
+    assert_eq!(pv[0], best_move, "PV head should match best move");
+}
+
+#[test]
+fn search_profile_basic_disables_advanced_pruning() {
+    let profile = SearchProfile::basic();
+    assert!(profile.prune.enable_nmp);
+    assert!(!profile.prune.enable_iid);
+    assert!(!profile.prune.enable_razor);
+    assert!(!profile.prune.enable_probcut);
+    assert!(profile.prune.enable_static_beta_pruning);
 }
 
 struct RecordingEvaluator {
@@ -157,7 +185,7 @@ impl Evaluator for RecordingEvaluator {
 #[test]
 fn evaluator_hooks_balance_for_classic_backend() {
     let evaluator = Arc::new(RecordingEvaluator::default());
-    let backend = ClassicBackend::new(Arc::clone(&evaluator));
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
     // 分岐数を絞った局面（両玉と金のみ）でフック呼び出しの整合性を検証する。
     // 深さ4の探索でもノード爆発を抑え、テスト実行時間を短縮することが目的。
     let mut pos = Position::empty();
@@ -180,5 +208,6 @@ fn evaluator_hooks_balance_for_classic_backend() {
     assert!(counts.set_position >= 1, "expected on_set_position to be called");
     assert!(counts.do_move > 0, "expected on_do_move to be used during search");
     assert_eq!(counts.do_move, counts.undo_move, "move hooks must balance");
+    assert!(counts.do_null_move > 0, "null move pruning should be exercised");
     assert_eq!(counts.do_null_move, counts.undo_null_move, "null-move hooks must balance");
 }

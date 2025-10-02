@@ -19,19 +19,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         if (ply as u16) >= crate::search::constants::MAX_QUIESCE_DEPTH {
             return alpha;
         }
-        if let Some(limit) = ctx.limits.time_limit() {
-            if ctx.start_time.elapsed() >= limit {
-                return alpha;
-            }
-        }
-        if Self::should_stop(ctx.limits) {
+        if ctx.time_up() || Self::should_stop(ctx.limits) {
             return alpha;
         }
-
-        *ctx.nodes += 1;
-        if ply > *ctx.seldepth {
-            *ctx.seldepth = ply;
-        }
+        ctx.tick(ply);
 
         if pos.is_in_check() {
             let mg = MoveGenerator::new();

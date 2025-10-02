@@ -58,6 +58,14 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
         let t0 = Instant::now();
         let mut applied_moves: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
         while d > 0 {
+            if ClassicBackend::<E>::should_stop(limits) {
+                break;
+            }
+            if let Some(limit) = limits.time_limit() {
+                if t0.elapsed() >= limit {
+                    break;
+                }
+            }
             let mv = if !first_used {
                 first
             } else {
