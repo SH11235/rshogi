@@ -190,6 +190,16 @@ impl Engine {
         }
     }
 
+    fn maybe_drop_nnue_when_inactive(&mut self) {
+        if !matches!(self.engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
+            let mut guard = self.nnue_evaluator.write();
+            if guard.is_some() {
+                *guard = None;
+                info!("NNUE weights dropped after switching to {:?}", self.engine_type);
+            }
+        }
+    }
+
     fn build_backend(&mut self) -> Option<Arc<dyn SearcherBackend + Send + Sync>> {
         match self.engine_type {
             EngineType::Stub => Some(Arc::new(StubBackend::new())),
@@ -338,10 +348,11 @@ impl Engine {
         let stop_ctrl = self._stop_ctrl.clone();
         let root_hash = pos.zobrist_hash();
         let sid = session_id;
-        let event_cb: Option<InfoEventCallback> = legacy_info.as_ref().map(|cb| {
-            let legacy_cb = cb.clone();
+        let wants_events = legacy_info.is_some() || legacy_info_string.is_some();
+        let event_cb: Option<InfoEventCallback> = if wants_events {
+            let legacy_cb = legacy_info.clone();
             let cb_str = legacy_info_string.clone();
-            Arc::new(move |evt: crate::search::api::InfoEvent| {
+            Some(Arc::new(move |evt: crate::search::api::InfoEvent| {
                 use crate::search::api::{AspirationOutcome, InfoEvent};
                 match evt {
                     InfoEvent::PV { line } => {
@@ -351,7 +362,9 @@ impl Engine {
                         let nodes = line.nodes.unwrap_or(0);
                         let seldepth = line.seldepth.unwrap_or(0);
                         let score = line.score_cp;
-                        legacy_cb(depth_u8, score, nodes, elapsed, line.pv.as_slice(), line.bound);
+                        if let Some(cb) = &legacy_cb {
+                            cb(depth_u8, score, nodes, elapsed, line.pv.as_slice(), line.bound);
+                        }
                         if let Some(s) = &cb_str {
                             if let Some(nodes) = line.nodes {
                                 s(&format!(
@@ -406,9 +419,10 @@ impl Engine {
                         }
                     }
                 }
-            }) as InfoEventCallback
-        });
-
+            }) as InfoEventCallback)
+        } else {
+            None
+        };
         let backend_task =
             backend.start_async(pos, limits, event_cb, Arc::clone(&self.active_searches));
         let (stop_handle, result_rx, join_handle) = backend_task.into_parts();
@@ -593,7 +607,11 @@ impl Engine {
     /// Set engine type
     pub fn set_engine_type(&mut self, engine_type: EngineType) {
         self.engine_type = engine_type;
-        self.ensure_nnue_evaluator_initialized();
+        if matches!(self.engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
+            self.ensure_nnue_evaluator_initialized();
+        } else {
+            self.maybe_drop_nnue_when_inactive();
+        }
         self.rebuild_backend();
     }
 

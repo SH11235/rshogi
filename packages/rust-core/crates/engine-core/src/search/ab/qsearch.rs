@@ -1,11 +1,14 @@
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::mate_score;
-use crate::search::params::{QS_MARGIN_CAPTURE, QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS};
+use crate::search::params::{
+    qs_checks_enabled, QS_MARGIN_CAPTURE, QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS,
+};
 use crate::Position;
 
 use super::driver::ClassicBackend;
-use super::pvs::{EvalMoveGuard, SearchContext};
+use super::ordering::EvalMoveGuard;
+use super::pvs::SearchContext;
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     pub(crate) fn qsearch(
@@ -95,27 +98,29 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        let Ok(quiet) = mg.generate_quiet(pos) else {
-            return alpha;
-        };
-        let mut tried_checks = 0usize;
-        for mv in quiet.as_slice().iter().copied() {
-            if tried_checks >= QS_MAX_QUIET_CHECKS {
-                break;
-            }
-            if pos.gives_check(mv) {
-                tried_checks += 1;
-                let mut child = pos.clone();
-                let sc = {
-                    let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
-                    child.do_move(mv);
-                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
-                };
-                if sc >= beta {
-                    return sc;
+        if qs_checks_enabled() {
+            let Ok(quiet) = mg.generate_quiet(pos) else {
+                return alpha;
+            };
+            let mut tried_checks = 0usize;
+            for mv in quiet.as_slice().iter().copied() {
+                if tried_checks >= QS_MAX_QUIET_CHECKS {
+                    break;
                 }
-                if sc > alpha {
-                    alpha = sc;
+                if pos.gives_check(mv) {
+                    tried_checks += 1;
+                    let mut child = pos.clone();
+                    let sc = {
+                        let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                        child.do_move(mv);
+                        -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+                    };
+                    if sc >= beta {
+                        return sc;
+                    }
+                    if sc > alpha {
+                        alpha = sc;
+                    }
                 }
             }
         }

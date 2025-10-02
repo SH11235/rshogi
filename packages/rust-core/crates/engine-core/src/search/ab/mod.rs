@@ -1,5 +1,7 @@
 mod driver;
+mod ordering;
 mod profile;
+mod pruning;
 mod pv_extract;
 mod pvs;
 mod qsearch;

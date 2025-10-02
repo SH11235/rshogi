@@ -53,6 +53,7 @@ static RUNTIME_ENABLE_NMP: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_IID: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_PROBCUT: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_STATIC_BETA: AtomicBool = AtomicBool::new(true);
+static RUNTIME_QS_CHECKS: AtomicBool = AtomicBool::new(true);
 static RUNTIME_RAZOR: AtomicBool = AtomicBool::new(RAZOR_ENABLED);
 static RUNTIME_IID_MIN_DEPTH: AtomicI32 = AtomicI32::new(6); // 既定: 6ply
 
@@ -115,6 +116,11 @@ pub fn static_beta_enabled() -> bool {
 }
 
 #[inline]
+pub fn qs_checks_enabled() -> bool {
+    RUNTIME_QS_CHECKS.load(Ordering::Relaxed)
+}
+
+#[inline]
 pub fn razor_enabled() -> bool {
     RUNTIME_RAZOR.load(Ordering::Relaxed)
 }
@@ -163,6 +169,9 @@ pub fn set_probcut_enabled(b: bool) {
 }
 pub fn set_static_beta_enabled(b: bool) {
     RUNTIME_ENABLE_STATIC_BETA.store(b, Ordering::Relaxed);
+}
+pub fn set_qs_checks_enabled(b: bool) {
+    RUNTIME_QS_CHECKS.store(b, Ordering::Relaxed);
 }
 pub fn set_razor_enabled(b: bool) {
     RUNTIME_RAZOR.store(b, Ordering::Relaxed);

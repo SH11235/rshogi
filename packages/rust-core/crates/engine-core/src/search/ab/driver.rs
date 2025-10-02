@@ -11,8 +11,9 @@ use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable}
 use crate::Position;
 use smallvec::SmallVec;
 
+use super::ordering::{self, Heuristics};
 use super::profile::{PruneToggles, SearchProfile};
-use super::pvs::{self, Heuristics, SearchContext};
+use super::pvs::{self, SearchContext};
 use crate::search::tt::TTProbe;
 
 #[derive(Clone)]
@@ -208,7 +209,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         let mut child = root.clone();
                         let score = {
-                            let _guard = pvs::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
+                            let _guard =
+                                ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
                             child.do_move(mv);
                             if idx == 0 {
                                 let mut search_ctx = SearchContext {
