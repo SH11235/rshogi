@@ -75,14 +75,6 @@ name = "tt_memory_barrier_bench"
 harness = false
 
 [[bench]]
-name = "false_sharing_bench"
-harness = false
-
-[[bench]]
-name = "parallel_searcher_benchmarks"
-harness = false
-
-[[bench]]
 name = "time_management_bench"
 harness = false
 
