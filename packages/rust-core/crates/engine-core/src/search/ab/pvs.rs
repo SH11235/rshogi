@@ -7,7 +7,8 @@ use crate::search::SearchLimits;
 use crate::Position;
 
 use super::driver::ClassicBackend;
-use super::ordering::{self, EvalMoveGuard, Heuristics};
+use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams};
+use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::search::types::NodeType;
 
 pub(crate) struct SearchContext<'a> {
@@ -93,6 +94,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (a_md, None);
         }
         alpha = a_md;
+        let beta = b_md;
 
         if self.should_static_beta_prune(&self.profile.prune, depth, pos, beta, static_eval) {
             return (static_eval, None);
@@ -102,20 +104,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (r, None);
         }
 
-        if let Some(score) = self.null_move_prune(
-            &self.profile.prune,
+        if let Some(score) = self.null_move_prune(NullMovePruneParams {
+            toggles: &self.profile.prune,
             depth,
             pos,
             beta,
             static_eval,
             ply,
-            stack,
-            heur,
-            tt_hits,
-            beta_cuts,
-            lmr_counter,
+            stack: &mut *stack,
+            heur: &mut *heur,
+            tt_hits: &mut *tt_hits,
+            beta_cuts: &mut *beta_cuts,
+            lmr_counter: &mut *lmr_counter,
             ctx,
-        ) {
+        }) {
             return (score, None);
         }
 
@@ -148,36 +150,36 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        self.maybe_iid(
-            &self.profile.prune,
+        self.maybe_iid(MaybeIidParams {
+            toggles: &self.profile.prune,
             depth,
             pos,
             alpha,
             beta,
             ply,
-            stack,
-            heur,
-            tt_hits,
-            beta_cuts,
-            lmr_counter,
+            stack: &mut *stack,
+            heur: &mut *heur,
+            tt_hits: &mut *tt_hits,
+            beta_cuts: &mut *beta_cuts,
+            lmr_counter: &mut *lmr_counter,
             ctx,
-            &mut tt_hint,
+            tt_hint: &mut tt_hint,
             tt_depth_ok,
-        );
+        });
 
-        if let Some((score, mv)) = self.probcut(
-            &self.profile.prune,
+        if let Some((score, mv)) = self.probcut(ProbcutParams {
+            toggles: &self.profile.prune,
             depth,
             pos,
             beta,
             ply,
-            stack,
-            heur,
-            tt_hits,
-            beta_cuts,
-            lmr_counter,
+            stack: &mut *stack,
+            heur: &mut *heur,
+            tt_hits: &mut *tt_hits,
+            beta_cuts: &mut *beta_cuts,
+            lmr_counter: &mut *lmr_counter,
             ctx,
-        ) {
+        }) {
             return (score, Some(mv));
         }
 
@@ -271,8 +273,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             let mut next_depth = depth - 1;
-            let reduction = ordering::late_move_reduction(
-                heur,
+            let reduction = ordering::late_move_reduction(LateMoveReductionParams {
+                heur: &mut *heur,
                 depth,
                 moveno,
                 is_quiet,
@@ -281,8 +283,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 gives_check,
                 static_eval,
                 ply,
-                stack,
-            );
+                stack: &*stack,
+            });
             if reduction > 0 {
                 next_depth -= reduction;
                 *lmr_counter += 1;

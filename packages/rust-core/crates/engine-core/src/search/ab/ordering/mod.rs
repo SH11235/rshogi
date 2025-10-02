@@ -22,8 +22,8 @@ fn ln_depth(depth: i32) -> f32 {
     let table = DEPTH_LOG_TABLE.get_or_init(|| {
         let size = crate::search::constants::MAX_PLY + 2;
         let mut values = vec![0.0f32; size];
-        for i in 1..size {
-            values[i] = (i as f32).ln();
+        for (i, value) in values.iter_mut().enumerate().skip(1) {
+            *value = (i as f32).ln();
         }
         values
     });
@@ -41,8 +41,8 @@ fn ln_moveno(moveno: usize) -> f32 {
     }
     let table = MOVENO_LOG_TABLE.get_or_init(|| {
         let mut values = vec![0.0f32; MOVENO_LOG_TABLE_SIZE];
-        for i in 1..MOVENO_LOG_TABLE_SIZE {
-            values[i] = (i as f32).ln();
+        for (i, value) in values.iter_mut().enumerate().skip(1) {
+            *value = (i as f32).ln();
         }
         values
     });
@@ -60,35 +60,38 @@ pub(crate) struct Heuristics {
     pub(crate) lmr_trials: u64,
 }
 
-pub(crate) fn late_move_reduction(
-    heur: &mut Heuristics,
-    depth: i32,
-    moveno: usize,
-    is_quiet: bool,
-    is_good_capture: bool,
-    is_pv: bool,
-    gives_check: bool,
-    static_eval: i32,
-    ply: u32,
-    stack: &[SearchStack],
-) -> i32 {
-    if depth < 3 || moveno < 3 || !is_quiet || is_good_capture {
+pub(crate) struct LateMoveReductionParams<'heur, 'stack> {
+    pub heur: &'heur mut Heuristics,
+    pub depth: i32,
+    pub moveno: usize,
+    pub is_quiet: bool,
+    pub is_good_capture: bool,
+    pub is_pv: bool,
+    pub gives_check: bool,
+    pub static_eval: i32,
+    pub ply: u32,
+    pub stack: &'stack [SearchStack],
+}
+
+pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_, '_>) -> i32 {
+    if params.depth < 3 || params.moveno < 3 || !params.is_quiet || params.is_good_capture {
         return 0;
     }
-    heur.lmr_trials = heur.lmr_trials.saturating_add(1);
-    let depth_ln = ln_depth(depth);
-    let moveno_ln = ln_moveno(moveno);
+    params.heur.lmr_trials = params.heur.lmr_trials.saturating_add(1);
+    let depth_ln = ln_depth(params.depth);
+    let moveno_ln = ln_moveno(params.moveno);
     let rd = ((depth_ln * moveno_ln) / dynp::lmr_k_coeff()).floor() as i32;
     let mut r = rd.max(1);
-    if is_pv {
+    if params.is_pv {
         r -= 1;
     }
-    if gives_check {
+    if params.gives_check {
         r = 0;
     }
-    let improving = if ply >= 2 {
-        if let Some(prev2) = stack[ply as usize - 2].static_eval {
-            static_eval >= prev2 - 10
+    let improving = if params.ply >= 2 {
+        let idx = (params.ply - 2) as usize;
+        if let Some(prev2) = params.stack[idx].static_eval {
+            params.static_eval >= prev2 - 10
         } else {
             false
         }
@@ -98,5 +101,5 @@ pub(crate) fn late_move_reduction(
     if improving {
         r -= 1;
     }
-    r.clamp(0, depth - 1)
+    r.clamp(0, params.depth - 1)
 }

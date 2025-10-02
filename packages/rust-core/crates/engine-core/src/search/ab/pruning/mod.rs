@@ -13,6 +13,52 @@ use super::ordering::{EvalMoveGuard, EvalNullGuard, Heuristics};
 use super::profile::PruneToggles;
 use super::pvs::{ABArgs, SearchContext};
 
+pub(super) struct NullMovePruneParams<'a, 'ctx> {
+    pub toggles: &'a PruneToggles,
+    pub depth: i32,
+    pub pos: &'a Position,
+    pub beta: i32,
+    pub static_eval: i32,
+    pub ply: u32,
+    pub stack: &'a mut [SearchStack],
+    pub heur: &'a mut Heuristics,
+    pub tt_hits: &'a mut u64,
+    pub beta_cuts: &'a mut u64,
+    pub lmr_counter: &'a mut u64,
+    pub ctx: &'a mut SearchContext<'ctx>,
+}
+
+pub(super) struct MaybeIidParams<'a, 'ctx> {
+    pub toggles: &'a PruneToggles,
+    pub depth: i32,
+    pub pos: &'a Position,
+    pub alpha: i32,
+    pub beta: i32,
+    pub ply: u32,
+    pub stack: &'a mut [SearchStack],
+    pub heur: &'a mut Heuristics,
+    pub tt_hits: &'a mut u64,
+    pub beta_cuts: &'a mut u64,
+    pub lmr_counter: &'a mut u64,
+    pub ctx: &'a mut SearchContext<'ctx>,
+    pub tt_hint: &'a mut Option<crate::shogi::Move>,
+    pub tt_depth_ok: bool,
+}
+
+pub(super) struct ProbcutParams<'a, 'ctx> {
+    pub toggles: &'a PruneToggles,
+    pub depth: i32,
+    pub pos: &'a Position,
+    pub beta: i32,
+    pub ply: u32,
+    pub stack: &'a mut [SearchStack],
+    pub heur: &'a mut Heuristics,
+    pub tt_hits: &'a mut u64,
+    pub beta_cuts: &'a mut u64,
+    pub lmr_counter: &'a mut u64,
+    pub ctx: &'a mut SearchContext<'ctx>,
+}
+
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     pub(super) fn should_static_beta_prune(
         &self,
@@ -54,21 +100,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         None
     }
 
-    pub(super) fn null_move_prune(
-        &self,
-        toggles: &PruneToggles,
-        depth: i32,
-        pos: &Position,
-        beta: i32,
-        static_eval: i32,
-        ply: u32,
-        stack: &mut [SearchStack],
-        heur: &mut Heuristics,
-        tt_hits: &mut u64,
-        beta_cuts: &mut u64,
-        lmr_counter: &mut u64,
-        ctx: &mut SearchContext,
-    ) -> Option<i32> {
+    pub(super) fn null_move_prune(&self, params: NullMovePruneParams<'_, '_>) -> Option<i32> {
+        let NullMovePruneParams {
+            toggles,
+            depth,
+            pos,
+            beta,
+            static_eval,
+            ply,
+            stack,
+            heur,
+            tt_hits,
+            beta_cuts,
+            lmr_counter,
+            ctx,
+        } = params;
         if !toggles.enable_nmp || !dynp::nmp_enabled() {
             return None;
         }
@@ -124,23 +170,23 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
     }
 
-    pub(super) fn maybe_iid(
-        &self,
-        toggles: &PruneToggles,
-        depth: i32,
-        pos: &Position,
-        alpha: i32,
-        beta: i32,
-        ply: u32,
-        stack: &mut [SearchStack],
-        heur: &mut Heuristics,
-        tt_hits: &mut u64,
-        beta_cuts: &mut u64,
-        lmr_counter: &mut u64,
-        ctx: &mut SearchContext,
-        tt_hint: &mut Option<crate::shogi::Move>,
-        tt_depth_ok: bool,
-    ) {
+    pub(super) fn maybe_iid(&self, params: MaybeIidParams<'_, '_>) {
+        let MaybeIidParams {
+            toggles,
+            depth,
+            pos,
+            alpha,
+            beta,
+            ply,
+            stack,
+            heur,
+            tt_hits,
+            beta_cuts,
+            lmr_counter,
+            ctx,
+            tt_hint,
+            tt_depth_ok,
+        } = params;
         if !(toggles.enable_iid
             && dynp::iid_enabled()
             && depth >= dynp::iid_min_depth()
@@ -175,18 +221,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
     pub(super) fn probcut(
         &self,
-        toggles: &PruneToggles,
-        depth: i32,
-        pos: &Position,
-        beta: i32,
-        ply: u32,
-        stack: &mut [SearchStack],
-        heur: &mut Heuristics,
-        tt_hits: &mut u64,
-        beta_cuts: &mut u64,
-        lmr_counter: &mut u64,
-        ctx: &mut SearchContext,
+        params: ProbcutParams<'_, '_>,
     ) -> Option<(i32, crate::shogi::Move)> {
+        let ProbcutParams {
+            toggles,
+            depth,
+            pos,
+            beta,
+            ply,
+            stack,
+            heur,
+            tt_hits,
+            beta_cuts,
+            lmr_counter,
+            ctx,
+        } = params;
         if !(toggles.enable_probcut && dynp::probcut_enabled() && depth >= 5 && !pos.is_in_check())
         {
             return None;

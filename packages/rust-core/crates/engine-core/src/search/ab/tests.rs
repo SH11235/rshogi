@@ -14,6 +14,7 @@ use crate::usi::parse_usi_square;
 use crate::Position;
 
 use super::driver::ClassicBackend;
+use super::pruning::NullMovePruneParams;
 use super::pvs::SearchContext;
 use super::SearchProfile;
 
@@ -237,20 +238,20 @@ fn null_move_respects_runtime_toggle() {
         seldepth: &mut seldepth,
     };
     let static_eval = evaluator.evaluate(&pos);
-    let allowed = backend.null_move_prune(
-        &backend.profile.prune,
-        4,
-        &pos,
-        0,
+    let allowed = backend.null_move_prune(NullMovePruneParams {
+        toggles: &backend.profile.prune,
+        depth: 4,
+        pos: &pos,
+        beta: 0,
         static_eval,
-        0,
-        &mut stack,
-        &mut heur,
-        &mut tt_hits,
-        &mut beta_cuts,
-        &mut lmr_counter,
-        &mut ctx,
-    );
+        ply: 0,
+        stack: &mut stack,
+        heur: &mut heur,
+        tt_hits: &mut tt_hits,
+        beta_cuts: &mut beta_cuts,
+        lmr_counter: &mut lmr_counter,
+        ctx: &mut ctx,
+    });
     assert!(allowed.is_some(), "NMP should run when runtime toggle is enabled");
 
     crate::search::params::set_nmp_enabled(false);
@@ -268,20 +269,20 @@ fn null_move_respects_runtime_toggle() {
         nodes: &mut nodes_off,
         seldepth: &mut seldepth_off,
     };
-    let denied = backend.null_move_prune(
-        &backend.profile.prune,
-        4,
-        &pos,
-        0,
+    let denied = backend.null_move_prune(NullMovePruneParams {
+        toggles: &backend.profile.prune,
+        depth: 4,
+        pos: &pos,
+        beta: 0,
         static_eval,
-        0,
-        &mut stack_off,
-        &mut heur_off,
-        &mut tt_hits_off,
-        &mut beta_cuts_off,
-        &mut lmr_counter_off,
-        &mut ctx_off,
-    );
+        ply: 0,
+        stack: &mut stack_off,
+        heur: &mut heur_off,
+        tt_hits: &mut tt_hits_off,
+        beta_cuts: &mut beta_cuts_off,
+        lmr_counter: &mut lmr_counter_off,
+        ctx: &mut ctx_off,
+    });
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
 
     crate::search::params::set_nmp_enabled(true);
