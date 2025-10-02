@@ -244,6 +244,8 @@ impl StopController {
         si.elapsed_ms = total_time_ms;
         si.nodes = total_nodes;
         si.depth_reached = (line.depth as u8).min(127);
+        // note: request_finalize/request_stop が reason/hard_timeout を確定させる。
+        // publish_root_line は進捗値のみ更新し、理由フラグは上書きしない。
         *guard = Some(si);
     }
 }
