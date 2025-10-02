@@ -1,5 +1,6 @@
+use std::env;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,21 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    fn currmove_throttle_ms() -> Option<u64> {
+        static POLICY: OnceLock<Option<u64>> = OnceLock::new();
+        *POLICY.get_or_init(|| match env::var("SHOGI_CURRMOVE_THROTTLE_MS") {
+            Ok(val) => {
+                let val = val.trim().to_ascii_lowercase();
+                if val == "off" || val == "0" {
+                    None
+                } else {
+                    val.parse::<u64>().ok().filter(|v| *v > 0)
+                }
+            }
+            Err(_) => Some(150),
+        })
+    }
+
     pub fn new(evaluator: Arc<E>) -> Self {
         Self::with_profile(evaluator, SearchProfile::default())
     }
@@ -105,11 +121,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut best_score = 0;
         let mut nodes: u64 = 0;
         let t0 = Instant::now();
+        let deadlines = limits.fallback_deadlines;
+        let soft_deadline = deadlines
+            .and_then(|dl| (dl.soft_limit_ms > 0).then(|| Duration::from_millis(dl.soft_limit_ms)));
+        let hard_deadline = deadlines
+            .and_then(|dl| (dl.hard_limit_ms > 0).then(|| Duration::from_millis(dl.hard_limit_ms)));
         let _last_hashfull_emit_ms = 0u64;
         let mut prev_score = 0;
         // Aspiration initial params
         const ASP_DELTA0: i32 = 30;
         const ASP_DELTA_MAX: i32 = 350;
+        const SELDEPTH_EXTRA_MARGIN: u32 = 32;
 
         // Cumulative counters for diagnostics
         let mut cum_tt_hits: u64 = 0;
@@ -128,7 +150,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if Self::should_stop(limits) {
                 break;
             }
+            if let Some(limit) = soft_deadline {
+                if t0.elapsed() >= limit {
+                    break;
+                }
+            }
+            if let Some(limit) = hard_deadline {
+                if t0.elapsed() >= limit {
+                    break;
+                }
+            }
             let mut seldepth: u32 = 0;
+            let throttle_ms = Self::currmove_throttle_ms();
+            let mut last_currmove_emit = Instant::now();
             // Build root move list for CurrMove events and basic ordering
             let mg = MoveGenerator::new();
             let Ok(list) = mg.generate_all(root) else {
@@ -185,10 +219,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if Self::should_stop(limits) {
                     break;
                 }
-                if let Some(deadlines) = limits.fallback_deadlines {
-                    if deadlines.hard_limit_ms > 0
-                        && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
-                    {
+                if let Some(limit) = soft_deadline {
+                    if t0.elapsed() >= limit {
+                        break;
+                    }
+                }
+                if let Some(limit) = hard_deadline {
+                    if t0.elapsed() >= limit {
                         break;
                     }
                 }
@@ -228,10 +265,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if Self::should_stop(limits) {
                         break;
                     }
-                    if let Some(deadlines) = limits.fallback_deadlines {
-                        if deadlines.hard_limit_ms > 0
-                            && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
-                        {
+                    if let Some(limit) = soft_deadline {
+                        if t0.elapsed() >= limit {
+                            break;
+                        }
+                    }
+                    if let Some(limit) = hard_deadline {
+                        if t0.elapsed() >= limit {
                             break;
                         }
                     }
@@ -244,10 +284,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if Self::should_stop(limits) {
                             break;
                         }
-                        if let Some(deadlines) = limits.fallback_deadlines {
-                            if deadlines.hard_limit_ms > 0
-                                && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
-                            {
+                        if let Some(limit) = soft_deadline {
+                            if t0.elapsed() >= limit {
+                                break;
+                            }
+                        }
+                        if let Some(limit) = hard_deadline {
+                            if t0.elapsed() >= limit {
                                 break;
                             }
                         }
@@ -257,12 +300,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             }
                         }
                         if let Some(cb) = info {
-                            let number = root_rank
-                                .iter()
-                                .position(|x| x.equals_without_piece_type(&mv))
-                                .map(|pos| (pos as u32) + 1)
-                                .unwrap_or((idx as u32) + 1);
-                            cb(InfoEvent::CurrMove { mv, number });
+                            let emit = match throttle_ms {
+                                None => true,
+                                Some(ms) => {
+                                    idx == 0
+                                        || last_currmove_emit.elapsed() >= Duration::from_millis(ms)
+                                }
+                            };
+                            if emit {
+                                last_currmove_emit = Instant::now();
+                                let number = root_rank
+                                    .iter()
+                                    .position(|x| x.equals_without_piece_type(&mv))
+                                    .map(|pos| (pos as u32) + 1)
+                                    .unwrap_or((idx as u32) + 1);
+                                cb(InfoEvent::CurrMove { mv, number });
+                            }
                         }
                         let mut child = root.clone();
                         let score = {
@@ -360,10 +413,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if Self::should_stop(limits) {
                         break;
                     }
-                    if let Some(deadlines) = limits.fallback_deadlines {
-                        if deadlines.hard_limit_ms > 0
-                            && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
-                        {
+                    if let Some(limit) = soft_deadline {
+                        if t0.elapsed() >= limit {
+                            break;
+                        }
+                    }
+                    if let Some(limit) = hard_deadline {
+                        if t0.elapsed() >= limit {
                             break;
                         }
                     }
@@ -409,9 +465,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // 発火: Depth / Hashfull（深さ1回の発火で十分）
                 if pv_idx == 1 {
                     if let Some(cb) = info {
+                        let reported_sd =
+                            seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32);
                         cb(InfoEvent::Depth {
                             depth: d as u32,
-                            seldepth,
+                            seldepth: reported_sd,
                         });
                         if let Some(tt) = &self.tt {
                             let hf = tt.hashfull_permille() as u32;
@@ -455,7 +513,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         score_cp: local_best,
                         bound: NodeType::Exact,
                         depth: d as u32,
-                        seldepth: Some(seldepth.min(u8::MAX as u32) as u8),
+                        seldepth: Some(
+                            seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32)
+                                as u8,
+                        ),
                         pv,
                         nodes: Some(nodes),
                         time_ms: Some(elapsed_ms_total),
@@ -515,28 +576,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // この深さのMultiPV行を最終結果候補として保持
             final_lines = Some(depth_lines);
             final_depth_reached = d as u8;
-            let capped_seldepth = seldepth.min(u8::MAX as u32) as u8;
+            let capped_seldepth =
+                seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32) as u8;
             final_seldepth_reached = Some(capped_seldepth);
 
             let mut lead_ms = 10u64;
-            if let Some(deadlines) = limits.fallback_deadlines {
-                if deadlines.hard_limit_ms > 0 {
-                    if deadlines.soft_limit_ms > 0
-                        && deadlines.soft_limit_ms < deadlines.hard_limit_ms
-                    {
-                        let diff = deadlines.hard_limit_ms - deadlines.soft_limit_ms;
+            if let Some(hard) = hard_deadline {
+                if let Some(soft) = soft_deadline {
+                    if hard > soft {
+                        let diff = hard.as_millis().saturating_sub(soft.as_millis()) as u64;
                         if diff > 0 {
                             lead_ms = lead_ms.max(diff);
                         }
                     }
-
-                    let hard = Duration::from_millis(deadlines.hard_limit_ms);
-                    if t0.elapsed() + Duration::from_millis(lead_ms) >= hard {
-                        break;
-                    }
-
-                    continue;
                 }
+
+                if t0.elapsed() + Duration::from_millis(lead_ms) >= hard {
+                    break;
+                }
+
+                continue;
             }
 
             if let Some(limit) = limits.time_limit() {
@@ -559,11 +618,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.root_fail_high_count = Some(cum_beta_cuts);
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
+        if let Some(first_line) = final_lines.as_ref().and_then(|lines| lines.first()) {
+            stats.pv = first_line.pv.iter().copied().collect();
+        }
         let mut result = SearchResult::new(best, best_score, stats);
         if let Some(lines) = final_lines {
             result.lines = Some(lines);
+            result.refresh_summary();
         }
-        result.refresh_summary();
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;
         }

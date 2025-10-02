@@ -5,8 +5,7 @@ use std::time::Instant;
 
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::engine::session::SearchSession;
-use engine_core::search::parallel::EngineStopBridge;
-use engine_core::search::parallel::FinalizerMsg;
+use engine_core::search::parallel::{EngineStopBridge, FinalizerMsg, StopController};
 use engine_core::shogi::Position;
 use engine_core::time_management::TimeControl;
 
@@ -136,6 +135,7 @@ pub struct EngineState {
     // Current (inner) time control for stop/gameover policy decisions
     pub current_time_control: Option<TimeControl>,
     pub stop_bridge: Arc<EngineStopBridge>,
+    pub stop_controller: StopController,
     // OOB finalize channel (from engine-core time manager via StopBridge)
     pub finalizer_rx: Option<mpsc::Receiver<FinalizerMsg>>,
     // Current engine-core session id (epoch) for matching finalize requests
@@ -156,6 +156,7 @@ impl EngineState {
         engine.set_threads(1);
         engine.set_hash_size(1024);
         let stop_bridge = engine.stop_bridge_handle();
+        let stop_controller = engine.stop_controller_handle();
         // Register OOB finalizer channel
         let (fin_tx, fin_rx) = mpsc::channel();
         stop_bridge.register_finalizer(fin_tx);
@@ -183,6 +184,7 @@ impl EngineState {
             bestmove_emitted: false,
             current_time_control: None,
             stop_bridge,
+            stop_controller,
             finalizer_rx: Some(fin_rx),
             current_session_core_id: None,
             idle_sync,
