@@ -24,15 +24,11 @@ use smallvec::SmallVec;
 use std::time::{Duration, Instant};
 
 // 引数過多関数 (qsearch / alphabeta) の Clippy 警告回避用に集約構造体をモジュールスコープで定義
-struct QSearchArgs<'a> {
-    pos: &'a Position,
-    alpha: i32,
-    beta: i32,
+struct SearchContext<'a> {
     limits: &'a SearchLimits,
     start_time: &'a Instant,
     nodes: &'a mut u64,
     seldepth: &'a mut u32,
-    ply: u32,
 }
 
 struct ABArgs<'a> {
@@ -40,10 +36,6 @@ struct ABArgs<'a> {
     depth: i32,
     alpha: i32,
     beta: i32,
-    limits: &'a SearchLimits,
-    start_time: &'a Instant,
-    nodes: &'a mut u64,
-    seldepth: &'a mut u32,
     ply: u32,
     // フル窓で探索されたPVノードかどうか（TT保存の優遇に使用）
     is_pv: bool,
@@ -68,6 +60,52 @@ struct Heuristics {
     // diagnostics counters
     lmr_trials: u64,
     lmr_applied: u64,
+}
+
+struct EvalMoveGuard<'a, T: Evaluator + ?Sized> {
+    evaluator: &'a T,
+    active: bool,
+}
+
+impl<'a, T: Evaluator + ?Sized> EvalMoveGuard<'a, T> {
+    fn new(evaluator: &'a T, pos: &Position, mv: crate::shogi::Move) -> Self {
+        evaluator.on_do_move(pos, mv);
+        Self {
+            evaluator,
+            active: true,
+        }
+    }
+}
+
+impl<'a, T: Evaluator + ?Sized> Drop for EvalMoveGuard<'a, T> {
+    fn drop(&mut self) {
+        if self.active {
+            self.evaluator.on_undo_move();
+        }
+    }
+}
+
+struct EvalNullGuard<'a, T: Evaluator + ?Sized> {
+    evaluator: &'a T,
+    active: bool,
+}
+
+impl<'a, T: Evaluator + ?Sized> EvalNullGuard<'a, T> {
+    fn new(evaluator: &'a T, pos: &Position) -> Self {
+        evaluator.on_do_null_move(pos);
+        Self {
+            evaluator,
+            active: true,
+        }
+    }
+}
+
+impl<'a, T: Evaluator + ?Sized> Drop for EvalNullGuard<'a, T> {
+    fn drop(&mut self) {
+        if self.active {
+            self.evaluator.on_undo_null_move();
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -122,37 +160,31 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     }
 
     /// Quiescence search (captures + checks + promising promotions only)
-    fn qsearch(&self, args: QSearchArgs) -> i32 {
-        let QSearchArgs {
-            pos,
-            mut alpha,
-            beta,
-            limits,
-            start_time,
-            nodes,
-            seldepth,
-            ply,
-        } = args;
-        // Hard recursion guard to prevent stack overflow in extreme positions
+    fn qsearch(
+        &self,
+        pos: &Position,
+        mut alpha: i32,
+        beta: i32,
+        ctx: &mut SearchContext,
+        ply: u32,
+    ) -> i32 {
         if (ply as u16) >= crate::search::constants::MAX_QUIESCE_DEPTH {
             return alpha;
         }
-        // Basic time check
-        if let Some(limit) = limits.time_limit() {
-            if start_time.elapsed() >= limit {
+        if let Some(limit) = ctx.limits.time_limit() {
+            if ctx.start_time.elapsed() >= limit {
                 return alpha;
             }
         }
-        if Self::should_stop(limits) {
+        if Self::should_stop(ctx.limits) {
             return alpha;
         }
 
-        *nodes += 1;
-        if ply > *seldepth {
-            *seldepth = ply;
+        *ctx.nodes += 1;
+        if ply > *ctx.seldepth {
+            *ctx.seldepth = ply;
         }
 
-        // If in check, generate full legal moves (evasion qsearch)
         if pos.is_in_check() {
             let mg = MoveGenerator::new();
             let Ok(list) = mg.generate_all(pos) else {
@@ -165,17 +197,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
                 has_legal = true;
                 let mut child = pos.clone();
-                child.do_move(mv);
-                let sc = -self.qsearch(QSearchArgs {
-                    pos: &child,
-                    alpha: -beta,
-                    beta: -alpha,
-                    limits,
-                    start_time,
-                    nodes,
-                    seldepth,
-                    ply: ply + 1,
-                });
+                let sc = {
+                    let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                    child.do_move(mv);
+                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+                };
                 if sc >= beta {
                     return sc;
                 }
@@ -189,7 +215,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return alpha;
         }
 
-        // Stand pat
         let stand_pat = self.evaluator.evaluate(pos);
         if stand_pat >= beta {
             return stand_pat;
@@ -198,23 +223,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             alpha = stand_pat;
         }
 
-        // Generate capture moves
         let mg = MoveGenerator::new();
         let Ok(captures) = mg.generate_captures(pos) else {
             return alpha;
         };
 
-        // Basic delta pruning for captures（params管理）
-        // QS_MARGIN_CAPTURE / QS_PROMOTE_BONUS を利用
-
-        // Score captures by SEE (descending)
         let mut caps: Vec<(crate::shogi::Move, i32)> =
             captures.as_slice().iter().copied().map(|m| (m, pos.see(m))).collect();
         caps.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-        // First search good captures (SEE >= 0)
         for (mv, _see) in caps.iter().copied().filter(|&(_, s)| s >= 0) {
-            // Delta pruning: if even best-case can't raise alpha, skip
             let captured_val = mv
                 .captured_piece_type()
                 .map(|pt| crate::shogi::piece_constants::SEE_PIECE_VALUES[0][pt as usize])
@@ -225,17 +243,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
 
             let mut child = pos.clone();
-            child.do_move(mv);
-            let sc = -self.qsearch(QSearchArgs {
-                pos: &child,
-                alpha: -beta,
-                beta: -alpha,
-                limits,
-                start_time,
-                nodes,
-                seldepth,
-                ply: ply + 1,
-            });
+            let sc = {
+                let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                child.do_move(mv);
+                -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+            };
             if sc >= beta {
                 return sc;
             }
@@ -244,7 +256,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        // Then try quiet checking moves (limit count to keep qsearch bounded)
         let Ok(quiet) = mg.generate_quiet(pos) else {
             return alpha;
         };
@@ -256,17 +267,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if pos.gives_check(mv) {
                 tried_checks += 1;
                 let mut child = pos.clone();
-                child.do_move(mv);
-                let sc = -self.qsearch(QSearchArgs {
-                    pos: &child,
-                    alpha: -beta,
-                    beta: -alpha,
-                    limits,
-                    start_time,
-                    nodes,
-                    seldepth,
-                    ply: ply + 1,
-                });
+                let sc = {
+                    let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                    child.do_move(mv);
+                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+                };
                 if sc >= beta {
                     return sc;
                 }
@@ -276,9 +281,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        // Finally, (optionally) try bad captures if they might still raise alpha
         for (mv, _see) in caps.into_iter().filter(|&(_, s)| s < 0) {
-            // Only consider if it gives check or captures a high-value piece
             let captured_val = mv
                 .captured_piece_type()
                 .map(|pt| crate::shogi::piece_constants::SEE_PIECE_VALUES[0][pt as usize])
@@ -287,17 +290,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 continue;
             }
             let mut child = pos.clone();
-            child.do_move(mv);
-            let sc = -self.qsearch(QSearchArgs {
-                pos: &child,
-                alpha: -beta,
-                beta: -alpha,
-                limits,
-                start_time,
-                nodes,
-                seldepth,
-                ply: ply + 1,
-            });
+            let sc = {
+                let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                child.do_move(mv);
+                -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+            };
             if sc >= beta {
                 return sc;
             }
@@ -309,17 +306,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         alpha
     }
 
-    /// PVSなしの基本Negamax αβ。内部ノードの順序付けを簡易実装。
-    fn alphabeta(&self, args: ABArgs) -> (i32, Option<crate::shogi::Move>) {
+    /// PVS（先手フル窓＋後手null-window再探索）付きの Negamax αβ。
+    fn alphabeta(
+        &self,
+        args: ABArgs,
+        ctx: &mut SearchContext,
+    ) -> (i32, Option<crate::shogi::Move>) {
         let ABArgs {
             pos,
             depth,
             mut alpha,
             beta,
-            limits,
-            start_time,
-            nodes,
-            seldepth,
             ply,
             is_pv,
             stack,
@@ -334,30 +331,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (eval, None);
         }
         // Basic time check
-        if let Some(limit) = limits.time_limit() {
-            if start_time.elapsed() >= limit {
+        if let Some(limit) = ctx.limits.time_limit() {
+            if ctx.start_time.elapsed() >= limit {
                 let eval = self.evaluator.evaluate(pos);
                 return (eval, None);
             }
         }
-        if Self::should_stop(limits) {
+        if Self::should_stop(ctx.limits) {
             return (0, None);
         }
-        *nodes += 1;
-        if ply > *seldepth {
-            *seldepth = ply;
+        *ctx.nodes += 1;
+        if ply > *ctx.seldepth {
+            *ctx.seldepth = ply;
         }
         if depth <= 0 {
-            let qs = self.qsearch(QSearchArgs {
-                pos,
-                alpha,
-                beta,
-                limits,
-                start_time,
-                nodes,
-                seldepth,
-                ply,
-            });
+            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
             return (qs, None);
         }
 
@@ -390,16 +378,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         // Razor: depth==1 quick qsearch probe
         if dynp::razor_enabled() && depth == 1 && !pos.is_in_check() {
-            let r = self.qsearch(QSearchArgs {
-                pos,
-                alpha,
-                beta: alpha + 1,
-                limits,
-                start_time,
-                nodes,
-                seldepth,
-                ply,
-            });
+            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply);
             if r <= alpha {
                 return (r, None);
             }
@@ -427,33 +406,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     let r = NMP_BASE_R + (depth / 4) + bonus;
                     let r = r.min(depth - 1); // 下限確保
                                               // do null move
-                    let mut child = pos.clone();
-                    // Evaluator hook（必要なら）
-                    self.evaluator.on_do_null_move(&child);
-                    let undo_null = child.do_null_move();
-                    stack[ply as usize].null_move = true;
-                    let (sc, _) = self.alphabeta(ABArgs {
-                        pos: &child,
-                        depth: depth - 1 - r,
-                        alpha: -(beta),
-                        beta: -(beta - 1),
-                        limits,
-                        start_time,
-                        nodes,
-                        seldepth,
-                        ply: ply + 1,
-                        is_pv: false,
-                        stack,
-                        heur,
-                        tt_hits,
-                        beta_cuts,
-                        lmr_counter,
-                    });
-                    // undo
-                    let mut child2 = child; // move child
-                    child2.undo_null_move(undo_null);
-                    stack[ply as usize].null_move = false;
-                    let score = -sc;
+                    let score = {
+                        let _guard = EvalNullGuard::new(self.evaluator.as_ref(), pos);
+                        let mut child = pos.clone();
+                        let undo_null = child.do_null_move();
+                        stack[ply as usize].null_move = true;
+                        let (sc, _) = self.alphabeta(
+                            ABArgs {
+                                pos: &child,
+                                depth: depth - 1 - r,
+                                alpha: -(beta),
+                                beta: -(beta - 1),
+                                ply: ply + 1,
+                                is_pv: false,
+                                stack,
+                                heur,
+                                tt_hits,
+                                beta_cuts,
+                                lmr_counter,
+                            },
+                            ctx,
+                        );
+                        let mut child2 = child;
+                        child2.undo_null_move(undo_null);
+                        stack[ply as usize].null_move = false;
+                        -sc
+                    };
                     if score >= beta {
                         return (score, None);
                     }
@@ -500,23 +478,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             && (!tt_depth_ok || tt_hint.is_none())
         {
             let iid_depth = depth - 2;
-            let (_s, _mv) = self.alphabeta(ABArgs {
-                pos,
-                depth: iid_depth,
-                alpha,
-                beta,
-                limits,
-                start_time,
-                nodes,
-                seldepth,
-                ply,
-                is_pv: false,
-                stack,
-                heur,
-                tt_hits,
-                beta_cuts,
-                lmr_counter,
-            });
+            let (_s, _mv) = self.alphabeta(
+                ABArgs {
+                    pos,
+                    depth: iid_depth,
+                    alpha,
+                    beta,
+                    ply,
+                    is_pv: false,
+                    stack,
+                    heur,
+                    tt_hits,
+                    beta_cuts,
+                    lmr_counter,
+                },
+                ctx,
+            );
             // re-probe TT for hint
             if let Some(tt) = &self.tt {
                 if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
@@ -535,26 +512,28 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         continue;
                     }
                     let mut child = pos.clone();
-                    child.do_move(mv);
-                    // 子は [-T, -T+1] のナロウ窓で叩く
-                    let (sc, _) = self.alphabeta(ABArgs {
-                        pos: &child,
-                        depth: depth - 2,
-                        alpha: -threshold,
-                        beta: -threshold + 1,
-                        limits,
-                        start_time,
-                        nodes,
-                        seldepth,
-                        ply: ply + 1,
-                        is_pv: false,
-                        stack,
-                        heur,
-                        tt_hits,
-                        beta_cuts,
-                        lmr_counter,
-                    });
-                    let parent_sc = -sc;
+                    let parent_sc = {
+                        let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                        child.do_move(mv);
+                        // 子は [-T, -T+1] のナロウ窓で叩く
+                        let (sc, _) = self.alphabeta(
+                            ABArgs {
+                                pos: &child,
+                                depth: depth - 2,
+                                alpha: -threshold,
+                                beta: -threshold + 1,
+                                ply: ply + 1,
+                                is_pv: false,
+                                stack,
+                                heur,
+                                tt_hits,
+                                beta_cuts,
+                                lmr_counter,
+                            },
+                            ctx,
+                        );
+                        -sc
+                    };
                     if parent_sc >= threshold {
                         return (parent_sc, Some(mv));
                     }
@@ -564,16 +543,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         let mg = MoveGenerator::new();
         let Ok(list) = mg.generate_all(pos) else {
-            let qs = self.qsearch(QSearchArgs {
-                pos,
-                alpha,
-                beta,
-                limits,
-                start_time,
-                nodes,
-                seldepth,
-                ply,
-            });
+            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
             return (qs, None);
         };
         let mut moves: Vec<(crate::shogi::Move, i32)> = list
@@ -669,8 +639,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     continue;
                 }
             }
-            let mut child = pos.clone();
-            child.do_move(mv);
             // LMR: 非王手・非良捕獲・moveno>=3 の静止手を減深（PV/王手/improvingで調整）
             let mut next_depth = depth - 1;
             if depth >= 3 && moveno >= 3 && is_quiet && !is_good_capture {
@@ -705,67 +673,72 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             // 内部PVS: 先頭手フル、以降はnull-window→必要時フル再探索
-            let score = if !first_move_done {
-                let (sc, _) = self.alphabeta(ABArgs {
-                    pos: &child,
-                    depth: next_depth,
-                    alpha: -beta,
-                    beta: -alpha,
-                    limits,
-                    start_time,
-                    nodes,
-                    seldepth,
-                    ply: ply + 1,
-                    is_pv: true,
-                    stack,
-                    heur,
-                    tt_hits,
-                    beta_cuts,
-                    lmr_counter,
-                });
-                first_move_done = true;
-                -sc
-            } else {
-                let (sc_nw, _) = self.alphabeta(ABArgs {
-                    pos: &child,
-                    depth: next_depth,
-                    alpha: -(alpha + 1),
-                    beta: -alpha,
-                    limits,
-                    start_time,
-                    nodes,
-                    seldepth,
-                    ply: ply + 1,
-                    is_pv: false,
-                    stack,
-                    heur,
-                    tt_hits,
-                    beta_cuts,
-                    lmr_counter,
-                });
-                let mut s = -sc_nw;
-                if s > alpha && s < beta {
-                    let (sc_fw, _) = self.alphabeta(ABArgs {
-                        pos: &child,
-                        depth: next_depth,
-                        alpha: -beta,
-                        beta: -alpha,
-                        limits,
-                        start_time,
-                        nodes,
-                        seldepth,
-                        ply: ply + 1,
-                        is_pv: true,
-                        stack,
-                        heur,
-                        tt_hits,
-                        beta_cuts,
-                        lmr_counter,
-                    });
-                    s = -sc_fw;
+            let pv_move = !first_move_done;
+            let score = {
+                let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                let mut child = pos.clone();
+                child.do_move(mv);
+                if pv_move {
+                    let (sc, _) = self.alphabeta(
+                        ABArgs {
+                            pos: &child,
+                            depth: next_depth,
+                            alpha: -beta,
+                            beta: -alpha,
+                            ply: ply + 1,
+                            is_pv: true,
+                            stack,
+                            heur,
+                            tt_hits,
+                            beta_cuts,
+                            lmr_counter,
+                        },
+                        ctx,
+                    );
+                    -sc
+                } else {
+                    let (sc_nw, _) = self.alphabeta(
+                        ABArgs {
+                            pos: &child,
+                            depth: next_depth,
+                            alpha: -(alpha + 1),
+                            beta: -alpha,
+                            ply: ply + 1,
+                            is_pv: false,
+                            stack,
+                            heur,
+                            tt_hits,
+                            beta_cuts,
+                            lmr_counter,
+                        },
+                        ctx,
+                    );
+                    let mut s = -sc_nw;
+                    if s > alpha && s < beta {
+                        let (sc_fw, _) = self.alphabeta(
+                            ABArgs {
+                                pos: &child,
+                                depth: next_depth,
+                                alpha: -beta,
+                                beta: -alpha,
+                                ply: ply + 1,
+                                is_pv: true,
+                                stack,
+                                heur,
+                                tt_hits,
+                                beta_cuts,
+                                lmr_counter,
+                            },
+                            ctx,
+                        );
+                        s = -sc_fw;
+                    }
+                    s
                 }
-                s
             };
+            if pv_move {
+                first_move_done = true;
+            }
             if score > best {
                 best = score;
                 best_mv = Some(mv);
@@ -791,16 +764,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
         if best == i32::MIN / 2 {
-            let qs = self.qsearch(QSearchArgs {
-                pos,
-                alpha,
-                beta,
-                limits,
-                start_time,
-                nodes,
-                seldepth,
-                ply,
-            });
+            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
             // 深さ0扱いのためTT保存は行わない
             (qs, None)
         } else {
@@ -886,27 +850,33 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         let mut first_used = false;
         let t0 = Instant::now();
+        let mut applied_moves: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
         while d > 0 {
             let mv = if !first_used {
                 first
             } else {
-                let (_sc, mv_opt) = self.alphabeta(ABArgs {
-                    pos: &pos,
-                    depth: d,
-                    alpha: i32::MIN / 2,
-                    beta: i32::MAX / 2,
+                let mut ctx = SearchContext {
                     limits,
                     start_time: &t0,
                     nodes,
                     seldepth: &mut seldepth_dummy,
-                    ply: 0,
-                    is_pv: true,
-                    stack: &mut stack,
-                    heur: &mut heur,
-                    tt_hits: &mut _tt_hits,
-                    beta_cuts: &mut _beta_cuts,
-                    lmr_counter: &mut _lmr_counter,
-                });
+                };
+                let (_sc, mv_opt) = self.alphabeta(
+                    ABArgs {
+                        pos: &pos,
+                        depth: d,
+                        alpha: i32::MIN / 2,
+                        beta: i32::MAX / 2,
+                        ply: 0,
+                        is_pv: true,
+                        stack: &mut stack,
+                        heur: &mut heur,
+                        tt_hits: &mut _tt_hits,
+                        beta_cuts: &mut _beta_cuts,
+                        lmr_counter: &mut _lmr_counter,
+                    },
+                    &mut ctx,
+                );
                 match mv_opt {
                     Some(m) => m,
                     None => break,
@@ -914,8 +884,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             };
             first_used = true;
             pv.push(mv);
+            self.evaluator.on_do_move(&pos, mv);
+            applied_moves.push(mv);
             pos.do_move(mv);
             d -= 1;
+        }
+        for _ in applied_moves.iter() {
+            self.evaluator.on_undo_move();
         }
         pv
     }
@@ -945,7 +920,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut stats_hint_exists: u64 = 0;
         let mut stats_hint_used: u64 = 0;
 
+        self.evaluator.on_set_position(root);
+
         let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
+        let mut final_depth_reached: u8 = 0;
+        let mut final_seldepth_reached: Option<u8> = None;
+        let mut last_nodes_for_line: u64 = 0;
+        let mut last_time_for_line: u64 = 0;
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
                 break;
@@ -999,9 +980,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut _local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
             let mut depth_hint_exists: u64 = 0;
             let mut depth_hint_used: u64 = 0;
-            let mut last_nodes_for_line = nodes;
-            let mut last_time_for_line = t0.elapsed().as_millis() as u64;
-
             for pv_idx in 1..=k {
                 // Aspiration window per PV head
                 let mut alpha = if d == 1 {
@@ -1052,67 +1030,85 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             cb(InfoEvent::CurrMove { mv, number });
                         }
                         let mut child = root.clone();
-                        child.do_move(mv);
-                        // Root-level PVS: first move full window, others null-window then re-search if needed
-                        let score = if idx == 0 {
-                            let (sc, _) = self.alphabeta(ABArgs {
-                                pos: &child,
-                                depth: d - 1,
-                                alpha: -beta,
-                                beta: -alpha,
-                                limits,
-                                start_time: &t0,
-                                nodes: &mut nodes,
-                                seldepth: &mut seldepth,
-                                ply: 1,
-                                is_pv: true,
-                                stack: &mut stack,
-                                heur: &mut heur,
-                                tt_hits: &mut tt_hits,
-                                beta_cuts: &mut beta_cuts,
-                                lmr_counter: &mut lmr_counter,
-                            });
-                            -sc
-                        } else {
-                            let (sc_nw, _) = self.alphabeta(ABArgs {
-                                pos: &child,
-                                depth: d - 1,
-                                alpha: -(alpha + 1),
-                                beta: -alpha,
-                                limits,
-                                start_time: &t0,
-                                nodes: &mut nodes,
-                                seldepth: &mut seldepth,
-                                ply: 1,
-                                is_pv: false,
-                                stack: &mut stack,
-                                heur: &mut heur,
-                                tt_hits: &mut tt_hits,
-                                beta_cuts: &mut beta_cuts,
-                                lmr_counter: &mut lmr_counter,
-                            });
-                            let mut s = -sc_nw;
-                            if s > alpha && s < beta {
-                                let (sc_fw, _) = self.alphabeta(ABArgs {
-                                    pos: &child,
-                                    depth: d - 1,
-                                    alpha: -beta,
-                                    beta: -alpha,
+                        let score = {
+                            let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
+                            child.do_move(mv);
+                            // Root-level PVS: first move full window, others null-window then re-search if needed
+                            if idx == 0 {
+                                let mut search_ctx = SearchContext {
                                     limits,
                                     start_time: &t0,
                                     nodes: &mut nodes,
                                     seldepth: &mut seldepth,
-                                    ply: 1,
-                                    is_pv: true,
-                                    stack: &mut stack,
-                                    heur: &mut heur,
-                                    tt_hits: &mut tt_hits,
-                                    beta_cuts: &mut beta_cuts,
-                                    lmr_counter: &mut lmr_counter,
-                                });
-                                s = -sc_fw;
+                                };
+                                let (sc, _) = self.alphabeta(
+                                    ABArgs {
+                                        pos: &child,
+                                        depth: d - 1,
+                                        alpha: -beta,
+                                        beta: -alpha,
+                                        ply: 1,
+                                        is_pv: true,
+                                        stack: &mut stack,
+                                        heur: &mut heur,
+                                        tt_hits: &mut tt_hits,
+                                        beta_cuts: &mut beta_cuts,
+                                        lmr_counter: &mut lmr_counter,
+                                    },
+                                    &mut search_ctx,
+                                );
+                                -sc
+                            } else {
+                                let mut search_ctx_nw = SearchContext {
+                                    limits,
+                                    start_time: &t0,
+                                    nodes: &mut nodes,
+                                    seldepth: &mut seldepth,
+                                };
+                                let (sc_nw, _) = self.alphabeta(
+                                    ABArgs {
+                                        pos: &child,
+                                        depth: d - 1,
+                                        alpha: -(alpha + 1),
+                                        beta: -alpha,
+                                        ply: 1,
+                                        is_pv: false,
+                                        stack: &mut stack,
+                                        heur: &mut heur,
+                                        tt_hits: &mut tt_hits,
+                                        beta_cuts: &mut beta_cuts,
+                                        lmr_counter: &mut lmr_counter,
+                                    },
+                                    &mut search_ctx_nw,
+                                );
+                                let mut s = -sc_nw;
+                                if s > alpha && s < beta {
+                                    let mut search_ctx_fw = SearchContext {
+                                        limits,
+                                        start_time: &t0,
+                                        nodes: &mut nodes,
+                                        seldepth: &mut seldepth,
+                                    };
+                                    let (sc_fw, _) = self.alphabeta(
+                                        ABArgs {
+                                            pos: &child,
+                                            depth: d - 1,
+                                            alpha: -beta,
+                                            beta: -alpha,
+                                            ply: 1,
+                                            is_pv: true,
+                                            stack: &mut stack,
+                                            heur: &mut heur,
+                                            tt_hits: &mut tt_hits,
+                                            beta_cuts: &mut beta_cuts,
+                                            lmr_counter: &mut lmr_counter,
+                                        },
+                                        &mut search_ctx_fw,
+                                    );
+                                    s = -sc_fw;
+                                }
+                                s
                             }
-                            s
                         };
                         if score > local_best {
                             local_best = score;
@@ -1266,6 +1262,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stats_hint_used = depth_hint_used;
             // この深さのMultiPV行を最終結果候補として保持
             final_lines = Some(depth_lines);
+            final_depth_reached = d as u8;
+            let capped_seldepth = seldepth.min(u8::MAX as u32) as u8;
+            final_seldepth_reached = Some(capped_seldepth);
 
             let mut lead_ms = 10u64;
             if let Some(deadlines) = limits.fallback_deadlines {
@@ -1300,6 +1299,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ..Default::default()
         };
         stats.elapsed = t0.elapsed();
+        stats.depth = final_depth_reached;
+        stats.seldepth = final_seldepth_reached;
         stats.tt_hits = Some(cum_tt_hits);
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);
@@ -1377,6 +1378,7 @@ mod tests {
     use crate::shogi::{Color, Piece, PieceType};
     use crate::usi::parse_usi_square;
     use crate::Position;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn qsearch_detects_mate_when_evasion_missing() {
@@ -1408,16 +1410,14 @@ mod tests {
         let mut nodes = 0_u64;
         let mut seldepth = 0_u32;
 
-        let score = backend.qsearch(QSearchArgs {
-            pos: &pos,
-            alpha: -SEARCH_INF,
-            beta: SEARCH_INF,
+        let mut ctx = SearchContext {
             limits: &limits,
             start_time: &start_time,
             nodes: &mut nodes,
             seldepth: &mut seldepth,
-            ply: 0,
-        });
+        };
+
+        let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0);
 
         assert_eq!(score, mate_score(0, false));
     }
@@ -1449,5 +1449,107 @@ mod tests {
                 assert!(ms <= result.stats.elapsed.as_millis() as u64);
             }
         }
+    }
+
+    struct RecordingEvaluator {
+        inner: MaterialEvaluator,
+        set_position: AtomicUsize,
+        do_move: AtomicUsize,
+        undo_move: AtomicUsize,
+        do_null_move: AtomicUsize,
+        undo_null_move: AtomicUsize,
+    }
+
+    impl Default for RecordingEvaluator {
+        fn default() -> Self {
+            Self {
+                inner: MaterialEvaluator,
+                set_position: AtomicUsize::new(0),
+                do_move: AtomicUsize::new(0),
+                undo_move: AtomicUsize::new(0),
+                do_null_move: AtomicUsize::new(0),
+                undo_null_move: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl RecordingEvaluator {
+        fn counts(&self) -> HookCallCounts {
+            HookCallCounts {
+                set_position: self.set_position.load(Ordering::Relaxed),
+                do_move: self.do_move.load(Ordering::Relaxed),
+                undo_move: self.undo_move.load(Ordering::Relaxed),
+                do_null_move: self.do_null_move.load(Ordering::Relaxed),
+                undo_null_move: self.undo_null_move.load(Ordering::Relaxed),
+            }
+        }
+    }
+
+    struct HookCallCounts {
+        set_position: usize,
+        do_move: usize,
+        undo_move: usize,
+        do_null_move: usize,
+        undo_null_move: usize,
+    }
+
+    impl Evaluator for RecordingEvaluator {
+        fn evaluate(&self, pos: &Position) -> i32 {
+            self.inner.evaluate(pos)
+        }
+
+        fn on_set_position(&self, pos: &Position) {
+            self.set_position.fetch_add(1, Ordering::Relaxed);
+            self.inner.on_set_position(pos);
+        }
+
+        fn on_do_move(&self, pre_pos: &Position, mv: crate::shogi::Move) {
+            self.do_move.fetch_add(1, Ordering::Relaxed);
+            self.inner.on_do_move(pre_pos, mv);
+        }
+
+        fn on_undo_move(&self) {
+            self.undo_move.fetch_add(1, Ordering::Relaxed);
+            self.inner.on_undo_move();
+        }
+
+        fn on_do_null_move(&self, pre_pos: &Position) {
+            self.do_null_move.fetch_add(1, Ordering::Relaxed);
+            self.inner.on_do_null_move(pre_pos);
+        }
+
+        fn on_undo_null_move(&self) {
+            self.undo_null_move.fetch_add(1, Ordering::Relaxed);
+            self.inner.on_undo_null_move();
+        }
+    }
+
+    #[test]
+    fn evaluator_hooks_balance_for_classic_backend() {
+        let evaluator = Arc::new(RecordingEvaluator::default());
+        let backend = ClassicBackend::new(Arc::clone(&evaluator));
+        // 分岐数を絞った静かな局面（両玉と金のみ）でフック呼び出しの整合性を確認する。
+        // 深さ4の探索でも合法手が少なく、デバッグビルドでも短時間で完走する。
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::Gold, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Gold, Color::White));
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let limits = SearchLimitsBuilder::default().depth(4).build();
+
+        let _ = backend.think_blocking(&pos, &limits, None);
+
+        let counts = evaluator.counts();
+        assert!(counts.set_position >= 1, "expected on_set_position to be called");
+        assert!(counts.do_move > 0, "expected on_do_move to be used during search");
+        assert_eq!(counts.do_move, counts.undo_move, "move hooks must balance");
+        assert_eq!(counts.do_null_move, counts.undo_null_move, "null-move hooks must balance");
     }
 }
