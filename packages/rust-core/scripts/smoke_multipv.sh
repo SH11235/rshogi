@@ -54,9 +54,9 @@ echo quit > "$CTRL_PIPE"
 wait $ENG_PID || true
 
 bm=$(rg -n "^bestmove " "$LOG" -r '$0' | tail -n1 | awk '{print $2}')
-# Align with finalize_select's chosen final move to avoid timing mismatches
+# Align with finalize_select/fast_select の最終選択と比較（fast finalize 対応）
 fsel=$( {
-  rg -n "finalize_select .* move=" "$LOG" -r '$0' \
+  rg -n "(finalize_select|.*_fast_select) .* move=" "$LOG" -r '$0' \
     | tail -n1 \
     | sed -E 's/.* move=([^ ]+).*/\1/'
 } || true )
@@ -67,7 +67,7 @@ if [[ -z "${bm:-}" ]]; then
 fi
 
 if [[ -z "${fsel:-}" ]]; then
-  echo "[smoke] WARN: finalize_select not found; falling back to bestmove" >&2
+  echo "[smoke] WARN: finalize_select/fast_select not found; falling back to bestmove" >&2
   fsel="$bm"
 fi
 
