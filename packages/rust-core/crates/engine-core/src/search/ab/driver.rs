@@ -50,6 +50,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
     }
 
+    pub fn with_profile_apply_defaults(evaluator: Arc<E>, profile: SearchProfile) -> Self {
+        profile.apply_runtime_defaults();
+        Self::with_profile(evaluator, profile)
+    }
+
     pub fn with_profile_and_tt(
         evaluator: Arc<E>,
         tt: Arc<TranspositionTable>,
@@ -60,6 +65,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             tt: Some(tt),
             profile,
         }
+    }
+
+    pub fn with_profile_and_tt_apply_defaults(
+        evaluator: Arc<E>,
+        tt: Arc<TranspositionTable>,
+        profile: SearchProfile,
+    ) -> Self {
+        profile.apply_runtime_defaults();
+        Self::with_profile_and_tt(evaluator, tt, profile)
     }
 
     pub(super) fn should_stop(limits: &SearchLimits) -> bool {

@@ -3,9 +3,44 @@ use std::error::Error as StdError;
 
 use engine_core::engine::controller::EngineType;
 use engine_core::evaluation::nnue::error::NNUEError;
+use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
 use crate::state::{EngineState, UsiOptions};
+
+fn profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
+    match engine_type {
+        EngineType::Material => SearchProfile::basic_material(),
+        EngineType::Enhanced => SearchProfile::enhanced_material(),
+        EngineType::Nnue => SearchProfile::basic_nnue(),
+        EngineType::EnhancedNnue => SearchProfile::enhanced_nnue(),
+        EngineType::Stub => SearchProfile::basic_material(),
+    }
+}
+
+fn current_profile(state: &EngineState) -> Option<SearchProfile> {
+    state
+        .engine
+        .lock()
+        .ok()
+        .map(|eng| profile_for_engine_type(eng.get_engine_type()))
+}
+
+fn profile_allows_iid(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.prune.enable_iid).unwrap_or(true)
+}
+
+fn profile_allows_probcut(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.prune.enable_probcut).unwrap_or(true)
+}
+
+fn profile_allows_razor(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.tuning.enable_razor).unwrap_or(true)
+}
+
+fn profile_allows_qs_checks(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.tuning.enable_qs_checks).unwrap_or(true)
+}
 
 pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("id name RustShogi USI (core)");
@@ -185,6 +220,9 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "QSearchChecks" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_qs_checks(state) {
+                    info_string("qsearch_note=Quiet-check extensions are disabled by the active SearchProfile");
+                }
                 engine_core::search::params::set_qs_checks_enabled(on);
                 info_string(if on {
                     "qsearch_checks=On"
@@ -273,6 +311,11 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "SearchParams.Razor" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_razor(state) {
+                    info_string(
+                        "pruning_note=Razor pruning is disabled by the active SearchProfile",
+                    );
+                }
                 engine_core::search::params::set_razor_enabled(on);
             }
         }
@@ -285,12 +328,18 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "SearchParams.EnableIID" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_iid(state) {
+                    info_string("pruning_note=IID is disabled by the active SearchProfile");
+                }
                 engine_core::search::params::set_iid_enabled(on);
             }
         }
         "SearchParams.EnableProbCut" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_probcut(state) {
+                    info_string("pruning_note=ProbCut is disabled by the active SearchProfile");
+                }
                 engine_core::search::params::set_probcut_enabled(on);
             }
         }
