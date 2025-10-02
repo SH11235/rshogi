@@ -357,9 +357,9 @@ impl Engine {
                 use crate::search::api::{AspirationOutcome, InfoEvent};
                 match evt {
                     InfoEvent::PV { line } => {
-                        stop_ctrl.publish_root_line(sid, root_hash, &line);
+                        stop_ctrl.publish_root_line(sid, root_hash, line.as_ref());
                         if let Some(cb) = &legacy_cb {
-                            cb(line.clone());
+                            cb(Arc::clone(&line));
                         }
                     }
                     InfoEvent::Depth { depth, seldepth } => {

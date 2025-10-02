@@ -202,13 +202,13 @@ pub fn limits_from_go(
     // Set up info callback for search progress reporting
     let multipv = opts.multipv.max(1);
     let stop_for_info = Arc::clone(&stop_flag);
-    let info_callback: InfoCallback = Arc::new(move |line: RootLine| {
+    let info_callback: InfoCallback = Arc::new(move |line: Arc<RootLine>| {
         if stop_for_info.load(Ordering::Relaxed) {
             return;
         }
         // Emit a unified PV info line via the adapter. We pass multipv>1 to
         // decide whether to include a multipv tag in the output for compatibility.
-        usi_adapter::emit_pv_line(&line, multipv > 1);
+        usi_adapter::emit_pv_line(line.as_ref(), multipv > 1);
     });
 
     // Set up info string callback for textual diagnostics

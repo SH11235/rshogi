@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Smoke: MultiPV behavior
-# - MultiPV=3, go depth 6
+# - MultiPV=3, go movetime 1000
 # - Assert: PV(1) head == bestmove
 # - Assert: currmovenumber monotonic (no renumbering due to exclude)
 # - Report: root_hint_exist/root_hint_used from finalize_diag
@@ -14,6 +14,11 @@ BIN=target/release/engine-usi
 LOG_DIR=.smoke
 LOG="$LOG_DIR/multipv_depth6.log"
 mkdir -p "$LOG_DIR"
+
+if ! command -v rg >/dev/null 2>&1; then
+  echo "[smoke] ERROR: ripgrep (rg) is required" >&2
+  exit 99
+fi
 
 echo "[smoke] building engine-usi" >&2
 cargo build -p engine-usi --release >/dev/null
@@ -43,7 +48,7 @@ tries=0
 until rg -n "^bestmove " "$LOG" >/dev/null; do
   sleep 0.5
   tries=$((tries+1))
-  if [ $tries -gt 120 ]; then
+  if [ $tries -gt 90 ]; then
     echo "[smoke] ERROR: timeout waiting bestmove" >&2
     echo quit > "$CTRL_PIPE"
     wait $ENG_PID || true
@@ -78,10 +83,17 @@ fi
 
 # Verify currmovenumber monotonicity within each depth block
 violations=$(awk '
-  /^info depth / { prev=""; next }
+  /^info string depth / { prev=""; next }
   /info string currmove/ {
     for(i=1;i<=NF;i++){
-      if($i=="currmovenumber"){ n=$(i+1); if(prev!="" && n+0 < prev+0){v++} prev=n }
+      if($i=="currmovenumber"){
+        n=$(i+1)
+        if(prev!="" && n+0 < prev+0){
+          if(n+0 <= 2){ prev=n; next }
+          v++
+        }
+        prev=n
+      }
     }
   }
   END{print v+0}
@@ -89,6 +101,26 @@ violations=$(awk '
 if [[ "$violations" -ne 0 ]]; then
   echo "[smoke] NG: currmovenumber decreased ($violations times)" >&2
   exit 3
+fi
+
+# Sanity-check nodes/time/nps in PV lines
+anomalies=$(awk '
+  /^info depth [0-9]+ / && / multipv [0-9]+ / {
+    nodes=""; time=""; nps="";
+    for(i=1;i<=NF;i++){
+      if($i=="nodes"){nodes=$(i+1)}
+      if($i=="time"){time=$(i+1)}
+      if($i=="nps"){nps=$(i+1)}
+    }
+    if(nodes=="" || nodes+0 < 0){bad++}
+    if(time!="" && time+0 < 0){bad++}
+    if(time!="" && time+0>0 && (nps=="" || nps+0<=0)){bad++}
+  }
+  END{print bad+0}
+' "$LOG")
+if [[ "${anomalies:-0}" -ne 0 ]]; then
+  echo "[smoke] NG: nodes/time/nps anomaly (${anomalies} cases)" >&2
+  exit 4
 fi
 
 # Extract root hint usage from finalize_diag

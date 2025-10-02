@@ -128,8 +128,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if Self::should_stop(limits) {
                 break;
             }
-            let mut last_nodes_for_line: u64 = nodes;
-            let mut last_time_for_line: u64 = t0.elapsed().as_millis() as u64;
             let mut seldepth: u32 = 0;
             // Build root move list for CurrMove events and basic ordering
             let mg = MoveGenerator::new();
@@ -167,6 +165,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
 
             let root_static_eval = self.evaluator.evaluate(root);
+            let root_static_eval_i16 =
+                root_static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
             // MultiPV（逐次選抜）
             let k = limits.multipv.max(1) as usize;
@@ -182,6 +182,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut depth_hint_exists: u64 = 0;
             let mut depth_hint_used: u64 = 0;
             for pv_idx in 1..=k {
+                if Self::should_stop(limits) {
+                    break;
+                }
                 // Aspiration window per PV head
                 let mut alpha = if d == 1 {
                     i32::MIN / 2
@@ -215,12 +218,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
                 loop {
+                    if Self::should_stop(limits) {
+                        break;
+                    }
                     if active_moves.is_empty() {
                         break;
                     }
                     let (old_alpha, old_beta) = (alpha, beta);
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
+                        if Self::should_stop(limits) {
+                            break;
+                        }
                         if let Some(limit) = limits.time_limit() {
                             if t0.elapsed() >= limit {
                                 break;
@@ -327,6 +336,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
 
+                    if Self::should_stop(limits) {
+                        break;
+                    }
                     if local_best <= old_alpha {
                         if let Some(cb) = info {
                             cb(InfoEvent::Aspiration {
@@ -408,23 +420,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                     let elapsed_ms_total = t0.elapsed().as_millis() as u64;
-                    let line_nodes = nodes.saturating_sub(last_nodes_for_line);
-                    let line_time_ms = elapsed_ms_total.saturating_sub(last_time_for_line);
-                    let line_nodes_opt = if line_nodes == 0 {
+                    let nps_opt = if elapsed_ms_total == 0 {
                         None
                     } else {
-                        Some(line_nodes)
-                    };
-                    let line_time_opt = if line_time_ms == 0 {
-                        None
-                    } else {
-                        Some(line_time_ms)
-                    };
-                    let nps_opt = match (line_nodes_opt, line_time_opt) {
-                        (Some(nodes_delta), Some(time_delta)) => {
-                            Some(nodes_delta.saturating_mul(1000).saturating_div(time_delta.max(1)))
-                        }
-                        _ => None,
+                        Some(nodes.saturating_mul(1000).saturating_div(elapsed_ms_total.max(1)))
                     };
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
@@ -435,30 +434,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         depth: d as u32,
                         seldepth: Some(seldepth.min(u8::MAX as u32) as u8),
                         pv,
-                        nodes: line_nodes_opt,
-                        time_ms: line_time_opt,
+                        nodes: Some(nodes),
+                        time_ms: Some(elapsed_ms_total),
                         nps: nps_opt,
                         exact_exhausted: false,
                         exhaust_reason: None,
                         mate_distance: None,
                     };
                     if let Some(cb) = info {
-                        cb(InfoEvent::PV { line: line.clone() });
+                        cb(InfoEvent::PV {
+                            line: Arc::new(line.clone()),
+                        });
                     }
                     depth_lines.push(line);
-                    last_nodes_for_line = nodes;
-                    last_time_for_line = elapsed_ms_total;
                     // TT保存は 1行目のみ（Exact, PV=true）
                     if pv_idx == 1 {
                         if let (Some(tt), Some(best_mv_root)) = (&self.tt, best) {
                             let node_type = NodeType::Exact;
                             let store_score =
-                                crate::search::common::adjust_mate_score_for_tt(best_score, 0);
+                                crate::search::common::adjust_mate_score_for_tt(best_score, 0)
+                                    .clamp(i16::MIN as i32, i16::MAX as i32)
+                                    as i16;
                             let mut args = crate::search::tt::TTStoreArgs::new(
                                 root.zobrist_hash,
                                 Some(best_mv_root),
-                                store_score as i16,
-                                root_static_eval as i16,
+                                store_score,
+                                root_static_eval_i16,
                                 d as u8,
                                 node_type,
                                 root.side_to_move,

@@ -25,7 +25,7 @@ pub enum InfoEvent {
         number: u32,
     },
     PV {
-        line: crate::search::types::RootLine,
+        line: Arc<crate::search::types::RootLine>,
     },
     Hashfull(u32),
     Aspiration {

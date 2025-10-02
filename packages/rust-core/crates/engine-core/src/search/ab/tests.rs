@@ -66,22 +66,39 @@ fn multipv_line_nodes_are_per_line() {
     let lines = result.lines.as_ref().expect("expected multipv lines to be present");
     assert!(lines.len() >= 2);
 
-    let total_line_nodes: u64 = lines.iter().filter_map(|l| l.nodes).sum();
-    assert!(total_line_nodes > 0, "line nodes should accumulate positive work");
-    assert!(
-        total_line_nodes <= result.stats.nodes,
-        "line nodes should not exceed total nodes"
-    );
+    let total_nodes = result.stats.nodes;
+    assert!(total_nodes > 0, "search should consume nodes");
+    let total_time_ms = result.stats.elapsed.as_millis() as u64;
 
-    for line in lines.iter() {
+    let first_line = &lines[0];
+    if let Some(n) = first_line.nodes {
+        assert!(n > 0);
+        assert!(n <= total_nodes);
+    }
+    if let Some(ms) = first_line.time_ms {
+        assert!(ms <= total_time_ms);
+    }
+
+    let mut prev_nodes = 0_u64;
+    let mut prev_time = 0_u64;
+    let mut last_reported_nodes = 0_u64;
+    let mut last_reported_time = 0_u64;
+    for (idx, line) in lines.iter().enumerate() {
         if let Some(n) = line.nodes {
-            assert!(n > 0, "each line should report positive nodes");
-            assert!(n <= result.stats.nodes);
+            assert!(n <= total_nodes, "line {idx} nodes exceed total nodes");
+            assert!(n >= prev_nodes, "line {idx} nodes regressed (non-monotonic)");
+            prev_nodes = n;
+            last_reported_nodes = n;
         }
         if let Some(ms) = line.time_ms {
-            assert!(ms <= result.stats.elapsed.as_millis() as u64);
+            assert!(ms <= total_time_ms, "line {idx} time exceeds total time");
+            assert!(ms >= prev_time, "line {idx} time regressed (non-monotonic)");
+            prev_time = ms;
+            last_reported_time = ms;
         }
     }
+    assert!(last_reported_nodes <= total_nodes);
+    assert!(last_reported_time <= total_time_ms);
 }
 
 #[test]
