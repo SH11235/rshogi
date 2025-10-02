@@ -620,8 +620,6 @@ fn test_do_null_move_undo_null_move() {
     assert_eq!(pos.ply, pos_after_move.ply);
 }
 
-// ========= Drop restriction tests (migrated from MovePicker tests) =========
-
 #[test]
 fn test_pawn_drop_restrictions() {
     // Test nifu (double pawn) restriction
@@ -825,8 +823,6 @@ fn test_knight_drop_last_two_ranks_restrictions() {
     let legal_drop = Move::drop(PieceType::Knight, parse_usi_square("5g").unwrap()); // 5g
     assert!(pos.is_legal_move(legal_drop), "White should be able to drop knight on rank 6");
 }
-
-// ========= Uchifuzume tests (migrated from MovePicker tests) =========
 
 #[test]
 fn test_uchifuzume_restriction() {
