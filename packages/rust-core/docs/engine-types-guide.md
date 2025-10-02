@@ -1,6 +1,6 @@
 # エンジンタイプ選択ガイド
 
-このドキュメントは、`EngineType` の選び方と `SearchProfile`/`SearchParams` の連携をまとめた最新ガイドです。すべての EngineType（Stub を除く）は `ClassicBackend` 上で動作し、評価器とプロファイルを組み合わせて性格付けしています。
+このドキュメントは、`EngineType` の選び方と `SearchProfile`/`SearchParams` の連携をまとめた最新ガイドです。すべての EngineType は `ClassicBackend` 上で動作し、評価器とプロファイルを組み合わせて性格付けしています。
 
 ---
 
@@ -8,7 +8,6 @@
 
 | EngineType | Evaluator | SearchProfile | 代表用途 | 備考 |
 |------------|-----------|---------------|----------|------|
-| Stub | StubBackend | ― | 移行期の非常用 | 近い将来削除予定（USI から非表示→撤去の段階を踏む） |
 | Material | MaterialEvaluator | `basic_material()` | デバッグ・テスト | 枝刈り最小 / 駒割り評価 |
 | Enhanced | MaterialEvaluator | `enhanced_material()` | 省メモリ・学習 | フル枝刈り + 駒割り評価 |
 | Nnue | NNUEEvaluatorProxy | `basic_nnue()` | 高速分析 | NNUE 評価 + 基本枝刈り |
@@ -61,12 +60,6 @@ Runtime で枝刈りを止めたいときは、例として `setoption name Sear
 - 駒割り評価 + 基本枝刈り。
 - デバッグや学習用途に最適。（低コストで挙動が追いやすい）
 
-### Stub（将来削除予定）
-- 移行期の非常手段として残置しているモック検索器。
-- ClassicBackend ソーク完了後に USI オプションから非表示→削除の段階を踏む予定。
-
----
-
 ## 4. シナリオ別推奨設定
 
 | シナリオ | 推奨 EngineType | 主なオプション例 |
@@ -93,6 +86,4 @@ Runtime で枝刈りを止めたいときは、例として `setoption name Sear
 
 1. EngineType と SearchProfile が 1:1 で対応し、切り替え時に `SearchParams` が既定値へ戻る。
 2. いつでも `setoption name SearchParams.*` で個別調整が可能だが、EngineType を変えたら再送が必要。
-3. Stub は非常用バックエンド。ClassicBackend が安定したら段階的に撤去する。
-
 迷ったら「EnhancedNnue + 十分な TT（≥256MB） + 必要な Threads（現状 1 thread 固定）」を基本形にし、用途に応じて Material / Enhanced / Nnue を選択してください。
