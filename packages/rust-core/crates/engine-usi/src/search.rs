@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use engine_core::search::limits::{FallbackDeadlines, SearchLimits, SearchLimitsBuilder};
+use engine_core::search::types::{InfoCallback, InfoStringCallback, RootLine};
 use engine_core::shogi::Color;
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
 use engine_core::usi::{create_position, move_to_usi};
@@ -108,7 +109,6 @@ pub fn limits_from_go(
     ponder_flag: Option<Arc<AtomicBool>>,
     stop_flag: Arc<AtomicBool>,
 ) -> SearchLimits {
-    use engine_core::search::types::{InfoCallback, InfoStringCallback};
     let builder = TimeParametersBuilder::new()
         .overhead_ms(opts.overhead_ms)
         .unwrap()
@@ -201,12 +201,11 @@ pub fn limits_from_go(
 
     // Set up info callback for search progress reporting
     let multipv = opts.multipv.max(1);
-    let info_callback: InfoCallback =
-        Arc::new(move |depth, score, nodes, elapsed, pv, node_type| {
-            // Emit a unified PV info line via the adapter. We pass multipv>1 to
-            // decide whether to include "multipv 1" in the output for compatibility.
-            usi_adapter::emit_pv_line(depth, score, nodes, elapsed, pv, node_type, multipv > 1);
-        });
+    let info_callback: InfoCallback = Arc::new(move |line: RootLine| {
+        // Emit a unified PV info line via the adapter. We pass multipv>1 to
+        // decide whether to include a multipv tag in the output for compatibility.
+        usi_adapter::emit_pv_line(&line, multipv > 1);
+    });
 
     // Set up info string callback for textual diagnostics
     let info_string_callback: InfoStringCallback = Arc::new(|msg: &str| {
@@ -386,10 +385,12 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             } else {
                 None
             };
+            state.deadline_near_notified = false;
         } else {
             // No meaningful time budget → clear deadlines
             state.deadline_hard = None;
             state.deadline_near = None;
+            state.deadline_near_notified = false;
         }
     }
 

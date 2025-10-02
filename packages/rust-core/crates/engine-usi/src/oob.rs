@@ -192,9 +192,10 @@ pub fn enforce_deadline(state: &mut EngineState) {
     let now = Instant::now();
 
     if let Some(nh) = state.deadline_near {
-        if now >= nh {
+        if now >= nh && !state.deadline_near_notified {
             // 近傍警告のみ（様子見）。必要なら fast finalize に切り替え可能。
             info_string("oob_deadline_nearhard_reached");
+            state.deadline_near_notified = true;
         }
     }
 
@@ -212,6 +213,7 @@ pub fn enforce_deadline(state: &mut EngineState) {
             // Clear deadlines
             state.deadline_hard = None;
             state.deadline_near = None;
+            state.deadline_near_notified = false;
         }
     }
 }
@@ -228,5 +230,6 @@ fn fast_finalize_no_detach(state: &mut EngineState, label: &str) {
     state.current_time_control = None;
     state.deadline_hard = None;
     state.deadline_near = None;
+    state.deadline_near_notified = false;
     state.notify_idle();
 }

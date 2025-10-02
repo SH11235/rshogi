@@ -691,6 +691,9 @@ mod tests {
 
     #[test]
     fn test_info_callback_cloning() {
+        use crate::search::types::RootLine;
+        use crate::shogi::Move;
+        use smallvec::SmallVec;
         use std::sync::atomic::{AtomicU64, Ordering};
 
         // Create a shared counter
@@ -698,10 +701,9 @@ mod tests {
         let counter_clone = counter.clone();
 
         // Create an info callback that increments the counter
-        let info_callback: InfoCallback =
-            Arc::new(move |_depth, _score, _nodes, _time, _pv, _extra| {
-                counter_clone.fetch_add(1, Ordering::Relaxed);
-            });
+        let info_callback: InfoCallback = Arc::new(move |_line| {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+        });
 
         // Create SearchLimits with the callback
         let limits1 = SearchLimits::builder().info_callback(info_callback).build();
@@ -714,11 +716,28 @@ mod tests {
         assert!(limits2.info_callback.is_some());
 
         // Call both callbacks and verify they share the same counter
+        let make_line = |depth: u32, nodes: Option<u64>, idx: u8| RootLine {
+            multipv_index: idx,
+            root_move: Move::null(),
+            score_internal: 0,
+            score_cp: 0,
+            bound: NodeType::Exact,
+            depth,
+            seldepth: Some(depth as u8),
+            pv: SmallVec::new(),
+            nodes,
+            time_ms: Some(1),
+            nps: Some(1),
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
         if let Some(cb1) = &limits1.info_callback {
-            cb1(1, 0, 100, Duration::from_millis(10), &[], NodeType::Exact);
+            cb1(make_line(1, Some(100), 1));
         }
         if let Some(cb2) = &limits2.info_callback {
-            cb2(2, 0, 200, Duration::from_millis(20), &[], NodeType::Exact);
+            cb2(make_line(2, Some(200), 2));
         }
 
         // Both callbacks should have incremented the same counter
