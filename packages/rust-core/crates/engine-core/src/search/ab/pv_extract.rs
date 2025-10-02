@@ -7,7 +7,8 @@ use crate::search::SearchLimits;
 use crate::Position;
 
 use super::driver::ClassicBackend;
-use super::pvs::{ABArgs, EvalMoveGuard, Heuristics, SearchContext};
+use super::ordering::{EvalMoveGuard, Heuristics};
+use super::pvs::{ABArgs, SearchContext};
 
 impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     pub(crate) fn reconstruct_root_pv_from_tt(
@@ -103,7 +104,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             pos.do_move(mv);
             d -= 1;
         }
-        drop(guard_stack);
+        while let Some(_guard) = guard_stack.pop() {}
         pv
     }
 }

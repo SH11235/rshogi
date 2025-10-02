@@ -1,15 +1,13 @@
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::params as dynp;
-use crate::search::params::{
-    NMP_BASE_R, NMP_BONUS_DELTA_BETA, NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH,
-};
 use crate::search::tt::TTProbe;
 use crate::search::types::SearchStack;
 use crate::search::SearchLimits;
 use crate::Position;
 
 use super::driver::ClassicBackend;
+use super::ordering::{self, EvalMoveGuard, Heuristics};
 use crate::search::types::NodeType;
 
 pub(crate) struct SearchContext<'a> {
@@ -46,49 +44,6 @@ pub(crate) struct ABArgs<'a> {
     pub(crate) tt_hits: &'a mut u64,
     pub(crate) beta_cuts: &'a mut u64,
     pub(crate) lmr_counter: &'a mut u64,
-}
-
-#[derive(Default)]
-pub(crate) struct Heuristics {
-    pub(crate) history: crate::search::history::ButterflyHistory,
-    pub(crate) counter: crate::search::history::CounterMoveHistory,
-    pub(crate) lmr_trials: u64,
-}
-
-#[must_use]
-pub(crate) struct EvalMoveGuard<'a, T: Evaluator + ?Sized> {
-    evaluator: &'a T,
-}
-
-impl<'a, T: Evaluator + ?Sized> EvalMoveGuard<'a, T> {
-    pub(crate) fn new(evaluator: &'a T, pos: &Position, mv: crate::shogi::Move) -> Self {
-        evaluator.on_do_move(pos, mv);
-        Self { evaluator }
-    }
-}
-
-impl<'a, T: Evaluator + ?Sized> Drop for EvalMoveGuard<'a, T> {
-    fn drop(&mut self) {
-        self.evaluator.on_undo_move();
-    }
-}
-
-#[must_use]
-pub(crate) struct EvalNullGuard<'a, T: Evaluator + ?Sized> {
-    evaluator: &'a T,
-}
-
-impl<'a, T: Evaluator + ?Sized> EvalNullGuard<'a, T> {
-    pub(crate) fn new(evaluator: &'a T, pos: &Position) -> Self {
-        evaluator.on_do_null_move(pos);
-        Self { evaluator }
-    }
-}
-
-impl<'a, T: Evaluator + ?Sized> Drop for EvalNullGuard<'a, T> {
-    fn drop(&mut self) {
-        self.evaluator.on_undo_null_move();
-    }
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
@@ -139,79 +94,28 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         alpha = a_md;
 
-        if self.profile.prune.enable_static_beta_pruning
-            && dynp::static_beta_enabled()
-            && depth <= 2
-            && !pos.is_in_check()
-        {
-            let margin = if depth == 1 {
-                dynp::sbp_margin_d1()
-            } else {
-                dynp::sbp_margin_d2()
-            };
-            if static_eval - margin >= beta {
-                return (static_eval, None);
-            }
+        if self.should_static_beta_prune(&self.profile.prune, depth, pos, beta, static_eval) {
+            return (static_eval, None);
         }
 
-        if self.profile.prune.enable_razor
-            && dynp::razor_enabled()
-            && depth == 1
-            && !pos.is_in_check()
-        {
-            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply);
-            if r <= alpha {
-                return (r, None);
-            }
+        if let Some(r) = self.razor_prune(&self.profile.prune, depth, pos, alpha, ctx, ply) {
+            return (r, None);
         }
 
-        if self.profile.prune.enable_nmp && dynp::nmp_enabled() {
-            let prev_null = if ply > 0 {
-                stack[(ply - 1) as usize].null_move
-            } else {
-                false
-            };
-            if depth >= NMP_MIN_DEPTH && !pos.is_in_check() && !prev_null {
-                let side = pos.side_to_move as usize;
-                let hand_sum: i32 = pos.hands[side].iter().map(|&c| c as i32).sum();
-                if hand_sum < NMP_HAND_SUM_DISABLE {
-                    let bonus = if static_eval - beta > NMP_BONUS_DELTA_BETA {
-                        1
-                    } else {
-                        0
-                    };
-                    let r = NMP_BASE_R + (depth / 4) + bonus;
-                    let r = r.min(depth - 1);
-                    let score = {
-                        let _guard = EvalNullGuard::new(self.evaluator.as_ref(), pos);
-                        let mut child = pos.clone();
-                        let undo_null = child.do_null_move();
-                        stack[ply as usize].null_move = true;
-                        let (sc, _) = self.alphabeta(
-                            ABArgs {
-                                pos: &child,
-                                depth: depth - 1 - r,
-                                alpha: -(beta),
-                                beta: -(beta - 1),
-                                ply: ply + 1,
-                                is_pv: false,
-                                stack,
-                                heur,
-                                tt_hits,
-                                beta_cuts,
-                                lmr_counter,
-                            },
-                            ctx,
-                        );
-                        child.undo_null_move(undo_null);
-                        stack[ply as usize].null_move = false;
-                        -sc
-                    };
-                    if score >= beta {
-                        return (score, None);
-                    }
-                }
-            }
+        if let Some(score) = self.null_move_prune(
+            &self.profile.prune,
+            depth,
+            pos,
+            beta,
+            ply,
+            stack,
+            heur,
+            tt_hits,
+            beta_cuts,
+            lmr_counter,
+            ctx,
+        ) {
+            return (score, None);
         }
 
         let mut tt_hint: Option<crate::shogi::Move> = None;
@@ -243,75 +147,37 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if self.profile.prune.enable_iid
-            && dynp::iid_enabled()
-            && depth >= dynp::iid_min_depth()
-            && !pos.is_in_check()
-            && (!tt_depth_ok || tt_hint.is_none())
-        {
-            let iid_depth = depth - 2;
-            let (_s, _mv) = self.alphabeta(
-                ABArgs {
-                    pos,
-                    depth: iid_depth,
-                    alpha,
-                    beta,
-                    ply,
-                    is_pv: false,
-                    stack,
-                    heur,
-                    tt_hits,
-                    beta_cuts,
-                    lmr_counter,
-                },
-                ctx,
-            );
-            if let Some(tt) = &self.tt {
-                if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
-                    tt_hint = entry.get_move();
-                }
-            }
-        }
+        self.maybe_iid(
+            &self.profile.prune,
+            depth,
+            pos,
+            alpha,
+            beta,
+            ply,
+            stack,
+            heur,
+            tt_hits,
+            beta_cuts,
+            lmr_counter,
+            ctx,
+            &mut tt_hint,
+            tt_depth_ok,
+        );
 
-        if self.profile.prune.enable_probcut
-            && dynp::probcut_enabled()
-            && depth >= 5
-            && !pos.is_in_check()
-        {
-            let threshold = beta + dynp::probcut_margin(depth);
-            let mgp = MoveGenerator::new();
-            if let Ok(caps) = mgp.generate_captures(pos) {
-                for mv in caps.as_slice().iter().copied() {
-                    if pos.see(mv) < 0 {
-                        continue;
-                    }
-                    let parent_sc = {
-                        let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
-                        let mut child = pos.clone();
-                        child.do_move(mv);
-                        let (sc, _) = self.alphabeta(
-                            ABArgs {
-                                pos: &child,
-                                depth: depth - 2,
-                                alpha: -threshold,
-                                beta: -threshold + 1,
-                                ply: ply + 1,
-                                is_pv: false,
-                                stack,
-                                heur,
-                                tt_hits,
-                                beta_cuts,
-                                lmr_counter,
-                            },
-                            ctx,
-                        );
-                        -sc
-                    };
-                    if parent_sc >= threshold {
-                        return (parent_sc, Some(mv));
-                    }
-                }
-            }
+        if let Some((score, mv)) = self.probcut(
+            &self.profile.prune,
+            depth,
+            pos,
+            beta,
+            ply,
+            stack,
+            heur,
+            tt_hits,
+            beta_cuts,
+            lmr_counter,
+            ctx,
+        ) {
+            return (score, Some(mv));
         }
 
         let mg = MoveGenerator::new();
@@ -404,34 +270,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             let mut next_depth = depth - 1;
-            if depth >= 3 && moveno >= 3 && is_quiet && !is_good_capture {
-                heur.lmr_trials = heur.lmr_trials.saturating_add(1);
-                let rd = ((depth as f32).ln() * (moveno as f32).ln() / dynp::lmr_k_coeff()).floor()
-                    as i32;
-                let mut r = rd.max(1);
-                if is_pv {
-                    r -= 1;
-                }
-                if gives_check {
-                    r = 0;
-                }
-                let improving = if ply >= 2 {
-                    if let Some(prev2) = stack[ply as usize - 2].static_eval {
-                        static_eval >= prev2 - 10
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if improving {
-                    r -= 1;
-                }
-                r = r.clamp(0, depth - 1);
-                if r > 0 {
-                    next_depth -= r;
-                    *lmr_counter += 1;
-                }
+            let reduction = ordering::late_move_reduction(
+                heur,
+                depth,
+                moveno,
+                is_quiet,
+                is_good_capture,
+                is_pv,
+                gives_check,
+                static_eval,
+                ply,
+                stack,
+            );
+            if reduction > 0 {
+                next_depth -= reduction;
+                *lmr_counter += 1;
             }
             let pv_move = !first_move_done;
             let score = {

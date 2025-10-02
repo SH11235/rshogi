@@ -96,6 +96,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(t) = v.parse::<usize>() {
                     state.opts.threads = t;
+                    info_string("threads_note=ClassicBackend currently runs single-threaded");
                 }
             }
         }
@@ -184,13 +185,12 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "QSearchChecks" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
-                if on {
-                    std::env::remove_var("SHOGI_QS_DISABLE_CHECKS");
-                    info_string("qsearch_checks=On");
+                engine_core::search::params::set_qs_checks_enabled(on);
+                info_string(if on {
+                    "qsearch_checks=On"
                 } else {
-                    std::env::set_var("SHOGI_QS_DISABLE_CHECKS", "1");
-                    info_string("qsearch_checks=Off");
-                }
+                    "qsearch_checks=Off"
+                });
             }
         }
         "ClearHash" => {
