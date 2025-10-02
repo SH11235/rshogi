@@ -358,22 +358,8 @@ impl Engine {
                 match evt {
                     InfoEvent::PV { line } => {
                         stop_ctrl.publish_root_line(sid, root_hash, &line);
-                        let seldepth = line.seldepth.unwrap_or(0);
                         if let Some(cb) = &legacy_cb {
                             cb(line.clone());
-                        }
-                        if let Some(s) = &cb_str {
-                            match (line.nodes, line.time_ms) {
-                                (Some(nodes), Some(time_ms)) => s(&format!(
-                                    "depth {} seldepth {} nodes {} time {}",
-                                    line.depth, seldepth, nodes, time_ms
-                                )),
-                                (Some(nodes), None) => s(&format!(
-                                    "depth {} seldepth {} nodes {}",
-                                    line.depth, seldepth, nodes
-                                )),
-                                _ => s(&format!("depth {} seldepth {}", line.depth, seldepth)),
-                            }
                         }
                     }
                     InfoEvent::Depth { depth, seldepth } => {

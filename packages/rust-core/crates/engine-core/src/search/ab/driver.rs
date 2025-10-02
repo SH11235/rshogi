@@ -124,12 +124,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
-        let mut last_nodes_for_line: u64 = 0;
-        let mut last_time_for_line: u64 = 0;
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
                 break;
             }
+            let mut last_nodes_for_line: u64 = nodes;
+            let mut last_time_for_line: u64 = t0.elapsed().as_millis() as u64;
             let mut seldepth: u32 = 0;
             // Build root move list for CurrMove events and basic ordering
             let mg = MoveGenerator::new();

@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -184,7 +184,7 @@ pub fn limits_from_go(
     };
 
     builder = builder.time_parameters(tp);
-    builder = builder.stop_flag(stop_flag);
+    builder = builder.stop_flag(Arc::clone(&stop_flag));
     // 重要: Ponder フラグは "go ponder" のときだけ有効化する。
     // USI の Ponder オプション（ON/OFF）に関わらず、通常探索では Ponder に包まない。
     if gp.ponder {
@@ -201,14 +201,22 @@ pub fn limits_from_go(
 
     // Set up info callback for search progress reporting
     let multipv = opts.multipv.max(1);
+    let stop_for_info = Arc::clone(&stop_flag);
     let info_callback: InfoCallback = Arc::new(move |line: RootLine| {
+        if stop_for_info.load(Ordering::Relaxed) {
+            return;
+        }
         // Emit a unified PV info line via the adapter. We pass multipv>1 to
         // decide whether to include a multipv tag in the output for compatibility.
         usi_adapter::emit_pv_line(&line, multipv > 1);
     });
 
     // Set up info string callback for textual diagnostics
-    let info_string_callback: InfoStringCallback = Arc::new(|msg: &str| {
+    let stop_for_info_str = Arc::clone(&stop_flag);
+    let info_string_callback: InfoStringCallback = Arc::new(move |msg: &str| {
+        if stop_for_info_str.load(Ordering::Relaxed) {
+            return;
+        }
         println!("info string {msg}");
     });
 
