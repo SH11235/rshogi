@@ -89,6 +89,9 @@ fn main() {
     let toggles = engine_core::search::ab::PruneToggles {
         enable_iid: !args.disable_iid,
         enable_nmp: !args.disable_nmp,
+        enable_razor: true,
+        enable_probcut: true,
+        enable_static_beta_pruning: true,
     };
     let backend = engine_core::search::ab::ClassicBackend::with_tt_and_toggles(
         Arc::new(MaterialEvaluator),

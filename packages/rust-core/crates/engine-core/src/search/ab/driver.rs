@@ -11,6 +11,7 @@ use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable}
 use crate::Position;
 use smallvec::SmallVec;
 
+use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, Heuristics, SearchContext};
 use crate::search::tt::TTProbe;
 
@@ -18,39 +19,16 @@ use crate::search::tt::TTProbe;
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     pub(super) evaluator: Arc<E>,
     pub(super) tt: Option<Arc<TranspositionTable>>, // 共有TT（Hashfull出力用、将来はprobe/storeでも使用）
-    pub(super) toggles: PruneToggles,
-}
-
-#[derive(Clone, Copy)]
-pub struct PruneToggles {
-    pub enable_iid: bool,
-    pub enable_nmp: bool,
-}
-
-impl Default for PruneToggles {
-    fn default() -> Self {
-        Self {
-            enable_iid: true,
-            enable_nmp: true,
-        }
-    }
+    pub(super) profile: SearchProfile,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     pub fn new(evaluator: Arc<E>) -> Self {
-        Self {
-            evaluator,
-            tt: None,
-            toggles: PruneToggles::default(),
-        }
+        Self::with_profile(evaluator, SearchProfile::default())
     }
 
     pub fn with_tt(evaluator: Arc<E>, tt: Arc<TranspositionTable>) -> Self {
-        Self {
-            evaluator,
-            tt: Some(tt),
-            toggles: PruneToggles::default(),
-        }
+        Self::with_profile_and_tt(evaluator, tt, SearchProfile::default())
     }
 
     pub fn with_tt_and_toggles(
@@ -58,10 +36,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         tt: Arc<TranspositionTable>,
         toggles: PruneToggles,
     ) -> Self {
+        Self::with_profile_and_tt(evaluator, tt, SearchProfile { prune: toggles })
+    }
+
+    pub fn with_profile(evaluator: Arc<E>, profile: SearchProfile) -> Self {
+        Self {
+            evaluator,
+            tt: None,
+            profile,
+        }
+    }
+
+    pub fn with_profile_and_tt(
+        evaluator: Arc<E>,
+        tt: Arc<TranspositionTable>,
+        profile: SearchProfile,
+    ) -> Self {
         Self {
             evaluator,
             tt: Some(tt),
-            toggles,
+            profile,
         }
     }
 
@@ -144,6 +138,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             root_moves.sort_unstable_by(|a, b| b.1.cmp(&a.1));
             let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
 
+            let root_static_eval = self.evaluator.evaluate(root);
+
             // MultiPV（逐次選抜）
             let k = limits.multipv.max(1) as usize;
             let mut excluded: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
@@ -191,6 +187,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
                 loop {
+                    let (old_alpha, old_beta) = (alpha, beta);
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
                         if let Some(limit) = limits.time_limit() {
@@ -298,29 +295,37 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
 
-                    if alpha < beta {
-                        break; // success
+                    if local_best <= old_alpha {
+                        if let Some(cb) = info {
+                            cb(InfoEvent::Aspiration {
+                                outcome: crate::search::api::AspirationOutcome::FailLow,
+                                old_alpha,
+                                old_beta,
+                                new_alpha: old_alpha.saturating_sub(2 * delta),
+                                new_beta: old_beta,
+                            });
+                        }
+                        alpha = old_alpha.saturating_sub(2 * delta).max(i32::MIN / 2);
+                        beta = old_beta;
+                        delta = (delta * 2).min(ASP_DELTA_MAX);
+                        continue;
                     }
-                    // Aspiration failed → widen window and emit event
-                    if let Some(cb) = info {
-                        let outcome = if prev_score >= beta {
-                            crate::search::api::AspirationOutcome::FailHigh
-                        } else {
-                            crate::search::api::AspirationOutcome::FailLow
-                        };
-                        cb(InfoEvent::Aspiration {
-                            outcome,
-                            old_alpha: alpha,
-                            old_beta: beta,
-                            new_alpha: alpha.saturating_sub(2 * delta),
-                            new_beta: beta.saturating_add(2 * delta),
-                        });
+                    if local_best >= old_beta {
+                        if let Some(cb) = info {
+                            cb(InfoEvent::Aspiration {
+                                outcome: crate::search::api::AspirationOutcome::FailHigh,
+                                old_alpha,
+                                old_beta,
+                                new_alpha: old_alpha,
+                                new_beta: old_beta.saturating_add(2 * delta),
+                            });
+                        }
+                        alpha = old_alpha;
+                        beta = old_beta.saturating_add(2 * delta).min(i32::MAX / 2);
+                        delta = (delta * 2).min(ASP_DELTA_MAX);
+                        continue;
                     }
-                    let new_alpha = alpha.saturating_sub(2 * delta);
-                    let new_beta = beta.saturating_add(2 * delta);
-                    alpha = new_alpha.max(i32::MIN / 2);
-                    beta = new_beta.min(i32::MAX / 2);
-                    delta = (delta * 2).min(ASP_DELTA_MAX);
+                    break; // success within window
                 }
 
                 // Counters aggregate
@@ -410,7 +415,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 root.zobrist_hash,
                                 Some(best_mv_root),
                                 store_score as i16,
-                                self.evaluator.evaluate(root) as i16,
+                                root_static_eval as i16,
                                 d as u8,
                                 node_type,
                                 root.side_to_move,

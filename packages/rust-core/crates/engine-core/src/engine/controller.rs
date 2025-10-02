@@ -8,6 +8,7 @@ use crate::{
     engine::session::SearchSession,
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
+    search::ab::SearchProfile,
     search::api::{InfoEventCallback, SearcherBackend, StopHandle, StubBackend},
     search::parallel::{EngineStopBridge, StopController},
     search::stub::run_stub_search,
@@ -31,6 +32,13 @@ struct ActiveCounterGuard(Arc<AtomicUsize>);
 impl Drop for ActiveCounterGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn search_profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
+    match engine_type {
+        EngineType::Enhanced | EngineType::EnhancedNnue => SearchProfile::enhanced(),
+        EngineType::Stub | EngineType::Material | EngineType::Nnue => SearchProfile::basic(),
     }
 }
 
@@ -275,9 +283,11 @@ impl Engine {
         let backend: Option<Arc<dyn SearcherBackend + Send + Sync>> = match engine_type {
             EngineType::Stub => Some(Arc::new(StubBackend::new())),
             EngineType::Material | EngineType::Enhanced => {
-                Some(Arc::new(crate::search::ab::ClassicBackend::with_tt(
+                let profile = search_profile_for_engine_type(engine_type);
+                Some(Arc::new(crate::search::ab::ClassicBackend::with_profile_and_tt(
                     material_evaluator.clone(),
                     shared_tt.clone(),
+                    profile,
                 )))
             }
             _ => None,
@@ -1230,9 +1240,11 @@ impl Engine {
             self.backend = match self.engine_type {
                 EngineType::Stub => Some(Arc::new(StubBackend::new())),
                 EngineType::Material | EngineType::Enhanced => {
-                    Some(Arc::new(crate::search::ab::ClassicBackend::with_tt(
+                    let profile = search_profile_for_engine_type(self.engine_type);
+                    Some(Arc::new(crate::search::ab::ClassicBackend::with_profile_and_tt(
                         self.material_evaluator.clone(),
                         new_tt_arc.clone(),
+                        profile,
                     )))
                 }
                 _ => self.backend.take(),

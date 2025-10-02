@@ -19,6 +19,21 @@ pub(crate) struct SearchContext<'a> {
     pub(crate) seldepth: &'a mut u32,
 }
 
+impl<'a> SearchContext<'a> {
+    #[inline]
+    pub(crate) fn tick(&mut self, ply: u32) {
+        *self.nodes += 1;
+        if ply > *self.seldepth {
+            *self.seldepth = ply;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn time_up(&self) -> bool {
+        self.limits.time_limit().is_some_and(|limit| self.start_time.elapsed() >= limit)
+    }
+}
+
 pub(crate) struct ABArgs<'a> {
     pub(crate) pos: &'a Position,
     pub(crate) depth: i32,
@@ -38,52 +53,41 @@ pub(crate) struct Heuristics {
     pub(crate) history: crate::search::history::ButterflyHistory,
     pub(crate) counter: crate::search::history::CounterMoveHistory,
     pub(crate) lmr_trials: u64,
-    pub(crate) lmr_applied: u64,
 }
 
+#[must_use]
 pub(crate) struct EvalMoveGuard<'a, T: Evaluator + ?Sized> {
     evaluator: &'a T,
-    active: bool,
 }
 
 impl<'a, T: Evaluator + ?Sized> EvalMoveGuard<'a, T> {
     pub(crate) fn new(evaluator: &'a T, pos: &Position, mv: crate::shogi::Move) -> Self {
         evaluator.on_do_move(pos, mv);
-        Self {
-            evaluator,
-            active: true,
-        }
+        Self { evaluator }
     }
 }
 
 impl<'a, T: Evaluator + ?Sized> Drop for EvalMoveGuard<'a, T> {
     fn drop(&mut self) {
-        if self.active {
-            self.evaluator.on_undo_move();
-        }
+        self.evaluator.on_undo_move();
     }
 }
 
+#[must_use]
 pub(crate) struct EvalNullGuard<'a, T: Evaluator + ?Sized> {
     evaluator: &'a T,
-    active: bool,
 }
 
 impl<'a, T: Evaluator + ?Sized> EvalNullGuard<'a, T> {
     pub(crate) fn new(evaluator: &'a T, pos: &Position) -> Self {
         evaluator.on_do_null_move(pos);
-        Self {
-            evaluator,
-            active: true,
-        }
+        Self { evaluator }
     }
 }
 
 impl<'a, T: Evaluator + ?Sized> Drop for EvalNullGuard<'a, T> {
     fn drop(&mut self) {
-        if self.active {
-            self.evaluator.on_undo_null_move();
-        }
+        self.evaluator.on_undo_null_move();
     }
 }
 
@@ -110,19 +114,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let eval = self.evaluator.evaluate(pos);
             return (eval, None);
         }
-        if let Some(limit) = ctx.limits.time_limit() {
-            if ctx.start_time.elapsed() >= limit {
-                let eval = self.evaluator.evaluate(pos);
-                return (eval, None);
-            }
+        if ctx.time_up() {
+            let eval = self.evaluator.evaluate(pos);
+            return (eval, None);
         }
         if Self::should_stop(ctx.limits) {
             return (0, None);
         }
-        *ctx.nodes += 1;
-        if ply > *ctx.seldepth {
-            *ctx.seldepth = ply;
-        }
+        ctx.tick(ply);
         if depth <= 0 {
             let qs = self.qsearch(pos, alpha, beta, ctx, ply);
             return (qs, None);
@@ -140,7 +139,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         alpha = a_md;
 
-        if depth <= 2 && !pos.is_in_check() {
+        if self.profile.prune.enable_static_beta_pruning && depth <= 2 && !pos.is_in_check() {
             let margin = if depth == 1 {
                 dynp::sbp_margin_d1()
             } else {
@@ -151,14 +150,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if dynp::razor_enabled() && depth == 1 && !pos.is_in_check() {
+        if self.profile.prune.enable_razor
+            && dynp::razor_enabled()
+            && depth == 1
+            && !pos.is_in_check()
+        {
             let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply);
             if r <= alpha {
                 return (r, None);
             }
         }
 
-        if self.toggles.enable_nmp {
+        if self.profile.prune.enable_nmp {
             let prev_null = if ply > 0 {
                 stack[(ply - 1) as usize].null_move
             } else {
@@ -237,7 +240,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if self.toggles.enable_iid
+        if self.profile.prune.enable_iid
             && depth >= dynp::iid_min_depth()
             && !pos.is_in_check()
             && (!tt_depth_ok || tt_hint.is_none())
@@ -266,7 +269,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if depth >= 5 && !pos.is_in_check() {
+        if self.profile.prune.enable_probcut && depth >= 5 && !pos.is_in_check() {
             let threshold = beta + dynp::probcut_margin(depth);
             let mgp = MoveGenerator::new();
             if let Ok(caps) = mgp.generate_captures(pos) {
@@ -422,18 +425,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if r > 0 {
                     next_depth -= r;
                     *lmr_counter += 1;
-                    heur.lmr_applied = heur.lmr_applied.saturating_add(1);
                 }
             }
             let pv_move = !first_move_done;
             let score = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
-                let mut child_ctx = SearchContext {
-                    limits: ctx.limits,
-                    start_time: ctx.start_time,
-                    nodes: ctx.nodes,
-                    seldepth: ctx.seldepth,
-                };
                 if pv_move {
                     let (sc, _) = self.alphabeta(
                         ABArgs {
@@ -449,7 +445,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             beta_cuts,
                             lmr_counter,
                         },
-                        &mut child_ctx,
+                        ctx,
                     );
                     -sc
                 } else {
@@ -467,7 +463,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             beta_cuts,
                             lmr_counter,
                         },
-                        &mut child_ctx,
+                        ctx,
                     );
                     let mut s = -sc_nw;
                     if s > alpha && s < beta {
@@ -485,7 +481,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 beta_cuts,
                                 lmr_counter,
                             },
-                            &mut child_ctx,
+                            ctx,
                         );
                         s = -sc_fw;
                     }
