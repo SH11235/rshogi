@@ -60,6 +60,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         depth: i32,
         pos: &Position,
         beta: i32,
+        static_eval: i32,
         ply: u32,
         stack: &mut [SearchStack],
         heur: &mut Heuristics,
@@ -68,7 +69,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         lmr_counter: &mut u64,
         ctx: &mut SearchContext,
     ) -> Option<i32> {
-        if !toggles.enable_nmp {
+        if !toggles.enable_nmp || !dynp::nmp_enabled() {
             return None;
         }
         let prev_null = if ply > 0 {
@@ -84,7 +85,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         if hand_sum >= NMP_HAND_SUM_DISABLE {
             return None;
         }
-        let static_eval = self.evaluator.evaluate(pos);
         let bonus = if static_eval - beta > NMP_BONUS_DELTA_BETA {
             1
         } else {
