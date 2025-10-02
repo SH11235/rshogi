@@ -185,6 +185,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if Self::should_stop(limits) {
                     break;
                 }
+                if let Some(deadlines) = limits.fallback_deadlines {
+                    if deadlines.hard_limit_ms > 0
+                        && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
+                    {
+                        break;
+                    }
+                }
                 // Aspiration window per PV head
                 let mut alpha = if d == 1 {
                     i32::MIN / 2
@@ -221,6 +228,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if Self::should_stop(limits) {
                         break;
                     }
+                    if let Some(deadlines) = limits.fallback_deadlines {
+                        if deadlines.hard_limit_ms > 0
+                            && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
+                        {
+                            break;
+                        }
+                    }
                     if active_moves.is_empty() {
                         break;
                     }
@@ -229,6 +243,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
                         if Self::should_stop(limits) {
                             break;
+                        }
+                        if let Some(deadlines) = limits.fallback_deadlines {
+                            if deadlines.hard_limit_ms > 0
+                                && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
+                            {
+                                break;
+                            }
                         }
                         if let Some(limit) = limits.time_limit() {
                             if t0.elapsed() >= limit {
@@ -339,6 +360,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if Self::should_stop(limits) {
                         break;
                     }
+                    if let Some(deadlines) = limits.fallback_deadlines {
+                        if deadlines.hard_limit_ms > 0
+                            && t0.elapsed() >= Duration::from_millis(deadlines.hard_limit_ms)
+                        {
+                            break;
+                        }
+                    }
                     if local_best <= old_alpha {
                         if let Some(cb) = info {
                             cb(InfoEvent::Aspiration {
@@ -420,11 +448,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                     let elapsed_ms_total = t0.elapsed().as_millis() as u64;
-                    let nps_opt = if elapsed_ms_total == 0 {
-                        None
-                    } else {
-                        Some(nodes.saturating_mul(1000).saturating_div(elapsed_ms_total.max(1)))
-                    };
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
@@ -436,17 +459,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         pv,
                         nodes: Some(nodes),
                         time_ms: Some(elapsed_ms_total),
-                        nps: nps_opt,
+                        nps: None,
                         exact_exhausted: false,
                         exhaust_reason: None,
                         mate_distance: None,
                     };
+                    let line_arc = Arc::new(line);
                     if let Some(cb) = info {
                         cb(InfoEvent::PV {
-                            line: Arc::new(line.clone()),
+                            line: Arc::clone(&line_arc),
                         });
                     }
-                    depth_lines.push(line);
+                    depth_lines.push(match Arc::try_unwrap(line_arc) {
+                        Ok(line) => line,
+                        Err(arc) => (*arc).clone(),
+                    });
                     // TT保存は 1行目のみ（Exact, PV=true）
                     if pv_idx == 1 {
                         if let (Some(tt), Some(best_mv_root)) = (&self.tt, best) {

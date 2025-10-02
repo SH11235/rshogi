@@ -81,24 +81,19 @@ fn multipv_line_nodes_are_per_line() {
 
     let mut prev_nodes = 0_u64;
     let mut prev_time = 0_u64;
-    let mut last_reported_nodes = 0_u64;
-    let mut last_reported_time = 0_u64;
     for (idx, line) in lines.iter().enumerate() {
         if let Some(n) = line.nodes {
             assert!(n <= total_nodes, "line {idx} nodes exceed total nodes");
             assert!(n >= prev_nodes, "line {idx} nodes regressed (non-monotonic)");
             prev_nodes = n;
-            last_reported_nodes = n;
         }
         if let Some(ms) = line.time_ms {
             assert!(ms <= total_time_ms, "line {idx} time exceeds total time");
             assert!(ms >= prev_time, "line {idx} time regressed (non-monotonic)");
             prev_time = ms;
-            last_reported_time = ms;
         }
+        assert!(line.nps.is_none(), "nps should be computed downstream");
     }
-    assert!(last_reported_nodes <= total_nodes);
-    assert!(last_reported_time <= total_time_ms);
 }
 
 #[test]

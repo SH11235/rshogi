@@ -15,14 +15,11 @@ pub fn emit_pv_line(line: &RootLine, multipv_enabled: bool) {
 
     if let Some(nodes) = line.nodes {
         out.push_str(&format!(" nodes {}", nodes));
-        if let Some(nps) = line.nps {
-            out.push_str(&format!(" nps {}", nps));
-        } else if let Some(ms) = line.time_ms {
-            let denom = ms.max(1);
-            let nps = nodes.saturating_mul(1000) / denom;
-            out.push_str(&format!(" nps {}", nps));
-        }
-    } else if let Some(nps) = line.nps {
+        let nps = line
+            .time_ms
+            .filter(|ms| *ms > 0)
+            .map(|ms| nodes.saturating_mul(1000) / ms.max(1))
+            .unwrap_or(0);
         out.push_str(&format!(" nps {}", nps));
     }
 
