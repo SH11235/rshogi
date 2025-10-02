@@ -8,7 +8,7 @@ use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::ab::{ClassicBackend, SearchProfile},
-    search::api::{InfoEventCallback, SearcherBackend, StubBackend},
+    search::api::{InfoEventCallback, SearcherBackend},
     search::parallel::{EngineStopBridge, StopController},
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
@@ -26,7 +26,7 @@ fn search_profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
         EngineType::Enhanced => SearchProfile::enhanced_material(),
         EngineType::EnhancedNnue => SearchProfile::enhanced_nnue(),
         EngineType::Nnue => SearchProfile::basic_nnue(),
-        EngineType::Stub | EngineType::Material => SearchProfile::basic_material(),
+        EngineType::Material => SearchProfile::basic_material(),
     }
 }
 
@@ -82,9 +82,6 @@ pub struct TtDebugInfo {
 /// - **For debugging**: Use `Material`
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EngineType {
-    /// Minimal stub searcher that returns a deterministic legal move without tree search
-    /// Useful during Phase 0 (migration) to keep USI responsive while replacing search core
-    Stub,
     /// Simple material-based evaluation with basic alpha-beta search
     /// - Simplest implementation
     /// - Best for debugging and testing
@@ -207,7 +204,6 @@ impl Engine {
 
     fn build_backend(&mut self) -> Option<Arc<dyn SearcherBackend + Send + Sync>> {
         match self.engine_type {
-            EngineType::Stub => Some(Arc::new(StubBackend::new())),
             EngineType::Material | EngineType::Enhanced => {
                 let profile = search_profile_for_engine_type(self.engine_type);
                 Some(Arc::new(ClassicBackend::with_profile_and_tt(

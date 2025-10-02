@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 
@@ -109,74 +109,4 @@ pub trait SearcherBackend: Send + Sync {
     ) -> SearchResult;
     fn update_threads(&self, n: usize);
     fn update_hash(&self, mb: usize);
-}
-
-/// Minimal stub backend that reuses the stub searcher
-pub struct StubBackend {
-    _threads: AtomicU64,
-    _hash_mb: AtomicU64,
-}
-
-impl StubBackend {
-    pub fn new() -> Self {
-        Self {
-            _threads: AtomicU64::new(1),
-            _hash_mb: AtomicU64::new(32),
-        }
-    }
-}
-
-impl Default for StubBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SearcherBackend for StubBackend {
-    fn start_async(
-        self: Arc<Self>,
-        root: Position,
-        mut limits: SearchLimits,
-        _info: Option<InfoEventCallback>,
-        active_counter: Arc<AtomicUsize>,
-    ) -> BackendSearchTask {
-        let stop_flag =
-            limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
-        active_counter.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::channel();
-        let handle = std::thread::Builder::new()
-            .name("stub-backend-search".into())
-            .spawn({
-                let counter = Arc::clone(&active_counter);
-                move || {
-                    struct Guard(Arc<AtomicUsize>);
-                    impl Drop for Guard {
-                        fn drop(&mut self) {
-                            self.0.fetch_sub(1, Ordering::SeqCst);
-                        }
-                    }
-                    let _guard = Guard(counter);
-                    let result = crate::search::stub::run_stub_search(&root, &limits);
-                    let _ = tx.send(result);
-                }
-            })
-            .expect("spawn stub backend search thread");
-        BackendSearchTask::new(stop_flag, rx, handle)
-    }
-
-    fn think_blocking(
-        &self,
-        root: &Position,
-        limits: &SearchLimits,
-        _info: Option<InfoEventCallback>,
-    ) -> SearchResult {
-        crate::search::stub::run_stub_search(root, limits)
-    }
-
-    fn update_threads(&self, n: usize) {
-        self._threads.store(n as u64, Ordering::Release);
-    }
-    fn update_hash(&self, mb: usize) {
-        self._hash_mb.store(mb as u64, Ordering::Release);
-    }
 }

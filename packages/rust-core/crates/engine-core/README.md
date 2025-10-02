@@ -1,185 +1,80 @@
 # Engine Core
 
-将棋エンジンのコア実装を提供するRustライブラリです。
+Rust 製将棋エンジンのコアライブラリです。`ClassicBackend` を中心に、探索アルゴリズム・評価関数・USI インタフェースに必要なコンポーネントを提供します。
 
-## 概要
+## 主な特徴
 
-engine-coreは、高性能な将棋エンジンの基盤となる機能を提供します。統一検索フレームワーク（UnifiedSearcher）により、コンパイル時の設定で様々な探索戦略を実現できます。
+- **ClassicBackend**: 反復深化 + PVS + 各種枝刈り（Null Move / LMR / Razor / ProbCut / IID / Static Beta Pruning）を備えた単スレ探索器。
+- **SearchProfile / SearchParams**: EngineType（Material / Enhanced / Nnue / EnhancedNnue）ごとに既定設定を切り替えつつ、USI `setoption` でランタイム調整が可能。
+- **評価関数**: 駒割り評価 (`MaterialEvaluator`) と NNUE 評価 (`NNUEEvaluatorWrapper`) をサポート。
+- **時間管理と停止制御**: `SearchLimits` + `StopController` により、USI 側の締切（panic/hard）と探索内部の判定を統合。
+- **補助モジュール**: TT（16B エントリ）、Move Ordering（History/Killer/Counter）、Aspiration などをモジュール分割して実装。
 
-## 主な機能
+## 代表的なモジュール
 
-- **統一検索フレームワーク**: const genericsを使用したゼロコスト抽象化
-- **複数の探索戦略**: 基本的なアルファベータ探索から高度な枝刈り技術まで
-- **評価関数**: Material評価とNNUE評価をサポート
-- **時間管理**: 柔軟な時間制御と思考時間管理
-- **USIプロトコル**: 標準的な将棋エンジンインターフェース
+- `search/ab/` … ClassicBackend 本体 (`driver.rs`, `pvs.rs`, `qsearch.rs`, `pv_extract.rs`, `ordering/`, `pruning/`)
+- `search/api.rs` … `SearcherBackend` トレイトと InfoEvent ブリッジ
+- `search/params.rs` … 探索パラメータ（LMR/LMP/ProbCut 等）の集中管理
+- `search/tt/` … 置換表実装
+- `evaluation/` … `MaterialEvaluator` と `NNUEEvaluatorWrapper`
+- `time_management/` … 思考時間計算と締切制御
 
-## アーキテクチャ
-
-### UnifiedSearcher
-
-const genericsを使用して、実行時オーバーヘッドなしに異なる探索設定を実現：
-
-```rust
-pub struct UnifiedSearcher<
-    E,                          // 評価関数の型
-    const USE_TT: bool,         // 置換表を使用するか
-    const USE_PRUNING: bool,    // 枝刈りを使用するか
-    const TT_SIZE_MB: usize,    // 置換表のサイズ（MB）
->
-```
-
-### 探索設定の例
+## 使い方（シンプルな例）
 
 ```rust
-// 基本的な探索（置換表のみ）
-type BasicConfig = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
-
-// 高度な探索（置換表 + 枝刈り）
-type EnhancedConfig = UnifiedSearcher<NnueEvaluator, true, true, 16>;
-```
-
-## エンジンタイプ
-
-4つの異なるエンジンタイプを提供しています：
-
-| タイプ | 評価関数 | 探索 | 用途 |
-|-------|---------|------|------|
-| Material | 駒価値 | 基本 | デバッグ・学習 |
-| Nnue | NNUE | 基本 | 高速解析 |
-| Enhanced | 駒価値 | 高度 | 省メモリ環境 |
-| EnhancedNnue | NNUE | 高度 | 最強設定 |
-
-詳細は[エンジンタイプ選択ガイド](docs/engine-type-selection.md)を参照してください。
-
-## 使用方法
-
-### 基本的な使用例
-
-```rust
+use std::sync::Arc;
 use engine_core::{
+    engine::controller::{Engine, EngineType},
+    search::{SearchLimits, SearchLimitsBuilder},
     Position,
-    search::{unified::UnifiedSearcher, SearchLimitsBuilder},
-    evaluation::evaluate::MaterialEvaluator,
 };
 
-// 評価関数の作成
-let evaluator = MaterialEvaluator;
+fn main() {
+    // EngineType::EnhancedNnue を選択（ClassicBackend + NNUE + Enhanced プロファイル）
+    let mut engine = Engine::new(EngineType::EnhancedNnue);
 
-// 探索エンジンの作成（内部で自動的にArc化）
-let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
+    // 開始局面を用意
+    let mut pos = Position::startpos();
 
-// 局面の作成
-let mut position = Position::startpos();
+    // 探索条件（深さ 6）を構築
+    let limits = SearchLimitsBuilder::default().depth(6).build();
 
-// 探索条件の設定
-let limits = SearchLimitsBuilder::default()
-    .depth(10)              // 深さ10まで探索
-    .fixed_time_ms(1000)    // または1秒間探索
-    .build();
-
-// 探索の実行
-let result = searcher.search(&mut position, limits);
-
-if let Some(best_move) = result.best_move {
-    println!("最善手: {}", best_move);
-    println!("評価値: {}", result.score);
+    // 同期的に探索実行
+    let result = engine.think_blocking(&pos, &limits, None);
+    if let Some(best) = result.best_move {
+        println!("bestmove {}", best);
+    }
 }
 ```
 
-### 探索パラメータ
+USI アプリケーションからは `engine-usi` クレートを利用することで、`setoption` → `go` → `bestmove` の一連の操作を行えます。
 
-`SearchLimitsBuilder`で以下のパラメータを設定可能：
+## エンジンタイプとプロファイル
 
-- `depth(u8)`: 最大探索深さ
-- `fixed_time_ms(u64)`: 固定思考時間（ミリ秒）
-- `nodes(u64)`: 最大探索ノード数
-- `stop_flag(Arc<AtomicBool>)`: 外部からの停止フラグ
-- `ponder_hit_flag(Arc<AtomicBool>)`: ポンダーヒットフラグ
+EngineType と SearchProfile の対応は次のとおりです（詳細は [docs/engine-types-guide.md](../../docs/engine-types-guide.md) を参照）。
 
-## モジュール構成
+| EngineType     | Evaluator           | SearchProfile                | 用途               |
+|----------------|---------------------|------------------------------|--------------------|
+| Material       | MaterialEvaluator   | `basic_material()`           | デバッグ・学習     |
+| Enhanced       | MaterialEvaluator   | `enhanced_material()`        | 省メモリ/長考      |
+| Nnue           | NNUEEvaluatorProxy  | `basic_nnue()`               | 高速検討           |
+| EnhancedNnue   | NNUEEvaluatorProxy  | `enhanced_nnue()`            | 対局・最強設定     |
 
-- `shogi/`: 将棋のルールと局面管理
-  - `board.rs`: 盤面表現
-  - `moves.rs`: 手の生成と検証
-  - `position.rs`: 局面管理
-  
-- `search/`: 探索アルゴリズム
-  - `unified/`: 統一検索フレームワーク
-  - `limits.rs`: 探索制限の設定
-  - `tt.rs`: 置換表の実装
-  
-- `evaluation/`: 評価関数
-  - `material.rs`: 駒の価値による評価
-  - `nnue/`: ニューラルネットワーク評価
-  
-- `time_management/`: 時間管理
-  - 持ち時間と秒読みの管理
-  - 最適な思考時間の計算
+EngineType を切り替えると、対応する `SearchProfile` が `SearchParams` の既定値を初期化します。個別調整が必要な場合は、USI `setoption name SearchParams.*` で再設定してください。
 
-## パフォーマンス
-
-Phase 4のベンチマーク結果（開始局面、深さ4）：
-
-| 設定 | 実行時間 | 相対性能 |
-|---|---:|---:|
-| 基本設定（枝刈りなし） | 139ms | 1.0x |
-| 拡張設定（枝刈りあり） | 7.3ms | 19.0x |
-
-const genericsによりゼロコスト抽象化を実現し、実行時オーバーヘッドはありません。
-
-## API互換性
-
-### 後方互換性のためのラッパー
-
-既存のコードとの互換性を保つため、以下のラッパークラスを提供しています：
-
-- `search_basic::Searcher`: 基本的な探索エンジンのラッパー
-- `search_enhanced::EnhancedSearcher`: 高度な探索エンジンのラッパー
-
-これらのラッパーは内部的にUnifiedSearcherを使用しており、以下のメソッドを提供します：
-
-```rust
-// 現在の探索深さを取得
-pub fn current_depth(&self) -> u8
-
-// 探索中のノード数を取得  
-pub fn nodes(&self) -> u64
-
-// 主要変化手順を取得
-pub fn principal_variation(&self) -> &[Move]
-```
-
-### 型パラメータについて
-
-評価関数の型パラメータは統一されています：
-
-- すべてのSearcherは生の型`E`を受け取ります
-- UnifiedSearcher内部で自動的に`Arc<E>`に変換されます
-- これにより、大きな評価関数（NNUE）も効率的に共有されます
-- 既存のArc化されたコードとの互換性のため、`with_arc()`メソッドも提供されています
-
-```rust
-// 新しい推奨API（生の型を渡す）
-let searcher = Searcher::new(MaterialEvaluator);
-
-// 既存コードとの互換性（Arc化済みを渡す）
-let searcher = Searcher::with_arc(Arc::new(MaterialEvaluator));
-```
-
-## ビルドとテスト
+## 開発・テスト
 
 ```bash
 # ビルド
 cargo build --release
 
-# テスト
+# 単体テスト
 cargo test
 
-# ベンチマーク
-cargo bench --bench search_benchmarks
+# 代表的な診断 CLI（例）
+cargo run --release --example classicab_diagnostics -- --depth-min 8 --depth-max 8 --time-ms 10000
 ```
 
 ## ライセンス
 
-このプロジェクトのライセンスについては、リポジトリのルートにあるLICENSEファイルを参照してください。
+リポジトリルートの `LICENSE` を参照してください。

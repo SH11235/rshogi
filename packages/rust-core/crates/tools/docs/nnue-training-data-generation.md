@@ -4,7 +4,7 @@
 
 ## 概要
 
-`generate_nnue_training_data` ツールは、SFEN局面ファイルを処理し、各局面に対して探索を実行して評価データを生成します。UnifiedSearcher フレームワーク上で動作し、以下のエンジンから選択できます：`material` / `enhanced` / `nnue` / `enhanced-nnue`。効率的なデータ生成のために並列処理を実装しています。
+`generate_nnue_training_data` ツールは、SFEN局面ファイルを処理し、各局面に対して ClassicBackend を用いて探索・評価を行い、教師データを生成します。利用できる EngineType は `material` / `enhanced` / `nnue` / `enhanced-nnue` です。
 
 ### 主な特徴
 
@@ -259,7 +259,7 @@ RUST_LOG=debug ./target/release/generate_nnue_training_data input.sfen output.tx
 ### エンジン設定
 - エンジンタイプ：`material` / `enhanced` / `nnue` / `enhanced-nnue`
 - NNUE重み：`--nnue-weights <path>`（未指定時はゼロ重み）
-- 探索アルゴリズム：UnifiedSearcher（強化設定はLMR/NullMove/Futility等）
+- 探索アルゴリズム：ClassicBackend（LMR/NullMove/Futility/ProbCut 等をプロファイルに応じて有効化）
 - トランスポジションテーブル：`--hash-mb` で指定（推奨 16MB）
 
 ### 並列処理
@@ -283,4 +283,3 @@ RUST_LOG=debug ./target/release/generate_nnue_training_data input.sfen output.tx
 ## 関連ドキュメント
 
 - [エンジンタイプ選択ガイド](../../engine-core/docs/engine-type-selection.md)
-- [UnifiedSearcherフレームワーク](../../docs/unified-searcher-design.md)
