@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use engine_core::engine::controller::{Engine, EngineType};
 #[cfg(feature = "nnue_telemetry")]
 use engine_core::evaluation::nnue::telemetry;
@@ -9,7 +9,7 @@ use engine_core::time_management::TimeControl;
 use engine_core::{search::types::RootLine, shogi::Position};
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::fs;
@@ -78,9 +78,6 @@ struct RunArgs {
     /// DefaultはNPS測定と同一（inc_ms, 最低100ms）。
     #[arg(long = "pv-ms", value_name = "MS")]
     pv_ms: Option<u64>,
-    /// Hidden: use deterministic stub engine for tests
-    #[arg(long, hide = true, action = ArgAction::SetTrue)]
-    stub: bool,
     /// Optional seed for deterministic shuffling of game schedule (default: no shuffle)
     #[arg(long, value_name = "N")]
     seed: Option<u64>,
@@ -485,7 +482,7 @@ impl PlayerEngine {
     }
 
     fn eval_multipv3_root_cp(&mut self, pos: &mut Position, per_ms: u64) -> Option<[i32; 3]> {
-        // Ensure MultiPV=3 at the limits level so UnifiedSearcher produces lines
+        // Ensure MultiPV=3 at the limits level so ClassicBackend produces lines
         self.eng.set_multipv_persistent(3);
         let limits = SearchLimitsBuilder::default()
             .time_control(TimeControl::FixedTime {
@@ -511,41 +508,6 @@ impl PlayerEngine {
     fn clear_tt(&mut self) {
         // Clear TT/heuristics to avoid cross-sample warming effects for fair NPS measurement
         self.eng.clear_hash();
-    }
-}
-
-// ---------------- Stub runner (deterministic) ----------------
-
-struct StubRunner {
-    rng: StdRng,
-}
-
-impl StubRunner {
-    fn new() -> Self {
-        Self {
-            rng: StdRng::seed_from_u64(42),
-        }
-    }
-    fn play_game(&mut self, game_idx: usize) -> (String, u32, u64, u64, u64, u64) {
-        // Produce deterministic result: 60% win, 10% draw
-        let r = self.rng.random::<f64>();
-        let result = if r < 0.6 {
-            "win"
-        } else if r < 0.7 {
-            "draw"
-        } else {
-            "loss"
-        };
-        let plies = 60 + (game_idx as u32 % 20);
-        // Candidate is ~+2% NPS vs base
-        let nps_base = 1_000_000 + (game_idx as u64 % 1000);
-        let nps_cand = (nps_base as f64 * 1.02) as u64;
-        let nodes_base = nps_base; // 1 second equivalent
-        let nodes_cand = nps_cand;
-        (result.to_string(), plies, nodes_base, nodes_cand, nps_base, nps_cand)
-    }
-    fn pv_spread_p90_cp(&mut self) -> f64 {
-        25.0
     }
 }
 
@@ -866,107 +828,6 @@ fn run_real(args: &RunArgs) -> Result<GauntletOut> {
     Ok(out)
 }
 
-fn run_stub(args: &RunArgs) -> Result<GauntletOut> {
-    validate_args(args)?;
-    let _time = parse_time_spec(&args.time)?;
-    let book = load_book_positions(Path::new(&args.book))?;
-    let mut stub = StubRunner::new();
-
-    // Simulate NPS
-    let nps_b_avg: f64 = 1_000_000.0;
-    let nps_c_avg: f64 = 1_020_000.0; // +2%
-    let nps_delta_pct: f64 = (nps_c_avg - nps_b_avg) / nps_b_avg * 100.0;
-    let pv_spread_p90 = stub.pv_spread_p90_cp();
-
-    let mut series = Vec::new();
-    let mut wins = 0usize;
-    let mut losses = 0usize;
-    let mut draws = 0usize;
-    let schedule = schedule_pairs_with_mode(book.len(), args.games, args.seed, args.seed_mode);
-    for (g, (open_idx, cand_black)) in schedule.into_iter().enumerate() {
-        let sfen = &book[open_idx];
-        let (res, plies, nb, nc, nps_b, nps_c) = stub.play_game(g);
-        match res.as_str() {
-            "win" => wins += 1,
-            "loss" => losses += 1,
-            _ => draws += 1,
-        }
-        series.push(SeriesItem {
-            game_index: g,
-            opening_index: open_idx,
-            sfen: sfen.clone(),
-            color_cand: if cand_black { "Black" } else { "White" }.to_string(),
-            result: res,
-            plies,
-            nodes_base: nb,
-            nodes_cand: nc,
-            nps_base: nps_b,
-            nps_cand: nps_c,
-        });
-    }
-    let score_rate = if args.games > 0 {
-        (wins as f64 + 0.5 * draws as f64) / (args.games as f64)
-    } else {
-        0.5
-    };
-    let winrate = score_rate;
-    let draw = if args.games > 0 {
-        draws as f64 / args.games as f64
-    } else {
-        0.0
-    };
-    let wl_lower = wilson_lower_bound(wins, losses);
-    let mut gate = GateDecision::Reject;
-    let mut reason: Option<String> = None;
-    if wl_lower > 0.5 {
-        gate = GateDecision::Provisional;
-    }
-    if winrate >= 0.55 && nps_delta_pct.abs() <= 3.0 {
-        gate = GateDecision::Pass;
-    } else if !matches!(gate, GateDecision::Provisional) {
-        if winrate < 0.55 {
-            reason = push_reason(reason, &format!("score rate {:.1}% < 55%", winrate * 100.0));
-        }
-        if nps_delta_pct.abs() > 3.0 {
-            reason = push_reason(reason, &format!("|nps_delta| {:.2}% > 3%", nps_delta_pct.abs()));
-        }
-    }
-    Ok(GauntletOut {
-        env: gather_env_info(),
-        params: ParamsOut {
-            time: args.time.clone(),
-            games: args.games,
-            threads: args.threads,
-            hash_mb: args.hash_mb,
-            book: args.book.clone(),
-            multipv: args.multipv,
-            pv_ms: args.pv_ms,
-            seed: args.seed,
-            seed_mode: args.seed.map(|_| match args.seed_mode {
-                SeedMode::Flat => "flat".to_string(),
-                SeedMode::Block => "block".to_string(),
-            }),
-        },
-        summary: SummaryOut {
-            winrate,
-            draw,
-            nps_delta_pct,
-            pv_spread_p90_cp: pv_spread_p90,
-            gate,
-            reject_reason: reason,
-            wins: Some(wins),
-            losses: Some(losses),
-            draws: Some(draws),
-            games: Some(args.games),
-            nps_samples: Some(100.min(book.len())),
-            pv_spread_samples: Some(100.min(book.len())),
-            nnue_telemetry: None,
-        },
-        training_config: None,
-        series,
-    })
-}
-
 fn emit_structured_jsonl_to<W: Write>(mut w: W, games: usize, summary: &SummaryOut) {
     // structured_v1 minimal line, extended with optional gauntlet metrics
     #[derive(Serialize)]
@@ -1102,11 +963,7 @@ fn main() -> Result<()> {
         None => cli.run_args,
     };
 
-    let out = if args.stub {
-        run_stub(&args)?
-    } else {
-        run_real(&args)?
-    };
+    let out = run_real(&args)?;
 
     let json_to_stdout = args.json == "-";
     let report_to_stdout = args.report == "-";

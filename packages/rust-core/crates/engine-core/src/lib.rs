@@ -1,4 +1,3 @@
-pub mod benchmark;
 pub mod engine;
 pub mod evaluation;
 pub mod game_phase;

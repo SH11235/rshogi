@@ -1410,7 +1410,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         EngineType::Enhanced => "enhanced",
                         EngineType::Nnue => "nnue",
                         EngineType::EnhancedNnue => "enhanced-nnue",
-                        EngineType::Stub => todo!(),
                     };
                     let effective_depth =
                         opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
@@ -1848,7 +1847,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EngineType::Enhanced => "enhanced",
         EngineType::Nnue => "nnue",
         EngineType::EnhancedNnue => "enhanced-nnue",
-        EngineType::Stub => "stub",
     };
     let attempted_total = total_attempted.load(Ordering::Relaxed);
 

@@ -3,7 +3,6 @@
 このドキュメントでは、将棋AIエンジンの各種ベンチマークコマンドとその用途を説明します。
 
 > crate固有のベンチ（TT実装など）は各crateのドキュメントに詳細があります。
-> engine-core の個別ベンチ一覧と実行条件は [crates/engine-core/docs/benchmarks.md](../../crates/engine-core/docs/benchmarks.md) を参照してください。
 
 ## ベンチマークの種類
 
