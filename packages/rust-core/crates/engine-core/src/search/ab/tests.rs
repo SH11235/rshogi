@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::evaluation::evaluate::{Evaluator, MaterialEvaluator};
+use crate::search::ab::ordering::Heuristics;
 use crate::search::api::SearcherBackend;
 use crate::search::constants::SEARCH_INF;
 use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
-use crate::search::SearchLimits;
+use crate::search::{SearchLimits, SearchStack};
 use crate::shogi::{Color, Piece, PieceType};
 use crate::usi::parse_usi_square;
 use crate::Position;
@@ -210,4 +211,78 @@ fn evaluator_hooks_balance_for_classic_backend() {
     assert_eq!(counts.do_move, counts.undo_move, "move hooks must balance");
     assert!(counts.do_null_move > 0, "null move pruning should be exercised");
     assert_eq!(counts.do_null_move, counts.undo_null_move, "null-move hooks must balance");
+}
+
+#[test]
+fn null_move_respects_runtime_toggle() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
+    let pos = Position::startpos();
+    let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+    let mut heur = Heuristics::default();
+    let mut tt_hits = 0;
+    let mut beta_cuts = 0;
+    let mut lmr_counter = 0;
+
+    crate::search::params::set_nmp_enabled(true);
+    let limits = SearchLimitsBuilder::default().depth(5).build();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+    };
+    let static_eval = evaluator.evaluate(&pos);
+    let allowed = backend.null_move_prune(
+        &backend.profile.prune,
+        4,
+        &pos,
+        0,
+        static_eval,
+        0,
+        &mut stack,
+        &mut heur,
+        &mut tt_hits,
+        &mut beta_cuts,
+        &mut lmr_counter,
+        &mut ctx,
+    );
+    assert!(allowed.is_some(), "NMP should run when runtime toggle is enabled");
+
+    crate::search::params::set_nmp_enabled(false);
+    let mut stack_off = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+    let mut heur_off = Heuristics::default();
+    let mut tt_hits_off = 0;
+    let mut beta_cuts_off = 0;
+    let mut lmr_counter_off = 0;
+    let start_time_off = Instant::now();
+    let mut nodes_off = 0_u64;
+    let mut seldepth_off = 0_u32;
+    let mut ctx_off = SearchContext {
+        limits: &limits,
+        start_time: &start_time_off,
+        nodes: &mut nodes_off,
+        seldepth: &mut seldepth_off,
+    };
+    let denied = backend.null_move_prune(
+        &backend.profile.prune,
+        4,
+        &pos,
+        0,
+        static_eval,
+        0,
+        &mut stack_off,
+        &mut heur_off,
+        &mut tt_hits_off,
+        &mut beta_cuts_off,
+        &mut lmr_counter_off,
+        &mut ctx_off,
+    );
+    assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
+
+    crate::search::params::set_nmp_enabled(true);
 }

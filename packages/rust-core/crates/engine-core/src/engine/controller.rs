@@ -23,8 +23,10 @@ use std::time::Instant;
 
 fn search_profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
     match engine_type {
-        EngineType::Enhanced | EngineType::EnhancedNnue => SearchProfile::enhanced(),
-        EngineType::Stub | EngineType::Material | EngineType::Nnue => SearchProfile::basic(),
+        EngineType::Enhanced => SearchProfile::enhanced_material(),
+        EngineType::EnhancedNnue => SearchProfile::enhanced_nnue(),
+        EngineType::Nnue => SearchProfile::basic_nnue(),
+        EngineType::Stub | EngineType::Material => SearchProfile::basic_material(),
     }
 }
 
@@ -176,6 +178,9 @@ impl Engine {
             session_counter: 0,
             backend: None,
         };
+
+        let profile = search_profile_for_engine_type(engine_type);
+        profile.apply_runtime_defaults();
 
         engine.rebuild_backend();
         engine
@@ -607,6 +612,8 @@ impl Engine {
     /// Set engine type
     pub fn set_engine_type(&mut self, engine_type: EngineType) {
         self.engine_type = engine_type;
+        let profile = search_profile_for_engine_type(engine_type);
+        profile.apply_runtime_defaults();
         if matches!(self.engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
             self.ensure_nnue_evaluator_initialized();
         } else {

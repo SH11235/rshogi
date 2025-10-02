@@ -37,7 +37,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         tt: Arc<TranspositionTable>,
         toggles: PruneToggles,
     ) -> Self {
-        Self::with_profile_and_tt(evaluator, tt, SearchProfile { prune: toggles })
+        let mut profile = SearchProfile::enhanced_material();
+        profile.prune = toggles;
+        Self::with_profile_and_tt(evaluator, tt, profile)
     }
 
     pub fn with_profile(evaluator: Arc<E>, profile: SearchProfile) -> Self {
@@ -395,7 +397,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         score_cp: local_best,
                         bound: NodeType::Exact,
                         depth: d as u32,
-                        seldepth: Some(seldepth as u8),
+                        seldepth: Some(seldepth.min(u8::MAX as u32) as u8),
                         pv,
                         nodes: Some(line_nodes),
                         time_ms: Some(line_time_ms),

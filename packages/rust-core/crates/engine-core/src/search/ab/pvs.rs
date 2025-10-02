@@ -107,6 +107,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             depth,
             pos,
             beta,
+            static_eval,
             ply,
             stack,
             heur,
