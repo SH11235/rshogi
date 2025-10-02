@@ -701,7 +701,7 @@ mod tests {
         let counter_clone = counter.clone();
 
         // Create an info callback that increments the counter
-        let info_callback: InfoCallback = Arc::new(move |_line| {
+        let info_callback: InfoCallback = Arc::new(move |_line: Arc<RootLine>| {
             counter_clone.fetch_add(1, Ordering::Relaxed);
         });
 
@@ -734,10 +734,10 @@ mod tests {
         };
 
         if let Some(cb1) = &limits1.info_callback {
-            cb1(make_line(1, Some(100), 1));
+            cb1(Arc::new(make_line(1, Some(100), 1)));
         }
         if let Some(cb2) = &limits2.info_callback {
-            cb2(make_line(2, Some(200), 2));
+            cb2(Arc::new(make_line(2, Some(200), 2)));
         }
 
         // Both callbacks should have incremented the same counter

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Info callback type for search progress reporting (legacy bridge for USI layer)
-pub type InfoCallback = Arc<dyn Fn(RootLine) + Send + Sync>;
+pub type InfoCallback = Arc<dyn Fn(Arc<RootLine>) + Send + Sync>;
 
 /// Iteration callback type for committed iteration results
 pub type IterationCallback = Arc<dyn Fn(&CommittedIteration) + Send + Sync>;

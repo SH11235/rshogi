@@ -233,14 +233,16 @@ impl StopController {
         snap.pv = pv_copy;
         snap.depth = (line.depth as u8).min(127);
         snap.score_cp = line.score_cp;
-        snap.nodes = line.nodes.unwrap_or(0);
-        snap.elapsed_ms = line.time_ms.unwrap_or(0) as u32;
+        let total_nodes = line.nodes.unwrap_or(0);
+        let total_time_ms = line.time_ms.unwrap_or(0);
+        snap.nodes = total_nodes;
+        snap.elapsed_ms = total_time_ms.min(u32::MAX as u64) as u32;
         self.publisher.publish(&snap);
         // Update StopInfo snapshot (best-effort)
         let mut guard = self.inner.stop_info.lock().unwrap();
         let mut si = guard.take().unwrap_or_default();
-        si.elapsed_ms = line.time_ms.unwrap_or(0);
-        si.nodes = line.nodes.unwrap_or(0);
+        si.elapsed_ms = total_time_ms;
+        si.nodes = total_nodes;
         si.depth_reached = (line.depth as u8).min(127);
         *guard = Some(si);
     }
