@@ -33,22 +33,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         soft: Option<Duration>,
         hard: Option<Duration>,
         limits: &SearchLimits,
+        min_think_ms: u64,
     ) -> bool {
         if Self::should_stop(limits) {
             return true;
         }
-        if let Some(limit) = soft {
-            if start.elapsed() >= limit {
+        let elapsed = start.elapsed();
+        let elapsed_ms = elapsed.as_millis() as u64;
+        let min_think_satisfied = min_think_ms == 0 || elapsed_ms >= min_think_ms;
+
+        if let Some(limit) = hard {
+            if elapsed >= limit {
                 return true;
             }
         }
-        if let Some(limit) = hard {
-            if start.elapsed() >= limit {
+        if let Some(limit) = soft {
+            if elapsed >= limit && min_think_satisfied {
                 return true;
             }
         }
         if let Some(limit) = limits.time_limit() {
-            if start.elapsed() >= limit {
+            if elapsed >= limit && min_think_satisfied {
                 return true;
             }
         }
@@ -176,6 +181,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         } else {
             (None, None)
         };
+        let min_think_ms = if limits.is_ponder {
+            0
+        } else {
+            limits.time_parameters.as_ref().map(|tp| tp.min_think_ms).unwrap_or(0)
+        };
         let _last_hashfull_emit_ms = 0u64;
         let mut prev_score = 0;
         // Aspiration initial params
@@ -199,7 +209,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_seldepth_raw: Option<u32> = None;
         let mut iterative_heur = Heuristics::default();
         for d in 1..=max_depth {
-            if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
+            if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits, min_think_ms) {
                 break;
             }
             let mut seldepth: u32 = 0;
@@ -262,7 +272,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut shared_heur = std::mem::take(&mut iterative_heur);
             shared_heur.lmr_trials = 0;
             for pv_idx in 1..=k {
-                if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
+                if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits, min_think_ms) {
                     break;
                 }
                 // Aspiration window per PV head
@@ -307,7 +317,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
                 loop {
-                    if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
+                    if Self::deadline_reached(
+                        t0,
+                        soft_deadline,
+                        hard_deadline,
+                        limits,
+                        min_think_ms,
+                    ) {
                         break;
                     }
                     if active_moves.is_empty() {
@@ -316,7 +332,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     let (old_alpha, old_beta) = (alpha, beta);
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
-                        if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
+                        if Self::deadline_reached(
+                            t0,
+                            soft_deadline,
+                            hard_deadline,
+                            limits,
+                            min_think_ms,
+                        ) {
                             break;
                         }
                         if let Some(cb) = info {
@@ -614,6 +636,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             final_seldepth_raw = Some(seldepth);
 
             let mut lead_ms = 10u64;
+
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                let elapsed_ms = t0.elapsed().as_millis();
+                let msg =
+                    format!("iter_complete depth={} elapsed_ms={} nodes={}", d, elapsed_ms, nodes);
+                cb(msg.as_str());
+            }
+
             if let Some(hard) = hard_deadline {
                 if let Some(soft) = soft_deadline {
                     if hard > soft {
