@@ -83,19 +83,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (qs, None);
         }
 
-        let orig_alpha = alpha;
-        let orig_beta = beta;
+        let _orig_alpha = alpha;
+        let _orig_beta = beta;
         let static_eval = self.evaluator.evaluate(pos);
         stack[ply as usize].static_eval = Some(static_eval);
 
-        let mut a_md = alpha;
-        let mut b_md = beta;
-        if crate::search::mate_distance_pruning(&mut a_md, &mut b_md, ply as u8) {
-            return (a_md, None);
+        let mut used_alpha = alpha;
+        let mut used_beta = beta;
+        if crate::search::mate_distance_pruning(&mut used_alpha, &mut used_beta, ply as u8) {
+            return (used_alpha, None);
         }
-        alpha = a_md;
-        // Use MDP-shrunk beta for the remainder of this node (orig_beta stays for TT classification).
-        let beta = b_md;
+        alpha = used_alpha;
+        let beta = used_beta;
 
         if self.should_static_beta_prune(&self.profile.prune, depth, pos, beta, static_eval) {
             return (static_eval, None);
@@ -365,9 +364,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             (qs, None)
         } else {
             if let Some(tt) = &self.tt {
-                let node_type = if best <= orig_alpha {
+                let node_type = if best <= used_alpha {
                     NodeType::UpperBound
-                } else if best >= orig_beta {
+                } else if best >= used_beta {
                     NodeType::LowerBound
                 } else {
                     NodeType::Exact

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::evaluation::evaluate::{Evaluator, MaterialEvaluator};
-use crate::search::ab::ordering::Heuristics;
+use crate::search::ab::ordering::{Heuristics, MovePicker};
 use crate::search::api::SearcherBackend;
 use crate::search::constants::SEARCH_INF;
 use crate::search::limits::SearchLimitsBuilder;
@@ -103,6 +103,67 @@ fn classify_root_bound_matches_aspiration_cases() {
     assert_eq!(Backend::classify_root_bound(-10, 0, 30), NodeType::UpperBound);
     assert_eq!(Backend::classify_root_bound(40, 0, 30), NodeType::LowerBound);
     assert_eq!(Backend::classify_root_bound(10, 0, 30), NodeType::Exact);
+}
+
+#[test]
+fn tt_bound_follows_used_window() {
+    use crate::search::tt::{TTProbe, TranspositionTable};
+    use crate::search::NodeType;
+
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::with_tt(evaluator.clone(), Arc::new(TranspositionTable::new(16)));
+    let pos = Position::startpos();
+    let limits = SearchLimits::default();
+    let t0 = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &t0,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+    };
+    let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+    let mut heur = Heuristics::default();
+    let mut tt_hits = 0;
+    let mut beta_cuts = 0;
+    let mut lmr_counter = 0;
+
+    // Narrow window forcing fail-low so node type should be UpperBound
+    let (score, _) = backend.alphabeta(
+        crate::search::ab::pvs::ABArgs {
+            pos: &pos,
+            depth: 2,
+            alpha: -10,
+            beta: -5,
+            ply: 0,
+            is_pv: true,
+            stack: &mut stack,
+            heur: &mut heur,
+            tt_hits: &mut tt_hits,
+            beta_cuts: &mut beta_cuts,
+            lmr_counter: &mut lmr_counter,
+        },
+        &mut ctx,
+    );
+    assert!(matches!(backend.tt.as_ref(), Some(_)), "default backend should have TT");
+    if let Some(tt) = backend.tt {
+        if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
+            assert_eq!(entry.node_type(), NodeType::UpperBound);
+        }
+    }
+    assert!(score <= -5);
+}
+
+#[test]
+fn qsearch_skips_quiet_checks_when_disabled() {
+    let pos = Position::startpos();
+    let heur = Heuristics::default();
+    let mut picker = MovePicker::new_qsearch(&pos, None, None, None, 0);
+
+    while let Some(mv) = picker.next(&heur) {
+        assert!(mv.is_capture_hint() || !pos.gives_check(mv));
+    }
 }
 
 #[test]

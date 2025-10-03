@@ -70,6 +70,13 @@ static RUNTIME_QS_CHECKS: AtomicBool = AtomicBool::new(true);
 static RUNTIME_RAZOR: AtomicBool = AtomicBool::new(RAZOR_ENABLED);
 static RUNTIME_IID_MIN_DEPTH: AtomicI32 = AtomicI32::new(6); // 既定: 6ply
 static PREFETCH_ENABLED: OnceLock<bool> = OnceLock::new();
+static RUNTIME_QUIET_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(QUIET_HISTORY_WEIGHT);
+static RUNTIME_CONT_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(CONTINUATION_HISTORY_WEIGHT);
+static RUNTIME_CAP_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(CAPTURE_HISTORY_WEIGHT);
+static RUNTIME_ROOT_TT_BONUS: AtomicI32 = AtomicI32::new(ROOT_TT_BONUS);
+static RUNTIME_ROOT_PREV_SCORE_SCALE: AtomicI32 = AtomicI32::new(ROOT_PREV_SCORE_SCALE);
+static RUNTIME_ROOT_MULTIPV_1: AtomicI32 = AtomicI32::new(ROOT_MULTIPV_BONUS_1);
+static RUNTIME_ROOT_MULTIPV_2: AtomicI32 = AtomicI32::new(ROOT_MULTIPV_BONUS_2);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -143,6 +150,40 @@ pub fn tt_prefetch_enabled() -> bool {
 }
 
 #[inline]
+pub fn quiet_history_weight() -> i32 {
+    RUNTIME_QUIET_HISTORY_WEIGHT.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn continuation_history_weight() -> i32 {
+    RUNTIME_CONT_HISTORY_WEIGHT.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn capture_history_weight() -> i32 {
+    RUNTIME_CAP_HISTORY_WEIGHT.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn root_tt_bonus() -> i32 {
+    RUNTIME_ROOT_TT_BONUS.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn root_prev_score_scale() -> i32 {
+    RUNTIME_ROOT_PREV_SCORE_SCALE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn root_multipv_bonus(rank: u8) -> i32 {
+    match rank {
+        1 => RUNTIME_ROOT_MULTIPV_1.load(Ordering::Relaxed),
+        2 => RUNTIME_ROOT_MULTIPV_2.load(Ordering::Relaxed),
+        _ => 0,
+    }
+}
+
+#[inline]
 pub fn razor_enabled() -> bool {
     RUNTIME_RAZOR.load(Ordering::Relaxed)
 }
@@ -194,6 +235,34 @@ pub fn set_static_beta_enabled(b: bool) {
 }
 pub fn set_qs_checks_enabled(b: bool) {
     RUNTIME_QS_CHECKS.store(b, Ordering::Relaxed);
+}
+
+pub fn set_quiet_history_weight(v: i32) {
+    RUNTIME_QUIET_HISTORY_WEIGHT.store(v, Ordering::Relaxed);
+}
+
+pub fn set_continuation_history_weight(v: i32) {
+    RUNTIME_CONT_HISTORY_WEIGHT.store(v, Ordering::Relaxed);
+}
+
+pub fn set_capture_history_weight(v: i32) {
+    RUNTIME_CAP_HISTORY_WEIGHT.store(v, Ordering::Relaxed);
+}
+
+pub fn set_root_tt_bonus(v: i32) {
+    RUNTIME_ROOT_TT_BONUS.store(v, Ordering::Relaxed);
+}
+
+pub fn set_root_prev_score_scale(v: i32) {
+    RUNTIME_ROOT_PREV_SCORE_SCALE.store(v, Ordering::Relaxed);
+}
+
+pub fn set_root_multipv_bonus(rank: u8, value: i32) {
+    match rank {
+        1 => RUNTIME_ROOT_MULTIPV_1.store(value, Ordering::Relaxed),
+        2 => RUNTIME_ROOT_MULTIPV_2.store(value, Ordering::Relaxed),
+        _ => {}
+    }
 }
 pub fn set_razor_enabled(b: bool) {
     RUNTIME_RAZOR.store(b, Ordering::Relaxed);

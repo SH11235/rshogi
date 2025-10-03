@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
@@ -216,6 +217,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 break;
             }
             let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
+            let mut rank_map: HashMap<u16, u32> = HashMap::with_capacity(root_rank.len());
+            for (idx, mv) in root_rank.iter().enumerate() {
+                rank_map.entry(mv.to_tt_key()).or_insert(idx as u32 + 1);
+            }
 
             let root_static_eval = self.evaluator.evaluate(root);
             let root_static_eval_i16 =
@@ -336,10 +341,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             };
                             if emit {
                                 last_currmove_emit = Instant::now();
-                                let number = root_rank
-                                    .iter()
-                                    .position(|x| x.equals_without_piece_type(&mv))
-                                    .map(|pos| (pos as u32) + 1)
+                                let number = rank_map
+                                    .get(&mv.to_tt_key())
+                                    .copied()
                                     .unwrap_or((idx as u32) + 1);
                                 cb(InfoEvent::CurrMove { mv, number });
                             }

@@ -91,6 +91,19 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.EnableIID type check default true");
     usi_println("option name SearchParams.EnableProbCut type check default true");
     usi_println("option name SearchParams.EnableStaticBeta type check default true");
+    usi_println("option name SearchParams.QuietHistoryWeight type spin default 4 min -64 max 64");
+    usi_println(
+        "option name SearchParams.ContinuationHistoryWeight type spin default 2 min -32 max 32",
+    );
+    usi_println("option name SearchParams.CaptureHistoryWeight type spin default 2 min -32 max 32");
+    usi_println("option name SearchParams.RootTTBonus type spin default 1500000 min 0 max 5000000");
+    usi_println("option name SearchParams.RootPrevScoreScale type spin default 200 min 0 max 2000");
+    usi_println(
+        "option name SearchParams.RootMultiPV1 type spin default 50000 min -200000 max 200000",
+    );
+    usi_println(
+        "option name SearchParams.RootMultiPV2 type spin default 25000 min -200000 max 200000",
+    );
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -354,6 +367,55 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 engine_core::search::params::set_static_beta_enabled(on);
+            }
+        }
+        "SearchParams.QuietHistoryWeight" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_quiet_history_weight(x);
+                }
+            }
+        }
+        "SearchParams.ContinuationHistoryWeight" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_continuation_history_weight(x);
+                }
+            }
+        }
+        "SearchParams.CaptureHistoryWeight" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_capture_history_weight(x);
+                }
+            }
+        }
+        "SearchParams.RootTTBonus" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_tt_bonus(x);
+                }
+            }
+        }
+        "SearchParams.RootPrevScoreScale" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_prev_score_scale(x);
+                }
+            }
+        }
+        "SearchParams.RootMultiPV1" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_multipv_bonus(1, x);
+                }
+            }
+        }
+        "SearchParams.RootMultiPV2" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_multipv_bonus(2, x);
+                }
             }
         }
         "OverheadMs" => {
