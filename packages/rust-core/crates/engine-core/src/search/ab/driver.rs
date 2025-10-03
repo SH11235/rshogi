@@ -34,10 +34,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         hard: Option<Duration>,
         limits: &SearchLimits,
     ) -> bool {
-        if let Some(flag) = limits.stop_flag.as_ref() {
-            if flag.load(Ordering::Relaxed) {
-                return true;
-            }
+        if Self::should_stop(limits) {
+            return true;
         }
         if let Some(limit) = soft {
             if start.elapsed() >= limit {
@@ -45,6 +43,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
         if let Some(limit) = hard {
+            if start.elapsed() >= limit {
+                return true;
+            }
+        }
+        if let Some(limit) = limits.time_limit() {
             if start.elapsed() >= limit {
                 return true;
             }
