@@ -3,6 +3,9 @@
 //! Provides a simple interface for using different evaluators with the search engine
 
 use crate::search::types::StopInfo;
+use crate::time_management::{
+    detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeState,
+};
 use crate::{
     engine::session::SearchSession,
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
@@ -128,6 +131,26 @@ pub struct Engine {
 }
 
 impl Engine {
+    fn build_time_manager_for_search(
+        pos: &Position,
+        limits: &SearchLimits,
+    ) -> Option<Arc<TimeManager>> {
+        if limits.is_ponder {
+            return None;
+        }
+
+        match limits.time_control {
+            TimeControl::Infinite | TimeControl::FixedNodes { .. } => return None,
+            TimeControl::Ponder(_) => return None,
+            _ => {}
+        }
+
+        let tm_limits: TimeLimits = limits.clone().into();
+        let game_phase = detect_game_phase_for_time(pos, pos.ply as u32);
+        let manager = TimeManager::new(&tm_limits, pos.side_to_move, pos.ply as u32, game_phase);
+        Some(Arc::new(manager))
+    }
+
     /// Create new engine with specified type
     pub fn new(engine_type: EngineType) -> Self {
         let material_evaluator = Arc::new(MaterialEvaluator);
@@ -313,8 +336,20 @@ impl Engine {
 
         limits.start_time = Instant::now();
 
+        // Attach time manager if this search requires time control
+        let time_manager = Self::build_time_manager_for_search(&pos, &limits);
+        if let Some(ref tm) = time_manager {
+            limits.time_manager = Some(Arc::clone(tm));
+        }
+
+        // Attach stop controller for downstream finalize coordination
+        limits.stop_controller = Some(Arc::clone(&self.stop_bridge));
+
         let mut base_stop_info = StopInfo::default();
-        if let Some(deadlines) = limits.fallback_deadlines {
+        if let Some(ref tm) = time_manager {
+            base_stop_info.soft_limit_ms = tm.soft_limit_ms();
+            base_stop_info.hard_limit_ms = tm.hard_limit_ms();
+        } else if let Some(deadlines) = limits.fallback_deadlines {
             base_stop_info.soft_limit_ms = deadlines.soft_limit_ms;
             base_stop_info.hard_limit_ms = deadlines.hard_limit_ms;
         } else if let Some(limit) = limits.time_limit() {
@@ -419,7 +454,7 @@ impl Engine {
         let backend_task =
             backend.start_async(pos, limits, event_cb, Arc::clone(&self.active_searches));
         let (stop_handle, result_rx, join_handle) = backend_task.into_parts();
-        SearchSession::new(session_id, result_rx, join_handle, stop_handle)
+        SearchSession::new(session_id, result_rx, join_handle, stop_handle, time_manager)
     }
 
     /// Search for best move in position (synchronous wrapper around start_search)
@@ -436,9 +471,16 @@ impl Engine {
 
         // Wait for result synchronously (for backward compatibility)
         // In the future, callers should use start_search() directly for true async behavior
-        session
+        let result = session
             .recv_result()
-            .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()))
+            .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()));
+
+        if let Some(tm) = session.time_manager() {
+            let elapsed_ms = result.stats.elapsed.as_millis() as u64;
+            tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+        }
+
+        result
     }
 
     /// Try to get a ponder move directly from TT for the child position after `best_move`.

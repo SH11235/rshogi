@@ -7,7 +7,7 @@ use engine_core::search::api::{InfoEvent, InfoEventCallback};
 use engine_core::search::limits::{FallbackDeadlines, SearchLimits, SearchLimitsBuilder};
 use engine_core::search::types::InfoStringCallback;
 use engine_core::shogi::Color;
-use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
+use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder, TimeState};
 use engine_core::usi::{create_position, move_to_usi};
 use log::info;
 
@@ -416,6 +416,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.stop_flag = Some(Arc::clone(&stop_flag));
     state.ponder_hit_flag = ponder_flag;
     let session_id = session.session_id();
+    state.active_time_manager = session.time_manager();
     state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
@@ -457,6 +458,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
 
                 let was_ponder = state.current_is_ponder;
                 state.current_is_ponder = false;
+                let time_manager = state.active_time_manager.take();
 
                 if state.stoch_suppress_result {
                     state.stoch_suppress_result = false;
@@ -487,6 +489,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                             state.searching = true;
                             state.stop_flag = Some(stop_flag);
                             state.ponder_hit_flag = None;
+                            state.active_time_manager = session.time_manager();
                             state.search_session = Some(session);
                             state.current_is_stochastic_ponder = false;
                             state.current_time_control = Some(tc_for_stop);
@@ -500,11 +503,23 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 } else if was_ponder {
                     // do nothing per USI specification
                 } else {
+                    if let Some(tm) = time_manager {
+                        let elapsed_ms = result.stats.elapsed.as_millis() as u64;
+                        tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+                    }
                     let stale = state
                         .current_root_hash
                         .map(|h| h != state.position.zobrist_hash())
                         .unwrap_or(false);
                     finalize_and_send(state, "finalize", Some(&result), stale);
+                    if !state.bestmove_emitted {
+                        let fallback = result
+                            .best_move
+                            .map(|mv| move_to_usi(&mv))
+                            .unwrap_or_else(|| "resign".to_string());
+                        emit_bestmove(&fallback, None);
+                        state.bestmove_emitted = true;
+                    }
                     state.current_time_control = None;
                     state.current_root_hash = None;
                     state.notify_idle();
@@ -536,6 +551,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 state.search_session = None;
                 state.current_time_control = None;
                 state.current_root_hash = None;
+                state.active_time_manager = None;
 
                 // Fallback: try to get a safe bestmove from Engine (TT or legal moves)
                 let bestmove = {
