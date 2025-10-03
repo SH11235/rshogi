@@ -364,7 +364,9 @@ impl Engine {
                     InfoEvent::PV { line } => {
                         stop_ctrl.publish_root_line(sid, root_hash, line.as_ref());
                         if let Some(cb) = &legacy_cb {
-                            cb(Arc::clone(&line));
+                            cb(InfoEvent::PV {
+                                line: Arc::clone(&line),
+                            });
                         }
                     }
                     InfoEvent::Depth { depth, seldepth } => {

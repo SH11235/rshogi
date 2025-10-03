@@ -49,6 +49,7 @@ pub(super) struct ProbcutParams<'a, 'ctx> {
     pub depth: i32,
     pub pos: &'a Position,
     pub beta: i32,
+    pub static_eval: i32,
     pub ply: u32,
     pub stack: &'a mut [SearchStack],
     pub heur: &'a mut Heuristics,
@@ -227,6 +228,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             depth,
             pos,
             beta,
+            static_eval,
             ply,
             stack,
             heur,
@@ -239,16 +241,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         {
             return None;
         }
-        let threshold = beta + dynp::probcut_margin(depth);
+        let margin = dynp::probcut_margin(depth);
+        let threshold = beta + margin;
+        let see_threshold = (threshold - static_eval).max(0);
         let prev_move = if ply > 0 {
             stack[(ply - 1) as usize].current_move
         } else {
             None
         };
         let excluded = stack[ply as usize].excluded_move;
-        let mut picker = MovePicker::new_probcut(pos, excluded, prev_move, threshold);
+        let mut picker = MovePicker::new_probcut(pos, excluded, prev_move, see_threshold);
         while let Some(mv) = picker.next(&*heur) {
-            if pos.see(mv) < 0 {
+            if pos.see(mv) < see_threshold {
                 continue;
             }
             let parent_sc = {
