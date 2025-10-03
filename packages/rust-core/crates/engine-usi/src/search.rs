@@ -11,11 +11,10 @@ use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBu
 use engine_core::usi::{create_position, move_to_usi};
 use log::info;
 
-use crate::finalize::{finalize_and_send, fmt_hash};
+use crate::finalize::{emit_bestmove_once, finalize_and_send, fmt_hash};
 use crate::io::info_string;
 use crate::state::{EngineState, GoParams, UsiOptions};
 use crate::usi_adapter;
-use crate::util::emit_bestmove;
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     let mut tokens = cmd.split_whitespace().skip(1).peekable();
@@ -292,8 +291,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.position.ply,
                     fmt_hash(state.position.zobrist_hash())
                 ));
-                emit_bestmove("resign", None);
-                state.bestmove_emitted = true;
+                emit_bestmove_once(state, String::from("resign"), None);
                 return Ok(());
             } else if slice.len() == 1 {
                 let mv_usi = move_to_usi(&slice[0]);
@@ -303,8 +301,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                     fmt_hash(state.position.zobrist_hash()),
                     mv_usi
                 ));
-                emit_bestmove(&mv_usi, None);
-                state.bestmove_emitted = true;
+                emit_bestmove_once(state, mv_usi, None);
                 return Ok(());
             }
         }
@@ -360,7 +357,13 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             // Record deadlines into EngineState for USI-side OOB finalize enforcement
             state.deadline_hard = Some(hard_deadline);
             // Conservative: near-hard is optional; if desired, compute as (hard - lead)
-            let lead = state.opts.byoyomi_deadline_lead_ms;
+            let lead = if state.opts.byoyomi_deadline_lead_ms > 0 {
+                state.opts.byoyomi_deadline_lead_ms
+            } else if matches!(tc_for_stop, TimeControl::Byoyomi { .. }) {
+                200 // fallback lead for pure byoyomi to match YaneuraOu behavior
+            } else {
+                0
+            };
             state.deadline_near = if lead > 0 {
                 hard_deadline.checked_sub(Duration::from_millis(lead))
             } else {
@@ -482,14 +485,13 @@ pub fn poll_search_completion(state: &mut EngineState) {
                         .current_root_hash
                         .map(|h| h != state.position.zobrist_hash())
                         .unwrap_or(false);
-                    finalize_and_send(state, "finalize", Some(&result), stale);
+                    finalize_and_send(state, "finalize", Some(&result), stale, None);
                     if !state.bestmove_emitted {
                         let fallback = result
                             .best_move
                             .map(|mv| move_to_usi(&mv))
                             .unwrap_or_else(|| "resign".to_string());
-                        emit_bestmove(&fallback, None);
-                        state.bestmove_emitted = true;
+                        emit_bestmove_once(state, fallback, None);
                     }
                     state.current_time_control = None;
                     state.current_root_hash = None;
@@ -534,15 +536,14 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 match bestmove {
                     Some(mv) => {
                         info_string(format!("fallback_bestmove move={mv} source=tt_or_legal"));
-                        emit_bestmove(&mv, None);
+                        emit_bestmove_once(state, mv, None);
                     }
                     None => {
                         info_string("fallback_bestmove move=resign source=no_legal_moves");
-                        emit_bestmove("resign", None);
+                        emit_bestmove_once(state, String::from("resign"), None);
                     }
                 }
 
-                state.bestmove_emitted = true;
                 state.notify_idle();
             }
         }

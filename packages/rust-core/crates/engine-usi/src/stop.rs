@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 
 use engine_core::time_management::TimeControl;
 
-use crate::finalize::{finalize_and_send, finalize_and_send_fast};
+use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
-use crate::util::emit_bestmove;
+use engine_core::search::parallel::FinalizeReason;
 use engine_core::usi::move_to_usi;
 
 pub fn handle_stop(state: &mut EngineState) {
@@ -70,14 +70,19 @@ pub fn handle_stop(state: &mut EngineState) {
                             .current_root_hash
                             .map(|h| h != state.position.zobrist_hash())
                             .unwrap_or(false);
-                        finalize_and_send(state, "stop_finalize", Some(&result), stale);
+                        finalize_and_send(
+                            state,
+                            "stop_finalize",
+                            Some(&result),
+                            stale,
+                            Some(FinalizeReason::UserStop),
+                        );
                         if !state.bestmove_emitted {
                             let fallback = result
                                 .best_move
                                 .map(|mv| move_to_usi(&mv))
                                 .unwrap_or_else(|| "resign".to_string());
-                            emit_bestmove(&fallback, None);
-                            state.bestmove_emitted = true;
+                            emit_bestmove_once(state, fallback, None);
                         }
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
@@ -151,14 +156,19 @@ pub fn handle_stop(state: &mut EngineState) {
                         let time_state = state.time_state_for_update(elapsed_ms);
                         tm.update_after_move(elapsed_ms, time_state);
                     }
-                    finalize_and_send(state, "stop_finalize", Some(&result), stale);
+                    finalize_and_send(
+                        state,
+                        "stop_finalize",
+                        Some(&result),
+                        stale,
+                        Some(FinalizeReason::UserStop),
+                    );
                     if !state.bestmove_emitted {
                         let fallback = result
                             .best_move
                             .map(|mv| move_to_usi(&mv))
                             .unwrap_or_else(|| "resign".to_string());
-                        emit_bestmove(&fallback, None);
-                        state.bestmove_emitted = true;
+                        emit_bestmove_once(state, fallback, None);
                     }
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
@@ -174,7 +184,11 @@ pub fn handle_stop(state: &mut EngineState) {
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
                 state.finalize_time_manager();
-                finalize_and_send_fast(state, "stop_timeout_finalize");
+                finalize_and_send_fast(
+                    state,
+                    "stop_timeout_finalize",
+                    Some(FinalizeReason::UserStop),
+                );
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
                 state.current_time_control = None;
@@ -272,14 +286,19 @@ pub fn handle_gameover(state: &mut EngineState) {
                                 let time_state = state.time_state_for_update(elapsed_ms);
                                 tm.update_after_move(elapsed_ms, time_state);
                             }
-                            finalize_and_send(state, "gameover_finalize", Some(&result), stale);
+                            finalize_and_send(
+                                state,
+                                "gameover_finalize",
+                                Some(&result),
+                                stale,
+                                Some(FinalizeReason::UserStop),
+                            );
                             if !state.bestmove_emitted {
                                 let fallback = result
                                     .best_move
                                     .map(|mv| move_to_usi(&mv))
                                     .unwrap_or_else(|| "resign".to_string());
-                                emit_bestmove(&fallback, None);
-                                state.bestmove_emitted = true;
+                                emit_bestmove_once(state, fallback, None);
                             }
                             state.current_is_ponder = false;
                             state.current_root_hash = None;
@@ -311,14 +330,19 @@ pub fn handle_gameover(state: &mut EngineState) {
                             let time_state = state.time_state_for_update(elapsed_ms);
                             tm.update_after_move(elapsed_ms, time_state);
                         }
-                        finalize_and_send(state, "gameover_finalize", Some(&result), stale);
+                        finalize_and_send(
+                            state,
+                            "gameover_finalize",
+                            Some(&result),
+                            stale,
+                            Some(FinalizeReason::UserStop),
+                        );
                         if !state.bestmove_emitted {
                             let fallback = result
                                 .best_move
                                 .map(|mv| move_to_usi(&mv))
                                 .unwrap_or_else(|| "resign".to_string());
-                            emit_bestmove(&fallback, None);
-                            state.bestmove_emitted = true;
+                            emit_bestmove_once(state, fallback, None);
                         }
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
@@ -334,7 +358,11 @@ pub fn handle_gameover(state: &mut EngineState) {
                     state.stop_flag = None;
                     state.ponder_hit_flag = None;
                     state.finalize_time_manager();
-                    finalize_and_send_fast(state, "gameover_timeout_finalize");
+                    finalize_and_send_fast(
+                        state,
+                        "gameover_timeout_finalize",
+                        Some(FinalizeReason::UserStop),
+                    );
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
                     state.current_time_control = None;
@@ -346,7 +374,11 @@ pub fn handle_gameover(state: &mut EngineState) {
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
                 state.finalize_time_manager();
-                finalize_and_send_fast(state, "gameover_immediate_finalize");
+                finalize_and_send_fast(
+                    state,
+                    "gameover_immediate_finalize",
+                    Some(FinalizeReason::UserStop),
+                );
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
                 state.current_time_control = None;
@@ -358,7 +390,11 @@ pub fn handle_gameover(state: &mut EngineState) {
             state.stop_flag = None;
             state.ponder_hit_flag = None;
             state.finalize_time_manager();
-            finalize_and_send_fast(state, "gameover_immediate_finalize");
+            finalize_and_send_fast(
+                state,
+                "gameover_immediate_finalize",
+                Some(FinalizeReason::UserStop),
+            );
             state.current_is_ponder = false;
             state.current_root_hash = None;
             state.current_time_control = None;

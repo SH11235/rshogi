@@ -3,10 +3,9 @@ use std::time::Duration;
 
 use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 
-use crate::finalize::{finalize_and_send, finalize_and_send_fast};
+use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
 use crate::state::EngineState;
-use crate::util::emit_bestmove;
 use engine_core::usi::move_to_usi;
 use std::time::Instant;
 
@@ -163,14 +162,13 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         let time_state = state.time_state_for_update(elapsed_ms);
                         tm.update_after_move(elapsed_ms, time_state);
                     }
-                    finalize_and_send(state, label, Some(&result), stale);
+                    finalize_and_send(state, label, Some(&result), stale, Some(reason));
                     if !state.bestmove_emitted {
                         let fallback = result
                             .best_move
                             .map(|mv| move_to_usi(&mv))
                             .unwrap_or_else(|| "resign".to_string());
-                        emit_bestmove(&fallback, None);
-                        state.bestmove_emitted = true;
+                        emit_bestmove_once(state, fallback, None);
                     }
                     info_string(format!("oob_finalize_result label={} mode=joined", label));
                     state.current_is_ponder = false;
@@ -186,7 +184,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         "oob_finalize_timeout no_result=1 sid={} budget_ms={}",
                         session_id, wait_budget_ms
                     ));
-                    fast_finalize_no_detach(state, label);
+                    fast_finalize_no_detach(state, label, Some(reason));
                     info_string(format!("oob_finalize_result label={} mode=fast", label));
                 }
             }
@@ -211,6 +209,7 @@ pub fn enforce_deadline(state: &mut EngineState) {
     if let Some(nh) = state.deadline_near {
         if now >= nh && !state.deadline_near_notified {
             info_string("oob_deadline_nearhard_reached");
+            info_string("oob_finalize_request reason=NearHard");
             state.stop_bridge.request_finalize(FinalizeReason::NearHard);
             state.deadline_near_notified = true;
             state.deadline_near = None;
@@ -222,7 +221,7 @@ pub fn enforce_deadline(state: &mut EngineState) {
             info_string("oob_finalize_request reason=Hard");
             // Mark StopInfo as TimeLimit/Hard for logging consistency and request finalize
             state.stop_bridge.request_finalize(FinalizeReason::Hard);
-            fast_finalize_no_detach(state, "oob_hard_finalize");
+            fast_finalize_no_detach(state, "oob_hard_finalize", Some(FinalizeReason::Hard));
             // Clear deadlines
             state.deadline_hard = None;
             state.deadline_near = None;
@@ -232,13 +231,17 @@ pub fn enforce_deadline(state: &mut EngineState) {
 }
 
 /// Fast finalize without waiting for result (SearchSession will clean up automatically)
-fn fast_finalize_no_detach(state: &mut EngineState, label: &str) {
+fn fast_finalize_no_detach(
+    state: &mut EngineState,
+    label: &str,
+    finalize_reason: Option<FinalizeReason>,
+) {
     state.searching = false;
     // Keep stop_flag for reuse in next session (don't set to None)
     state.ponder_hit_flag = None;
     state.search_session = None;
     state.finalize_time_manager();
-    finalize_and_send_fast(state, label);
+    finalize_and_send_fast(state, label, finalize_reason);
     state.current_is_ponder = false;
     state.current_root_hash = None;
     state.current_time_control = None;
