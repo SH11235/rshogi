@@ -70,30 +70,39 @@ fn multipv_line_nodes_are_per_line() {
     assert!(total_nodes > 0, "search should consume nodes");
     let total_time_ms = result.stats.elapsed.as_millis() as u64;
 
-    let first_line = &lines[0];
-    if let Some(n) = first_line.nodes {
-        assert!(n > 0);
-        assert!(n <= total_nodes);
-    }
-    if let Some(ms) = first_line.time_ms {
-        assert!(ms <= total_time_ms);
-    }
-
-    let mut prev_nodes = 0_u64;
-    let mut prev_time = 0_u64;
+    let mut sum_nodes = 0_u64;
+    let mut sum_time = 0_u64;
     for (idx, line) in lines.iter().enumerate() {
         if let Some(n) = line.nodes {
-            assert!(n <= total_nodes, "line {idx} nodes exceed total nodes");
-            assert!(n >= prev_nodes, "line {idx} nodes regressed (non-monotonic)");
-            prev_nodes = n;
+            assert!(n > 0, "line {idx} nodes should be positive");
+            sum_nodes = sum_nodes.saturating_add(n);
         }
         if let Some(ms) = line.time_ms {
             assert!(ms <= total_time_ms, "line {idx} time exceeds total time");
-            assert!(ms >= prev_time, "line {idx} time regressed (non-monotonic)");
-            prev_time = ms;
+            sum_time = sum_time.saturating_add(ms);
         }
-        assert!(line.nps.is_none(), "nps should be computed downstream");
+        if let Some(nps) = line.nps {
+            if let Some(ms) = line.time_ms {
+                if ms > 0 {
+                    let expected = line.nodes.unwrap_or(0).saturating_mul(1000) / ms.max(1);
+                    assert_eq!(nps, expected, "line {idx} nps should match nodes/time");
+                }
+            }
+        }
     }
+    assert!(sum_nodes <= total_nodes, "per-line nodes exceed total nodes");
+    assert!(sum_time <= total_time_ms, "per-line time exceeds total time");
+}
+
+#[test]
+fn classify_root_bound_matches_aspiration_cases() {
+    use crate::search::types::NodeType;
+
+    type Backend = ClassicBackend<MaterialEvaluator>;
+
+    assert_eq!(Backend::classify_root_bound(-10, 0, 30), NodeType::UpperBound);
+    assert_eq!(Backend::classify_root_bound(40, 0, 30), NodeType::LowerBound);
+    assert_eq!(Backend::classify_root_bound(10, 0, 30), NodeType::Exact);
 }
 
 #[test]

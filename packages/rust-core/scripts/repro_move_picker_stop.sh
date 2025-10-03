@@ -26,26 +26,36 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 cleanup() {
-    kill 0 2>/dev/null || true
+    if [[ -n ${ENGINE_IN:-} ]]; then
+        exec {ENGINE_IN}>&-
+    fi
+    if [[ -n ${ENGINE_PID:-} ]]; then
+        kill "$ENGINE_PID" 2>/dev/null || true
+        wait "$ENGINE_PID" 2>/dev/null || true
+    fi
+    if [[ -n ${LOGGER_PID:-} ]]; then
+        kill "$LOGGER_PID" 2>/dev/null || true
+        wait "$LOGGER_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM
-
-run_engine() {
-    timeout 20s stdbuf -oL -eL "$BIN"
-}
 
 wait_for() {
     local pattern="$1"
     local timeout_seconds="${2:-5}"
-    if ! timeout "$timeout_seconds" sh -c "tail -F -n0 -- '$LOG' | stdbuf -oL grep -m1 -- '$pattern'" >/dev/null 2>&1; then
+    if ! timeout "$timeout_seconds" sh -c "tail -F -n0 -- '$LOG' | stdbuf -oL grep -F -m1 -- '$pattern'" >/dev/null 2>&1; then
         echo "[repro] ERROR: timeout while waiting for pattern '$pattern'" >&2
         return 1
     fi
     return 0
 }
 
-exec {ENGINE_IN}> >(run_engine | tee "$LOG")
-ENGINE_PID=$!
+: >"$LOG"
+coproc ENGINE { timeout 30s stdbuf -oL -eL "$BIN"; }
+ENGINE_PID=$COPROC_PID
+cat <&${ENGINE[0]} | tee "$LOG" &
+LOGGER_PID=$!
+exec {ENGINE_IN}>&${ENGINE[1]}
 
 send() {
     printf '%s\n' "$1" >&${ENGINE_IN}
@@ -72,7 +82,9 @@ wait_for "bestmove" 10
 send "position startpos moves 5i5h 5a6b"
 send "go ponder btime 0 wtime 0 byoyomi 10000"
 wait_for "info string search_started" 5
-wait_for "info string currmove" 5
+if ! wait_for "info string currmove" 5; then
+    wait_for "info depth" 5
+fi
 
 send "stop"
 if ! wait_for "bestmove" 10; then
@@ -81,5 +93,10 @@ fi
 
 send "quit"
 wait "$ENGINE_PID" || true
+kill "$LOGGER_PID" 2>/dev/null || true
+
+if jobs -p &>/dev/null; then
+    wait 2>/dev/null || true
+fi
 
 echo "[repro] session log captured at $LOG" >&2

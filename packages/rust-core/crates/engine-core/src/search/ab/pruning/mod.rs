@@ -252,9 +252,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let excluded = stack[ply as usize].excluded_move;
         let mut picker = MovePicker::new_probcut(pos, excluded, prev_move, see_threshold);
         while let Some(mv) = picker.next(&*heur) {
-            if pos.see(mv) < see_threshold {
-                continue;
-            }
             let parent_sc = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                 let mut child = pos.clone();

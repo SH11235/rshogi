@@ -125,7 +125,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut tt_hint: Option<crate::shogi::Move> = None;
         let mut tt_depth_ok = false;
         if let Some(tt) = &self.tt {
-            if depth >= 3 {
+            if depth >= 3 && dynp::tt_prefetch_enabled() {
                 tt.prefetch_l2(pos.zobrist_hash, pos.side_to_move);
             }
             if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
@@ -372,12 +372,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 } else {
                     NodeType::Exact
                 };
-                let store_score = crate::search::common::adjust_mate_score_for_tt(best, ply as u8);
+                let store_score = crate::search::common::adjust_mate_score_for_tt(best, ply as u8)
+                    .clamp(i16::MIN as i32, i16::MAX as i32);
+                let static_eval_i16 = static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 let mut args = crate::search::tt::TTStoreArgs::new(
                     pos.zobrist_hash,
                     best_mv,
                     store_score as i16,
-                    static_eval as i16,
+                    static_eval_i16,
                     depth as u8,
                     node_type,
                     pos.side_to_move,

@@ -1,13 +1,10 @@
+use crate::search::params::{
+    ROOT_BASE_KEY, ROOT_MULTIPV_BONUS_1, ROOT_MULTIPV_BONUS_2, ROOT_PREV_SCORE_CLAMP,
+    ROOT_PREV_SCORE_SCALE, ROOT_TT_BONUS,
+};
 use crate::search::types::RootLine;
 use crate::shogi::Move;
 use crate::Position;
-
-const ROOT_BASE_KEY: i32 = 2_000_000;
-const ROOT_TT_BONUS: i32 = 1_500_000;
-const ROOT_PREV_SCORE_SCALE: i32 = 200;
-const ROOT_PREV_SCORE_CLAMP: i32 = 300;
-const ROOT_MULTIPV_BONUS_1: i32 = 50_000;
-const ROOT_MULTIPV_BONUS_2: i32 = 25_000;
 
 #[derive(Clone, Copy)]
 struct RootScoredMove {
@@ -36,6 +33,7 @@ impl RootPicker {
             let good_capture = mv.is_capture_hint() && see >= 0;
 
             let mut key = ROOT_BASE_KEY;
+            // チェック/成りは “基礎 + 追加” の二段加点で強調している（既存順位との互換性保持）。
             key += is_check * 2_000 + see * 10 + is_promo;
             key += 500 * is_check + 300 * is_promo + 200 * (good_capture as i32);
 

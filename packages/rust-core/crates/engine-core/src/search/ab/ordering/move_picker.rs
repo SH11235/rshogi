@@ -2,13 +2,11 @@ use smallvec::SmallVec;
 
 use super::Heuristics;
 use crate::movegen::MoveGenerator;
-use crate::search::params::QS_PROMOTE_BONUS;
+use crate::search::params::{
+    CAPTURE_HISTORY_WEIGHT, CONTINUATION_HISTORY_WEIGHT, QS_PROMOTE_BONUS, QUIET_HISTORY_WEIGHT,
+};
 use crate::shogi::Move;
 use crate::Position;
-
-const QUIET_HISTORY_WEIGHT: i32 = 4;
-const CONTINUATION_HISTORY_WEIGHT: i32 = 2;
-const CAPTURE_HISTORY_WEIGHT: i32 = 2;
 
 /// Arguments for MovePicker::base to avoid too_many_arguments clippy warning
 struct MovePickerArgs<'a> {
@@ -403,6 +401,7 @@ impl<'a> MovePicker<'a> {
             }
             self.buf.push(ScoredMove { mv, key });
         }
+        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
     }
 
     fn prepare_bad_captures(&mut self, heur: &Heuristics) {
@@ -422,6 +421,7 @@ impl<'a> MovePicker<'a> {
             }
             self.buf.push(ScoredMove { mv, key });
         }
+        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
     }
 
     fn prepare_quiets(&mut self, heur: &Heuristics) {
@@ -464,6 +464,7 @@ impl<'a> MovePicker<'a> {
             }
             self.buf.push(ScoredMove { mv, key });
         }
+        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
     }
 
     fn prepare_evasions(&mut self, heur: &Heuristics) {
@@ -485,6 +486,7 @@ impl<'a> MovePicker<'a> {
                 self.buf.push(ScoredMove { mv, key });
             }
         }
+        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
     }
 
     fn prepare_qs_captures(&mut self, heur: &Heuristics, good: bool) {
@@ -513,6 +515,7 @@ impl<'a> MovePicker<'a> {
             }
             self.buf.push(ScoredMove { mv, key });
         }
+        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
     }
 
     fn prepare_qs_checks(&mut self, heur: &Heuristics) {
@@ -531,6 +534,7 @@ impl<'a> MovePicker<'a> {
             }
             self.qsearch_state = Some(state);
         }
+        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
     }
 
     fn prepare_probcut(&mut self) {
@@ -554,6 +558,7 @@ impl<'a> MovePicker<'a> {
                 });
             }
         }
+        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
     }
 
     fn yield_killer_or_counter(&mut self) -> Option<Move> {
@@ -581,13 +586,6 @@ impl<'a> MovePicker<'a> {
 
     fn pick_next(&mut self) -> Option<Move> {
         while self.cursor < self.buf.len() {
-            let mut best = self.cursor;
-            for idx in (self.cursor + 1)..self.buf.len() {
-                if self.buf[idx].key > self.buf[best].key {
-                    best = idx;
-                }
-            }
-            self.buf.swap(self.cursor, best);
             let mv = self.buf[self.cursor].mv;
             self.cursor += 1;
             if self.should_skip(mv) {
