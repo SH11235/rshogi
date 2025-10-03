@@ -10,6 +10,20 @@ const QUIET_HISTORY_WEIGHT: i32 = 4;
 const CONTINUATION_HISTORY_WEIGHT: i32 = 2;
 const CAPTURE_HISTORY_WEIGHT: i32 = 2;
 
+/// Arguments for MovePicker::base to avoid too_many_arguments clippy warning
+struct MovePickerArgs<'a> {
+    pos: &'a Position,
+    stage: Stage,
+    tt_move: Option<Move>,
+    excluded: Option<Move>,
+    killers: [Option<Move>; 2],
+    counter_move: Option<Move>,
+    history_prev_move: Option<Move>,
+    in_check: bool,
+    qsearch_state: Option<QSearchState>,
+    probcut_threshold: Option<i32>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Tt,
@@ -76,18 +90,18 @@ impl<'a> MovePicker<'a> {
         history_prev_move: Option<Move>,
     ) -> Self {
         let in_check = pos.is_in_check();
-        Self::base(
+        Self::base(MovePickerArgs {
             pos,
-            if in_check { Stage::Evasions } else { Stage::Tt },
+            stage: if in_check { Stage::Evasions } else { Stage::Tt },
             tt_move,
             excluded,
             killers,
             counter_move,
             history_prev_move,
             in_check,
-            None,
-            None,
-        )
+            qsearch_state: None,
+            probcut_threshold: None,
+        })
     }
 
     pub fn new_evasion(
@@ -96,18 +110,18 @@ impl<'a> MovePicker<'a> {
         excluded: Option<Move>,
         history_prev_move: Option<Move>,
     ) -> Self {
-        Self::base(
+        Self::base(MovePickerArgs {
             pos,
-            Stage::Tt,
+            stage: Stage::Tt,
             tt_move,
             excluded,
-            [None, None],
-            None,
+            killers: [None, None],
+            counter_move: None,
             history_prev_move,
-            true,
-            None,
-            None,
-        )
+            in_check: true,
+            qsearch_state: None,
+            probcut_threshold: None,
+        })
     }
 
     pub fn new_qsearch(
@@ -122,18 +136,18 @@ impl<'a> MovePicker<'a> {
             quiet_checks_generated: 0,
             quiet_check_limit,
         });
-        Self::base(
+        Self::base(MovePickerArgs {
             pos,
-            if in_check { Stage::Evasions } else { Stage::Tt },
+            stage: if in_check { Stage::Evasions } else { Stage::Tt },
             tt_move,
             excluded,
-            [None, None],
-            None,
+            killers: [None, None],
+            counter_move: None,
             history_prev_move,
             in_check,
-            qs_state,
-            None,
-        )
+            qsearch_state: qs_state,
+            probcut_threshold: None,
+        })
     }
 
     pub fn new_probcut(
@@ -142,32 +156,33 @@ impl<'a> MovePicker<'a> {
         history_prev_move: Option<Move>,
         threshold: i32,
     ) -> Self {
-        Self::base(
+        Self::base(MovePickerArgs {
             pos,
-            Stage::ProbCut,
-            None,
+            stage: Stage::ProbCut,
+            tt_move: None,
             excluded,
-            [None, None],
-            None,
+            killers: [None, None],
+            counter_move: None,
             history_prev_move,
-            pos.is_in_check(),
-            None,
-            Some(threshold),
-        )
+            in_check: pos.is_in_check(),
+            qsearch_state: None,
+            probcut_threshold: Some(threshold),
+        })
     }
 
-    fn base(
-        pos: &'a Position,
-        stage: Stage,
-        tt_move: Option<Move>,
-        excluded: Option<Move>,
-        killers: [Option<Move>; 2],
-        counter_move: Option<Move>,
-        history_prev_move: Option<Move>,
-        in_check: bool,
-        qsearch_state: Option<QSearchState>,
-        probcut_threshold: Option<i32>,
-    ) -> Self {
+    fn base(args: MovePickerArgs<'a>) -> Self {
+        let MovePickerArgs {
+            pos,
+            stage,
+            tt_move,
+            excluded,
+            killers,
+            counter_move,
+            history_prev_move,
+            in_check,
+            qsearch_state,
+            probcut_threshold,
+        } = args;
         Self {
             pos,
             stage,

@@ -145,8 +145,8 @@ impl ButterflyHistory {
 #[derive(Clone)]
 pub struct ContinuationHistory {
     /// [color][piece_moved_2_ply_ago][to_square_2_ply_ago][piece_to_move][to_square] -> score
-    /// Using simplified indexing for memory efficiency
-    scores: Vec<i32>,
+    /// Stored as i16 to reduce footprint (≈6.4MB)
+    scores: Vec<i16>,
     size: usize,
 }
 
@@ -159,11 +159,11 @@ impl Default for ContinuationHistory {
 impl ContinuationHistory {
     /// Create new continuation history
     pub fn new() -> Self {
-        // Simplified: 2 colors * 16 piece types * N squares * 16 piece types * N squares
-        // This is large but manageable (~3.4MB)
-        let size = 2 * 16 * SHOGI_BOARD_SIZE * 16 * SHOGI_BOARD_SIZE;
+        let piece_dim = NUM_PIECE_TYPES;
+        // 2 (colors) * piece_dim * N * piece_dim * N ≒ 6.4MB at i16
+        let size = 2 * piece_dim * SHOGI_BOARD_SIZE * piece_dim * SHOGI_BOARD_SIZE;
         ContinuationHistory {
-            scores: vec![0; size],
+            scores: vec![0i16; size],
             size,
         }
     }
@@ -179,9 +179,10 @@ impl ContinuationHistory {
     ) -> usize {
         let color_idx = color as usize;
         let n = SHOGI_BOARD_SIZE;
-        let idx = color_idx * (16 * n * 16 * n)
-            + prev_piece * (n * 16 * n)
-            + prev_to.index() * (16 * n)
+        let piece_dim = NUM_PIECE_TYPES;
+        let idx = color_idx * (piece_dim * n * piece_dim * n)
+            + prev_piece * (n * piece_dim * n)
+            + prev_to.index() * (piece_dim * n)
             + curr_piece * n
             + curr_to.index();
 
@@ -199,7 +200,7 @@ impl ContinuationHistory {
         curr_to: Square,
     ) -> i32 {
         let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-        self.scores[idx]
+        i32::from(self.scores[idx])
     }
 
     /// Update continuation history with bonus
@@ -214,10 +215,10 @@ impl ContinuationHistory {
     ) {
         let bonus = depth * depth;
         let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-
-        let score = &mut self.scores[idx];
-        *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        let score = i32::from(self.scores[idx]);
+        let updated = score + bonus - (score * bonus.abs() / MAX_HISTORY_SCORE);
+        let clamped = updated.clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        self.scores[idx] = clamped as i16;
     }
 
     /// Update continuation history with penalty
@@ -232,16 +233,16 @@ impl ContinuationHistory {
     ) {
         let penalty = -(depth * depth);
         let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-
-        let score = &mut self.scores[idx];
-        *score += penalty - (*score * penalty.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        let score = i32::from(self.scores[idx]);
+        let updated = score + penalty - (score * penalty.abs() / MAX_HISTORY_SCORE);
+        let clamped = updated.clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        self.scores[idx] = clamped as i16;
     }
 
     /// Age all continuation history scores
     pub fn age_scores(&mut self) {
         for score in &mut self.scores {
-            *score /= HISTORY_AGING_DIVISOR;
+            *score = (*score as i32 / HISTORY_AGING_DIVISOR) as i16;
         }
     }
 

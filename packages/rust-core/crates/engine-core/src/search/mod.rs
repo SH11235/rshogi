@@ -14,11 +14,12 @@ pub mod types;
 
 // Re-export commonly used items
 pub use crate::game_phase::GamePhase;
+pub use api::{InfoEvent, InfoEventCallback};
 pub use common::{is_mate_score, mate_distance_pruning, mate_score, LimitChecker};
 pub use constants::*;
 pub use limits::{SearchLimits, SearchLimitsBuilder};
 pub use tt::TranspositionTable;
 pub use types::{
-    CommittedIteration, InfoCallback, IterationCallback, NodeType, SearchResult, SearchStack,
-    SearchState, SearchStats,
+    CommittedIteration, IterationCallback, NodeType, SearchResult, SearchStack, SearchState,
+    SearchStats,
 };

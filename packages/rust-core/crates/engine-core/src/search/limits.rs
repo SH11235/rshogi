@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
-use super::types::{InfoCallback, InfoStringCallback, IterationCallback};
+use super::types::{InfoStringCallback, IterationCallback};
 
 /// Unified search limits combining time control with other constraints
 pub struct SearchLimits {
@@ -31,7 +31,7 @@ pub struct SearchLimits {
     /// Stop flag for interrupting search (temporarily kept for compatibility)
     pub stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress (temporarily kept for compatibility)
-    pub info_callback: Option<InfoCallback>,
+    pub info_callback: Option<crate::search::api::InfoEventCallback>,
     /// Callback for textual diagnostics routed as `info string`
     pub info_string_callback: Option<InfoStringCallback>,
     /// Iteration callback for committed iteration results
@@ -145,7 +145,7 @@ pub struct SearchLimitsBuilder {
     contempt: Option<i32>,
     is_ponder: bool,
     stop_flag: Option<Arc<AtomicBool>>,
-    info_callback: Option<InfoCallback>,
+    info_callback: Option<crate::search::api::InfoEventCallback>,
     info_string_callback: Option<InfoStringCallback>,
     iteration_callback: Option<IterationCallback>,
     ponder_hit_flag: Option<Arc<AtomicBool>>,
@@ -319,7 +319,7 @@ impl SearchLimitsBuilder {
     }
 
     /// Set info callback
-    pub fn info_callback(mut self, callback: InfoCallback) -> Self {
+    pub fn info_callback(mut self, callback: crate::search::api::InfoEventCallback) -> Self {
         self.info_callback = Some(callback);
         self
     }
@@ -691,6 +691,7 @@ mod tests {
 
     #[test]
     fn test_info_callback_cloning() {
+        use crate::search::api::{InfoEvent, InfoEventCallback};
         use crate::search::types::RootLine;
         use crate::shogi::Move;
         use smallvec::SmallVec;
@@ -701,8 +702,10 @@ mod tests {
         let counter_clone = counter.clone();
 
         // Create an info callback that increments the counter
-        let info_callback: InfoCallback = Arc::new(move |_line: Arc<RootLine>| {
-            counter_clone.fetch_add(1, Ordering::Relaxed);
+        let info_callback: InfoEventCallback = Arc::new(move |event| {
+            if matches!(event, InfoEvent::PV { .. }) {
+                counter_clone.fetch_add(1, Ordering::Relaxed);
+            }
         });
 
         // Create SearchLimits with the callback
@@ -734,10 +737,14 @@ mod tests {
         };
 
         if let Some(cb1) = &limits1.info_callback {
-            cb1(Arc::new(make_line(1, Some(100), 1)));
+            cb1(InfoEvent::PV {
+                line: Arc::new(make_line(1, Some(100), 1)),
+            });
         }
         if let Some(cb2) = &limits2.info_callback {
-            cb2(Arc::new(make_line(2, Some(200), 2)));
+            cb2(InfoEvent::PV {
+                line: Arc::new(make_line(2, Some(200), 2)),
+            });
         }
 
         // Both callbacks should have incremented the same counter

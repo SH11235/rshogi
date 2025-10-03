@@ -215,6 +215,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut _local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
             let mut depth_hint_exists: u64 = 0;
             let mut depth_hint_used: u64 = 0;
+            let mut line_nodes_checkpoint = nodes;
+            let mut line_time_checkpoint = t0.elapsed().as_millis() as u64;
+            let mut shared_heur = Heuristics::default();
             for pv_idx in 1..=k {
                 if Self::should_stop(limits) {
                     break;
@@ -241,10 +244,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     prev_score + ASP_DELTA0
                 };
                 let mut delta = ASP_DELTA0;
+                let alpha_orig = alpha;
+                let beta_orig = beta;
 
                 // 検索用stack/heuristicsを初期化
                 let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
-                let mut heur = Heuristics::default();
+                let mut heur = std::mem::take(&mut shared_heur);
+                let lmr_trials_checkpoint = heur.lmr_trials;
                 let mut tt_hits: u64 = 0;
                 let mut beta_cuts: u64 = 0;
                 let mut lmr_counter: u64 = 0;
@@ -460,7 +466,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 depth_tt_hits = depth_tt_hits.saturating_add(tt_hits);
                 depth_beta_cuts = depth_beta_cuts.saturating_add(beta_cuts);
                 depth_lmr_counter = depth_lmr_counter.saturating_add(lmr_counter);
-                depth_lmr_trials = depth_lmr_trials.saturating_add(heur.lmr_trials);
+                depth_lmr_trials = depth_lmr_trials
+                    .saturating_add(heur.lmr_trials.saturating_sub(lmr_trials_checkpoint));
+                shared_heur = heur;
 
                 // 発火: Depth / Hashfull（深さ1回の発火で十分）
                 if pv_idx == 1 {
@@ -506,21 +514,36 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                     let elapsed_ms_total = t0.elapsed().as_millis() as u64;
+                    let current_nodes = nodes;
+                    let line_nodes = current_nodes.saturating_sub(line_nodes_checkpoint);
+                    let line_time_ms = elapsed_ms_total.saturating_sub(line_time_checkpoint);
+                    let line_nps = if line_time_ms > 0 {
+                        Some((line_nodes.saturating_mul(1000)).saturating_div(line_time_ms.max(1)))
+                    } else {
+                        Some(0)
+                    };
+                    let bound = if local_best <= alpha_orig {
+                        NodeType::UpperBound
+                    } else if local_best >= beta_orig {
+                        NodeType::LowerBound
+                    } else {
+                        NodeType::Exact
+                    };
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
                         score_internal: local_best,
                         score_cp: local_best,
-                        bound: NodeType::Exact,
+                        bound,
                         depth: d as u32,
                         seldepth: Some(
                             seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32)
                                 as u8,
                         ),
                         pv,
-                        nodes: Some(nodes),
-                        time_ms: Some(elapsed_ms_total),
-                        nps: None,
+                        nodes: Some(line_nodes),
+                        time_ms: Some(line_time_ms),
+                        nps: line_nps,
                         exact_exhausted: false,
                         exhaust_reason: None,
                         mate_distance: None,
@@ -558,6 +581,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                     // 除外へ追加
                     excluded.push(m);
+                    line_nodes_checkpoint = current_nodes;
+                    line_time_checkpoint = elapsed_ms_total;
                 } else {
                     // 局面が詰み/手なし等でPVが取れない → 打ち切り
                     break;

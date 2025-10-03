@@ -2,6 +2,13 @@ use crate::search::types::RootLine;
 use crate::shogi::Move;
 use crate::Position;
 
+const ROOT_BASE_KEY: i32 = 2_000_000;
+const ROOT_TT_BONUS: i32 = 1_500_000;
+const ROOT_PREV_SCORE_SCALE: i32 = 200;
+const ROOT_PREV_SCORE_CLAMP: i32 = 300;
+const ROOT_MULTIPV_BONUS_1: i32 = 50_000;
+const ROOT_MULTIPV_BONUS_2: i32 = 25_000;
+
 #[derive(Clone, Copy)]
 struct RootScoredMove {
     mv: Move,
@@ -28,24 +35,24 @@ impl RootPicker {
             let is_promo = mv.is_promote() as i32;
             let good_capture = mv.is_capture_hint() && see >= 0;
 
-            let mut key = 2_000_000;
-            key += is_check * 10_000 + see * 10 + is_promo; // 既存の基本スコア要素
+            let mut key = ROOT_BASE_KEY;
+            key += is_check * 2_000 + see * 10 + is_promo;
             key += 500 * is_check + 300 * is_promo + 200 * (good_capture as i32);
 
             if let Some(ttm) = tt_move {
                 if mv.equals_without_piece_type(&ttm) {
-                    key += 1_000_000;
+                    key += ROOT_TT_BONUS;
                 }
             }
 
             if let Some(prev) = prev_lines.and_then(|lines| {
                 lines.iter().find(|line| line.root_move.equals_without_piece_type(&mv))
             }) {
-                let clamped = prev.score_cp.clamp(-300, 300);
-                key += 10_000 * clamped;
+                let clamped = prev.score_cp.clamp(-ROOT_PREV_SCORE_CLAMP, ROOT_PREV_SCORE_CLAMP);
+                key += ROOT_PREV_SCORE_SCALE * clamped;
                 let rank_bonus = match prev.multipv_index {
-                    1 => 10_000,
-                    2 => 5_000,
+                    1 => ROOT_MULTIPV_BONUS_1,
+                    2 => ROOT_MULTIPV_BONUS_2,
                     _ => 0,
                 };
                 key += rank_bonus;
