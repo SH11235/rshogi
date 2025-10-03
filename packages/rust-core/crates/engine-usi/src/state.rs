@@ -7,7 +7,8 @@ use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::engine::session::SearchSession;
 use engine_core::search::parallel::{EngineStopBridge, FinalizerMsg, StopController};
 use engine_core::shogi::Position;
-use engine_core::time_management::{TimeControl, TimeManager};
+use engine_core::time_management::{TimeControl, TimeManager, TimeState};
+use engine_core::Color;
 
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
@@ -194,6 +195,49 @@ impl EngineState {
             deadline_near: None,
             deadline_near_notified: false,
             active_time_manager: None,
+        }
+    }
+
+    /// 探索終了後に TimeManager::update_after_move へ渡す TimeState を計算する
+    ///
+    /// Byoyomi では go コマンドの残り時間と経過時間から推定し、それ以外は NonByoyomi を返す。
+    pub fn time_state_for_update(&self, elapsed_ms: u64) -> TimeState {
+        if let Some(TimeControl::Byoyomi { main_time_ms, .. }) = &self.current_time_control {
+            let side_to_move = self.position.side_to_move;
+            let main_before = self
+                .last_go_params
+                .as_ref()
+                .and_then(|gp| match side_to_move {
+                    Color::Black => gp.btime,
+                    Color::White => gp.wtime,
+                })
+                .or(Some(*main_time_ms));
+
+            if let Some(before) = main_before {
+                if before == 0 {
+                    return TimeState::Byoyomi { main_left_ms: 0 };
+                }
+                let remaining = before.saturating_sub(elapsed_ms);
+                if remaining > 0 {
+                    return TimeState::Main {
+                        main_left_ms: remaining,
+                    };
+                }
+                return TimeState::Byoyomi { main_left_ms: 0 };
+            }
+
+            return TimeState::Byoyomi { main_left_ms: 0 };
+        }
+
+        TimeState::NonByoyomi
+    }
+
+    /// 現在保持している TimeManager に消費時間を通知した上で破棄する
+    pub fn finalize_time_manager(&mut self) {
+        if let Some(tm) = self.active_time_manager.take() {
+            let elapsed_ms = tm.elapsed_ms();
+            let time_state = self.time_state_for_update(elapsed_ms);
+            tm.update_after_move(elapsed_ms, time_state);
         }
     }
 

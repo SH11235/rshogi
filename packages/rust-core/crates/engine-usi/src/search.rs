@@ -7,7 +7,7 @@ use engine_core::search::api::{InfoEvent, InfoEventCallback};
 use engine_core::search::limits::{FallbackDeadlines, SearchLimits, SearchLimitsBuilder};
 use engine_core::search::types::InfoStringCallback;
 use engine_core::shogi::Color;
-use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder, TimeState};
+use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
 use engine_core::usi::{create_position, move_to_usi};
 use log::info;
 
@@ -475,7 +475,8 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 } else {
                     if let Some(tm) = time_manager {
                         let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                        tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+                        let time_state = state.time_state_for_update(elapsed_ms);
+                        tm.update_after_move(elapsed_ms, time_state);
                     }
                     let stale = state
                         .current_root_hash
@@ -519,9 +520,9 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
                 state.search_session = None;
+                state.finalize_time_manager();
                 state.current_time_control = None;
                 state.current_root_hash = None;
-                state.active_time_manager = None;
 
                 // Fallback: try to get a safe bestmove from Engine (TT or legal moves)
                 let bestmove = {
