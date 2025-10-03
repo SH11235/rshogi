@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use engine_core::time_management::{TimeControl, TimeState};
+use engine_core::time_management::TimeControl;
 
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
@@ -63,7 +63,8 @@ pub fn handle_stop(state: &mut EngineState) {
 
                         if let Some(tm) = state.active_time_manager.take() {
                             let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                            tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+                            let time_state = state.time_state_for_update(elapsed_ms);
+                            tm.update_after_move(elapsed_ms, time_state);
                         }
                         let stale = state
                             .current_root_hash
@@ -147,7 +148,8 @@ pub fn handle_stop(state: &mut EngineState) {
                         .unwrap_or(false);
                     if let Some(tm) = state.active_time_manager.take() {
                         let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                        tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+                        let time_state = state.time_state_for_update(elapsed_ms);
+                        tm.update_after_move(elapsed_ms, time_state);
                     }
                     finalize_and_send(state, "stop_finalize", Some(&result), stale);
                     if !state.bestmove_emitted {
@@ -171,7 +173,7 @@ pub fn handle_stop(state: &mut EngineState) {
                 // Clear stop_flag - each session gets a fresh flag to avoid race conditions
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
-                state.active_time_manager = None;
+                state.finalize_time_manager();
                 finalize_and_send_fast(state, "stop_timeout_finalize");
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
@@ -267,7 +269,8 @@ pub fn handle_gameover(state: &mut EngineState) {
                                 .unwrap_or(false);
                             if let Some(tm) = state.active_time_manager.take() {
                                 let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                                tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+                                let time_state = state.time_state_for_update(elapsed_ms);
+                                tm.update_after_move(elapsed_ms, time_state);
                             }
                             finalize_and_send(state, "gameover_finalize", Some(&result), stale);
                             if !state.bestmove_emitted {
@@ -305,7 +308,8 @@ pub fn handle_gameover(state: &mut EngineState) {
                             .unwrap_or(false);
                         if let Some(tm) = state.active_time_manager.take() {
                             let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                            tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+                            let time_state = state.time_state_for_update(elapsed_ms);
+                            tm.update_after_move(elapsed_ms, time_state);
                         }
                         finalize_and_send(state, "gameover_finalize", Some(&result), stale);
                         if !state.bestmove_emitted {
@@ -329,7 +333,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                     // Clear stop_flag - each session gets a fresh flag to avoid race conditions
                     state.stop_flag = None;
                     state.ponder_hit_flag = None;
-                    state.active_time_manager = None;
+                    state.finalize_time_manager();
                     finalize_and_send_fast(state, "gameover_timeout_finalize");
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
@@ -341,7 +345,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                 // Clear stop_flag - each session gets a fresh flag to avoid race conditions
                 state.stop_flag = None;
                 state.ponder_hit_flag = None;
-                state.active_time_manager = None;
+                state.finalize_time_manager();
                 finalize_and_send_fast(state, "gameover_immediate_finalize");
                 state.current_is_ponder = false;
                 state.current_root_hash = None;
@@ -353,7 +357,7 @@ pub fn handle_gameover(state: &mut EngineState) {
             // Clear stop_flag - each session gets a fresh flag to avoid race conditions
             state.stop_flag = None;
             state.ponder_hit_flag = None;
-            state.active_time_manager = None;
+            state.finalize_time_manager();
             finalize_and_send_fast(state, "gameover_immediate_finalize");
             state.current_is_ponder = false;
             state.current_root_hash = None;

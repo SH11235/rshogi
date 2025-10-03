@@ -806,8 +806,7 @@ impl TimeManager {
                 manager.handle_update(time_spent_ms, Some(main_left_ms), *byoyomi_ms);
             }
             (TimeControl::Byoyomi { .. }, TimeState::NonByoyomi) => {
-                warn!("TimeState::NonByoyomi used with Byoyomi time control - ignoring update");
-                debug_assert!(false, "TimeState::NonByoyomi used with Byoyomi time control");
+                warn!("TimeState::NonByoyomi used with Byoyomi time control - skipping update");
             }
             _ => {
                 // Fischer and other modes: time update handled by GUI

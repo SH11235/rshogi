@@ -2,7 +2,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
-use engine_core::time_management::TimeState;
 
 use crate::finalize::{finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
@@ -161,7 +160,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         .unwrap_or(false);
                     if let Some(tm) = state.active_time_manager.take() {
                         let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                        tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+                        let time_state = state.time_state_for_update(elapsed_ms);
+                        tm.update_after_move(elapsed_ms, time_state);
                     }
                     finalize_and_send(state, label, Some(&result), stale);
                     if !state.bestmove_emitted {
@@ -237,7 +237,7 @@ fn fast_finalize_no_detach(state: &mut EngineState, label: &str) {
     // Keep stop_flag for reuse in next session (don't set to None)
     state.ponder_hit_flag = None;
     state.search_session = None;
-    state.active_time_manager = None;
+    state.finalize_time_manager();
     finalize_and_send_fast(state, label);
     state.current_is_ponder = false;
     state.current_root_hash = None;
