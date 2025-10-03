@@ -37,7 +37,20 @@ pub const QS_MARGIN_CAPTURE: i32 = 100; // cp, delta pruning margin for captures
 pub const QS_PROMOTE_BONUS: i32 = 50; // cp, small promote bonus in delta estimate
 pub const QS_MAX_QUIET_CHECKS: usize = 16; // cap quiet-check searches to bound qsearch
 
+// Move ordering weights (exported for tuning)
+pub const QUIET_HISTORY_WEIGHT: i32 = 4;
+pub const CONTINUATION_HISTORY_WEIGHT: i32 = 2;
+pub const CAPTURE_HISTORY_WEIGHT: i32 = 2;
+
+pub const ROOT_BASE_KEY: i32 = 2_000_000;
+pub const ROOT_TT_BONUS: i32 = 1_500_000;
+pub const ROOT_PREV_SCORE_SCALE: i32 = 200;
+pub const ROOT_PREV_SCORE_CLAMP: i32 = 300;
+pub const ROOT_MULTIPV_BONUS_1: i32 = 50_000;
+pub const ROOT_MULTIPV_BONUS_2: i32 = 25_000;
+
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 // ランタイム値（USI setoptionで変更可能）
 static RUNTIME_LMR_K_X100: AtomicU32 = AtomicU32::new((LMR_K_COEFF * 100.0) as u32);
@@ -56,6 +69,7 @@ static RUNTIME_ENABLE_STATIC_BETA: AtomicBool = AtomicBool::new(true);
 static RUNTIME_QS_CHECKS: AtomicBool = AtomicBool::new(true);
 static RUNTIME_RAZOR: AtomicBool = AtomicBool::new(RAZOR_ENABLED);
 static RUNTIME_IID_MIN_DEPTH: AtomicI32 = AtomicI32::new(6); // 既定: 6ply
+static PREFETCH_ENABLED: OnceLock<bool> = OnceLock::new();
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -118,6 +132,14 @@ pub fn static_beta_enabled() -> bool {
 #[inline]
 pub fn qs_checks_enabled() -> bool {
     RUNTIME_QS_CHECKS.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn tt_prefetch_enabled() -> bool {
+    *PREFETCH_ENABLED.get_or_init(|| match std::env::var("SHOGI_TT_PREFETCH") {
+        Ok(val) => matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+        Err(_) => true,
+    })
 }
 
 #[inline]

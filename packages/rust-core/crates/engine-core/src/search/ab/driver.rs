@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
+use crate::search::params as dynp;
 use crate::search::types::{NodeType, RootLine, SearchStack};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::Position;
@@ -25,6 +26,21 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    #[inline]
+    pub(crate) fn classify_root_bound(
+        local_best: i32,
+        alpha_orig: i32,
+        beta_orig: i32,
+    ) -> NodeType {
+        if local_best <= alpha_orig {
+            NodeType::UpperBound
+        } else if local_best >= beta_orig {
+            NodeType::LowerBound
+        } else {
+            NodeType::Exact
+        }
+    }
+
     fn currmove_throttle_ms() -> Option<u64> {
         static POLICY: OnceLock<Option<u64>> = OnceLock::new();
         *POLICY.get_or_init(|| match env::var("SHOGI_CURRMOVE_THROTTLE_MS") {
@@ -153,6 +169,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
         let mut final_seldepth_raw: Option<u32> = None;
+        let mut iterative_heur = Heuristics::default();
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
                 break;
@@ -179,7 +196,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // Root TT hint boost（存在すれば大ボーナス）
             let mut root_tt_hint_mv: Option<crate::shogi::Move> = None;
             if let Some(tt) = &self.tt {
-                tt.prefetch_l2(root.zobrist_hash, root.side_to_move);
+                if dynp::tt_prefetch_enabled() {
+                    tt.prefetch_l2(root.zobrist_hash, root.side_to_move);
+                }
                 if let Some(entry) = tt.probe(root.zobrist_hash, root.side_to_move) {
                     if let Some(ttm) = entry.get_move() {
                         root_tt_hint_mv = Some(ttm);
@@ -217,7 +236,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut depth_hint_used: u64 = 0;
             let mut line_nodes_checkpoint = nodes;
             let mut line_time_checkpoint = t0.elapsed().as_millis() as u64;
-            let mut shared_heur = Heuristics::default();
+            iterative_heur.age_all();
+            let mut shared_heur = std::mem::take(&mut iterative_heur);
+            shared_heur.lmr_trials = 0;
             for pv_idx in 1..=k {
                 if Self::should_stop(limits) {
                     break;
@@ -518,17 +539,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     let line_nodes = current_nodes.saturating_sub(line_nodes_checkpoint);
                     let line_time_ms = elapsed_ms_total.saturating_sub(line_time_checkpoint);
                     let line_nps = if line_time_ms > 0 {
-                        Some((line_nodes.saturating_mul(1000)).saturating_div(line_time_ms.max(1)))
+                        Some(line_nodes.saturating_mul(1000) / line_time_ms.max(1))
                     } else {
-                        Some(0)
+                        None
                     };
-                    let bound = if local_best <= alpha_orig {
-                        NodeType::UpperBound
-                    } else if local_best >= beta_orig {
-                        NodeType::LowerBound
-                    } else {
-                        NodeType::Exact
-                    };
+                    let bound = Self::classify_root_bound(local_best, alpha_orig, beta_orig);
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
@@ -603,6 +618,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             final_depth_reached = d as u8;
             let capped_seldepth =
                 seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32) as u8;
+
+            iterative_heur = shared_heur;
             final_seldepth_reached = Some(capped_seldepth);
             final_seldepth_raw = Some(seldepth);
 

@@ -71,6 +71,15 @@ pub struct Heuristics {
     pub(crate) lmr_trials: u64,
 }
 
+impl Heuristics {
+    pub fn age_all(&mut self) {
+        self.history.age_scores();
+        self.continuation.age_scores();
+        self.capture.age_scores();
+        // Counter movesは age 概念が薄いためリセットのみ行う場合は別途検討
+    }
+}
+
 pub(crate) struct LateMoveReductionParams<'stack> {
     pub lmr_trials: &'stack mut u64,
     pub depth: i32,
