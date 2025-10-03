@@ -287,7 +287,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let active_moves: Vec<(crate::shogi::Move, i32)> = root_moves
                     .iter()
                     .copied()
-                    .filter(|(m, _)| !excluded.iter().any(|e| m.equals_without_piece_type(e)))
+                    .filter(|(m, _)| {
+                        let key = m.to_u32();
+                        // MultiPV では完全一致の手のみ除外し、昇成・不成などの派生は別ラインとして扱う。
+                        !excluded.iter().any(|e| e.to_u32() == key)
+                    })
                     .collect();
 
                 // 探索ループ（Aspiration）
