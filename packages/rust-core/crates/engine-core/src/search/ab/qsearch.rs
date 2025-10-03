@@ -5,6 +5,8 @@ use crate::search::params::{
 };
 use crate::Position;
 
+use std::sync::OnceLock;
+
 use super::driver::ClassicBackend;
 use super::ordering::{EvalMoveGuard, Heuristics, MovePicker};
 use super::pvs::SearchContext;
@@ -26,12 +28,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         ctx.tick(ply);
 
-        let heur_stub = Heuristics::default();
+        static HEUR_STUB: OnceLock<Heuristics> = OnceLock::new();
+        let heur_stub = HEUR_STUB.get_or_init(Heuristics::default);
 
         if pos.is_in_check() {
             let mut picker = MovePicker::new_evasion(pos, None, None, None);
             let mut has_legal = false;
-            while let Some(mv) = picker.next(&heur_stub) {
+            while let Some(mv) = picker.next(heur_stub) {
                 has_legal = true;
                 let mut child = pos.clone();
                 let sc = {
@@ -67,7 +70,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         };
         let mut picker = MovePicker::new_qsearch(pos, None, None, None, quiet_limit);
 
-        while let Some(mv) = picker.next(&heur_stub) {
+        while let Some(mv) = picker.next(heur_stub) {
             if mv.is_capture_hint() {
                 let see = pos.see(mv);
                 if see >= 0 {

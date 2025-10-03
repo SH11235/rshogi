@@ -502,7 +502,7 @@ impl<'a> MovePicker<'a> {
 
     fn prepare_qs_checks(&mut self, heur: &Heuristics) {
         self.buf.clear();
-        if let Some(mut state) = self.qsearch_state {
+        if let Some(mut state) = self.qsearch_state.take() {
             for &mv in &self.quiet_moves {
                 if state.quiet_checks_generated >= state.quiet_check_limit {
                     break;
@@ -719,5 +719,39 @@ mod tests {
 
         let rest: Vec<_> = std::iter::from_fn(|| picker.next(&heur)).collect();
         assert!(rest.iter().any(|mv| mv.equals_without_piece_type(&right_capture)));
+    }
+
+    #[test]
+    fn qsearch_quiet_check_limit_respected() {
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+
+        let mg = MoveGenerator::new();
+        let quiet_moves = mg.generate_quiet(&pos).unwrap();
+        let quiet_checks: Vec<_> = quiet_moves
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|mv| pos.gives_check(*mv))
+            .collect();
+        assert!(quiet_checks.len() >= 3, "expected multiple quiet checks for test setup");
+
+        let heur = Heuristics::default();
+        let mut picker = MovePicker::new_qsearch(&pos, None, None, None, 2);
+
+        let mut returned_checks = 0;
+        while let Some(mv) = picker.next(&heur) {
+            if pos.gives_check(mv) {
+                returned_checks += 1;
+            }
+        }
+
+        assert_eq!(returned_checks, 2, "quiet check limit must cap returned moves");
     }
 }
