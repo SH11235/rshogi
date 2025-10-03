@@ -7,6 +7,7 @@ use crate::search::params::{
 };
 use crate::shogi::Move;
 use crate::Position;
+use std::cmp::Ordering;
 
 /// Arguments for MovePicker::base to avoid too_many_arguments clippy warning
 struct MovePickerArgs<'a> {
@@ -385,6 +386,7 @@ impl<'a> MovePicker<'a> {
 
     fn prepare_good_captures(&mut self, heur: &Heuristics) {
         self.buf.clear();
+        let capture_weight = capture_history_weight();
         for entry in &self.capture_entries {
             if entry.see < 0 {
                 continue;
@@ -402,17 +404,16 @@ impl<'a> MovePicker<'a> {
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * capture_history_weight();
+                key += cap_score * capture_weight;
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| {
-            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
-        });
+        self.buf.sort_unstable_by(Self::cmp_scored);
     }
 
     fn prepare_bad_captures(&mut self, heur: &Heuristics) {
         self.buf.clear();
+        let capture_weight = capture_history_weight();
         for entry in &self.deferred_bad_captures {
             let mv = entry.mv;
             if self.should_skip(mv) {
@@ -424,17 +425,17 @@ impl<'a> MovePicker<'a> {
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * capture_history_weight();
+                key += cap_score * capture_weight;
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| {
-            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
-        });
+        self.buf.sort_unstable_by(Self::cmp_scored);
     }
 
     fn prepare_quiets(&mut self, heur: &Heuristics) {
         self.buf.clear();
+        let quiet_weight = quiet_history_weight();
+        let continuation_weight = continuation_history_weight();
         for &mv in &self.quiet_moves {
             if self.should_skip(mv) {
                 continue;
@@ -442,8 +443,7 @@ impl<'a> MovePicker<'a> {
             if mv.is_capture_hint() {
                 continue;
             }
-            let mut key =
-                1_000_000 + heur.history.get(self.pos.side_to_move, mv) * quiet_history_weight();
+            let mut key = 1_000_000 + heur.history.get(self.pos.side_to_move, mv) * quiet_weight;
             if let Some(prev) = self.history_prev_move {
                 if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
                     if counter.equals_without_piece_type(&mv) {
@@ -458,7 +458,7 @@ impl<'a> MovePicker<'a> {
                         curr_piece as usize,
                         mv.to(),
                     );
-                    key += cont_score * continuation_history_weight();
+                    key += cont_score * continuation_weight;
                 }
             }
             if self
@@ -473,9 +473,7 @@ impl<'a> MovePicker<'a> {
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| {
-            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
-        });
+        self.buf.sort_unstable_by(Self::cmp_scored);
     }
 
     fn prepare_evasions(&mut self, heur: &Heuristics) {
@@ -497,13 +495,12 @@ impl<'a> MovePicker<'a> {
                 self.buf.push(ScoredMove { mv, key });
             }
         }
-        self.buf.sort_unstable_by(|a, b| {
-            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
-        });
+        self.buf.sort_unstable_by(Self::cmp_scored);
     }
 
     fn prepare_qs_captures(&mut self, heur: &Heuristics, good: bool) {
         self.buf.clear();
+        let capture_weight = capture_history_weight();
         for entry in &self.capture_entries {
             if good && entry.see < 0 {
                 continue;
@@ -524,13 +521,11 @@ impl<'a> MovePicker<'a> {
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * capture_history_weight();
+                key += cap_score * capture_weight;
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| {
-            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
-        });
+        self.buf.sort_unstable_by(Self::cmp_scored);
     }
 
     fn prepare_qs_checks(&mut self, heur: &Heuristics) {
@@ -549,9 +544,7 @@ impl<'a> MovePicker<'a> {
             }
             self.qsearch_state = Some(state);
         }
-        self.buf.sort_unstable_by(|a, b| {
-            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
-        });
+        self.buf.sort_unstable_by(Self::cmp_scored);
     }
 
     fn prepare_probcut(&mut self) {
@@ -575,7 +568,7 @@ impl<'a> MovePicker<'a> {
                 });
             }
         }
-        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+        self.buf.sort_unstable_by(Self::cmp_scored);
     }
 
     fn yield_killer_or_counter(&mut self) -> Option<Move> {
@@ -624,11 +617,17 @@ impl<'a> MovePicker<'a> {
         if self.tt_move.is_some_and(|tt| tt.equals_without_piece_type(&mv) && self.used_tt) {
             return true;
         }
-        self.returned.iter().any(|m| m.equals_without_piece_type(&mv))
+        let target = mv.to_u32();
+        self.returned.iter().any(|m| m.to_u32() == target)
     }
 
     fn record_return(&mut self, mv: Move) {
         self.returned.push(mv);
+    }
+
+    #[inline]
+    fn cmp_scored(a: &ScoredMove, b: &ScoredMove) -> Ordering {
+        b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
     }
 }
 
