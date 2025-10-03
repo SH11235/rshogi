@@ -251,11 +251,11 @@ impl ContinuationHistory {
     }
 }
 
-/// Capture history - tracks success of captures by piece types
+/// Capture history - tracks success of captures by attacker/victim/to square
 #[derive(Clone)]
 pub struct CaptureHistory {
-    /// [color][attacker_piece][victim_piece] -> score
-    scores: [[[i32; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
+    /// [color][attacker_piece][victim_piece][to_square] -> score
+    scores: [[[[i32; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
 }
 
 impl Default for CaptureHistory {
@@ -268,13 +268,13 @@ impl CaptureHistory {
     /// Create new capture history
     pub fn new() -> Self {
         CaptureHistory {
-            scores: [[[0; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
+            scores: [[[[0; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
         }
     }
 
     /// Get capture history score
-    pub fn get(&self, color: Color, attacker: PieceType, victim: PieceType) -> i32 {
-        self.scores[color as usize][attacker as usize][victim as usize]
+    pub fn get(&self, color: Color, attacker: PieceType, victim: PieceType, to: Square) -> i32 {
+        self.scores[color as usize][attacker as usize][victim as usize][to.index()]
     }
 
     /// Update capture history with bonus
@@ -283,18 +283,28 @@ impl CaptureHistory {
         color: Color,
         attacker: PieceType,
         victim: PieceType,
+        to: Square,
         depth: i32,
     ) {
         let bonus = depth * depth;
-        let score = &mut self.scores[color as usize][attacker as usize][victim as usize];
+        let score =
+            &mut self.scores[color as usize][attacker as usize][victim as usize][to.index()];
         *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
         *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
     }
 
     /// Update capture history with penalty
-    pub fn update_bad(&mut self, color: Color, attacker: PieceType, victim: PieceType, depth: i32) {
+    pub fn update_bad(
+        &mut self,
+        color: Color,
+        attacker: PieceType,
+        victim: PieceType,
+        to: Square,
+        depth: i32,
+    ) {
         let penalty = -(depth * depth);
-        let score = &mut self.scores[color as usize][attacker as usize][victim as usize];
+        let score =
+            &mut self.scores[color as usize][attacker as usize][victim as usize][to.index()];
         *score += penalty - (*score * penalty.abs() / MAX_HISTORY_SCORE);
         *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
     }
@@ -303,8 +313,10 @@ impl CaptureHistory {
     pub fn age_scores(&mut self) {
         for color_scores in &mut self.scores {
             for attacker_scores in color_scores {
-                for score in attacker_scores {
-                    *score /= HISTORY_AGING_DIVISOR;
+                for victim_scores in attacker_scores {
+                    for score in victim_scores {
+                        *score /= HISTORY_AGING_DIVISOR;
+                    }
                 }
             }
         }
@@ -312,7 +324,13 @@ impl CaptureHistory {
 
     /// Clear all capture history
     pub fn clear(&mut self) {
-        self.scores = [[[0; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2];
+        for color_scores in &mut self.scores {
+            for attacker_scores in color_scores {
+                for victim_scores in attacker_scores {
+                    victim_scores.fill(0);
+                }
+            }
+        }
     }
 }
 
@@ -522,22 +540,23 @@ mod tests {
         let color = Color::Black;
         let attacker = PieceType::Knight;
         let victim = PieceType::Silver;
+        let target = parse_usi_square("5e").unwrap();
 
         // Initial score should be 0
-        assert_eq!(history.get(color, attacker, victim), 0);
+        assert_eq!(history.get(color, attacker, victim, target), 0);
 
         // Update with good capture
-        history.update_good(color, attacker, victim, 4);
-        assert!(history.get(color, attacker, victim) > 0);
+        history.update_good(color, attacker, victim, target, 4);
+        assert!(history.get(color, attacker, victim, target) > 0);
 
         // Update with bad capture
-        history.update_bad(color, attacker, victim, 2);
-        let score = history.get(color, attacker, victim);
+        history.update_bad(color, attacker, victim, target, 2);
+        let score = history.get(color, attacker, victim, target);
         assert!(score > 0); // Should still be positive but reduced
 
         // Test aging
-        let old_score = history.get(color, attacker, victim);
+        let old_score = history.get(color, attacker, victim, target);
         history.age_scores();
-        assert_eq!(history.get(color, attacker, victim), old_score / 2);
+        assert_eq!(history.get(color, attacker, victim, target), old_score / 2);
     }
 }

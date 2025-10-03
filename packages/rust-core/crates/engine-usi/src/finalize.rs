@@ -185,20 +185,24 @@ pub fn finalize_and_send(
         }
     };
 
-    let (soft_ms, hard_ms) = result
-        .and_then(|r| r.stop_info.as_ref())
-        .map(|si| (si.soft_limit_ms, si.hard_limit_ms))
-        .unwrap_or((0, 0));
+    let controller_stop_info = state.stop_controller.try_read_stop_info();
+    let (soft_ms, hard_ms, reason_str) = result
+        .and_then(|r| {
+            r.stop_info
+                .as_ref()
+                .map(|si| (si.soft_limit_ms, si.hard_limit_ms, format!("{:?}", si.reason)))
+        })
+        .or_else(|| {
+            controller_stop_info
+                .as_ref()
+                .map(|si| (si.soft_limit_ms, si.hard_limit_ms, format!("{:?}", si.reason)))
+        })
+        .unwrap_or((0, 0, "Unknown".to_string()));
 
     if let Some(res) = result {
         let best_usi =
             res.best_move.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
         let pv0_usi = res.stats.pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string());
-        let stop_reason = res
-            .stop_info
-            .as_ref()
-            .map(|si| format!("{:?}", si.reason))
-            .unwrap_or_else(|| "Unknown".to_string());
         info_string(format!(
             "finalize_snapshot best={} pv0={} depth={} nodes={} elapsed_ms={} stop_reason={}",
             best_usi,
@@ -206,16 +210,14 @@ pub fn finalize_and_send(
             res.stats.depth,
             res.stats.nodes,
             res.stats.elapsed.as_millis(),
-            stop_reason
+            reason_str
         ));
 
         // 極小Byoyomi対策の可視化: ハード/ソフト上限と停止理由
-        if let Some(si) = res.stop_info.as_ref() {
-            info_string(format!(
-                "time_caps hard_ms={} soft_ms={} reason={:?}",
-                si.hard_limit_ms, si.soft_limit_ms, si.reason
-            ));
-        }
+        info_string(format!(
+            "time_caps hard_ms={} soft_ms={} reason={}",
+            hard_ms, soft_ms, reason_str
+        ));
 
         if let Some(tt_hits) = res.stats.tt_hits {
             let nodes = res.stats.nodes;
@@ -242,6 +244,8 @@ pub fn finalize_and_send(
             let rese = res.stats.re_searches.unwrap_or(0);
             let pvchg = res.stats.pv_changed.unwrap_or(0);
             let sel = res.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+            let sel_raw =
+                res.stats.raw_seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
             let dup = res
                 .stats
                 .duplication_percentage
@@ -301,8 +305,9 @@ pub fn finalize_and_send(
             };
 
             info_string(format!(
-                "finalize_diag seldepth={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} lmr={} lmr_trials={} root_hint_exist={} root_hint_used={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
+                "finalize_diag seldepth={} seldepth_raw={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} lmr={} lmr_trials={} root_hint_exist={} root_hint_used={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
                 sel,
+                sel_raw,
                 qratio,
                 nodes.saturating_sub(qnodes),
                 tt_hit_rate,
@@ -348,6 +353,7 @@ pub fn finalize_and_send(
             } else {
                 0
             };
+            let nps_agg_u64 = nps_agg.min(u64::MAX as u128) as u64;
 
             // Emit TT diagnostics snapshot (address/size/hf/attempts)
             {
@@ -382,10 +388,16 @@ pub fn finalize_and_send(
                         if let Some(sd) = line.seldepth.or(res.stats.seldepth) {
                             s.push_str(&format!(" seldepth {}", sd));
                         }
-                        s.push_str(&format!(" time {}", res.stats.elapsed.as_millis()));
-                        let nodes = line.nodes.unwrap_or(res.stats.nodes);
-                        s.push_str(&format!(" nodes {}", nodes));
-                        s.push_str(&format!(" nps {}", nps_agg));
+                        let line_nodes = line.nodes.unwrap_or(res.stats.nodes);
+                        let line_time_ms =
+                            line.time_ms.unwrap_or(res.stats.elapsed.as_millis() as u64);
+                        let line_nps = match (line.nodes, line.time_ms) {
+                            (Some(n), Some(t)) if t > 0 => n.saturating_mul(1000).saturating_div(t),
+                            _ => nps_agg_u64,
+                        };
+                        s.push_str(&format!(" time {}", line_time_ms));
+                        s.push_str(&format!(" nodes {}", line_nodes));
+                        s.push_str(&format!(" nps {}", line_nps));
                         s.push_str(&format!(" hashfull {}", hf_permille));
                         let view = score_view_with_clamp(line.score_internal);
                         append_usi_score_and_bound(&mut s, view, line.bound);

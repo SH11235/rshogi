@@ -122,10 +122,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut nodes: u64 = 0;
         let t0 = Instant::now();
         let deadlines = limits.fallback_deadlines;
-        let soft_deadline = deadlines
-            .and_then(|dl| (dl.soft_limit_ms > 0).then(|| Duration::from_millis(dl.soft_limit_ms)));
-        let hard_deadline = deadlines
-            .and_then(|dl| (dl.hard_limit_ms > 0).then(|| Duration::from_millis(dl.hard_limit_ms)));
+        let (soft_deadline, hard_deadline) = if let Some(dl) = deadlines {
+            (
+                (dl.soft_limit_ms > 0).then(|| Duration::from_millis(dl.soft_limit_ms)),
+                (dl.hard_limit_ms > 0).then(|| Duration::from_millis(dl.hard_limit_ms)),
+            )
+        } else if let Some(limit) = limits.time_limit() {
+            (Some(limit), Some(limit))
+        } else {
+            (None, None)
+        };
         let _last_hashfull_emit_ms = 0u64;
         let mut prev_score = 0;
         // Aspiration initial params
@@ -146,6 +152,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
+        let mut final_seldepth_raw: Option<u32> = None;
         for d in 1..=max_depth {
             if Self::should_stop(limits) {
                 break;
@@ -163,23 +170,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut seldepth: u32 = 0;
             let throttle_ms = Self::currmove_throttle_ms();
             let mut last_currmove_emit = Instant::now();
+            let prev_root_lines = final_lines.as_ref().map(|lines| lines.as_slice());
             // Build root move list for CurrMove events and basic ordering
             let mg = MoveGenerator::new();
             let Ok(list) = mg.generate_all(root) else {
                 break;
             };
-            let mut root_moves: Vec<(crate::shogi::Move, i32)> = list
-                .as_slice()
-                .iter()
-                .copied()
-                .map(|m| {
-                    let is_check = root.gives_check(m) as i32;
-                    let see = if m.is_capture_hint() { root.see(m) } else { 0 };
-                    let promo = m.is_promote() as i32;
-                    let key = is_check * 10_000 + see * 10 + promo;
-                    (m, key)
-                })
-                .collect();
             // Root TT hint boost（存在すれば大ボーナス）
             let mut root_tt_hint_mv: Option<crate::shogi::Move> = None;
             if let Some(tt) = &self.tt {
@@ -187,15 +183,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if let Some(entry) = tt.probe(root.zobrist_hash, root.side_to_move) {
                     if let Some(ttm) = entry.get_move() {
                         root_tt_hint_mv = Some(ttm);
-                        for (m, key) in &mut root_moves {
-                            if m.equals_without_piece_type(&ttm) {
-                                *key += 1_000_000;
-                            }
-                        }
                     }
                 }
             }
-            root_moves.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            let mut root_picker =
+                ordering::RootPicker::new(root, list.as_slice(), root_tt_hint_mv, prev_root_lines);
+            let mut root_moves: Vec<(crate::shogi::Move, i32)> =
+                Vec::with_capacity(list.as_slice().len());
+            while let Some((mv, key)) = root_picker.next() {
+                root_moves.push((mv, key));
+            }
+            if root_moves.is_empty() {
+                break;
+            }
             let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
 
             let root_static_eval = self.evaluator.evaluate(root);
@@ -579,6 +579,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let capped_seldepth =
                 seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32) as u8;
             final_seldepth_reached = Some(capped_seldepth);
+            final_seldepth_raw = Some(seldepth);
 
             let mut lead_ms = 10u64;
             if let Some(hard) = hard_deadline {
@@ -612,6 +613,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.elapsed = t0.elapsed();
         stats.depth = final_depth_reached;
         stats.seldepth = final_seldepth_reached;
+        stats.raw_seldepth = final_seldepth_raw.map(|v| v.min(u16::MAX as u32) as u16);
         stats.tt_hits = Some(cum_tt_hits);
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);

@@ -1,12 +1,21 @@
 mod guards;
+mod move_picker;
+mod root_picker;
 
 use std::sync::OnceLock;
 
-use crate::search::history::{ButterflyHistory, CounterMoveHistory};
+use crate::search::history::{
+    ButterflyHistory, CaptureHistory, ContinuationHistory, CounterMoveHistory,
+};
 use crate::search::params as dynp;
 use crate::search::types::SearchStack;
 
 pub(crate) use guards::{EvalMoveGuard, EvalNullGuard};
+#[cfg(any(test, feature = "bench-move-picker"))]
+pub use move_picker::MovePicker;
+#[cfg(not(any(test, feature = "bench-move-picker")))]
+pub(crate) use move_picker::MovePicker;
+pub(crate) use root_picker::RootPicker;
 
 const MOVENO_LOG_TABLE_SIZE: usize = 512;
 
@@ -54,14 +63,16 @@ fn ln_moveno(moveno: usize) -> f32 {
 }
 
 #[derive(Default)]
-pub(crate) struct Heuristics {
+pub struct Heuristics {
     pub(crate) history: ButterflyHistory,
     pub(crate) counter: CounterMoveHistory,
+    pub(crate) continuation: ContinuationHistory,
+    pub(crate) capture: CaptureHistory,
     pub(crate) lmr_trials: u64,
 }
 
-pub(crate) struct LateMoveReductionParams<'heur, 'stack> {
-    pub heur: &'heur mut Heuristics,
+pub(crate) struct LateMoveReductionParams<'stack> {
+    pub lmr_trials: &'stack mut u64,
     pub depth: i32,
     pub moveno: usize,
     pub is_quiet: bool,
@@ -73,11 +84,11 @@ pub(crate) struct LateMoveReductionParams<'heur, 'stack> {
     pub stack: &'stack [SearchStack],
 }
 
-pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_, '_>) -> i32 {
+pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_>) -> i32 {
     if params.depth < 3 || params.moveno < 3 || !params.is_quiet || params.is_good_capture {
         return 0;
     }
-    params.heur.lmr_trials = params.heur.lmr_trials.saturating_add(1);
+    *params.lmr_trials = params.lmr_trials.saturating_add(1);
     let depth_ln = ln_depth(params.depth);
     let moveno_ln = ln_moveno(params.moveno);
     let rd = ((depth_ln * moveno_ln) / dynp::lmr_k_coeff()).floor() as i32;

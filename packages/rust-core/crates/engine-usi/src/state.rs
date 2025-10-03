@@ -159,7 +159,8 @@ impl EngineState {
         let stop_controller = engine.stop_controller_handle();
         // Register OOB finalizer channel
         let (fin_tx, fin_rx) = mpsc::channel();
-        stop_bridge.register_finalizer(fin_tx);
+        stop_bridge.register_finalizer(fin_tx.clone());
+        stop_controller.register_finalizer(fin_tx.clone());
 
         let idle_sync = Arc::new(IdleSync::default());
 
