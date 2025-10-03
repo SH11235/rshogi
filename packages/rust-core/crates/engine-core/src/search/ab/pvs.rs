@@ -212,8 +212,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stack[ply as usize].current_move = Some(mv);
             let gives_check = pos.gives_check(mv);
             let is_capture = mv.is_capture_hint();
-            let see = if is_capture { pos.see(mv) } else { 0 };
-            let is_good_capture = is_capture && see >= 0;
+            let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
 
             if depth <= 3 && is_quiet {
