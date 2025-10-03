@@ -11,9 +11,10 @@ use crate::search::constants::SEARCH_INF;
 use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
 use crate::search::{SearchLimits, SearchStack};
-use crate::shogi::{Color, Piece, PieceType};
+use crate::shogi::{Color, Move, Piece, PieceType};
 use crate::usi::{parse_usi_move, parse_usi_square};
 use crate::Position;
+use smallvec::SmallVec;
 
 use super::driver::ClassicBackend;
 use super::pruning::NullMovePruneParams;
@@ -215,6 +216,26 @@ fn root_rank_map_distinguishes_promotion_pairs() {
         rank_map.get(&non_promo.to_u32()),
         rank_map.get(&promo.to_u32()),
         "promotion pair must receive distinct currmove numbers",
+    );
+}
+
+#[test]
+fn multipv_filter_retains_promotion_variant() {
+    let non_prom = parse_usi_move("3d4c").unwrap();
+    let prom = parse_usi_move("3d4c+").unwrap();
+    let root_moves: Vec<(Move, i32)> = vec![(non_prom, 0), (prom, 0)];
+    let mut excluded = SmallVec::<[Move; 4]>::new();
+    excluded.push(non_prom);
+    let excluded_keys: SmallVec<[u32; 4]> = excluded.iter().map(|m| m.to_u32()).collect();
+    let active: SmallVec<[(Move, i32); 4]> = root_moves
+        .iter()
+        .copied()
+        .filter(|(m, _)| !excluded_keys.iter().any(|&ex| ex == m.to_u32()))
+        .collect();
+
+    assert!(
+        active.iter().any(|(m, _)| m.to_u32() == prom.to_u32()),
+        "promotion variant should remain after excluding non-promotion"
     );
 }
 
@@ -551,4 +572,94 @@ fn null_move_respects_runtime_toggle() {
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
 
     crate::search::params::set_nmp_enabled(true);
+}
+#[test]
+fn excluded_drop_only_blocks_same_piece_type() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+    pos.hands[Color::Black as usize][PieceType::Gold.hand_index().unwrap()] = 1;
+
+    // Exclude a pawn drop; gold drop to same square should remain available
+    let excluded = Some(parse_usi_move("P*5f").unwrap());
+    let target = parse_usi_square("5f").unwrap();
+    let mut picker = MovePicker::new_normal(&pos, None, excluded, [None, None], None, None);
+    let heur = Heuristics::default();
+    let mut found_gold = false;
+
+    while let Some(mv) = picker.next(&heur) {
+        if mv.is_drop() && mv.drop_piece_type() == PieceType::Gold && mv.to() == target {
+            found_gold = true;
+            break;
+        }
+    }
+
+    assert!(found_gold, "gold drop should not be excluded when pawn drop is excluded");
+}
+
+#[test]
+fn generate_evasions_matches_all_single_check() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+
+    let mg = MoveGenerator::new();
+    let all_moves = mg.generate_all(&pos).unwrap();
+    let evasion_moves = mg.generate_evasions(&pos).unwrap();
+
+    assert!(!evasion_moves.is_empty(), "expected evasions when side is in check");
+
+    let all_keys: SmallVec<[u32; 64]> =
+        all_moves.as_slice().iter().map(|&mv| mv.to_u32()).collect();
+    let evasion_keys: SmallVec<[u32; 64]> =
+        evasion_moves.as_slice().iter().map(|&mv| mv.to_u32()).collect();
+
+    let mut all_sorted = all_keys.clone();
+    all_sorted.sort_unstable();
+    let mut evasion_sorted = evasion_keys.clone();
+    evasion_sorted.sort_unstable();
+
+    assert_eq!(all_sorted, evasion_sorted);
+}
+
+#[test]
+fn generate_evasions_double_check_only_king_moves() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    let king_sq = parse_usi_square("5i").unwrap();
+    pos.board.put_piece(king_sq, Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("1e").unwrap(), Piece::new(PieceType::Bishop, Color::White));
+
+    let mg = MoveGenerator::new();
+    let all_moves = mg.generate_all(&pos).unwrap();
+    let evasion_moves = mg.generate_evasions(&pos).unwrap();
+
+    assert!(!evasion_moves.is_empty(), "expected evasions when in double check");
+    for mv in evasion_moves.as_slice() {
+        assert_eq!(mv.from(), Some(king_sq), "double check must yield only king moves");
+    }
+
+    let all_keys: SmallVec<[u32; 32]> =
+        all_moves.as_slice().iter().map(|&mv| mv.to_u32()).collect();
+    let evasion_keys: SmallVec<[u32; 32]> =
+        evasion_moves.as_slice().iter().map(|&mv| mv.to_u32()).collect();
+
+    let mut all_sorted = all_keys.clone();
+    all_sorted.sort_unstable();
+    let mut evasion_sorted = evasion_keys.clone();
+    evasion_sorted.sort_unstable();
+
+    assert_eq!(all_sorted, evasion_sorted);
 }

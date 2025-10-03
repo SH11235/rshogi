@@ -396,7 +396,7 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
-            let mut key = 2_000_000 + entry.see * 10;
+            let mut key = 2_000_000_i64 + (entry.see as i64) * 10;
             if self.pos.gives_check(mv) {
                 key += 5_000;
             }
@@ -405,12 +405,12 @@ impl<'a> MovePicker<'a> {
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * capture_weight;
+                key += (cap_score as i64) * (capture_weight as i64);
             }
             debug_assert!(key.abs() < 3_500_000, "good capture key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
-                key,
+                key: Self::clamp_key(key),
                 tiebreak: mv.to_u32(),
             });
         }
@@ -425,18 +425,18 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
-            let mut key = 100_000 + entry.see;
+            let mut key = 100_000_i64 + (entry.see as i64);
             if self.pos.gives_check(mv) {
                 key += 1_000;
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * capture_weight;
+                key += (cap_score as i64) * (capture_weight as i64);
             }
             debug_assert!(key.abs() < 3_500_000, "bad capture key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
-                key,
+                key: Self::clamp_key(key),
                 tiebreak: mv.to_u32(),
             });
         }
@@ -454,7 +454,8 @@ impl<'a> MovePicker<'a> {
             if mv.is_capture_hint() {
                 continue;
             }
-            let mut key = 1_000_000 + heur.history.get(self.pos.side_to_move, mv) * quiet_weight;
+            let mut key = 1_000_000_i64
+                + (heur.history.get(self.pos.side_to_move, mv) as i64) * (quiet_weight as i64);
             if let Some(prev) = self.history_prev_move {
                 if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
                     if counter.equals_without_piece_type(&mv) {
@@ -469,7 +470,7 @@ impl<'a> MovePicker<'a> {
                         curr_piece as usize,
                         mv.to(),
                     );
-                    key += cont_score * continuation_weight;
+                    key += (cont_score as i64) * (continuation_weight as i64);
                 }
             }
             if self
@@ -485,7 +486,7 @@ impl<'a> MovePicker<'a> {
             debug_assert!(key.abs() < 3_000_000, "quiet key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
-                key,
+                key: Self::clamp_key(key),
                 tiebreak: mv.to_u32(),
             });
         }
@@ -500,15 +501,15 @@ impl<'a> MovePicker<'a> {
                 if self.should_skip(mv) {
                     continue;
                 }
-                let mut key = 1_500_000;
+                let mut key = 1_500_000_i64;
                 if mv.is_capture_hint() {
-                    key += self.pos.see(mv) * 10;
+                    key += (self.pos.see(mv) as i64) * 10;
                 }
-                key += heur.history.get(self.pos.side_to_move, mv);
+                key += heur.history.get(self.pos.side_to_move, mv) as i64;
                 debug_assert!(key.abs() < 3_000_000, "evasion key overflow: {key}");
                 self.buf.push(ScoredMove {
                     mv,
-                    key,
+                    key: Self::clamp_key(key),
                     tiebreak: mv.to_u32(),
                 });
             }
@@ -530,21 +531,21 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
-            let mut key = 1_800_000 + entry.see * 10;
+            let mut key = 1_800_000_i64 + (entry.see as i64) * 10;
             if self.pos.gives_check(mv) {
                 key += 5_000;
             }
             if mv.is_promote() {
-                key += QS_PROMOTE_BONUS;
+                key += QS_PROMOTE_BONUS as i64;
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * capture_weight;
+                key += (cap_score as i64) * (capture_weight as i64);
             }
             debug_assert!(key.abs() < 3_500_000, "qsearch capture key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
-                key,
+                key: Self::clamp_key(key),
                 tiebreak: mv.to_u32(),
             });
         }
@@ -561,11 +562,11 @@ impl<'a> MovePicker<'a> {
                 if self.should_skip(mv) || !self.pos.gives_check(mv) {
                     continue;
                 }
-                let key = 1_200_000 + heur.history.get(self.pos.side_to_move, mv);
+                let key = 1_200_000_i64 + (heur.history.get(self.pos.side_to_move, mv) as i64);
                 debug_assert!(key.abs() < 2_000_000, "qsearch quiet-check key overflow: {key}");
                 self.buf.push(ScoredMove {
                     mv,
-                    key,
+                    key: Self::clamp_key(key),
                     tiebreak: mv.to_u32(),
                 });
                 state.quiet_checks_generated += 1;
@@ -592,7 +593,7 @@ impl<'a> MovePicker<'a> {
                 }
                 self.buf.push(ScoredMove {
                     mv,
-                    key: 2_000_000 + see * 10,
+                    key: Self::clamp_key(2_000_000_i64 + (see as i64) * 10),
                     tiebreak: mv.to_u32(),
                 });
             }
@@ -664,12 +665,19 @@ impl<'a> MovePicker<'a> {
     #[inline]
     fn excluded_matches(ex: Move, mv: Move) -> bool {
         if ex.is_drop() {
+            // Drop は同一駒種＋同一 to のみ遮断（別駒種は別プランとみなす）
             mv.is_drop() && ex.drop_piece_type() == mv.drop_piece_type() && ex.to() == mv.to()
         } else if mv.is_drop() {
             false
         } else {
+            // Root とは異なり、内部の singular/exclusion 用には昇成・不成をまとめて除外する
             ex.from() == mv.from() && ex.to() == mv.to()
         }
+    }
+
+    #[inline]
+    fn clamp_key(key: i64) -> i32 {
+        key.clamp(i32::MIN as i64, i32::MAX as i64) as i32
     }
 }
 

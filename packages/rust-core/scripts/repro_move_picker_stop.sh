@@ -10,6 +10,15 @@ LOG="$LOG_DIR/move_picker_stop.log"
 mkdir -p "$LOG_DIR"
 : >"$LOG"
 
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD=${TIMEOUT_CMD:-timeout}
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD=${TIMEOUT_CMD:-gtimeout}
+else
+    echo "[repro] ERROR: neither 'timeout' nor 'gtimeout' is available" >&2
+    exit 1
+fi
+
 export RUST_MIN_STACK=${RUST_MIN_STACK:-8388608}
 if command -v ulimit >/dev/null 2>&1; then
     ulimit -s 16384 || true
@@ -54,7 +63,7 @@ wait_for() {
     done
 }
 
-coproc ENG { timeout 60s stdbuf -oL -eL "$BIN"; }
+coproc ENG { "$TIMEOUT_CMD" 60s stdbuf -oL -eL "$BIN"; }
 ENG_PID=${ENG_PID:-$COPROC_PID}
 exec {ENGIN}>&"${ENG[1]}"
 exec {ENGOUT}<&"${ENG[0]}"
