@@ -217,9 +217,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 break;
             }
             let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
-            let mut rank_map: HashMap<u16, u32> = HashMap::with_capacity(root_rank.len());
+            let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
             for (idx, mv) in root_rank.iter().enumerate() {
-                rank_map.entry(mv.to_tt_key()).or_insert(idx as u32 + 1);
+                rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
             }
 
             let root_static_eval = self.evaluator.evaluate(root);
@@ -341,10 +341,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             };
                             if emit {
                                 last_currmove_emit = Instant::now();
-                                let number = rank_map
-                                    .get(&mv.to_tt_key())
-                                    .copied()
-                                    .unwrap_or((idx as u32) + 1);
+                                let number =
+                                    rank_map.get(&mv.to_u32()).copied().unwrap_or((idx as u32) + 1);
                                 cb(InfoEvent::CurrMove { mv, number });
                             }
                         }

@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::evaluation::evaluate::{Evaluator, MaterialEvaluator};
+use crate::movegen::MoveGenerator;
 use crate::search::ab::ordering::{Heuristics, MovePicker};
 use crate::search::api::SearcherBackend;
 use crate::search::constants::SEARCH_INF;
@@ -164,6 +166,117 @@ fn qsearch_skips_quiet_checks_when_disabled() {
     while let Some(mv) = picker.next(&heur) {
         assert!(mv.is_capture_hint() || !pos.gives_check(mv));
     }
+}
+
+#[test]
+fn root_rank_map_distinguishes_promotion_pairs() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("3d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+
+    let mg = MoveGenerator::new();
+    let root_moves = mg.generate_all(&pos).unwrap();
+    let mut promo_pair: Vec<_> = root_moves
+        .as_slice()
+        .iter()
+        .copied()
+        .filter(|mv| {
+            mv.from().is_some_and(|sq| sq == parse_usi_square("3d").unwrap())
+                && mv.to() == parse_usi_square("4c").unwrap()
+        })
+        .collect();
+    promo_pair.sort_by_key(|mv| (mv.is_promote(), mv.to_u32()));
+    assert_eq!(promo_pair.len(), 2, "expected promotion pair for Silver move");
+
+    let mut rank_map: HashMap<u32, u32> = HashMap::new();
+    for (idx, mv) in promo_pair.iter().enumerate() {
+        rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
+    }
+
+    let non_promo = promo_pair[0];
+    let promo = promo_pair[1];
+    assert_ne!(
+        rank_map.get(&non_promo.to_u32()),
+        rank_map.get(&promo.to_u32()),
+        "promotion pair must receive distinct currmove numbers",
+    );
+}
+
+#[test]
+fn move_picker_returns_promotion_and_nonpromotion() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("3d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+
+    let mut picker = MovePicker::new_normal(&pos, None, None, [None, None], None, None);
+    let heur = Heuristics::default();
+    let mut found_promo = false;
+    let mut found_nonpromo = false;
+    let source = parse_usi_square("3d").unwrap();
+    let dest = parse_usi_square("4c").unwrap();
+
+    while let Some(mv) = picker.next(&heur) {
+        if mv.from() == Some(source) && mv.to() == dest {
+            if mv.is_promote() {
+                found_promo = true;
+            } else {
+                found_nonpromo = true;
+            }
+            if found_promo && found_nonpromo {
+                break;
+            }
+        }
+    }
+
+    assert!(found_nonpromo, "non-promotion move should be surfaced");
+    assert!(found_promo, "promotion move should be surfaced");
+}
+
+#[test]
+fn probcut_sort_is_deterministic() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("2h").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("8h").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("1g").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("9g").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+
+    let heur = Heuristics::default();
+    let threshold = 0;
+    let mut first = MovePicker::new_probcut(&pos, None, None, threshold);
+    let mut second = MovePicker::new_probcut(&pos, None, None, threshold);
+
+    let collect = |picker: &mut MovePicker<'_>| {
+        let mut moves = Vec::new();
+        while let Some(mv) = picker.next(&heur) {
+            moves.push(mv.to_u32());
+        }
+        moves
+    };
+
+    let seq1 = collect(&mut first);
+    let seq2 = collect(&mut second);
+
+    assert!(seq1.len() >= 2, "expected at least two probcut candidates");
+    assert_eq!(seq1, seq2, "probcut picker must produce deterministic order");
 }
 
 #[test]

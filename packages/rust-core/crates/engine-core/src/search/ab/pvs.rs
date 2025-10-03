@@ -202,7 +202,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut moveno: usize = 0;
         let mut first_move_done = false;
         let mut tried_captures: SmallVec<[crate::shogi::Move; 16]> = SmallVec::new();
+        let mut aborted = false;
         while let Some(mv) = picker.next(&*heur) {
+            if ctx.time_up() || Self::should_stop(ctx.limits) {
+                aborted = true;
+                break;
+            }
             moveno += 1;
             stack[ply as usize].current_move = Some(mv);
             let gives_check = pos.gives_check(mv);
@@ -357,6 +362,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             if is_quiet {
                 stack[ply as usize].quiet_moves.push(mv);
+            }
+        }
+        if aborted {
+            if first_move_done {
+                return (best, best_mv);
+            } else {
+                return (static_eval, None);
             }
         }
         if best == i32::MIN / 2 {
