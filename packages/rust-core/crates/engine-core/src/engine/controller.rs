@@ -145,7 +145,13 @@ impl Engine {
             _ => {}
         }
 
-        let tm_limits: TimeLimits = limits.clone().into();
+        let tm_limits = TimeLimits {
+            time_control: limits.time_control.clone(),
+            moves_to_go: limits.moves_to_go,
+            depth: limits.depth.map(|d| d as u32),
+            nodes: limits.nodes,
+            time_parameters: limits.time_parameters,
+        };
         let game_phase = detect_game_phase_for_time(pos, pos.ply as u32);
         let manager = TimeManager::new(&tm_limits, pos.side_to_move, pos.ply as u32, game_phase);
         Some(Arc::new(manager))
