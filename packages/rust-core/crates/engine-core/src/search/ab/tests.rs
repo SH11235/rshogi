@@ -12,7 +12,7 @@ use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
 use crate::search::{SearchLimits, SearchStack};
 use crate::shogi::{Color, Piece, PieceType};
-use crate::usi::parse_usi_square;
+use crate::usi::{parse_usi_move, parse_usi_square};
 use crate::Position;
 
 use super::driver::ClassicBackend;
@@ -240,6 +240,40 @@ fn move_picker_returns_promotion_and_nonpromotion() {
 
     assert!(found_nonpromo, "non-promotion move should be surfaced");
     assert!(found_promo, "promotion move should be surfaced");
+}
+
+#[test]
+fn tt_move_does_not_hide_promotion_variant() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("3d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+
+    // TT 手として非成を登録し、同じ from→to の成りが返るか確認する
+    let tt_move = parse_usi_move("3d4c").unwrap();
+    let mut picker = MovePicker::new_normal(&pos, Some(tt_move), None, [None, None], None, None);
+    let heur = Heuristics::default();
+
+    // 1 手目は TT 手（非成）が返り、その後も昇成が得られることを期待
+    let first = picker.next(&heur).expect("expected TT move first");
+    assert_eq!(first.to_u32(), tt_move.to_u32());
+
+    let mut found_promo = false;
+    while let Some(mv) = picker.next(&heur) {
+        if mv.from() == Some(parse_usi_square("3d").unwrap())
+            && mv.to() == parse_usi_square("4c").unwrap()
+            && mv.is_promote()
+        {
+            found_promo = true;
+            break;
+        }
+    }
+
+    assert!(found_promo, "promotion move should still be surfaced after TT move");
 }
 
 #[test]

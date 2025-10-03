@@ -42,6 +42,7 @@ enum Stage {
 struct ScoredMove {
     mv: Move,
     key: i32,
+    tiebreak: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -406,7 +407,11 @@ impl<'a> MovePicker<'a> {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += cap_score * capture_weight;
             }
-            self.buf.push(ScoredMove { mv, key });
+            self.buf.push(ScoredMove {
+                mv,
+                key,
+                tiebreak: mv.to_u32(),
+            });
         }
         self.buf.sort_unstable_by(Self::cmp_scored);
     }
@@ -427,7 +432,11 @@ impl<'a> MovePicker<'a> {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += cap_score * capture_weight;
             }
-            self.buf.push(ScoredMove { mv, key });
+            self.buf.push(ScoredMove {
+                mv,
+                key,
+                tiebreak: mv.to_u32(),
+            });
         }
         self.buf.sort_unstable_by(Self::cmp_scored);
     }
@@ -471,7 +480,11 @@ impl<'a> MovePicker<'a> {
             if self.pos.gives_check(mv) {
                 key += 500;
             }
-            self.buf.push(ScoredMove { mv, key });
+            self.buf.push(ScoredMove {
+                mv,
+                key,
+                tiebreak: mv.to_u32(),
+            });
         }
         self.buf.sort_unstable_by(Self::cmp_scored);
     }
@@ -492,7 +505,11 @@ impl<'a> MovePicker<'a> {
                     key += self.pos.see(mv) * 10;
                 }
                 key += heur.history.get(self.pos.side_to_move, mv);
-                self.buf.push(ScoredMove { mv, key });
+                self.buf.push(ScoredMove {
+                    mv,
+                    key,
+                    tiebreak: mv.to_u32(),
+                });
             }
         }
         self.buf.sort_unstable_by(Self::cmp_scored);
@@ -523,7 +540,11 @@ impl<'a> MovePicker<'a> {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += cap_score * capture_weight;
             }
-            self.buf.push(ScoredMove { mv, key });
+            self.buf.push(ScoredMove {
+                mv,
+                key,
+                tiebreak: mv.to_u32(),
+            });
         }
         self.buf.sort_unstable_by(Self::cmp_scored);
     }
@@ -539,7 +560,11 @@ impl<'a> MovePicker<'a> {
                     continue;
                 }
                 let key = 1_200_000 + heur.history.get(self.pos.side_to_move, mv);
-                self.buf.push(ScoredMove { mv, key });
+                self.buf.push(ScoredMove {
+                    mv,
+                    key,
+                    tiebreak: mv.to_u32(),
+                });
                 state.quiet_checks_generated += 1;
             }
             self.qsearch_state = Some(state);
@@ -565,6 +590,7 @@ impl<'a> MovePicker<'a> {
                 self.buf.push(ScoredMove {
                     mv,
                     key: 2_000_000 + see * 10,
+                    tiebreak: mv.to_u32(),
                 });
             }
         }
@@ -614,7 +640,7 @@ impl<'a> MovePicker<'a> {
         if self.excluded.is_some_and(|ex| ex.equals_without_piece_type(&mv)) {
             return true;
         }
-        if self.tt_move.is_some_and(|tt| tt.equals_without_piece_type(&mv) && self.used_tt) {
+        if self.tt_move.is_some_and(|tt| tt.to_tt_key() == mv.to_tt_key() && self.used_tt) {
             return true;
         }
         let target = mv.to_u32();
@@ -627,7 +653,8 @@ impl<'a> MovePicker<'a> {
 
     #[inline]
     fn cmp_scored(a: &ScoredMove, b: &ScoredMove) -> Ordering {
-        b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
+        // 同スコア時にも巡回順序が揺れないよう、ステージ生成時に算出した 32bit キーで決定化する。
+        b.key.cmp(&a.key).then_with(|| a.tiebreak.cmp(&b.tiebreak))
     }
 }
 

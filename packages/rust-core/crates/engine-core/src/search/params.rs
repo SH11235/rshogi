@@ -69,7 +69,7 @@ static RUNTIME_ENABLE_STATIC_BETA: AtomicBool = AtomicBool::new(true);
 static RUNTIME_QS_CHECKS: AtomicBool = AtomicBool::new(true);
 static RUNTIME_RAZOR: AtomicBool = AtomicBool::new(RAZOR_ENABLED);
 static RUNTIME_IID_MIN_DEPTH: AtomicI32 = AtomicI32::new(6); // 既定: 6ply
-static PREFETCH_ENABLED: OnceLock<bool> = OnceLock::new();
+static PREFETCH_ENABLED: OnceLock<AtomicBool> = OnceLock::new();
 static RUNTIME_QUIET_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(QUIET_HISTORY_WEIGHT);
 static RUNTIME_CONT_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(CONTINUATION_HISTORY_WEIGHT);
 static RUNTIME_CAP_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(CAPTURE_HISTORY_WEIGHT);
@@ -143,10 +143,16 @@ pub fn qs_checks_enabled() -> bool {
 
 #[inline]
 pub fn tt_prefetch_enabled() -> bool {
-    *PREFETCH_ENABLED.get_or_init(|| match std::env::var("SHOGI_TT_PREFETCH") {
+    PREFETCH_ENABLED
+        .get_or_init(|| AtomicBool::new(default_prefetch_value()))
+        .load(Ordering::Relaxed)
+}
+
+fn default_prefetch_value() -> bool {
+    match std::env::var("SHOGI_TT_PREFETCH") {
         Ok(val) => matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
         Err(_) => true,
-    })
+    }
 }
 
 #[inline]
@@ -249,6 +255,12 @@ pub fn set_capture_history_weight(v: i32) {
     RUNTIME_CAP_HISTORY_WEIGHT.store(v, Ordering::Relaxed);
 }
 
+pub fn set_tt_prefetch_enabled_runtime(on: bool) {
+    PREFETCH_ENABLED
+        .get_or_init(|| AtomicBool::new(default_prefetch_value()))
+        .store(on, Ordering::Relaxed);
+}
+
 pub fn set_root_tt_bonus(v: i32) {
     RUNTIME_ROOT_TT_BONUS.store(v, Ordering::Relaxed);
 }
@@ -269,4 +281,72 @@ pub fn set_razor_enabled(b: bool) {
 }
 pub fn set_iid_min_depth(v: i32) {
     RUNTIME_IID_MIN_DEPTH.store(v.max(0), Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub fn __test_override_tt_prefetch_enabled(on: bool) {
+    set_tt_prefetch_enabled_runtime(on);
+}
+
+#[cfg(test)]
+pub fn __test_reset_tt_prefetch_to_default() {
+    set_tt_prefetch_enabled_runtime(default_prefetch_value());
+}
+
+#[cfg(test)]
+pub fn __test_reset_runtime_values() {
+    set_lmr_k_x100((LMR_K_COEFF * 100.0) as u32);
+    set_lmp_d1(LMP_LIMIT_D1);
+    set_lmp_d2(LMP_LIMIT_D2);
+    set_lmp_d3(LMP_LIMIT_D3);
+    set_hp_threshold(HP_THRESHOLD);
+    set_sbp_d1(SBP_MARGIN_D1);
+    set_sbp_d2(SBP_MARGIN_D2);
+    set_probcut_d5(PROBCUT_MARGIN_D5);
+    set_probcut_d6p(PROBCUT_MARGIN_D6P);
+    set_nmp_enabled(true);
+    set_iid_enabled(true);
+    set_probcut_enabled(true);
+    set_static_beta_enabled(true);
+    set_qs_checks_enabled(true);
+    set_quiet_history_weight(QUIET_HISTORY_WEIGHT);
+    set_continuation_history_weight(CONTINUATION_HISTORY_WEIGHT);
+    set_capture_history_weight(CAPTURE_HISTORY_WEIGHT);
+    set_root_tt_bonus(ROOT_TT_BONUS);
+    set_root_prev_score_scale(ROOT_PREV_SCORE_SCALE);
+    set_root_multipv_bonus(1, ROOT_MULTIPV_BONUS_1);
+    set_root_multipv_bonus(2, ROOT_MULTIPV_BONUS_2);
+    set_razor_enabled(RAZOR_ENABLED);
+    set_iid_min_depth(6);
+    set_tt_prefetch_enabled_runtime(default_prefetch_value());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn quiet_history_weight_updates_and_restores() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let original = quiet_history_weight();
+        let new_value = original + 5;
+        set_quiet_history_weight(new_value);
+        assert_eq!(quiet_history_weight(), new_value);
+        set_quiet_history_weight(original);
+    }
+
+    #[test]
+    fn tt_prefetch_override_takes_effect() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let default = default_prefetch_value();
+        set_tt_prefetch_enabled_runtime(true);
+        assert!(tt_prefetch_enabled());
+        set_tt_prefetch_enabled_runtime(false);
+        assert!(!tt_prefetch_enabled());
+        set_tt_prefetch_enabled_runtime(default);
+        assert_eq!(tt_prefetch_enabled(), default);
+    }
 }

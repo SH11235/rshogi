@@ -365,6 +365,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
         if aborted {
+            // 中断時は現時点のベスト値（非PV手は探索済み）か静的評価をそのまま返す。
+            // 上位では stop 判定と組み合わせて結果を採用/破棄するため、TT へは書き込まない。
             if first_move_done {
                 return (best, best_mv);
             } else {
