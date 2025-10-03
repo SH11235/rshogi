@@ -112,12 +112,19 @@ impl UsiProc {
     }
 
     fn wait_for_contains(&self, pat: &str, timeout_ms: u64) -> bool {
+        self.wait_for(timeout_ms, |line| line.contains(pat))
+    }
+
+    fn wait_for<F>(&self, timeout_ms: u64, mut on_line: F) -> bool
+    where
+        F: FnMut(&str) -> bool,
+    {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         while Instant::now() < deadline {
             match self.rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(line) => {
                     println!("OUT: {}", line);
-                    if line.contains(pat) {
+                    if on_line(&line) {
                         return true;
                     }
                 }
@@ -255,6 +262,7 @@ fn e2e_stop_fast_finalize_fixed_and_infinite_and_ponder() {
         p1.wait_for_contains("bestmove ", 1000),
         "bestmove not emitted promptly for movetime"
     );
+    p1.assert_no_contains("bestmove ", 200);
 
     // Infinite
     let mut p2 = UsiProc::spawn();
@@ -305,13 +313,56 @@ fn e2e_byoyomi_oob_finalize_logs() {
     p.write_line("position startpos");
     p.write_line("go btime 0 wtime 0 byoyomi 2000");
 
+    let mut saw_oob = false;
+    let mut time_budget_line: Option<String> = None;
+    let mut time_caps_line: Option<String> = None;
+
+    let bestmove_seen = p.wait_for(6000, |line| {
+        if line.contains("time_budget") {
+            time_budget_line = Some(line.to_string());
+        }
+        if line.contains("time_caps") {
+            time_caps_line = Some(line.to_string());
+        }
+        if line.contains("oob_finalize_request") {
+            saw_oob = true;
+        }
+        line.starts_with("bestmove ")
+    });
+
+    assert!(bestmove_seen, "bestmove was not emitted after OOB finalize");
+    assert!(saw_oob, "OOB finalize log was not observed");
+
+    fn parse_soft_hard(line: &str) -> Option<(u64, u64)> {
+        let mut soft = None;
+        let mut hard = None;
+        for part in line.split_whitespace() {
+            if let Some(rest) = part.strip_prefix("soft_ms=") {
+                soft = rest.trim_end_matches(',').parse::<u64>().ok();
+            }
+            if let Some(rest) = part.strip_prefix("hard_ms=") {
+                hard = rest.trim_end_matches(',').parse::<u64>().ok();
+            }
+        }
+        match (soft, hard) {
+            (Some(s), Some(h)) => Some((s, h)),
+            _ => None,
+        }
+    }
+
+    let (budget_soft, budget_hard) =
+        parse_soft_hard(time_budget_line.as_deref().expect("time_budget log missing"))
+            .expect("failed parsing time_budget");
+    let (caps_soft, caps_hard) =
+        parse_soft_hard(time_caps_line.as_deref().expect("time_caps log missing"))
+            .expect("failed parsing time_caps");
+
+    assert_eq!(caps_hard, budget_hard, "time_caps hard should match time_budget hard");
     assert!(
-        p.wait_for_contains("oob_finalize_request", 5000),
-        "OOB finalize log was not observed"
-    );
-    assert!(
-        p.wait_for_contains("bestmove ", 2000),
-        "bestmove was not emitted after OOB finalize"
+        caps_soft >= budget_soft,
+        "time_caps soft should not undershoot time_budget (caps_soft={} budget_soft={})",
+        caps_soft,
+        budget_soft
     );
 }
 

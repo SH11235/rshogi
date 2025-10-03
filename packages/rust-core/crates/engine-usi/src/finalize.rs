@@ -1,4 +1,5 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
+use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::{
     types::{NodeType, StopInfo},
     SearchResult,
@@ -27,6 +28,114 @@ fn source_to_str(src: FinalBestSource) -> &'static str {
         FinalBestSource::LegalFallback => "legal",
         FinalBestSource::Resign => "resign",
     }
+}
+
+fn log_and_emit_final_selection(
+    state: &mut EngineState,
+    label: &str,
+    source: FinalBestSource,
+    final_move: &str,
+    ponder: Option<String>,
+    stop_meta: &StopMeta,
+) {
+    info_string(format!(
+        "{}_select source={} move={} soft_ms={} hard_ms={}",
+        label,
+        source_to_str(source),
+        final_move,
+        stop_meta.soft_ms,
+        stop_meta.hard_ms
+    ));
+    emit_bestmove_once(state, final_move.to_string(), ponder);
+}
+
+fn prepare_stop_meta(
+    label: &str,
+    controller_info: Option<StopInfo>,
+    result_stop_info: Option<&StopInfo>,
+    finalize_reason: Option<FinalizeReason>,
+) -> StopMeta {
+    if let Some(reason) = finalize_reason {
+        if label.starts_with("oob_") {
+            info_string(format!("oob_finalize_request reason={:?}", reason));
+        }
+    }
+    gather_stop_meta(controller_info, result_stop_info, finalize_reason)
+}
+
+#[derive(Debug, Clone)]
+struct StopMeta {
+    info: Option<StopInfo>,
+    reason_label: String,
+    soft_ms: u64,
+    hard_ms: u64,
+}
+
+fn copy_stop_info(src: &StopInfo) -> StopInfo {
+    StopInfo {
+        reason: src.reason,
+        elapsed_ms: src.elapsed_ms,
+        nodes: src.nodes,
+        depth_reached: src.depth_reached,
+        hard_timeout: src.hard_timeout,
+        soft_limit_ms: src.soft_limit_ms,
+        hard_limit_ms: src.hard_limit_ms,
+    }
+}
+
+fn gather_stop_meta(
+    controller_info: Option<StopInfo>,
+    result_info: Option<&StopInfo>,
+    finalize_reason: Option<FinalizeReason>,
+) -> StopMeta {
+    let controller_reason = controller_info.as_ref().map(|si| format!("{:?}", si.reason));
+    let result_reason = result_info.map(|si| format!("{:?}", si.reason));
+
+    let reason_label = finalize_reason
+        .map(|r| format!("{:?}", r))
+        .or(result_reason)
+        .or(controller_reason)
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let chosen_info = result_info.map(copy_stop_info).or(controller_info);
+
+    let (soft_ms, hard_ms) = chosen_info
+        .as_ref()
+        .map(|si| (si.soft_limit_ms, si.hard_limit_ms))
+        .unwrap_or((0, 0));
+
+    StopMeta {
+        info: chosen_info,
+        reason_label,
+        soft_ms,
+        hard_ms,
+    }
+}
+
+/// Emit bestmove exactly once per go-session and update common state.
+///
+/// Returns true when the move was emitted in this call. If the bestmove was
+/// already sent earlier, the function leaves the state untouched and returns
+/// false so callers can decide whetherフェールセーフを走らせるか判断できる。
+pub fn emit_bestmove_once<S: Into<String>>(
+    state: &mut EngineState,
+    final_move: S,
+    ponder: Option<String>,
+) -> bool {
+    if state.bestmove_emitted {
+        return false;
+    }
+
+    let final_usi = final_move.into();
+    emit_bestmove(&final_usi, ponder);
+
+    state.bestmove_emitted = true;
+    state.current_root_hash = None;
+    state.deadline_hard = None;
+    state.deadline_near = None;
+    state.deadline_near_notified = false;
+
+    true
 }
 
 const TT_LOCK_BACKOFF_US: u64 = 100;
@@ -101,10 +210,11 @@ pub fn finalize_and_send(
     label: &str,
     result: Option<&SearchResult>,
     stale: bool,
+    finalize_reason: Option<FinalizeReason>,
 ) {
     if stale {
         info_string(format!("{label}_stale=1 fallback=fast"));
-        finalize_and_send_fast(state, label);
+        finalize_and_send_fast(state, label, finalize_reason);
         return;
     }
 
@@ -187,18 +297,13 @@ pub fn finalize_and_send(
     };
 
     let controller_stop_info = state.stop_controller.try_read_stop_info();
-    let (soft_ms, hard_ms, reason_str) = result
-        .and_then(|r| {
-            r.stop_info
-                .as_ref()
-                .map(|si| (si.soft_limit_ms, si.hard_limit_ms, format!("{:?}", si.reason)))
-        })
-        .or_else(|| {
-            controller_stop_info
-                .as_ref()
-                .map(|si| (si.soft_limit_ms, si.hard_limit_ms, format!("{:?}", si.reason)))
-        })
-        .unwrap_or((0, 0, "Unknown".to_string()));
+
+    let stop_meta = prepare_stop_meta(
+        label,
+        controller_stop_info,
+        result.and_then(|r| r.stop_info.as_ref()),
+        finalize_reason,
+    );
 
     if let Some(res) = result {
         let best_usi =
@@ -211,13 +316,13 @@ pub fn finalize_and_send(
             res.stats.depth,
             res.stats.nodes,
             res.stats.elapsed.as_millis(),
-            reason_str
+            stop_meta.reason_label
         ));
 
         // 極小Byoyomi対策の可視化: ハード/ソフト上限と停止理由
         info_string(format!(
             "time_caps hard_ms={} soft_ms={} reason={}",
-            hard_ms, soft_ms, reason_str
+            stop_meta.hard_ms, stop_meta.soft_ms, stop_meta.reason_label
         ));
 
         if let Some(tt_hits) = res.stats.tt_hits {
@@ -331,18 +436,6 @@ pub fn finalize_and_send(
         }
     }
 
-    info_string(format!(
-        "{}_select source={} move={} soft_ms={} hard_ms={}",
-        label,
-        source_to_str(final_best.source),
-        final_best
-            .best_move
-            .map(|m| move_to_usi(&m))
-            .unwrap_or_else(|| "resign".to_string()),
-        soft_ms,
-        hard_ms
-    ));
-
     if let Some(res) = result {
         if !stale {
             let hf_permille = {
@@ -447,13 +540,14 @@ pub fn finalize_and_send(
     } else {
         None
     };
-    emit_bestmove(&final_usi, ponder_mv);
-
-    state.bestmove_emitted = true;
-    state.current_root_hash = None;
-    state.deadline_hard = None;
-    state.deadline_near = None;
-    state.deadline_near_notified = false;
+    log_and_emit_final_selection(
+        state,
+        label,
+        final_best.source,
+        &final_usi,
+        ponder_mv,
+        &stop_meta,
+    );
 }
 
 fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_permille: u16) {
@@ -485,7 +579,11 @@ fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_
     usi_println(&s);
 }
 
-pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
+pub fn finalize_and_send_fast(
+    state: &mut EngineState,
+    label: &str,
+    finalize_reason: Option<FinalizeReason>,
+) {
     if state.bestmove_emitted {
         info_string(format!("{label}_fast_skip already_emitted=1"));
         return;
@@ -496,9 +594,9 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
     }
     info_string(format!("{label}_fast_claim_success=1"));
 
-    let stop_info_snapshot = state.stop_controller.try_read_stop_info();
+    let controller_stop_info = state.stop_controller.try_read_stop_info();
 
-    if let Some(si) = stop_info_snapshot.as_ref() {
+    if let Some(ref si) = controller_stop_info {
         info_string(format!(
             "{label}_oob_stop_info sid={} reason={:?} elapsed_ms={} soft_ms={} hard_ms={}",
             state.current_session_core_id.unwrap_or(0),
@@ -508,6 +606,9 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
             si.hard_limit_ms
         ));
     }
+
+    let stop_meta = prepare_stop_meta(label, controller_stop_info, None, finalize_reason);
+    info_string(format!("{}_fast_reason reason={}", label, stop_meta.reason_label));
 
     let root_key_hex = fmt_hash(state.position.zobrist_hash());
 
@@ -521,26 +622,37 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 let shallow =
                     snap.depth < FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT || snap.pv.is_empty();
                 let budget_ms =
-                    compute_tt_probe_budget_ms(stop_info_snapshot.as_ref(), snap.elapsed_ms);
+                    compute_tt_probe_budget_ms(stop_meta.info.as_ref(), snap.elapsed_ms);
                 if shallow {
-                    if let Some((eng_guard, spent_ms, spent_us)) =
+                    let snapshot_emit = if let Some((eng_guard, spent_ms, spent_us)) =
                         try_lock_engine_with_budget(&state.engine, budget_ms)
                     {
-                        let final_best = eng_guard.choose_final_bestmove(&state.position, None);
-                        let final_usi = final_best
-                            .best_move
-                            .map(|m| move_to_usi(&m))
-                            .unwrap_or_else(|| move_to_usi(&best));
-                        let ponder_mv = if state.opts.ponder {
-                            final_best
-                                .pv
-                                .get(1)
-                                .map(move_to_usi)
-                                .or_else(|| snap.pv.get(1).map(move_to_usi))
-                        } else {
-                            None
+                        let (final_usi, ponder_mv, final_source) = {
+                            let final_best = eng_guard.choose_final_bestmove(&state.position, None);
+                            let final_usi = final_best
+                                .best_move
+                                .map(|m| move_to_usi(&m))
+                                .unwrap_or_else(|| move_to_usi(&best));
+                            let ponder_mv = if state.opts.ponder {
+                                final_best
+                                    .pv
+                                    .get(1)
+                                    .map(move_to_usi)
+                                    .or_else(|| snap.pv.get(1).map(move_to_usi))
+                            } else {
+                                None
+                            };
+                            (final_usi, ponder_mv, final_best.source)
                         };
                         drop(eng_guard);
+                        Some((final_usi, ponder_mv, final_source, spent_ms, spent_us))
+                    } else {
+                        None
+                    };
+
+                    if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us)) =
+                        snapshot_emit
+                    {
                         info_string(format!(
                             "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=1 tt_probe_budget_ms={} tt_probe_spent_ms={}",
                             label,
@@ -560,12 +672,14 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                             fmt_hash(snap.root_key),
                             spent_us
                         ));
-                        emit_bestmove(&final_usi, ponder_mv);
-                        state.bestmove_emitted = true;
-                        state.deadline_hard = None;
-                        state.deadline_near = None;
-                        state.deadline_near_notified = false;
-                        state.current_root_hash = None;
+                        log_and_emit_final_selection(
+                            state,
+                            label,
+                            final_source,
+                            &final_usi,
+                            ponder_mv,
+                            &stop_meta,
+                        );
                         return;
                     }
                 }
@@ -587,35 +701,40 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                     snap.pv.len(),
                     budget_ms
                 ));
-                emit_bestmove(&final_usi, ponder_mv);
-                state.bestmove_emitted = true;
-                state.deadline_hard = None;
-                state.deadline_near = None;
-                state.deadline_near_notified = false;
-                state.current_root_hash = None;
+                log_and_emit_final_selection(
+                    state,
+                    label,
+                    FinalBestSource::Committed,
+                    &final_usi,
+                    ponder_mv,
+                    &stop_meta,
+                );
                 return;
             }
         }
     }
 
-    let fallback_budget_ms = compute_tt_probe_budget_ms(stop_info_snapshot.as_ref(), 0);
-    if let Some((eng_guard, spent_ms, spent_us)) =
+    let fallback_budget_ms = compute_tt_probe_budget_ms(stop_meta.info.as_ref(), 0);
+    let fallback_emit = if let Some((eng_guard, spent_ms, spent_us)) =
         try_lock_engine_with_budget(&state.engine, fallback_budget_ms)
     {
         let dbg = eng_guard.tt_debug_info();
-        let final_best = eng_guard.choose_final_bestmove(&state.position, None);
-        let final_usi = final_best
-            .best_move
-            .map(|m| move_to_usi(&m))
-            .unwrap_or_else(|| "resign".to_string());
-        let ponder_mv = if state.opts.ponder {
-            final_best.pv.get(1).map(move_to_usi).or_else(|| {
-                final_best.best_move.and_then(|bm| {
-                    eng_guard.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
+        let (final_usi, ponder_mv, final_source) = {
+            let final_best = eng_guard.choose_final_bestmove(&state.position, None);
+            let final_usi = final_best
+                .best_move
+                .map(|m| move_to_usi(&m))
+                .unwrap_or_else(|| "resign".to_string());
+            let ponder_mv = if state.opts.ponder {
+                final_best.pv.get(1).map(move_to_usi).or_else(|| {
+                    final_best.best_move.and_then(|bm| {
+                        eng_guard.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
+                    })
                 })
-            })
-        } else {
-            None
+            } else {
+                None
+            };
+            (final_usi, ponder_mv, final_best.source)
         };
         drop(eng_guard);
         info_string(format!(
@@ -631,21 +750,32 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
             spent_ms,
             spent_us
         ));
+        Some((final_usi, ponder_mv, final_source, spent_ms, spent_us, dbg))
+    } else {
+        None
+    };
+
+    if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us, dbg)) = fallback_emit {
         info_string(format!(
-            "{}_fast_select sid={} root_key={} source={} move={} ponder={:?}",
+            "{}_fast_snapshot sid={} root_key={} tt_probe=0 tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,
-            source_to_str(final_best.source),
-            final_usi,
-            ponder_mv
+            fallback_budget_ms,
+            spent_ms,
+            spent_us
         ));
-        emit_bestmove(&final_usi, ponder_mv);
-        state.bestmove_emitted = true;
-        state.deadline_hard = None;
-        state.deadline_near = None;
-        state.deadline_near_notified = false;
-        state.current_root_hash = None;
+        info_string(format!(
+            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf_permille={} store_attempts={}",
+            label,
+            state.current_session_core_id.unwrap_or(0),
+            root_key_hex,
+            dbg.addr,
+            dbg.size_mb,
+            dbg.hf_permille,
+            dbg.store_attempts
+        ));
+        log_and_emit_final_selection(state, label, final_source, &final_usi, ponder_mv, &stop_meta);
         return;
     }
 
@@ -667,7 +797,14 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                     state.current_session_core_id.unwrap_or(0),
                     root_key_hex
                 ));
-                emit_bestmove("resign", None);
+                log_and_emit_final_selection(
+                    state,
+                    label,
+                    FinalBestSource::Resign,
+                    "resign",
+                    None,
+                    &stop_meta,
+                );
             } else {
                 let pos = &state.position;
                 let in_check = pos.is_in_check();
@@ -702,14 +839,14 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
 
                 if let Some(chosen) = chosen {
                     let final_usi = move_to_usi(&chosen);
-                    info_string(format!(
-                        "{}_fast_select_legal sid={} root_key={} move={}",
+                    log_and_emit_final_selection(
+                        state,
                         label,
-                        state.current_session_core_id.unwrap_or(0),
-                        root_key_hex,
-                        final_usi
-                    ));
-                    emit_bestmove(&final_usi, None);
+                        FinalBestSource::LegalFallback,
+                        &final_usi,
+                        None,
+                        &stop_meta,
+                    );
                 } else {
                     info_string(format!(
                         "{}_fast_select_resign sid={} root_key={} no_legal_moves=1",
@@ -717,7 +854,14 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                         state.current_session_core_id.unwrap_or(0),
                         root_key_hex
                     ));
-                    emit_bestmove("resign", None);
+                    log_and_emit_final_selection(
+                        state,
+                        label,
+                        FinalBestSource::Resign,
+                        "resign",
+                        None,
+                        &stop_meta,
+                    );
                 }
             }
         }
@@ -729,14 +873,16 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
                 root_key_hex,
                 e
             ));
-            emit_bestmove("resign", None);
+            log_and_emit_final_selection(
+                state,
+                label,
+                FinalBestSource::Resign,
+                "resign",
+                None,
+                &stop_meta,
+            );
         }
     }
-    state.bestmove_emitted = true;
-    state.current_root_hash = None;
-    state.deadline_hard = None;
-    state.deadline_near = None;
-    state.deadline_near_notified = false;
 }
 const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 2;
 
@@ -767,5 +913,27 @@ mod tests {
         assert_eq!(compute_tt_probe_budget_ms(Some(&si_close), 0), 1);
         // Missing StopInfo yields zero budget
         assert_eq!(compute_tt_probe_budget_ms(None, 0), 0);
+    }
+
+    #[test]
+    fn emit_bestmove_once_sets_flags_and_is_idempotent() {
+        use crate::state::EngineState;
+        use std::time::Instant;
+
+        let mut state = EngineState::new();
+        state.current_root_hash = Some(0x1234);
+        state.deadline_hard = Some(Instant::now());
+        state.deadline_near = Some(Instant::now());
+        state.deadline_near_notified = true;
+
+        assert!(emit_bestmove_once(&mut state, "resign", None));
+        assert!(state.bestmove_emitted);
+        assert!(state.current_root_hash.is_none());
+        assert!(state.deadline_hard.is_none());
+        assert!(state.deadline_near.is_none());
+        assert!(!state.deadline_near_notified);
+
+        // Second call should be a no-op
+        assert!(!emit_bestmove_once(&mut state, "resign", None));
     }
 }
