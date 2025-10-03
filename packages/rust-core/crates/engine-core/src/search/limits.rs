@@ -516,37 +516,6 @@ impl From<SearchLimits> for crate::time_management::TimeLimits {
     }
 }
 
-/// Manual Clone implementation for SearchLimits
-impl Clone for SearchLimits {
-    fn clone(&self) -> Self {
-        Self {
-            time_control: self.time_control.clone(),
-            moves_to_go: self.moves_to_go,
-            depth: self.depth,
-            nodes: self.nodes,
-            qnodes_limit: self.qnodes_limit,
-            time_parameters: self.time_parameters,
-            session_id: self.session_id,
-            start_time: self.start_time,
-            panic_time_scale: self.panic_time_scale,
-            contempt: self.contempt,
-            is_ponder: self.is_ponder,
-            stop_flag: self.stop_flag.clone(),
-            info_callback: self.info_callback.clone(), // Arc can be cloned
-            info_string_callback: self.info_string_callback.clone(),
-            iteration_callback: self.iteration_callback.clone(),
-            ponder_hit_flag: self.ponder_hit_flag.clone(),
-            qnodes_counter: self.qnodes_counter.clone(),
-            immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
-            multipv: self.multipv,
-            enable_fail_safe: self.enable_fail_safe,
-            fallback_deadlines: self.fallback_deadlines,
-            time_manager: None,
-            stop_controller: None,
-        }
-    }
-}
-
 /// Manual Debug implementation for SearchLimits
 ///
 /// Shows whether `stop_flag`, `info_callback`, and `ponder_hit_flag` are present (Some/None)
@@ -723,11 +692,10 @@ mod tests {
             }
         });
 
-        // Create SearchLimits with the callback
-        let limits1 = SearchLimits::builder().info_callback(info_callback).build();
-
-        // Clone the limits
-        let limits2 = limits1.clone();
+        // Create SearchLimits instances sharing the same callback Arc
+        let callback_arc = info_callback;
+        let limits1 = SearchLimits::builder().info_callback(Arc::clone(&callback_arc)).build();
+        let limits2 = SearchLimits::builder().info_callback(callback_arc).build();
 
         // Both should have the callback
         assert!(limits1.info_callback.is_some());
@@ -817,12 +785,12 @@ mod tests {
     }
 
     #[test]
-    fn test_multipv_clone() {
-        let original = SearchLimits::builder().multipv(7).depth(15).build();
-        let cloned = original.clone();
+    fn test_multipv_repeated_builder_creates_equivalent_values() {
+        let limits_a = SearchLimits::builder().multipv(7).depth(15).build();
+        let limits_b = SearchLimits::builder().multipv(7).depth(15).build();
 
-        assert_eq!(cloned.multipv, original.multipv);
-        assert_eq!(cloned.depth, original.depth);
+        assert_eq!(limits_a.multipv, limits_b.multipv);
+        assert_eq!(limits_a.depth, limits_b.depth);
     }
 
     #[test]
