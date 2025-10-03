@@ -7,7 +7,7 @@
 use crate::search::snapshot::{RootSnapshot, RootSnapshotPublisher};
 use crate::search::types::StopInfo;
 use smallvec::SmallVec;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Reason for an out-of-band finalize request issued by time management or other guards.
@@ -99,6 +99,16 @@ impl StopController {
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
     }
 
+    fn set_external_stop_flag(&self) {
+        let upgraded = {
+            let guard = self.inner.external_stop_flag.lock().unwrap();
+            guard.as_ref().and_then(|w| w.upgrade())
+        };
+        if let Some(flag) = upgraded {
+            flag.store(true, Ordering::Release);
+        }
+    }
+
     /// Clear all handles after the session finishes.
     pub fn clear(&self) {
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
@@ -154,6 +164,8 @@ impl StopController {
         if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
             let _ = tx.send(FinalizerMsg::Finalize { session_id, reason });
         }
+
+        self.set_external_stop_flag();
 
         let mut guard = self.inner.stop_info.lock().unwrap();
         let mut si = guard.take().unwrap_or_default();

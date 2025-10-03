@@ -157,6 +157,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         .map(|h| h != state.position.zobrist_hash())
                         .unwrap_or(false);
                     finalize_and_send(state, label, Some(&result), stale);
+                    info_string(format!("oob_finalize_result label={} mode=joined", label));
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
                     state.current_time_control = None;
@@ -171,6 +172,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         session_id, wait_budget_ms
                     ));
                     fast_finalize_no_detach(state, label);
+                    info_string(format!("oob_finalize_result label={} mode=fast", label));
                 }
             }
         }
@@ -193,21 +195,17 @@ pub fn enforce_deadline(state: &mut EngineState) {
 
     if let Some(nh) = state.deadline_near {
         if now >= nh && !state.deadline_near_notified {
-            // 近傍警告のみ（様子見）。必要なら fast finalize に切り替え可能。
             info_string("oob_deadline_nearhard_reached");
+            state.stop_bridge.request_finalize(FinalizeReason::NearHard);
             state.deadline_near_notified = true;
+            state.deadline_near = None;
         }
     }
 
     if let Some(hard) = state.deadline_hard {
         if now >= hard {
             info_string("oob_finalize_request reason=Hard");
-            // Stop broadcast then fast finalize without detach
-            if let Some(session) = &state.search_session {
-                session.request_stop();
-            }
-            state.stop_bridge.request_stop();
-            // Mark StopInfo as TimeLimit/Hard for logging consistency
+            // Mark StopInfo as TimeLimit/Hard for logging consistency and request finalize
             state.stop_bridge.request_finalize(FinalizeReason::Hard);
             fast_finalize_no_detach(state, "oob_hard_finalize");
             // Clear deadlines
