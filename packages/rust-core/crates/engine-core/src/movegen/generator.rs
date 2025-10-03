@@ -49,6 +49,12 @@ impl MoveGenerator {
         let mut gen = MoveGenImpl::new(pos)?;
         Ok(gen.generate_quiet())
     }
+
+    /// Generate only legal evasion moves (used when the side to move is in check)
+    pub fn generate_evasions(&self, pos: &Position) -> Result<MoveList, MoveGenError> {
+        let mut gen = MoveGenImpl::new(pos)?;
+        Ok(gen.generate_evasions())
+    }
 }
 
 /// Internal move generation implementation
@@ -173,6 +179,26 @@ impl<'a> MoveGenImpl<'a> {
         if self.checkers.is_empty() || self.checkers.count_ones() == 1 {
             self.generate_drop_moves(&mut moves);
         }
+
+        moves
+    }
+
+    /// Generate only evasion moves (assuming side to move is in check)
+    fn generate_evasions(&mut self) -> MoveList {
+        let mut moves = MoveList::new();
+
+        if self.checkers.is_empty() {
+            return moves;
+        }
+
+        if self.checkers.count_ones() > 1 {
+            self.generate_king_moves(&mut moves);
+            return moves;
+        }
+
+        self.generate_king_moves(&mut moves);
+        self.generate_piece_moves(&mut moves);
+        self.generate_drop_moves(&mut moves);
 
         moves
     }

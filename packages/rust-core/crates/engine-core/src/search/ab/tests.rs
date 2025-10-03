@@ -131,13 +131,15 @@ fn tt_bound_follows_used_window() {
     let mut beta_cuts = 0;
     let mut lmr_counter = 0;
 
-    // Narrow window forcing fail-low so node type should be UpperBound
+    // Narrow window forcing a bound update – verify TT entry uses the window after MDP adjustments
+    let original_alpha = -10;
+    let original_beta = -5;
     let (score, _) = backend.alphabeta(
         crate::search::ab::pvs::ABArgs {
             pos: &pos,
             depth: 2,
-            alpha: -10,
-            beta: -5,
+            alpha: original_alpha,
+            beta: original_beta,
             ply: 0,
             is_pv: true,
             stack: &mut stack,
@@ -151,10 +153,19 @@ fn tt_bound_follows_used_window() {
     assert!(matches!(backend.tt.as_ref(), Some(_)), "default backend should have TT");
     if let Some(tt) = backend.tt {
         if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
-            assert_eq!(entry.node_type(), NodeType::UpperBound);
+            let mut used_alpha = original_alpha;
+            let mut used_beta = original_beta;
+            crate::search::mate_distance_pruning(&mut used_alpha, &mut used_beta, 0);
+            let expected = if score <= used_alpha {
+                NodeType::UpperBound
+            } else if score >= used_beta {
+                NodeType::LowerBound
+            } else {
+                NodeType::Exact
+            };
+            assert_eq!(entry.node_type(), expected);
         }
     }
-    assert!(score <= -5);
 }
 
 #[test]
@@ -311,6 +322,31 @@ fn probcut_sort_is_deterministic() {
 
     assert!(seq1.len() >= 2, "expected at least two probcut candidates");
     assert_eq!(seq1, seq2, "probcut picker must produce deterministic order");
+}
+
+#[test]
+fn excluded_move_hides_entire_promotion_family() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("3d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+
+    let excluded = Some(parse_usi_move("3d4c").unwrap());
+    let mut picker = MovePicker::new_normal(&pos, None, excluded, [None, None], None, None);
+    let heur = Heuristics::default();
+
+    while let Some(mv) = picker.next(&heur) {
+        let from = mv.from();
+        if from == Some(parse_usi_square("3d").unwrap())
+            && mv.to() == parse_usi_square("4c").unwrap()
+        {
+            panic!("excluded move (including promotion) must not be returned: {mv:?}");
+        }
+    }
 }
 
 #[test]

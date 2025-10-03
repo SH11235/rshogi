@@ -28,6 +28,30 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     #[inline]
+    fn deadline_reached(
+        start: Instant,
+        soft: Option<Duration>,
+        hard: Option<Duration>,
+        limits: &SearchLimits,
+    ) -> bool {
+        if let Some(flag) = limits.stop_flag.as_ref() {
+            if flag.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+        if let Some(limit) = soft {
+            if start.elapsed() >= limit {
+                return true;
+            }
+        }
+        if let Some(limit) = hard {
+            if start.elapsed() >= limit {
+                return true;
+            }
+        }
+        false
+    }
+    #[inline]
     pub(crate) fn classify_root_bound(
         local_best: i32,
         alpha_orig: i32,
@@ -172,18 +196,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_seldepth_raw: Option<u32> = None;
         let mut iterative_heur = Heuristics::default();
         for d in 1..=max_depth {
-            if Self::should_stop(limits) {
+            if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
                 break;
-            }
-            if let Some(limit) = soft_deadline {
-                if t0.elapsed() >= limit {
-                    break;
-                }
-            }
-            if let Some(limit) = hard_deadline {
-                if t0.elapsed() >= limit {
-                    break;
-                }
             }
             let mut seldepth: u32 = 0;
             let throttle_ms = Self::currmove_throttle_ms();
@@ -245,18 +259,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut shared_heur = std::mem::take(&mut iterative_heur);
             shared_heur.lmr_trials = 0;
             for pv_idx in 1..=k {
-                if Self::should_stop(limits) {
+                if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
                     break;
-                }
-                if let Some(limit) = soft_deadline {
-                    if t0.elapsed() >= limit {
-                        break;
-                    }
-                }
-                if let Some(limit) = hard_deadline {
-                    if t0.elapsed() >= limit {
-                        break;
-                    }
                 }
                 // Aspiration window per PV head
                 let mut alpha = if d == 1 {
@@ -284,13 +288,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut root_tt_hint_used: u64 = 0;
 
                 // 作業用root move配列（excludedを除外）
-                let active_moves: Vec<(crate::shogi::Move, i32)> = root_moves
+                let excluded_keys: SmallVec<[u32; 32]> =
+                    excluded.iter().map(|m| m.to_u32()).collect();
+                let active_moves: SmallVec<[(crate::shogi::Move, i32); 64]> = root_moves
                     .iter()
                     .copied()
                     .filter(|(m, _)| {
                         let key = m.to_u32();
                         // MultiPV では完全一致の手のみ除外し、昇成・不成などの派生は別ラインとして扱う。
-                        !excluded.iter().any(|e| e.to_u32() == key)
+                        !excluded_keys.contains(&key)
                     })
                     .collect();
 
@@ -298,18 +304,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
                 loop {
-                    if Self::should_stop(limits) {
+                    if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
                         break;
-                    }
-                    if let Some(limit) = soft_deadline {
-                        if t0.elapsed() >= limit {
-                            break;
-                        }
-                    }
-                    if let Some(limit) = hard_deadline {
-                        if t0.elapsed() >= limit {
-                            break;
-                        }
                     }
                     if active_moves.is_empty() {
                         break;
@@ -317,23 +313,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     let (old_alpha, old_beta) = (alpha, beta);
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
-                        if Self::should_stop(limits) {
+                        if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits) {
                             break;
-                        }
-                        if let Some(limit) = soft_deadline {
-                            if t0.elapsed() >= limit {
-                                break;
-                            }
-                        }
-                        if let Some(limit) = hard_deadline {
-                            if t0.elapsed() >= limit {
-                                break;
-                            }
-                        }
-                        if let Some(limit) = limits.time_limit() {
-                            if t0.elapsed() >= limit {
-                                break;
-                            }
                         }
                         if let Some(cb) = info {
                             let emit = match throttle_ms {
@@ -522,7 +503,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         prev_score = local_best;
                         if let Some(hint) = root_tt_hint_mv {
                             root_tt_hint_exists = 1;
-                            if m.equals_without_piece_type(&hint) {
+                            if m.to_u32() == hint.to_u32() {
                                 root_tt_hint_used = 1;
                             }
                         }

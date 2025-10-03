@@ -76,7 +76,7 @@ pub struct MovePicker<'a> {
     generated_quiets: bool,
     quiet_moves: SmallVec<[Move; 96]>,
     deferred_bad_captures: SmallVec<[CaptureEntry; 32]>,
-    returned: SmallVec<[Move; 128]>,
+    returned: SmallVec<[u32; 128]>,
     probcut_threshold: Option<i32>,
 }
 
@@ -407,6 +407,7 @@ impl<'a> MovePicker<'a> {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += cap_score * capture_weight;
             }
+            debug_assert!(key.abs() < 3_500_000, "good capture key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
                 key,
@@ -432,6 +433,7 @@ impl<'a> MovePicker<'a> {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += cap_score * capture_weight;
             }
+            debug_assert!(key.abs() < 3_500_000, "bad capture key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
                 key,
@@ -480,6 +482,7 @@ impl<'a> MovePicker<'a> {
             if self.pos.gives_check(mv) {
                 key += 500;
             }
+            debug_assert!(key.abs() < 3_000_000, "quiet key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
                 key,
@@ -492,12 +495,9 @@ impl<'a> MovePicker<'a> {
     fn prepare_evasions(&mut self, heur: &Heuristics) {
         self.buf.clear();
         let mg = MoveGenerator::new();
-        if let Ok(list) = mg.generate_all(self.pos) {
+        if let Ok(list) = mg.generate_evasions(self.pos) {
             for &mv in list.as_slice() {
                 if self.should_skip(mv) {
-                    continue;
-                }
-                if !self.pos.is_legal_move(mv) {
                     continue;
                 }
                 let mut key = 1_500_000;
@@ -505,6 +505,7 @@ impl<'a> MovePicker<'a> {
                     key += self.pos.see(mv) * 10;
                 }
                 key += heur.history.get(self.pos.side_to_move, mv);
+                debug_assert!(key.abs() < 3_000_000, "evasion key overflow: {key}");
                 self.buf.push(ScoredMove {
                     mv,
                     key,
@@ -540,6 +541,7 @@ impl<'a> MovePicker<'a> {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += cap_score * capture_weight;
             }
+            debug_assert!(key.abs() < 3_500_000, "qsearch capture key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
                 key,
@@ -560,6 +562,7 @@ impl<'a> MovePicker<'a> {
                     continue;
                 }
                 let key = 1_200_000 + heur.history.get(self.pos.side_to_move, mv);
+                debug_assert!(key.abs() < 2_000_000, "qsearch quiet-check key overflow: {key}");
                 self.buf.push(ScoredMove {
                     mv,
                     key,
@@ -637,24 +640,36 @@ impl<'a> MovePicker<'a> {
     }
 
     fn should_skip(&self, mv: Move) -> bool {
-        if self.excluded.is_some_and(|ex| ex.equals_without_piece_type(&mv)) {
+        // excluded は同一 from/to（昇成違い含む）を広く遮断して singular 等の挙動を保つ
+        if self.excluded.is_some_and(|ex| Self::excluded_matches(ex, mv)) {
             return true;
         }
         if self.tt_move.is_some_and(|tt| tt.to_tt_key() == mv.to_tt_key() && self.used_tt) {
             return true;
         }
         let target = mv.to_u32();
-        self.returned.iter().any(|m| m.to_u32() == target)
+        self.returned.contains(&target)
     }
 
     fn record_return(&mut self, mv: Move) {
-        self.returned.push(mv);
+        self.returned.push(mv.to_u32());
     }
 
     #[inline]
     fn cmp_scored(a: &ScoredMove, b: &ScoredMove) -> Ordering {
-        // 同スコア時にも巡回順序が揺れないよう、ステージ生成時に算出した 32bit キーで決定化する。
+        // 同点時のみステージ生成時の 32bit キーを使って巡回順序を決定し、比較回数を抑制する。
         b.key.cmp(&a.key).then_with(|| a.tiebreak.cmp(&b.tiebreak))
+    }
+
+    #[inline]
+    fn excluded_matches(ex: Move, mv: Move) -> bool {
+        if ex.is_drop() {
+            mv.is_drop() && ex.drop_piece_type() == mv.drop_piece_type() && ex.to() == mv.to()
+        } else if mv.is_drop() {
+            false
+        } else {
+            ex.from() == mv.from() && ex.to() == mv.to()
+        }
     }
 }
 
@@ -677,6 +692,43 @@ mod tests {
         while let Some(mv) = picker.next(&heur) {
             assert!(!mv.equals_without_piece_type(&tt), "TT move must not repeat");
         }
+    }
+
+    #[test]
+    fn tt_move_drop_differentiation() {
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        let dest = parse_usi_square("5e").unwrap();
+        let pawn_drop = Move::drop(PieceType::Pawn, dest);
+        let lance_drop = Move::drop(PieceType::Lance, dest);
+
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+        pos.hands[Color::Black as usize][PieceType::Lance.hand_index().unwrap()] = 1;
+
+        let mut picker =
+            MovePicker::new_normal(&pos, Some(pawn_drop), None, [None, None], None, None);
+        let heur = Heuristics::default();
+
+        let first = picker.next(&heur).expect("expected TT pawn drop to be returned first");
+        assert_eq!(first, pawn_drop);
+
+        let mut found_lance = false;
+        while let Some(mv) = picker.next(&heur) {
+            if mv == lance_drop {
+                found_lance = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_lance,
+            "lance drop should remain selectable despite TT pawn drop with same destination",
+        );
     }
 
     #[test]
