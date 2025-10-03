@@ -4,12 +4,14 @@
 //! that runs asynchronously without holding the Engine lock.
 
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use crate::search::api::StopHandle;
 use crate::search::parallel::EngineStopBridge;
 use crate::search::SearchResult;
+use crate::time_management::TimeManager;
 
 /// Result type for non-blocking poll operations on SearchSession.
 ///
@@ -45,6 +47,7 @@ pub struct SearchSession {
     handle: Option<thread::JoinHandle<()>>,
 
     stop_handle: StopHandle,
+    time_manager: Option<Arc<TimeManager>>,
 }
 
 impl SearchSession {
@@ -54,12 +57,14 @@ impl SearchSession {
         result_rx: mpsc::Receiver<SearchResult>,
         handle: Option<thread::JoinHandle<()>>,
         stop_handle: StopHandle,
+        time_manager: Option<Arc<TimeManager>>,
     ) -> Self {
         Self {
             session_id,
             result_rx,
             handle,
             stop_handle,
+            time_manager,
         }
     }
 
@@ -139,6 +144,11 @@ impl SearchSession {
     /// Request backend stop without waiting for result.
     pub fn request_stop(&self) {
         self.stop_handle.request_stop();
+    }
+
+    /// Clone the time manager associated with this search (if any).
+    pub fn time_manager(&self) -> Option<Arc<TimeManager>> {
+        self.time_manager.as_ref().map(Arc::clone)
     }
 
     /// Join the background thread, blocking until it completes.

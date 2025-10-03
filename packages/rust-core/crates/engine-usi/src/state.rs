@@ -7,7 +7,7 @@ use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::engine::session::SearchSession;
 use engine_core::search::parallel::{EngineStopBridge, FinalizerMsg, StopController};
 use engine_core::shogi::Position;
-use engine_core::time_management::TimeControl;
+use engine_core::time_management::{TimeControl, TimeManager};
 
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
@@ -145,6 +145,7 @@ pub struct EngineState {
     pub deadline_hard: Option<Instant>,
     pub deadline_near: Option<Instant>,
     pub deadline_near_notified: bool,
+    pub active_time_manager: Option<Arc<TimeManager>>,
 }
 
 impl EngineState {
@@ -192,6 +193,7 @@ impl EngineState {
             deadline_hard: None,
             deadline_near: None,
             deadline_near_notified: false,
+            active_time_manager: None,
         }
     }
 

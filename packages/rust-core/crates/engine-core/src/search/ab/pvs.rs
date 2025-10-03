@@ -29,7 +29,19 @@ impl<'a> SearchContext<'a> {
 
     #[inline]
     pub(crate) fn time_up(&self) -> bool {
-        self.limits.time_limit().is_some_and(|limit| self.start_time.elapsed() >= limit)
+        if let Some(tm) = self.limits.time_manager.as_ref() {
+            if tm.should_stop(*self.nodes) {
+                return true;
+            }
+        }
+
+        if let Some(limit) = self.limits.time_limit() {
+            if self.start_time.elapsed() >= limit {
+                return true;
+            }
+        }
+
+        false
     }
 }
 

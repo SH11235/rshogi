@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
+use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
 use crate::search::types::{NodeType, RootLine, SearchStack};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
@@ -19,6 +20,13 @@ use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
 use crate::search::tt::TTProbe;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeadlineHit {
+    Stop,
+    Hard,
+    Soft,
+}
+
 #[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     pub(super) evaluator: Arc<E>,
@@ -28,36 +36,49 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     #[inline]
-    fn deadline_reached(
+    fn deadline_hit(
         start: Instant,
         soft: Option<Duration>,
         hard: Option<Duration>,
         limits: &SearchLimits,
         min_think_ms: u64,
-    ) -> bool {
+        current_nodes: u64,
+    ) -> Option<DeadlineHit> {
         if Self::should_stop(limits) {
-            return true;
+            return Some(DeadlineHit::Stop);
         }
+        if let Some(tm) = limits.time_manager.as_ref() {
+            if tm.should_stop(current_nodes) {
+                let hard_limit = tm.hard_limit_ms();
+                let tm_elapsed = tm.elapsed_ms();
+                if hard_limit != u64::MAX && tm_elapsed >= hard_limit {
+                    return Some(DeadlineHit::Hard);
+                }
+                return Some(DeadlineHit::Soft);
+            }
+            return None;
+        }
+
         let elapsed = start.elapsed();
         let elapsed_ms = elapsed.as_millis() as u64;
         let min_think_satisfied = min_think_ms == 0 || elapsed_ms >= min_think_ms;
 
         if let Some(limit) = hard {
             if elapsed >= limit {
-                return true;
+                return Some(DeadlineHit::Hard);
             }
         }
         if let Some(limit) = soft {
             if elapsed >= limit && min_think_satisfied {
-                return true;
+                return Some(DeadlineHit::Soft);
             }
         }
         if let Some(limit) = limits.time_limit() {
             if elapsed >= limit && min_think_satisfied {
-                return true;
+                return Some(DeadlineHit::Hard);
             }
         }
-        false
+        None
     }
     #[inline]
     pub(crate) fn classify_root_bound(
@@ -208,8 +229,34 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_seldepth_reached: Option<u8> = None;
         let mut final_seldepth_raw: Option<u32> = None;
         let mut iterative_heur = Heuristics::default();
+        let stop_controller = limits.stop_controller.clone();
+        let mut finalize_soft_sent = false;
+        let mut finalize_hard_sent = false;
+        let mut notify_deadline = |hit: DeadlineHit| {
+            if let Some(ctrl) = stop_controller.as_ref() {
+                match hit {
+                    DeadlineHit::Hard => {
+                        if !finalize_hard_sent {
+                            ctrl.request_finalize(FinalizeReason::Hard);
+                            finalize_hard_sent = true;
+                        }
+                    }
+                    DeadlineHit::Soft => {
+                        if !finalize_soft_sent {
+                            ctrl.request_finalize(FinalizeReason::Planned);
+                            finalize_soft_sent = true;
+                        }
+                    }
+                    DeadlineHit::Stop => {}
+                }
+            }
+        };
+
         for d in 1..=max_depth {
-            if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits, min_think_ms) {
+            if let Some(hit) =
+                Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
+            {
+                notify_deadline(hit);
                 break;
             }
             let mut seldepth: u32 = 0;
@@ -257,6 +304,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let k = limits.multipv.max(1) as usize;
             let mut excluded: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
             let mut depth_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
+            let required_multipv_lines = if k > 1 {
+                root_moves.len().min(k).max(1)
+            } else {
+                1
+            };
 
             // Counters aggregate across PVs at this depth
             let mut depth_tt_hits: u64 = 0;
@@ -272,8 +324,23 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut shared_heur = std::mem::take(&mut iterative_heur);
             shared_heur.lmr_trials = 0;
             for pv_idx in 1..=k {
-                if Self::deadline_reached(t0, soft_deadline, hard_deadline, limits, min_think_ms) {
-                    break;
+                if let Some(hit) = Self::deadline_hit(
+                    t0,
+                    soft_deadline,
+                    hard_deadline,
+                    limits,
+                    min_think_ms,
+                    nodes,
+                ) {
+                    notify_deadline(hit);
+                    match hit {
+                        DeadlineHit::Stop | DeadlineHit::Hard => break,
+                        DeadlineHit::Soft => {
+                            if depth_lines.len() >= required_multipv_lines {
+                                break;
+                            }
+                        }
+                    }
                 }
                 // Aspiration window per PV head
                 let mut alpha = if d == 1 {
@@ -317,14 +384,23 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
                 loop {
-                    if Self::deadline_reached(
+                    if let Some(hit) = Self::deadline_hit(
                         t0,
                         soft_deadline,
                         hard_deadline,
                         limits,
                         min_think_ms,
+                        nodes,
                     ) {
-                        break;
+                        notify_deadline(hit);
+                        match hit {
+                            DeadlineHit::Stop | DeadlineHit::Hard => break,
+                            DeadlineHit::Soft => {
+                                if depth_lines.len() >= required_multipv_lines {
+                                    break;
+                                }
+                            }
+                        }
                     }
                     if active_moves.is_empty() {
                         break;
@@ -332,14 +408,23 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     let (old_alpha, old_beta) = (alpha, beta);
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
-                        if Self::deadline_reached(
+                        if let Some(hit) = Self::deadline_hit(
                             t0,
                             soft_deadline,
                             hard_deadline,
                             limits,
                             min_think_ms,
+                            nodes,
                         ) {
-                            break;
+                            notify_deadline(hit);
+                            match hit {
+                                DeadlineHit::Stop | DeadlineHit::Hard => break,
+                                DeadlineHit::Soft => {
+                                    if depth_lines.len() >= required_multipv_lines {
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         if let Some(cb) = info {
                             let emit = match throttle_ms {
@@ -449,17 +534,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
 
-                    if Self::should_stop(limits) {
-                        break;
-                    }
-                    if let Some(limit) = soft_deadline {
-                        if t0.elapsed() >= limit {
-                            break;
-                        }
-                    }
-                    if let Some(limit) = hard_deadline {
-                        if t0.elapsed() >= limit {
-                            break;
+                    if let Some(hit) = Self::deadline_hit(
+                        t0,
+                        soft_deadline,
+                        hard_deadline,
+                        limits,
+                        min_think_ms,
+                        nodes,
+                    ) {
+                        notify_deadline(hit);
+                        match hit {
+                            DeadlineHit::Stop | DeadlineHit::Hard => break,
+                            DeadlineHit::Soft => {
+                                if depth_lines.len() >= required_multipv_lines {
+                                    break;
+                                }
+                            }
                         }
                     }
                     if local_best <= old_alpha {
@@ -626,7 +716,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stats_hint_exists = depth_hint_exists;
             stats_hint_used = depth_hint_used;
             // この深さのMultiPV行を最終結果候補として保持
-            final_lines = Some(depth_lines);
+            final_lines = Some(depth_lines.clone());
             final_depth_reached = d as u8;
             let capped_seldepth =
                 seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32) as u8;
@@ -642,6 +732,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let msg =
                     format!("iter_complete depth={} elapsed_ms={} nodes={}", d, elapsed_ms, nodes);
                 cb(msg.as_str());
+            }
+
+            if Self::should_stop(limits) {
+                break;
             }
 
             if let Some(hard) = hard_deadline {

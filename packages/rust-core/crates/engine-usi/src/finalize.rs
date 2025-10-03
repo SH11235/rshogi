@@ -116,6 +116,7 @@ pub fn finalize_and_send(
         info_string(format!("{label}_skip claimed_by_other=1"));
         return;
     }
+    info_string(format!("{label}_claim_success=1"));
 
     let committed = if let Some(res) = result {
         let mut committed_pv = res.stats.pv.clone();
@@ -432,6 +433,11 @@ pub fn finalize_and_send(
         }
     }
 
+    if !state.stop_bridge.try_claim_finalize() {
+        info_string(format!("{label}_claim_skip already_claimed=1"));
+        return;
+    }
+
     let final_usi = final_best
         .best_move
         .map(|m| move_to_usi(&m))
@@ -447,6 +453,7 @@ pub fn finalize_and_send(
         None
     };
     emit_bestmove(&final_usi, ponder_mv);
+
     state.bestmove_emitted = true;
     state.current_root_hash = None;
     state.deadline_hard = None;
@@ -492,6 +499,7 @@ pub fn finalize_and_send_fast(state: &mut EngineState, label: &str) {
         info_string(format!("{label}_fast_skip claimed_by_other=1"));
         return;
     }
+    info_string(format!("{label}_fast_claim_success=1"));
 
     let stop_info_snapshot = state.stop_controller.try_read_stop_info();
 

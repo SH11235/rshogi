@@ -1,6 +1,7 @@
 //! Unified search limits for both basic and enhanced search
 
-use crate::time_management::{TimeControl, TimeParameters};
+use crate::search::parallel::StopController;
+use crate::time_management::{TimeControl, TimeManager, TimeParameters};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,6 +53,10 @@ pub struct SearchLimits {
     pub enable_fail_safe: bool,
     /// Local deadlines used as a fallback when time manager / OOB finalize is unavailable
     pub fallback_deadlines: Option<FallbackDeadlines>,
+    /// Time manager coordinating soft/hard limits (None during ponder/infinite)
+    pub time_manager: Option<Arc<TimeManager>>,
+    /// Stop controller used for OOB finalize coordination
+    pub stop_controller: Option<Arc<StopController>>,
 }
 
 impl Default for SearchLimits {
@@ -78,6 +83,8 @@ impl Default for SearchLimits {
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
+            time_manager: None,
+            stop_controller: None,
         }
     }
 }
@@ -437,6 +444,8 @@ impl SearchLimitsBuilder {
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
             fallback_deadlines: self.fallback_deadlines,
+            time_manager: None,
+            stop_controller: None,
         }
     }
 }
@@ -475,6 +484,8 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
+            time_manager: None,
+            stop_controller: None,
         }
     }
 }
@@ -530,6 +541,8 @@ impl Clone for SearchLimits {
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
             fallback_deadlines: self.fallback_deadlines,
+            time_manager: None,
+            stop_controller: None,
         }
     }
 }
@@ -562,6 +575,8 @@ impl std::fmt::Debug for SearchLimits {
             .field("multipv", &self.multipv)
             .field("enable_fail_safe", &self.enable_fail_safe)
             .field("fallback_deadlines", &self.fallback_deadlines.is_some())
+            .field("time_manager", &self.time_manager.is_some())
+            .field("stop_controller", &self.stop_controller.is_some())
             .finish()
     }
 }
