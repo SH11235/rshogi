@@ -246,7 +246,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             None
         };
         let excluded = stack[ply as usize].excluded_move;
-        let mut picker = MovePicker::new_probcut(pos, excluded, prev_move, 0);
+        let mut picker = MovePicker::new_probcut(pos, excluded, prev_move, threshold);
         while let Some(mv) = picker.next(&*heur) {
             if pos.see(mv) < 0 {
                 continue;
