@@ -10,7 +10,7 @@ use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
 use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
-use crate::search::types::{NodeType, RootLine, SearchStack};
+use crate::search::types::{NodeType, RootLine, SearchStack, StopInfo, TerminationReason};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::Position;
 use smallvec::SmallVec;
@@ -231,6 +231,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut iterative_heur = Heuristics::default();
         let stop_controller = limits.stop_controller.clone();
         let mut finalize_soft_sent = false;
+        let mut last_deadline_hit: Option<DeadlineHit> = None;
         let mut finalize_hard_sent = false;
         let mut notify_deadline = |hit: DeadlineHit| {
             if let Some(ctrl) = stop_controller.as_ref() {
@@ -257,6 +258,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
             {
                 notify_deadline(hit);
+                last_deadline_hit = Some(hit);
                 break;
             }
             let mut seldepth: u32 = 0;
@@ -333,6 +335,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     nodes,
                 ) {
                     notify_deadline(hit);
+                    last_deadline_hit = Some(hit);
                     match hit {
                         DeadlineHit::Stop | DeadlineHit::Hard => break,
                         DeadlineHit::Soft => {
@@ -393,6 +396,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nodes,
                     ) {
                         notify_deadline(hit);
+                        last_deadline_hit = Some(hit);
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
                             DeadlineHit::Soft => {
@@ -417,6 +421,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             nodes,
                         ) {
                             notify_deadline(hit);
+                            last_deadline_hit = Some(hit);
                             match hit {
                                 DeadlineHit::Stop | DeadlineHit::Hard => break,
                                 DeadlineHit::Soft => {
@@ -543,6 +548,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nodes,
                     ) {
                         notify_deadline(hit);
+                        last_deadline_hit = Some(hit);
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
                             DeadlineHit::Soft => {
@@ -786,6 +792,62 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;
+        }
+
+        if result.stop_info.is_none() {
+            if let Some(tm) = limits.time_manager.as_ref() {
+                let elapsed = tm.elapsed_ms();
+                let hard_ms = tm.hard_limit_ms();
+                let soft_ms = tm.soft_limit_ms();
+                let hard_timeout = matches!(last_deadline_hit, Some(DeadlineHit::Hard))
+                    || (hard_ms != u64::MAX && elapsed >= hard_ms);
+                let reason = match last_deadline_hit {
+                    Some(DeadlineHit::Stop) => TerminationReason::UserStop,
+                    Some(DeadlineHit::Hard) | Some(DeadlineHit::Soft) => {
+                        TerminationReason::TimeLimit
+                    }
+                    None => {
+                        if Self::should_stop(limits) {
+                            TerminationReason::UserStop
+                        } else {
+                            TerminationReason::Completed
+                        }
+                    }
+                };
+                result.stop_info = Some(StopInfo {
+                    reason,
+                    elapsed_ms: elapsed,
+                    nodes,
+                    depth_reached: final_depth_reached,
+                    hard_timeout,
+                    soft_limit_ms: if soft_ms != u64::MAX { soft_ms } else { 0 },
+                    hard_limit_ms: if hard_ms != u64::MAX { hard_ms } else { 0 },
+                });
+                result.end_reason = reason;
+            } else if let Some(dl) = limits.fallback_deadlines {
+                let elapsed = t0.elapsed().as_millis() as u64;
+                let hard_timeout = elapsed >= dl.hard_limit_ms;
+                let reason =
+                    if hard_timeout || (dl.soft_limit_ms > 0 && elapsed >= dl.soft_limit_ms) {
+                        TerminationReason::TimeLimit
+                    } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
+                        || Self::should_stop(limits)
+                    {
+                        TerminationReason::UserStop
+                    } else {
+                        TerminationReason::Completed
+                    };
+                result.stop_info = Some(StopInfo {
+                    reason,
+                    elapsed_ms: elapsed,
+                    nodes,
+                    depth_reached: final_depth_reached,
+                    hard_timeout,
+                    soft_limit_ms: dl.soft_limit_ms,
+                    hard_limit_ms: dl.hard_limit_ms,
+                });
+                result.end_reason = reason;
+            }
         }
         result
     }

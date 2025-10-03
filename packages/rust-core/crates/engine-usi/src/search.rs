@@ -260,8 +260,6 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     state.last_go_params = Some(gp.clone());
 
-    // With start_search(), waiting is minimal since Engine lock releases immediately
-    let waited_before_go_ms = 0_u64;
     let mut search_position = state.position.clone();
     let current_is_stochastic_ponder = gp.ponder && state.opts.stochastic_ponder;
     if current_is_stochastic_ponder {
@@ -320,31 +318,6 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         Arc::clone(&stop_flag),
     );
 
-    if waited_before_go_ms > 0 {
-        if let Some(ref mut params) = limits.time_parameters {
-            // Phase 1: Accurate wait attribution for pure byoyomi (up to 2000ms)
-            // Reflects actual startup delay in time budget to prevent TimeManager over-optimization
-            let is_pure_byoyomi = gp.byoyomi.unwrap_or(0) > 0
-                && gp.btime.unwrap_or(0) == 0
-                && gp.wtime.unwrap_or(0) == 0;
-
-            let clamped_wait = if is_pure_byoyomi {
-                waited_before_go_ms.min(2000)
-            } else {
-                waited_before_go_ms
-            };
-
-            params.network_delay2_ms = params.network_delay2_ms.saturating_add(clamped_wait);
-
-            if clamped_wait < waited_before_go_ms {
-                info_string(format!(
-                    "wait_time_clamped waited={} clamped={} pure_byo={}",
-                    waited_before_go_ms, clamped_wait, is_pure_byoyomi as u8
-                ));
-            }
-        }
-    }
-
     let mut tc_for_stop = limits.time_control.clone();
     if let TimeControl::Ponder(inner) = tc_for_stop {
         tc_for_stop = *inner;
@@ -367,10 +340,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             phase,
             &params,
         );
-        info_string(format!(
-            "time_budget waited_ms={} soft_ms={} hard_ms={} tc={:?}",
-            waited_before_go_ms, soft, hard, tc_for_stop
-        ));
+        info_string(format!("time_budget soft_ms={} hard_ms={} tc={:?}", soft, hard, tc_for_stop));
 
         if hard != u64::MAX && hard > 0 && !gp.ponder {
             let base = Instant::now();
