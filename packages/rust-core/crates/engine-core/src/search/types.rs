@@ -29,6 +29,8 @@ pub struct SearchStats {
     pub depth: u8,
     /// Selective depth reached (optional for enhanced search)
     pub seldepth: Option<u8>,
+    /// Raw selective depth before any clipping (diagnostics)
+    pub raw_seldepth: Option<u16>,
     /// Number of aspiration window failures (optional for enhanced search)
     pub aspiration_failures: Option<u32>,
     /// Number of transposition table hits (optional)

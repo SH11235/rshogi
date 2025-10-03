@@ -29,6 +29,8 @@ nnue_fast_fma = []
 diff_agg_hash = []
 # 追加診断ログ（near-deadline/short-circuit の1回限りINFOなど）
 diagnostics = []
+# Internal feature: exposes MovePicker for benches
+bench-move-picker = []
 
 # Quiescence-search checking-moves policy compile-time overrides
 # - qs_checks_force_off: disable checking moves in QS regardless of env/USI option
@@ -85,3 +87,8 @@ harness = false
 [[bench]]
 name = "nnue_single_chain_bench"
 harness = false
+
+[[bench]]
+name = "search_move_picker_bench"
+harness = false
+required-features = ["bench-move-picker"]

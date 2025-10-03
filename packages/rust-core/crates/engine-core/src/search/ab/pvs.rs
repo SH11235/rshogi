@@ -1,13 +1,13 @@
 use crate::evaluation::evaluate::Evaluator;
-use crate::movegen::MoveGenerator;
 use crate::search::params as dynp;
 use crate::search::tt::TTProbe;
 use crate::search::types::SearchStack;
 use crate::search::SearchLimits;
 use crate::Position;
+use smallvec::SmallVec;
 
 use super::driver::ClassicBackend;
-use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams};
+use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, MovePicker};
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::search::types::NodeType;
 
@@ -184,64 +184,25 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (score, Some(mv));
         }
 
-        let mg = MoveGenerator::new();
-        let Ok(list) = mg.generate_all(pos) else {
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
-            return (qs, None);
+        let prev_move = if ply > 0 {
+            stack[(ply - 1) as usize].current_move
+        } else {
+            None
         };
-        let mut moves: Vec<(crate::shogi::Move, i32)> = list
-            .as_slice()
-            .iter()
-            .copied()
-            .map(|m| {
-                let is_check = pos.gives_check(m) as i32;
-                let is_capture = m.is_capture_hint();
-                let see = if is_capture { pos.see(m) } else { 0 };
-                let promo = m.is_promote() as i32;
-                let stage = if is_check == 1 {
-                    3
-                } else if is_capture && see >= 0 {
-                    2
-                } else if is_capture && see < 0 {
-                    0
-                } else {
-                    1
-                };
-                let mut key = stage * 100_000 + is_check * 10_000 + see * 10 + promo;
-                if stack[ply as usize].is_killer(m) {
-                    key += 50_000;
-                }
-                if ply > 0 {
-                    if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                        if let Some(cm) = heur.counter.get(pos.side_to_move, prev_mv) {
-                            if cm.equals_without_piece_type(&m) {
-                                key += 60_000;
-                            }
-                        }
-                    }
-                }
-                key += heur.history.get(pos.side_to_move, m);
-                (m, key)
-            })
-            .collect();
-        if let Some(ttm) = tt_hint {
-            for (m, key) in &mut moves {
-                if m.equals_without_piece_type(&ttm) {
-                    *key += 1_000_000;
-                }
-            }
-        }
-        moves.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        let counter_mv = prev_move.and_then(|mv| heur.counter.get(pos.side_to_move, mv));
+        let killers = stack[ply as usize].killers;
+        let excluded_move = stack[ply as usize].excluded_move;
+        let mut picker =
+            MovePicker::new_normal(pos, tt_hint, excluded_move, killers, counter_mv, prev_move);
 
         stack[ply as usize].clear_for_new_node();
+        stack[ply as usize].in_check = pos.is_in_check();
         let mut best_mv = None;
         let mut best = i32::MIN / 2;
         let mut moveno: usize = 0;
         let mut first_move_done = false;
-        for (mv, _key) in moves.into_iter() {
-            if !pos.is_legal_move(mv) {
-                continue;
-            }
+        let mut tried_captures: SmallVec<[crate::shogi::Move; 16]> = SmallVec::new();
+        while let Some(mv) = picker.next(&*heur) {
             moveno += 1;
             stack[ply as usize].current_move = Some(mv);
             let gives_check = pos.gives_check(mv);
@@ -252,16 +213,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
             if depth <= 3 && is_quiet {
                 let h = heur.history.get(pos.side_to_move, mv);
-                let mut is_counter = false;
-                if ply > 0 {
-                    if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                        if let Some(cm) = heur.counter.get(pos.side_to_move, prev_mv) {
-                            if cm.equals_without_piece_type(&mv) {
-                                is_counter = true;
-                            }
-                        }
-                    }
-                }
+                let is_counter = counter_mv.is_some_and(|cm| cm.equals_without_piece_type(&mv));
                 if h < dynp::hp_threshold() && !stack[ply as usize].is_killer(mv) && !is_counter {
                     continue;
                 }
@@ -275,7 +227,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             let mut next_depth = depth - 1;
             let reduction = ordering::late_move_reduction(LateMoveReductionParams {
-                heur: &mut *heur,
+                lmr_trials: &mut heur.lmr_trials,
                 depth,
                 moveno,
                 is_quiet,
@@ -371,10 +323,37 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if ply > 0 {
                         if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
                             heur.counter.update(pos.side_to_move, prev_mv, mv);
+                            if let (Some(prev_piece), Some(curr_piece)) =
+                                (prev_mv.piece_type(), mv.piece_type())
+                            {
+                                heur.continuation.update_good(
+                                    pos.side_to_move,
+                                    prev_piece as usize,
+                                    prev_mv.to(),
+                                    curr_piece as usize,
+                                    mv.to(),
+                                    depth,
+                                );
+                            }
                         }
+                    }
+                } else if is_capture {
+                    if let (Some(attacker), Some(victim)) =
+                        (mv.piece_type(), mv.captured_piece_type())
+                    {
+                        heur.capture.update_good(
+                            pos.side_to_move,
+                            attacker,
+                            victim,
+                            mv.to(),
+                            depth,
+                        );
                     }
                 }
                 break;
+            }
+            if is_capture {
+                tried_captures.push(mv);
             }
             if is_quiet {
                 stack[ply as usize].quiet_moves.push(mv);
@@ -405,9 +384,40 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 args.is_pv = is_pv;
                 tt.store(args);
             }
+            for &cmv in &tried_captures {
+                if Some(cmv) != best_mv {
+                    if let (Some(attacker), Some(victim)) =
+                        (cmv.piece_type(), cmv.captured_piece_type())
+                    {
+                        heur.capture.update_bad(
+                            pos.side_to_move,
+                            attacker,
+                            victim,
+                            cmv.to(),
+                            depth,
+                        );
+                    }
+                }
+            }
             for &qmv in &stack[ply as usize].quiet_moves {
                 if Some(qmv) != best_mv {
                     heur.history.update_bad(pos.side_to_move, qmv, depth);
+                    if ply > 0 {
+                        if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
+                            if let (Some(prev_piece), Some(curr_piece)) =
+                                (prev_mv.piece_type(), qmv.piece_type())
+                            {
+                                heur.continuation.update_bad(
+                                    pos.side_to_move,
+                                    prev_piece as usize,
+                                    prev_mv.to(),
+                                    curr_piece as usize,
+                                    qmv.to(),
+                                    depth,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             (best, best_mv)

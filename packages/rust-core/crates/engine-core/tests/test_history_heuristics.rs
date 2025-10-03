@@ -54,18 +54,19 @@ fn test_capture_history_functionality() {
     let color = Color::Black;
     let attacker = PieceType::Knight;
     let victim = PieceType::Silver;
+    let target = parse_usi_square("5e").unwrap();
 
     // Initial score should be 0
-    assert_eq!(history.capture.get(color, attacker, victim), 0);
+    assert_eq!(history.capture.get(color, attacker, victim, target), 0);
 
     // Update with good capture
-    history.capture.update_good(color, attacker, victim, 4);
-    let score = history.capture.get(color, attacker, victim);
+    history.capture.update_good(color, attacker, victim, target, 4);
+    let score = history.capture.get(color, attacker, victim, target);
     assert!(score > 0);
 
     // Age the scores
     history.age_all();
-    assert_eq!(history.capture.get(color, attacker, victim), score / 2);
+    assert_eq!(history.capture.get(color, attacker, victim, target), score / 2);
 }
 
 #[test]

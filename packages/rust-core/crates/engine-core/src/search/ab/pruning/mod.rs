@@ -1,5 +1,4 @@
 use crate::evaluation::evaluate::Evaluator;
-use crate::movegen::MoveGenerator;
 use crate::search::params as dynp;
 use crate::search::params::{
     NMP_BASE_R, NMP_BONUS_DELTA_BETA, NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH,
@@ -9,7 +8,7 @@ use crate::search::types::SearchStack;
 use crate::Position;
 
 use super::driver::ClassicBackend;
-use super::ordering::{EvalMoveGuard, EvalNullGuard, Heuristics};
+use super::ordering::{EvalMoveGuard, EvalNullGuard, Heuristics, MovePicker};
 use super::profile::PruneToggles;
 use super::pvs::{ABArgs, SearchContext};
 
@@ -241,37 +240,41 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return None;
         }
         let threshold = beta + dynp::probcut_margin(depth);
-        let mgp = MoveGenerator::new();
-        if let Ok(caps) = mgp.generate_captures(pos) {
-            for mv in caps.as_slice().iter().copied() {
-                if pos.see(mv) < 0 {
-                    continue;
-                }
-                let parent_sc = {
-                    let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
-                    let mut child = pos.clone();
-                    child.do_move(mv);
-                    let (sc, _) = self.alphabeta(
-                        ABArgs {
-                            pos: &child,
-                            depth: depth - 2,
-                            alpha: -threshold,
-                            beta: -threshold + 1,
-                            ply: ply + 1,
-                            is_pv: false,
-                            stack,
-                            heur,
-                            tt_hits,
-                            beta_cuts,
-                            lmr_counter,
-                        },
-                        ctx,
-                    );
-                    -sc
-                };
-                if parent_sc >= threshold {
-                    return Some((parent_sc, mv));
-                }
+        let prev_move = if ply > 0 {
+            stack[(ply - 1) as usize].current_move
+        } else {
+            None
+        };
+        let excluded = stack[ply as usize].excluded_move;
+        let mut picker = MovePicker::new_probcut(pos, excluded, prev_move, 0);
+        while let Some(mv) = picker.next(&*heur) {
+            if pos.see(mv) < 0 {
+                continue;
+            }
+            let parent_sc = {
+                let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
+                let mut child = pos.clone();
+                child.do_move(mv);
+                let (sc, _) = self.alphabeta(
+                    ABArgs {
+                        pos: &child,
+                        depth: depth - 2,
+                        alpha: -threshold,
+                        beta: -threshold + 1,
+                        ply: ply + 1,
+                        is_pv: false,
+                        stack,
+                        heur,
+                        tt_hits,
+                        beta_cuts,
+                        lmr_counter,
+                    },
+                    ctx,
+                );
+                -sc
+            };
+            if parent_sc >= threshold {
+                return Some((parent_sc, mv));
             }
         }
         None
