@@ -566,9 +566,34 @@ impl Engine {
         if clamped_size != size_mb {
             warn!("Hash size {size_mb}MB clamped to {clamped_size}MB (valid range: 1-1024)");
         }
-        // Store in pending to be applied on next search
-        self.pending_tt_size = Some(clamped_size);
-        info!("Hash size will be updated to {clamped_size}MB on next search");
+        if self.active_searches.load(Ordering::SeqCst) != 0 {
+            // Defer until current searches complete
+            self.pending_tt_size = Some(clamped_size);
+            info!("Hash size change to {clamped_size}MB deferred until active searches finish");
+            return;
+        }
+
+        self.pending_tt_size = None;
+        self.tt_size_mb = clamped_size;
+        let new_tt_arc = {
+            let arc0 = Arc::new(TranspositionTable::new(clamped_size));
+            #[cfg(feature = "tt_metrics")]
+            {
+                let mut arc1 = arc0;
+                if let Some(tt) = Arc::get_mut(&mut arc1) {
+                    tt.enable_metrics();
+                }
+                arc1
+            }
+            #[cfg(not(feature = "tt_metrics"))]
+            {
+                arc0
+            }
+        };
+        self.shared_tt = new_tt_arc.clone();
+        self.rebuild_backend();
+
+        info!("Applied hash size immediately: {}MB", self.tt_size_mb);
     }
 
     /// Apply pending TT size (called at search start)

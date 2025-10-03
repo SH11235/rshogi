@@ -1,4 +1,5 @@
 use crate::evaluation::evaluate::Evaluator;
+use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
 use crate::search::params as dynp;
 use crate::search::tt::TTProbe;
 use crate::search::types::SearchStack;
@@ -29,10 +30,25 @@ impl<'a> SearchContext<'a> {
 
     #[inline]
     pub(crate) fn time_up(&self) -> bool {
-        if let Some(tm) = self.limits.time_manager.as_ref() {
+        let mask = if let Some(tm) = self.limits.time_manager.as_ref() {
+            let mask = if tm.is_in_byoyomi() {
+                TIME_CHECK_MASK_BYOYOMI
+            } else {
+                TIME_CHECK_MASK_NORMAL
+            };
+            if (*self.nodes & mask) != 0 {
+                return false;
+            }
             if tm.should_stop(*self.nodes) {
                 return true;
             }
+            mask
+        } else {
+            TIME_CHECK_MASK_NORMAL
+        };
+
+        if (*self.nodes & mask) != 0 {
+            return false;
         }
 
         if let Some(limit) = self.limits.time_limit() {

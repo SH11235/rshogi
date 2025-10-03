@@ -433,11 +433,6 @@ pub fn finalize_and_send(
         }
     }
 
-    if !state.stop_bridge.try_claim_finalize() {
-        info_string(format!("{label}_claim_skip already_claimed=1"));
-        return;
-    }
-
     let final_usi = final_best
         .best_move
         .map(|m| move_to_usi(&m))
