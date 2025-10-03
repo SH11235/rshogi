@@ -437,6 +437,9 @@ impl History {
     }
 
     /// Age all history scores periodically
+    ///
+    /// Note: counter moveテーブルは「直近ヒットのみ保持」する設計なので
+    /// aging の対象にはしていない。
     pub fn age_all(&mut self) {
         self.butterfly.age_scores();
         self.continuation.age_scores();

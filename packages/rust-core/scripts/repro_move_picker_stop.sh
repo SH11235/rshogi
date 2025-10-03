@@ -43,16 +43,35 @@ trap cleanup EXIT INT TERM
 wait_for() {
     local pattern="$1"
     local timeout_seconds="${2:-5}"
-    if ! timeout "$timeout_seconds" sh -c "tail -F -n0 -- '$LOG' | stdbuf -oL grep -F -m1 -- '$pattern'" >/dev/null 2>&1; then
+    if [[ ! -p ${LOG}.fifo ]]; then
+        mkfifo ${LOG}.fifo
+    fi
+    tail -F -n0 -- "$LOG" | stdbuf -oL grep -F --line-buffered -- "$pattern" >"${LOG}.fifo" &
+    local grep_pid=$!
+    if ! timeout "$timeout_seconds" head -n1 "${LOG}.fifo" >/dev/null 2>&1; then
         echo "[repro] ERROR: timeout while waiting for pattern '$pattern'" >&2
+        kill "$grep_pid" 2>/dev/null || true
+        wait "$grep_pid" 2>/dev/null || true
+        rm -f "${LOG}.fifo"
         return 1
     fi
+    kill "$grep_pid" 2>/dev/null || true
+    wait "$grep_pid" 2>/dev/null || true
+    rm -f "${LOG}.fifo"
     return 0
 }
 
 : >"$LOG"
 coproc ENGINE { timeout 30s stdbuf -oL -eL "$BIN"; }
-ENGINE_PID=$COPROC_PID
+if [[ -n ${ENGINE_PID-} ]]; then
+    ENGINE_MAIN_PID=$ENGINE_PID
+elif [[ -n ${COPROC_PID-} ]]; then
+    ENGINE_MAIN_PID=$COPROC_PID
+else
+    echo "[repro] ERROR: coproc PID was not assigned" >&2
+    exit 1
+fi
+ENGINE_PID=$ENGINE_MAIN_PID
 cat <&${ENGINE[0]} | tee "$LOG" &
 LOGGER_PID=$!
 exec {ENGINE_IN}>&${ENGINE[1]}
@@ -94,6 +113,7 @@ fi
 send "quit"
 wait "$ENGINE_PID" || true
 kill "$LOGGER_PID" 2>/dev/null || true
+
 
 if jobs -p &>/dev/null; then
     wait 2>/dev/null || true

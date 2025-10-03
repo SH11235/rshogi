@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 use super::Heuristics;
 use crate::movegen::MoveGenerator;
 use crate::search::params::{
-    CAPTURE_HISTORY_WEIGHT, CONTINUATION_HISTORY_WEIGHT, QS_PROMOTE_BONUS, QUIET_HISTORY_WEIGHT,
+    capture_history_weight, continuation_history_weight, quiet_history_weight, QS_PROMOTE_BONUS,
 };
 use crate::shogi::Move;
 use crate::Position;
@@ -276,7 +276,12 @@ impl<'a> MovePicker<'a> {
                     if let Some(mv) = self.pick_next() {
                         return Some(mv);
                     }
-                    self.transition(Stage::QChecks);
+                    if self.qsearch_state.as_ref().is_some_and(|state| state.quiet_check_limit == 0)
+                    {
+                        self.transition(Stage::QBad);
+                    } else {
+                        self.transition(Stage::QChecks);
+                    }
                 }
                 Stage::QChecks => {
                     self.ensure_quiets();
@@ -397,11 +402,13 @@ impl<'a> MovePicker<'a> {
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * CAPTURE_HISTORY_WEIGHT;
+                key += cap_score * capture_history_weight();
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+        self.buf.sort_unstable_by(|a, b| {
+            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
+        });
     }
 
     fn prepare_bad_captures(&mut self, heur: &Heuristics) {
@@ -417,11 +424,13 @@ impl<'a> MovePicker<'a> {
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * CAPTURE_HISTORY_WEIGHT;
+                key += cap_score * capture_history_weight();
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+        self.buf.sort_unstable_by(|a, b| {
+            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
+        });
     }
 
     fn prepare_quiets(&mut self, heur: &Heuristics) {
@@ -434,7 +443,7 @@ impl<'a> MovePicker<'a> {
                 continue;
             }
             let mut key =
-                1_000_000 + heur.history.get(self.pos.side_to_move, mv) * QUIET_HISTORY_WEIGHT;
+                1_000_000 + heur.history.get(self.pos.side_to_move, mv) * quiet_history_weight();
             if let Some(prev) = self.history_prev_move {
                 if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
                     if counter.equals_without_piece_type(&mv) {
@@ -449,7 +458,7 @@ impl<'a> MovePicker<'a> {
                         curr_piece as usize,
                         mv.to(),
                     );
-                    key += cont_score * CONTINUATION_HISTORY_WEIGHT;
+                    key += cont_score * continuation_history_weight();
                 }
             }
             if self
@@ -464,7 +473,9 @@ impl<'a> MovePicker<'a> {
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+        self.buf.sort_unstable_by(|a, b| {
+            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
+        });
     }
 
     fn prepare_evasions(&mut self, heur: &Heuristics) {
@@ -486,7 +497,9 @@ impl<'a> MovePicker<'a> {
                 self.buf.push(ScoredMove { mv, key });
             }
         }
-        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+        self.buf.sort_unstable_by(|a, b| {
+            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
+        });
     }
 
     fn prepare_qs_captures(&mut self, heur: &Heuristics, good: bool) {
@@ -511,11 +524,13 @@ impl<'a> MovePicker<'a> {
             }
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
-                key += cap_score * CAPTURE_HISTORY_WEIGHT;
+                key += cap_score * capture_history_weight();
             }
             self.buf.push(ScoredMove { mv, key });
         }
-        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+        self.buf.sort_unstable_by(|a, b| {
+            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
+        });
     }
 
     fn prepare_qs_checks(&mut self, heur: &Heuristics) {
@@ -534,7 +549,9 @@ impl<'a> MovePicker<'a> {
             }
             self.qsearch_state = Some(state);
         }
-        self.buf.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+        self.buf.sort_unstable_by(|a, b| {
+            b.key.cmp(&a.key).then_with(|| a.mv.to_u32().cmp(&b.mv.to_u32()))
+        });
     }
 
     fn prepare_probcut(&mut self) {

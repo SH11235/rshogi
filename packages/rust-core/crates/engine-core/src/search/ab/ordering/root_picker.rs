@@ -1,6 +1,5 @@
 use crate::search::params::{
-    ROOT_BASE_KEY, ROOT_MULTIPV_BONUS_1, ROOT_MULTIPV_BONUS_2, ROOT_PREV_SCORE_CLAMP,
-    ROOT_PREV_SCORE_SCALE, ROOT_TT_BONUS,
+    root_multipv_bonus, root_prev_score_scale, root_tt_bonus, ROOT_BASE_KEY, ROOT_PREV_SCORE_CLAMP,
 };
 use crate::search::types::RootLine;
 use crate::shogi::Move;
@@ -39,7 +38,7 @@ impl RootPicker {
 
             if let Some(ttm) = tt_move {
                 if mv.equals_without_piece_type(&ttm) {
-                    key += ROOT_TT_BONUS;
+                    key += root_tt_bonus();
                 }
             }
 
@@ -47,13 +46,8 @@ impl RootPicker {
                 lines.iter().find(|line| line.root_move.equals_without_piece_type(&mv))
             }) {
                 let clamped = prev.score_cp.clamp(-ROOT_PREV_SCORE_CLAMP, ROOT_PREV_SCORE_CLAMP);
-                key += ROOT_PREV_SCORE_SCALE * clamped;
-                let rank_bonus = match prev.multipv_index {
-                    1 => ROOT_MULTIPV_BONUS_1,
-                    2 => ROOT_MULTIPV_BONUS_2,
-                    _ => 0,
-                };
-                key += rank_bonus;
+                key += root_prev_score_scale() * clamped;
+                key += root_multipv_bonus(prev.multipv_index);
             }
 
             let scored_move = RootScoredMove {
