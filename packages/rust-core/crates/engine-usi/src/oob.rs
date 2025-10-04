@@ -5,7 +5,7 @@ use std::time::Duration;
 use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 
 use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast};
-use crate::io::info_string;
+use crate::io::diag_info_string;
 use crate::state::EngineState;
 use engine_core::usi::move_to_usi;
 use std::time::Instant;
@@ -35,7 +35,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
         match msg {
             FinalizerMsg::SessionStart { session_id } => {
                 state.current_session_core_id = Some(session_id);
-                info_string(format!("oob_session_start id={}", session_id));
+                diag_info_string(format!("oob_session_start id={}", session_id));
             }
             FinalizerMsg::Finalize { session_id, reason } => {
                 // Accept only if this session is active and we haven't emitted yet
@@ -45,7 +45,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 // Late-bind if SessionStart hasn't arrived yet
                 if state.current_session_core_id.is_none() {
                     state.current_session_core_id = Some(session_id);
-                    info_string(format!("oob_session_late_bind id={}", session_id));
+                    diag_info_string(format!("oob_session_late_bind id={}", session_id));
                 }
                 if state.current_session_core_id != Some(session_id) {
                     // Stale or mismatched session; ignore with extended diagnostics for debugging
@@ -60,7 +60,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                         .as_ref()
                         .map(|f| f.load(Ordering::Relaxed))
                         .unwrap_or(false);
-                    info_string(format!(
+                    diag_info_string(format!(
                         "oob_finalize_ignored stale=1 sid={} cur={:?} searching={} bestmove_emitted={} active_session={} stop_flag={} pending_result_rx={}",
                         session_id,
                         state.current_session_core_id,
@@ -81,7 +81,10 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     FinalizeReason::UserStop => "oob_user_finalize",
                 };
 
-                info_string(format!("oob_finalize_request reason={:?} sid={}", reason, session_id));
+                diag_info_string(format!(
+                    "oob_finalize_request reason={:?} sid={}",
+                    reason, session_id
+                ));
 
                 // Step 1: broadcast immediate stop to backend/search threads
                 if let Some(session) = &state.search_session {
@@ -113,7 +116,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     stop_wait_ms.clamp(50, 150)
                 };
 
-                info_string(format!(
+                diag_info_string(format!(
                     "oob_finalize_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={}",
                     wait_budget_ms, is_pure_byoyomi as u8, stop_wait_ms
                 ));
@@ -123,7 +126,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if let Some(session) = &state.search_session {
                     let chunk_ms = 50u64; // Wait in 50ms chunks
                     let max_rounds = wait_budget_ms.div_ceil(chunk_ms);
-                    info_string(format!(
+                    diag_info_string(format!(
                         "oob_recv_wait_start budget_ms={} max_rounds={} session_id={}",
                         wait_budget_ms,
                         max_rounds,
@@ -133,7 +136,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     for round in 0..max_rounds {
                         match session.recv_result_timeout(Duration::from_millis(chunk_ms)) {
                             Some(result) => {
-                                info_string(format!(
+                                diag_info_string(format!(
                                     "oob_recv_result round={} waited_ms={}",
                                     round,
                                     (round + 1) * chunk_ms
@@ -144,7 +147,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                             None => {
                                 // Timeout or disconnected - log every 4 rounds (200ms)
                                 if round % 4 == 3 || round == max_rounds - 1 {
-                                    info_string(format!(
+                                    diag_info_string(format!(
                                         "oob_recv_waiting round={}/{} waited_ms={}",
                                         round + 1,
                                         max_rounds,
@@ -157,7 +160,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     }
 
                     if finalize_candidate.is_none() {
-                        info_string(format!(
+                        diag_info_string(format!(
                             "oob_recv_timeout_all budget_ms={} max_rounds={}",
                             wait_budget_ms, max_rounds
                         ));
@@ -166,7 +169,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 
                 // Step 4: finalize with result or use fast path
                 if let Some(result) = finalize_candidate {
-                    info_string(format!("oob_finalize_joined label={}", label));
+                    diag_info_string(format!("oob_finalize_joined label={}", label));
                     state.searching = false;
                     state.stop_flag = None;
                     state.ponder_hit_flag = None;
@@ -188,7 +191,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                             .unwrap_or_else(|| "resign".to_string());
                         let _ = emit_bestmove_once(state, fallback, None);
                     }
-                    info_string(format!("oob_finalize_result label={} mode=joined", label));
+                    diag_info_string(format!("oob_finalize_result label={} mode=joined", label));
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
                     state.current_time_control = None;
@@ -198,12 +201,12 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     // Note: Previously tried to prohibit fast path for pure byoyomi with margin,
                     // but this caused infinite loops because Finalize message is not resent.
                     // Better to send bestmove immediately than to time-loss.
-                    info_string(format!(
+                    diag_info_string(format!(
                         "oob_finalize_timeout no_result=1 sid={} budget_ms={}",
                         session_id, wait_budget_ms
                     ));
                     fast_finalize_no_detach(state, label, Some(reason));
-                    info_string(format!("oob_finalize_result label={} mode=fast", label));
+                    diag_info_string(format!("oob_finalize_result label={} mode=fast", label));
                 }
             }
         }
@@ -226,8 +229,8 @@ pub fn enforce_deadline(state: &mut EngineState) {
 
     if let Some(nh) = state.deadline_near {
         if now >= nh && !state.deadline_near_notified {
-            info_string("oob_deadline_nearhard_reached");
-            info_string("oob_finalize_request reason=NearHard");
+            diag_info_string("oob_deadline_nearhard_reached");
+            diag_info_string("oob_finalize_request reason=NearHard");
             state.stop_controller.request_finalize(FinalizeReason::NearHard);
             state.deadline_near_notified = true;
             state.deadline_near = None;
@@ -236,9 +239,12 @@ pub fn enforce_deadline(state: &mut EngineState) {
 
     if let Some(hard) = state.deadline_hard {
         if now >= hard {
-            info_string("oob_finalize_request reason=Hard");
+            diag_info_string("oob_finalize_request reason=Hard");
             // Mark StopInfo as TimeLimit/Hard for logging consistency and request finalize
             state.stop_controller.request_finalize(FinalizeReason::Hard);
+            if let Some(session) = &state.search_session {
+                session.request_stop();
+            }
             fast_finalize_no_detach(state, "oob_hard_finalize", Some(FinalizeReason::Hard));
             // Clear deadlines
             state.deadline_hard = None;
@@ -267,4 +273,43 @@ fn fast_finalize_no_detach(
     state.deadline_near = None;
     state.deadline_near_notified = false;
     state.notify_idle();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_core::search::types::StopInfo;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    #[test]
+    fn finalize_before_session_start_late_bind_emits_once() {
+        let mut state = EngineState::new();
+        let (tx, rx) = mpsc::channel();
+        state.finalizer_rx = Some(rx);
+        state.stop_controller.register_finalizer(tx.clone());
+
+        state.stop_controller.prime_stop_info(StopInfo::default());
+        state.searching = true;
+        state.bestmove_emitted = false;
+        state.stop_flag = Some(Arc::new(AtomicBool::new(false)));
+        state.current_session_core_id = None;
+
+        tx.send(FinalizerMsg::Finalize {
+            session_id: 42,
+            reason: FinalizeReason::NearHard,
+        })
+        .unwrap();
+        tx.send(FinalizerMsg::SessionStart { session_id: 42 }).unwrap();
+
+        poll_oob_finalize(&mut state);
+
+        assert_eq!(state.current_session_core_id, Some(42));
+        assert!(state.bestmove_emitted);
+        assert!(!state.searching);
+
+        // Ensure no duplicate emission when draining remaining messages
+        poll_oob_finalize(&mut state);
+        assert!(state.bestmove_emitted);
+    }
 }

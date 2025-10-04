@@ -314,6 +314,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                     fmt_hash(state.position.zobrist_hash())
                 ));
                 let _ = emit_bestmove_once(state, String::from("resign"), None);
+                state.notify_idle();
                 return Ok(());
             } else if slice.len() == 1 {
                 let mv_usi = move_to_usi(&slice[0]);
@@ -324,6 +325,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                     mv_usi
                 ));
                 let _ = emit_bestmove_once(state, mv_usi, None);
+                state.notify_idle();
                 return Ok(());
             }
         }

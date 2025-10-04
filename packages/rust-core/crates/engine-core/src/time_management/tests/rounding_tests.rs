@@ -1,5 +1,5 @@
 use crate::shogi::Color;
-use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
+use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager, TimeParameters};
 
 #[test]
 fn test_set_search_end_rounds_to_next_second_minus_overhead() {
@@ -91,4 +91,25 @@ fn test_set_search_end_respects_remain_upper_in_byoyomi() {
         scheduled2 <= scheduled,
         "scheduled_end must only tighten, prev={scheduled}, now={scheduled2}"
     );
+}
+
+#[test]
+fn fixed_time_min_think_prefers_soft_clamp_over_hard_expand() {
+    let mut params = TimeParameters::default();
+    params.overhead_ms = 10;
+    params.min_think_ms = 380;
+
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 400 },
+        time_parameters: Some(params),
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::Opening);
+    let soft = tm.soft_limit_ms();
+    let hard = tm.hard_limit_ms();
+
+    assert_eq!(hard, 390);
+    assert_eq!(soft, 370, "soft should clamp to hard - margin without expanding hard");
+    assert!(soft < params.min_think_ms, "FixedTime may relax min_think to honor GUI intent");
 }

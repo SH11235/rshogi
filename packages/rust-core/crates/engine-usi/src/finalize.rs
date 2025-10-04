@@ -7,7 +7,7 @@ use engine_core::search::{
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
-use crate::io::{info_string, usi_println};
+use crate::io::{diag_info_string, usi_println};
 use crate::state::EngineState;
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
@@ -38,7 +38,7 @@ fn log_and_emit_final_selection(
     ponder: Option<String>,
     stop_meta: &StopMeta,
 ) {
-    info_string(format!(
+    diag_info_string(format!(
         "{}_select source={} move={} soft_ms={} hard_ms={}",
         label,
         source_to_str(source),
@@ -163,7 +163,7 @@ pub fn emit_bestmove_once<S: Into<String>>(
     true
 }
 
-const TT_LOCK_BACKOFF_US: u64 = 100;
+const TT_LOCK_MAX_SPINS: usize = 16;
 
 /// StopInfo から "残り" 時間を見積もり、TT ロックに使ってよい猶予を ms で返す。
 /// 現状は soft/hard の最小値のみを参照する。将来 planned limit も StopInfo に
@@ -219,13 +219,29 @@ fn try_lock_engine_with_budget<'a>(
         return None;
     }
     let deadline = start + Duration::from_millis(budget_ms);
+    let mut spins = 0usize;
     while Instant::now() < deadline {
-        std::thread::yield_now();
-        std::thread::sleep(Duration::from_micros(TT_LOCK_BACKOFF_US));
         if let Ok(guard) = engine.try_lock() {
             let elapsed = start.elapsed();
             return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
         }
+
+        if spins < TT_LOCK_MAX_SPINS {
+            std::hint::spin_loop();
+        } else if spins < TT_LOCK_MAX_SPINS * 2 {
+            std::thread::yield_now();
+        } else {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline - now;
+            let sleep_dur = remaining.min(Duration::from_micros(50));
+            if sleep_dur > Duration::from_micros(0) {
+                std::thread::sleep(sleep_dur);
+            }
+        }
+        spins += 1;
     }
     None
 }
@@ -239,20 +255,20 @@ pub fn finalize_and_send(
     finalize_reason: Option<FinalizeReason>,
 ) {
     if stale {
-        info_string(format!("{label}_stale=1 fallback=fast"));
+        diag_info_string(format!("{label}_stale=1 fallback=fast"));
         finalize_and_send_fast(state, label, finalize_reason);
         return;
     }
 
     if state.bestmove_emitted {
-        info_string(format!("{label}_skip already_emitted=1"));
+        diag_info_string(format!("{label}_skip already_emitted=1"));
         return;
     }
     if !state.stop_controller.try_claim_finalize() {
-        info_string(format!("{label}_skip claimed_by_other=1"));
+        diag_info_string(format!("{label}_skip claimed_by_other=1"));
         return;
     }
-    info_string(format!("{label}_claim_success=1"));
+    diag_info_string(format!("{label}_claim_success=1"));
 
     let committed = if let Some(res) = result {
         let mut committed_pv = res.stats.pv.clone();
@@ -261,7 +277,7 @@ pub fn finalize_and_send(
             let has_mismatch =
                 committed_pv.first().is_none_or(|pv0| !pv0.equals_without_piece_type(&bm));
             if has_mismatch {
-                info_string(format!(
+                diag_info_string(format!(
                     "pv_head_mismatch=1 pv0={} best={}",
                     committed_pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string()),
                     move_to_usi(&bm)
@@ -307,7 +323,7 @@ pub fn finalize_and_send(
     });
     if let Some(snap) = snapshot_valid.as_ref() {
         if snapshot_committed.is_some() {
-            info_string(format!(
+            diag_info_string(format!(
                 "{label}_snapshot_pref sid={} depth={} nodes={} elapsed_ms={}",
                 snap.search_id, snap.depth, snap.nodes, snap.elapsed_ms
             ));
@@ -335,7 +351,7 @@ pub fn finalize_and_send(
         let best_usi =
             res.best_move.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
         let pv0_usi = res.stats.pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string());
-        info_string(format!(
+        diag_info_string(format!(
             "finalize_snapshot best={} pv0={} depth={} nodes={} elapsed_ms={} stop_reason={}",
             best_usi,
             pv0_usi,
@@ -346,7 +362,7 @@ pub fn finalize_and_send(
         ));
 
         // 極小Byoyomi対策の可視化: ハード/ソフト上限と停止理由
-        info_string(format!(
+        diag_info_string(format!(
             "time_caps hard_ms={} soft_ms={} reason={}",
             stop_meta.hard_ms, stop_meta.soft_ms, stop_meta.reason_label
         ));
@@ -358,7 +374,7 @@ pub fn finalize_and_send(
             } else {
                 0.0
             };
-            info_string(format!(
+            diag_info_string(format!(
                 "tt_summary nodes={} hits={} hit_pct={:.2}",
                 nodes, tt_hits, hit_pct
             ));
@@ -436,7 +452,7 @@ pub fn finalize_and_send(
                 }
             };
 
-            info_string(format!(
+            diag_info_string(format!(
                 "finalize_diag seldepth={} seldepth_raw={} qratio={:.3} ab_nodes={} tt_hit_rate={:.3} tt_hits={} asp_fail={} asp_hit={} re_searches={} pv_changed={} dup_pct={} root_fail_high={} lmr={} lmr_trials={} root_hint_exist={} root_hint_used={} root_in_check={} root_legal_count={} root_evasion_count={} root_scoring=static checks_in_q_allowed={}",
                 sel,
                 sel_raw,
@@ -481,7 +497,7 @@ pub fn finalize_and_send(
                     let eng = state.engine.lock().unwrap();
                     eng.tt_debug_info()
                 };
-                info_string(format!(
+                diag_info_string(format!(
                     "tt_debug addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={}",
                     dbg.addr,
                     dbg.size_mb,
@@ -499,7 +515,7 @@ pub fn finalize_and_send(
                     let eng = state.engine.lock().unwrap();
                     eng.tt_roundtrip_test(root_hash)
                 };
-                info_string(format!("tt_roundtrip root={}", ok));
+                diag_info_string(format!("tt_roundtrip root={}", ok));
             }
 
             if state.opts.multipv > 1 {
@@ -615,19 +631,19 @@ pub fn finalize_and_send_fast(
     finalize_reason: Option<FinalizeReason>,
 ) {
     if state.bestmove_emitted {
-        info_string(format!("{label}_fast_skip already_emitted=1"));
+        diag_info_string(format!("{label}_fast_skip already_emitted=1"));
         return;
     }
     if !state.stop_controller.try_claim_finalize() {
-        info_string(format!("{label}_fast_skip claimed_by_other=1"));
+        diag_info_string(format!("{label}_fast_skip claimed_by_other=1"));
         return;
     }
-    info_string(format!("{label}_fast_claim_success=1"));
+    diag_info_string(format!("{label}_fast_claim_success=1"));
 
     let controller_stop_info = state.stop_controller.try_read_stop_info();
 
     if let Some(ref si) = controller_stop_info {
-        info_string(format!(
+        diag_info_string(format!(
             "{label}_oob_stop_info sid={} reason={:?} elapsed_ms={} soft_ms={} hard_ms={}",
             state.current_session_core_id.unwrap_or(0),
             si.reason,
@@ -638,7 +654,7 @@ pub fn finalize_and_send_fast(
     }
 
     let stop_meta = prepare_stop_meta(label, controller_stop_info, None, finalize_reason);
-    info_string(format!("{}_fast_reason reason={}", label, stop_meta.reason_label));
+    diag_info_string(format!("{}_fast_reason reason={}", label, stop_meta.reason_label));
 
     let root_key_hex = fmt_hash(state.position.zobrist_hash());
 
@@ -689,7 +705,7 @@ pub fn finalize_and_send_fast(
                     if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us)) =
                         snapshot_emit
                     {
-                        info_string(format!(
+                        diag_info_string(format!(
                             "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=1 tt_probe_src=snapshot tt_probe_budget_ms={} tt_probe_spent_ms={}",
                             label,
                             snap.search_id,
@@ -701,7 +717,7 @@ pub fn finalize_and_send_fast(
                             budget_ms,
                             spent_ms
                         ));
-                        info_string(format!(
+                        diag_info_string(format!(
                             "{}_fast_snapshot_tt sid={} root_key={} tt_probe_spent_us={}",
                             label,
                             snap.search_id,
@@ -726,7 +742,7 @@ pub fn finalize_and_send_fast(
                 } else {
                     None
                 };
-                info_string(format!(
+                diag_info_string(format!(
                     "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=0 tt_probe_src=snapshot tt_probe_budget_ms={} note=depth_sufficient",
                     label,
                     snap.search_id,
@@ -773,7 +789,7 @@ pub fn finalize_and_send_fast(
             (final_usi, ponder_mv, final_best.source)
         };
         drop(eng_guard);
-        info_string(format!(
+        diag_info_string(format!(
             "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
@@ -793,7 +809,7 @@ pub fn finalize_and_send_fast(
     };
 
     if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us, dbg)) = fallback_emit {
-        info_string(format!(
+        diag_info_string(format!(
             "{}_fast_tt_probe sid={} root_key={} tt_probe=1 tt_probe_src=tt tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
@@ -802,7 +818,7 @@ pub fn finalize_and_send_fast(
             spent_ms,
             spent_us
         ));
-        info_string(format!(
+        diag_info_string(format!(
             "{}_fast_tt_meta sid={} root_key={} addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={}",
             label,
             state.current_session_core_id.unwrap_or(0),
@@ -817,7 +833,7 @@ pub fn finalize_and_send_fast(
         return;
     }
 
-    info_string(format!(
+    diag_info_string(format!(
         "{}_fast_path=legal_fallback sid={} root_key={} tt_probe_budget_ms={}",
         label,
         state.current_session_core_id.unwrap_or(0),
@@ -829,7 +845,7 @@ pub fn finalize_and_send_fast(
         Ok(list) => {
             let slice = list.as_slice();
             if slice.is_empty() {
-                info_string(format!(
+                diag_info_string(format!(
                     "{}_fast_select_resign sid={} root_key={}",
                     label,
                     state.current_session_core_id.unwrap_or(0),
@@ -886,7 +902,7 @@ pub fn finalize_and_send_fast(
                         &stop_meta,
                     );
                 } else {
-                    info_string(format!(
+                    diag_info_string(format!(
                         "{}_fast_select_resign sid={} root_key={} no_legal_moves=1",
                         label,
                         state.current_session_core_id.unwrap_or(0),
@@ -904,7 +920,7 @@ pub fn finalize_and_send_fast(
             }
         }
         Err(e) => {
-            info_string(format!(
+            diag_info_string(format!(
                 "{}_fast_select_error sid={} root_key={} resign_fallback=1 err={}",
                 label,
                 state.current_session_core_id.unwrap_or(0),
