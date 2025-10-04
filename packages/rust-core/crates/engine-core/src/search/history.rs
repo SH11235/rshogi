@@ -2,15 +2,14 @@
 //!
 //! Tracks the success rate of moves in different contexts to improve move ordering
 
+use crate::search::ab::ordering::constants::{
+    CAP_HISTORY_AGING_SHIFT, CAP_HISTORY_BONUS_FACTOR, CAP_HISTORY_MAX, CAP_HISTORY_SHIFT,
+    CONT_HISTORY_AGING_SHIFT, CONT_HISTORY_BONUS_FACTOR, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT,
+    QUIET_HISTORY_AGING_SHIFT, QUIET_HISTORY_BONUS_FACTOR, QUIET_HISTORY_MAX, QUIET_HISTORY_SHIFT,
+};
 use crate::shogi::board::NUM_PIECE_TYPES;
 use crate::shogi::SHOGI_BOARD_SIZE;
 use crate::{shogi::Move, Color, PieceType, Square};
-
-/// Maximum history score
-const MAX_HISTORY_SCORE: i32 = 10000;
-
-/// History aging divisor (applied periodically to prevent overflow)
-const HISTORY_AGING_DIVISOR: i32 = 2;
 
 /// Counter move history - tracks which moves work well after specific moves
 #[derive(Clone)]
@@ -66,7 +65,7 @@ impl CounterMoveHistory {
 #[derive(Clone)]
 pub struct ButterflyHistory {
     /// [color][from_square][to_square] -> score
-    scores: [[[i32; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+    scores: [[[i16; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
 }
 
 impl Default for ButterflyHistory {
@@ -85,25 +84,25 @@ impl ButterflyHistory {
 
     /// Get history score for a move
     pub fn get(&self, color: Color, mv: Move) -> i32 {
-        if mv.is_drop() {
-            // For drops, use a special scoring
+        let raw = if mv.is_drop() {
             self.scores[color as usize][0][mv.to().index()]
         } else {
             let from = mv.from().unwrap();
             let to = mv.to();
             self.scores[color as usize][from.index()][to.index()]
-        }
+        };
+        i32::from(raw)
     }
 
     /// Update history score with bonus
     pub fn update_good(&mut self, color: Color, mv: Move, depth: i32) {
-        let bonus = depth * depth; // Quadratic bonus based on depth
+        let bonus = scaled_bonus(depth, QUIET_HISTORY_BONUS_FACTOR);
         self.add_bonus(color, mv, bonus);
     }
 
     /// Update history score with penalty
     pub fn update_bad(&mut self, color: Color, mv: Move, depth: i32) {
-        let penalty = -(depth * depth); // Quadratic penalty based on depth
+        let penalty = -scaled_bonus(depth, QUIET_HISTORY_BONUS_FACTOR);
         self.add_bonus(color, mv, penalty);
     }
 
@@ -116,20 +115,15 @@ impl ButterflyHistory {
         };
 
         let score = &mut self.scores[color as usize][from_idx][to_idx];
-
-        // Use a formula that prevents overflow and maintains relative ordering
-        *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
-
-        // Clamp to maximum
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        apply_history_update(score, bonus, QUIET_HISTORY_MAX, QUIET_HISTORY_SHIFT);
     }
 
-    /// Age all history scores (divide by 2) to prevent overflow
+    /// Age all history scores to prevent drift and overflow
     pub fn age_scores(&mut self) {
         for color_scores in &mut self.scores {
             for from_scores in color_scores {
                 for score in from_scores {
-                    *score /= HISTORY_AGING_DIVISOR;
+                    age_value(score, QUIET_HISTORY_AGING_SHIFT);
                 }
             }
         }
@@ -213,12 +207,10 @@ impl ContinuationHistory {
         curr_to: Square,
         depth: i32,
     ) {
-        let bonus = depth * depth;
+        let bonus = scaled_bonus(depth, CONT_HISTORY_BONUS_FACTOR);
         let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-        let score = i32::from(self.scores[idx]);
-        let updated = score + bonus - (score * bonus.abs() / MAX_HISTORY_SCORE);
-        let clamped = updated.clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
-        self.scores[idx] = clamped as i16;
+        let score = &mut self.scores[idx];
+        apply_history_update(score, bonus, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT);
     }
 
     /// Update continuation history with penalty
@@ -231,18 +223,16 @@ impl ContinuationHistory {
         curr_to: Square,
         depth: i32,
     ) {
-        let penalty = -(depth * depth);
+        let penalty = -scaled_bonus(depth, CONT_HISTORY_BONUS_FACTOR);
         let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-        let score = i32::from(self.scores[idx]);
-        let updated = score + penalty - (score * penalty.abs() / MAX_HISTORY_SCORE);
-        let clamped = updated.clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
-        self.scores[idx] = clamped as i16;
+        let score = &mut self.scores[idx];
+        apply_history_update(score, penalty, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT);
     }
 
     /// Age all continuation history scores
     pub fn age_scores(&mut self) {
         for score in &mut self.scores {
-            *score = (*score as i32 / HISTORY_AGING_DIVISOR) as i16;
+            age_value(score, CONT_HISTORY_AGING_SHIFT);
         }
     }
 
@@ -256,7 +246,7 @@ impl ContinuationHistory {
 #[derive(Clone)]
 pub struct CaptureHistory {
     /// [color][attacker_piece][victim_piece][to_square] -> score
-    scores: [[[[i32; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
+    scores: [[[[i16; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
 }
 
 impl Default for CaptureHistory {
@@ -275,7 +265,7 @@ impl CaptureHistory {
 
     /// Get capture history score
     pub fn get(&self, color: Color, attacker: PieceType, victim: PieceType, to: Square) -> i32 {
-        self.scores[color as usize][attacker as usize][victim as usize][to.index()]
+        i32::from(self.scores[color as usize][attacker as usize][victim as usize][to.index()])
     }
 
     /// Update capture history with bonus
@@ -287,11 +277,10 @@ impl CaptureHistory {
         to: Square,
         depth: i32,
     ) {
-        let bonus = depth * depth;
+        let bonus = scaled_bonus(depth, CAP_HISTORY_BONUS_FACTOR);
         let score =
             &mut self.scores[color as usize][attacker as usize][victim as usize][to.index()];
-        *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        apply_history_update(score, bonus, CAP_HISTORY_MAX, CAP_HISTORY_SHIFT);
     }
 
     /// Update capture history with penalty
@@ -303,11 +292,10 @@ impl CaptureHistory {
         to: Square,
         depth: i32,
     ) {
-        let penalty = -(depth * depth);
+        let penalty = -scaled_bonus(depth, CAP_HISTORY_BONUS_FACTOR);
         let score =
             &mut self.scores[color as usize][attacker as usize][victim as usize][to.index()];
-        *score += penalty - (*score * penalty.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        apply_history_update(score, penalty, CAP_HISTORY_MAX, CAP_HISTORY_SHIFT);
     }
 
     /// Age all capture history scores
@@ -316,7 +304,7 @@ impl CaptureHistory {
             for attacker_scores in color_scores {
                 for victim_scores in attacker_scores {
                     for score in victim_scores {
-                        *score /= HISTORY_AGING_DIVISOR;
+                        age_value(score, CAP_HISTORY_AGING_SHIFT);
                     }
                 }
             }
@@ -455,8 +443,39 @@ impl History {
     }
 }
 
+fn scaled_bonus(depth: i32, factor: i32) -> i32 {
+    let d = depth.max(1);
+    let sq = d.saturating_mul(d);
+    sq.saturating_mul(factor)
+}
+
+fn apply_history_update(value: &mut i16, bonus: i32, max: i16, shift: u32) {
+    let current = i32::from(*value);
+    let delta = if shift == 0 {
+        bonus - current
+    } else {
+        (bonus - current) >> shift
+    };
+    let next = current.saturating_add(delta);
+    let limit = i32::from(max);
+    *value = next.clamp(-limit, limit) as i16;
+}
+
+fn age_value(value: &mut i16, shift: u32) {
+    if shift == 0 {
+        return;
+    }
+    let current = i32::from(*value);
+    let delta = current >> shift;
+    let next = current - delta;
+    *value = next as i16;
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::search::ab::ordering::constants::{
+        CAP_HISTORY_MAX, CONT_HISTORY_MAX, QUIET_HISTORY_MAX,
+    };
     use crate::{usi::parse_usi_square, Color, PieceType};
 
     use super::*;
@@ -473,17 +492,21 @@ mod tests {
 
         // Update with good move
         history.update_good(color, mv, 5);
-        assert!(history.get(color, mv) > 0);
+        let after_good = history.get(color, mv);
+        assert!(after_good > 0);
+        assert!(after_good <= i32::from(QUIET_HISTORY_MAX));
 
         // Update with bad move
         history.update_bad(color, mv, 3);
-        let score = history.get(color, mv);
-        assert!(score < 25); // Should be reduced but still positive
+        let after_bad = history.get(color, mv);
+        assert!(after_bad <= after_good);
+        assert!(after_bad >= -i32::from(QUIET_HISTORY_MAX));
 
         // Test aging
-        let old_score = history.get(color, mv);
+        let magnitude_before = after_bad.abs();
         history.age_scores();
-        assert_eq!(history.get(color, mv), old_score / 2);
+        let aged = history.get(color, mv);
+        assert!(aged.abs() <= magnitude_before);
     }
 
     #[test]
@@ -519,7 +542,19 @@ mod tests {
 
         // Update with good continuation
         history.update_good(color, prev_piece, prev_to, curr_piece, curr_to, 4);
-        assert!(history.get(color, prev_piece, prev_to, curr_piece, curr_to) > 0);
+        let after_good = history.get(color, prev_piece, prev_to, curr_piece, curr_to);
+        assert!(after_good > 0);
+        assert!(after_good <= i32::from(CONT_HISTORY_MAX));
+
+        // Apply penalty and ensure値が縮む
+        history.update_bad(color, prev_piece, prev_to, curr_piece, curr_to, 2);
+        let after_bad = history.get(color, prev_piece, prev_to, curr_piece, curr_to);
+        assert!(after_bad.abs() <= after_good.abs());
+
+        let magnitude_before = after_bad.abs();
+        history.age_scores();
+        let aged = history.get(color, prev_piece, prev_to, curr_piece, curr_to);
+        assert!(aged.abs() <= magnitude_before);
     }
 
     #[test]
@@ -534,8 +569,8 @@ mod tests {
             history.update_good(color, mv, 10);
         }
 
-        // Score should be clamped to MAX_HISTORY_SCORE
-        assert!(history.get(color, mv) <= MAX_HISTORY_SCORE);
+        // Score should remain within the configured quiet-history bounds
+        assert!(history.get(color, mv).abs() <= i32::from(QUIET_HISTORY_MAX));
     }
 
     #[test]
@@ -551,16 +586,20 @@ mod tests {
 
         // Update with good capture
         history.update_good(color, attacker, victim, target, 4);
-        assert!(history.get(color, attacker, victim, target) > 0);
+        let after_good = history.get(color, attacker, victim, target);
+        assert!(after_good > 0);
+        assert!(after_good <= i32::from(CAP_HISTORY_MAX));
 
         // Update with bad capture
         history.update_bad(color, attacker, victim, target, 2);
-        let score = history.get(color, attacker, victim, target);
-        assert!(score > 0); // Should still be positive but reduced
+        let after_bad = history.get(color, attacker, victim, target);
+        assert!(after_bad.abs() <= after_good.abs());
+        assert!(after_bad.abs() <= i32::from(CAP_HISTORY_MAX));
 
         // Test aging
-        let old_score = history.get(color, attacker, victim, target);
+        let magnitude_before = after_bad.abs();
         history.age_scores();
-        assert_eq!(history.get(color, attacker, victim, target), old_score / 2);
+        let aged = history.get(color, attacker, victim, target);
+        assert!(aged.abs() <= magnitude_before);
     }
 }

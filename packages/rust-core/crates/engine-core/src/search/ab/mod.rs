@@ -1,5 +1,5 @@
 mod driver;
-mod ordering;
+pub mod ordering;
 mod profile;
 mod pruning;
 mod pv_extract;

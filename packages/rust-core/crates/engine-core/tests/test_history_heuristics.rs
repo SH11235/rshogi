@@ -3,6 +3,9 @@
 //! This is a simple smoke test to ensure the history heuristic code paths
 //! are being exercised. Full integration testing happens through the search tests.
 
+use engine_core::search::ab::ordering::constants::{
+    CAP_HISTORY_AGING_SHIFT, QUIET_HISTORY_AGING_SHIFT,
+};
 use engine_core::search::history::History;
 use engine_core::shogi::Move;
 use engine_core::usi::parse_usi_square;
@@ -66,7 +69,9 @@ fn test_capture_history_functionality() {
 
     // Age the scores
     history.age_all();
-    assert_eq!(history.capture.get(color, attacker, victim, target), score / 2);
+    let aged = history.capture.get(color, attacker, victim, target);
+    let expected = score - (score >> CAP_HISTORY_AGING_SHIFT);
+    assert_eq!(aged, expected);
 }
 
 #[test]
@@ -125,5 +130,6 @@ fn test_history_aging() {
     history.age_all();
 
     let score_after = history.get_score(color, mv, None);
-    assert_eq!(score_after, score_before / 2);
+    let expected = score_before - (score_before >> QUIET_HISTORY_AGING_SHIFT);
+    assert_eq!(score_after, expected);
 }
