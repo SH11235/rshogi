@@ -13,6 +13,7 @@ use log::info;
 
 use crate::finalize::{emit_bestmove_once, finalize_and_send, fmt_hash};
 use crate::io::info_string;
+use crate::oob::poll_oob_finalize;
 use crate::state::{EngineState, GoParams, UsiOptions};
 use crate::usi_adapter;
 
@@ -241,6 +242,10 @@ pub fn limits_from_go(
 }
 
 pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
+    // 新しい go を受理する前に、前回探索から残っている OOB finalize 要求を掃除しておく。
+    // SessionStart が届く前の Finalize を握りつぶすことで stale=1 ログを抑止する。
+    poll_oob_finalize(state);
+
     if state.searching {
         info!("Ignoring go while searching");
         return Ok(());
