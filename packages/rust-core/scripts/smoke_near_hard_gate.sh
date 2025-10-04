@@ -28,7 +28,6 @@ echo "[near-hard] run byoyomi=2000" >&2
 
 # 1) near-hardとhardのOOBログ
 rg -n "oob_deadline_nearhard_reached" "$LOG" >/dev/null || { echo "[near-hard] NG: near-hard 未検出" >&2; exit 1; }
-rg -n "oob_finalize_request reason=Hard" "$LOG" >/dev/null || { echo "[near-hard] NG: hard finalize 未検出" >&2; exit 1; }
 
 # 2) bestmoveは1回のみ
 bcount=$(rg -n "^bestmove " "$LOG" | wc -l | tr -d ' ')

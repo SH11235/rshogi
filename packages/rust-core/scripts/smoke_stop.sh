@@ -43,12 +43,4 @@ if [[ "$bcount" != "1" ]]; then
   exit 2
 fi
 
-has_stopinfo=$(rg -n "oob_stop_info" "$LOG" -q && echo 1 || echo 0)
-if [[ "$has_stopinfo" -ne 1 ]]; then
-  echo "[smoke] WARN: StopInfo snapshot (oob_stop_info) not observed; finalize likely joined with result" >&2
-else
-  echo "[smoke] OK: observed StopInfo snapshot via *_oob_stop_info"
-fi
-
 echo "[smoke] OK: bestmove emitted exactly once"
-
