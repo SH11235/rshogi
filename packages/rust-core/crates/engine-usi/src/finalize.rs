@@ -655,6 +655,7 @@ pub fn finalize_and_send_fast(
                     {
                         let (final_usi, ponder_mv, final_source) = {
                             let final_best = eng_guard.choose_final_bestmove(&state.position, None);
+                            let used_snapshot_move = final_best.best_move.is_none();
                             let final_usi = final_best
                                 .best_move
                                 .map(|m| move_to_usi(&m))
@@ -668,7 +669,12 @@ pub fn finalize_and_send_fast(
                             } else {
                                 None
                             };
-                            (final_usi, ponder_mv, final_best.source)
+                            let final_source = if used_snapshot_move {
+                                FinalBestSource::Committed
+                            } else {
+                                final_best.source
+                            };
+                            (final_usi, ponder_mv, final_source)
                         };
                         drop(eng_guard);
                         Some((final_usi, ponder_mv, final_source, spent_ms, spent_us))
