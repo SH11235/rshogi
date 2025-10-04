@@ -14,6 +14,8 @@ use crate::{shogi::Move, Color, PieceType, Square};
 /// Counter move history - tracks which moves work well after specific moves
 const COUNTER_FROM_DIM: usize = SHOGI_BOARD_SIZE + 1;
 const COUNTER_DROP_INDEX: usize = SHOGI_BOARD_SIZE;
+const CONT_PREV_DROP_DIM: usize = 2;
+const CONT_CURR_DROP_DIM: usize = 2;
 
 #[derive(Clone)]
 pub struct CounterMoveHistory {
@@ -140,10 +142,45 @@ impl ButterflyHistory {
 /// Continuation history - tracks move success in context of previous moves
 #[derive(Clone)]
 pub struct ContinuationHistory {
-    /// [color][piece_moved_2_ply_ago][to_square_2_ply_ago][piece_to_move][to_square] -> score
-    /// Stored as i16 to reduce footprint（約1.7MB）
+    /// [color][prev_piece][prev_to][prev_is_drop?][curr_piece][curr_to][curr_is_drop?] -> score
+    /// Stored as i16 to reduce footprint（約6.7MB）
     scores: Vec<i16>,
     size: usize,
+}
+
+/// 2手継続（Continuation）ヒストリ参照キー
+#[derive(Copy, Clone, Debug)]
+pub struct ContinuationKey {
+    pub color: Color,
+    pub prev_piece: usize,
+    pub prev_to: Square,
+    pub prev_is_drop: bool,
+    pub curr_piece: usize,
+    pub curr_to: Square,
+    pub curr_is_drop: bool,
+}
+
+impl ContinuationKey {
+    #[inline]
+    pub fn new(
+        color: Color,
+        prev_piece: usize,
+        prev_to: Square,
+        prev_is_drop: bool,
+        curr_piece: usize,
+        curr_to: Square,
+        curr_is_drop: bool,
+    ) -> Self {
+        Self {
+            color,
+            prev_piece,
+            prev_to,
+            prev_is_drop,
+            curr_piece,
+            curr_to,
+            curr_is_drop,
+        }
+    }
 }
 
 impl Default for ContinuationHistory {
@@ -156,8 +193,14 @@ impl ContinuationHistory {
     /// Create new continuation history
     pub fn new() -> Self {
         let piece_dim = NUM_PIECE_TYPES;
-        // 2 (colors) * piece_dim * N * piece_dim * N ≒ 6.4MB at i16
-        let size = 2 * piece_dim * SHOGI_BOARD_SIZE * piece_dim * SHOGI_BOARD_SIZE;
+        // 2 (colors) * CONT_PREV_DROP_DIM * piece_dim * N * CONT_CURR_DROP_DIM * piece_dim * N ≒ 6.7MB at i16
+        let size = 2
+            * CONT_PREV_DROP_DIM
+            * piece_dim
+            * SHOGI_BOARD_SIZE
+            * CONT_CURR_DROP_DIM
+            * piece_dim
+            * SHOGI_BOARD_SIZE;
         ContinuationHistory {
             scores: vec![0i16; size],
             size,
@@ -165,70 +208,54 @@ impl ContinuationHistory {
     }
 
     /// Calculate index for continuation history
-    fn index(
-        &self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-    ) -> usize {
-        let color_idx = color as usize;
+    fn index(&self, key: &ContinuationKey) -> usize {
+        let color_idx = key.color as usize;
         let n = SHOGI_BOARD_SIZE;
         let piece_dim = NUM_PIECE_TYPES;
-        let idx = color_idx * (piece_dim * n * piece_dim * n)
-            + prev_piece * (n * piece_dim * n)
-            + prev_to.index() * (piece_dim * n)
-            + curr_piece * n
-            + curr_to.index();
+        let prev_drop_idx = if key.prev_is_drop { 1 } else { 0 };
+        let curr_drop_idx = if key.curr_is_drop { 1 } else { 0 };
+
+        let stride_prev_drop = piece_dim * n * CONT_CURR_DROP_DIM * piece_dim * n;
+        let stride_prev_piece = n * CONT_CURR_DROP_DIM * piece_dim * n;
+        let stride_prev_to = CONT_CURR_DROP_DIM * piece_dim * n;
+        let stride_curr_drop = piece_dim * n;
+        let stride_curr_piece = n;
+
+        let mut idx = color_idx * CONT_PREV_DROP_DIM * stride_prev_drop;
+        idx += prev_drop_idx * stride_prev_drop;
+        idx += key.prev_piece * stride_prev_piece;
+        idx += key.prev_to.index() * stride_prev_to;
+        idx += curr_drop_idx * stride_curr_drop;
+        idx += key.curr_piece * stride_curr_piece;
+        idx += key.curr_to.index();
 
         debug_assert!(idx < self.size);
         idx
     }
 
     /// Get continuation history score
-    pub fn get(
-        &self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-    ) -> i32 {
-        let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
+    pub fn get(&self, key: ContinuationKey) -> i32 {
+        let idx = self.index(&key);
         i32::from(self.scores[idx])
     }
 
     /// Update continuation history with bonus
-    pub fn update_good(
-        &mut self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-        depth: i32,
-    ) {
-        let bonus = scaled_bonus(depth, CONT_HISTORY_BONUS_FACTOR);
-        let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-        let score = &mut self.scores[idx];
-        apply_history_update(score, bonus, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT);
+    pub fn update_good(&mut self, key: ContinuationKey, depth: i32) {
+        self.apply_update(key, depth, true);
     }
 
-    /// Update continuation history with penalty
-    pub fn update_bad(
-        &mut self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-        depth: i32,
-    ) {
-        let penalty = -scaled_bonus(depth, CONT_HISTORY_BONUS_FACTOR);
-        let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
+    /// Update continuation history with penalty (bad move)
+    pub fn update_bad(&mut self, key: ContinuationKey, depth: i32) {
+        self.apply_update(key, depth, false);
+    }
+
+    #[inline]
+    fn apply_update(&mut self, key: ContinuationKey, depth: i32, good: bool) {
+        let bonus = scaled_bonus(depth, CONT_HISTORY_BONUS_FACTOR);
+        let delta = if good { bonus } else { -bonus };
+        let idx = self.index(&key);
         let score = &mut self.scores[idx];
-        apply_history_update(score, penalty, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT);
+        apply_history_update(score, delta, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT);
     }
 
     /// Age all continuation history scores
@@ -362,18 +389,18 @@ impl History {
         // Add continuation history if we have context
         if let Some(prev_mv) = prev_move {
             if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
-                // Ensure prev_move was not a drop (needs a destination square)
-                if !prev_mv.is_drop() {
-                    let prev_to = prev_mv.to();
-                    let curr_to = mv.to();
-                    score += self.continuation.get(
-                        color,
-                        prev_piece as usize,
-                        prev_to,
-                        curr_piece as usize,
-                        curr_to,
-                    );
-                }
+                let prev_to = prev_mv.to();
+                let curr_to = mv.to();
+                let key = ContinuationKey::new(
+                    color,
+                    prev_piece as usize,
+                    prev_to,
+                    prev_mv.is_drop(),
+                    curr_piece as usize,
+                    curr_to,
+                    mv.is_drop(),
+                );
+                score += self.continuation.get(key);
             }
         }
 
@@ -387,18 +414,18 @@ impl History {
         // Update continuation history if we have piece type info
         if let Some(prev_mv) = prev_move {
             if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
-                if !prev_mv.is_drop() && !mv.is_drop() {
-                    let prev_to = prev_mv.to();
-                    let curr_to = mv.to();
-                    self.continuation.update_good(
-                        color,
-                        prev_piece as usize,
-                        prev_to,
-                        curr_piece as usize,
-                        curr_to,
-                        depth,
-                    );
-                }
+                let prev_to = prev_mv.to();
+                let curr_to = mv.to();
+                let key = ContinuationKey::new(
+                    color,
+                    prev_piece as usize,
+                    prev_to,
+                    prev_mv.is_drop(),
+                    curr_piece as usize,
+                    curr_to,
+                    mv.is_drop(),
+                );
+                self.continuation.update_good(key, depth);
             }
         }
     }
@@ -410,18 +437,18 @@ impl History {
         // Update continuation history if we have piece type info
         if let Some(prev_mv) = prev_move {
             if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
-                if !prev_mv.is_drop() && !mv.is_drop() {
-                    let prev_to = prev_mv.to();
-                    let curr_to = mv.to();
-                    self.continuation.update_bad(
-                        color,
-                        prev_piece as usize,
-                        prev_to,
-                        curr_piece as usize,
-                        curr_to,
-                        depth,
-                    );
-                }
+                let prev_to = prev_mv.to();
+                let curr_to = mv.to();
+                let key = ContinuationKey::new(
+                    color,
+                    prev_piece as usize,
+                    prev_to,
+                    prev_mv.is_drop(),
+                    curr_piece as usize,
+                    curr_to,
+                    mv.is_drop(),
+                );
+                self.continuation.update_bad(key, depth);
             }
         }
     }
@@ -561,23 +588,65 @@ mod tests {
         let curr_to = parse_usi_square("1e").unwrap();
 
         // Initial score should be 0
-        assert_eq!(history.get(color, prev_piece, prev_to, curr_piece, curr_to), 0);
+        assert_eq!(
+            history.get(ContinuationKey::new(
+                color, prev_piece, prev_to, false, curr_piece, curr_to, false
+            )),
+            0
+        );
 
         // Update with good continuation
-        history.update_good(color, prev_piece, prev_to, curr_piece, curr_to, 4);
-        let after_good = history.get(color, prev_piece, prev_to, curr_piece, curr_to);
+        history.update_good(
+            ContinuationKey::new(color, prev_piece, prev_to, false, curr_piece, curr_to, false),
+            4,
+        );
+        let after_good = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
         assert!(after_good > 0);
         assert!(after_good <= i32::from(CONT_HISTORY_MAX));
 
         // Apply penalty and ensure値が縮む
-        history.update_bad(color, prev_piece, prev_to, curr_piece, curr_to, 2);
-        let after_bad = history.get(color, prev_piece, prev_to, curr_piece, curr_to);
+        history.update_bad(
+            ContinuationKey::new(color, prev_piece, prev_to, false, curr_piece, curr_to, false),
+            2,
+        );
+        let after_bad = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
         assert!(after_bad.abs() <= after_good.abs());
 
         let magnitude_before = after_bad.abs();
         history.age_scores();
-        let aged = history.get(color, prev_piece, prev_to, curr_piece, curr_to);
+        let aged = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
         assert!(aged.abs() <= magnitude_before);
+    }
+    #[test]
+    fn test_continuation_history_handles_drop() {
+        let mut history = ContinuationHistory::new();
+        let color = Color::Black;
+
+        let prev_piece = PieceType::Pawn as usize;
+        let prev_to = parse_usi_square("5e").unwrap();
+        let curr_piece = PieceType::Pawn as usize;
+        let curr_to = parse_usi_square("5d").unwrap();
+
+        // Update drop vs non-drop to ensure indices differ
+        history.update_good(
+            ContinuationKey::new(color, prev_piece, prev_to, true, curr_piece, curr_to, true),
+            3,
+        );
+        let drop_score = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, true, curr_piece, curr_to, true,
+        ));
+        assert!(drop_score > 0);
+
+        let normal_score = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
+        assert_eq!(normal_score, 0);
     }
 
     #[test]

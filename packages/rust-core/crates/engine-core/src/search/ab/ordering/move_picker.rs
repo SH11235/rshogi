@@ -463,13 +463,16 @@ impl<'a> MovePicker<'a> {
                     }
                 }
                 if let (Some(prev_piece), Some(curr_piece)) = (prev.piece_type(), mv.piece_type()) {
-                    let cont_score = heur.continuation.get(
+                    let cont_key = crate::search::history::ContinuationKey::new(
                         self.pos.side_to_move,
                         prev_piece as usize,
                         prev.to(),
+                        prev.is_drop(),
                         curr_piece as usize,
                         mv.to(),
+                        mv.is_drop(),
                     );
+                    let cont_score = heur.continuation.get(cont_key);
                     key += (cont_score as i64) * (continuation_weight as i64);
                 }
             }
@@ -773,14 +776,16 @@ mod tests {
         let alternative = quiet_moves[2];
 
         let mut heur = Heuristics::default();
-        heur.continuation.update_good(
+        let key = crate::search::history::ContinuationKey::new(
             Color::Black,
             prev.piece_type().unwrap() as usize,
             prev.to(),
+            prev.is_drop(),
             preferred.piece_type().unwrap() as usize,
             preferred.to(),
-            5,
+            preferred.is_drop(),
         );
+        heur.continuation.update_good(key, 5);
 
         let mut picker = MovePicker::new_normal(&pos, None, None, [None, None], None, Some(prev));
         let first = picker.next(&heur).unwrap();

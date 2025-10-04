@@ -363,14 +363,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if let (Some(prev_piece), Some(curr_piece)) =
                                 (prev_mv.piece_type(), mv.piece_type())
                             {
-                                heur.continuation.update_good(
+                                let key = crate::search::history::ContinuationKey::new(
                                     pos.side_to_move,
                                     prev_piece as usize,
                                     prev_mv.to(),
+                                    prev_mv.is_drop(),
                                     curr_piece as usize,
                                     mv.to(),
-                                    depth,
+                                    mv.is_drop(),
                                 );
+                                heur.continuation.update_good(key, depth);
                             }
                         }
                     }
@@ -455,14 +457,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if let (Some(prev_piece), Some(curr_piece)) =
                                 (prev_mv.piece_type(), qmv.piece_type())
                             {
-                                heur.continuation.update_bad(
+                                let key = crate::search::history::ContinuationKey::new(
                                     pos.side_to_move,
                                     prev_piece as usize,
                                     prev_mv.to(),
+                                    prev_mv.is_drop(),
                                     curr_piece as usize,
                                     qmv.to(),
-                                    depth,
+                                    qmv.is_drop(),
                                 );
+                                heur.continuation.update_bad(key, depth);
                             }
                         }
                     }
