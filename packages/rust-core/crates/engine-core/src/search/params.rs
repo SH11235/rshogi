@@ -36,7 +36,7 @@ pub const NMP_HAND_SUM_DISABLE: i32 = 6; // disable when hand pieces sum >= this
 pub const QS_MARGIN_CAPTURE: i32 = 150; // cp, delta pruning margin for captures
 pub const QS_PROMOTE_BONUS: i32 = 50; // cp, small promote bonus in delta estimate
 pub const QS_MAX_QUIET_CHECKS: usize = 4; // cap quiet-check searches to bound qsearch
-pub const QS_BAD_CAPTURE_MIN: i32 = 500; // cp, SEE<0 captures below this are pruned unless checking
+pub const QS_BAD_CAPTURE_MIN: i32 = 450; // cp, SEE<0 captures below this are pruned unless checking
 pub const QS_CHECK_PRUNE_MARGIN: i32 = 150; // cp, require stand_pat improvement before exploring quiet check
 
 // Move ordering weights (exported for tuning)
@@ -79,6 +79,9 @@ static RUNTIME_ROOT_TT_BONUS: AtomicI32 = AtomicI32::new(ROOT_TT_BONUS);
 static RUNTIME_ROOT_PREV_SCORE_SCALE: AtomicI32 = AtomicI32::new(ROOT_PREV_SCORE_SCALE);
 static RUNTIME_ROOT_MULTIPV_1: AtomicI32 = AtomicI32::new(ROOT_MULTIPV_BONUS_1);
 static RUNTIME_ROOT_MULTIPV_2: AtomicI32 = AtomicI32::new(ROOT_MULTIPV_BONUS_2);
+static RUNTIME_QS_MARGIN_CAPTURE: AtomicI32 = AtomicI32::new(QS_MARGIN_CAPTURE);
+static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN);
+static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -141,6 +144,21 @@ pub fn static_beta_enabled() -> bool {
 #[inline]
 pub fn qs_checks_enabled() -> bool {
     RUNTIME_QS_CHECKS.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn qs_margin_capture() -> i32 {
+    RUNTIME_QS_MARGIN_CAPTURE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn qs_bad_capture_min() -> i32 {
+    RUNTIME_QS_BAD_CAPTURE_MIN.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn qs_check_prune_margin() -> i32 {
+    RUNTIME_QS_CHECK_PRUNE_MARGIN.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -243,6 +261,21 @@ pub fn set_static_beta_enabled(b: bool) {
 }
 pub fn set_qs_checks_enabled(b: bool) {
     RUNTIME_QS_CHECKS.store(b, Ordering::Relaxed);
+}
+
+pub fn set_qs_margin_capture(v: i32) {
+    let clamped = v.clamp(0, 5000);
+    RUNTIME_QS_MARGIN_CAPTURE.store(clamped, Ordering::Relaxed);
+}
+
+pub fn set_qs_bad_capture_min(v: i32) {
+    let clamped = v.clamp(0, 5000);
+    RUNTIME_QS_BAD_CAPTURE_MIN.store(clamped, Ordering::Relaxed);
+}
+
+pub fn set_qs_check_prune_margin(v: i32) {
+    let clamped = v.clamp(0, 5000);
+    RUNTIME_QS_CHECK_PRUNE_MARGIN.store(clamped, Ordering::Relaxed);
 }
 
 pub fn set_quiet_history_weight(v: i32) {

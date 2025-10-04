@@ -12,6 +12,9 @@ use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, 
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::search::types::NodeType;
 
+#[cfg(feature = "diagnostics")]
+use super::qsearch::record_qnodes_peak;
+
 pub(crate) struct SearchContext<'a> {
     pub(crate) limits: &'a SearchLimits,
     pub(crate) start_time: &'a std::time::Instant,
@@ -33,6 +36,13 @@ impl<'a> SearchContext<'a> {
     #[inline]
     pub(crate) fn register_qnode(&mut self) -> bool {
         *self.qnodes += 1;
+        #[cfg(feature = "diagnostics")]
+        record_qnodes_peak(*self.qnodes, self.qnodes_limit);
+        *self.qnodes >= self.qnodes_limit
+    }
+
+    #[inline]
+    pub(crate) fn qnodes_limit_reached(&self) -> bool {
         *self.qnodes >= self.qnodes_limit
     }
 

@@ -12,6 +12,9 @@ use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
 use crate::search::{SearchLimits, SearchStack};
 use crate::shogi::{Color, Move, Piece, PieceType};
+use crate::time_management::{
+    self, mock_advance_time, mock_set_time, GamePhase, TimeControl, TimeLimits, TimeManager,
+};
 use crate::usi::{parse_usi_move, parse_usi_square};
 use crate::Position;
 use smallvec::SmallVec;
@@ -208,6 +211,221 @@ fn qsearch_skips_quiet_checks_when_disabled() {
     while let Some(mv) = picker.next(&heur) {
         assert!(mv.is_capture_hint() || !pos.gives_check(mv));
     }
+}
+
+#[test]
+fn qsearch_respects_qnodes_limit() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator);
+    let pos = Position::startpos();
+    let limit_value = 8_u64;
+    let limits = SearchLimitsBuilder::default().qnodes_limit(limit_value).build();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit: limit_value,
+    };
+
+    let _ = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0);
+
+    assert!(
+        qnodes <= limit_value,
+        "qsearch should respect qnodes limit ({} > {})",
+        qnodes,
+        limit_value
+    );
+}
+
+#[test]
+fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator);
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+    let limits = SearchLimitsBuilder::default().qnodes_limit(1).build();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit: 1,
+    };
+
+    let alpha = -1000;
+    let beta = 1000;
+    let _score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0);
+
+    assert!(
+        nodes > 1,
+        "qsearch should recurse into at least one evasion before honoring qnode limit"
+    );
+    assert!(qnodes <= 1, "qnodes counter must respect configured limit");
+}
+
+#[test]
+fn compute_qnodes_limit_scales_with_remaining_time() {
+    mock_set_time(0);
+
+    let mut time_limits = TimeLimits::default();
+    time_limits.time_control = TimeControl::FixedTime { ms_per_move: 5_000 };
+    let tm = Arc::new(TimeManager::new(&time_limits, Color::Black, 0, GamePhase::Opening));
+
+    let mut limits = SearchLimitsBuilder::default()
+        .time_control(TimeControl::FixedTime { ms_per_move: 5_000 })
+        .start_time(time_management::mock_now())
+        .build();
+    limits.time_manager = Some(tm.clone());
+
+    let initial = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 4, 1);
+    assert!(
+        initial <= 50_000 && initial > crate::search::constants::MIN_QNODES_LIMIT,
+        "initial qnodes limit should scale with soft budget (got {initial})",
+        initial = initial
+    );
+
+    mock_advance_time(4_000);
+    let reduced = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 4, 1);
+    assert!(
+        reduced < initial,
+        "qnodes limit should shrink as remaining time decreases (initial={initial}, reduced={reduced})"
+    );
+    assert!(
+        reduced >= crate::search::constants::MIN_QNODES_LIMIT,
+        "qnodes limit should not fall below safety floor"
+    );
+
+    mock_set_time(0);
+}
+
+#[test]
+fn qsearch_detects_mate_with_min_qnodes_budget() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator);
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("9h").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("8i").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("8h").unwrap(), Piece::new(PieceType::Silver, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("8g").unwrap(), Piece::new(PieceType::Silver, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("7h").unwrap(), Piece::new(PieceType::Gold, Color::White));
+
+    let limits = SearchLimitsBuilder::default().qnodes_limit(1).build();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let qnodes_limit = 1;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit,
+    };
+
+    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0);
+
+    assert_eq!(score, mate_score(0, false));
+}
+
+#[test]
+fn qsearch_returns_stand_pat_when_limit_exhausted() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator.clone());
+    let pos = Position::startpos();
+    let limits = SearchLimitsBuilder::default().qnodes_limit(1).build();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit: 1,
+    };
+
+    let material = MaterialEvaluator;
+    let stand_pat = material.evaluate(&pos);
+    let alpha = stand_pat - 200;
+    let beta = stand_pat + 200;
+    let score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0);
+
+    assert_eq!(score, stand_pat.max(alpha));
+    assert_eq!(qnodes, 1);
+}
+
+#[test]
+fn qsearch_prunes_negative_see_small_capture() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator.clone());
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+    let capture = parse_usi_move("5g5f").unwrap();
+    assert!(pos.see(capture) < 0, "expected negative SEE for the capture scenario");
+
+    let limits = SearchLimits::default();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit: crate::search::constants::DEFAULT_QNODES_LIMIT,
+    };
+
+    let material = MaterialEvaluator;
+    let stand_pat = material.evaluate(&pos);
+    let score = backend.qsearch(&pos, stand_pat - 200, stand_pat + 200, &mut ctx, 0);
+
+    assert_eq!(score, stand_pat);
+    assert_eq!(qnodes, 1, "negative SEE small capture should be pruned without expanding");
 }
 
 #[test]

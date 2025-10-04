@@ -76,6 +76,9 @@ pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
 /// This prevents explosion in complex positions with many captures.
 /// Can be overridden with SearchLimits::builder().qnodes_limit()
 pub const DEFAULT_QNODES_LIMIT: u64 = 300_000;
+pub const MIN_QNODES_LIMIT: u64 = 10_000;
+pub const QNODES_PER_MS: u64 = 10;
+pub const QNODES_DEPTH_BONUS_PCT: u64 = 5;
 
 /// Near-deadline window (ms) used by lightweight time polling to increase
 /// responsiveness as we approach either the hard limit or a scheduled
