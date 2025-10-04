@@ -46,7 +46,7 @@ fn log_and_emit_final_selection(
         stop_meta.soft_ms,
         stop_meta.hard_ms
     ));
-    emit_bestmove_once(state, final_move.to_string(), ponder);
+    let _ = emit_bestmove_once(state, final_move.to_string(), ponder);
 }
 
 fn prepare_stop_meta(
@@ -140,6 +140,7 @@ fn sanitize_ponder_for_bestmove(final_usi: &str, ponder: Option<String>) -> Opti
 /// Returns true when the move was emitted in this call. If the bestmove was
 /// already sent earlier, the function leaves the state untouched and returns
 /// false so callers can decide whetherフェールセーフを走らせるか判断できる。
+#[must_use]
 pub fn emit_bestmove_once<S: Into<String>>(
     state: &mut EngineState,
     final_move: S,
@@ -194,7 +195,7 @@ fn compute_tt_probe_budget_ms(stop_info: Option<&StopInfo>, snapshot_elapsed_ms:
     }
 
     let remain = limit - elapsed;
-    if remain == 0 {
+    if remain <= 1 {
         return 0;
     }
 
@@ -219,6 +220,7 @@ fn try_lock_engine_with_budget<'a>(
     }
     let deadline = start + Duration::from_millis(budget_ms);
     while Instant::now() < deadline {
+        std::thread::yield_now();
         std::thread::sleep(Duration::from_micros(TT_LOCK_BACKOFF_US));
         if let Ok(guard) = engine.try_lock() {
             let elapsed = start.elapsed();
@@ -781,7 +783,7 @@ pub fn finalize_and_send_fast(
 
     if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us, dbg)) = fallback_emit {
         info_string(format!(
-            "{}_fast_tt_probe sid={} root_key={} tt_probe=1 tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
+            "{}_fast_tt_probe sid={} root_key={} tt_probe=1 tt_probe_src=tt tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,
@@ -929,12 +931,12 @@ mod tests {
         assert_eq!(compute_tt_probe_budget_ms(Some(&si), 0), 2);
         // Snapshot elapsed overrides StopInfo elapsed when provided
         assert_eq!(compute_tt_probe_budget_ms(Some(&si), 1_995), 1);
-        // Remaining time less than 10ms still yields minimum 1ms budget
+        // Remaining時間が 2ms 未満ならロックを諦める
         let si_close = StopInfo {
             elapsed_ms: 1_999,
             ..si
         };
-        assert_eq!(compute_tt_probe_budget_ms(Some(&si_close), 0), 1);
+        assert_eq!(compute_tt_probe_budget_ms(Some(&si_close), 0), 0);
         // Missing StopInfo yields zero budget
         assert_eq!(compute_tt_probe_budget_ms(None, 0), 0);
     }

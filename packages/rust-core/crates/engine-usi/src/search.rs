@@ -307,7 +307,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.position.ply,
                     fmt_hash(state.position.zobrist_hash())
                 ));
-                emit_bestmove_once(state, String::from("resign"), None);
+                let _ = emit_bestmove_once(state, String::from("resign"), None);
                 return Ok(());
             } else if slice.len() == 1 {
                 let mv_usi = move_to_usi(&slice[0]);
@@ -317,7 +317,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
                     fmt_hash(state.position.zobrist_hash()),
                     mv_usi
                 ));
-                emit_bestmove_once(state, mv_usi, None);
+                let _ = emit_bestmove_once(state, mv_usi, None);
                 return Ok(());
             }
         }
@@ -507,7 +507,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                             .best_move
                             .map(|mv| move_to_usi(&mv))
                             .unwrap_or_else(|| "resign".to_string());
-                        emit_bestmove_once(state, fallback, None);
+                        let _ = emit_bestmove_once(state, fallback, None);
                     }
                     state.current_time_control = None;
                     state.current_root_hash = None;
@@ -552,11 +552,11 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 match bestmove {
                     Some(mv) => {
                         info_string(format!("fallback_bestmove move={mv} source=tt_or_legal"));
-                        emit_bestmove_once(state, mv, None);
+                        let _ = emit_bestmove_once(state, mv, None);
                     }
                     None => {
                         info_string("fallback_bestmove move=resign source=no_legal_moves");
-                        emit_bestmove_once(state, String::from("resign"), None);
+                        let _ = emit_bestmove_once(state, String::from("resign"), None);
                     }
                 }
 

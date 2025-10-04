@@ -82,7 +82,7 @@ pub fn handle_stop(state: &mut EngineState) {
                                 .best_move
                                 .map(|mv| move_to_usi(&mv))
                                 .unwrap_or_else(|| "resign".to_string());
-                            emit_bestmove_once(state, fallback, None);
+                            let _ = emit_bestmove_once(state, fallback, None);
                         }
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
@@ -168,7 +168,7 @@ pub fn handle_stop(state: &mut EngineState) {
                             .best_move
                             .map(|mv| move_to_usi(&mv))
                             .unwrap_or_else(|| "resign".to_string());
-                        emit_bestmove_once(state, fallback, None);
+                        let _ = emit_bestmove_once(state, fallback, None);
                     }
                     state.current_is_ponder = false;
                     state.current_root_hash = None;
@@ -298,7 +298,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                                     .best_move
                                     .map(|mv| move_to_usi(&mv))
                                     .unwrap_or_else(|| "resign".to_string());
-                                emit_bestmove_once(state, fallback, None);
+                                let _ = emit_bestmove_once(state, fallback, None);
                             }
                             state.current_is_ponder = false;
                             state.current_root_hash = None;
@@ -342,7 +342,7 @@ pub fn handle_gameover(state: &mut EngineState) {
                                 .best_move
                                 .map(|mv| move_to_usi(&mv))
                                 .unwrap_or_else(|| "resign".to_string());
-                            emit_bestmove_once(state, fallback, None);
+                            let _ = emit_bestmove_once(state, fallback, None);
                         }
                         state.current_is_ponder = false;
                         state.current_root_hash = None;
