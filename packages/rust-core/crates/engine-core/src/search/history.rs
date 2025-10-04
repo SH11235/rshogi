@@ -12,15 +12,6 @@ use crate::shogi::piece_constants::NUM_HAND_PIECE_TYPES;
 use crate::shogi::SHOGI_BOARD_SIZE;
 use crate::{shogi::Move, Color, PieceType, Square};
 
-#[cfg(not(debug_assertions))]
-#[cold]
-fn log_invalid_drop(mv: Move) {
-    log::warn!(
-        "CounterMoveHistory: drop move lacks hand index, ignoring (mv={mv}, raw=0x{:08x})",
-        mv.to_u32()
-    );
-}
-
 /// Counter move history - tracks which moves work well after specific moves
 const COUNTER_DROP_DIM: usize = NUM_HAND_PIECE_TYPES;
 const COUNTER_FROM_DIM: usize = SHOGI_BOARD_SIZE + COUNTER_DROP_DIM;
@@ -53,7 +44,7 @@ impl CounterMoveHistory {
     #[inline]
     pub fn get(&self, color: Color, prev_move: Move) -> Option<Move> {
         let from_idx = if prev_move.is_drop() {
-            drop_from_index(prev_move)?
+            drop_from_index(prev_move)
         } else {
             prev_move.from().unwrap().index()
         };
@@ -65,10 +56,7 @@ impl CounterMoveHistory {
     #[inline]
     pub fn update(&mut self, color: Color, prev_move: Move, counter_move: Move) {
         let from_idx = if prev_move.is_drop() {
-            let Some(idx) = drop_from_index(prev_move) else {
-                return;
-            };
-            idx
+            drop_from_index(prev_move)
         } else {
             prev_move.from().unwrap().index()
         };
@@ -83,22 +71,12 @@ impl CounterMoveHistory {
 }
 
 #[inline]
-fn drop_from_index(mv: Move) -> Option<usize> {
+fn drop_from_index(mv: Move) -> usize {
     debug_assert!(mv.is_drop(), "drop_from_index called with non-drop move");
     mv.drop_piece_type()
         .hand_index()
         .map(|hand_idx| COUNTER_DROP_BASE + hand_idx)
-        .or_else(|| {
-            #[cfg(debug_assertions)]
-            {
-                panic!("CounterMoveHistory: drop piece must have hand index (mv={mv})");
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                log_invalid_drop(mv);
-                None
-            }
-        })
+        .unwrap_or_else(|| panic!("CounterMoveHistory: drop piece must have hand index (mv={mv})"))
 }
 
 /// Butterfly history - tracks move success by from-to squares
@@ -111,6 +89,10 @@ pub struct ButterflyHistory {
 const BUTTERFLY_FROM_DIM: usize = SHOGI_BOARD_SIZE + 1;
 /// Shared "drop-from" slot for all piece types (non-overlapping with board squares).
 const BUTTERFLY_DROP_INDEX: usize = SHOGI_BOARD_SIZE;
+const _: () = {
+    // Ensure drop slot remains disjoint from board squares.
+    assert!(BUTTERFLY_DROP_INDEX == SHOGI_BOARD_SIZE);
+};
 
 impl Default for ButterflyHistory {
     fn default() -> Self {
