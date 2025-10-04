@@ -257,7 +257,7 @@ impl Engine {
         match self.engine_type {
             EngineType::Material | EngineType::Enhanced => {
                 let profile = search_profile_for_engine_type(self.engine_type);
-                Some(Arc::new(ClassicBackend::with_profile_and_tt(
+                Some(Arc::new(ClassicBackend::with_profile_and_tt_apply_defaults(
                     Arc::clone(&self.material_evaluator),
                     Arc::clone(&self.shared_tt),
                     profile,
@@ -270,7 +270,7 @@ impl Engine {
                     locals: thread_local::ThreadLocal::new(),
                 });
                 let profile = search_profile_for_engine_type(self.engine_type);
-                Some(Arc::new(ClassicBackend::with_profile_and_tt(
+                Some(Arc::new(ClassicBackend::with_profile_and_tt_apply_defaults(
                     proxy,
                     Arc::clone(&self.shared_tt),
                     profile,

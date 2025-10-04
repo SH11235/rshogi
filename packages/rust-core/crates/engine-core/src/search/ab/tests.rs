@@ -429,6 +429,43 @@ fn qsearch_prunes_negative_see_small_capture() {
 }
 
 #[test]
+fn qsearch_depth_cap_still_handles_in_check() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator);
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("9h").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("8i").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("8h").unwrap(), Piece::new(PieceType::Silver, Color::White));
+
+    let limits = SearchLimits::default();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit: crate::search::constants::DEFAULT_QNODES_LIMIT,
+    };
+
+    let max_ply = crate::search::constants::MAX_QUIESCE_DEPTH as u32;
+    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, max_ply);
+
+    assert_eq!(score, mate_score(max_ply as u8, false));
+}
+
+#[test]
 fn root_rank_map_distinguishes_promotion_pairs() {
     let mut pos = Position::empty();
     pos.side_to_move = Color::Black;

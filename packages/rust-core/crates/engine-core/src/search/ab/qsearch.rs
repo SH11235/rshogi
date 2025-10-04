@@ -81,9 +81,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         ctx: &mut SearchContext,
         ply: u32,
     ) -> i32 {
-        if (ply as u16) >= crate::search::constants::MAX_QUIESCE_DEPTH {
-            return alpha;
-        }
         ctx.tick(ply);
 
         static HEUR_STUB: OnceLock<Heuristics> = OnceLock::new();
@@ -133,6 +130,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         let stand_pat = self.evaluator.evaluate(pos);
+
+        if (ply as u16) >= crate::search::constants::MAX_QUIESCE_DEPTH {
+            return stand_pat.max(alpha);
+        }
 
         #[cfg(feature = "diagnostics")]
         {
