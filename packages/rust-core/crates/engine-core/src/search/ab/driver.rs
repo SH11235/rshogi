@@ -18,6 +18,8 @@ use smallvec::SmallVec;
 use super::ordering::{self, Heuristics};
 use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
+#[cfg(feature = "diagnostics")]
+use super::qsearch::reset_qsearch_diagnostics;
 use crate::search::tt::TTProbe;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +222,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         self.evaluator.on_set_position(root);
 
+        #[cfg(feature = "diagnostics")]
+        reset_qsearch_diagnostics();
+
         let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
@@ -386,6 +391,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut lmr_counter: u64 = 0;
                 let mut root_tt_hint_exists: u64 = 0;
                 let mut root_tt_hint_used: u64 = 0;
+                let mut qnodes: u64 = 0;
+                let qnodes_limit =
+                    limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
 
                 // 作業用root move配列（excludedを除外）
                 let excluded_keys: SmallVec<[u32; 32]> =
@@ -476,6 +484,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     start_time: &t0,
                                     nodes: &mut nodes,
                                     seldepth: &mut seldepth,
+                                    qnodes: &mut qnodes,
+                                    qnodes_limit,
                                 };
                                 let (sc, _) = self.alphabeta(
                                     pvs::ABArgs {
@@ -500,6 +510,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     start_time: &t0,
                                     nodes: &mut nodes,
                                     seldepth: &mut seldepth,
+                                    qnodes: &mut qnodes,
+                                    qnodes_limit,
                                 };
                                 let (sc_nw, _) = self.alphabeta(
                                     pvs::ABArgs {
@@ -524,6 +536,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         start_time: &t0,
                                         nodes: &mut nodes,
                                         seldepth: &mut seldepth,
+                                        qnodes: &mut qnodes,
+                                        qnodes_limit,
                                     };
                                     let (sc_fw, _) = self.alphabeta(
                                         pvs::ABArgs {

@@ -70,11 +70,16 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             let mv = if !first_used {
                 first
             } else {
+                let mut qnodes = 0_u64;
+                let qnodes_limit =
+                    limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
                 let mut ctx = SearchContext {
                     limits,
                     start_time: &t0,
                     nodes,
                     seldepth: &mut seldepth_dummy,
+                    qnodes: &mut qnodes,
+                    qnodes_limit,
                 };
                 let (_sc, mv_opt) = self.alphabeta(
                     ABArgs {

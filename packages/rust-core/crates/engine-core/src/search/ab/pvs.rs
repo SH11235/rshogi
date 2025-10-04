@@ -17,6 +17,8 @@ pub(crate) struct SearchContext<'a> {
     pub(crate) start_time: &'a std::time::Instant,
     pub(crate) nodes: &'a mut u64,
     pub(crate) seldepth: &'a mut u32,
+    pub(crate) qnodes: &'a mut u64,
+    pub(crate) qnodes_limit: u64,
 }
 
 impl<'a> SearchContext<'a> {
@@ -26,6 +28,12 @@ impl<'a> SearchContext<'a> {
         if ply > *self.seldepth {
             *self.seldepth = ply;
         }
+    }
+
+    #[inline]
+    pub(crate) fn register_qnode(&mut self) -> bool {
+        *self.qnodes += 1;
+        *self.qnodes >= self.qnodes_limit
     }
 
     #[inline]
@@ -63,6 +71,23 @@ impl<'a> SearchContext<'a> {
         }
 
         time_limit_expired()
+    }
+
+    #[inline]
+    pub(crate) fn time_up_fast(&self) -> bool {
+        if let Some(tm) = self.limits.time_manager.as_ref() {
+            if tm.should_stop(*self.nodes) {
+                return true;
+            }
+        }
+
+        if let Some(limit) = self.limits.time_limit() {
+            if self.start_time.elapsed() >= limit {
+                return true;
+            }
+        }
+
+        false
     }
 }
 

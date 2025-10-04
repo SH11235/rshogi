@@ -75,7 +75,7 @@ pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
 /// Default quiescence search node limit (1 million nodes)
 /// This prevents explosion in complex positions with many captures.
 /// Can be overridden with SearchLimits::builder().qnodes_limit()
-pub const DEFAULT_QNODES_LIMIT: u64 = 1_000_000;
+pub const DEFAULT_QNODES_LIMIT: u64 = 300_000;
 
 /// Near-deadline window (ms) used by lightweight time polling to increase
 /// responsiveness as we approach either the hard limit or a scheduled
