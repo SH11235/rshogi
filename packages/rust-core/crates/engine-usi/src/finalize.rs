@@ -482,8 +482,12 @@ pub fn finalize_and_send(
                     eng.tt_debug_info()
                 };
                 info_string(format!(
-                    "tt_debug addr={:#x} size_mb={} hf_permille={} store_attempts={}",
-                    dbg.addr, dbg.size_mb, dbg.hf_permille, dbg.store_attempts
+                    "tt_debug addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={}",
+                    dbg.addr,
+                    dbg.size_mb,
+                    dbg.hf_permille,
+                    dbg.hf_physical_permille,
+                    dbg.store_attempts
                 ));
             }
 
@@ -770,13 +774,14 @@ pub fn finalize_and_send_fast(
         };
         drop(eng_guard);
         info_string(format!(
-            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf_permille={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
+            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,
             dbg.addr,
             dbg.size_mb,
             dbg.hf_permille,
+            dbg.hf_physical_permille,
             dbg.store_attempts,
             fallback_budget_ms,
             spent_ms,
@@ -798,13 +803,14 @@ pub fn finalize_and_send_fast(
             spent_us
         ));
         info_string(format!(
-            "{}_fast_tt_meta sid={} root_key={} addr={:#x} size_mb={} hf_permille={} store_attempts={}",
+            "{}_fast_tt_meta sid={} root_key={} addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,
             dbg.addr,
             dbg.size_mb,
             dbg.hf_permille,
+            dbg.hf_physical_permille,
             dbg.store_attempts
         ));
         log_and_emit_final_selection(state, label, final_source, &final_usi, ponder_mv, &stop_meta);

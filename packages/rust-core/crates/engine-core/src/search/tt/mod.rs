@@ -107,6 +107,9 @@ pub struct TranspositionTable {
     empty_slot_mode_last_hf: AtomicU16,
 }
 
+// Report `key == 0` へのストアは設計上あり得ないため、一度でも発生したらログに流して即座に切り分けできるようにする。
+static ZERO_KEY_LOG_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl TranspositionTable {
     /// Create new transposition table with given size in MB (backward compatible)
     pub fn new(size_mb: usize) -> Self {
@@ -349,7 +352,29 @@ impl TranspositionTable {
             }
         }
 
-        let hf = (occupied_count * 1000) / sample_size;
+        let mut hf = if sample_size > 0 {
+            (occupied_count * 1000) / sample_size
+        } else {
+            0
+        };
+
+        if hf == 0 {
+            let store_attempts = self.store_attempts.load(Ordering::Relaxed);
+            if self.num_buckets > 0 {
+                let approx = (store_attempts.min(self.num_buckets as u64) * 1000)
+                    / (self.num_buckets as u64);
+                hf = hf.max(approx as usize);
+            }
+
+            if hf == 0 {
+                hf = self.hashfull_physical_permille() as usize;
+            }
+
+            if hf == 0 && store_attempts > 0 {
+                hf = 1;
+            }
+        }
+
         self.hashfull_estimate.store(hf as u16, Ordering::Relaxed);
     }
 
@@ -555,6 +580,19 @@ impl TranspositionTable {
     #[inline]
     pub fn hashfull_permille(&self) -> u16 {
         self.hashfull_estimate()
+    }
+
+    /// Compute physical occupancy by scanning the bitmap
+    pub fn hashfull_physical_permille(&self) -> u16 {
+        let mut occupied_bits: u64 = 0;
+        for byte in &self.occupied_bitmap {
+            occupied_bits += byte.load(Ordering::Relaxed).count_ones() as u64;
+        }
+        if self.num_buckets == 0 {
+            return 0;
+        }
+        let permille = (occupied_bits * 1000).div_ceil(self.num_buckets as u64);
+        permille.min(1000) as u16
     }
 
     /// Get size in bytes
@@ -830,6 +868,21 @@ impl TranspositionTable {
     fn store_entry(&self, mut params: TTEntryParams) {
         // Lightweight diagnostics: count store attempts even if filtered
         self.store_attempts.fetch_add(1, Ordering::Relaxed);
+        if params.key == 0 {
+            if ZERO_KEY_LOG_ONCE
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                log::warn!(
+                    "info string tt_store_key_zero side={:?} depth={} node_type={:?} is_pv={}",
+                    params.side_to_move,
+                    params.depth,
+                    params.node_type,
+                    params.is_pv
+                );
+            }
+            return;
+        }
         #[cfg(not(feature = "tt_metrics"))]
         let _metrics: Option<&()> = None;
         // Debug assertions to validate input values

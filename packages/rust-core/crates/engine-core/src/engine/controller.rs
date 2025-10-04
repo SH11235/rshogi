@@ -56,6 +56,7 @@ pub struct TtDebugInfo {
     pub addr: usize,
     pub size_mb: usize,
     pub hf_permille: u16,
+    pub hf_physical_permille: u16,
     pub store_attempts: u64,
 }
 /// Engine type selection
@@ -404,7 +405,14 @@ impl Engine {
         }
 
         let stop_flag_ref = limits.stop_flag.as_ref();
+        let info_string_cb = limits.info_string_callback.clone();
+        if let Some(cb) = &info_string_cb {
+            cb(&format!("session_publish stop_ctrl sid={}", session_id));
+        }
         self._stop_ctrl.publish_session(stop_flag_ref, session_id);
+        if let Some(cb) = &info_string_cb {
+            cb(&format!("session_publish stop_bridge sid={}", session_id));
+        }
         self.stop_bridge.publish_session(stop_flag_ref, session_id);
 
         self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
@@ -414,7 +422,7 @@ impl Engine {
             Arc::clone(self.backend.as_ref().expect("backend must be initialized after rebuild"));
 
         let legacy_info = limits.info_callback.clone();
-        let legacy_info_string = limits.info_string_callback.clone();
+        let legacy_info_string = info_string_cb.clone();
         let stop_ctrl = self._stop_ctrl.clone();
         let root_hash = pos.zobrist_hash();
         let sid = session_id;
@@ -576,11 +584,13 @@ impl Engine {
         let addr = StdArc::as_ptr(&self.shared_tt) as usize;
         let size_mb = self.shared_tt.size();
         let hf = self.shared_tt.hashfull();
+        let hf_phys = self.shared_tt.hashfull_physical_permille();
         let attempts = self.shared_tt.store_attempts();
         TtDebugInfo {
             addr,
             size_mb,
             hf_permille: hf,
+            hf_physical_permille: hf_phys,
             store_attempts: attempts,
         }
     }

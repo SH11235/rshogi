@@ -259,6 +259,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         for d in 1..=max_depth {
             if let Some(cb) = limits.info_string_callback.as_ref() {
                 cb(&format!("iter_start depth={} nodes={}", d, nodes));
+                if let Some(tt) = &self.tt {
+                    cb(&format!(
+                        "tt_snapshot depth={} hf={} hf_phys={} attempts={}",
+                        d,
+                        tt.hashfull_permille(),
+                        tt.hashfull_physical_permille(),
+                        tt.store_attempts()
+                    ));
+                }
             }
             if let Some(hit) =
                 Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
