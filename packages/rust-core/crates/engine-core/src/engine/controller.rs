@@ -368,8 +368,6 @@ impl Engine {
         self.stop_bridge.prime_stop_info(base_stop_info.clone());
 
         limits.session_id = session_id;
-        self._stop_ctrl.publish_session(limits.stop_flag.as_ref(), session_id);
-
         self.apply_pending_thread_count();
         self.apply_pending_tt_size();
 
@@ -384,6 +382,10 @@ impl Engine {
         if limits.stop_flag.is_none() {
             limits.stop_flag = Some(Arc::new(AtomicBool::new(false)));
         }
+
+        let stop_flag_ref = limits.stop_flag.as_ref();
+        self._stop_ctrl.publish_session(stop_flag_ref, session_id);
+        self.stop_bridge.publish_session(stop_flag_ref, session_id);
 
         self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
         self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
