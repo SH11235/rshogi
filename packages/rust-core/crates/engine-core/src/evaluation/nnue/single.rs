@@ -100,20 +100,4 @@ impl SingleChannelNet {
         let feats = extract_features(pos, ksq, stm);
         self.infer_with_active_indices(feats.as_slice(), stm)
     }
-
-    /// Accumulator からの推論（差分更新用）。ReLU 済みの acc を仮定。
-    #[deprecated(note = "Use evaluate_from_accumulator_pre for SINGLE diff path")]
-    #[inline]
-    pub fn evaluate_from_accumulator(&self, acc: &[f32]) -> i32 {
-        let d = self.acc_dim;
-        debug_assert_eq!(acc.len(), d);
-
-        // Output
-        let mut cp = self.b2;
-        for (w, a) in self.w2[..d].iter().zip(acc[..d].iter()) {
-            cp += (*w) * (*a);
-        }
-        let cp = cp.clamp(-32000.0, 32000.0);
-        cp as i32
-    }
 }
