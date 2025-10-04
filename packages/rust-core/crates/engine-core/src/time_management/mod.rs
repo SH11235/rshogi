@@ -211,10 +211,22 @@ impl TimeManager {
                 let margin = Self::min_soft_margin(hard_ms);
                 if margin > 0 && soft_ms.saturating_add(margin) > hard_ms {
                     if enforced_min_think {
-                        let new_hard = soft_ms.saturating_add(margin);
-                        if new_hard != hard_ms {
-                            hard_ms = new_hard;
-                            budget_clamped = true;
+                        if matches!(&limits.time_control, TimeControl::FixedTime { .. }) {
+                            let clamp = margin.max(1);
+                            let mut new_soft = hard_ms.saturating_sub(clamp);
+                            if new_soft >= hard_ms {
+                                new_soft = hard_ms.saturating_sub(1);
+                            }
+                            if new_soft != soft_ms {
+                                soft_ms = new_soft;
+                                budget_clamped = true;
+                            }
+                        } else {
+                            let new_hard = soft_ms.saturating_add(margin);
+                            if new_hard != hard_ms {
+                                hard_ms = new_hard;
+                                budget_clamped = true;
+                            }
                         }
                     } else {
                         let mut new_soft = hard_ms.saturating_sub(margin);

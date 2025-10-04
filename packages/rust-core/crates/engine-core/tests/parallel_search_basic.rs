@@ -6,7 +6,7 @@ use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
     search::{
         parallel::{ParallelSearcher, StopController},
-        SearchLimitsBuilder, ShardedTranspositionTable,
+        SearchLimitsBuilder, TranspositionTable,
     },
     shogi::Position,
 };
@@ -15,7 +15,7 @@ use std::sync::Arc;
 #[test]
 fn parallel_searcher_smoke() {
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let mut searcher = ParallelSearcher::new(evaluator, tt, 2, Arc::new(StopController::new()));
     let mut position = Position::startpos();
 
@@ -29,7 +29,7 @@ fn parallel_searcher_smoke() {
 #[test]
 fn parallel_searcher_adjust_threads_no_panic() {
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(4));
+    let tt = Arc::new(TranspositionTable::new(4));
     let stop_ctrl = Arc::new(StopController::new());
     let mut searcher = ParallelSearcher::new(evaluator, tt, 1, stop_ctrl);
 
