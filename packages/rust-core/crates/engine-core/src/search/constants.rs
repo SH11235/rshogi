@@ -31,10 +31,6 @@ pub const MAX_QPLY: u8 = 32;
 /// This is now a secondary safeguard, increased from 32 to allow deeper main searches
 pub const MAX_QUIESCE_DEPTH: u16 = 96;
 
-/// Quiescence search evaluation penalty for check positions
-/// Applied when in check at depth limit to make evaluation slightly pessimistic
-pub const QUIESCE_CHECK_EVAL_PENALTY: i32 = 50;
-
 /// Aspiration window constants
 ///
 /// These values control the alpha-beta window narrowing optimization:

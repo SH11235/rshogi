@@ -38,9 +38,19 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    #[inline]
+    fn is_byoyomi_active(limits: &SearchLimits) -> bool {
+        matches!(limits.time_control, TimeControl::Byoyomi { .. })
+            || limits
+                .time_manager
+                .as_ref()
+                .is_some_and(|tm| tm.is_in_byoyomi())
+    }
+
     fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
         let mut limit =
             limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
+        let byoyomi_active = Self::is_byoyomi_active(limits);
 
         if let Some(tm) = limits.time_manager.as_ref() {
             let soft = tm.soft_limit_ms();
@@ -60,9 +70,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if tm.is_in_byoyomi() || matches!(limits.time_control, TimeControl::Byoyomi { .. }) {
-                limit /= 2;
-            }
         } else if let Some(duration) = limits.time_limit() {
             let soft_ms = duration.as_millis() as u64;
             if soft_ms > 0 {
@@ -71,23 +78,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if matches!(limits.time_control, TimeControl::Byoyomi { .. })
-            || limits.time_manager.as_ref().is_some_and(|tm| tm.is_in_byoyomi())
-        {
-            let depth_scale = 100
-                + (depth.max(1) as u64)
-                    .saturating_mul(crate::search::constants::QNODES_DEPTH_BONUS_PCT);
-            limit = limit.saturating_mul(depth_scale).saturating_add(99) / 100;
-            limit = limit.min(crate::search::constants::DEFAULT_QNODES_LIMIT);
-        }
-
         if pv_idx > 1 {
             let divisor = (pv_idx as u64).saturating_add(1);
             limit /= divisor;
         }
 
-        limit = limit.max(crate::search::constants::MIN_QNODES_LIMIT);
+        if byoyomi_active {
+            let base = (limit / 2).max(crate::search::constants::MIN_QNODES_LIMIT);
+            let depth_scale = 100
+                + (depth.max(1) as u64)
+                    .saturating_mul(crate::search::constants::QNODES_DEPTH_BONUS_PCT);
+            limit = base.saturating_mul(depth_scale).saturating_add(99) / 100;
+        }
+
         limit
+            .max(crate::search::constants::MIN_QNODES_LIMIT)
+            .min(crate::search::constants::DEFAULT_QNODES_LIMIT)
     }
 
     #[cfg(test)]
