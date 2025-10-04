@@ -17,6 +17,7 @@ pub struct SearchLimits {
     pub nodes: Option<u64>,
     pub qnodes_limit: Option<u64>,
     pub time_parameters: Option<TimeParameters>,
+    pub random_time_ms: Option<u64>,
     /// Session ID for OOB (out-of-band) finalize coordination
     /// This must match the Engine's session_id for proper snapshot reception
     /// Default: 0 (tests and legacy code), should be set by Engine::start_search()
@@ -68,6 +69,7 @@ impl Default for SearchLimits {
             nodes: None,
             qnodes_limit: None,
             time_parameters: None,
+            random_time_ms: None,
             session_id: 0, // Default for tests, should be set by Engine::start_search()
             start_time: Instant::now(),
             panic_time_scale: None,
@@ -146,6 +148,7 @@ pub struct SearchLimitsBuilder {
     nodes: Option<u64>,
     qnodes_limit: Option<u64>,
     time_parameters: Option<TimeParameters>,
+    random_time_ms: Option<u64>,
     session_id: u64,
     start_time: Instant,
     panic_time_scale: Option<f64>,
@@ -171,6 +174,7 @@ impl Default for SearchLimitsBuilder {
             nodes: None,
             qnodes_limit: None,
             time_parameters: None,
+            random_time_ms: None,
             session_id: 0, // Default for tests, should be overridden by Engine
             start_time: Instant::now(),
             panic_time_scale: None,
@@ -319,6 +323,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set random time override (go rtime)
+    pub fn random_time_ms(mut self, ms: u64) -> Self {
+        self.random_time_ms = Some(ms);
+        self
+    }
+
     /// Set stop flag
     pub fn stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.stop_flag = Some(flag);
@@ -429,6 +439,7 @@ impl SearchLimitsBuilder {
             nodes: self.nodes,
             qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
+            random_time_ms: self.random_time_ms,
             session_id: self.session_id,
             start_time: self.start_time,
             panic_time_scale: self.panic_time_scale,
@@ -469,6 +480,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             nodes: tm.nodes,
             qnodes_limit: None,
             time_parameters: tm.time_parameters,
+            random_time_ms: tm.random_time_ms,
             session_id: 0, // Default, should be set by Engine
             start_time: Instant::now(),
             panic_time_scale: None,
@@ -512,6 +524,7 @@ impl From<SearchLimits> for crate::time_management::TimeLimits {
             depth: unified.depth.map(|d| d as u32),
             nodes: unified.nodes,
             time_parameters: unified.time_parameters,
+            random_time_ms: unified.random_time_ms,
         }
     }
 }
@@ -529,6 +542,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("nodes", &self.nodes)
             .field("qnodes_limit", &self.qnodes_limit)
             .field("time_parameters", &self.time_parameters)
+            .field("random_time_ms", &self.random_time_ms)
             .field("session_id", &self.session_id)
             .field("start_time", &self.start_time)
             .field("panic_time_scale", &self.panic_time_scale)

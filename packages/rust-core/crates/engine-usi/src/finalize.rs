@@ -469,7 +469,7 @@ pub fn finalize_and_send(
                     eng.tt_debug_info()
                 };
                 info_string(format!(
-                    "tt_debug addr={:#x} size_mb={} hf={} store_attempts={}",
+                    "tt_debug addr={:#x} size_mb={} hf_permille={} store_attempts={}",
                     dbg.addr, dbg.size_mb, dbg.hf_permille, dbg.store_attempts
                 ));
             }
@@ -751,7 +751,7 @@ pub fn finalize_and_send_fast(
         };
         drop(eng_guard);
         info_string(format!(
-            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
+            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf_permille={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,

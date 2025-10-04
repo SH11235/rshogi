@@ -1162,3 +1162,31 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
     }
     pv
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{TTStoreArgs, TranspositionTable};
+    use crate::search::NodeType;
+    use crate::shogi::Move;
+    use crate::Color;
+
+    #[test]
+    fn tt_store_probe_smoke() {
+        let tt = TranspositionTable::new(4);
+        let key = 0x1234_5678_90AB_CDEF;
+        // Store an EXACT node with moderate depth and ensure immediate probe succeeds.
+        tt.store(TTStoreArgs::new(key, None::<Move>, 42, 18, 12, NodeType::Exact, Color::Black));
+
+        let entry = tt
+            .probe_entry(key, Color::Black)
+            .expect("TT probe should hit freshly stored entry");
+
+        assert!(entry.matches(key), "stored key must round-trip");
+        assert_eq!(entry.node_type(), NodeType::Exact);
+        assert!(
+            entry.depth() >= 12,
+            "stored depth should be preserved (expected >=12, got {})",
+            entry.depth()
+        );
+    }
+}

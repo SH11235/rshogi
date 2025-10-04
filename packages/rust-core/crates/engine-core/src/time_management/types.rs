@@ -45,6 +45,7 @@ pub struct TimeLimits {
     pub depth: Option<u32>,       // Maximum search depth
     pub nodes: Option<u64>,       // Maximum nodes to search
     pub time_parameters: Option<TimeParameters>, // Custom parameters
+    pub random_time_ms: Option<u64>, // go rtime override
 }
 
 impl Default for TimeLimits {
@@ -55,6 +56,7 @@ impl Default for TimeLimits {
             depth: None,
             nodes: None,
             time_parameters: None,
+            random_time_ms: None,
         }
     }
 }
