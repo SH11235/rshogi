@@ -12,10 +12,13 @@ use crate::shogi::SHOGI_BOARD_SIZE;
 use crate::{shogi::Move, Color, PieceType, Square};
 
 /// Counter move history - tracks which moves work well after specific moves
+const COUNTER_FROM_DIM: usize = SHOGI_BOARD_SIZE + 1;
+const COUNTER_DROP_INDEX: usize = SHOGI_BOARD_SIZE;
+
 #[derive(Clone)]
 pub struct CounterMoveHistory {
-    /// [color][from_square][to_square] -> counter move
-    table: [[[Option<Move>; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+    /// [color][from_square_or_drop][to_square] -> counter move
+    table: [[[Option<Move>; SHOGI_BOARD_SIZE]; COUNTER_FROM_DIM]; 2],
 }
 
 impl Default for CounterMoveHistory {
@@ -28,36 +31,35 @@ impl CounterMoveHistory {
     /// Create new counter move history
     pub fn new() -> Self {
         CounterMoveHistory {
-            table: [[[None; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+            table: [[[None; SHOGI_BOARD_SIZE]; COUNTER_FROM_DIM]; 2],
         }
     }
 
     /// Get counter move for previous move
     pub fn get(&self, color: Color, prev_move: Move) -> Option<Move> {
-        if prev_move.is_drop() {
-            // For drops, use a special index (e.g., square 0)
-            self.table[color as usize][0][prev_move.to().index()]
+        let from_idx = if prev_move.is_drop() {
+            COUNTER_DROP_INDEX
         } else {
-            let from = prev_move.from().unwrap();
-            let to = prev_move.to();
-            self.table[color as usize][from.index()][to.index()]
-        }
+            prev_move.from().unwrap().index()
+        };
+        let to = prev_move.to();
+        self.table[color as usize][from_idx][to.index()]
     }
 
     /// Update counter move
     pub fn update(&mut self, color: Color, prev_move: Move, counter_move: Move) {
-        if prev_move.is_drop() {
-            self.table[color as usize][0][prev_move.to().index()] = Some(counter_move);
+        let from_idx = if prev_move.is_drop() {
+            COUNTER_DROP_INDEX
         } else {
-            let from = prev_move.from().unwrap();
-            let to = prev_move.to();
-            self.table[color as usize][from.index()][to.index()] = Some(counter_move);
-        }
+            prev_move.from().unwrap().index()
+        };
+        let to = prev_move.to();
+        self.table[color as usize][from_idx][to.index()] = Some(counter_move);
     }
 
     /// Clear all counter moves
     pub fn clear(&mut self) {
-        self.table = [[[None; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2];
+        self.table = [[[None; SHOGI_BOARD_SIZE]; COUNTER_FROM_DIM]; 2];
     }
 }
 
@@ -139,7 +141,7 @@ impl ButterflyHistory {
 #[derive(Clone)]
 pub struct ContinuationHistory {
     /// [color][piece_moved_2_ply_ago][to_square_2_ply_ago][piece_to_move][to_square] -> score
-    /// Stored as i16 to reduce footprint (≈6.4MB)
+    /// Stored as i16 to reduce footprint（約1.7MB）
     scores: Vec<i16>,
     size: usize,
 }
@@ -525,6 +527,27 @@ mod tests {
         // Update counter move
         history.update(color, prev_move, counter_move);
         assert_eq!(history.get(color, prev_move), Some(counter_move));
+    }
+
+    #[test]
+    fn test_counter_move_drop_isolated_from_board_index_zero() {
+        let mut history = CounterMoveHistory::new();
+        let color = Color::Black;
+
+        let drop_prev = Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
+        let drop_counter =
+            Move::normal(parse_usi_square("5h").unwrap(), parse_usi_square("5g").unwrap(), false);
+
+        let normal_prev =
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false);
+        let normal_counter =
+            Move::normal(parse_usi_square("8a").unwrap(), parse_usi_square("8b").unwrap(), false);
+
+        history.update(color, drop_prev, drop_counter);
+        history.update(color, normal_prev, normal_counter);
+
+        assert_eq!(history.get(color, drop_prev), Some(drop_counter));
+        assert_eq!(history.get(color, normal_prev), Some(normal_counter));
     }
 
     #[test]
