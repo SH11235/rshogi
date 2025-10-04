@@ -41,10 +41,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     #[inline]
     fn is_byoyomi_active(limits: &SearchLimits) -> bool {
         matches!(limits.time_control, TimeControl::Byoyomi { .. })
-            || limits
-                .time_manager
-                .as_ref()
-                .is_some_and(|tm| tm.is_in_byoyomi())
+            || limits.time_manager.as_ref().is_some_and(|tm| tm.is_in_byoyomi())
     }
 
     fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
@@ -69,7 +66,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     limit = limit.min(crate::search::constants::MIN_QNODES_LIMIT);
                 }
             }
-
         } else if let Some(duration) = limits.time_limit() {
             let soft_ms = duration.as_millis() as u64;
             if soft_ms > 0 {
@@ -91,9 +87,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             limit = base.saturating_mul(depth_scale).saturating_add(99) / 100;
         }
 
-        limit
-            .max(crate::search::constants::MIN_QNODES_LIMIT)
-            .min(crate::search::constants::DEFAULT_QNODES_LIMIT)
+        limit.clamp(
+            crate::search::constants::MIN_QNODES_LIMIT,
+            crate::search::constants::DEFAULT_QNODES_LIMIT,
+        )
     }
 
     #[cfg(test)]
