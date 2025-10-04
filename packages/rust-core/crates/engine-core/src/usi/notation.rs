@@ -11,6 +11,7 @@ use std::fmt;
 pub enum UsiParseError {
     InvalidSquare(String),
     InvalidPiece(char),
+    InvalidDropPiece(char),
     InvalidMoveFormat(String),
     InvalidSfen(String),
     InvalidRankCount(usize),
@@ -25,6 +26,9 @@ impl fmt::Display for UsiParseError {
         match self {
             UsiParseError::InvalidSquare(s) => write!(f, "Invalid square notation: {s}"),
             UsiParseError::InvalidPiece(c) => write!(f, "Invalid piece character: {c}"),
+            UsiParseError::InvalidDropPiece(c) => {
+                write!(f, "Invalid drop piece: {c} cannot be dropped")
+            }
             UsiParseError::InvalidMoveFormat(s) => write!(f, "Invalid move format: {s}"),
             UsiParseError::InvalidSfen(s) => write!(f, "Invalid SFEN: {s}"),
             UsiParseError::InvalidRankCount(n) => {
@@ -82,6 +86,9 @@ pub fn parse_usi_move(s: &str) -> Result<Move, UsiParseError> {
         let first_char =
             parts[0].chars().next().ok_or(UsiParseError::InvalidMoveFormat(s.to_string()))?;
         let piece_type = parse_usi_piece_type(first_char)?;
+        if piece_type.hand_index().is_none() {
+            return Err(UsiParseError::InvalidDropPiece(first_char));
+        }
         let to = parse_usi_square(parts[1])?;
 
         return Ok(Move::drop(piece_type, to));
@@ -498,6 +505,9 @@ mod tests {
         assert_eq!(mv.to(), parse_usi_square("5e").unwrap());
         assert!(mv.is_drop());
         assert_eq!(mv.drop_piece_type(), PieceType::Pawn);
+
+        // Invalid drop (King) is rejected
+        assert!(matches!(parse_usi_move("K*5e"), Err(UsiParseError::InvalidDropPiece('K'))));
     }
 
     #[test]

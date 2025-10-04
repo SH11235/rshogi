@@ -5,7 +5,8 @@ fn profile_toggles_emit_pruning_notes() {
     let mut cmd = Command::cargo_bin("engine-usi").expect("binary available");
     let script = r#"usi
 isready
-setoption name EngineType value Enhanced
+setoption name EngineType value Material
+isready
 setoption name SearchParams.EnableIID value true
 setoption name SearchParams.EnableProbCut value true
 setoption name SearchParams.EnableNMP value true
@@ -27,6 +28,43 @@ quit
         text
     );
     // Razor may be enabled by profile; ensure no unexpected warning when allowed
+}
+
+#[test]
+fn enhanced_nnue_profile_allows_pruning_toggles() {
+    let mut cmd = Command::cargo_bin("engine-usi").expect("binary available");
+    let script = r#"usi
+isready
+setoption name EngineType value EnhancedNnue
+isready
+setoption name SearchParams.EnableIID value true
+setoption name SearchParams.EnableProbCut value true
+setoption name SearchParams.EnableNMP value true
+setoption name SearchParams.EnableRazor value true
+isready
+position startpos
+go depth 4
+quit
+"#;
+
+    let output = cmd.write_stdin(script).assert().success().get_output().stdout.clone();
+    let text = String::from_utf8_lossy(&output);
+
+    assert!(
+        !text.contains("pruning_note=IID"),
+        "IID note should not be emitted for EnhancedNnue profile: {}",
+        text
+    );
+    assert!(
+        !text.contains("pruning_note=ProbCut"),
+        "ProbCut note should not be emitted for EnhancedNnue profile: {}",
+        text
+    );
+    assert!(
+        !text.contains("pruning_note=NMP"),
+        "NMP note should not be emitted when profile allows it: {}",
+        text
+    );
 }
 
 #[test]
