@@ -235,23 +235,17 @@ impl Engine {
     fn time_state_for_manager(tm: &TimeManager, elapsed_ms: u64) -> TimeState {
         match tm.time_control() {
             TimeControl::Byoyomi { main_time_ms, .. } => {
-                if let Some((_, _, in_byoyomi)) = tm.get_byoyomi_state() {
-                    if in_byoyomi {
-                        return TimeState::Byoyomi { main_left_ms: 0 };
-                    }
+                if main_time_ms == 0 {
+                    return TimeState::Byoyomi { main_left_ms: 0 };
                 }
 
-                if main_time_ms == 0 {
-                    TimeState::Byoyomi { main_left_ms: 0 }
-                } else {
-                    let remaining = main_time_ms.saturating_sub(elapsed_ms);
-                    if remaining > 0 {
-                        TimeState::Main {
-                            main_left_ms: remaining,
-                        }
-                    } else {
-                        TimeState::Byoyomi { main_left_ms: 0 }
+                let remaining = main_time_ms.saturating_sub(elapsed_ms);
+                if remaining > 0 {
+                    TimeState::Main {
+                        main_left_ms: remaining,
                     }
+                } else {
+                    TimeState::Byoyomi { main_left_ms: 0 }
                 }
             }
             _ => TimeState::NonByoyomi,
@@ -538,7 +532,8 @@ impl Engine {
         if !entry.matches(child_hash) {
             return None;
         }
-        // YaneuraOu 同様、確信度の低い境界ノードは避ける（誤誘導になるため Exact のみ）。
+        // YaneuraOu 同様、確信度の低い境界ノードは避ける（成り／駒種差などで
+        // PV 順が揺れても決定手を誤誘導しないよう Exact のみ採用）。
         if entry.node_type() != crate::search::NodeType::Exact {
             return None;
         }

@@ -792,7 +792,7 @@ pub fn finalize_and_send_fast(
             spent_us
         ));
         info_string(format!(
-            "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf_permille={} store_attempts={}",
+            "{}_fast_tt_meta sid={} root_key={} addr={:#x} size_mb={} hf_permille={} store_attempts={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,
