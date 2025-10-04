@@ -8,12 +8,14 @@ use crate::search::ab::ordering::constants::{
     QUIET_HISTORY_AGING_SHIFT, QUIET_HISTORY_BONUS_FACTOR, QUIET_HISTORY_MAX, QUIET_HISTORY_SHIFT,
 };
 use crate::shogi::board::NUM_PIECE_TYPES;
+use crate::shogi::piece_constants::NUM_HAND_PIECE_TYPES;
 use crate::shogi::SHOGI_BOARD_SIZE;
 use crate::{shogi::Move, Color, PieceType, Square};
 
 /// Counter move history - tracks which moves work well after specific moves
-const COUNTER_FROM_DIM: usize = SHOGI_BOARD_SIZE + 1;
-const COUNTER_DROP_INDEX: usize = SHOGI_BOARD_SIZE;
+const COUNTER_DROP_DIM: usize = NUM_HAND_PIECE_TYPES;
+const COUNTER_FROM_DIM: usize = SHOGI_BOARD_SIZE + COUNTER_DROP_DIM;
+const COUNTER_DROP_BASE: usize = SHOGI_BOARD_SIZE;
 const CONT_PREV_DROP_DIM: usize = 2;
 const CONT_CURR_DROP_DIM: usize = 2;
 
@@ -40,7 +42,7 @@ impl CounterMoveHistory {
     /// Get counter move for previous move
     pub fn get(&self, color: Color, prev_move: Move) -> Option<Move> {
         let from_idx = if prev_move.is_drop() {
-            COUNTER_DROP_INDEX
+            drop_from_index(prev_move)
         } else {
             prev_move.from().unwrap().index()
         };
@@ -51,7 +53,7 @@ impl CounterMoveHistory {
     /// Update counter move
     pub fn update(&mut self, color: Color, prev_move: Move, counter_move: Move) {
         let from_idx = if prev_move.is_drop() {
-            COUNTER_DROP_INDEX
+            drop_from_index(prev_move)
         } else {
             prev_move.from().unwrap().index()
         };
@@ -65,12 +67,26 @@ impl CounterMoveHistory {
     }
 }
 
+#[inline]
+fn drop_from_index(mv: Move) -> usize {
+    debug_assert!(mv.is_drop(), "drop_from_index called with non-drop move");
+    let piece = mv.drop_piece_type();
+    let hand_idx = piece.hand_index().unwrap_or_else(|| {
+        debug_assert!(false, "counter history drop piece without hand index: {:?}", piece);
+        0
+    });
+    COUNTER_DROP_BASE + hand_idx
+}
+
 /// Butterfly history - tracks move success by from-to squares
 #[derive(Clone)]
 pub struct ButterflyHistory {
-    /// [color][from_square][to_square] -> score
-    scores: [[[i16; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+    /// [color][from_square_or_drop][to_square] -> score
+    scores: [[[i16; SHOGI_BOARD_SIZE]; BUTTERFLY_FROM_DIM]; 2],
 }
+
+const BUTTERFLY_FROM_DIM: usize = SHOGI_BOARD_SIZE + 1;
+const BUTTERFLY_DROP_INDEX: usize = SHOGI_BOARD_SIZE;
 
 impl Default for ButterflyHistory {
     fn default() -> Self {
@@ -82,14 +98,14 @@ impl ButterflyHistory {
     /// Create new butterfly history
     pub fn new() -> Self {
         ButterflyHistory {
-            scores: [[[0; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+            scores: [[[0; SHOGI_BOARD_SIZE]; BUTTERFLY_FROM_DIM]; 2],
         }
     }
 
     /// Get history score for a move
     pub fn get(&self, color: Color, mv: Move) -> i32 {
         let raw = if mv.is_drop() {
-            self.scores[color as usize][0][mv.to().index()]
+            self.scores[color as usize][BUTTERFLY_DROP_INDEX][mv.to().index()]
         } else {
             let from = mv.from().unwrap();
             let to = mv.to();
@@ -113,7 +129,7 @@ impl ButterflyHistory {
     /// Add bonus/penalty to history score
     fn add_bonus(&mut self, color: Color, mv: Move, bonus: i32) {
         let (from_idx, to_idx) = if mv.is_drop() {
-            (0, mv.to().index())
+            (BUTTERFLY_DROP_INDEX, mv.to().index())
         } else {
             (mv.from().unwrap().index(), mv.to().index())
         };
@@ -135,7 +151,7 @@ impl ButterflyHistory {
 
     /// Clear all history scores
     pub fn clear(&mut self) {
-        self.scores = [[[0; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2];
+        self.scores = [[[0; SHOGI_BOARD_SIZE]; BUTTERFLY_FROM_DIM]; 2];
     }
 }
 
@@ -557,6 +573,27 @@ mod tests {
     }
 
     #[test]
+    fn test_counter_move_drop_piece_type_separation() {
+        let mut history = CounterMoveHistory::new();
+        let color = Color::Black;
+
+        let square = parse_usi_square("5e").unwrap();
+        let pawn_drop = Move::drop(PieceType::Pawn, square);
+        let lance_drop = Move::drop(PieceType::Lance, square);
+
+        let pawn_counter =
+            Move::normal(parse_usi_square("4g").unwrap(), parse_usi_square("4f").unwrap(), false);
+        let lance_counter =
+            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false);
+
+        history.update(color, pawn_drop, pawn_counter);
+        history.update(color, lance_drop, lance_counter);
+
+        assert_eq!(history.get(color, pawn_drop), Some(pawn_counter));
+        assert_eq!(history.get(color, lance_drop), Some(lance_counter));
+    }
+
+    #[test]
     fn test_counter_move_drop_isolated_from_board_index_zero() {
         let mut history = CounterMoveHistory::new();
         let color = Color::Black;
@@ -575,6 +612,21 @@ mod tests {
 
         assert_eq!(history.get(color, drop_prev), Some(drop_counter));
         assert_eq!(history.get(color, normal_prev), Some(normal_counter));
+    }
+
+    #[test]
+    fn test_butterfly_drop_separate_slot() {
+        let mut history = ButterflyHistory::new();
+        let color = Color::Black;
+
+        let drop_mv = Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
+        let board_mv =
+            Move::normal(parse_usi_square("1a").unwrap(), parse_usi_square("1b").unwrap(), false);
+
+        history.update_good(color, drop_mv, 3);
+
+        assert!(history.get(color, drop_mv) > 0);
+        assert_eq!(history.get(color, board_mv), 0);
     }
 
     #[test]
