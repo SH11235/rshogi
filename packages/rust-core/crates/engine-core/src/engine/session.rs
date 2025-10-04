@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::search::api::StopHandle;
-use crate::search::parallel::EngineStopBridge;
+use crate::search::parallel::StopController;
 use crate::search::SearchResult;
 use crate::time_management::TimeManager;
 
@@ -127,17 +127,17 @@ impl SearchSession {
     ///
     /// This is intended for isready/quit commands where we need to ensure
     /// the search completes cleanly. First requests immediate stop via the
-    /// stop bridge, then waits for the result with the given timeout.
+    /// stop controller, then waits for the result with the given timeout.
     ///
     /// Returns `Some(result)` if the search completed within the timeout,
     /// `None` if the timeout expired.
     pub fn request_stop_and_wait(
         &self,
-        bridge: &EngineStopBridge,
+        controller: &StopController,
         timeout: Duration,
     ) -> Option<SearchResult> {
         self.stop_handle.request_stop();
-        bridge.request_stop();
+        controller.request_stop();
         self.recv_result_timeout(timeout)
     }
 

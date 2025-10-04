@@ -69,6 +69,12 @@ impl<'a> SearchContext<'a> {
                 return false;
             }
 
+            if let Some(flag) = self.limits.stop_flag.as_ref() {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return true;
+                }
+            }
+
             if tm.should_stop(*self.nodes) {
                 return true;
             }
@@ -86,6 +92,11 @@ impl<'a> SearchContext<'a> {
     #[inline]
     pub(crate) fn time_up_fast(&self) -> bool {
         if let Some(tm) = self.limits.time_manager.as_ref() {
+            if let Some(flag) = self.limits.stop_flag.as_ref() {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return true;
+                }
+            }
             if tm.should_stop(*self.nodes) {
                 return true;
             }

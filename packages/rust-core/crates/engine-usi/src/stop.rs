@@ -98,7 +98,7 @@ pub fn handle_stop(state: &mut EngineState) {
             }
             // Timeout expired - try immediate stop and quick polling
             if !finalized {
-                state.stop_bridge.request_stop();
+                state.stop_controller.request_stop();
 
                 let mut waited_after_stop_ms = 0u64;
                 let mut finalize_candidate: Option<engine_core::search::SearchResult> = None;
@@ -130,7 +130,7 @@ pub fn handle_stop(state: &mut EngineState) {
                     }
                 }
 
-                let snapshot = state.stop_bridge.snapshot();
+                let snapshot = state.stop_controller.snapshot();
                 let has_result = finalize_candidate.is_some();
 
                 info_string(format!(
@@ -258,8 +258,7 @@ pub fn handle_ponderhit(state: &mut EngineState) {
                     hard_limit_ms: hard_ms,
                     ..Default::default()
                 };
-                state.stop_controller.prime_stop_info(stop_info.clone());
-                state.stop_bridge.prime_stop_info(stop_info);
+                state.stop_controller.prime_stop_info(stop_info);
             } else {
                 state.deadline_hard = None;
                 state.deadline_near = None;

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::engine::session::SearchSession;
-use engine_core::search::parallel::{EngineStopBridge, FinalizerMsg, StopController};
+use engine_core::search::parallel::{FinalizerMsg, StopController};
 use engine_core::shogi::Position;
 use engine_core::time_management::{TimeControl, TimeManager, TimeState};
 use engine_core::Color;
@@ -42,6 +42,8 @@ pub struct UsiOptions {
     pub mate_early_stop: bool,
     // Stop bounded wait time
     pub stop_wait_ms: u64,
+    // Main-loop watchdog polling interval (ms)
+    pub watchdog_poll_ms: u64,
     // 純秒読みでGUIの厳格締切より少し手前で確実に返すための追加リード（ms）
     // network_delay2_ms に加算して最終化を前倒しする。手番側 main=0 でも適用。
     // 既定: 300ms
@@ -83,6 +85,7 @@ impl Default for UsiOptions {
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
             stop_wait_ms: 0,
+            watchdog_poll_ms: 2,
             byoyomi_deadline_lead_ms: 300,
             multipv: 1,
             gameover_sends_bestmove: false,
@@ -137,9 +140,8 @@ pub struct EngineState {
     pub bestmove_emitted: bool,
     // Current (inner) time control for stop/gameover policy decisions
     pub current_time_control: Option<TimeControl>,
-    pub stop_bridge: Arc<EngineStopBridge>,
-    pub stop_controller: StopController,
-    // OOB finalize channel (from engine-core time manager via StopBridge)
+    pub stop_controller: Arc<StopController>,
+    // OOB finalize channel (from engine-core time manager via StopController)
     pub finalizer_rx: Option<mpsc::Receiver<FinalizerMsg>>,
     // Current engine-core session id (epoch) for matching finalize requests
     pub current_session_core_id: Option<u64>,
@@ -159,11 +161,9 @@ impl EngineState {
         let mut engine = Engine::new(EngineType::Material);
         engine.set_threads(1);
         engine.set_hash_size(1024);
-        let stop_bridge = engine.stop_bridge_handle();
         let stop_controller = engine.stop_controller_handle();
-        // Register OOB finalizer channel
+        // Register OOB finalizer channel（StopController 経由に統一）
         let (fin_tx, fin_rx) = mpsc::channel();
-        stop_bridge.register_finalizer(fin_tx.clone());
         stop_controller.register_finalizer(fin_tx.clone());
 
         let idle_sync = Arc::new(IdleSync::default());
@@ -188,7 +188,6 @@ impl EngineState {
             current_search_id: 0,
             bestmove_emitted: false,
             current_time_control: None,
-            stop_bridge,
             stop_controller,
             finalizer_rx: Some(fin_rx),
             current_session_core_id: None,

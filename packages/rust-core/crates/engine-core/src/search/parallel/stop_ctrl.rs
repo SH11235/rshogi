@@ -1,17 +1,16 @@
-//! Stop controller (new API) for coordinating search finalization and stop requests.
+//! Stop controller for coordinating search finalization and stop requests.
 //!
-//! Transitional wrapper around the existing `EngineStopBridge` that provides a
-//! cleaner, Engine-facing surface. This allows us to migrate call sites without
-//! large-scale refactors and then replace the internals later.
+//! Provides a unified interface for stopping searches, publishing snapshots,
+//! and issuing finalize requests with priority handling.
 
 use crate::search::snapshot::{RootSnapshot, RootSnapshotPublisher};
 use crate::search::types::StopInfo;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Reason for an out-of-band finalize request issued by time management or other guards.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeReason {
     /// Hard deadline reached (elapsed >= hard)
     Hard,
@@ -58,6 +57,7 @@ struct Inner {
     external_stop_flag: Arc<std::sync::Mutex<Option<std::sync::Weak<AtomicBool>>>>,
     session_id: Arc<std::sync::atomic::AtomicU64>,
     finalize_claimed: Arc<std::sync::atomic::AtomicBool>,
+    finalize_priority: Arc<AtomicU8>,
     finalizer_tx: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<FinalizerMsg>>>>,
     stop_info: Arc<std::sync::Mutex<Option<StopInfo>>>,
 }
@@ -81,6 +81,7 @@ impl StopController {
         self.update_external_stop_flag(external_stop);
         self.inner.session_id.store(session_id, std::sync::atomic::Ordering::Release);
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
+        self.inner.finalize_priority.store(0, Ordering::Release);
         if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
             let _ = tx.send(FinalizerMsg::SessionStart { session_id });
         }
@@ -97,6 +98,7 @@ impl StopController {
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
         *guard = external_stop.map(Arc::downgrade);
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
+        self.inner.finalize_priority.store(0, Ordering::Release);
     }
 
     fn set_external_stop_flag(&self) {
@@ -109,11 +111,41 @@ impl StopController {
         }
     }
 
+    #[inline]
+    fn finalize_reason_priority(reason: FinalizeReason) -> u8 {
+        match reason {
+            FinalizeReason::Hard => 5,
+            FinalizeReason::NearHard => 4,
+            FinalizeReason::Planned => 3,
+            FinalizeReason::TimeManagerStop => 2,
+            FinalizeReason::UserStop => 1,
+        }
+    }
+
+    fn should_accept_finalize(&self, reason: FinalizeReason) -> bool {
+        let priority = Self::finalize_reason_priority(reason);
+        loop {
+            let prev = self.inner.finalize_priority.load(Ordering::Acquire);
+            if prev >= priority {
+                return false;
+            }
+            if self
+                .inner
+                .finalize_priority
+                .compare_exchange(prev, priority, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
     /// Clear all handles after the session finishes.
     pub fn clear(&self) {
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
         *guard = None;
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
+        self.inner.finalize_priority.store(0, Ordering::Release);
     }
 
     /// Force clear references (advances session epoch).
@@ -126,6 +158,7 @@ impl StopController {
             *guard = None;
         }
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
+        self.inner.finalize_priority.store(0, Ordering::Release);
         self.inner.session_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
@@ -160,6 +193,9 @@ impl StopController {
 
     /// Request out-of-band finalize with a reason.
     pub fn request_finalize(&self, reason: FinalizeReason) {
+        if !self.should_accept_finalize(reason) {
+            return;
+        }
         let session_id = self.inner.session_id.load(std::sync::atomic::Ordering::Acquire);
         if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
             let _ = tx.send(FinalizerMsg::Finalize { session_id, reason });
@@ -259,5 +295,101 @@ impl StopController {
         // note: request_finalize/request_stop が reason/hard_timeout を確定させる。
         // publish_root_line は進捗値のみ更新し、理由フラグは上書きしない。
         *guard = Some(si);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::{mpsc, Arc};
+
+    #[test]
+    fn finalize_priority_prefers_hard() {
+        let ctrl = StopController::new();
+        let ext_flag = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        ctrl.register_finalizer(tx);
+        ctrl.publish_session(Some(&ext_flag), 7);
+
+        match rx.recv().unwrap() {
+            FinalizerMsg::SessionStart { session_id } => assert_eq!(session_id, 7),
+            other => panic!("expected SessionStart, got {other:?}"),
+        }
+
+        ctrl.request_finalize(FinalizeReason::Planned);
+        match rx.recv().unwrap() {
+            FinalizerMsg::Finalize { reason, .. } => assert_eq!(reason, FinalizeReason::Planned),
+            other => panic!("expected Planned finalize, got {other:?}"),
+        }
+        assert!(ext_flag.load(AtomicOrdering::Relaxed));
+
+        ext_flag.store(false, AtomicOrdering::Relaxed);
+        ctrl.request_finalize(FinalizeReason::Hard);
+        match rx.recv().unwrap() {
+            FinalizerMsg::Finalize { reason, .. } => assert_eq!(reason, FinalizeReason::Hard),
+            other => panic!("expected Hard finalize, got {other:?}"),
+        }
+        assert!(ext_flag.load(AtomicOrdering::Relaxed));
+
+        ext_flag.store(false, AtomicOrdering::Relaxed);
+        ctrl.request_finalize(FinalizeReason::TimeManagerStop);
+        assert!(rx.try_recv().is_err(), "lower-priority finalize should be ignored");
+        assert!(!ext_flag.load(AtomicOrdering::Relaxed));
+    }
+
+    #[test]
+    fn finalize_priority_resets_per_session() {
+        let ctrl = StopController::new();
+        let ext_flag = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        ctrl.register_finalizer(tx);
+
+        ctrl.publish_session(Some(&ext_flag), 1);
+        let _ = rx.recv().unwrap(); // SessionStart
+        ctrl.request_finalize(FinalizeReason::Hard);
+        let _ = rx.recv().unwrap(); // Hard finalize
+
+        ctrl.publish_session(Some(&ext_flag), 2);
+        match rx.recv().unwrap() {
+            FinalizerMsg::SessionStart { session_id } => assert_eq!(session_id, 2),
+            other => panic!("expected SessionStart, got {other:?}"),
+        }
+
+        ctrl.request_finalize(FinalizeReason::Planned);
+        match rx.recv().unwrap() {
+            FinalizerMsg::Finalize { reason, .. } => assert_eq!(reason, FinalizeReason::Planned),
+            other => panic!("expected Planned finalize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_priority_nearhard_escalates_to_hard() {
+        let ctrl = StopController::new();
+        let ext_flag = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        ctrl.register_finalizer(tx);
+        ctrl.publish_session(Some(&ext_flag), 99);
+        let _ = rx.recv().unwrap(); // SessionStart
+
+        ctrl.request_finalize(FinalizeReason::NearHard);
+        match rx.recv().unwrap() {
+            FinalizerMsg::Finalize { reason, .. } => assert_eq!(reason, FinalizeReason::NearHard),
+            other => panic!("expected NearHard finalize, got {other:?}"),
+        }
+        assert!(ext_flag.load(AtomicOrdering::Relaxed));
+
+        ext_flag.store(false, AtomicOrdering::Relaxed);
+        ctrl.request_finalize(FinalizeReason::Hard);
+        match rx.recv().unwrap() {
+            FinalizerMsg::Finalize { reason, .. } => assert_eq!(reason, FinalizeReason::Hard),
+            other => panic!("expected Hard finalize, got {other:?}"),
+        }
+        assert!(ext_flag.load(AtomicOrdering::Relaxed));
+
+        ext_flag.store(false, AtomicOrdering::Relaxed);
+        ctrl.request_finalize(FinalizeReason::Planned);
+        assert!(rx.try_recv().is_err());
+        assert!(!ext_flag.load(AtomicOrdering::Relaxed));
     }
 }

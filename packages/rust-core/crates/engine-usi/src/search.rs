@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use engine_core::search::api::{InfoEvent, InfoEventCallback};
 use engine_core::search::limits::{FallbackDeadlines, SearchLimits, SearchLimitsBuilder};
+use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::types::InfoStringCallback;
 use engine_core::shogi::Color;
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
@@ -568,6 +569,100 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 state.notify_idle();
             }
         }
+    }
+}
+
+/// メインスレッドで TimeManager を監視し、探索停止を司るウォッチドッグ。
+pub fn tick_time_watchdog(state: &mut EngineState) {
+    if !state.searching {
+        return;
+    }
+
+    let (tm, stop_flag) = match (state.active_time_manager.as_ref(), state.stop_flag.as_ref()) {
+        (Some(tm), Some(flag)) => (tm, flag),
+        _ => return,
+    };
+
+    if stop_flag.load(Ordering::Acquire) {
+        return;
+    }
+
+    let elapsed = tm.elapsed_ms();
+    let hard = tm.hard_limit_ms();
+    let scheduled = tm.scheduled_end_ms();
+    let opt = tm.opt_limit_ms();
+    let mut finalize_reason: Option<FinalizeReason> = None;
+
+    if hard != u64::MAX && elapsed >= hard {
+        finalize_reason = Some(FinalizeReason::Hard);
+    } else if scheduled != u64::MAX && elapsed >= scheduled {
+        finalize_reason = Some(FinalizeReason::Planned);
+    } else {
+        if scheduled == u64::MAX && opt != u64::MAX && elapsed >= opt {
+            tm.ensure_scheduled_stop(elapsed);
+            let new_deadline = tm.scheduled_end_ms();
+            if new_deadline != u64::MAX {
+                info_string(format!(
+                    "tm_watchdog_schedule elapsed_ms={} opt_ms={} scheduled_ms={}",
+                    elapsed, opt, new_deadline
+                ));
+            }
+        }
+
+        if tm.is_time_critical() {
+            finalize_reason = Some(FinalizeReason::TimeManagerStop);
+        }
+    }
+
+    if let Some(reason) = finalize_reason {
+        stop_flag.store(true, Ordering::Release);
+        info_string(format!("tm_watchdog_stop reason={:?} elapsed_ms={}", reason, elapsed));
+        // StopController 経由で finalize を要求し、優先度制御と stop_flag 連携を統一する。
+        state.stop_controller.request_finalize(reason);
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use engine_core::time_management::{GamePhase, TimeLimits, TimeManager};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn watchdog_triggers_after_hard_deadline() {
+        let mut state = EngineState::new();
+        state.searching = true;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        state.stop_flag = Some(Arc::clone(&stop_flag));
+
+        let mut limits = TimeLimits::default();
+        limits.time_control = TimeControl::FixedTime { ms_per_move: 50 };
+
+        let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
+        state.active_time_manager = Some(Arc::clone(&tm));
+
+        let timeout = Duration::from_secs(2);
+        let start = Instant::now();
+
+        while !stop_flag.load(AtomicOrdering::Relaxed) {
+            tick_time_watchdog(&mut state);
+            if stop_flag.load(AtomicOrdering::Relaxed) {
+                break;
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "watchdog did not trigger within timeout (hard_limit_ms={})",
+                    tm.hard_limit_ms()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(stop_flag.load(AtomicOrdering::Relaxed));
     }
 }
 

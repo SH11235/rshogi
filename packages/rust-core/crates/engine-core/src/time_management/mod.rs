@@ -560,6 +560,18 @@ impl TimeManager {
         self.inner.soft_limit_ms.load(Ordering::Relaxed)
     }
 
+    /// Ensure a rounded stop is scheduled when watchdog側から呼び出す
+    ///
+    /// `TimeManager::should_stop` と同様、まだ `search_end_ms` が未設定かつ
+    /// 既に最適上限を超えた場合に、丸め込みロジックを適用して計画停止時刻を入れる。
+    /// ウォッチャースレッドが時間監視を担うケースで使用する。
+    pub fn ensure_scheduled_stop(&self, elapsed_ms: u64) {
+        let current = self.inner.search_end_ms.load(Ordering::Relaxed);
+        if current == u64::MAX {
+            self.set_search_end(elapsed_ms);
+        }
+    }
+
     #[cfg(test)]
     pub fn override_limits_for_test(&self, soft_ms: u64, hard_ms: u64) {
         self.inner.soft_limit_ms.store(soft_ms, Ordering::Relaxed);
@@ -574,6 +586,11 @@ impl TimeManager {
     /// Get configured NetworkDelay2 in milliseconds
     pub fn network_delay2_ms(&self) -> u64 {
         self.inner.params.network_delay2_ms
+    }
+
+    /// Return true if現在の残時間が危険域に入っている。
+    pub fn is_time_critical(&self) -> bool {
+        self.state_checker().is_time_critical()
     }
 
     /// Get opt time budget (Phase 1)

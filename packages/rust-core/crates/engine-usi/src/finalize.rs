@@ -248,7 +248,7 @@ pub fn finalize_and_send(
         info_string(format!("{label}_skip already_emitted=1"));
         return;
     }
-    if !state.stop_bridge.try_claim_finalize() {
+    if !state.stop_controller.try_claim_finalize() {
         info_string(format!("{label}_skip claimed_by_other=1"));
         return;
     }
@@ -618,7 +618,7 @@ pub fn finalize_and_send_fast(
         info_string(format!("{label}_fast_skip already_emitted=1"));
         return;
     }
-    if !state.stop_bridge.try_claim_finalize() {
+    if !state.stop_controller.try_claim_finalize() {
         info_string(format!("{label}_fast_skip claimed_by_other=1"));
         return;
     }

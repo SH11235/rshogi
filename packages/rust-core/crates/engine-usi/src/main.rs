@@ -20,7 +20,7 @@ use std::time::Duration;
 use io::{info_string, usi_println};
 use oob::{enforce_deadline, poll_oob_finalize};
 use options::{apply_options_to_engine, handle_setoption, send_id_and_options};
-use search::{handle_go, parse_position, poll_search_completion};
+use search::{handle_go, parse_position, poll_search_completion, tick_time_watchdog};
 use state::EngineState;
 use stop::{handle_gameover, handle_ponderhit, handle_stop};
 
@@ -60,6 +60,8 @@ fn main() -> Result<()> {
         poll_oob_finalize(&mut state);
         // Enforce locally computed deadlines (USI-side OOB finalize)
         enforce_deadline(&mut state);
+        // Watchdog based on TimeManager state
+        tick_time_watchdog(&mut state);
 
         if let Ok(line) = line_rx.try_recv() {
             let cmd = line.trim();
@@ -81,14 +83,14 @@ fn main() -> Result<()> {
                     }
 
                     if let Some(session) = state.search_session.take() {
-                        let bridge = {
+                        let stop_ctrl = {
                             let engine = state.engine.lock().unwrap();
-                            engine.stop_bridge_handle()
+                            engine.stop_controller_handle()
                         };
 
                         // Try to get result with 1200ms timeout
-                        let got_result =
-                            session.request_stop_and_wait(&bridge, Duration::from_millis(1200));
+                        let got_result = session
+                            .request_stop_and_wait(stop_ctrl.as_ref(), Duration::from_millis(1200));
 
                         // Join only if search completed or disconnected; detach if still pending
                         if got_result.is_some() {
@@ -144,14 +146,14 @@ fn main() -> Result<()> {
 
                 // Ensure any ongoing search completes before quit
                 if let Some(session) = state.search_session.take() {
-                    let bridge = {
+                    let stop_ctrl = {
                         let engine = state.engine.lock().unwrap();
-                        engine.stop_bridge_handle()
+                        engine.stop_controller_handle()
                     };
 
                     // Try to get result with 1500ms timeout
-                    let got_result =
-                        session.request_stop_and_wait(&bridge, Duration::from_millis(1500));
+                    let got_result = session
+                        .request_stop_and_wait(stop_ctrl.as_ref(), Duration::from_millis(1500));
 
                     // Join only if search completed or disconnected; detach if still pending
                     if got_result.is_some() {
@@ -199,7 +201,8 @@ fn main() -> Result<()> {
 
             info!("Ignoring command: {cmd}");
         } else {
-            thread::sleep(Duration::from_millis(2));
+            let poll_ms = state.opts.watchdog_poll_ms.max(1);
+            thread::sleep(Duration::from_millis(poll_ms));
         }
     }
 

@@ -12,7 +12,7 @@ use crate::{
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::ab::{ClassicBackend, SearchProfile},
     search::api::{InfoEventCallback, SearcherBackend},
-    search::parallel::{EngineStopBridge, StopController},
+    search::parallel::StopController,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
 };
@@ -125,8 +125,7 @@ pub struct Engine {
     pending_tt_size: Option<usize>,
     desired_multi_pv: u8,
     active_searches: Arc<AtomicUsize>,
-    stop_bridge: Arc<EngineStopBridge>,
-    _stop_ctrl: StopController,
+    stop_controller: Arc<StopController>,
     session_counter: u64,
     backend: Option<Arc<dyn SearcherBackend + Send + Sync>>,
 }
@@ -207,8 +206,7 @@ impl Engine {
         let material_evaluator = Arc::new(MaterialEvaluator);
         let default_tt_size = 1024; // Default TT size in MB
 
-        let stop_bridge = Arc::new(EngineStopBridge::new());
-        let stop_ctrl = StopController::new();
+        let stop_ctrl = Arc::new(StopController::new());
 
         let nnue_evaluator = Arc::new(RwLock::new(None));
         if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
@@ -244,8 +242,7 @@ impl Engine {
             pending_tt_size: None,
             desired_multi_pv: 1,
             active_searches: Arc::new(AtomicUsize::new(0)),
-            stop_bridge,
-            _stop_ctrl: stop_ctrl,
+            stop_controller: Arc::clone(&stop_ctrl),
             session_counter: 0,
             backend: None,
         };
@@ -332,19 +329,13 @@ impl Engine {
 
     /// Issue an immediate stop request to the currently running search without acquiring locks.
     pub fn request_stop_immediate(&self) {
-        self.stop_bridge.request_stop();
-        // Mirror via new controller (安全に重ね打ち)
-        self._stop_ctrl.request_stop();
+        self.stop_controller.request_stop();
     }
 
     /// Obtain a clone of the stop bridge for out-of-engine coordination (USI layer).
-    pub fn stop_bridge_handle(&self) -> Arc<EngineStopBridge> {
-        Arc::clone(&self.stop_bridge)
-    }
-
-    /// Obtain a clone of the StopController for snapshot/stop-info consumers.
-    pub fn stop_controller_handle(&self) -> StopController {
-        self._stop_ctrl.clone()
+    /// Obtain a shared StopController handle for snapshot/stop-info consumers.
+    pub fn stop_controller_handle(&self) -> Arc<StopController> {
+        Arc::clone(&self.stop_controller)
     }
 
     /// Return TT metrics summary string if available (tt_metrics feature only)
@@ -414,7 +405,7 @@ impl Engine {
         }
 
         // Attach stop controller for downstream finalize coordination
-        limits.stop_controller = Some(Arc::clone(&self.stop_bridge));
+        limits.stop_controller = Some(Arc::clone(&self.stop_controller));
 
         let mut base_stop_info = StopInfo::default();
         if let Some(ref tm) = time_manager {
@@ -428,8 +419,7 @@ impl Engine {
             base_stop_info.soft_limit_ms = ms;
             base_stop_info.hard_limit_ms = ms;
         }
-        self._stop_ctrl.prime_stop_info(base_stop_info.clone());
-        self.stop_bridge.prime_stop_info(base_stop_info.clone());
+        self.stop_controller.prime_stop_info(base_stop_info.clone());
 
         limits.session_id = session_id;
         self.apply_pending_thread_count();
@@ -452,21 +442,15 @@ impl Engine {
         if let Some(cb) = &info_string_cb {
             cb(&format!("session_publish stop_ctrl sid={}", session_id));
         }
-        self._stop_ctrl.publish_session(stop_flag_ref, session_id);
-        if let Some(cb) = &info_string_cb {
-            cb(&format!("session_publish stop_bridge sid={}", session_id));
-        }
-        self.stop_bridge.publish_session(stop_flag_ref, session_id);
-
-        self.stop_bridge.update_external_stop_flag(limits.stop_flag.as_ref());
-        self._stop_ctrl.update_external_stop_flag(limits.stop_flag.as_ref());
+        self.stop_controller.publish_session(stop_flag_ref, session_id);
+        self.stop_controller.update_external_stop_flag(limits.stop_flag.as_ref());
 
         let backend =
             Arc::clone(self.backend.as_ref().expect("backend must be initialized after rebuild"));
 
         let legacy_info = limits.info_callback.clone();
         let legacy_info_string = info_string_cb.clone();
-        let stop_ctrl = self._stop_ctrl.clone();
+        let stop_ctrl = self.stop_controller.as_ref().clone();
         let root_hash = pos.zobrist_hash();
         let sid = session_id;
         let wants_events = legacy_info.is_some() || legacy_info_string.is_some();

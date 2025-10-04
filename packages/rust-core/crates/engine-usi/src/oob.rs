@@ -87,7 +87,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if let Some(session) = &state.search_session {
                     session.request_stop();
                 }
-                state.stop_bridge.request_stop();
+                state.stop_controller.request_stop();
 
                 // compute wait budget based on time control and StopWaitMs
                 // Prefer in-place join with extended waiting
@@ -228,7 +228,7 @@ pub fn enforce_deadline(state: &mut EngineState) {
         if now >= nh && !state.deadline_near_notified {
             info_string("oob_deadline_nearhard_reached");
             info_string("oob_finalize_request reason=NearHard");
-            state.stop_bridge.request_finalize(FinalizeReason::NearHard);
+            state.stop_controller.request_finalize(FinalizeReason::NearHard);
             state.deadline_near_notified = true;
             state.deadline_near = None;
         }
@@ -238,7 +238,7 @@ pub fn enforce_deadline(state: &mut EngineState) {
         if now >= hard {
             info_string("oob_finalize_request reason=Hard");
             // Mark StopInfo as TimeLimit/Hard for logging consistency and request finalize
-            state.stop_bridge.request_finalize(FinalizeReason::Hard);
+            state.stop_controller.request_finalize(FinalizeReason::Hard);
             fast_finalize_no_detach(state, "oob_hard_finalize", Some(FinalizeReason::Hard));
             // Clear deadlines
             state.deadline_hard = None;
