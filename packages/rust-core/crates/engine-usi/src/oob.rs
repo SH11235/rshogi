@@ -186,7 +186,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                             .best_move
                             .map(|mv| move_to_usi(&mv))
                             .unwrap_or_else(|| "resign".to_string());
-                        emit_bestmove_once(state, fallback, None);
+                        let _ = emit_bestmove_once(state, fallback, None);
                     }
                     info_string(format!("oob_finalize_result label={} mode=joined", label));
                     state.current_is_ponder = false;

@@ -538,6 +538,7 @@ impl Engine {
         if !entry.matches(child_hash) {
             return None;
         }
+        // YaneuraOu 同様、確信度の低い境界ノードは避ける（誤誘導になるため Exact のみ）。
         if entry.node_type() != crate::search::NodeType::Exact {
             return None;
         }
