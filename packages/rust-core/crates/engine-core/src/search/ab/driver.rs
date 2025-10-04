@@ -357,8 +357,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     prev_score + ASP_DELTA0
                 };
                 let mut delta = ASP_DELTA0;
-                let alpha_orig = alpha;
-                let beta_orig = beta;
+                let mut window_alpha = alpha;
+                let mut window_beta = beta;
 
                 // 検索用stack/heuristicsを初期化
                 let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
@@ -410,6 +410,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         break;
                     }
                     let (old_alpha, old_beta) = (alpha, beta);
+                    window_alpha = old_alpha;
+                    window_beta = old_beta;
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
                         if let Some(hit) = Self::deadline_hit(
@@ -651,7 +653,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     } else {
                         None
                     };
-                    let bound = Self::classify_root_bound(local_best, alpha_orig, beta_orig);
+                    let bound = Self::classify_root_bound(local_best, window_alpha, window_beta);
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,

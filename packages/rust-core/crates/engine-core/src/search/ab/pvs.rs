@@ -30,34 +30,39 @@ impl<'a> SearchContext<'a> {
 
     #[inline]
     pub(crate) fn time_up(&self) -> bool {
-        let mask = if let Some(tm) = self.limits.time_manager.as_ref() {
+        let should_poll = |mask: u64| (*self.nodes & mask) == 0;
+        let time_limit_expired = || {
+            if let Some(limit) = self.limits.time_limit() {
+                if self.start_time.elapsed() >= limit {
+                    return true;
+                }
+            }
+            false
+        };
+
+        if let Some(tm) = self.limits.time_manager.as_ref() {
             let mask = if tm.is_in_byoyomi() {
                 TIME_CHECK_MASK_BYOYOMI
             } else {
                 TIME_CHECK_MASK_NORMAL
             };
-            if (*self.nodes & mask) != 0 {
+
+            if !should_poll(mask) {
                 return false;
             }
+
             if tm.should_stop(*self.nodes) {
                 return true;
             }
-            mask
-        } else {
-            TIME_CHECK_MASK_NORMAL
-        };
 
-        if (*self.nodes & mask) != 0 {
+            return time_limit_expired();
+        }
+
+        if !should_poll(TIME_CHECK_MASK_NORMAL) {
             return false;
         }
 
-        if let Some(limit) = self.limits.time_limit() {
-            if self.start_time.elapsed() >= limit {
-                return true;
-            }
-        }
-
-        false
+        time_limit_expired()
     }
 }
 
