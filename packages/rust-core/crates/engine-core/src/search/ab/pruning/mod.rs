@@ -213,7 +213,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
         );
         if let Some(tt) = &self.tt {
-            if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
+            if let Some(entry) = tt.probe(pos.zobrist_hash(), pos.side_to_move) {
                 *tt_hint = entry.get_move();
             }
         }

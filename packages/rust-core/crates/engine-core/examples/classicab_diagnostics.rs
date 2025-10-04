@@ -243,7 +243,7 @@ fn main() {
             let asp_fail_low = asp_fail_low.load(Ordering::Relaxed);
             // Probe TT at root to check adoption
             let (tt_root_match, tt_root_depth) = {
-                let entry = tt.probe(pos.zobrist_hash, pos.side_to_move);
+                let entry = tt.probe(pos.zobrist_hash(), pos.side_to_move);
                 match (entry, res.best_move) {
                     (Some(e), Some(bm)) => {
                         let tt_mv = e.get_move();

@@ -359,11 +359,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             };
             // Root TT hint boost（存在すれば大ボーナス）
             let mut root_tt_hint_mv: Option<crate::shogi::Move> = None;
+            let root_hash = root.zobrist_hash();
             if let Some(tt) = &self.tt {
                 if dynp::tt_prefetch_enabled() {
-                    tt.prefetch_l2(root.zobrist_hash, root.side_to_move);
+                    tt.prefetch_l2(root_hash, root.side_to_move);
                 }
-                if let Some(entry) = tt.probe(root.zobrist_hash, root.side_to_move) {
+                if let Some(entry) = tt.probe(root_hash, root.side_to_move) {
                     if let Some(ttm) = entry.get_move() {
                         root_tt_hint_mv = Some(ttm);
                     }
@@ -791,7 +792,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     .clamp(i16::MIN as i32, i16::MAX as i32)
                                     as i16;
                             let mut args = crate::search::tt::TTStoreArgs::new(
-                                root.zobrist_hash,
+                                root_hash,
                                 Some(best_mv_root),
                                 store_score,
                                 root_static_eval_i16,

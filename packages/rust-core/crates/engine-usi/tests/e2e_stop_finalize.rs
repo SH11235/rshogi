@@ -343,7 +343,7 @@ fn e2e_byoyomi_oob_finalize_logs() {
     assert!(bestmove_seen, "bestmove was not emitted after OOB finalize");
     assert!(saw_oob, "OOB finalize log was not observed");
     assert!(
-        oob_log_count >= 1 && oob_log_count <= 2,
+        (1..=2).contains(&oob_log_count),
         "unexpected number of oob_finalize_request logs: {}",
         oob_log_count
     );

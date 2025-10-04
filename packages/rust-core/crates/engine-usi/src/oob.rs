@@ -87,7 +87,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if let Some(session) = &state.search_session {
                     session.request_stop();
                 }
-                state.stop_controller.request_stop();
+                state.stop_controller.request_stop_flag_only();
 
                 // compute wait budget based on time control and StopWaitMs
                 // Prefer in-place join with extended waiting

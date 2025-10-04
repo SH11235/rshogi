@@ -71,11 +71,6 @@ impl StopController {
         }
     }
 
-    /// Get the underlying bridge (temporary accessor for mixed code paths).
-    pub fn bridge(&self) -> StopController {
-        self.clone()
-    }
-
     /// Publish the current session (external stop flag + session id).
     pub fn publish_session(&self, external_stop: Option<&Arc<AtomicBool>>, session_id: u64) {
         self.update_external_stop_flag(external_stop);
@@ -149,10 +144,15 @@ impl StopController {
     }
 
     /// Force clear references (advances session epoch).
+    ///
+    /// Callers are expected to follow this with `publish_session()` so a fresh
+    /// stop flag replaces the one we force-set here; this prevents the previous
+    /// session's flag value from leaking into the next session.
     pub fn force_clear(&self) {
         {
             let mut guard = self.inner.external_stop_flag.lock().unwrap();
             if let Some(flag) = guard.as_ref().and_then(|w| w.upgrade()) {
+                // Ensure current observers see a stop before the handle is dropped.
                 flag.store(true, std::sync::atomic::Ordering::Release);
             }
             *guard = None;
@@ -164,18 +164,20 @@ impl StopController {
 
     /// Request immediate stop (best-effort broadcast).
     pub fn request_stop(&self) {
-        let upgraded = {
-            let guard = self.inner.external_stop_flag.lock().unwrap();
-            guard.as_ref().and_then(|w| w.upgrade())
-        };
-        if let Some(flag) = upgraded {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-        }
+        self.set_external_stop_flag();
         let mut guard = self.inner.stop_info.lock().unwrap();
         let mut si = guard.take().unwrap_or_default();
-        si.reason = crate::search::types::TerminationReason::UserStop;
-        si.hard_timeout = false;
+        use crate::search::types::TerminationReason;
+        if matches!(si.reason, TerminationReason::Completed) {
+            si.reason = TerminationReason::UserStop;
+            si.hard_timeout = false;
+        }
         *guard = Some(si);
+    }
+
+    /// Request only the external stop flag without mutating StopInfo.
+    pub fn request_stop_flag_only(&self) {
+        self.set_external_stop_flag();
     }
 
     /// Try to claim finalize token (exactly-once).
