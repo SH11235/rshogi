@@ -106,6 +106,7 @@ pub struct GoParams {
     pub byoyomi: Option<u64>,
     pub periods: Option<u32>,
     pub moves_to_go: Option<u32>,
+    pub rtime: Option<u64>,
 }
 
 pub struct EngineState {

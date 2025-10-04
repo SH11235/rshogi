@@ -151,6 +151,7 @@ impl Engine {
             depth: limits.depth.map(|d| d as u32),
             nodes: limits.nodes,
             time_parameters: limits.time_parameters,
+            random_time_ms: limits.random_time_ms,
         };
         let game_phase = detect_game_phase_for_time(pos, pos.ply as u32);
         let manager = TimeManager::new(&tm_limits, pos.side_to_move, pos.ply as u32, game_phase);

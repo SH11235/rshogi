@@ -90,7 +90,7 @@ pub fn parse_go(cmd: &str) -> GoParams {
             // periods: 秒読みの残り回数（将来のGUI/スクリプト互換のため事前対応）
             "periods" => gp.periods = it.next().and_then(|v| v.parse().ok()),
             "rtime" => {
-                let _ = it.next();
+                gp.rtime = it.next().and_then(|v| v.parse().ok());
             }
             "movestogo" => gp.moves_to_go = it.next().and_then(|v| v.parse().ok()),
             "mate" => {
@@ -182,6 +182,10 @@ pub fn limits_from_go(
     } else {
         builder.infinite()
     };
+
+    if let Some(rtime_ms) = gp.rtime {
+        builder = builder.random_time_ms(rtime_ms);
+    }
 
     builder = builder.time_parameters(tp);
     builder = builder.stop_flag(Arc::clone(&stop_flag));

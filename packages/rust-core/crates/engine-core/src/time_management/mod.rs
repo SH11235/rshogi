@@ -17,6 +17,7 @@
 use lazy_static::lazy_static;
 use log::warn;
 use parking_lot::{Mutex, RwLock};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
@@ -162,19 +163,35 @@ impl TimeManager {
             params.min_think_ms
         );
 
-        // Calculate initial time allocation
-        let (raw_soft, raw_hard) = calculate_time_allocation(
-            &limits.time_control,
-            side,
-            ply,
-            limits.moves_to_go,
-            game_phase,
-            &params,
-        );
+        // Optional random time override (go rtime)
+        let random_override = limits.random_time_ms.map(|base| {
+            let randomized = Self::randomize_rtime(base, ply);
+            log::info!(
+                "[TimeManager::new] random_time override active: base={}ms, randomized={}ms",
+                base,
+                randomized
+            );
+            randomized
+        });
+        let rtime_active = random_override.is_some();
+
+        // Calculate initial time allocation (or apply override)
+        let (raw_soft, raw_hard) = if let Some(override_ms) = random_override {
+            (override_ms, override_ms)
+        } else {
+            calculate_time_allocation(
+                &limits.time_control,
+                side,
+                ply,
+                limits.moves_to_go,
+                game_phase,
+                &params,
+            )
+        };
 
         // Log calculated raw values
         log::info!(
-            "[TimeManager::new] calculate_time_allocation returned - raw_soft: {}ms, raw_hard: {}ms",
+            "[TimeManager::new] initial budget - raw_soft: {}ms, raw_hard: {}ms",
             raw_soft,
             raw_hard
         );
@@ -183,9 +200,10 @@ impl TimeManager {
         let mut soft_ms = raw_soft;
         let mut hard_ms = raw_hard;
         let mut budget_clamped = false;
+        let mut enforced_min_think = false;
 
         // Only clamp when budgets are finite
-        if soft_ms != u64::MAX && hard_ms != u64::MAX {
+        if !rtime_active && soft_ms != u64::MAX && hard_ms != u64::MAX {
             let lower = match &limits.time_control {
                 TimeControl::Byoyomi { .. } => params.critical_byoyomi_ms.max(50),
                 TimeControl::Fischer { .. } => params.critical_fischer_ms.max(50),
@@ -224,14 +242,26 @@ impl TimeManager {
                 if min_think > 0 && soft_ms < min_think {
                     soft_ms = min_think;
                     budget_clamped = true;
+                    enforced_min_think = true;
                 }
 
-                // Enforce margin: soft <= hard - 50ms (δ=50ms)
-                if soft_ms.saturating_add(50) > hard_ms {
-                    let new_soft = hard_ms.saturating_sub(50);
-                    if new_soft != soft_ms {
-                        soft_ms = new_soft;
-                        budget_clamped = true;
+                let margin = Self::min_soft_margin(hard_ms);
+                if margin > 0 && soft_ms.saturating_add(margin) > hard_ms {
+                    if enforced_min_think {
+                        let new_hard = soft_ms.saturating_add(margin);
+                        if new_hard != hard_ms {
+                            hard_ms = new_hard;
+                            budget_clamped = true;
+                        }
+                    } else {
+                        let mut new_soft = hard_ms.saturating_sub(margin);
+                        if min_think > 0 {
+                            new_soft = new_soft.max(min_think);
+                        }
+                        if new_soft != soft_ms {
+                            soft_ms = new_soft;
+                            budget_clamped = true;
+                        }
                     }
                 }
             }
@@ -303,8 +333,14 @@ impl TimeManager {
 
         let tm = Self { inner };
 
-        // YaneuraOu-style FinalPush activation
-        if let TimeControl::Byoyomi {
+        if rtime_active {
+            tm.inner.soft_limit_ms.store(raw_soft, Ordering::Relaxed);
+            tm.inner.hard_limit_ms.store(raw_soft, Ordering::Relaxed);
+            tm.inner.opt_limit_ms.store(raw_soft, Ordering::Relaxed);
+            tm.inner.search_end_ms.store(u64::MAX, Ordering::Relaxed);
+            tm.inner.final_push_active.store(false, Ordering::Relaxed);
+            tm.inner.final_push_min_ms.store(raw_soft, Ordering::Relaxed);
+        } else if let TimeControl::Byoyomi {
             main_time_ms,
             byoyomi_ms,
             ..
@@ -328,22 +364,36 @@ impl TimeManager {
                     *byoyomi_ms
                 };
 
-                let min_ms = available_time.saturating_sub(worst).saturating_sub(avg);
+                let guard_floor = params
+                    .min_think_ms
+                    .max(params.critical_byoyomi_ms)
+                    .max(soft_ms.min(hard_ms))
+                    .max(50);
+
+                let safe_room = available_time.saturating_sub(guard_floor);
+                let worst_clamped = worst.min(safe_room);
+                let avg_clamped = avg.min(safe_room.saturating_sub(worst_clamped));
+
+                let mut min_ms = available_time
+                    .saturating_sub(worst_clamped)
+                    .saturating_sub(avg_clamped)
+                    .max(guard_floor);
+                if min_ms > hard_ms {
+                    min_ms = hard_ms;
+                }
+
                 tm.inner.final_push_active.store(true, Ordering::Relaxed);
                 tm.inner.final_push_min_ms.store(min_ms, Ordering::Relaxed);
 
                 // In FinalPush, set opt_limit with earlier scheduling for pure-byoyomi.
-                // Pure-byoyomi (main_time==0) needs earlier scheduling to guarantee
-                // bestmove emission before strict GUI deadlines.
                 let current_hard = tm.inner.hard_limit_ms.load(Ordering::Relaxed);
-                let mut target_opt = current_hard.saturating_sub(50);
+                let mut target_opt =
+                    current_hard.saturating_sub(Self::min_soft_margin(current_hard).max(20));
                 if *main_time_ms == 0 {
-                    // Prefer the computed soft limit as opt_limit to schedule rounding sooner.
-                    // This gives the stop scheduler ~1.2–1.5s of headroom with typical params.
                     let soft = tm.inner.soft_limit_ms.load(Ordering::Relaxed);
-                    // Ensure ordering: soft < hard, but keep a small guard below hard
-                    target_opt = soft.min(current_hard.saturating_sub(200));
+                    target_opt = soft.min(current_hard.saturating_sub(200)).max(soft);
                 }
+                target_opt = target_opt.max(soft_ms);
                 tm.inner.opt_limit_ms.store(target_opt, Ordering::Relaxed);
 
                 log::debug!(
@@ -355,7 +405,6 @@ impl TimeManager {
                     min_ms
                 );
 
-                // Log the opt_limit after FinalPush update
                 log::debug!(
                     "[FinalPush] Updated opt_limit to {}ms (was {}ms) (pure_byoyomi={})",
                     target_opt,
@@ -375,6 +424,56 @@ impl TimeManager {
         );
 
         tm
+    }
+
+    #[inline]
+    fn min_soft_margin(hard_ms: u64) -> u64 {
+        if hard_ms == u64::MAX {
+            0
+        } else if hard_ms >= 1_000 {
+            50
+        } else if hard_ms >= 500 {
+            30
+        } else if hard_ms >= 200 {
+            20
+        } else if hard_ms >= 100 {
+            15
+        } else {
+            10
+        }
+    }
+
+    #[inline]
+    fn randomize_rtime(base: u64, ply: u32) -> u64 {
+        if base == 0 {
+            return 0;
+        }
+        if ply == 0 {
+            return base;
+        }
+
+        let seed = monotonic_ms().wrapping_add((ply as u64) << 32).wrapping_add(base);
+        let mut rng = SmallRng::seed_from_u64(seed);
+
+        let half = base / 2;
+        let dynamic = if ply > 0 {
+            let numerator = (base as u128).saturating_mul(10);
+            let denom = ply as u128;
+            if denom == 0 {
+                base
+            } else {
+                (numerator / denom).min(u128::from(u64::MAX)) as u64
+            }
+        } else {
+            base
+        };
+
+        let max_bonus = half.min(dynamic);
+        if max_bonus == 0 {
+            base
+        } else {
+            base.saturating_add(rng.random_range(0..=max_bonus))
+        }
     }
 
     /// Whether initial budgets were clamped to maintain sane bounds/order

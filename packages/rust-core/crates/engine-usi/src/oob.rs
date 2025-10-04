@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -47,10 +48,27 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     info_string(format!("oob_session_late_bind id={}", session_id));
                 }
                 if state.current_session_core_id != Some(session_id) {
-                    // Stale or mismatched session; ignore
+                    // Stale or mismatched session; ignore with extended diagnostics for debugging
+                    let active_session = state
+                        .search_session
+                        .as_ref()
+                        .map(|s| s.session_id())
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "none".to_string());
+                    let stop_flag = state
+                        .stop_flag
+                        .as_ref()
+                        .map(|f| f.load(Ordering::Relaxed))
+                        .unwrap_or(false);
                     info_string(format!(
-                        "oob_finalize_ignored stale=1 sid={} cur={:?}",
-                        session_id, state.current_session_core_id
+                        "oob_finalize_ignored stale=1 sid={} cur={:?} searching={} bestmove_emitted={} active_session={} stop_flag={} pending_result_rx={}",
+                        session_id,
+                        state.current_session_core_id,
+                        state.searching as u8,
+                        state.bestmove_emitted as u8,
+                        active_session,
+                        stop_flag as u8,
+                        state.finalizer_rx.is_some() as u8
                     ));
                     continue;
                 }

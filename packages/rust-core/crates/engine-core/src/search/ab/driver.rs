@@ -233,7 +233,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut finalize_soft_sent = false;
         let mut last_deadline_hit: Option<DeadlineHit> = None;
         let mut finalize_hard_sent = false;
-        let mut notify_deadline = |hit: DeadlineHit| {
+        let mut notify_deadline = |hit: DeadlineHit, nodes_now: u64| {
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                let elapsed = t0.elapsed().as_millis();
+                cb(&format!(
+                    "deadline_hit kind={:?} elapsed_ms={} nodes={}",
+                    hit, elapsed, nodes_now
+                ));
+            }
             if let Some(ctrl) = stop_controller.as_ref() {
                 match hit {
                     DeadlineHit::Hard => {
@@ -254,10 +261,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         };
 
         for d in 1..=max_depth {
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                cb(&format!("iter_start depth={} nodes={}", d, nodes));
+            }
             if let Some(hit) =
                 Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
             {
-                notify_deadline(hit);
+                notify_deadline(hit, nodes);
                 last_deadline_hit = Some(hit);
                 break;
             }
@@ -334,7 +344,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     min_think_ms,
                     nodes,
                 ) {
-                    notify_deadline(hit);
+                    notify_deadline(hit, nodes);
                     last_deadline_hit = Some(hit);
                     match hit {
                         DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -395,7 +405,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         min_think_ms,
                         nodes,
                     ) {
-                        notify_deadline(hit);
+                        notify_deadline(hit, nodes);
                         last_deadline_hit = Some(hit);
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -422,7 +432,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             min_think_ms,
                             nodes,
                         ) {
-                            notify_deadline(hit);
+                            notify_deadline(hit, nodes);
                             last_deadline_hit = Some(hit);
                             match hit {
                                 DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -549,7 +559,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         min_think_ms,
                         nodes,
                     ) {
-                        notify_deadline(hit);
+                        notify_deadline(hit, nodes);
                         last_deadline_hit = Some(hit);
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -745,6 +755,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
 
             if Self::should_stop(limits) {
+                if let Some(cb) = limits.info_string_callback.as_ref() {
+                    let elapsed = t0.elapsed().as_millis();
+                    cb(&format!(
+                        "stop_flag_break depth={} elapsed_ms={} nodes={}",
+                        d, elapsed, nodes
+                    ));
+                }
                 break;
             }
 
@@ -759,6 +776,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
 
                 if t0.elapsed() + Duration::from_millis(lead_ms) >= hard {
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        let elapsed = t0.elapsed().as_millis();
+                        cb(&format!(
+                            "stop_lead_break reason=hard_window depth={} elapsed_ms={} nodes={} lead_ms={}",
+                            d, elapsed, nodes, lead_ms
+                        ));
+                    }
                     break;
                 }
 
@@ -767,6 +791,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
             if let Some(limit) = limits.time_limit() {
                 if t0.elapsed() + Duration::from_millis(lead_ms) >= limit {
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        let elapsed = t0.elapsed().as_millis();
+                        cb(&format!(
+                            "stop_lead_break reason=time_limit depth={} elapsed_ms={} nodes={} lead_ms={}",
+                            d, elapsed, nodes, lead_ms
+                        ));
+                    }
                     break;
                 }
             }
@@ -852,6 +883,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 });
                 result.end_reason = reason;
             }
+        }
+        if let Some(cb) = limits.info_string_callback.as_ref() {
+            let reason = result
+                .stop_info
+                .as_ref()
+                .map(|info| format!("{:?}", info.reason))
+                .unwrap_or_else(|| "Unknown".to_string());
+            cb(&format!(
+                "iterative_complete depth={} elapsed_ms={} reason={}",
+                final_depth_reached,
+                t0.elapsed().as_millis(),
+                reason
+            ));
         }
         result
     }

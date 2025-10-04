@@ -190,33 +190,63 @@ fn calculate_byoyomi_time(
     } else {
         // In byoyomi period
         // Incorporate GUI/IPC delay (network_delay2_ms) into budgeting.
-        // hard = byoyomi - overhead - safety - network_delay2
-        // soft = (byoyomi * ratio) - overhead - (network_delay2 / 2)
-        // Ensure soft <= hard (keep a small margin when needed).
+        // Ensure we never subtract more than the period itself minus a safety floor.
         let overhead = params.overhead_ms;
-        let nd2 = params.network_delay2_ms;
+        let guard_floor = params.min_think_ms.max(params.critical_byoyomi_ms).max(50);
+
+        let mut effective_nd2 = params.network_delay2_ms;
+        if effective_nd2 >= byoyomi_ms {
+            effective_nd2 = byoyomi_ms.saturating_sub(guard_floor);
+        }
+        let mut effective_nd2_half = effective_nd2 / 2;
+
+        let available_after_overhead = byoyomi_ms.saturating_sub(overhead);
+        let safe_room = available_after_overhead.saturating_sub(guard_floor);
+        effective_nd2 = effective_nd2.min(safe_room);
+        effective_nd2_half = effective_nd2_half.min(safe_room);
 
         let mut soft = (((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64)
             .saturating_sub(overhead)
-            .saturating_sub(nd2 / 2);
+            .saturating_sub(effective_nd2_half);
 
         // Apply SlowMover to soft in byoyomi as well (keeps behavior consistent)
         soft = ((soft as u128 * params.slow_mover_pct as u128 + 50) / 100) as u64;
+        soft = soft.max(guard_floor).min(byoyomi_ms);
 
-        let mut hard = byoyomi_ms
-            .saturating_sub(overhead)
+        let hard_candidate = available_after_overhead
             .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
-            .saturating_sub(nd2);
+            .saturating_sub(effective_nd2);
 
-        // Clamp hard by ratio if needed
-        if params.max_time_ratio > 0.0 {
-            let max_hard = ((soft as f64 * params.max_time_ratio) + 0.5) as u64;
-            if hard > max_hard {
-                hard = max_hard;
-            }
+        let ratio_cap = if params.max_time_ratio > 0.0 {
+            ((soft as f64 * params.max_time_ratio) + 0.5) as u64
+        } else {
+            u64::MAX
+        };
+
+        let margin = byoyomi_margin(soft, byoyomi_ms);
+        let desired_floor = soft.saturating_add(margin);
+
+        let mut hard = hard_candidate.min(ratio_cap).max(desired_floor);
+        hard = hard.max(guard_floor).min(byoyomi_ms);
+        if hard <= soft {
+            hard = (soft + margin).min(byoyomi_ms);
         }
 
         (soft, hard)
+    }
+}
+
+fn byoyomi_margin(soft_ms: u64, period_ms: u64) -> u64 {
+    if soft_ms >= 1_000 || period_ms >= 1_500 {
+        50
+    } else if soft_ms >= 500 || period_ms >= 1_000 {
+        30
+    } else if soft_ms >= 200 {
+        20
+    } else if soft_ms >= 120 {
+        15
+    } else {
+        10
     }
 }
 
@@ -602,5 +632,30 @@ mod tests {
 
         assert_eq!(soft, expected_soft);
         assert_eq!(hard, expected_hard);
+    }
+
+    #[test]
+    fn test_byoyomi_high_latency_clamps_to_floor() {
+        let mut params = TimeParameters::default();
+        params.network_delay2_ms = 1_300;
+        params.min_think_ms = 250;
+        params.critical_byoyomi_ms = 200;
+
+        let (soft, hard) = calculate_time_allocation(
+            &TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms: 1_000,
+                periods: 2,
+            },
+            Color::White,
+            80,
+            None,
+            GamePhase::EndGame,
+            &params,
+        );
+
+        assert!(soft >= params.min_think_ms);
+        assert!(hard >= soft);
+        assert!(hard <= 1_000);
     }
 }
