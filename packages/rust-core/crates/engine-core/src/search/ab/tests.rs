@@ -46,11 +46,15 @@ fn qsearch_detects_mate_when_evasion_missing() {
     let start_time = Instant::now();
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
         nodes: &mut nodes,
         seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit,
     };
 
     let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0);
@@ -142,11 +146,15 @@ fn tt_bound_follows_used_window() {
     let t0 = Instant::now();
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &t0,
         nodes: &mut nodes,
         seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit,
     };
     let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
     let mut heur = Heuristics::default();
@@ -415,7 +423,7 @@ fn search_profile_basic_disables_advanced_pruning() {
     assert!(profile.prune.enable_nmp);
     assert!(!profile.prune.enable_iid);
     assert!(!profile.prune.enable_razor);
-    assert!(!profile.prune.enable_probcut);
+    assert!(profile.prune.enable_probcut);
     assert!(profile.prune.enable_static_beta_pruning);
 }
 
@@ -539,11 +547,15 @@ fn null_move_respects_runtime_toggle() {
     let start_time = Instant::now();
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
         nodes: &mut nodes,
         seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit,
     };
     let static_eval = evaluator.evaluate(&pos);
     let allowed = backend.null_move_prune(NullMovePruneParams {
@@ -571,11 +583,14 @@ fn null_move_respects_runtime_toggle() {
     let start_time_off = Instant::now();
     let mut nodes_off = 0_u64;
     let mut seldepth_off = 0_u32;
+    let mut qnodes_off = 0_u64;
     let mut ctx_off = SearchContext {
         limits: &limits,
         start_time: &start_time_off,
         nodes: &mut nodes_off,
         seldepth: &mut seldepth_off,
+        qnodes: &mut qnodes_off,
+        qnodes_limit,
     };
     let denied = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,

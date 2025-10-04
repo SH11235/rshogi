@@ -33,9 +33,11 @@ pub const NMP_BONUS_DELTA_BETA: i32 = 150; // if static_eval - beta > this, R +=
 pub const NMP_HAND_SUM_DISABLE: i32 = 6; // disable when hand pieces sum >= this
 
 // QSearch parameters
-pub const QS_MARGIN_CAPTURE: i32 = 100; // cp, delta pruning margin for captures
+pub const QS_MARGIN_CAPTURE: i32 = 150; // cp, delta pruning margin for captures
 pub const QS_PROMOTE_BONUS: i32 = 50; // cp, small promote bonus in delta estimate
-pub const QS_MAX_QUIET_CHECKS: usize = 16; // cap quiet-check searches to bound qsearch
+pub const QS_MAX_QUIET_CHECKS: usize = 4; // cap quiet-check searches to bound qsearch
+pub const QS_BAD_CAPTURE_MIN: i32 = 500; // cp, SEE<0 captures below this are pruned unless checking
+pub const QS_CHECK_PRUNE_MARGIN: i32 = 150; // cp, require stand_pat improvement before exploring quiet check
 
 // Move ordering weights (exported for tuning)
 pub const QUIET_HISTORY_WEIGHT: i32 = 4;
