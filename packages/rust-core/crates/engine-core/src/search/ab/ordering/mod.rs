@@ -1,3 +1,4 @@
+pub mod constants;
 mod guards;
 mod move_picker;
 mod root_picker;
@@ -77,6 +78,14 @@ impl Heuristics {
         self.continuation.age_scores();
         self.capture.age_scores();
         // Counter movesは age 概念が薄いためリセットのみ行う場合は別途検討
+    }
+
+    pub fn clear_all(&mut self) {
+        self.history.clear();
+        self.counter.clear();
+        self.continuation.clear();
+        self.capture.clear();
+        self.lmr_trials = 0;
     }
 }
 
