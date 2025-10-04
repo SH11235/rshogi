@@ -232,6 +232,32 @@ impl Engine {
         }
     }
 
+    fn time_state_for_manager(tm: &TimeManager, elapsed_ms: u64) -> TimeState {
+        match tm.time_control() {
+            TimeControl::Byoyomi { main_time_ms, .. } => {
+                if let Some((_, _, in_byoyomi)) = tm.get_byoyomi_state() {
+                    if in_byoyomi {
+                        return TimeState::Byoyomi { main_left_ms: 0 };
+                    }
+                }
+
+                if main_time_ms == 0 {
+                    TimeState::Byoyomi { main_left_ms: 0 }
+                } else {
+                    let remaining = main_time_ms.saturating_sub(elapsed_ms);
+                    if remaining > 0 {
+                        TimeState::Main {
+                            main_left_ms: remaining,
+                        }
+                    } else {
+                        TimeState::Byoyomi { main_left_ms: 0 }
+                    }
+                }
+            }
+            _ => TimeState::NonByoyomi,
+        }
+    }
+
     fn build_backend(&mut self) -> Option<Arc<dyn SearcherBackend + Send + Sync>> {
         match self.engine_type {
             EngineType::Material | EngineType::Enhanced => {
@@ -486,7 +512,8 @@ impl Engine {
 
         if let Some(tm) = session.time_manager() {
             let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-            tm.update_after_move(elapsed_ms, TimeState::NonByoyomi);
+            let time_state = Self::time_state_for_manager(&tm, elapsed_ms);
+            tm.update_after_move(elapsed_ms, time_state);
         }
 
         result

@@ -81,14 +81,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         None
     }
     #[inline]
-    pub(crate) fn classify_root_bound(
-        local_best: i32,
-        alpha_orig: i32,
-        beta_orig: i32,
-    ) -> NodeType {
-        if local_best <= alpha_orig {
+    pub(crate) fn classify_root_bound(local_best: i32, alpha_win: i32, beta_win: i32) -> NodeType {
+        if local_best <= alpha_win {
             NodeType::UpperBound
-        } else if local_best >= beta_orig {
+        } else if local_best >= beta_win {
             NodeType::LowerBound
         } else {
             NodeType::Exact

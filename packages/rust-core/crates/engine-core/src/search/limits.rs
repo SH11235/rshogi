@@ -268,6 +268,9 @@ impl SearchLimitsBuilder {
     }
 
     /// Set Ponder mode (legacy - loses time control information)
+    #[deprecated(
+        note = "Use `ponder_with_inner()` to preserve the current time control for ponderhit"
+    )]
     pub fn ponder(mut self) -> Self {
         // Create a dummy inner time control for backward compatibility
         let inner = Box::new(TimeControl::Infinite);

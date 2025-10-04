@@ -78,6 +78,8 @@ fn copy_stop_info(src: &StopInfo) -> StopInfo {
     }
 }
 
+/// Build `StopMeta`, prioritizing metadata in the order
+/// `FinalizeReason` > `result.stop_info` > controller-derived `StopInfo`.
 fn gather_stop_meta(
     mut controller_info: Option<StopInfo>,
     result_info: Option<&StopInfo>,
@@ -125,6 +127,14 @@ fn gather_stop_meta(
     }
 }
 
+fn sanitize_ponder_for_bestmove(final_usi: &str, ponder: Option<String>) -> Option<String> {
+    if matches!(final_usi, "resign" | "win") {
+        None
+    } else {
+        ponder
+    }
+}
+
 /// Emit bestmove exactly once per go-session and update common state.
 ///
 /// Returns true when the move was emitted in this call. If the bestmove was
@@ -140,6 +150,7 @@ pub fn emit_bestmove_once<S: Into<String>>(
     }
 
     let final_usi = final_move.into();
+    let ponder = sanitize_ponder_for_bestmove(&final_usi, ponder);
     emit_bestmove(&final_usi, ponder);
 
     state.bestmove_emitted = true;
@@ -667,7 +678,7 @@ pub fn finalize_and_send_fast(
                         snapshot_emit
                     {
                         info_string(format!(
-                            "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=1 tt_probe_budget_ms={} tt_probe_spent_ms={}",
+                            "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=1 tt_probe_src=snapshot tt_probe_budget_ms={} tt_probe_spent_ms={}",
                             label,
                             snap.search_id,
                             fmt_hash(snap.root_key),
@@ -704,7 +715,7 @@ pub fn finalize_and_send_fast(
                     None
                 };
                 info_string(format!(
-                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=0 tt_probe_budget_ms={} note=depth_sufficient",
+                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=0 tt_probe_src=snapshot tt_probe_budget_ms={} note=depth_sufficient",
                     label,
                     snap.search_id,
                     fmt_hash(snap.root_key),
@@ -948,6 +959,14 @@ mod tests {
 
         // Second call should be a no-op
         assert!(!emit_bestmove_once(&mut state, "resign", None));
+    }
+
+    #[test]
+    fn sanitize_ponder_drops_for_resign() {
+        assert!(sanitize_ponder_for_bestmove("resign", Some("7g7f".to_string())).is_none());
+        let kept = sanitize_ponder_for_bestmove("7g7f", Some("7g7f".to_string()));
+        assert_eq!(kept.as_deref(), Some("7g7f"));
+        assert!(sanitize_ponder_for_bestmove("win", Some("7g7f".to_string())).is_none());
     }
 
     #[test]

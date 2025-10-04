@@ -133,8 +133,14 @@ pub fn limits_from_go(
     // 純秒読み（main=0）時の締切リードを worst-case ネット遅延に加算して、
     // エンジンの最終化をGUI締切（byoyomi）より前倒しにする。
     // goコマンドのパラメータから純秒読みを推定: btime=wtime=0 かつ byoyomi>0
-    let pure_byoyomi =
-        gp.byoyomi.unwrap_or(0) > 0 && gp.btime.unwrap_or(0) == 0 && gp.wtime.unwrap_or(0) == 0;
+    let byoyomi_total = gp.byoyomi.unwrap_or(0);
+    let b_main = gp.btime.unwrap_or(0);
+    let w_main = gp.wtime.unwrap_or(0);
+    let side_main_zero = match side {
+        Color::Black => b_main == 0,
+        Color::White => w_main == 0,
+    };
+    let pure_byoyomi = byoyomi_total > 0 && ((b_main == 0 && w_main == 0) || side_main_zero);
     if pure_byoyomi && opts.byoyomi_deadline_lead_ms > 0 {
         // 上限 2000ms（オプション側でも clamp 済み）。
         let before = tp.network_delay2_ms;

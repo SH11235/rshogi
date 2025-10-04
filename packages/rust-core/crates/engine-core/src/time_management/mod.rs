@@ -545,12 +545,14 @@ impl TimeManager {
         let now_ms = monotonic_ms();
         let start_ms = self.inner.start_mono_ms.load(Ordering::Relaxed);
         let diff = now_ms.saturating_sub(start_ms);
-        // Clamp sub-millisecond scheduling jitter to 0 to keep tests deterministic
-        if diff < 2 {
-            0
-        } else {
-            diff
+        #[cfg(test)]
+        {
+            if diff < 2 {
+                return 0;
+            }
         }
+
+        diff
     }
 
     /// Get soft time limit in milliseconds
@@ -584,8 +586,9 @@ impl TimeManager {
         self.inner.search_end_ms.load(Ordering::Relaxed)
     }
 
-    /// Compute a rounded stop target following YaneuraOu design
-    /// Round up to next second boundary, then subtract average network delay
+    /// Compute a rounded stop target following YaneuraOu's design:
+    /// round up to the next second boundary and subtract the average
+    /// network delay (`NetworkDelay`).
     fn round_up(&self, elapsed_ms: u64) -> u64 {
         // YaneuraOu style: round to next second boundary
         let next_sec = ((elapsed_ms / 1000).saturating_add(1)).saturating_mul(1000);
@@ -673,6 +676,10 @@ impl TimeManager {
     fn remain_upper_ms(&self) -> Option<u64> {
         let overhead = self.inner.params.overhead_ms;
         let nd2 = self.inner.params.network_delay2_ms;
+        let params = &self.inner.params;
+        let floor_fischer = params.min_think_ms.max(params.critical_fischer_ms).max(50);
+        let floor_byoyomi = params.min_think_ms.max(params.critical_byoyomi_ms).max(50);
+        let floor_fixed = params.min_think_ms.max(50);
         let tc = self.get_active_time_control();
         match &*tc {
             TimeControl::Fischer {
@@ -685,7 +692,7 @@ impl TimeManager {
                 } else {
                     *black_ms
                 };
-                Some(remain.saturating_sub(nd2).saturating_sub(overhead).max(50))
+                Some(remain.saturating_sub(nd2).saturating_sub(overhead).max(floor_fischer))
             }
             TimeControl::Byoyomi {
                 main_time_ms,
@@ -693,13 +700,18 @@ impl TimeManager {
                 ..
             } => {
                 if self.is_in_byoyomi() {
-                    Some(byoyomi_ms.saturating_sub(nd2).saturating_sub(overhead).max(50))
+                    Some(byoyomi_ms.saturating_sub(nd2).saturating_sub(overhead).max(floor_byoyomi))
                 } else {
-                    Some(main_time_ms.saturating_sub(nd2).saturating_sub(overhead).max(50))
+                    Some(
+                        main_time_ms
+                            .saturating_sub(nd2)
+                            .saturating_sub(overhead)
+                            .max(floor_fischer),
+                    )
                 }
             }
             TimeControl::FixedTime { ms_per_move } => {
-                Some(ms_per_move.saturating_sub(overhead).max(50))
+                Some(ms_per_move.saturating_sub(overhead).max(floor_fixed))
             }
             _ => None,
         }
@@ -801,7 +813,8 @@ impl TimeManager {
         manager.ponder_hit(new_limits, time_already_spent_ms);
     }
 
-    /// Phase 4: Calculate safety margin based on NetworkDelay2 (YaneuraOu-style)
+    /// Phase 4: Calculate safety margin based on YaneuraOu's staged
+    /// `NetworkDelay2` clamp.
     fn calculate_safety_margin(&self, hard_limit: u64) -> u64 {
         // Use NetworkDelay2 as base safety margin
         let network_delay2 = self.inner.params.network_delay2_ms;
