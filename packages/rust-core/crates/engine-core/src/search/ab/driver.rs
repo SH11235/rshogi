@@ -328,7 +328,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut depth_hint_used: u64 = 0;
             let mut line_nodes_checkpoint = nodes;
             let mut line_time_checkpoint = t0.elapsed().as_millis() as u64;
-            iterative_heur.age_all();
+            if d % 2 == 0 {
+                iterative_heur.age_all();
+            }
             let mut shared_heur = std::mem::take(&mut iterative_heur);
             shared_heur.lmr_trials = 0;
             for pv_idx in 1..=k {
