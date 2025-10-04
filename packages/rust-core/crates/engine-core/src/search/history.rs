@@ -40,6 +40,7 @@ impl CounterMoveHistory {
     }
 
     /// Get counter move for previous move
+    #[inline]
     pub fn get(&self, color: Color, prev_move: Move) -> Option<Move> {
         let from_idx = if prev_move.is_drop() {
             drop_from_index(prev_move)
@@ -51,6 +52,7 @@ impl CounterMoveHistory {
     }
 
     /// Update counter move
+    #[inline]
     pub fn update(&mut self, color: Color, prev_move: Move, counter_move: Move) {
         let from_idx = if prev_move.is_drop() {
             drop_from_index(prev_move)
@@ -70,11 +72,10 @@ impl CounterMoveHistory {
 #[inline]
 fn drop_from_index(mv: Move) -> usize {
     debug_assert!(mv.is_drop(), "drop_from_index called with non-drop move");
-    let piece = mv.drop_piece_type();
-    let hand_idx = piece.hand_index().unwrap_or_else(|| {
-        debug_assert!(false, "counter history drop piece without hand index: {:?}", piece);
-        0
-    });
+    let hand_idx = mv
+        .drop_piece_type()
+        .hand_index()
+        .expect("CounterMoveHistory: drop piece must have hand index");
     COUNTER_DROP_BASE + hand_idx
 }
 
@@ -103,6 +104,7 @@ impl ButterflyHistory {
     }
 
     /// Get history score for a move
+    #[inline]
     pub fn get(&self, color: Color, mv: Move) -> i32 {
         let raw = if mv.is_drop() {
             self.scores[color as usize][BUTTERFLY_DROP_INDEX][mv.to().index()]
@@ -577,20 +579,33 @@ mod tests {
         let mut history = CounterMoveHistory::new();
         let color = Color::Black;
 
-        let square = parse_usi_square("5e").unwrap();
-        let pawn_drop = Move::drop(PieceType::Pawn, square);
-        let lance_drop = Move::drop(PieceType::Lance, square);
+        let drop_square = parse_usi_square("5e").unwrap();
+        let board_from_files = ["1a", "2a", "3a", "4a", "5a", "6a", "7a"];
+        let board_to_files = ["1b", "2b", "3b", "4b", "5b", "6b", "7b"];
 
-        let pawn_counter =
-            Move::normal(parse_usi_square("4g").unwrap(), parse_usi_square("4f").unwrap(), false);
-        let lance_counter =
-            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false);
+        for hand_idx in 0..NUM_HAND_PIECE_TYPES {
+            let piece = PieceType::from_hand_index(hand_idx).expect("hand index maps to piece");
+            let drop = Move::drop(piece, drop_square);
+            let counter = Move::normal(
+                parse_usi_square(board_from_files[hand_idx]).unwrap(),
+                parse_usi_square(board_to_files[hand_idx]).unwrap(),
+                false,
+            );
+            history.update(color, drop, counter);
+            assert_eq!(history.get(color, drop), Some(counter));
+        }
 
-        history.update(color, pawn_drop, pawn_counter);
-        history.update(color, lance_drop, lance_counter);
-
-        assert_eq!(history.get(color, pawn_drop), Some(pawn_counter));
-        assert_eq!(history.get(color, lance_drop), Some(lance_counter));
+        // 再度ループして他駒種の学習結果が混ざっていないことを確認
+        for hand_idx in 0..NUM_HAND_PIECE_TYPES {
+            let piece = PieceType::from_hand_index(hand_idx).expect("hand index maps to piece");
+            let drop = Move::drop(piece, drop_square);
+            let expected = Move::normal(
+                parse_usi_square(board_from_files[hand_idx]).unwrap(),
+                parse_usi_square(board_to_files[hand_idx]).unwrap(),
+                false,
+            );
+            assert_eq!(history.get(color, drop), Some(expected));
+        }
     }
 
     #[test]
@@ -620,13 +635,17 @@ mod tests {
         let color = Color::Black;
 
         let drop_mv = Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
-        let board_mv =
-            Move::normal(parse_usi_square("1a").unwrap(), parse_usi_square("1b").unwrap(), false);
+        let board_mvs = [
+            Move::normal(parse_usi_square("1a").unwrap(), parse_usi_square("1b").unwrap(), false),
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false),
+        ];
 
         history.update_good(color, drop_mv, 3);
 
         assert!(history.get(color, drop_mv) > 0);
-        assert_eq!(history.get(color, board_mv), 0);
+        for mv in board_mvs {
+            assert_eq!(history.get(color, mv), 0);
+        }
     }
 
     #[test]
