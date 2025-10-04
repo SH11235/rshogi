@@ -19,8 +19,9 @@ use super::ordering::{self, Heuristics};
 use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
 #[cfg(feature = "diagnostics")]
-use super::qsearch::reset_qsearch_diagnostics;
+use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
 use crate::search::tt::TTProbe;
+use crate::time_management::TimeControl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -37,6 +38,67 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
+        let mut limit =
+            limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
+
+        if let Some(tm) = limits.time_manager.as_ref() {
+            let soft = tm.soft_limit_ms();
+            if soft > 0 && soft != u64::MAX {
+                let base_scaled = soft.saturating_mul(crate::search::constants::QNODES_PER_MS);
+                limit = limit.min(base_scaled);
+
+                let elapsed = tm.elapsed_ms();
+                if elapsed < soft {
+                    let remaining = soft - elapsed;
+                    let dynamic = remaining
+                        .saturating_mul(crate::search::constants::QNODES_PER_MS)
+                        .saturating_add(crate::search::constants::MIN_QNODES_LIMIT / 2);
+                    limit = limit.min(dynamic);
+                } else {
+                    limit = limit.min(crate::search::constants::MIN_QNODES_LIMIT);
+                }
+            }
+
+            if tm.is_in_byoyomi() || matches!(limits.time_control, TimeControl::Byoyomi { .. }) {
+                limit /= 2;
+            }
+        } else if let Some(duration) = limits.time_limit() {
+            let soft_ms = duration.as_millis() as u64;
+            if soft_ms > 0 {
+                let scaled = soft_ms.saturating_mul(crate::search::constants::QNODES_PER_MS);
+                limit = limit.min(scaled);
+            }
+        }
+
+        if matches!(limits.time_control, TimeControl::Byoyomi { .. })
+            || limits.time_manager.as_ref().is_some_and(|tm| tm.is_in_byoyomi())
+        {
+            let depth_scale = 100
+                + (depth.max(1) as u64)
+                    .saturating_mul(crate::search::constants::QNODES_DEPTH_BONUS_PCT);
+            limit = limit.saturating_mul(depth_scale).saturating_add(99) / 100;
+            limit = limit.min(crate::search::constants::DEFAULT_QNODES_LIMIT);
+        }
+
+        if pv_idx > 1 {
+            let divisor = (pv_idx as u64).saturating_add(1);
+            limit /= divisor;
+        }
+
+        limit = limit.max(crate::search::constants::MIN_QNODES_LIMIT);
+        limit
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compute_qnodes_limit_for_test(
+        limits: &SearchLimits,
+        depth: i32,
+        pv_idx: usize,
+    ) -> u64 {
+        Self::compute_qnodes_limit(limits, depth, pv_idx)
+    }
+
     #[inline]
     fn deadline_hit(
         start: Instant,
@@ -262,6 +324,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         };
 
         for d in 1..=max_depth {
+            #[cfg(feature = "diagnostics")]
+            reset_qsearch_diagnostics();
             if let Some(cb) = limits.info_string_callback.as_ref() {
                 cb(&format!("iter_start depth={} nodes={}", d, nodes));
                 if let Some(tt) = &self.tt {
@@ -392,8 +456,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut root_tt_hint_exists: u64 = 0;
                 let mut root_tt_hint_used: u64 = 0;
                 let mut qnodes: u64 = 0;
-                let qnodes_limit =
-                    limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
+                let qnodes_limit = Self::compute_qnodes_limit(limits, d, pv_idx);
 
                 // 作業用root move配列（excludedを除外）
                 let excluded_keys: SmallVec<[u32; 32]> =
@@ -774,6 +837,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     format!("iter_complete depth={} elapsed_ms={} nodes={}", d, elapsed_ms, nodes);
                 cb(msg.as_str());
             }
+
+            #[cfg(feature = "diagnostics")]
+            publish_qsearch_diagnostics(d, limits.info_string_callback.as_ref());
 
             if Self::should_stop(limits) {
                 if let Some(cb) = limits.info_string_callback.as_ref() {

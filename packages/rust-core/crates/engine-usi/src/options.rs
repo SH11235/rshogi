@@ -91,6 +91,11 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.EnableIID type check default true");
     usi_println("option name SearchParams.EnableProbCut type check default true");
     usi_println("option name SearchParams.EnableStaticBeta type check default true");
+    usi_println("option name SearchParams.QS_MarginCapture type spin default 150 min 0 max 5000");
+    usi_println("option name SearchParams.QS_BadCaptureMin type spin default 450 min 0 max 5000");
+    usi_println(
+        "option name SearchParams.QS_CheckPruneMargin type spin default 150 min 0 max 5000",
+    );
     usi_println("option name SearchParams.QuietHistoryWeight type spin default 4 min -64 max 64");
     usi_println(
         "option name SearchParams.ContinuationHistoryWeight type spin default 2 min -32 max 32",
@@ -367,6 +372,27 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 engine_core::search::params::set_static_beta_enabled(on);
+            }
+        }
+        "SearchParams.QS_MarginCapture" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_margin_capture(x);
+                }
+            }
+        }
+        "SearchParams.QS_BadCaptureMin" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_bad_capture_min(x);
+                }
+            }
+        }
+        "SearchParams.QS_CheckPruneMargin" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_check_prune_margin(x);
+                }
             }
         }
         "SearchParams.QuietHistoryWeight" => {

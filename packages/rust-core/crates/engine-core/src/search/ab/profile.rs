@@ -183,6 +183,9 @@ impl SearchProfile {
         params::set_probcut_d5(self.tuning.probcut_margin_d5);
         params::set_probcut_d6p(self.tuning.probcut_margin_d6p);
         params::set_iid_min_depth(self.tuning.iid_min_depth);
+        params::set_qs_margin_capture(params::QS_MARGIN_CAPTURE);
+        params::set_qs_bad_capture_min(params::QS_BAD_CAPTURE_MIN);
+        params::set_qs_check_prune_margin(params::QS_CHECK_PRUNE_MARGIN);
 
         // Boolean toggles (runtime gates)
         params::set_qs_checks_enabled(self.tuning.enable_qs_checks);
