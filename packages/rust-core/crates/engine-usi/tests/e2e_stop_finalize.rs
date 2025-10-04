@@ -314,6 +314,9 @@ fn e2e_byoyomi_oob_finalize_logs() {
     p.write_line("go btime 0 wtime 0 byoyomi 2000");
 
     let mut saw_oob = false;
+    let mut oob_log_count = 0u32;
+    let mut fast_tt_probe_count = 0u32;
+    let mut legacy_fast_snapshot_seen = false;
     let mut time_budget_line: Option<String> = None;
     let mut time_caps_line: Option<String> = None;
 
@@ -326,12 +329,26 @@ fn e2e_byoyomi_oob_finalize_logs() {
         }
         if line.contains("oob_finalize_request") {
             saw_oob = true;
+            oob_log_count = oob_log_count.saturating_add(1);
+        }
+        if line.contains("_fast_tt_probe") {
+            fast_tt_probe_count = fast_tt_probe_count.saturating_add(1);
+        }
+        if line.contains("_fast_snapshot") {
+            legacy_fast_snapshot_seen = true;
         }
         line.starts_with("bestmove ")
     });
 
     assert!(bestmove_seen, "bestmove was not emitted after OOB finalize");
     assert!(saw_oob, "OOB finalize log was not observed");
+    assert!(
+        oob_log_count >= 1 && oob_log_count <= 2,
+        "unexpected number of oob_finalize_request logs: {}",
+        oob_log_count
+    );
+    assert!(fast_tt_probe_count >= 1, "fast finalize should emit *_fast_tt_probe log");
+    assert!(!legacy_fast_snapshot_seen, "legacy *_fast_snapshot log should not appear");
 
     fn parse_soft_hard(line: &str) -> Option<(u64, u64)> {
         let mut soft = None;
@@ -364,6 +381,76 @@ fn e2e_byoyomi_oob_finalize_logs() {
         caps_soft,
         budget_soft
     );
+}
+
+#[test]
+#[ignore]
+fn e2e_stop_flag_reset_after_oob_finalize() {
+    let mut p = UsiProc::spawn();
+    p.write_line("usi");
+    assert!(p.wait_for_contains("usiok", 2000), "usiok timeout");
+
+    p.write_line("setoption name Threads value 2");
+    p.write_line("setoption name MinThinkMs value 2000");
+    p.write_line("setoption name ByoyomiDeadlineLeadMs value 0");
+    p.write_line("setoption name ByoyomiSafetyMs value 0");
+    p.write_line("setoption name OverheadMs value 0");
+    p.write_line("setoption name ByoyomiOverheadMs value 0");
+    p.write_line("setoption name StopWaitMs value 0");
+    p.write_line("setoption name Ponder value false");
+
+    p.write_line("isready");
+    assert!(p.wait_for_contains("readyok", 2000), "readyok timeout after option updates");
+
+    p.write_line("usinewgame");
+    p.write_line("position startpos");
+
+    let mut first_addr: Option<String> = None;
+    let mut first_oob = 0u32;
+    p.write_line("go btime 0 wtime 0 byoyomi 2000");
+    let first_bestmove = p.wait_for(6000, |line| {
+        if line.contains("stop_flag_create addr=") && first_addr.is_none() {
+            if let Some(addr) = line.split("stop_flag_create addr=").nth(1) {
+                if let Some(head) = addr.split_whitespace().next() {
+                    first_addr = Some(head.to_string());
+                }
+            }
+        }
+        if line.contains("oob_finalize_request") {
+            first_oob = first_oob.saturating_add(1);
+        }
+        line.starts_with("bestmove ")
+    });
+    assert!(first_bestmove, "first bestmove not observed");
+    let first_addr = first_addr.expect("first stop_flag address missing");
+    assert!(first_oob > 0, "first go did not trigger OOB finalize");
+
+    p.write_line("isready");
+    assert!(p.wait_for_contains("readyok", 2000), "readyok timeout after first search");
+
+    p.write_line("position startpos");
+
+    let mut second_addr: Option<String> = None;
+    let mut second_oob = 0u32;
+    p.write_line("go btime 0 wtime 0 byoyomi 2000");
+    let second_bestmove = p.wait_for(6000, |line| {
+        if line.contains("stop_flag_create addr=") && second_addr.is_none() {
+            if let Some(addr) = line.split("stop_flag_create addr=").nth(1) {
+                if let Some(head) = addr.split_whitespace().next() {
+                    second_addr = Some(head.to_string());
+                }
+            }
+        }
+        if line.contains("oob_finalize_request") {
+            second_oob = second_oob.saturating_add(1);
+        }
+        line.starts_with("bestmove ")
+    });
+    assert!(second_bestmove, "second bestmove not observed");
+    let second_addr = second_addr.expect("second stop_flag address missing");
+    assert!(second_oob > 0, "second go did not trigger OOB finalize");
+
+    assert_ne!(first_addr, second_addr, "stop_flag address must change between OOB finalizes");
 }
 
 #[test]

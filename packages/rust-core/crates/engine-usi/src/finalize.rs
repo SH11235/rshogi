@@ -50,18 +50,11 @@ fn log_and_emit_final_selection(
 }
 
 fn prepare_stop_meta(
-    label: &str,
+    _label: &str,
     controller_info: Option<StopInfo>,
     result_stop_info: Option<&StopInfo>,
     finalize_reason: Option<FinalizeReason>,
 ) -> StopMeta {
-    if let Some(reason) = finalize_reason {
-        if label.starts_with("oob_") {
-            // OOB enforce 側でも同じログを出力するが、finalize パイプライン内でも
-            // _claim/_select 系ログと並べて把握できるよう意図的に重複させる。
-            info_string(format!("oob_finalize_request reason={:?}", reason));
-        }
-    }
     gather_stop_meta(controller_info, result_stop_info, finalize_reason)
 }
 
@@ -86,20 +79,38 @@ fn copy_stop_info(src: &StopInfo) -> StopInfo {
 }
 
 fn gather_stop_meta(
-    controller_info: Option<StopInfo>,
+    mut controller_info: Option<StopInfo>,
     result_info: Option<&StopInfo>,
     finalize_reason: Option<FinalizeReason>,
 ) -> StopMeta {
     let controller_reason = controller_info.as_ref().map(|si| format!("{:?}", si.reason));
-    let result_reason = result_info.map(|si| format!("{:?}", si.reason));
+    let result_info_for_reason = result_info;
+    let result_reason = result_info_for_reason.map(|si| format!("{:?}", si.reason));
 
-    let reason_label = finalize_reason
+    let mut reason_label = finalize_reason
         .map(|r| format!("{:?}", r))
-        .or(result_reason)
-        .or(controller_reason)
+        .or(result_reason.clone())
+        .or(controller_reason.clone())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let chosen_info = result_info.map(copy_stop_info).or(controller_info);
+    if finalize_reason.is_some_and(|r| matches!(r, FinalizeReason::TimeManagerStop)) {
+        let result_info_for_tm = result_info;
+        let tm_tag_source =
+            result_info_for_tm.or(controller_info.as_ref().map(|si| si as &StopInfo));
+        let tm_tag = tm_tag_source
+            .map(|si| {
+                if si.hard_timeout {
+                    "tm=hard"
+                } else {
+                    "tm=soft"
+                }
+            })
+            .unwrap_or("tm=unknown");
+        reason_label.push('|');
+        reason_label.push_str(tm_tag);
+    }
+
+    let chosen_info = result_info.map(copy_stop_info).or(controller_info.take());
 
     let (soft_ms, hard_ms) = chosen_info
         .as_ref()
@@ -759,7 +770,7 @@ pub fn finalize_and_send_fast(
 
     if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us, dbg)) = fallback_emit {
         info_string(format!(
-            "{}_fast_snapshot sid={} root_key={} tt_probe=0 tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
+            "{}_fast_tt_probe sid={} root_key={} tt_probe=1 tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
             label,
             state.current_session_core_id.unwrap_or(0),
             root_key_hex,
@@ -937,5 +948,32 @@ mod tests {
 
         // Second call should be a no-op
         assert!(!emit_bestmove_once(&mut state, "resign", None));
+    }
+
+    #[test]
+    fn gather_stop_meta_appends_tm_kind_tag() {
+        use engine_core::search::types::TerminationReason;
+
+        let mut base = StopInfo {
+            reason: TerminationReason::TimeLimit,
+            elapsed_ms: 1_000,
+            nodes: 42,
+            depth_reached: 12,
+            hard_timeout: false,
+            soft_limit_ms: 1_500,
+            hard_limit_ms: 2_000,
+        };
+
+        let soft_meta =
+            gather_stop_meta(Some(base.clone()), None, Some(FinalizeReason::TimeManagerStop));
+        assert_eq!(soft_meta.reason_label, "TimeManagerStop|tm=soft");
+
+        base.hard_timeout = true;
+        let hard_meta =
+            gather_stop_meta(Some(base.clone()), None, Some(FinalizeReason::TimeManagerStop));
+        assert_eq!(hard_meta.reason_label, "TimeManagerStop|tm=hard");
+
+        let unknown_meta = gather_stop_meta(None, None, Some(FinalizeReason::TimeManagerStop));
+        assert_eq!(unknown_meta.reason_label, "TimeManagerStop|tm=unknown");
     }
 }

@@ -806,6 +806,7 @@ impl TimeManager {
                 manager.handle_update(time_spent_ms, Some(main_left_ms), *byoyomi_ms);
             }
             (TimeControl::Byoyomi { .. }, TimeState::NonByoyomi) => {
+                debug_assert!(false, "TimeState::NonByoyomi used with Byoyomi time control");
                 warn!("TimeState::NonByoyomi used with Byoyomi time control - skipping update");
             }
             _ => {

@@ -767,9 +767,8 @@ impl Engine {
                         .map(|pt| matches!(pt, crate::shogi::PieceType::King))
                         .unwrap_or(false)
                 };
-                let is_tactical = |m: &crate::shogi::Move| {
-                    m.is_drop() || m.is_capture_hint() || m.is_promote()
-                };
+                let is_tactical =
+                    |m: &crate::shogi::Move| m.is_drop() || m.is_capture_hint() || m.is_promote();
 
                 // Legal filter
                 let legal_moves: Vec<crate::shogi::Move> =
@@ -884,5 +883,27 @@ impl Evaluator for NNUEEvaluatorProxy {
         if let Some(mut l) = self.ensure_local() {
             l.undo_move();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shogi::Position;
+    use crate::usi::move_to_usi;
+
+    #[test]
+    fn legal_fallback_prefers_promotion_as_tactical() {
+        let engine = Engine::new(EngineType::Material);
+        let pos = Position::from_sfen("4k4/9/9/2P6/9/9/9/9/4K4 b - 1").unwrap();
+
+        let best = engine.choose_final_bestmove(&pos, None);
+        let mv = best.best_move.expect("expected fallback move");
+        assert!(
+            mv.is_promote(),
+            "fallback should prefer promotion as tactical: {}",
+            move_to_usi(&mv)
+        );
+        assert_eq!(best.source, FinalBestSource::LegalFallback);
     }
 }
