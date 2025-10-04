@@ -653,7 +653,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     } else {
                         None
                     };
-                    let bound = Self::classify_root_bound(local_best, window_alpha, window_beta);
+                    let alpha = window_alpha;
+                    let beta = window_beta;
+                    let bound = Self::classify_root_bound(local_best, alpha, beta);
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,

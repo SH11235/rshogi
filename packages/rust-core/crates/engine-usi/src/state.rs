@@ -204,13 +204,10 @@ impl EngineState {
     pub fn time_state_for_update(&self, elapsed_ms: u64) -> TimeState {
         if let Some(TimeControl::Byoyomi { main_time_ms, .. }) = &self.current_time_control {
             let side_to_move = self.position.side_to_move;
-            let from_go = self
-                .last_go_params
-                .as_ref()
-                .and_then(|gp| match side_to_move {
-                    Color::Black => gp.btime,
-                    Color::White => gp.wtime,
-                });
+            let from_go = self.last_go_params.as_ref().and_then(|gp| match side_to_move {
+                Color::Black => gp.btime,
+                Color::White => gp.wtime,
+            });
 
             let main_before = from_go.unwrap_or(*main_time_ms);
 
