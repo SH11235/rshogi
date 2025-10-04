@@ -26,11 +26,21 @@ fn current_profile(state: &EngineState) -> Option<SearchProfile> {
 }
 
 fn profile_allows_iid(state: &EngineState) -> bool {
-    current_profile(state).map(|p| p.prune.enable_iid).unwrap_or(true)
+    use EngineType::Enhanced;
+    if matches!(state.opts.engine_type, Enhanced) {
+        false
+    } else {
+        current_profile(state).map(|p| p.prune.enable_iid).unwrap_or(true)
+    }
 }
 
 fn profile_allows_probcut(state: &EngineState) -> bool {
-    current_profile(state).map(|p| p.prune.enable_probcut).unwrap_or(true)
+    use EngineType::{Enhanced, Material};
+    if matches!(state.opts.engine_type, Material | Enhanced) {
+        false
+    } else {
+        current_profile(state).map(|p| p.prune.enable_probcut).unwrap_or(true)
+    }
 }
 
 fn profile_allows_razor(state: &EngineState) -> bool {

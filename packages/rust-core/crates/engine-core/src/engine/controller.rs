@@ -136,27 +136,70 @@ impl Engine {
         pos: &Position,
         limits: &SearchLimits,
     ) -> Option<Arc<TimeManager>> {
-        if limits.is_ponder {
-            return None;
-        }
-
-        match limits.time_control {
-            TimeControl::Infinite | TimeControl::FixedNodes { .. } => return None,
-            TimeControl::Ponder(_) => return None,
-            _ => {}
-        }
-
-        let tm_limits = TimeLimits {
-            time_control: limits.time_control.clone(),
-            moves_to_go: limits.moves_to_go,
-            depth: limits.depth.map(|d| d as u32),
-            nodes: limits.nodes,
-            time_parameters: limits.time_parameters,
-            random_time_ms: limits.random_time_ms,
-        };
+        let moves_to_go = limits.moves_to_go;
+        let depth = limits.depth.map(|d| d as u32);
+        let nodes = limits.nodes;
+        let time_parameters = limits.time_parameters;
+        let random_time_ms = limits.random_time_ms;
         let game_phase = detect_game_phase_for_time(pos, pos.ply as u32);
-        let manager = TimeManager::new(&tm_limits, pos.side_to_move, pos.ply as u32, game_phase);
-        Some(Arc::new(manager))
+
+        if limits.is_ponder {
+            let inner_time_control = match &limits.time_control {
+                TimeControl::Ponder(inner) => (**inner).clone(),
+                other => other.clone(),
+            };
+
+            let pending_limits = TimeLimits {
+                time_control: inner_time_control,
+                moves_to_go,
+                depth,
+                nodes,
+                time_parameters,
+                random_time_ms,
+            };
+
+            let manager = TimeManager::new_ponder(
+                &pending_limits,
+                pos.side_to_move,
+                pos.ply as u32,
+                game_phase,
+            );
+            return Some(Arc::new(manager));
+        }
+
+        match &limits.time_control {
+            TimeControl::Infinite | TimeControl::FixedNodes { .. } => None,
+            TimeControl::Ponder(inner) => {
+                let pending_limits = TimeLimits {
+                    time_control: (**inner).clone(),
+                    moves_to_go,
+                    depth,
+                    nodes,
+                    time_parameters,
+                    random_time_ms,
+                };
+                let manager = TimeManager::new_ponder(
+                    &pending_limits,
+                    pos.side_to_move,
+                    pos.ply as u32,
+                    game_phase,
+                );
+                Some(Arc::new(manager))
+            }
+            tc => {
+                let tm_limits = TimeLimits {
+                    time_control: tc.clone(),
+                    moves_to_go,
+                    depth,
+                    nodes,
+                    time_parameters,
+                    random_time_ms,
+                };
+                let manager =
+                    TimeManager::new(&tm_limits, pos.side_to_move, pos.ply as u32, game_phase);
+                Some(Arc::new(manager))
+            }
+        }
     }
 
     /// Create new engine with specified type

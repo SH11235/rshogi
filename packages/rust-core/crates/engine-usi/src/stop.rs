@@ -8,6 +8,7 @@ use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_f
 use crate::io::info_string;
 use crate::state::EngineState;
 use engine_core::search::parallel::FinalizeReason;
+use engine_core::search::types::StopInfo;
 use engine_core::usi::move_to_usi;
 
 pub fn handle_stop(state: &mut EngineState) {
@@ -209,7 +210,66 @@ pub fn handle_ponderhit(state: &mut EngineState) {
         if let Some(flag) = &state.ponder_hit_flag {
             flag.store(true, Ordering::SeqCst);
         }
+
         state.current_is_ponder = false;
+
+        let mut soft_hard: Option<(u64, u64)> = None;
+
+        if let Some(tm) = state.active_time_manager.as_ref() {
+            let elapsed_ms = tm.elapsed_ms();
+            tm.ponder_hit(None, elapsed_ms);
+            let soft_ms = tm.soft_limit_ms();
+            let hard_ms = tm.hard_limit_ms();
+            let tc_str = state
+                .current_time_control
+                .as_ref()
+                .map(|tc| format!("{tc:?}"))
+                .unwrap_or_else(|| "None".to_string());
+            info_string(format!(
+                "time_budget soft_ms={} hard_ms={} source=ponderhit elapsed_ms={} tc={}",
+                soft_ms, hard_ms, elapsed_ms, tc_str
+            ));
+            soft_hard = Some((soft_ms, hard_ms));
+        } else {
+            info_string("ponderhit_no_time_manager=1");
+        }
+
+        if let Some((soft_ms, hard_ms)) = soft_hard {
+            if hard_ms != u64::MAX && hard_ms > 0 {
+                let now = Instant::now();
+                let hard_deadline = now + Duration::from_millis(hard_ms);
+                state.deadline_hard = Some(hard_deadline);
+                let lead_ms = if state.opts.byoyomi_deadline_lead_ms > 0 {
+                    state.opts.byoyomi_deadline_lead_ms
+                } else if matches!(state.current_time_control, Some(TimeControl::Byoyomi { .. })) {
+                    200
+                } else {
+                    0
+                };
+                state.deadline_near = if lead_ms > 0 {
+                    hard_deadline.checked_sub(Duration::from_millis(lead_ms))
+                } else {
+                    None
+                };
+                state.deadline_near_notified = false;
+
+                let stop_info = StopInfo {
+                    soft_limit_ms: if soft_ms != u64::MAX { soft_ms } else { 0 },
+                    hard_limit_ms: hard_ms,
+                    ..Default::default()
+                };
+                state.stop_controller.prime_stop_info(stop_info.clone());
+                state.stop_bridge.prime_stop_info(stop_info);
+            } else {
+                state.deadline_hard = None;
+                state.deadline_near = None;
+                state.deadline_near_notified = false;
+            }
+        } else {
+            state.deadline_hard = None;
+            state.deadline_near = None;
+            state.deadline_near_notified = false;
+        }
     }
 }
 
@@ -412,5 +472,57 @@ pub fn handle_gameover(state: &mut EngineState) {
         state.ponder_hit_flag = None;
         state.current_time_control = None;
         state.notify_idle();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_core::time_management::{
+        detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeParameters,
+    };
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    #[test]
+    fn handle_ponderhit_reinitializes_time_manager_and_deadlines() {
+        let mut state = EngineState::new();
+        state.opts.ponder = true;
+        state.searching = true;
+        state.current_is_ponder = true;
+        state.current_time_control = Some(TimeControl::Byoyomi {
+            main_time_ms: 0,
+            byoyomi_ms: 10_000,
+            periods: 1,
+        });
+
+        let pending_limits = TimeLimits {
+            time_control: state.current_time_control.as_ref().unwrap().clone(),
+            moves_to_go: None,
+            depth: None,
+            nodes: None,
+            time_parameters: Some(TimeParameters::default()),
+            random_time_ms: None,
+        };
+
+        let phase = detect_game_phase_for_time(&state.position, state.position.ply as u32);
+        let tm = Arc::new(TimeManager::new_ponder(
+            &pending_limits,
+            state.position.side_to_move,
+            state.position.ply as u32,
+            phase,
+        ));
+        state.active_time_manager = Some(Arc::clone(&tm));
+
+        state.ponder_hit_flag = Some(Arc::new(AtomicBool::new(false)));
+
+        handle_ponderhit(&mut state);
+
+        assert!(!tm.is_pondering(), "TimeManager should exit ponder mode after ponderhit");
+
+        let hard_ms = tm.hard_limit_ms();
+        assert!(hard_ms != u64::MAX && hard_ms > 0);
+        assert!(state.deadline_hard.is_some());
+        assert!(!state.deadline_near_notified);
+        assert!(!state.current_is_ponder);
     }
 }
