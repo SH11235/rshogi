@@ -137,7 +137,7 @@ impl SearchSession {
         timeout: Duration,
     ) -> Option<SearchResult> {
         self.stop_handle.request_stop();
-        controller.request_stop();
+        controller.request_stop_flag_only();
         self.recv_result_timeout(timeout)
     }
 

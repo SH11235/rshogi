@@ -648,9 +648,9 @@ mod watchdog_tests {
         let timeout = Duration::from_secs(2);
         let start = Instant::now();
 
-        while !stop_flag.load(AtomicOrdering::Relaxed) {
+        while !stop_flag.load(AtomicOrdering::Acquire) {
             tick_time_watchdog(&mut state);
-            if stop_flag.load(AtomicOrdering::Relaxed) {
+            if stop_flag.load(AtomicOrdering::Acquire) {
                 break;
             }
             if start.elapsed() >= timeout {
@@ -662,7 +662,7 @@ mod watchdog_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        assert!(stop_flag.load(AtomicOrdering::Relaxed));
+        assert!(stop_flag.load(AtomicOrdering::Acquire));
     }
 }
 

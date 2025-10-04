@@ -443,7 +443,6 @@ impl Engine {
             cb(&format!("session_publish stop_ctrl sid={}", session_id));
         }
         self.stop_controller.publish_session(stop_flag_ref, session_id);
-        self.stop_controller.update_external_stop_flag(limits.stop_flag.as_ref());
 
         let backend =
             Arc::clone(self.backend.as_ref().expect("backend must be initialized after rebuild"));
@@ -559,7 +558,7 @@ impl Engine {
         let mut child = pos.clone();
         // We don't need the undo handle here
         let _ = child.do_move(best_move);
-        let child_hash = child.zobrist_hash;
+        let child_hash = child.zobrist_hash();
 
         // 常に shared TT を参照
         let tt = self.shared_tt.clone();

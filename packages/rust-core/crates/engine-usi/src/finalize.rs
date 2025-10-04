@@ -494,7 +494,7 @@ pub fn finalize_and_send(
             // Optional: TT roundtrip smoke test at current root hash
             #[cfg(all(feature = "diagnostics", feature = "tt_metrics"))]
             {
-                let root_hash = state.position.zobrist_hash;
+                let root_hash = state.position.zobrist_hash();
                 let ok = {
                     let eng = state.engine.lock().unwrap();
                     eng.tt_roundtrip_test(root_hash)

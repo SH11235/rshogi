@@ -1180,7 +1180,7 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
     let max_len = max_depth.min(crate::search::constants::MAX_PLY as u8) as usize;
 
     for _ in 0..max_len {
-        let hash = pos.zobrist_hash;
+        let hash = pos.zobrist_hash();
         if !visited.insert(hash) {
             break;
         }

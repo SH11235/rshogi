@@ -184,9 +184,9 @@ fn tt_bound_follows_used_window() {
         },
         &mut ctx,
     );
-    assert!(matches!(backend.tt.as_ref(), Some(_)), "default backend should have TT");
+    assert!(backend.tt.as_ref().is_some(), "default backend should have TT");
     if let Some(tt) = backend.tt {
-        if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
+        if let Some(entry) = tt.probe(pos.zobrist_hash(), pos.side_to_move) {
             let mut used_alpha = original_alpha;
             let mut used_beta = original_beta;
             crate::search::mate_distance_pruning(&mut used_alpha, &mut used_beta, 0);

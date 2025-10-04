@@ -70,7 +70,7 @@ impl<'a> SearchContext<'a> {
             }
 
             if let Some(flag) = self.limits.stop_flag.as_ref() {
-                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                if flag.load(std::sync::atomic::Ordering::Acquire) {
                     return true;
                 }
             }
@@ -93,7 +93,7 @@ impl<'a> SearchContext<'a> {
     pub(crate) fn time_up_fast(&self) -> bool {
         if let Some(tm) = self.limits.time_manager.as_ref() {
             if let Some(flag) = self.limits.stop_flag.as_ref() {
-                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                if flag.load(std::sync::atomic::Ordering::Acquire) {
                     return true;
                 }
             }
@@ -149,12 +149,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let eval = self.evaluator.evaluate(pos);
             return (eval, None);
         }
-        if ctx.time_up() {
+        if ctx.time_up() || Self::should_stop(ctx.limits) {
             let eval = self.evaluator.evaluate(pos);
             return (eval, None);
-        }
-        if Self::should_stop(ctx.limits) {
-            return (0, None);
         }
         ctx.tick(ply);
         if depth <= 0 {
@@ -202,11 +199,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         let mut tt_hint: Option<crate::shogi::Move> = None;
         let mut tt_depth_ok = false;
+        let pos_hash = pos.zobrist_hash();
         if let Some(tt) = &self.tt {
             if depth >= 3 && dynp::tt_prefetch_enabled() {
-                tt.prefetch_l2(pos.zobrist_hash, pos.side_to_move);
+                tt.prefetch_l2(pos_hash, pos.side_to_move);
             }
-            if let Some(entry) = tt.probe(pos.zobrist_hash, pos.side_to_move) {
+            if let Some(entry) = tt.probe(pos_hash, pos.side_to_move) {
                 *tt_hits += 1;
                 let stored = entry.score() as i32;
                 let score = crate::search::common::adjust_mate_score_from_tt(stored, ply as u8);
@@ -469,7 +467,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     .clamp(i16::MIN as i32, i16::MAX as i32);
                 let static_eval_i16 = static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 let mut args = crate::search::tt::TTStoreArgs::new(
-                    pos.zobrist_hash,
+                    pos_hash,
                     best_mv,
                     store_score as i16,
                     static_eval_i16,
