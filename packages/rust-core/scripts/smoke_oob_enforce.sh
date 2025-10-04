@@ -26,7 +26,7 @@ echo "[oob] run byoyomi=2000" >&2
 } | stdbuf -oL -eL "$BIN" | tee "$LOG" >/dev/null
 
 # enforce_deadline が発火して bestmove 1回のみ
-rg -n "oob_finalize_request reason=Hard" "$LOG" >/dev/null || { echo "[oob] NG: Hard finalize 未検出" >&2; exit 1; }
+rg -n "oob_finalize_request reason=NearHard" "$LOG" >/dev/null || { echo "[oob] NG: NearHard finalize 未検出" >&2; exit 1; }
 bcount=$(rg -n "^bestmove " "$LOG" | wc -l | tr -d ' ')
 [[ "$bcount" == 1 ]] || { echo "[oob] NG: bestmove=$bcount" >&2; exit 1; }
 

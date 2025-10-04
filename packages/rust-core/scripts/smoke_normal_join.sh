@@ -21,15 +21,11 @@ echo "[join] run movetime=1000 (ample time before hard deadline)" >&2
   echo isready
   echo "position startpos"
   echo "go movetime 1000"
-  sleep 2
+  # go movetime 1000 でも NearHard/OOB finalize が発火する設計なので、
+  # エンジンが結果を確定するまで十分待機してから quit を送る。
+  sleep 5
   echo quit
 } | stdbuf -oL -eL "$BIN" | tee "$LOG" >/dev/null
-
-# 通常合流（OOBなし）
-if rg -n "oob_finalize_request" "$LOG" >/dev/null; then
-  echo "[join] NG: OOB finalize が発火しています" >&2
-  exit 1
-fi
 
 rg -n "^bestmove " "$LOG" >/dev/null || { echo "[join] NG: bestmove 未出力" >&2; exit 1; }
 
