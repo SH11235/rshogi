@@ -109,6 +109,28 @@ fn classify_root_bound_matches_aspiration_cases() {
 }
 
 #[test]
+fn root_bound_uses_final_window_after_research() {
+    use crate::search::types::NodeType;
+
+    type Backend = ClassicBackend<MaterialEvaluator>;
+
+    let alpha_initial = -30;
+    let beta_initial = 30;
+    let local_best = 100;
+    let final_alpha = alpha_initial;
+    let final_beta = beta_initial + 120;
+
+    assert_eq!(
+        Backend::classify_root_bound(local_best, alpha_initial, beta_initial),
+        NodeType::LowerBound,
+    );
+    assert_eq!(
+        Backend::classify_root_bound(local_best, final_alpha, final_beta),
+        NodeType::Exact,
+    );
+}
+
+#[test]
 fn tt_bound_follows_used_window() {
     use crate::search::tt::{TTProbe, TranspositionTable};
     use crate::search::NodeType;

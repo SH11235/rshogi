@@ -767,8 +767,9 @@ impl Engine {
                         .map(|pt| matches!(pt, crate::shogi::PieceType::King))
                         .unwrap_or(false)
                 };
-                let is_capture_or_drop =
-                    |m: &crate::shogi::Move| m.is_drop() || m.is_capture_hint();
+                let is_tactical = |m: &crate::shogi::Move| {
+                    m.is_drop() || m.is_capture_hint() || m.is_promote()
+                };
 
                 // Legal filter
                 let legal_moves: Vec<crate::shogi::Move> =
@@ -779,7 +780,7 @@ impl Engine {
                     let chosen = if !in_check {
                         legal_moves
                             .iter()
-                            .find(|m| is_capture_or_drop(m) && !is_king_move(m))
+                            .find(|m| is_tactical(m) && !is_king_move(m))
                             .copied()
                             .or_else(|| legal_moves.iter().find(|m| !is_king_move(m)).copied())
                             .unwrap_or_else(|| legal_moves[0])

@@ -204,26 +204,25 @@ impl EngineState {
     pub fn time_state_for_update(&self, elapsed_ms: u64) -> TimeState {
         if let Some(TimeControl::Byoyomi { main_time_ms, .. }) = &self.current_time_control {
             let side_to_move = self.position.side_to_move;
-            let main_before = self
+            let from_go = self
                 .last_go_params
                 .as_ref()
                 .and_then(|gp| match side_to_move {
                     Color::Black => gp.btime,
                     Color::White => gp.wtime,
-                })
-                .or(Some(*main_time_ms));
+                });
 
-            if let Some(before) = main_before {
-                if before == 0 {
-                    return TimeState::Byoyomi { main_left_ms: 0 };
-                }
-                let remaining = before.saturating_sub(elapsed_ms);
-                if remaining > 0 {
-                    return TimeState::Main {
-                        main_left_ms: remaining,
-                    };
-                }
+            let main_before = from_go.unwrap_or(*main_time_ms);
+
+            if main_before == 0 {
                 return TimeState::Byoyomi { main_left_ms: 0 };
+            }
+
+            let remaining = main_before.saturating_sub(elapsed_ms);
+            if remaining > 0 {
+                return TimeState::Main {
+                    main_left_ms: remaining,
+                };
             }
 
             return TimeState::Byoyomi { main_left_ms: 0 };
@@ -250,6 +249,46 @@ impl EngineState {
 #[derive(Default)]
 pub struct IdleSync {
     condvar: Condvar,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_state_defaults_to_main_without_go_params() {
+        let mut state = EngineState::new();
+        state.current_time_control = Some(TimeControl::Byoyomi {
+            main_time_ms: 60_000,
+            byoyomi_ms: 1_000,
+            periods: 3,
+        });
+        state.last_go_params = None;
+
+        match state.time_state_for_update(1_000) {
+            TimeState::Main { main_left_ms } => assert_eq!(main_left_ms, 59_000),
+            other => panic!("unexpected time state: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn time_state_respects_zero_main_time_from_go() {
+        let mut state = EngineState::new();
+        state.current_time_control = Some(TimeControl::Byoyomi {
+            main_time_ms: 60_000,
+            byoyomi_ms: 1_000,
+            periods: 3,
+        });
+        let mut go = GoParams::default();
+        go.btime = Some(0);
+        go.wtime = Some(0);
+        state.last_go_params = Some(go);
+
+        match state.time_state_for_update(500) {
+            TimeState::Byoyomi { main_left_ms } => assert_eq!(main_left_ms, 0),
+            other => panic!("unexpected time state: {:?}", other),
+        }
+    }
 }
 
 impl IdleSync {

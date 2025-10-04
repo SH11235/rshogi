@@ -57,6 +57,8 @@ fn prepare_stop_meta(
 ) -> StopMeta {
     if let Some(reason) = finalize_reason {
         if label.starts_with("oob_") {
+            // OOB enforce 側でも同じログを出力するが、finalize パイプライン内でも
+            // _claim/_select 系ログと並べて把握できるよう意図的に重複させる。
             info_string(format!("oob_finalize_request reason={:?}", reason));
         }
     }

@@ -259,6 +259,12 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     state.last_go_params = Some(gp.clone());
 
+    // 新しい go セッションに入る前に bestmove の送信状態をリセットしておく。
+    // 早期リターン経路（合法手 0/1 件）では search_session を作成せずに
+    // emit_bestmove_once() を用いるため、前回探索のフラグが残っていると
+    // bestmove が送信されない退行が起きる。
+    state.bestmove_emitted = false;
+
     let mut search_position = state.position.clone();
     let current_is_stochastic_ponder = gp.ponder && state.opts.stochastic_ponder;
     if current_is_stochastic_ponder {
