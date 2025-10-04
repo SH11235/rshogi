@@ -567,6 +567,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "WatchdogPollMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.watchdog_poll_ms = ms.clamp(1, 20);
+                }
+            }
+        }
         "GameoverSendsBestmove" => {
             if let Some(v) = value_ref {
                 let v = v.to_lowercase();
@@ -723,6 +730,10 @@ fn print_time_policy_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name StopWaitMs type spin default {} min 0 max 2000",
         opts.stop_wait_ms
+    ));
+    usi_println(&format!(
+        "option name WatchdogPollMs type spin default {} min 1 max 20",
+        opts.watchdog_poll_ms
     ));
     usi_println(&format!(
         "option name GameoverSendsBestmove type check default {}",
