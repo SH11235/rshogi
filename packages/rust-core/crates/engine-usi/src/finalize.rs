@@ -945,6 +945,7 @@ const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::engine::controller::{Engine, EngineType};
 
     #[test]
     fn tt_probe_budget_respects_stop_info_and_snapshot_elapsed() {
@@ -999,6 +1000,23 @@ mod tests {
         let kept = sanitize_ponder_for_bestmove("7g7f", Some("7g7f".to_string()));
         assert_eq!(kept.as_deref(), Some("7g7f"));
         assert!(sanitize_ponder_for_bestmove("win", Some("7g7f".to_string())).is_none());
+    }
+
+    #[test]
+    fn try_lock_engine_with_budget_succeeds_when_unlocked() {
+        let engine = Arc::new(Mutex::new(Engine::new(EngineType::Material)));
+        let result =
+            super::try_lock_engine_with_budget(&engine, 1).expect("lock should succeed when free");
+        drop(result.0);
+    }
+
+    #[test]
+    fn try_lock_engine_with_budget_respects_deadline_when_locked() {
+        let engine = Arc::new(Mutex::new(Engine::new(EngineType::Material)));
+        let guard = engine.lock().unwrap();
+        let result = super::try_lock_engine_with_budget(&engine, 1);
+        drop(guard);
+        assert!(result.is_none(), "lock attempt must time out when mutex is held");
     }
 
     #[test]

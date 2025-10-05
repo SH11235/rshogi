@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::evaluation::evaluate::{Evaluator, MaterialEvaluator};
 use crate::movegen::MoveGenerator;
@@ -10,6 +10,7 @@ use crate::search::api::SearcherBackend;
 use crate::search::constants::SEARCH_INF;
 use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
+use crate::search::types::TerminationReason;
 use crate::search::{SearchLimits, SearchStack};
 use crate::shogi::{Color, Move, Piece, PieceType};
 use crate::time_management::{
@@ -783,6 +784,66 @@ fn evaluator_hooks_balance_for_classic_backend() {
     assert_eq!(counts.do_move, counts.undo_move, "move hooks must balance");
     assert!(counts.do_null_move > 0, "null move pruning should be exercised");
     assert_eq!(counts.do_null_move, counts.undo_null_move, "null-move hooks must balance");
+}
+
+struct PanicEvaluator;
+
+impl Evaluator for PanicEvaluator {
+    fn evaluate(&self, _pos: &Position) -> i32 {
+        panic!("panic-evaluator invoked");
+    }
+}
+
+#[test]
+fn panic_in_search_thread_returns_error_result_with_stop_info() {
+    time_management::mock_set_time(0);
+
+    let evaluator = Arc::new(PanicEvaluator);
+    let backend =
+        Arc::new(ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced()));
+
+    let time_limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 1000 },
+        ..Default::default()
+    };
+    let tm = Arc::new(TimeManager::new(&time_limits, Color::Black, 0, GamePhase::Opening));
+    tm.override_limits_for_test(600, 800);
+
+    // 経過時間を 250ms に設定してから探索を開始する。
+    time_management::mock_advance_time(250);
+    let expected_elapsed = tm.elapsed_ms();
+
+    let mut limits = SearchLimits::builder().depth(1).build();
+    limits.time_manager = Some(Arc::clone(&tm));
+    limits.start_time = Instant::now() - Duration::from_millis(expected_elapsed);
+
+    let active_counter = Arc::new(AtomicUsize::new(0));
+    let task = backend.start_async(Position::startpos(), limits, None, Arc::clone(&active_counter));
+    let (_stop, rx, handle) = task.into_parts();
+
+    let result = rx.recv_timeout(Duration::from_millis(200)).expect("panic fallback result");
+
+    if let Some(handle) = handle {
+        handle.join().expect("search thread join");
+    }
+
+    assert_eq!(result.end_reason, TerminationReason::Error);
+    let info = result.stop_info.expect("stop info should be present");
+    assert_eq!(info.reason, TerminationReason::Error);
+    assert_eq!(info.soft_limit_ms, 600);
+    assert_eq!(info.hard_limit_ms, 800);
+    assert!(!info.hard_timeout, "panic fallback should not mark hard timeout");
+    let delta = info
+        .elapsed_ms
+        .abs_diff(expected_elapsed);
+    assert!(
+        delta <= 20,
+        "elapsed_ms should stay close to expected (expected {expected_elapsed}, actual {} , delta {delta})",
+        info.elapsed_ms
+    );
+    let stats_elapsed = result.stats.elapsed.as_millis() as u64;
+    assert_eq!(stats_elapsed, info.elapsed_ms);
+    assert_eq!(active_counter.load(Ordering::SeqCst), 0);
 }
 
 #[test]
