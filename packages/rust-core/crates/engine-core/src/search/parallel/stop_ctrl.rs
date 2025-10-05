@@ -100,11 +100,13 @@ impl StopController {
     ///
     /// # Contract
     ///
-    /// This API is intended for session-boundary refreshes (e.g. inside
-    /// `publish_session()`). Resetting `finalize_claimed` mid-session would
-    /// accidentally allow a second finalize to be accepted, so callers should not
-    /// invoke this while a search is active.
-    pub fn update_external_stop_flag(&self, external_stop: Option<&Arc<AtomicBool>>) {
+    /// セッション境界専用。検索中に呼ぶと `finalize_claimed` リセットにより Exactly-once が破壊されるため、
+    /// `publish_session()` からのみ利用する。
+    fn update_external_stop_flag(&self, external_stop: Option<&Arc<AtomicBool>>) {
+        debug_assert!(
+            !self.inner.finalize_claimed.load(std::sync::atomic::Ordering::Acquire),
+            "update_external_stop_flag must not be invoked mid-session"
+        );
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
         *guard = external_stop.map(Arc::downgrade);
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
@@ -293,6 +295,21 @@ impl StopController {
         if line.multipv_index != 1 {
             return;
         }
+        let expected_sid = self.inner.session_id.load(Ordering::Acquire);
+        if expected_sid != session_id {
+            debug_assert_eq!(
+                expected_sid, session_id,
+                "publish_root_line received mismatched session_id"
+            );
+            log::warn!(
+                "publish_root_line session_id mismatch expected={} got={} root_key={:016x}",
+                expected_sid,
+                session_id,
+                root_key
+            );
+            return;
+        }
+
         let current_snapshot = self.publisher.try_read();
         let depth_u8 = (line.depth as u8).min(127);
         // Publish only if we do NOT have an existing snapshot for this session whose depth is already deeper.
@@ -627,5 +644,54 @@ mod tests {
         let after = ctrl.try_read_stop_info().expect("stop info present");
         assert_eq!(after.reason, info.reason);
         assert_eq!(after.hard_timeout, info.hard_timeout);
+    }
+
+    #[test]
+    fn finalize_concurrency_prefers_highest_priority() {
+        use std::thread;
+
+        let ctrl = StopController::new();
+        let (tx, rx) = mpsc::channel();
+        ctrl.register_finalizer(tx);
+        let external = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&external), 99);
+
+        // Drain initial SessionStart
+        match rx.recv().unwrap() {
+            FinalizerMsg::SessionStart { session_id } => assert_eq!(session_id, 99),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let ctrl_clone1 = ctrl.clone();
+        let ctrl_clone2 = ctrl.clone();
+        let ctrl_clone3 = ctrl.clone();
+
+        let t1 = thread::spawn(move || {
+            ctrl_clone1.request_finalize(FinalizeReason::Planned);
+        });
+        let t2 = thread::spawn(move || {
+            ctrl_clone2.request_finalize(FinalizeReason::NearHard);
+        });
+        let t3 = thread::spawn(move || {
+            ctrl_clone3.request_finalize(FinalizeReason::Hard);
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+
+        // Collect all finalize messages and ensure the highest priority (Hard) wins last.
+        let mut reasons = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let FinalizerMsg::Finalize { reason, .. } = msg {
+                reasons.push(reason);
+            }
+        }
+
+        assert!(reasons.contains(&FinalizeReason::Hard));
+        assert!(reasons.iter().rfind(|&&r| r == FinalizeReason::Hard).is_some());
+        if let Some(last) = reasons.last() {
+            assert_eq!(*last, FinalizeReason::Hard, "highest priority finalize must be last");
+        }
     }
 }

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::env;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use log::error;
+use log::warn;
 
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
@@ -32,6 +32,8 @@ enum DeadlineHit {
     Hard,
     Soft,
 }
+
+static SEARCH_THREAD_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
@@ -1009,8 +1011,14 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
         let (tx, rx) = mpsc::channel();
         let backend = self;
         let info_cb = info;
+        let thread_suffix = if limits.session_id != 0 {
+            limits.session_id
+        } else {
+            SEARCH_THREAD_SEQ.fetch_add(1, Ordering::Relaxed)
+        };
+        let thread_name = format!("classic-backend-search-{thread_suffix}");
         let handle = thread::Builder::new()
-            .name("classic-backend-search".into())
+            .name(thread_name)
             .spawn({
                 let counter = Arc::clone(&active_counter);
                 move || {
@@ -1037,13 +1045,69 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
                                 let dyn_type = payload.as_ref().type_id();
                                 format!("unknown panic payload (type_id={dyn_type:?})")
                             };
-                            error!("classic backend search thread panicked: {panic_msg}");
+                            warn!("classic backend search thread panicked: {panic_msg}");
 
-                            let mut fallback = SearchResult::new(None, 0, SearchStats::default());
+                            let elapsed_base = limits.start_time.elapsed().as_millis() as u64;
+                            let mut elapsed_ms = elapsed_base;
+                            let mut soft_limit_ms = 0;
+                            let mut hard_limit_ms = 0;
+                            let mut hard_timeout = false;
+
+                            if let Some(tm) = limits.time_manager.as_ref() {
+                                let tm_elapsed = tm.elapsed_ms();
+                                let tm_soft = tm.soft_limit_ms();
+                                let tm_hard = tm.hard_limit_ms();
+                                if tm_elapsed > 0 {
+                                    elapsed_ms = tm_elapsed;
+                                }
+                                if tm_soft != u64::MAX {
+                                    soft_limit_ms = tm_soft;
+                                }
+                                if tm_hard != u64::MAX {
+                                    hard_limit_ms = tm_hard;
+                                }
+                            }
+
+                            if hard_limit_ms > 0 {
+                                hard_timeout = elapsed_ms >= hard_limit_ms;
+                            }
+
+                            if let Some(deadlines) = limits.fallback_deadlines {
+                                if soft_limit_ms == 0 {
+                                    soft_limit_ms = deadlines.soft_limit_ms;
+                                }
+                                if hard_limit_ms == 0 {
+                                    hard_limit_ms = deadlines.hard_limit_ms;
+                                }
+                                if hard_limit_ms > 0 {
+                                    hard_timeout =
+                                        hard_timeout || elapsed_ms >= deadlines.hard_limit_ms;
+                                }
+                            }
+
+                            if soft_limit_ms == 0 && hard_limit_ms == 0 {
+                                if let Some(limit) = limits.time_limit() {
+                                    let ms = limit.as_millis() as u64;
+                                    soft_limit_ms = ms;
+                                    hard_limit_ms = ms;
+                                }
+                            }
+
+                            let stats = SearchStats {
+                                elapsed: Duration::from_millis(elapsed_ms),
+                                ..Default::default()
+                            };
+
+                            let mut fallback = SearchResult::new(None, 0, stats);
                             fallback.end_reason = TerminationReason::Error;
                             fallback.stop_info = Some(StopInfo {
                                 reason: TerminationReason::Error,
-                                ..Default::default()
+                                elapsed_ms,
+                                nodes: 0,
+                                depth_reached: 0,
+                                hard_timeout,
+                                soft_limit_ms,
+                                hard_limit_ms,
                             });
                             let _ = tx.send(fallback);
                         }

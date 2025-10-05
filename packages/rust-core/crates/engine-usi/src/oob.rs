@@ -21,6 +21,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
     };
 
     // Drain all pending messages (try_recv はノンブロッキングなのでループで枯らしても軽い)。
+    // 将来ログ量が増えた場合は、このループ内での診断ログを間引くなどして 1 フレームの処理時間が
+    // 伸びないよう調整することを想定している。
     loop {
         let msg = match rx.try_recv() {
             Ok(m) => m,
