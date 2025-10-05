@@ -303,6 +303,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let stop_controller = limits.stop_controller.clone();
         let mut finalize_soft_sent = false;
         let mut last_deadline_hit: Option<DeadlineHit> = None;
+        let mut lead_window_stop = false;
         let mut finalize_hard_sent = false;
         let mut notify_deadline = |hit: DeadlineHit, nodes_now: u64| {
             if let Some(cb) = limits.info_string_callback.as_ref() {
@@ -879,6 +880,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             d, elapsed, nodes, lead_ms
                         ));
                     }
+                    if !matches!(last_deadline_hit, Some(DeadlineHit::Hard)) {
+                        last_deadline_hit = Some(DeadlineHit::Soft);
+                    }
+                    lead_window_stop = true;
                     break;
                 }
 
@@ -894,6 +899,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             d, elapsed, nodes, lead_ms
                         ));
                     }
+                    if !matches!(last_deadline_hit, Some(DeadlineHit::Hard)) {
+                        last_deadline_hit = Some(DeadlineHit::Soft);
+                    }
+                    lead_window_stop = true;
                     break;
                 }
             }
@@ -981,9 +990,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else if let Some(limit) = limits.time_limit() {
                 let cap_ms = limit.as_millis() as u64;
                 let elapsed = t0.elapsed().as_millis() as u64;
-                let hard_timeout =
-                    elapsed >= cap_ms || matches!(last_deadline_hit, Some(DeadlineHit::Hard));
-                let reason = if hard_timeout || matches!(last_deadline_hit, Some(DeadlineHit::Soft))
+                let mut hard_timeout = match last_deadline_hit {
+                    Some(DeadlineHit::Hard) => true,
+                    Some(DeadlineHit::Soft) => false,
+                    _ => elapsed >= cap_ms,
+                };
+                if lead_window_stop {
+                    hard_timeout = false;
+                }
+                let reason = if hard_timeout
+                    || matches!(last_deadline_hit, Some(DeadlineHit::Soft))
+                    || lead_window_stop
                 {
                     TerminationReason::TimeLimit
                 } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))

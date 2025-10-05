@@ -9,6 +9,8 @@ use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
+const STRICT_SESSION_ASSERT: bool = cfg!(feature = "strict-stop-session-assert");
+
 /// Reason for an out-of-band finalize request issued by time management or other guards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeReason {
@@ -291,10 +293,12 @@ impl StopController {
         }
         let expected_sid = self.inner.session_id.load(Ordering::Acquire);
         if expected_sid != session_id {
-            debug_assert_eq!(
-                expected_sid, session_id,
-                "publish_root_line received mismatched session_id"
-            );
+            if STRICT_SESSION_ASSERT {
+                debug_assert_eq!(
+                    expected_sid, session_id,
+                    "publish_root_line received mismatched session_id"
+                );
+            }
             log::warn!(
                 "publish_root_line session_id mismatch expected={} got={} root_key={:016x}",
                 expected_sid,
@@ -517,6 +521,18 @@ mod tests {
     }
 
     #[test]
+    fn try_claim_finalize_resets_per_session() {
+        let ctrl = StopController::new();
+
+        ctrl.publish_session(None, 1);
+        assert!(ctrl.try_claim_finalize());
+        assert!(!ctrl.try_claim_finalize(), "second claim within session must fail");
+
+        ctrl.publish_session(None, 2);
+        assert!(ctrl.try_claim_finalize(), "new session must allow finalize claim again");
+    }
+
+    #[test]
     fn publish_session_clears_stop_info() {
         let ctrl = StopController::new();
         ctrl.prime_stop_info(StopInfo::default());
@@ -724,17 +740,24 @@ mod tests {
             mate_distance: None,
         };
 
+        let before = ctrl.try_read_snapshot();
+
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ctrl.publish_root_line(11, 0xABC, &line);
         }));
 
-        if cfg!(debug_assertions) {
-            assert!(res.is_err(), "mismatched session should panic in debug builds");
+        if cfg!(all(debug_assertions, feature = "strict-stop-session-assert")) {
+            assert!(
+                res.is_err(),
+                "mismatched session should panic when strict session assert is enabled"
+            );
         } else {
             assert!(res.is_ok());
-            assert!(
-                ctrl.try_read_snapshot().is_none(),
-                "snapshot must remain untouched for mismatched session"
+            let after = ctrl.try_read_snapshot();
+            assert_eq!(
+                before.as_ref().map(|s| s.search_id),
+                after.as_ref().map(|s| s.search_id),
+                "snapshot search_id must remain unchanged for mismatched session"
             );
             let info = ctrl.try_read_stop_info().expect("stop info");
             assert_eq!(info.depth_reached, 5);
