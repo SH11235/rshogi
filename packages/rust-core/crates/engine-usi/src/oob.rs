@@ -1,12 +1,11 @@
+use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::time::Duration;
-
-use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 
 use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast, fmt_hash};
 use crate::io::diag_info_string;
 use crate::state::EngineState;
+use crate::stop::{compute_wait_budget_from_state, wait_for_result_with_budget};
 use engine_core::usi::move_to_usi;
 use std::time::Instant;
 
@@ -28,7 +27,10 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
             Ok(m) => m,
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
-                state.finalizer_rx = Some(rx);
+                diag_info_string("oob_finalizer_rx_disconnected=1");
+                let (tx, new_rx) = mpsc::channel();
+                state.stop_controller.register_finalizer(tx);
+                state.finalizer_rx = Some(new_rx);
                 return;
             }
         };
@@ -106,76 +108,56 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 
                 // compute wait budget based on time control and StopWaitMs
                 // Prefer in-place join with extended waiting
-                let stop_wait_ms = state.opts.stop_wait_ms;
-                let is_pure_byoyomi = if let Some(ref tc) = state.current_time_control {
-                    use engine_core::time_management::TimeControl;
-                    matches!(
-                        tc,
-                        TimeControl::Byoyomi {
-                            main_time_ms: 0,
-                            ..
-                        }
-                    )
-                } else {
-                    false
-                };
-
-                let wait_budget_ms = if is_pure_byoyomi {
-                    // Pure byoyomi: allow longer wait (150-250ms range)
-                    stop_wait_ms.clamp(150, 250)
-                } else {
-                    // Other time controls: conservative wait
-                    stop_wait_ms.clamp(50, 150)
-                };
+                let (wait_budget_ms, chunk_ms, is_pure_byoyomi) =
+                    compute_wait_budget_from_state(state);
 
                 diag_info_string(format!(
-                    "oob_finalize_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={}",
-                    wait_budget_ms, is_pure_byoyomi as u8, stop_wait_ms
+                    "oob_finalize_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={} chunk_ms={}",
+                    wait_budget_ms,
+                    is_pure_byoyomi as u8,
+                    state.opts.stop_wait_ms,
+                    chunk_ms
                 ));
 
                 // Step 3: try to receive result with bounded waiting using SearchSession
                 let mut finalize_candidate: Option<engine_core::search::SearchResult> = None;
                 if let Some(session) = &state.search_session {
-                    let chunk_ms = 50u64; // Wait in 50ms chunks
-                    let max_rounds = wait_budget_ms.div_ceil(chunk_ms);
-                    diag_info_string(format!(
-                        "oob_recv_wait_start budget_ms={} max_rounds={} session_id={}",
-                        wait_budget_ms,
-                        max_rounds,
-                        session.session_id()
-                    ));
-
-                    for round in 0..max_rounds {
-                        match session.recv_result_timeout(Duration::from_millis(chunk_ms)) {
-                            Some(result) => {
-                                diag_info_string(format!(
-                                    "oob_recv_result round={} waited_ms={}",
-                                    round,
-                                    (round + 1) * chunk_ms
-                                ));
-                                finalize_candidate = Some(result);
-                                break;
-                            }
-                            None => {
-                                // Timeout or disconnected - log every 4 rounds (200ms)
-                                if round % 4 == 3 || round == max_rounds - 1 {
-                                    diag_info_string(format!(
-                                        "oob_recv_waiting round={}/{} waited_ms={}",
-                                        round + 1,
-                                        max_rounds,
-                                        (round + 1) * chunk_ms
-                                    ));
-                                }
-                                continue;
-                            }
-                        }
-                    }
-
-                    if finalize_candidate.is_none() {
+                    if wait_budget_ms > 0 {
+                        let max_rounds = wait_budget_ms.div_ceil(chunk_ms.max(1));
                         diag_info_string(format!(
-                            "oob_recv_timeout_all budget_ms={} max_rounds={}",
-                            wait_budget_ms, max_rounds
+                            "oob_recv_wait_start budget_ms={} max_rounds={} session_id={}",
+                            wait_budget_ms,
+                            max_rounds,
+                            session.session_id()
                         ));
+
+                        let log_wait = |round: u64, waited_ms: u64| {
+                            if round.is_multiple_of(4) || waited_ms >= wait_budget_ms {
+                                diag_info_string(format!(
+                                    "oob_recv_waiting round={} waited_ms={}",
+                                    round, waited_ms
+                                ));
+                            }
+                        };
+
+                        if let Some((result, waited)) = wait_for_result_with_budget(
+                            session,
+                            wait_budget_ms,
+                            chunk_ms.max(1),
+                            log_wait,
+                        ) {
+                            diag_info_string(format!(
+                                "oob_recv_result waited_ms={} session_id={}",
+                                waited,
+                                session.session_id()
+                            ));
+                            finalize_candidate = Some(result);
+                        } else {
+                            diag_info_string(format!(
+                                "oob_recv_timeout_all budget_ms={} max_rounds={}",
+                                wait_budget_ms, max_rounds
+                            ));
+                        }
                     }
                 }
 
@@ -355,5 +337,18 @@ mod tests {
         assert!(state.searching, "ponder finalize should not end the search");
         assert!(!state.bestmove_emitted);
         assert!(state.stop_controller.try_claim_finalize());
+    }
+
+    #[test]
+    fn finalizer_channel_is_reestablished_after_disconnect() {
+        let mut state = EngineState::new();
+        let (_tx, rx) = mpsc::channel();
+        // Drop sender to simulate disconnect
+        state.finalizer_rx = Some(rx);
+
+        poll_oob_finalize(&mut state);
+
+        let rx_ref = state.finalizer_rx.as_ref().expect("finalizer receiver should be reattached");
+        assert!(matches!(rx_ref.try_recv(), Err(mpsc::TryRecvError::Empty)));
     }
 }

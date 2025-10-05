@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use engine_core::time_management::{
     detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeParametersBuilder,
 };
+use engine_core::{engine::session::SearchSession, search::SearchResult};
 
 use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast, fmt_hash};
 use crate::io::info_string;
@@ -13,6 +14,63 @@ use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::types::StopInfo;
 use engine_core::usi::move_to_usi;
 
+pub(crate) const WAIT_CHUNK_MS: u64 = 50;
+
+pub(crate) fn is_pure_byoyomi(state: &EngineState) -> bool {
+    matches!(
+        state.current_time_control,
+        Some(TimeControl::Byoyomi { main_time_ms, .. }) if main_time_ms == 0
+            || main_time_ms <= state.opts.network_delay2_ms
+    )
+}
+
+pub(crate) fn compute_wait_budget(is_pure_byoyomi: bool, stop_wait_ms: u64) -> (u64, u64) {
+    if stop_wait_ms == 0 {
+        return (0, 0);
+    }
+    let chunk_ms = WAIT_CHUNK_MS;
+    let budget = if is_pure_byoyomi {
+        stop_wait_ms.clamp(chunk_ms, chunk_ms * 5)
+    } else {
+        stop_wait_ms
+    };
+    (budget, chunk_ms)
+}
+
+pub(crate) fn wait_for_result_with_budget<F>(
+    session: &SearchSession,
+    wait_budget_ms: u64,
+    chunk_ms: u64,
+    mut on_wait: F,
+) -> Option<(SearchResult, u64)>
+where
+    F: FnMut(u64, u64),
+{
+    if wait_budget_ms == 0 || chunk_ms == 0 {
+        return None;
+    }
+
+    let mut waited_ms = 0u64;
+    let mut round = 0u64;
+    while waited_ms < wait_budget_ms {
+        let slice = chunk_ms.min(wait_budget_ms - waited_ms);
+        if let Some(result) = session.recv_result_timeout(Duration::from_millis(slice)) {
+            waited_ms += slice;
+            return Some((result, waited_ms));
+        }
+        waited_ms += slice;
+        round += 1;
+        on_wait(round, waited_ms);
+    }
+    None
+}
+
+pub(crate) fn compute_wait_budget_from_state(state: &EngineState) -> (u64, u64, bool) {
+    let pure = is_pure_byoyomi(state);
+    let (budget, chunk) = compute_wait_budget(pure, state.opts.stop_wait_ms);
+    (budget, chunk, pure)
+}
+
 pub fn handle_stop(state: &mut EngineState) {
     if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
         flag.store(true, Ordering::SeqCst);
@@ -20,82 +78,62 @@ pub fn handle_stop(state: &mut EngineState) {
 
         // Use SearchSession API instead of manual channel
         if let Some(session) = state.search_session.take() {
-            let mut wait_ms = state.opts.stop_wait_ms;
-            if let Some(tc) = &state.current_time_control {
-                match tc {
-                    TimeControl::FixedTime { .. } | TimeControl::Infinite => {
-                        wait_ms = 0;
-                        info_string("stop_fast_finalize=fixed_or_infinite");
-                    }
-                    TimeControl::Byoyomi { main_time_ms, .. } => {
-                        if *main_time_ms == 0 || *main_time_ms <= state.opts.network_delay2_ms {
-                            wait_ms = 0;
+            let (wait_budget_ms, chunk_ms, pure_byo) = compute_wait_budget_from_state(state);
+            if wait_budget_ms == 0 {
+                if let Some(tc) = &state.current_time_control {
+                    match tc {
+                        TimeControl::FixedTime { .. } | TimeControl::Infinite => {
+                            info_string("stop_fast_finalize=fixed_or_infinite");
+                        }
+                        TimeControl::Byoyomi { .. } if pure_byo => {
                             info_string("stop_fast_finalize=byoyomi");
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
 
             // Wait for result with timeout using SearchSession API
-            let deadline = Instant::now() + Duration::from_millis(wait_ms);
             let mut finalized = false;
+            if wait_budget_ms > 0 {
+                if let Some((result, _waited)) =
+                    wait_for_result_with_budget(&session, wait_budget_ms, chunk_ms, |_, _| {})
+                {
+                    // No session_id check needed - SearchSession manages this internally
+                    // No worker join needed - SearchSession manages thread lifecycle
+                    state.searching = false;
+                    // Clear stop_flag - each session gets a fresh flag to avoid race conditions
+                    state.stop_flag = None;
+                    state.ponder_hit_flag = None;
 
-            while Instant::now() < deadline && !finalized {
-                let now = Instant::now();
-                let remain = if deadline > now {
-                    deadline - now
-                } else {
-                    Duration::from_millis(0)
-                };
-                let slice = if remain > Duration::from_millis(20) {
-                    Duration::from_millis(20)
-                } else {
-                    remain
-                };
-
-                // Use SearchSession::recv_result_timeout() instead of manual channel
-                match session.recv_result_timeout(slice) {
-                    Some(result) => {
-                        // No session_id check needed - SearchSession manages this internally
-                        // No worker join needed - SearchSession manages thread lifecycle
-                        state.searching = false;
-                        // Clear stop_flag - each session gets a fresh flag to avoid race conditions
-                        state.stop_flag = None;
-                        state.ponder_hit_flag = None;
-
-                        if let Some(tm) = state.active_time_manager.take() {
-                            let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                            let time_state = state.time_state_for_update(elapsed_ms);
-                            tm.update_after_move(elapsed_ms, time_state);
-                        }
-                        let stale = state
-                            .current_root_hash
-                            .map(|h| h != state.position.zobrist_hash())
-                            .unwrap_or(false);
-                        finalize_and_send(
-                            state,
-                            "stop_finalize",
-                            Some(&result),
-                            stale,
-                            Some(FinalizeReason::UserStop),
-                        );
-                        if !state.bestmove_emitted {
-                            let fallback = result
-                                .best_move
-                                .map(|mv| move_to_usi(&mv))
-                                .unwrap_or_else(|| "resign".to_string());
-                            let _ = emit_bestmove_once(state, fallback, None);
-                        }
-                        state.current_is_ponder = false;
-                        state.current_root_hash = None;
-                        state.current_time_control = None;
-                        state.notify_idle();
-                        finalized = true;
+                    if let Some(tm) = state.active_time_manager.take() {
+                        let elapsed_ms = result.stats.elapsed.as_millis() as u64;
+                        let time_state = state.time_state_for_update(elapsed_ms);
+                        tm.update_after_move(elapsed_ms, time_state);
                     }
-                    None => {
-                        // Timeout or disconnected - continue waiting
+                    let stale = state
+                        .current_root_hash
+                        .map(|h| h != state.position.zobrist_hash())
+                        .unwrap_or(false);
+                    finalize_and_send(
+                        state,
+                        "stop_finalize",
+                        Some(&result),
+                        stale,
+                        Some(FinalizeReason::UserStop),
+                    );
+                    if !state.bestmove_emitted {
+                        let fallback = result
+                            .best_move
+                            .map(|mv| move_to_usi(&mv))
+                            .unwrap_or_else(|| "resign".to_string());
+                        let _ = emit_bestmove_once(state, fallback, None);
                     }
+                    state.current_is_ponder = false;
+                    state.current_root_hash = None;
+                    state.current_time_control = None;
+                    state.notify_idle();
+                    finalized = true;
                 }
             }
             // Timeout expired - try immediate stop and quick polling
@@ -209,7 +247,7 @@ pub fn handle_stop(state: &mut EngineState) {
         ));
 
         state.stop_controller.request_finalize(FinalizeReason::UserStop);
-        state.stop_controller.request_stop_flag_only();
+        state.finalize_time_manager();
         finalize_and_send_fast(
             state,
             "stop_post_completion_finalize",
@@ -232,6 +270,7 @@ pub fn handle_stop(state: &mut EngineState) {
 
         state.current_time_control = None;
         state.current_root_hash = None;
+        state.active_time_manager = None;
         state.notify_idle();
     } else {
         info_string(format!(
@@ -643,9 +682,23 @@ mod tests {
         state.current_session_core_id = Some(77);
         state.current_root_hash = Some(state.position.zobrist_hash());
 
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 1000 },
+            ..Default::default()
+        };
+        let phase = detect_game_phase_for_time(&state.position, state.position.ply as u32);
+        let tm = Arc::new(TimeManager::new(
+            &limits,
+            state.position.side_to_move,
+            state.position.ply as u32,
+            phase,
+        ));
+        state.active_time_manager = Some(Arc::clone(&tm));
+
         handle_stop(&mut state);
 
         assert!(state.bestmove_emitted, "stop should emit fallback bestmove");
         assert!(state.current_root_hash.is_none());
+        assert!(state.active_time_manager.is_none());
     }
 }
