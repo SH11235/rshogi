@@ -100,17 +100,11 @@ impl StopController {
     ///
     /// # Contract
     ///
-    /// セッション境界専用。検索中に呼ぶと `finalize_claimed` リセットにより Exactly-once が破壊されるため、
-    /// `publish_session()` からのみ利用する。
+    /// セッション境界専用。Exactly-once セマンティクスは呼び出し元（`publish_session()`）で
+    /// `finalize_claimed` / `finalize_priority` をリセットすることで維持する。
     fn update_external_stop_flag(&self, external_stop: Option<&Arc<AtomicBool>>) {
-        debug_assert!(
-            !self.inner.finalize_claimed.load(std::sync::atomic::Ordering::Acquire),
-            "update_external_stop_flag must not be invoked mid-session"
-        );
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
         *guard = external_stop.map(Arc::downgrade);
-        self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
-        self.inner.finalize_priority.store(0, Ordering::Release);
     }
 
     fn set_external_stop_flag(&self) {
