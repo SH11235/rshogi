@@ -43,6 +43,13 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if !state.searching || state.bestmove_emitted {
                     continue;
                 }
+                if state.current_is_ponder && !matches!(reason, FinalizeReason::UserStop) {
+                    diag_info_string(format!(
+                        "oob_finalize_guard suppressed=1 reason={:?} sid={}",
+                        reason, session_id
+                    ));
+                    continue;
+                }
                 // Late-bind if SessionStart hasn't arrived yet
                 if state.current_session_core_id.is_none() {
                     state.current_session_core_id = Some(session_id);
@@ -229,6 +236,9 @@ pub fn enforce_deadline(state: &mut EngineState) {
     if !state.searching || state.bestmove_emitted {
         return;
     }
+    if state.current_is_ponder {
+        return;
+    }
 
     let now = Instant::now();
 
@@ -316,5 +326,30 @@ mod tests {
         // Ensure no duplicate emission when draining remaining messages
         poll_oob_finalize(&mut state);
         assert!(state.bestmove_emitted);
+    }
+
+    #[test]
+    fn finalize_is_suppressed_during_ponder() {
+        let mut state = EngineState::new();
+        let (tx, rx) = mpsc::channel();
+        state.finalizer_rx = Some(rx);
+        state.stop_controller.register_finalizer(tx.clone());
+
+        state.searching = true;
+        state.current_is_ponder = true;
+        state.bestmove_emitted = false;
+        state.stop_flag = Some(Arc::new(AtomicBool::new(false)));
+
+        tx.send(FinalizerMsg::Finalize {
+            session_id: 99,
+            reason: FinalizeReason::Planned,
+        })
+        .unwrap();
+
+        poll_oob_finalize(&mut state);
+
+        assert!(state.searching, "ponder finalize should not end the search");
+        assert!(!state.bestmove_emitted);
+        assert!(state.stop_controller.try_claim_finalize());
     }
 }

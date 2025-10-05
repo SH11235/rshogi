@@ -1,8 +1,10 @@
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use engine_core::time_management::TimeControl;
+use engine_core::time_management::{
+    detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeParametersBuilder,
+};
 
 use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast};
 use crate::io::info_string;
@@ -213,25 +215,91 @@ pub fn handle_ponderhit(state: &mut EngineState) {
 
         state.current_is_ponder = false;
 
+        if state.active_time_manager.is_none() {
+            if let Some(ref tc) = state.current_time_control {
+                let mut builder = TimeParametersBuilder::new()
+                    .overhead_ms(state.opts.overhead_ms)
+                    .unwrap()
+                    .network_delay_ms(state.opts.network_delay_ms)
+                    .unwrap()
+                    .network_delay2_ms(state.opts.network_delay2_ms)
+                    .unwrap()
+                    .byoyomi_safety_ms(state.opts.byoyomi_safety_ms)
+                    .unwrap()
+                    .byoyomi_early_finish_ratio(state.opts.byoyomi_early_finish_ratio)
+                    .unwrap()
+                    .pv_stability_base(state.opts.pv_stability_base)
+                    .unwrap()
+                    .pv_stability_slope(state.opts.pv_stability_slope)
+                    .unwrap()
+                    .slow_mover_pct(state.opts.slow_mover_pct)
+                    .unwrap()
+                    .max_time_ratio(state.opts.max_time_ratio_pct as f64 / 100.0)
+                    .unwrap();
+                if state.opts.move_horizon_trigger_ms > 0 {
+                    builder = builder
+                        .move_horizon_guard(
+                            state.opts.move_horizon_trigger_ms,
+                            state.opts.move_horizon_min_moves,
+                        )
+                        .unwrap();
+                }
+                let mut tp = builder.build();
+                tp.min_think_ms = state.opts.min_think_ms;
+
+                let go_snapshot = state.last_go_params.clone();
+                let pending_limits = TimeLimits {
+                    time_control: tc.clone(),
+                    moves_to_go: go_snapshot.as_ref().and_then(|gp| gp.moves_to_go),
+                    depth: go_snapshot.as_ref().and_then(|gp| gp.depth),
+                    nodes: go_snapshot.as_ref().and_then(|gp| gp.nodes),
+                    time_parameters: Some(tp),
+                    random_time_ms: go_snapshot.as_ref().and_then(|gp| gp.rtime),
+                };
+
+                let phase = detect_game_phase_for_time(&state.position, state.position.ply as u32);
+                let tm_new = Arc::new(TimeManager::new(
+                    &pending_limits,
+                    state.position.side_to_move,
+                    state.position.ply as u32,
+                    phase,
+                ));
+                state.active_time_manager = Some(Arc::clone(&tm_new));
+                info_string("ponderhit_time_manager_created=1");
+            } else {
+                info_string("ponderhit_time_manager_missing=1");
+            }
+        }
+
         let mut soft_hard: Option<(u64, u64)> = None;
 
         if let Some(tm) = state.active_time_manager.as_ref() {
-            let elapsed_ms = tm.elapsed_ms();
-            tm.ponder_hit(None, elapsed_ms);
-            let soft_ms = tm.soft_limit_ms();
-            let hard_ms = tm.hard_limit_ms();
             let tc_str = state
                 .current_time_control
                 .as_ref()
                 .map(|tc| format!("{tc:?}"))
                 .unwrap_or_else(|| "None".to_string());
-            info_string(format!(
-                "time_budget soft_ms={} hard_ms={} source=ponderhit elapsed_ms={} tc={}",
-                soft_ms, hard_ms, elapsed_ms, tc_str
-            ));
-            soft_hard = Some((soft_ms, hard_ms));
+            if tm.is_pondering() {
+                let elapsed_ms = tm.elapsed_ms();
+                tm.ponder_hit(None, elapsed_ms);
+                let soft_ms = tm.soft_limit_ms();
+                let hard_ms = tm.hard_limit_ms();
+                info_string(format!(
+                    "time_budget soft_ms={} hard_ms={} source=ponderhit elapsed_ms={} tc={}",
+                    soft_ms, hard_ms, elapsed_ms, tc_str
+                ));
+                soft_hard = Some((soft_ms, hard_ms));
+            } else {
+                let soft_ms = tm.soft_limit_ms();
+                let hard_ms = tm.hard_limit_ms();
+                info_string(format!(
+                    "time_budget soft_ms={} hard_ms={} source=ponderhit_reinit tc={}",
+                    soft_ms, hard_ms, tc_str
+                ));
+                soft_hard = Some((soft_ms, hard_ms));
+            }
         } else {
-            info_string("ponderhit_no_time_manager=1");
+            info_string("ponderhit_time_manager_unavailable=1");
         }
 
         if let Some((soft_ms, hard_ms)) = soft_hard {
@@ -460,6 +528,7 @@ pub fn handle_gameover(state: &mut EngineState) {
             state.notify_idle();
         }
     } else {
+        info_string("stop_ignored search_inactive=1");
         if let Some(flag) = &state.stop_flag {
             flag.store(true, Ordering::SeqCst);
         }

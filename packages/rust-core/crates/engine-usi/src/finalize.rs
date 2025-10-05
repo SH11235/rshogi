@@ -256,6 +256,13 @@ pub fn finalize_and_send(
     stale: bool,
     finalize_reason: Option<FinalizeReason>,
 ) {
+    if state.current_is_ponder && !matches!(finalize_reason, Some(FinalizeReason::UserStop)) {
+        diag_info_string(format!(
+            "{}_ponder_guard suppressed=1 reason={:?}",
+            label, finalize_reason
+        ));
+        return;
+    }
     if stale {
         diag_info_string(format!("{label}_stale=1 fallback=fast"));
         finalize_and_send_fast(state, label, finalize_reason);
@@ -632,6 +639,13 @@ pub fn finalize_and_send_fast(
     label: &str,
     finalize_reason: Option<FinalizeReason>,
 ) {
+    if state.current_is_ponder && !matches!(finalize_reason, Some(FinalizeReason::UserStop)) {
+        diag_info_string(format!(
+            "{}_ponder_guard suppressed=1 reason={:?}",
+            label, finalize_reason
+        ));
+        return;
+    }
     if state.bestmove_emitted {
         diag_info_string(format!("{label}_fast_skip already_emitted=1"));
         return;
@@ -945,7 +959,9 @@ const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::EngineState;
     use engine_core::engine::controller::{Engine, EngineType};
+    use engine_core::search::parallel::FinalizeReason;
 
     #[test]
     fn tt_probe_budget_respects_stop_info_and_snapshot_elapsed() {
@@ -1000,6 +1016,27 @@ mod tests {
         let kept = sanitize_ponder_for_bestmove("7g7f", Some("7g7f".to_string()));
         assert_eq!(kept.as_deref(), Some("7g7f"));
         assert!(sanitize_ponder_for_bestmove("win", Some("7g7f".to_string())).is_none());
+    }
+
+    #[test]
+    fn finalize_guard_skips_bestmove_during_ponder() {
+        let mut state = EngineState::new();
+        state.current_is_ponder = true;
+        finalize_and_send(&mut state, "test_guard", None, false, Some(FinalizeReason::Planned));
+        assert!(!state.bestmove_emitted);
+        assert!(
+            state.stop_controller.try_claim_finalize(),
+            "guarded finalize should not consume the claim"
+        );
+    }
+
+    #[test]
+    fn finalize_fast_guard_skips_bestmove_during_ponder() {
+        let mut state = EngineState::new();
+        state.current_is_ponder = true;
+        finalize_and_send_fast(&mut state, "test_guard_fast", Some(FinalizeReason::Hard));
+        assert!(!state.bestmove_emitted);
+        assert!(state.stop_controller.try_claim_finalize());
     }
 
     #[test]

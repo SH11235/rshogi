@@ -1085,7 +1085,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
                             } else if let Some(s) = payload.downcast_ref::<String>() {
                                 s.clone()
                             } else {
-                                let dyn_type = payload.as_ref().type_id();
+                                let dyn_type = (*payload).type_id();
                                 format!("unknown panic payload (type_id={dyn_type:?})")
                             };
                             warn!("classic backend search thread panicked: {panic_msg}");

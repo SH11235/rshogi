@@ -414,6 +414,10 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.ponder_hit_flag = ponder_flag;
     let session_id = session.session_id();
     state.active_time_manager = session.time_manager();
+    if gp.ponder {
+        state.active_time_manager = None;
+        info_string("ponder_time_manager_detached=1");
+    }
     state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
@@ -498,6 +502,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                         }
                     }
                 } else if was_ponder {
+                    info_string("search_completion_guard=ponder");
                     // do nothing per USI specification
                 } else {
                     if let Some(tm) = time_manager {
@@ -639,12 +644,61 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use crate::oob::poll_oob_finalize;
+    use crate::stop::handle_stop;
     use engine_core::search::parallel::FinalizerMsg;
     use engine_core::time_management::{GamePhase, TimeLimits, TimeManager};
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering as AtomicOrdering;
     use std::sync::Arc;
+    use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn go_ponder_emits_bestmove_only_after_stop() {
+        let mut state = EngineState::new();
+        state.opts.ponder = true;
+
+        handle_go("go ponder btime 10000 wtime 10000 binc 0 winc 0", &mut state)
+            .expect("go ponder should start search");
+
+        // Wait briefly for the search session to spin up.
+        for _ in 0..40 {
+            if state.searching {
+                break;
+            }
+            poll_oob_finalize(&mut state);
+            poll_search_completion(&mut state);
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(state.searching, "ponder search should be active");
+        assert!(state.current_is_ponder, "state must record ponder mode");
+        assert!(!state.bestmove_emitted);
+
+        // Poll for a short duration to ensure no bestmove is emitted while pondering.
+        for _ in 0..10 {
+            poll_oob_finalize(&mut state);
+            poll_search_completion(&mut state);
+            assert!(!state.bestmove_emitted);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        handle_stop(&mut state);
+
+        // Give the finalizer loop a moment to flush the result.
+        for _ in 0..30 {
+            poll_oob_finalize(&mut state);
+            poll_search_completion(&mut state);
+            if !state.searching && state.bestmove_emitted {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(state.bestmove_emitted, "bestmove must emit after stop");
+        assert!(!state.current_is_ponder);
+    }
 
     #[test]
     fn watchdog_triggers_after_hard_deadline() {
