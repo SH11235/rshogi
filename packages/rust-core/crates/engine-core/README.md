@@ -75,6 +75,11 @@ cargo test
 cargo run --release --example classicab_diagnostics -- --depth-min 8 --depth-max 8 --time-ms 10000
 ```
 
+### StopController に関連するオプション
+
+- セッション ID 不一致時に `debug_assert!` で即座に検知したい場合は `engine-core` を `--features strict-stop-session-assert` 付きでビルドします。CI での再現確認は `cargo test -p engine-core --features strict-stop-session-assert` などで実施できます。
+- リードウィンドウ停止時に `Finalize(Planned)` を送出する挙動は既定で有効です。互換性検証などで従来動作に戻したい場合は `SHOGI_LEAD_WINDOW_FINALIZE=off`（`0` / `false` も可）を環境変数に設定してください。
+
 ## ライセンス
 
 リポジトリルートの `LICENSE` を参照してください。

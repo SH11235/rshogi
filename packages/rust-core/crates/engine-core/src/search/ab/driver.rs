@@ -147,7 +147,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         if let Some(limit) = limits.time_limit() {
             if elapsed >= limit && min_think_satisfied {
-                return Some(DeadlineHit::Hard);
+                // 固定時間探索はリードウィンドウで緩やかに停止させる方針のため、min_think を満たした後は Hard ではなく Soft とみなす。
+                return Some(DeadlineHit::Soft);
             }
         }
         None
@@ -266,7 +267,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 (dl.hard_limit_ms > 0).then(|| Duration::from_millis(dl.hard_limit_ms)),
             )
         } else if let Some(limit) = limits.time_limit() {
-            (Some(limit), Some(limit))
+            // 固定時間探索は Hard 判定を用いず、リードウィンドウと Soft 停止で丸める。
+            (Some(limit), None)
         } else {
             (None, None)
         };
@@ -303,7 +305,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let stop_controller = limits.stop_controller.clone();
         let mut finalize_soft_sent = false;
         let mut last_deadline_hit: Option<DeadlineHit> = None;
-        let mut lead_window_stop = false;
+        let mut lead_window_soft_break = false;
         let mut finalize_hard_sent = false;
         let mut notify_deadline = |hit: DeadlineHit, nodes_now: u64| {
             if let Some(cb) = limits.info_string_callback.as_ref() {
@@ -331,6 +333,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
         };
+
+        static LEAD_WINDOW_FINALIZE_ENABLED: OnceLock<bool> = OnceLock::new();
+        let lead_window_finalize = *LEAD_WINDOW_FINALIZE_ENABLED.get_or_init(|| {
+            match env::var("SHOGI_LEAD_WINDOW_FINALIZE") {
+                Ok(val) => {
+                    let normalized = val.trim().to_ascii_lowercase();
+                    !(normalized == "off" || normalized == "0" || normalized == "false")
+                }
+                Err(_) => true,
+            }
+        });
 
         for d in 1..=max_depth {
             #[cfg(feature = "diagnostics")]
@@ -862,6 +875,28 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 break;
             }
 
+            let mut check_lead_window =
+                |reason: &'static str, deadline: Duration, lead_ms_current: u64| {
+                    if t0.elapsed() + Duration::from_millis(lead_ms_current) >= deadline {
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            let elapsed = t0.elapsed().as_millis();
+                            cb(&format!(
+                            "stop_lead_break reason={} depth={} elapsed_ms={} nodes={} lead_ms={}",
+                            reason, d, elapsed, nodes, lead_ms_current
+                        ));
+                        }
+                        if lead_window_finalize {
+                            notify_deadline(DeadlineHit::Soft, nodes);
+                        }
+                        if !matches!(last_deadline_hit, Some(DeadlineHit::Hard)) {
+                            last_deadline_hit = Some(DeadlineHit::Soft);
+                        }
+                        lead_window_soft_break = true;
+                        return true;
+                    }
+                    false
+                };
+
             if let Some(hard) = hard_deadline {
                 if let Some(soft) = soft_deadline {
                     if hard > soft {
@@ -872,18 +907,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                 }
 
-                if t0.elapsed() + Duration::from_millis(lead_ms) >= hard {
-                    if let Some(cb) = limits.info_string_callback.as_ref() {
-                        let elapsed = t0.elapsed().as_millis();
-                        cb(&format!(
-                            "stop_lead_break reason=hard_window depth={} elapsed_ms={} nodes={} lead_ms={}",
-                            d, elapsed, nodes, lead_ms
-                        ));
-                    }
-                    if !matches!(last_deadline_hit, Some(DeadlineHit::Hard)) {
-                        last_deadline_hit = Some(DeadlineHit::Soft);
-                    }
-                    lead_window_stop = true;
+                // 固定時間探索では min_think よりも締切回避を優先したいので、リードウィンドウは min_think 判定を迂回して早期停止させる。
+                if check_lead_window("hard_window", hard, lead_ms) {
                     break;
                 }
 
@@ -891,18 +916,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
 
             if let Some(limit) = limits.time_limit() {
-                if t0.elapsed() + Duration::from_millis(lead_ms) >= limit {
-                    if let Some(cb) = limits.info_string_callback.as_ref() {
-                        let elapsed = t0.elapsed().as_millis();
-                        cb(&format!(
-                            "stop_lead_break reason=time_limit depth={} elapsed_ms={} nodes={} lead_ms={}",
-                            d, elapsed, nodes, lead_ms
-                        ));
-                    }
-                    if !matches!(last_deadline_hit, Some(DeadlineHit::Hard)) {
-                        last_deadline_hit = Some(DeadlineHit::Soft);
-                    }
-                    lead_window_stop = true;
+                if check_lead_window("time_limit", limit, lead_ms) {
                     break;
                 }
             }
@@ -967,22 +981,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else if let Some(dl) = limits.fallback_deadlines {
                 let elapsed = t0.elapsed().as_millis() as u64;
                 let hard_timeout = elapsed >= dl.hard_limit_ms;
-                let reason =
-                    if hard_timeout || (dl.soft_limit_ms > 0 && elapsed >= dl.soft_limit_ms) {
-                        TerminationReason::TimeLimit
-                    } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
-                        || Self::should_stop(limits)
-                    {
-                        TerminationReason::UserStop
-                    } else {
-                        TerminationReason::Completed
-                    };
+                let soft_hit = dl.soft_limit_ms > 0 && elapsed >= dl.soft_limit_ms;
+                let time_limited = hard_timeout
+                    || soft_hit
+                    || lead_window_soft_break
+                    || matches!(last_deadline_hit, Some(DeadlineHit::Soft));
+                let reason = if time_limited {
+                    TerminationReason::TimeLimit
+                } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
+                    || Self::should_stop(limits)
+                {
+                    TerminationReason::UserStop
+                } else {
+                    TerminationReason::Completed
+                };
                 result.stop_info = Some(StopInfo {
                     reason,
                     elapsed_ms: elapsed,
                     nodes,
                     depth_reached: final_depth_reached,
-                    hard_timeout,
+                    hard_timeout: hard_timeout && !lead_window_soft_break,
                     soft_limit_ms: dl.soft_limit_ms,
                     hard_limit_ms: dl.hard_limit_ms,
                 });
@@ -995,12 +1013,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     Some(DeadlineHit::Soft) => false,
                     _ => elapsed >= cap_ms,
                 };
-                if lead_window_stop {
+                if lead_window_soft_break {
                     hard_timeout = false;
                 }
                 let reason = if hard_timeout
                     || matches!(last_deadline_hit, Some(DeadlineHit::Soft))
-                    || lead_window_stop
+                    || lead_window_soft_break
                 {
                     TerminationReason::TimeLimit
                 } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))

@@ -6,8 +6,9 @@
 use crate::search::snapshot::{RootSnapshot, RootSnapshotPublisher};
 use crate::search::types::StopInfo;
 use smallvec::SmallVec;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const STRICT_SESSION_ASSERT: bool = cfg!(feature = "strict-stop-session-assert");
 
@@ -299,12 +300,23 @@ impl StopController {
                     "publish_root_line received mismatched session_id"
                 );
             }
-            log::warn!(
-                "publish_root_line session_id mismatch expected={} got={} root_key={:016x}",
-                expected_sid,
-                session_id,
-                root_key
-            );
+            static WARN_FILTER: OnceLock<Mutex<HashSet<(u64, u64, u64)>>> = OnceLock::new();
+            let should_warn = {
+                let guard = WARN_FILTER.get_or_init(|| Mutex::new(HashSet::new()));
+                let mut cache = guard.lock().unwrap();
+                if cache.len() > 1024 {
+                    cache.clear();
+                }
+                cache.insert((expected_sid, session_id, root_key))
+            };
+            if should_warn {
+                log::warn!(
+                    "publish_root_line session_id mismatch expected={} got={} root_key={:016x}",
+                    expected_sid,
+                    session_id,
+                    root_key
+                );
+            }
             return;
         }
 

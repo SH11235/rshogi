@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -883,7 +883,7 @@ impl Evaluator for SleepyEvaluator {
 #[test]
 fn fixed_time_limit_lead_window_marks_soft_reason() {
     let evaluator = Arc::new(SleepyEvaluator {
-        delay: Duration::from_millis(12),
+        delay: Duration::from_millis(15),
     });
     let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
     let pos = Position::startpos();
@@ -892,7 +892,7 @@ fn fixed_time_limit_lead_window_marks_soft_reason() {
     let lead_triggered = Arc::new(AtomicBool::new(false));
     let callback_flag = Arc::clone(&lead_triggered);
     let limits = SearchLimitsBuilder::default()
-        .fixed_time_ms(30)
+        .fixed_time_ms(40)
         .info_string_callback(Arc::new(move |msg: &str| {
             if msg.contains("stop_lead_break") {
                 callback_flag.store(true, Ordering::Relaxed);
@@ -905,9 +905,61 @@ fn fixed_time_limit_lead_window_marks_soft_reason() {
     assert!(lead_triggered.load(Ordering::Relaxed), "lead window callback should have fired");
     assert_eq!(info.reason, TerminationReason::TimeLimit);
     assert!(!info.hard_timeout, "lead window経由の停止ではhard_timeout=false");
-    assert_eq!(info.soft_limit_ms, 30);
-    assert_eq!(info.hard_limit_ms, 30);
+    assert_eq!(info.soft_limit_ms, 40);
+    assert_eq!(info.hard_limit_ms, 40);
     assert_eq!(result.end_reason, TerminationReason::TimeLimit);
+}
+
+#[test]
+fn fixed_time_limit_lead_window_notifies_finalize_once() {
+    use crate::search::parallel::{FinalizeReason, FinalizerMsg, StopController};
+
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(15),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let controller = Arc::new(StopController::new());
+    let (finalizer_tx, finalizer_rx) = mpsc::channel();
+    controller.register_finalizer(finalizer_tx);
+
+    let session_id = 123;
+    controller.publish_session(None, session_id);
+
+    let limits = SearchLimitsBuilder::default().session_id(session_id).fixed_time_ms(30).build();
+    let mut limits = limits;
+    limits.stop_controller = Some(controller.clone());
+
+    // publish_session() で最初に SessionStart が流れるので消費しておく。
+    let start_msg = finalizer_rx
+        .recv_timeout(Duration::from_millis(100))
+        .expect("SessionStart should arrive");
+    match start_msg {
+        FinalizerMsg::SessionStart { session_id: sid } => {
+            assert_eq!(sid, session_id);
+        }
+        other => panic!("unexpected first message: {other:?}"),
+    }
+
+    let result = backend.think_blocking(&pos, &limits, None);
+    let info = result.stop_info.expect("stop info present");
+    assert_eq!(info.reason, TerminationReason::TimeLimit);
+    assert!(!info.hard_timeout, "lead windowでの停止はhard_timeout=falseのままにする");
+
+    let finalize_msg = finalizer_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("StopController should receive Planned finalize");
+    match finalize_msg {
+        FinalizerMsg::Finalize {
+            session_id: sid,
+            reason,
+        } => {
+            assert_eq!(sid, session_id);
+            assert_eq!(reason, FinalizeReason::Planned);
+        }
+        other => panic!("unexpected finalize message: {other:?}"),
+    }
+    assert!(finalizer_rx.try_recv().is_err(), "finalize should fire exactly once");
 }
 
 #[test]
