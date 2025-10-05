@@ -627,6 +627,7 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use engine_core::search::parallel::FinalizerMsg;
     use engine_core::time_management::{GamePhase, TimeLimits, TimeManager};
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering as AtomicOrdering;
@@ -665,6 +666,71 @@ mod watchdog_tests {
         }
 
         assert!(stop_flag.load(AtomicOrdering::Acquire));
+    }
+
+    #[test]
+    fn watchdog_establishes_scheduled_stop_before_planned_finalize() {
+        let mut state = EngineState::new();
+        state.searching = true;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        state.stop_flag = Some(Arc::clone(&stop_flag));
+
+        let mut limits = TimeLimits::default();
+        limits.time_control = TimeControl::FixedTime { ms_per_move: 1_000 };
+
+        let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
+        state.active_time_manager = Some(Arc::clone(&tm));
+
+        assert_eq!(tm.scheduled_end_ms(), u64::MAX);
+
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline && tm.scheduled_end_ms() == u64::MAX {
+            tick_time_watchdog(&mut state);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_ne!(
+            tm.scheduled_end_ms(),
+            u64::MAX,
+            "watchdog should schedule a planned stop before hitting hard deadline"
+        );
+        assert!(!stop_flag.load(AtomicOrdering::Acquire));
+
+        if let Some(rx) = state.finalizer_rx.as_ref() {
+            assert!(rx.try_recv().is_err(), "no finalize should be emitted when only scheduling");
+        }
+    }
+
+    #[test]
+    fn watchdog_triggers_time_manager_stop_when_critical() {
+        let mut state = EngineState::new();
+        state.searching = true;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        state.stop_flag = Some(Arc::clone(&stop_flag));
+
+        let mut limits = TimeLimits::default();
+        limits.time_control = TimeControl::Fischer {
+            white_ms: 10,
+            black_ms: 10,
+            increment_ms: 0,
+        };
+
+        let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
+        state.active_time_manager = Some(tm);
+
+        tick_time_watchdog(&mut state);
+
+        assert!(stop_flag.load(AtomicOrdering::Acquire));
+        let rx = state.finalizer_rx.as_ref().expect("finalizer receiver available");
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(FinalizerMsg::Finalize { reason, .. }) => {
+                assert_eq!(reason, FinalizeReason::TimeManagerStop);
+            }
+            Ok(other) => panic!("unexpected finalizer message: {:?}", other),
+            Err(err) => panic!("expected finalizer message, got error: {err}"),
+        }
     }
 }
 
