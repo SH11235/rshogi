@@ -446,6 +446,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
 
     // Use SearchSession::try_poll() to detect thread disconnection
     if let Some(session) = &state.search_session {
+        let session_id = session.session_id();
         use engine_core::engine::TryResult;
         match session.try_poll() {
             TryResult::Ok(result) => {
@@ -502,7 +503,15 @@ pub fn poll_search_completion(state: &mut EngineState) {
                         }
                     }
                 } else if was_ponder {
-                    info_string("search_completion_guard=ponder");
+                    let root =
+                        state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
+                    info_string(format!(
+                        "search_completion_guard=ponder sid={} root={} elapsed_ms={} nodes={}",
+                        session_id,
+                        fmt_hash(root),
+                        result.stats.elapsed.as_millis(),
+                        result.stats.nodes
+                    ));
                     // do nothing per USI specification
                 } else {
                     if let Some(tm) = time_manager {
