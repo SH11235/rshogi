@@ -1,6 +1,22 @@
 use crate::shogi::Color;
 use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager, TimeParameters};
 
+fn margin_for(hard: u64) -> u64 {
+    if hard == u64::MAX {
+        0
+    } else if hard >= 1_000 {
+        50
+    } else if hard >= 500 {
+        30
+    } else if hard >= 200 {
+        20
+    } else if hard >= 100 {
+        15
+    } else {
+        10
+    }
+}
+
 #[test]
 fn test_set_search_end_rounds_to_next_second_minus_overhead() {
     // FixedTime with sufficiently large hard limit to avoid near-hard cap
@@ -112,4 +128,54 @@ fn fixed_time_min_think_prefers_soft_clamp_over_hard_expand() {
     assert_eq!(hard, 390);
     assert_eq!(soft, 370, "soft should clamp to hard - margin without expanding hard");
     assert!(soft < params.min_think_ms, "FixedTime may relax min_think to honor GUI intent");
+}
+
+#[test]
+fn fixed_time_min_think_raises_soft_within_margin() {
+    let mut params = TimeParameters::default();
+    params.overhead_ms = 10;
+    params.min_think_ms = 730;
+
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 800 },
+        time_parameters: Some(params),
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
+    let soft = tm.soft_limit_ms();
+    let hard = tm.hard_limit_ms();
+
+    assert_eq!(soft, 730);
+    assert_eq!(hard, 790);
+    let margin = margin_for(hard);
+    assert!(
+        soft + margin <= hard,
+        "soft({soft}) + margin({margin}) must stay <= hard({hard})"
+    );
+}
+
+#[test]
+fn fixed_time_min_think_zero_keeps_allocations() {
+    let mut params = TimeParameters::default();
+    params.overhead_ms = 10;
+    params.min_think_ms = 0;
+
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 800 },
+        time_parameters: Some(params),
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::Opening);
+    let soft = tm.soft_limit_ms();
+    let hard = tm.hard_limit_ms();
+
+    assert_eq!(soft, 710, "soft should remain the calculated allocation");
+    assert_eq!(hard, 790);
+    let margin = margin_for(hard);
+    assert!(
+        soft + margin <= hard,
+        "soft({soft}) + margin({margin}) must stay <= hard({hard})"
+    );
 }

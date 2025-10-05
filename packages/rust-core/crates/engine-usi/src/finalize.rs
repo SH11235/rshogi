@@ -236,9 +236,11 @@ fn try_lock_engine_with_budget<'a>(
                 break;
             }
             let remaining = deadline - now;
-            let sleep_dur = remaining.min(Duration::from_micros(50));
-            if sleep_dur > Duration::from_micros(0) {
-                std::thread::sleep(sleep_dur);
+            if remaining >= Duration::from_millis(1) {
+                std::thread::sleep(Duration::from_millis(1));
+            } else {
+                // Windows では 1ms 未満の sleep が丸め込まれるため、残り予算が細い場合は yield で粘る。
+                std::thread::yield_now();
             }
         }
         spins += 1;

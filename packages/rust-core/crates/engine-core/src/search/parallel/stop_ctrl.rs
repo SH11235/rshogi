@@ -74,6 +74,7 @@ impl StopController {
     /// Publish the current session (external stop flag + session id).
     pub fn publish_session(&self, external_stop: Option<&Arc<AtomicBool>>, session_id: u64) {
         self.update_external_stop_flag(external_stop);
+        // 古いセッションの StopInfo が残らないよう明示的にクリアしてから ID を更新。
         self.inner.stop_info.lock().unwrap().take();
         self.inner.session_id.store(session_id, std::sync::atomic::Ordering::Release);
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
@@ -84,12 +85,25 @@ impl StopController {
     }
 
     /// Initialize StopInfo snapshot for the upcoming session.
+    ///
+    /// # Order
+    ///
+    /// `publish_session()` clears any pending snapshot via `stop_info.take()`. Call
+    /// this method *after* `publish_session()` so that the primed value remains
+    /// visible to the backend workers.
     pub fn prime_stop_info(&self, info: StopInfo) {
         let mut guard = self.inner.stop_info.lock().unwrap();
         *guard = Some(info);
     }
 
     /// Update only the external stop flag reference.
+    ///
+    /// # Contract
+    ///
+    /// This API is intended for session-boundary refreshes (e.g. inside
+    /// `publish_session()`). Resetting `finalize_claimed` mid-session would
+    /// accidentally allow a second finalize to be accepted, so callers should not
+    /// invoke this while a search is active.
     pub fn update_external_stop_flag(&self, external_stop: Option<&Arc<AtomicBool>>) {
         let mut guard = self.inner.external_stop_flag.lock().unwrap();
         *guard = external_stop.map(Arc::downgrade);
@@ -197,6 +211,11 @@ impl StopController {
     }
 
     /// Request out-of-band finalize with a reason.
+    ///
+    /// `StopInfo.reason` follows a "highest accepted priority wins" policy: lower
+    /// priority finalize requests that are rejected by `should_accept_finalize()` do
+    /// not overwrite the snapshot. As a result the recorded reason always reflects
+    /// the most severe finalize that was actually accepted for the session.
     pub fn request_finalize(&self, reason: FinalizeReason) {
         if !self.should_accept_finalize(reason) {
             return;
@@ -277,6 +296,7 @@ impl StopController {
         let current_snapshot = self.publisher.try_read();
         let depth_u8 = (line.depth as u8).min(127);
         // Publish only if we do NOT have an existing snapshot for this session whose depth is already deeper.
+        // equal depth オーバーライトは PV/score/nodes の更新を許容する目的で許可する。
         let should_publish = !matches!(
             current_snapshot.as_ref(),
             Some(existing)
@@ -318,7 +338,7 @@ impl StopController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::types::StopInfo;
+    use crate::search::types::{StopInfo, TerminationReason};
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::{mpsc, Arc};
 
@@ -547,5 +567,65 @@ mod tests {
         assert_eq!(stop_info.depth_reached, 14);
         assert!(stop_info.nodes >= 20_000);
         assert!(stop_info.elapsed_ms >= 180);
+    }
+
+    #[test]
+    fn root_snapshot_allows_equal_depth_updates() {
+        use crate::search::types::{Bound, RootLine};
+        use crate::shogi::Move;
+        use smallvec::SmallVec;
+
+        let ctrl = StopController::new();
+        ctrl.publish_session(None, 12);
+
+        let mut pv = SmallVec::<[Move; 32]>::new();
+        pv.push(Move::null());
+        let base_line = |nodes: u64, time_ms: u64| RootLine {
+            multipv_index: 1,
+            root_move: Move::null(),
+            score_internal: 0,
+            score_cp: 50,
+            bound: Bound::Exact,
+            depth: 16,
+            seldepth: Some(16),
+            pv: pv.clone(),
+            nodes: Some(nodes),
+            time_ms: Some(time_ms),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
+        ctrl.publish_root_line(12, 0x1234, &base_line(20_000, 150));
+        let first = ctrl.try_read_snapshot().expect("snapshot present");
+        assert_eq!(first.depth, 16);
+        assert_eq!(first.nodes, 20_000);
+
+        ctrl.publish_root_line(12, 0x1234, &base_line(28_000, 210));
+        let updated = ctrl.try_read_snapshot().expect("snapshot present");
+        assert_eq!(updated.depth, 16);
+        assert_eq!(updated.nodes, 28_000, "equal depth update should refresh metrics");
+        assert_eq!(updated.elapsed_ms, 210);
+
+        let info = ctrl.try_read_stop_info().expect("stop info present");
+        assert_eq!(info.depth_reached, 16);
+        assert_eq!(info.nodes, 28_000);
+        assert_eq!(info.elapsed_ms, 210);
+    }
+
+    #[test]
+    fn request_stop_flag_only_keeps_stop_info_reason() {
+        let ctrl = StopController::new();
+        let mut info = StopInfo::default();
+        info.reason = TerminationReason::TimeLimit;
+        info.hard_timeout = true;
+        ctrl.prime_stop_info(info.clone());
+
+        ctrl.request_stop_flag_only();
+
+        let after = ctrl.try_read_stop_info().expect("stop info present");
+        assert_eq!(after.reason, info.reason);
+        assert_eq!(after.hard_timeout, info.hard_timeout);
     }
 }
