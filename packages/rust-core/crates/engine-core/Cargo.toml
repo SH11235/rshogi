@@ -31,6 +31,8 @@ diff_agg_hash = []
 diagnostics = []
 # Internal feature: exposes MovePicker for benches
 bench-move-picker = []
+# Enforce panic on session mismatch in StopController::publish_root_line (デフォルトOFF)
+strict-stop-session-assert = []
 
 # Quiescence-search checking-moves policy compile-time overrides
 # - qs_checks_force_off: disable checking moves in QS regardless of env/USI option

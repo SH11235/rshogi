@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::evaluation::evaluate::{Evaluator, MaterialEvaluator};
@@ -859,8 +860,52 @@ fn fixed_time_limit_populates_stop_info() {
 
     assert_eq!(info.soft_limit_ms, 50);
     assert_eq!(info.hard_limit_ms, 50);
+    assert_eq!(info.reason, TerminationReason::TimeLimit);
+    assert_eq!(result.end_reason, TerminationReason::TimeLimit);
     assert_eq!(result.end_reason, info.reason);
     assert_eq!(result.stats.elapsed.as_millis() as u64, info.elapsed_ms);
+    assert!(!info.hard_timeout, "lead windowでの停止はhard_timeout=falseのままにする");
+}
+
+struct SleepyEvaluator {
+    delay: Duration,
+}
+
+impl Evaluator for SleepyEvaluator {
+    fn evaluate(&self, _pos: &Position) -> i32 {
+        thread::sleep(self.delay);
+        0
+    }
+}
+
+#[test]
+fn fixed_time_limit_lead_window_marks_soft_reason() {
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(12),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+
+    // lead window が作動するよう適度な固定時間（40ms）と遅延 evaluator を併用する。
+    let lead_triggered = Arc::new(AtomicBool::new(false));
+    let callback_flag = Arc::clone(&lead_triggered);
+    let limits = SearchLimitsBuilder::default()
+        .fixed_time_ms(30)
+        .info_string_callback(Arc::new(move |msg: &str| {
+            if msg.contains("stop_lead_break") {
+                callback_flag.store(true, Ordering::Relaxed);
+            }
+        }))
+        .build();
+    let result = backend.think_blocking(&pos, &limits, None);
+    let info = result.stop_info.expect("stop info present");
+
+    assert!(lead_triggered.load(Ordering::Relaxed), "lead window callback should have fired");
+    assert_eq!(info.reason, TerminationReason::TimeLimit);
+    assert!(!info.hard_timeout, "lead window経由の停止ではhard_timeout=false");
+    assert_eq!(info.soft_limit_ms, 30);
+    assert_eq!(info.hard_limit_ms, 30);
+    assert_eq!(result.end_reason, TerminationReason::TimeLimit);
 }
 
 #[test]
