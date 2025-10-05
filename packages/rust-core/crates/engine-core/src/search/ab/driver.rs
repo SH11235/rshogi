@@ -238,7 +238,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
     pub(super) fn should_stop(limits: &SearchLimits) -> bool {
         if let Some(flag) = &limits.stop_flag {
-            return flag.load(Ordering::Relaxed);
+            return flag.load(Ordering::Acquire);
         }
         false
     }
