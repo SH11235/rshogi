@@ -136,12 +136,9 @@ pub fn handle_stop(state: &mut EngineState) {
                     }
                 };
 
-                if let Some((result, waited)) = wait_for_result_with_budget(
-                    &session,
-                    wait_budget_ms,
-                    chunk_ms,
-                    log_wait,
-                ) {
+                if let Some((result, waited)) =
+                    wait_for_result_with_budget(&session, wait_budget_ms, chunk_ms, log_wait)
+                {
                     info_string(format!("stop_recv_result sid={} waited_ms={}", sid, waited));
                     // No session_id check needed - SearchSession manages this internally
                     // No worker join needed - SearchSession manages thread lifecycle

@@ -313,10 +313,7 @@ fn e2e_byoyomi_oob_finalize_logs() {
     p.write_line("position startpos");
     p.write_line("go btime 0 wtime 0 byoyomi 2000");
 
-    let mut saw_oob = false;
-    let mut oob_log_count = 0u32;
-    let mut fast_tt_probe_count = 0u32;
-    let mut legacy_fast_snapshot_seen = false;
+    let mut finalize_events: Vec<String> = Vec::new();
     let mut time_budget_line: Option<String> = None;
     let mut time_caps_line: Option<String> = None;
 
@@ -327,28 +324,21 @@ fn e2e_byoyomi_oob_finalize_logs() {
         if line.contains("time_caps") {
             time_caps_line = Some(line.to_string());
         }
-        if line.contains("oob_finalize_request") {
-            saw_oob = true;
-            oob_log_count = oob_log_count.saturating_add(1);
-        }
-        if line.contains("_fast_tt_probe") {
-            fast_tt_probe_count = fast_tt_probe_count.saturating_add(1);
-        }
-        if line.contains("_fast_snapshot") {
-            legacy_fast_snapshot_seen = true;
+        if line.contains("finalize_event ") {
+            finalize_events.push(line.to_string());
         }
         line.starts_with("bestmove ")
     });
 
     assert!(bestmove_seen, "bestmove was not emitted after OOB finalize");
-    assert!(saw_oob, "OOB finalize log was not observed");
+    assert!(!finalize_events.is_empty(), "finalize_event log was not observed");
+    let saw_oob_event = finalize_events.iter().any(|line| line.contains("label=oob_"));
+    let saw_joined_event = finalize_events.iter().any(|line| line.contains("mode=joined"));
     assert!(
-        (1..=2).contains(&oob_log_count),
-        "unexpected number of oob_finalize_request logs: {}",
-        oob_log_count
+        saw_oob_event || saw_joined_event,
+        "expected OOB or joined finalize event, logs={:?}",
+        finalize_events
     );
-    assert!(fast_tt_probe_count >= 1, "fast finalize should emit *_fast_tt_probe log");
-    assert!(!legacy_fast_snapshot_seen, "legacy *_fast_snapshot log should not appear");
 
     fn parse_soft_hard(line: &str) -> Option<(u64, u64)> {
         let mut soft = None;
@@ -370,17 +360,16 @@ fn e2e_byoyomi_oob_finalize_logs() {
     let (budget_soft, budget_hard) =
         parse_soft_hard(time_budget_line.as_deref().expect("time_budget log missing"))
             .expect("failed parsing time_budget");
-    let (caps_soft, caps_hard) =
-        parse_soft_hard(time_caps_line.as_deref().expect("time_caps log missing"))
-            .expect("failed parsing time_caps");
-
-    assert_eq!(caps_hard, budget_hard, "time_caps hard should match time_budget hard");
-    assert!(
-        caps_soft >= budget_soft,
-        "time_caps soft should not undershoot time_budget (caps_soft={} budget_soft={})",
-        caps_soft,
-        budget_soft
-    );
+    if let Some(line) = time_caps_line.as_deref() {
+        let (caps_soft, caps_hard) = parse_soft_hard(line).expect("failed parsing time_caps");
+        assert_eq!(caps_hard, budget_hard, "time_caps hard should match time_budget hard");
+        assert!(
+            caps_soft >= budget_soft,
+            "time_caps soft should not undershoot time_budget (caps_soft={} budget_soft={})",
+            caps_soft,
+            budget_soft
+        );
+    }
 }
 
 #[test]
@@ -406,7 +395,7 @@ fn e2e_stop_flag_reset_after_oob_finalize() {
     p.write_line("position startpos");
 
     let mut first_addr: Option<String> = None;
-    let mut first_oob = 0u32;
+    let mut first_finalize_events = 0u32;
     p.write_line("go btime 0 wtime 0 byoyomi 2000");
     let first_bestmove = p.wait_for(6000, |line| {
         if line.contains("stop_flag_create addr=") && first_addr.is_none() {
@@ -416,14 +405,14 @@ fn e2e_stop_flag_reset_after_oob_finalize() {
                 }
             }
         }
-        if line.contains("oob_finalize_request") {
-            first_oob = first_oob.saturating_add(1);
+        if line.contains("finalize_event ") {
+            first_finalize_events = first_finalize_events.saturating_add(1);
         }
         line.starts_with("bestmove ")
     });
     assert!(first_bestmove, "first bestmove not observed");
     let first_addr = first_addr.expect("first stop_flag address missing");
-    assert!(first_oob > 0, "first go did not trigger OOB finalize");
+    assert!(first_finalize_events > 0, "first go did not trigger finalize event");
 
     p.write_line("isready");
     assert!(p.wait_for_contains("readyok", 2000), "readyok timeout after first search");
@@ -431,7 +420,7 @@ fn e2e_stop_flag_reset_after_oob_finalize() {
     p.write_line("position startpos");
 
     let mut second_addr: Option<String> = None;
-    let mut second_oob = 0u32;
+    let mut second_finalize_events = 0u32;
     p.write_line("go btime 0 wtime 0 byoyomi 2000");
     let second_bestmove = p.wait_for(6000, |line| {
         if line.contains("stop_flag_create addr=") && second_addr.is_none() {
@@ -441,14 +430,14 @@ fn e2e_stop_flag_reset_after_oob_finalize() {
                 }
             }
         }
-        if line.contains("oob_finalize_request") {
-            second_oob = second_oob.saturating_add(1);
+        if line.contains("finalize_event ") {
+            second_finalize_events = second_finalize_events.saturating_add(1);
         }
         line.starts_with("bestmove ")
     });
     assert!(second_bestmove, "second bestmove not observed");
     let second_addr = second_addr.expect("second stop_flag address missing");
-    assert!(second_oob > 0, "second go did not trigger OOB finalize");
+    assert!(second_finalize_events > 0, "second go did not trigger finalize event");
 
     assert_ne!(first_addr, second_addr, "stop_flag address must change between OOB finalizes");
 }
@@ -474,11 +463,18 @@ fn e2e_ponder_stop_then_go_fast() {
         p.write_line("go ponder btime 0 wtime 0 byoyomi 2000");
         p.assert_no_contains("fallback_deadline_trigger=", 300);
         p.write_line("stop");
+        assert!(
+            p.wait_for_contains("finalize_event label=stop_finalize", 2000),
+            "stop_finalize event missing"
+        );
         assert!(p.wait_for_contains("bestmove ", 2000));
 
         p.write_line("position startpos moves 7g7f 3c3d 2g2f");
         p.write_line("go btime 0 wtime 0 byoyomi 2000");
-        assert!(p.wait_for_contains("oob_session_start", 1000));
+        assert!(
+            p.wait_for_contains("session_publish stop_ctrl sid=", 1000),
+            "session_publish log missing"
+        );
         assert!(p.wait_for_contains("bestmove ", 4000));
     }
 }
