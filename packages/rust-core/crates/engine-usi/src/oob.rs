@@ -111,7 +111,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 // compute wait budget based on time control and StopWaitMs
                 // Prefer in-place join with extended waiting
                 let (wait_budget_ms, chunk_ms, is_pure_byoyomi) =
-                    compute_wait_budget_from_state(state);
+                    compute_wait_budget_from_state(state, Some(reason));
 
                 diag_info_string(format!(
                     "oob_finalize_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={} chunk_ms={}",

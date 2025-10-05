@@ -67,8 +67,27 @@ where
     None
 }
 
-pub(crate) fn compute_wait_budget_from_state(state: &EngineState) -> (u64, u64, bool) {
+pub(crate) fn compute_wait_budget_from_state(
+    state: &EngineState,
+    reason: Option<FinalizeReason>,
+) -> (u64, u64, bool) {
     let pure = is_pure_byoyomi(state);
+
+    if let Some(reason) = reason {
+        match reason {
+            FinalizeReason::Hard => return (0, 0, pure),
+            FinalizeReason::NearHard => return (WAIT_CHUNK_MS, WAIT_CHUNK_MS, pure),
+            _ => {}
+        }
+    }
+
+    if matches!(
+        state.current_time_control,
+        Some(TimeControl::FixedTime { .. } | TimeControl::Infinite)
+    ) {
+        return (0, 0, pure);
+    }
+
     let (budget, chunk) = compute_wait_budget(pure, state.opts.stop_wait_ms);
     (budget, chunk, pure)
 }
@@ -80,7 +99,7 @@ pub fn handle_stop(state: &mut EngineState) {
 
         // Use SearchSession API instead of manual channel
         if let Some(session) = state.search_session.take() {
-            let (wait_budget_ms, chunk_ms, pure_byo) = compute_wait_budget_from_state(state);
+            let (wait_budget_ms, chunk_ms, pure_byo) = compute_wait_budget_from_state(state, None);
             if wait_budget_ms == 0 {
                 if let Some(tc) = &state.current_time_control {
                     match tc {
@@ -95,12 +114,35 @@ pub fn handle_stop(state: &mut EngineState) {
                 }
             }
 
+            info_string(format!(
+                "stop_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={} chunk_ms={}",
+                wait_budget_ms, pure_byo as u8, state.opts.stop_wait_ms, chunk_ms
+            ));
+
             // Wait for result with timeout using SearchSession API
             let mut finalized = false;
             if wait_budget_ms > 0 {
-                if let Some((result, _waited)) =
-                    wait_for_result_with_budget(&session, wait_budget_ms, chunk_ms, |_, _| {})
-                {
+                let sid = session.session_id();
+                info_string(format!(
+                    "stop_recv_wait_start sid={} budget_ms={} chunk_ms={}",
+                    sid, wait_budget_ms, chunk_ms
+                ));
+                let log_wait = |round: u64, waited_ms: u64| {
+                    if round.is_multiple_of(4) || waited_ms >= wait_budget_ms {
+                        info_string(format!(
+                            "stop_recv_waiting sid={} round={} waited_ms={}",
+                            sid, round, waited_ms
+                        ));
+                    }
+                };
+
+                if let Some((result, waited)) = wait_for_result_with_budget(
+                    &session,
+                    wait_budget_ms,
+                    chunk_ms,
+                    log_wait,
+                ) {
+                    info_string(format!("stop_recv_result sid={} waited_ms={}", sid, waited));
                     // No session_id check needed - SearchSession manages this internally
                     // No worker join needed - SearchSession manages thread lifecycle
                     state.searching = false;
@@ -136,6 +178,11 @@ pub fn handle_stop(state: &mut EngineState) {
                     state.current_time_control = None;
                     state.notify_idle();
                     finalized = true;
+                } else {
+                    info_string(format!(
+                        "stop_recv_timeout_all sid={} budget_ms={}",
+                        sid, wait_budget_ms
+                    ));
                 }
             }
             // Timeout expired - try immediate stop and quick polling
@@ -442,7 +489,8 @@ pub fn handle_gameover(state: &mut EngineState) {
         if state.searching {
             // Use SearchSession API instead of manual channel
             if let Some(session) = state.search_session.take() {
-                let (wait_budget_ms, chunk_ms, pure_byo) = compute_wait_budget_from_state(state);
+                let (wait_budget_ms, chunk_ms, pure_byo) =
+                    compute_wait_budget_from_state(state, None);
                 if wait_budget_ms == 0 {
                     if let Some(tc) = &state.current_time_control {
                         match tc {
@@ -456,6 +504,11 @@ pub fn handle_gameover(state: &mut EngineState) {
                         }
                     }
                 }
+
+                info_string(format!(
+                    "gameover_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={} chunk_ms={}",
+                    wait_budget_ms, pure_byo as u8, state.opts.stop_wait_ms, chunk_ms
+                ));
 
                 let mut finalized = false;
                 if wait_budget_ms > 0 {
