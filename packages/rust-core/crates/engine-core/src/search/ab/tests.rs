@@ -833,9 +833,7 @@ fn panic_in_search_thread_returns_error_result_with_stop_info() {
     assert_eq!(info.soft_limit_ms, 600);
     assert_eq!(info.hard_limit_ms, 800);
     assert!(!info.hard_timeout, "panic fallback should not mark hard timeout");
-    let delta = info
-        .elapsed_ms
-        .abs_diff(expected_elapsed);
+    let delta = info.elapsed_ms.abs_diff(expected_elapsed);
     assert!(
         delta <= 20,
         "elapsed_ms should stay close to expected (expected {expected_elapsed}, actual {} , delta {delta})",
