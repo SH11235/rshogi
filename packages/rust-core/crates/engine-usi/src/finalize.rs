@@ -7,7 +7,7 @@ use engine_core::search::{
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
-use crate::io::{diag_info_string, usi_println};
+use crate::io::{diag_info_string, info_string, usi_println};
 use crate::state::EngineState;
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
@@ -56,6 +56,14 @@ fn prepare_stop_meta(
     finalize_reason: Option<FinalizeReason>,
 ) -> StopMeta {
     gather_stop_meta(controller_info, result_stop_info, finalize_reason)
+}
+
+fn emit_finalize_event(state: &EngineState, label: &str, mode: &str, stop_meta: &StopMeta) {
+    let sid = state.current_session_core_id.unwrap_or(0);
+    info_string(format!(
+        "finalize_event label={} mode={} reason={} sid={} soft_ms={} hard_ms={}",
+        label, mode, stop_meta.reason_label, sid, stop_meta.soft_ms, stop_meta.hard_ms
+    ));
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +363,8 @@ pub fn finalize_and_send(
         result.and_then(|r| r.stop_info.as_ref()),
         finalize_reason,
     );
+
+    emit_finalize_event(state, label, "joined", &stop_meta);
 
     if let Some(res) = result {
         let best_usi =
@@ -670,6 +680,7 @@ pub fn finalize_and_send_fast(
     }
 
     let stop_meta = prepare_stop_meta(label, controller_stop_info, None, finalize_reason);
+    emit_finalize_event(state, label, "fast", &stop_meta);
     diag_info_string(format!("{}_fast_reason reason={}", label, stop_meta.reason_label));
 
     let root_key_hex = fmt_hash(state.position.zobrist_hash());

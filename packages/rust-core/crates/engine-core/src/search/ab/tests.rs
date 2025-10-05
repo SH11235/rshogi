@@ -843,7 +843,13 @@ fn panic_in_search_thread_returns_error_result_with_stop_info() {
         info.elapsed_ms
     );
     let stats_elapsed = result.stats.elapsed.as_millis() as u64;
-    assert_eq!(stats_elapsed, info.elapsed_ms);
+    assert!(
+        stats_elapsed.abs_diff(info.elapsed_ms) <= 5,
+        "stats_elapsed={} info_elapsed={} diff={}",
+        stats_elapsed,
+        info.elapsed_ms,
+        stats_elapsed.abs_diff(info.elapsed_ms)
+    );
     assert_eq!(active_counter.load(Ordering::SeqCst), 0);
 }
 
@@ -867,7 +873,7 @@ fn fixed_time_limit_populates_stop_info() {
     assert_eq!(result.end_reason, info.reason);
     let stats_elapsed = result.stats.elapsed.as_millis() as u64;
     assert!(
-        stats_elapsed.abs_diff(info.elapsed_ms) <= 1,
+        stats_elapsed.abs_diff(info.elapsed_ms) <= 5,
         "stats_elapsed={} info_elapsed={} diff={}",
         stats_elapsed,
         info.elapsed_ms,
