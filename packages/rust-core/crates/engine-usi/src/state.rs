@@ -84,7 +84,7 @@ impl Default for UsiOptions {
             stochastic_ponder: false,
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
-            stop_wait_ms: 0,
+            stop_wait_ms: 200,
             watchdog_poll_ms: 2,
             byoyomi_deadline_lead_ms: 300,
             multipv: 1,

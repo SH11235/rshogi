@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::env;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use log::error;
 
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
@@ -1018,8 +1021,35 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
                         }
                     }
                     let _guard = Guard(counter);
-                    let result = backend.iterative(&root, &limits, info_cb.as_ref());
-                    let _ = tx.send(result);
+                    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                        backend.iterative(&root, &limits, info_cb.as_ref())
+                    }));
+                    match result {
+                        Ok(res) => {
+                            let _ = tx.send(res);
+                        }
+                        Err(payload) => {
+                            let panic_msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                                (*s).to_string()
+                            } else if let Some(s) = payload.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                format!(
+                                    "unknown panic payload (type_id={:?})",
+                                    (*payload).type_id()
+                                )
+                            };
+                            error!("classic backend search thread panicked: {panic_msg}");
+
+                            let mut fallback = SearchResult::new(None, 0, SearchStats::default());
+                            fallback.end_reason = TerminationReason::Error;
+                            fallback.stop_info = Some(StopInfo {
+                                reason: TerminationReason::Error,
+                                ..Default::default()
+                            });
+                            let _ = tx.send(fallback);
+                        }
+                    }
                 }
             })
             .expect("spawn classic backend search thread");

@@ -26,6 +26,7 @@ use stop::{handle_gameover, handle_ponderhit, handle_stop};
 
 fn main() -> Result<()> {
     env_logger::init();
+    engine_core::util::panic::install_panic_hook();
     let stdin = stdio::stdin();
     let mut state = EngineState::new();
 

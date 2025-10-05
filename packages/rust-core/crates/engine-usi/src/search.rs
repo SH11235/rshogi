@@ -535,10 +535,22 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     "Search thread disconnected unexpectedly for session {}",
                     session.session_id()
                 );
+                let elapsed_ms =
+                    state.active_time_manager.as_ref().map(|tm| tm.elapsed_ms()).unwrap_or(0);
+                let stop_flag_state = state
+                    .stop_flag
+                    .as_ref()
+                    .map(|flag| flag.load(Ordering::Acquire) as u8)
+                    .unwrap_or(0);
                 info_string(format!(
-                    "search_thread_disconnected session_id={} root_hash={}",
+                    "search_thread_disconnected session_id={} root_hash={} elapsed_ms={} stop_flag={}",
                     session.session_id(),
-                    state.current_root_hash.map(fmt_hash).unwrap_or_else(|| "none".to_string())
+                    state
+                        .current_root_hash
+                        .map(fmt_hash)
+                        .unwrap_or_else(|| "none".to_string()),
+                    elapsed_ms,
+                    stop_flag_state
                 ));
 
                 state.searching = false;
@@ -731,6 +743,40 @@ mod watchdog_tests {
             Ok(other) => panic!("unexpected finalizer message: {:?}", other),
             Err(err) => panic!("expected finalizer message, got error: {err}"),
         }
+    }
+
+    #[test]
+    fn watchdog_triggers_planned_before_hard() {
+        let mut state = EngineState::new();
+        state.searching = true;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        state.stop_flag = Some(Arc::clone(&stop_flag));
+
+        let mut limits = TimeLimits::default();
+        limits.time_control = TimeControl::FixedTime { ms_per_move: 250 };
+
+        let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
+        state.active_time_manager = Some(Arc::clone(&tm));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !stop_flag.load(AtomicOrdering::Acquire) {
+            tick_time_watchdog(&mut state);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(stop_flag.load(AtomicOrdering::Acquire));
+        let rx = state.finalizer_rx.as_ref().expect("finalizer receiver available");
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(FinalizerMsg::Finalize { reason, .. }) => {
+                assert_eq!(reason, FinalizeReason::Planned);
+            }
+            Ok(other) => panic!("unexpected finalizer message: {:?}", other),
+            Err(err) => panic!("expected planned finalize, got error: {err}"),
+        }
+
+        // ensure scheduled deadline was設定されていた
+        assert_ne!(tm.scheduled_end_ms(), u64::MAX);
     }
 }
 
