@@ -104,6 +104,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if let Some(session) = &state.search_session {
                     session.request_stop();
                 }
+                // ここでは StopController には finalize を要求せず、外部 stop フラグだけを立てる。
+                // finalize は最終的に fast/normal finalize の経路で一度だけ行う。
                 state.stop_controller.request_stop_flag_only();
 
                 // compute wait budget based on time control and StopWaitMs
@@ -342,8 +344,8 @@ mod tests {
     #[test]
     fn finalizer_channel_is_reestablished_after_disconnect() {
         let mut state = EngineState::new();
-        let (_tx, rx) = mpsc::channel();
-        // Drop sender to simulate disconnect
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
         state.finalizer_rx = Some(rx);
 
         poll_oob_finalize(&mut state);

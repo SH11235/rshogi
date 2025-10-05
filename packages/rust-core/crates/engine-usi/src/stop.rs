@@ -30,7 +30,9 @@ pub(crate) fn compute_wait_budget(is_pure_byoyomi: bool, stop_wait_ms: u64) -> (
     }
     let chunk_ms = WAIT_CHUNK_MS;
     let budget = if is_pure_byoyomi {
-        stop_wait_ms.clamp(chunk_ms, chunk_ms * 5)
+        let min_budget = chunk_ms * 3; // 保守的に 150ms を下限に保持
+        let max_budget = chunk_ms * 5; // 上限は 250ms 程度に丸める
+        stop_wait_ms.clamp(min_budget, max_budget)
     } else {
         stop_wait_ms
     };
@@ -440,81 +442,73 @@ pub fn handle_gameover(state: &mut EngineState) {
         if state.searching {
             // Use SearchSession API instead of manual channel
             if let Some(session) = state.search_session.take() {
-                let mut wait_ms = state.opts.stop_wait_ms;
-                if let Some(tc) = &state.current_time_control {
-                    match tc {
-                        TimeControl::FixedTime { .. } | TimeControl::Infinite => {
-                            wait_ms = 0;
-                            info_string("gameover_fast_finalize=fixed_or_infinite");
-                        }
-                        TimeControl::Byoyomi { main_time_ms, .. } => {
-                            if *main_time_ms == 0 || *main_time_ms <= state.opts.network_delay2_ms {
-                                wait_ms = 0;
+                let (wait_budget_ms, chunk_ms, pure_byo) = compute_wait_budget_from_state(state);
+                if wait_budget_ms == 0 {
+                    if let Some(tc) = &state.current_time_control {
+                        match tc {
+                            TimeControl::FixedTime { .. } | TimeControl::Infinite => {
+                                info_string("gameover_fast_finalize=fixed_or_infinite");
+                            }
+                            TimeControl::Byoyomi { .. } if pure_byo => {
                                 info_string("gameover_fast_finalize=byoyomi");
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
 
-                let deadline = Instant::now() + Duration::from_millis(wait_ms);
                 let mut finalized = false;
-
-                while Instant::now() < deadline && !finalized {
-                    let now = Instant::now();
-                    let remain = if deadline > now {
-                        deadline - now
-                    } else {
-                        Duration::from_millis(0)
-                    };
-                    let slice = if remain > Duration::from_millis(20) {
-                        Duration::from_millis(20)
-                    } else {
-                        remain
+                if wait_budget_ms > 0 {
+                    let log_wait = |round: u64, waited_ms: u64| {
+                        if round.is_multiple_of(4) || waited_ms >= wait_budget_ms {
+                            info_string(format!(
+                                "gameover_recv_waiting round={} waited_ms={}",
+                                round, waited_ms
+                            ));
+                        }
                     };
 
-                    // Use SearchSession::recv_result_timeout() instead of manual channel
-                    match session.recv_result_timeout(slice) {
-                        Some(result) => {
-                            // No session_id check needed - SearchSession manages this internally
-                            // No worker join needed - SearchSession manages thread lifecycle
-                            state.searching = false;
-                            // Clear stop_flag - each session gets a fresh flag to avoid race conditions
-                            state.stop_flag = None;
-                            state.ponder_hit_flag = None;
+                    if let Some((result, waited)) =
+                        wait_for_result_with_budget(&session, wait_budget_ms, chunk_ms, log_wait)
+                    {
+                        info_string(format!("gameover_recv_result waited_ms={}", waited));
+                        state.searching = false;
+                        state.stop_flag = None;
+                        state.ponder_hit_flag = None;
 
-                            let stale = state
-                                .current_root_hash
-                                .map(|h| h != state.position.zobrist_hash())
-                                .unwrap_or(false);
-                            if let Some(tm) = state.active_time_manager.take() {
-                                let elapsed_ms = result.stats.elapsed.as_millis() as u64;
-                                let time_state = state.time_state_for_update(elapsed_ms);
-                                tm.update_after_move(elapsed_ms, time_state);
-                            }
-                            finalize_and_send(
-                                state,
-                                "gameover_finalize",
-                                Some(&result),
-                                stale,
-                                Some(FinalizeReason::UserStop),
-                            );
-                            if !state.bestmove_emitted {
-                                let fallback = result
-                                    .best_move
-                                    .map(|mv| move_to_usi(&mv))
-                                    .unwrap_or_else(|| "resign".to_string());
-                                let _ = emit_bestmove_once(state, fallback, None);
-                            }
-                            state.current_is_ponder = false;
-                            state.current_root_hash = None;
-                            state.current_time_control = None;
-                            state.notify_idle();
-                            finalized = true;
+                        let stale = state
+                            .current_root_hash
+                            .map(|h| h != state.position.zobrist_hash())
+                            .unwrap_or(false);
+                        if let Some(tm) = state.active_time_manager.take() {
+                            let elapsed_ms = result.stats.elapsed.as_millis() as u64;
+                            let time_state = state.time_state_for_update(elapsed_ms);
+                            tm.update_after_move(elapsed_ms, time_state);
                         }
-                        None => {
-                            // Timeout or disconnected - continue waiting
+                        finalize_and_send(
+                            state,
+                            "gameover_finalize",
+                            Some(&result),
+                            stale,
+                            Some(FinalizeReason::UserStop),
+                        );
+                        if !state.bestmove_emitted {
+                            let fallback = result
+                                .best_move
+                                .map(|mv| move_to_usi(&mv))
+                                .unwrap_or_else(|| "resign".to_string());
+                            let _ = emit_bestmove_once(state, fallback, None);
                         }
+                        state.current_is_ponder = false;
+                        state.current_root_hash = None;
+                        state.current_time_control = None;
+                        state.notify_idle();
+                        finalized = true;
+                    } else {
+                        info_string(format!(
+                            "gameover_recv_timeout_all budget_ms={}",
+                            wait_budget_ms
+                        ));
                     }
                 }
 
