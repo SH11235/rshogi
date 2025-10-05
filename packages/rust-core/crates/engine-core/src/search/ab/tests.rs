@@ -845,6 +845,25 @@ fn panic_in_search_thread_returns_error_result_with_stop_info() {
 }
 
 #[test]
+fn fixed_time_limit_populates_stop_info() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+
+    let limits = SearchLimitsBuilder::default().fixed_time_ms(50).build();
+
+    let result = backend.think_blocking(&pos, &limits, None);
+    let info = result
+        .stop_info
+        .expect("stop info should be present when only time_limit is provided");
+
+    assert_eq!(info.soft_limit_ms, 50);
+    assert_eq!(info.hard_limit_ms, 50);
+    assert_eq!(result.end_reason, info.reason);
+    assert_eq!(result.stats.elapsed.as_millis() as u64, info.elapsed_ms);
+}
+
+#[test]
 fn null_move_respects_runtime_toggle() {
     let evaluator = Arc::new(MaterialEvaluator);
     let backend =

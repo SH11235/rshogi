@@ -978,6 +978,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     hard_limit_ms: dl.hard_limit_ms,
                 });
                 result.end_reason = reason;
+            } else if let Some(limit) = limits.time_limit() {
+                let cap_ms = limit.as_millis() as u64;
+                let elapsed = t0.elapsed().as_millis() as u64;
+                let hard_timeout =
+                    elapsed >= cap_ms || matches!(last_deadline_hit, Some(DeadlineHit::Hard));
+                let reason = if hard_timeout || matches!(last_deadline_hit, Some(DeadlineHit::Soft))
+                {
+                    TerminationReason::TimeLimit
+                } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
+                    || Self::should_stop(limits)
+                {
+                    TerminationReason::UserStop
+                } else {
+                    TerminationReason::Completed
+                };
+
+                result.stop_info = Some(StopInfo {
+                    reason,
+                    elapsed_ms: elapsed,
+                    nodes,
+                    depth_reached: final_depth_reached,
+                    hard_timeout,
+                    soft_limit_ms: cap_ms,
+                    hard_limit_ms: cap_ms,
+                });
+                result.end_reason = reason;
             }
         }
         if let Some(cb) = limits.info_string_callback.as_ref() {

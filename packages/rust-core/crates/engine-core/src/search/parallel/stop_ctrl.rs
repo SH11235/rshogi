@@ -688,4 +688,58 @@ mod tests {
             assert_eq!(*last, FinalizeReason::Hard, "highest priority finalize must be last");
         }
     }
+
+    #[test]
+    fn publish_root_line_ignores_mismatched_session() {
+        use crate::search::types::{Bound, RootLine};
+        use crate::shogi::Move;
+        use smallvec::SmallVec;
+
+        let ctrl = StopController::new();
+        let external = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&external), 10);
+        ctrl.prime_stop_info(StopInfo {
+            depth_reached: 5,
+            nodes: 100,
+            elapsed_ms: 40,
+            ..Default::default()
+        });
+
+        let mut pv = SmallVec::<[Move; 32]>::new();
+        pv.push(Move::null());
+        let line = RootLine {
+            multipv_index: 1,
+            root_move: Move::null(),
+            score_internal: 0,
+            score_cp: 12,
+            bound: Bound::Exact,
+            depth: 8,
+            seldepth: Some(8),
+            pv: pv.clone(),
+            nodes: Some(500),
+            time_ms: Some(120),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctrl.publish_root_line(11, 0xABC, &line);
+        }));
+
+        if cfg!(debug_assertions) {
+            assert!(res.is_err(), "mismatched session should panic in debug builds");
+        } else {
+            assert!(res.is_ok());
+            assert!(
+                ctrl.try_read_snapshot().is_none(),
+                "snapshot must remain untouched for mismatched session"
+            );
+            let info = ctrl.try_read_stop_info().expect("stop info");
+            assert_eq!(info.depth_reached, 5);
+            assert_eq!(info.nodes, 100);
+            assert_eq!(info.elapsed_ms, 40);
+        }
+    }
 }
