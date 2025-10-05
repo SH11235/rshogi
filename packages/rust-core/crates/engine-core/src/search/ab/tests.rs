@@ -287,8 +287,10 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
 fn compute_qnodes_limit_scales_with_remaining_time() {
     mock_set_time(0);
 
-    let mut time_limits = TimeLimits::default();
-    time_limits.time_control = TimeControl::FixedTime { ms_per_move: 5_000 };
+    let time_limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 5_000 },
+        ..Default::default()
+    };
     let tm = Arc::new(TimeManager::new(&time_limits, Color::Black, 0, GamePhase::Opening));
 
     let mut limits = SearchLimitsBuilder::default()

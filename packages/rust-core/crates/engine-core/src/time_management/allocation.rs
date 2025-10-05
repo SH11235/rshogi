@@ -636,10 +636,12 @@ mod tests {
 
     #[test]
     fn test_byoyomi_high_latency_clamps_to_floor() {
-        let mut params = TimeParameters::default();
-        params.network_delay2_ms = 1_300;
-        params.min_think_ms = 250;
-        params.critical_byoyomi_ms = 200;
+        let params = TimeParameters {
+            network_delay2_ms: 1_300,
+            min_think_ms: 250,
+            critical_byoyomi_ms: 200,
+            ..Default::default()
+        };
 
         let (soft, hard) = calculate_time_allocation(
             &TimeControl::Byoyomi {

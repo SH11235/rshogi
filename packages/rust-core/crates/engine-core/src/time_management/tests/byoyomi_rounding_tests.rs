@@ -56,11 +56,13 @@ fn test_pure_byoyomi_schedules_before_hard_with_margin() {
 fn test_pure_byoyomi_respects_min_think_under_latency() {
     mock_set_time(0);
 
-    let mut params = crate::time_management::TimeParameters::default();
-    params.network_delay2_ms = 1_200;
-    params.min_think_ms = 300;
-    params.critical_byoyomi_ms = 150;
-    params.byoyomi_hard_limit_reduction_ms = 100;
+    let params = crate::time_management::TimeParameters {
+        network_delay2_ms: 1_200,
+        min_think_ms: 300,
+        critical_byoyomi_ms: 150,
+        byoyomi_hard_limit_reduction_ms: 100,
+        ..Default::default()
+    };
 
     let limits = TimeLimits {
         time_control: TimeControl::Byoyomi {
