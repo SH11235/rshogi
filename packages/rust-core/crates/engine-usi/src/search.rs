@@ -654,8 +654,10 @@ mod watchdog_tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         state.stop_flag = Some(Arc::clone(&stop_flag));
 
-        let mut limits = TimeLimits::default();
-        limits.time_control = TimeControl::FixedTime { ms_per_move: 50 };
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 50 },
+            ..Default::default()
+        };
 
         let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
         state.active_time_manager = Some(Arc::clone(&tm));
@@ -688,8 +690,10 @@ mod watchdog_tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         state.stop_flag = Some(Arc::clone(&stop_flag));
 
-        let mut limits = TimeLimits::default();
-        limits.time_control = TimeControl::FixedTime { ms_per_move: 1_000 };
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 1_000 },
+            ..Default::default()
+        };
 
         let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
         state.active_time_manager = Some(Arc::clone(&tm));
@@ -722,11 +726,13 @@ mod watchdog_tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         state.stop_flag = Some(Arc::clone(&stop_flag));
 
-        let mut limits = TimeLimits::default();
-        limits.time_control = TimeControl::Fischer {
-            white_ms: 10,
-            black_ms: 10,
-            increment_ms: 0,
+        let limits = TimeLimits {
+            time_control: TimeControl::Fischer {
+                white_ms: 10,
+                black_ms: 10,
+                increment_ms: 0,
+            },
+            ..Default::default()
         };
 
         let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
@@ -753,8 +759,10 @@ mod watchdog_tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         state.stop_flag = Some(Arc::clone(&stop_flag));
 
-        let mut limits = TimeLimits::default();
-        limits.time_control = TimeControl::FixedTime { ms_per_move: 250 };
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 250 },
+            ..Default::default()
+        };
 
         let tm = Arc::new(TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame));
         state.active_time_manager = Some(Arc::clone(&tm));

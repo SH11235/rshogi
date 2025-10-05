@@ -111,9 +111,11 @@ fn test_set_search_end_respects_remain_upper_in_byoyomi() {
 
 #[test]
 fn fixed_time_min_think_prefers_soft_clamp_over_hard_expand() {
-    let mut params = TimeParameters::default();
-    params.overhead_ms = 10;
-    params.min_think_ms = 380;
+    let params = TimeParameters {
+        overhead_ms: 10,
+        min_think_ms: 380,
+        ..Default::default()
+    };
 
     let limits = TimeLimits {
         time_control: TimeControl::FixedTime { ms_per_move: 400 },
@@ -132,9 +134,11 @@ fn fixed_time_min_think_prefers_soft_clamp_over_hard_expand() {
 
 #[test]
 fn fixed_time_min_think_raises_soft_within_margin() {
-    let mut params = TimeParameters::default();
-    params.overhead_ms = 10;
-    params.min_think_ms = 730;
+    let params = TimeParameters {
+        overhead_ms: 10,
+        min_think_ms: 730,
+        ..Default::default()
+    };
 
     let limits = TimeLimits {
         time_control: TimeControl::FixedTime { ms_per_move: 800 },
@@ -157,9 +161,11 @@ fn fixed_time_min_think_raises_soft_within_margin() {
 
 #[test]
 fn fixed_time_min_think_zero_keeps_allocations() {
-    let mut params = TimeParameters::default();
-    params.overhead_ms = 10;
-    params.min_think_ms = 0;
+    let params = TimeParameters {
+        overhead_ms: 10,
+        min_think_ms: 0,
+        ..Default::default()
+    };
 
     let limits = TimeLimits {
         time_control: TimeControl::FixedTime { ms_per_move: 800 },

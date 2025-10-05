@@ -644,9 +644,11 @@ mod tests {
     #[test]
     fn request_stop_flag_only_keeps_stop_info_reason() {
         let ctrl = StopController::new();
-        let mut info = StopInfo::default();
-        info.reason = TerminationReason::TimeLimit;
-        info.hard_timeout = true;
+        let info = StopInfo {
+            reason: TerminationReason::TimeLimit,
+            hard_timeout: true,
+            ..Default::default()
+        };
         ctrl.prime_stop_info(info.clone());
 
         ctrl.request_stop_flag_only();

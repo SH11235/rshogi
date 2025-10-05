@@ -249,6 +249,12 @@ pub struct IdleSync {
     condvar: Condvar,
 }
 
+impl IdleSync {
+    pub fn notify_all(&self) {
+        self.condvar.notify_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,20 +283,16 @@ mod tests {
             byoyomi_ms: 1_000,
             periods: 3,
         });
-        let mut go = GoParams::default();
-        go.btime = Some(0);
-        go.wtime = Some(0);
+        let go = GoParams {
+            btime: Some(0),
+            wtime: Some(0),
+            ..Default::default()
+        };
         state.last_go_params = Some(go);
 
         match state.time_state_for_update(500) {
             TimeState::Byoyomi { main_left_ms } => assert_eq!(main_left_ms, 0),
             other => panic!("unexpected time state: {:?}", other),
         }
-    }
-}
-
-impl IdleSync {
-    pub fn notify_all(&self) {
-        self.condvar.notify_all();
     }
 }

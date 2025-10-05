@@ -107,10 +107,10 @@ mod tests {
             parse_usi_move("7g7f").unwrap(),
             parse_usi_move("2g2f").unwrap(),
         ];
-        let tt_move = Some(parse_usi_move("2g2f").unwrap());
-        let mut picker = RootPicker::new(&pos, &moves, tt_move, None);
+        let tt_move = parse_usi_move("2g2f").expect("valid tt move");
+        let mut picker = RootPicker::new(&pos, &moves, Some(tt_move), None);
         let first = picker.next().unwrap();
-        assert!(first.0.equals_without_piece_type(&tt_move.unwrap()));
+        assert!(first.0.equals_without_piece_type(&tt_move));
     }
 
     #[test]
