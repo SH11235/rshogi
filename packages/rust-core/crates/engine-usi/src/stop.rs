@@ -6,7 +6,7 @@ use engine_core::time_management::{
     detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeParametersBuilder,
 };
 
-use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast};
+use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast, fmt_hash};
 use crate::io::info_string;
 use crate::state::EngineState;
 use engine_core::search::parallel::FinalizeReason;
@@ -198,6 +198,46 @@ pub fn handle_stop(state: &mut EngineState) {
                 state.notify_idle();
             }
         }
+    } else if !state.searching && !state.bestmove_emitted {
+        let sid = state.current_session_core_id.unwrap_or(0);
+        let root = state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
+        info_string(format!(
+            "stop_post_completion sid={} root={} current_is_ponder={}",
+            sid,
+            fmt_hash(root),
+            state.current_is_ponder as u8
+        ));
+
+        state.stop_controller.request_finalize(FinalizeReason::UserStop);
+        state.stop_controller.request_stop_flag_only();
+        finalize_and_send_fast(
+            state,
+            "stop_post_completion_finalize",
+            Some(FinalizeReason::UserStop),
+        );
+
+        if !state.bestmove_emitted {
+            // As a last resort fall back to legal move selection directly.
+            let fallback = {
+                let eng = state.engine.lock().unwrap();
+                eng.choose_final_bestmove(&state.position, None)
+            };
+            let final_usi = fallback
+                .best_move
+                .map(|mv| move_to_usi(&mv))
+                .unwrap_or_else(|| "resign".to_string());
+            let ponder = None;
+            let _ = emit_bestmove_once(state, final_usi, ponder);
+        }
+
+        state.current_time_control = None;
+        state.current_root_hash = None;
+        state.notify_idle();
+    } else {
+        info_string(format!(
+            "stop_ignored searching={} bestmove_emitted={}",
+            state.searching as u8, state.bestmove_emitted as u8
+        ));
     }
 }
 
@@ -592,5 +632,20 @@ mod tests {
         assert!(state.deadline_hard.is_some());
         assert!(!state.deadline_near_notified);
         assert!(!state.current_is_ponder);
+    }
+
+    #[test]
+    fn handle_stop_emits_bestmove_after_ponder_completion() {
+        let mut state = EngineState::new();
+        state.searching = false;
+        state.bestmove_emitted = false;
+        state.current_is_ponder = false;
+        state.current_session_core_id = Some(77);
+        state.current_root_hash = Some(state.position.zobrist_hash());
+
+        handle_stop(&mut state);
+
+        assert!(state.bestmove_emitted, "stop should emit fallback bestmove");
+        assert!(state.current_root_hash.is_none());
     }
 }

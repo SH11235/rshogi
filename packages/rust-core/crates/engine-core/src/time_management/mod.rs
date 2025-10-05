@@ -490,6 +490,8 @@ impl TimeManager {
 
         // If pondering, only stop on force_stop
         if self.is_pondering() {
+            // Ponder 中は TimeManager 側からの自発停止を行わない。
+            // STOP/ponderhit の到着まで待機することで USI 仕様を満たす。
             return false;
         }
 

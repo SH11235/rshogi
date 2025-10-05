@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use engine_core::search::parallel::{FinalizeReason, FinalizerMsg};
 
-use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast};
+use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast, fmt_hash};
 use crate::io::diag_info_string;
 use crate::state::EngineState;
 use engine_core::usi::move_to_usi;
@@ -44,9 +44,13 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     continue;
                 }
                 if state.current_is_ponder && !matches!(reason, FinalizeReason::UserStop) {
+                    let root =
+                        state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
                     diag_info_string(format!(
-                        "oob_finalize_guard suppressed=1 reason={:?} sid={}",
-                        reason, session_id
+                        "oob_finalize_guard suppressed=1 reason={:?} sid={} root={}",
+                        reason,
+                        session_id,
+                        fmt_hash(root)
                     ));
                     continue;
                 }
