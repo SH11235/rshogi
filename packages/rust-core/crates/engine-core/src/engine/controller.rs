@@ -332,8 +332,10 @@ impl Engine {
         self.stop_controller.request_stop();
     }
 
-    /// Obtain a clone of the stop bridge for out-of-engine coordination (USI layer).
-    /// Obtain a shared StopController handle for snapshot/stop-info consumers.
+    /// Obtain a shared StopController handle for out-of-engine coordination (USI layer).
+    ///
+    /// `StopController` は `Clone` 実装済みなので、呼び出し側はこのハンドルを複製
+    /// するだけで旧 `bridge()` と同等の振る舞いを得られる。
     pub fn stop_controller_handle(&self) -> Arc<StopController> {
         Arc::clone(&self.stop_controller)
     }

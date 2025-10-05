@@ -20,9 +20,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
         return;
     };
 
-    // Drain at most a few messages to keep the loop responsive
-    // 増やして取りこぼしを抑制（E2E検証支援）
-    for _ in 0..16 {
+    // Drain all pending messages (try_recv はノンブロッキングなのでループで枯らしても軽い)。
+    loop {
         let msg = match rx.try_recv() {
             Ok(m) => m,
             Err(mpsc::TryRecvError::Empty) => break,
@@ -220,6 +219,10 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 ///
 /// - hard 期限を過ぎたら探索合流を待たずに fast finalize を発火
 /// - near-hard は現時点ではログのみ（必要なら hard の前に同様に発火可能）
+///
+/// Hard 到達時は `request_finalize(Hard)` → `session.request_stop()` →
+/// `fast_finalize_no_detach()` の順に呼び出し、StopInfo の `hard_timeout=true`
+/// がログ出力に確実に反映されるようにしている。
 pub fn enforce_deadline(state: &mut EngineState) {
     if !state.searching || state.bestmove_emitted {
         return;
