@@ -10,3 +10,16 @@ pub fn usi_println(s: &str) {
 pub fn info_string<S: AsRef<str>>(s: S) {
     usi_println(&format!("info string {}", s.as_ref()));
 }
+
+/// Verbose diagnostic info string controlled via the `verbose_usi` feature flag.
+#[inline]
+pub fn diag_info_string<S: AsRef<str>>(s: S) {
+    #[cfg(feature = "verbose_usi")]
+    {
+        info_string(s);
+    }
+    #[cfg(not(feature = "verbose_usi"))]
+    {
+        let _ = s;
+    }
+}

@@ -53,6 +53,35 @@ fn test_pure_byoyomi_schedules_before_hard_with_margin() {
 }
 
 #[test]
+fn test_pure_byoyomi_respects_min_think_under_latency() {
+    mock_set_time(0);
+
+    let params = crate::time_management::TimeParameters {
+        network_delay2_ms: 1_200,
+        min_think_ms: 300,
+        critical_byoyomi_ms: 150,
+        byoyomi_hard_limit_reduction_ms: 100,
+        ..Default::default()
+    };
+
+    let limits = TimeLimits {
+        time_control: TimeControl::Byoyomi {
+            main_time_ms: 0,
+            byoyomi_ms: 1_000,
+            periods: 2,
+        },
+        time_parameters: Some(params),
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::Black, 120, GamePhase::EndGame);
+
+    assert!(tm.soft_limit_ms() >= params.min_think_ms);
+    assert!(tm.hard_limit_ms() >= tm.soft_limit_ms());
+    assert!(tm.hard_limit_ms() <= 1_000);
+}
+
+#[test]
 fn test_fixed_nodes_time_manager_respects_node_limit() {
     // FixedNodes 指定時は時間ではなくノード数で停止する
     mock_set_time(0);

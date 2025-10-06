@@ -100,9 +100,12 @@ impl<'a> StateChecker<'a> {
     pub fn on_pv_change(&self, depth: u32, elapsed_ms: u64) {
         self.last_pv_change_ms.store(elapsed_ms, Ordering::Relaxed);
 
-        // Adjust threshold based on depth
-        let threshold =
-            self.params.pv_base_threshold_ms + (depth as u64 * self.params.pv_depth_slope_ms);
+        // MinThink 未満の浅い反復では安定判定を抑制する。
+        let threshold = if elapsed_ms < self.params.min_think_ms || depth < 3 {
+            u64::MAX
+        } else {
+            self.params.pv_base_threshold_ms + (depth as u64 * self.params.pv_depth_slope_ms)
+        };
         self.pv_threshold_ms.store(threshold, Ordering::Relaxed);
     }
 }

@@ -3,9 +3,57 @@ use std::error::Error as StdError;
 
 use engine_core::engine::controller::EngineType;
 use engine_core::evaluation::nnue::error::NNUEError;
+use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
 use crate::state::{EngineState, UsiOptions};
+
+fn profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
+    match engine_type {
+        EngineType::Material => SearchProfile::basic_material(),
+        EngineType::Enhanced => SearchProfile::enhanced_material(),
+        EngineType::Nnue => SearchProfile::basic_nnue(),
+        EngineType::EnhancedNnue => SearchProfile::enhanced_nnue(),
+    }
+}
+
+fn current_profile(state: &EngineState) -> Option<SearchProfile> {
+    state
+        .engine
+        .lock()
+        .ok()
+        .map(|eng| profile_for_engine_type(eng.get_engine_type()))
+}
+
+fn profile_allows_iid(state: &EngineState) -> bool {
+    use EngineType::Enhanced;
+    if matches!(state.opts.engine_type, Enhanced) {
+        false
+    } else {
+        current_profile(state).map(|p| p.prune.enable_iid).unwrap_or(true)
+    }
+}
+
+fn profile_allows_probcut(state: &EngineState) -> bool {
+    use EngineType::{Enhanced, Material};
+    if matches!(state.opts.engine_type, Material | Enhanced) {
+        false
+    } else {
+        current_profile(state).map(|p| p.prune.enable_probcut).unwrap_or(true)
+    }
+}
+
+fn profile_allows_razor(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.prune.enable_razor).unwrap_or(true)
+}
+
+fn profile_allows_qs_checks(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.tuning.enable_qs_checks).unwrap_or(true)
+}
+
+fn profile_allows_nmp(state: &EngineState) -> bool {
+    current_profile(state).map(|p| p.prune.enable_nmp).unwrap_or(true)
+}
 
 pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("id name RustShogi USI (core)");
@@ -35,6 +83,42 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name MateEarlyStop type check default true");
     // Diagnostics / policy knobs
     usi_println("option name QSearchChecks type combo default On var On var Off");
+    // Search parameter knobs (runtime-adjustable)
+    usi_println("option name SearchParams.LMR_K_x100 type spin default 170 min 80 max 400");
+    usi_println("option name SearchParams.LMP_D1 type spin default 6 min 0 max 64");
+    usi_println("option name SearchParams.LMP_D2 type spin default 12 min 0 max 64");
+    usi_println("option name SearchParams.LMP_D3 type spin default 18 min 0 max 64");
+    usi_println(
+        "option name SearchParams.HP_Threshold type spin default -2000 min -10000 max 10000",
+    );
+    usi_println("option name SearchParams.SBP_D1 type spin default 200 min 0 max 2000");
+    usi_println("option name SearchParams.SBP_D2 type spin default 300 min 0 max 2000");
+    usi_println("option name SearchParams.ProbCut_D5 type spin default 250 min 0 max 2000");
+    usi_println("option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000");
+    usi_println("option name SearchParams.IID_MinDepth type spin default 6 min 0 max 20");
+    usi_println("option name SearchParams.Razor type check default true");
+    usi_println("option name SearchParams.EnableNMP type check default true");
+    usi_println("option name SearchParams.EnableIID type check default true");
+    usi_println("option name SearchParams.EnableProbCut type check default true");
+    usi_println("option name SearchParams.EnableStaticBeta type check default true");
+    usi_println("option name SearchParams.QS_MarginCapture type spin default 150 min 0 max 5000");
+    usi_println("option name SearchParams.QS_BadCaptureMin type spin default 450 min 0 max 5000");
+    usi_println(
+        "option name SearchParams.QS_CheckPruneMargin type spin default 150 min 0 max 5000",
+    );
+    usi_println("option name SearchParams.QuietHistoryWeight type spin default 4 min -64 max 64");
+    usi_println(
+        "option name SearchParams.ContinuationHistoryWeight type spin default 2 min -32 max 32",
+    );
+    usi_println("option name SearchParams.CaptureHistoryWeight type spin default 2 min -32 max 32");
+    usi_println("option name SearchParams.RootTTBonus type spin default 1500000 min 0 max 5000000");
+    usi_println("option name SearchParams.RootPrevScoreScale type spin default 200 min 0 max 2000");
+    usi_println(
+        "option name SearchParams.RootMultiPV1 type spin default 50000 min -200000 max 200000",
+    );
+    usi_println(
+        "option name SearchParams.RootMultiPV2 type spin default 25000 min -200000 max 200000",
+    );
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -78,6 +162,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(t) = v.parse::<usize>() {
                     state.opts.threads = t;
+                    info_string("threads_note=ClassicBackend currently runs single-threaded");
                 }
             }
         }
@@ -165,19 +250,208 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "QSearchChecks" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
-                if on {
-                    std::env::remove_var("SHOGI_QS_DISABLE_CHECKS");
-                    info_string("qsearch_checks=On");
-                } else {
-                    std::env::set_var("SHOGI_QS_DISABLE_CHECKS", "1");
-                    info_string("qsearch_checks=Off");
+                if on && !profile_allows_qs_checks(state) {
+                    info_string(
+                        "qsearch_note=Profile defaults suppress quiet-check extensions; runtime On may still be limited",
+                    );
                 }
+                engine_core::search::params::set_qs_checks_enabled(on);
+                info_string(if on {
+                    "qsearch_checks=On"
+                } else {
+                    "qsearch_checks=Off"
+                });
             }
         }
         "ClearHash" => {
             if let Ok(mut eng) = state.engine.lock() {
                 eng.set_multipv_persistent(state.opts.multipv);
                 eng.clear_hash();
+            }
+        }
+        // --- Search parameters (runtime) ---
+        "SearchParams.LMR_K_x100" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u32>() {
+                    engine_core::search::params::set_lmr_k_x100(x);
+                }
+            }
+        }
+        "SearchParams.LMP_D1" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<usize>() {
+                    engine_core::search::params::set_lmp_d1(x);
+                }
+            }
+        }
+        "SearchParams.LMP_D2" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<usize>() {
+                    engine_core::search::params::set_lmp_d2(x);
+                }
+            }
+        }
+        "SearchParams.LMP_D3" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<usize>() {
+                    engine_core::search::params::set_lmp_d3(x);
+                }
+            }
+        }
+        "SearchParams.HP_Threshold" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_hp_threshold(x);
+                }
+            }
+        }
+        "SearchParams.SBP_D1" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_sbp_d1(x);
+                }
+            }
+        }
+        "SearchParams.SBP_D2" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_sbp_d2(x);
+                }
+            }
+        }
+        "SearchParams.ProbCut_D5" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_probcut_d5(x);
+                }
+            }
+        }
+        "SearchParams.ProbCut_D6P" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_probcut_d6p(x);
+                }
+            }
+        }
+        "SearchParams.IID_MinDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_iid_min_depth(x);
+                }
+            }
+        }
+        "SearchParams.Razor" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_razor(state) {
+                    info_string(
+                        "pruning_note=Razor pruning is disabled by the active SearchProfile",
+                    );
+                }
+                engine_core::search::params::set_razor_enabled(on);
+            }
+        }
+        "SearchParams.EnableNMP" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_nmp(state) {
+                    info_string("pruning_note=NMP is disabled by the active SearchProfile");
+                }
+                engine_core::search::params::set_nmp_enabled(on);
+            }
+        }
+        "SearchParams.EnableIID" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_iid(state) {
+                    info_string("pruning_note=IID is disabled by the active SearchProfile");
+                }
+                engine_core::search::params::set_iid_enabled(on);
+            }
+        }
+        "SearchParams.EnableProbCut" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_probcut(state) {
+                    info_string("pruning_note=ProbCut is disabled by the active SearchProfile");
+                }
+                engine_core::search::params::set_probcut_enabled(on);
+            }
+        }
+        "SearchParams.EnableStaticBeta" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_static_beta_enabled(on);
+            }
+        }
+        "SearchParams.QS_MarginCapture" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_margin_capture(x);
+                }
+            }
+        }
+        "SearchParams.QS_BadCaptureMin" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_bad_capture_min(x);
+                }
+            }
+        }
+        "SearchParams.QS_CheckPruneMargin" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_check_prune_margin(x);
+                }
+            }
+        }
+        "SearchParams.QuietHistoryWeight" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_quiet_history_weight(x);
+                }
+            }
+        }
+        "SearchParams.ContinuationHistoryWeight" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_continuation_history_weight(x);
+                }
+            }
+        }
+        "SearchParams.CaptureHistoryWeight" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_capture_history_weight(x);
+                }
+            }
+        }
+        "SearchParams.RootTTBonus" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_tt_bonus(x);
+                }
+            }
+        }
+        "SearchParams.RootPrevScoreScale" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_prev_score_scale(x);
+                }
+            }
+        }
+        "SearchParams.RootMultiPV1" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_multipv_bonus(1, x);
+                }
+            }
+        }
+        "SearchParams.RootMultiPV2" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_root_multipv_bonus(2, x);
+                }
             }
         }
         "OverheadMs" => {
@@ -290,6 +564,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(ms) = v.parse::<u64>() {
                     state.opts.stop_wait_ms = ms.min(2000);
+                }
+            }
+        }
+        "WatchdogPollMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.watchdog_poll_ms = ms.clamp(1, 20);
                 }
             }
         }
@@ -449,6 +730,10 @@ fn print_time_policy_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name StopWaitMs type spin default {} min 0 max 2000",
         opts.stop_wait_ms
+    ));
+    usi_println(&format!(
+        "option name WatchdogPollMs type spin default {} min 1 max 20",
+        opts.watchdog_poll_ms
     ));
     usi_println(&format!(
         "option name GameoverSendsBestmove type check default {}",

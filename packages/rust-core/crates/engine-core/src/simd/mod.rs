@@ -234,9 +234,7 @@ fn run_selftest_avx512f() -> bool {
                 if refdst.len() != dst.len() {
                     return false;
                 }
-                for i in 0..n {
-                    let a = refdst[i];
-                    let b = dst[i];
+                for (a, b) in refdst.iter().zip(dst.iter()).take(n) {
                     if a.to_bits() == b.to_bits() {
                         continue;
                     }
@@ -433,8 +431,8 @@ mod tests {
         // 特にAVX-512のテイル（マスク）を意識して 0..=63 を重点確認
         for len in 0usize..=63 {
             let mut row = vec![0.0f32; len];
-            for i in 0..len {
-                row[i] = ((i as f32 + 0.125) * 0.07).sin();
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = ((i as f32 + 0.125) * 0.07).sin();
             }
             // 検証セット: k = ±1, ±2
             for &k in &[1.0f32, -1.0, 2.0, -2.0] {
@@ -472,8 +470,8 @@ mod tests {
             let mut dst_a = vec![0.0f32; len];
             let mut dst_b = vec![0.0f32; len];
             let mut row = vec![0.0f32; len];
-            for i in 0..len {
-                row[i] = ((i as f32 + 0.5) * 0.01).sin();
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = ((i as f32 + 0.5) * 0.01).sin();
             }
             scalar_ref(&mut dst_a, &row, 1.0);
             add_row_scaled_f32(&mut dst_b, &row, 1.0);
@@ -491,8 +489,8 @@ mod tests {
             let mut dst_a = vec![0.0f32; len];
             let mut dst_b = vec![0.0f32; len];
             let mut row = vec![0.0f32; len];
-            for i in 0..len {
-                row[i] = ((i as f32 + 0.5) * 0.01).cos();
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = ((i as f32 + 0.5) * 0.01).cos();
             }
             scalar_ref(&mut dst_a, &row, -1.0);
             add_row_scaled_f32(&mut dst_b, &row, -1.0);
@@ -510,8 +508,8 @@ mod tests {
             let mut dst_ref = vec![0.0f32; len];
             let mut dst_k2 = vec![0.0f32; len];
             let mut row = vec![0.0f32; len];
-            for i in 0..len {
-                row[i] = ((i as f32 + 0.5) * 0.01).sin();
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = ((i as f32 + 0.5) * 0.01).sin();
             }
             // 参照: k=1.0 を2回
             add_row_scaled_f32(&mut dst_ref, &row, 1.0);
@@ -532,8 +530,8 @@ mod tests {
             let mut dst_ref = vec![0.0f32; len];
             let mut dst_k2 = vec![0.0f32; len];
             let mut row = vec![0.0f32; len];
-            for i in 0..len {
-                row[i] = ((i as f32 + 0.25) * 0.02).cos();
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = ((i as f32 + 0.25) * 0.02).cos();
             }
             // 参照: k=-1.0 を2回
             add_row_scaled_f32(&mut dst_ref, &row, -1.0);
@@ -554,8 +552,8 @@ mod tests {
                 let mut dst_a = vec![0.0f32; len];
                 let mut dst_b = vec![0.0f32; len];
                 let mut row = vec![0.0f32; len];
-                for i in 0..len {
-                    row[i] = ((i as f32 + 0.5) * 0.01).tan().clamp(-1e3, 1e3);
+                for (i, v) in row.iter_mut().enumerate() {
+                    *v = ((i as f32 + 0.5) * 0.01).tan().clamp(-1e3, 1e3);
                 }
                 scalar_ref(&mut dst_a, &row, k);
                 add_row_scaled_f32(&mut dst_b, &row, k);
@@ -613,7 +611,9 @@ mod tests {
                 let mut dst_b = vec![0.0f32; len];
                 // 乱数でなく決定論的だが十分
                 let mut row = vec![0.0f32; len];
-                for i in 0..len { row[i] = ((i as f32 + 0.5) * 0.01).sin(); }
+                for (i, v) in row.iter_mut().enumerate() {
+                    *v = ((i as f32 + 0.5) * 0.01).sin();
+                }
                 scalar_ref(&mut dst_a, &row, 1.0);
                 add_row_scaled_f32(&mut dst_b, &row, 1.0);
                 for i in 0..len { prop_assert!(dst_a[i].to_bits() == dst_b[i].to_bits()); }
@@ -624,7 +624,9 @@ mod tests {
                 let mut dst_a = vec![0.0f32; len];
                 let mut dst_b = vec![0.0f32; len];
                 let mut row = vec![0.0f32; len];
-                for i in 0..len { row[i] = ((i as f32 + 0.25) * 0.02).cos(); }
+                for (i, v) in row.iter_mut().enumerate() {
+                    *v = ((i as f32 + 0.25) * 0.02).cos();
+                }
                 scalar_ref(&mut dst_a, &row, -1.0);
                 add_row_scaled_f32(&mut dst_b, &row, -1.0);
                 for i in 0..len { prop_assert!(dst_a[i].to_bits() == dst_b[i].to_bits()); }
@@ -635,7 +637,9 @@ mod tests {
                 let mut dst_ref = vec![0.0f32; len];
                 let mut dst_k2  = vec![0.0f32; len];
                 let mut row = vec![0.0f32; len];
-                for i in 0..len { row[i] = ((i as f32 + 0.5) * 0.01).sin(); }
+                for (i, v) in row.iter_mut().enumerate() {
+                    *v = ((i as f32 + 0.5) * 0.01).sin();
+                }
                 // 参照: k=1.0 を2回
                 add_row_scaled_f32(&mut dst_ref, &row, 1.0);
                 add_row_scaled_f32(&mut dst_ref, &row, 1.0);
@@ -649,7 +653,8 @@ mod tests {
                 let mut dst_ref = vec![0.0f32; len];
                 let mut dst_k2  = vec![0.0f32; len];
                 let mut row = vec![0.0f32; len];
-                for i in 0..len { row[i] = ((i as f32 + 0.25) * 0.02).cos(); }
+                for (i, v) in row.iter_mut().enumerate() {
+                        *v = ((i as f32 + 0.25) * 0.02).cos(); }
                 // 参照: k=-1.0 を2回
                 add_row_scaled_f32(&mut dst_ref, &row, -1.0);
                 add_row_scaled_f32(&mut dst_ref, &row, -1.0);

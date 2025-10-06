@@ -1,4 +1,5 @@
 pub mod emergency;
+pub mod panic;
 pub mod search_helpers;
 pub mod usi_helpers;
 

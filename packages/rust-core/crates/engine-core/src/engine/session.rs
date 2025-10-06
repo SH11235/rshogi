@@ -4,11 +4,14 @@
 //! that runs asynchronously without holding the Engine lock.
 
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::search::parallel::EngineStopBridge;
+use crate::search::api::StopHandle;
+use crate::search::parallel::StopController;
 use crate::search::SearchResult;
+use crate::time_management::TimeManager;
 
 /// Result type for non-blocking poll operations on SearchSession.
 ///
@@ -42,6 +45,9 @@ pub struct SearchSession {
 
     /// Optional handle to the background thread for explicit joining
     handle: Option<thread::JoinHandle<()>>,
+
+    stop_handle: StopHandle,
+    time_manager: Option<Arc<TimeManager>>,
 }
 
 impl SearchSession {
@@ -50,11 +56,15 @@ impl SearchSession {
         session_id: u64,
         result_rx: mpsc::Receiver<SearchResult>,
         handle: Option<thread::JoinHandle<()>>,
+        stop_handle: StopHandle,
+        time_manager: Option<Arc<TimeManager>>,
     ) -> Self {
         Self {
             session_id,
             result_rx,
             handle,
+            stop_handle,
+            time_manager,
         }
     }
 
@@ -117,17 +127,28 @@ impl SearchSession {
     ///
     /// This is intended for isready/quit commands where we need to ensure
     /// the search completes cleanly. First requests immediate stop via the
-    /// stop bridge, then waits for the result with the given timeout.
+    /// stop controller, then waits for the result with the given timeout.
     ///
     /// Returns `Some(result)` if the search completed within the timeout,
     /// `None` if the timeout expired.
     pub fn request_stop_and_wait(
         &self,
-        bridge: &EngineStopBridge,
+        controller: &StopController,
         timeout: Duration,
     ) -> Option<SearchResult> {
-        bridge.request_stop_immediate();
+        self.stop_handle.request_stop();
+        controller.request_stop_flag_only();
         self.recv_result_timeout(timeout)
+    }
+
+    /// Request backend stop without waiting for result.
+    pub fn request_stop(&self) {
+        self.stop_handle.request_stop();
+    }
+
+    /// Clone the time manager associated with this search (if any).
+    pub fn time_manager(&self) -> Option<Arc<TimeManager>> {
+        self.time_manager.as_ref().map(Arc::clone)
     }
 
     /// Join the background thread, blocking until it completes.

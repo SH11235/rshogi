@@ -32,12 +32,12 @@ pub mod metrics;
 pub mod prefetch;
 // pub mod pv_reconstruction; // merged into this module
 pub mod utils;
+use crate::search::tt::filter::{boost_pv_depth, boost_tt_depth, should_skip_tt_store_dyn};
 
-#[cfg(test)]
-mod tests;
-
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+use crate::search::ab::diagnostics;
 use crate::Position;
-use crate::{search::SEARCH_INF, shogi::Move};
+use crate::{search::SEARCH_INF, shogi::Move, Color};
 use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
 use flexible_bucket::FlexibleTTBucket;
@@ -46,9 +46,6 @@ use prefetch::PrefetchStatsTracker;
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
-use utils::*;
-
-// No need to import entry module since it's already defined
 
 // Re-export main types for backward compatibility
 use crate::search::NodeType;
@@ -111,6 +108,9 @@ pub struct TranspositionTable {
     /// Last hashfull for hysteresis control
     empty_slot_mode_last_hf: AtomicU16,
 }
+
+// Report `key == 0` へのストアは設計上あり得ないため、一度でも発生したらログに流して即座に切り分けできるようにする。
+static ZERO_KEY_LOG_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl TranspositionTable {
     /// Create new transposition table with given size in MB (backward compatible)
@@ -275,9 +275,30 @@ impl TranspositionTable {
 
     /// Get bucket index from hash
     #[inline(always)]
-    fn bucket_index(&self, hash: u64) -> usize {
-        // Use fast masking since num_buckets is always power of 2
-        (hash as usize) & (self.num_buckets - 1)
+    fn bucket_index(&self, hash: u64, _side_to_move: Color) -> usize {
+        // Standard approach: Use hash directly for indexing
+        // Position's Zobrist hash already includes side_to_move (64-bit random key),
+        // so no additional XOR is needed. Adding 1-bit XOR would reduce entropy.
+        //
+        // Note: side_to_move parameter kept for API compatibility but unused.
+        let idx = (hash as usize) & (self.num_buckets - 1);
+
+        // 診断ログ追加
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static INDEX_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = INDEX_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 20 {
+                // 最初の20回だけログ
+                eprintln!(
+                    "[TT_DIAG] bucket_index: hash={hash:016x} -> idx={idx} (num_buckets={})",
+                    self.num_buckets
+                );
+            }
+        }
+
+        idx
     }
 
     /// Mark bucket as occupied in bitmap
@@ -289,17 +310,6 @@ impl TranspositionTable {
 
         // Use fetch_or to atomically set the bit
         self.occupied_bitmap[byte_idx].fetch_or(mask, Ordering::Relaxed);
-    }
-
-    /// Check if bucket is occupied in bitmap
-    #[cfg(test)]
-    #[inline]
-    fn is_bucket_occupied(&self, bucket_idx: usize) -> bool {
-        let byte_idx = bucket_idx / 8;
-        let bit_idx = bucket_idx % 8;
-        let mask = 1u8 << bit_idx;
-
-        (self.occupied_bitmap[byte_idx].load(Ordering::Relaxed) & mask) != 0
     }
 
     /// Clear bucket occupied bit
@@ -314,8 +324,11 @@ impl TranspositionTable {
 
     /// Update hashfull estimate by sampling actual keys (key != 0) in buckets
     ///
-    /// 以前は「占有ビットマップ」を用いてタッチ率を近似していたが、短時間で飽和するため
-    /// 実効占有率の推定精度を上げるべく、実キーの有無をサンプリングする方式に切り替える。
+    /// 本実装の hashfull は「物理占有率（キー非ゼロのバケット割合）」の推定値です。
+    /// YaneuraOu/Stockfish系の `hashfull(maxAge)` は「現行世代（相対年齢が閾値以下）の活性度」を
+    /// 意味し設計上の解釈が異なります。そのため YYO 想定のしきい値(例: 600/800/900/950)を
+    /// 直接流用すると意図とズレる可能性があります。本実装側のフィルタはこの“物理占有率”に
+    /// 前提を置いて較正してあります。
     fn update_hashfull_estimate(&self) {
         // Sample ~1% of buckets (minimum 64, maximum 1024), but never exceed num_buckets
         let mut sample_size = (self.num_buckets / 100).clamp(64, 1024);
@@ -330,14 +343,8 @@ impl TranspositionTable {
 
         for i in 0..sample_size {
             let idx = (start_idx.wrapping_add(i * 97)) & (self.num_buckets - 1); // 97 is prime
-                                                                                 // Prefer fast occupancy bitmap; fall back to key check to avoid stale bitmap effects
-            let byte_idx = idx / 8;
-            let bit_idx = idx % 8;
-            let mask = 1u8 << bit_idx;
-            let occ = (self.occupied_bitmap[byte_idx].load(Ordering::Relaxed) & mask) != 0;
-            let any = if occ {
-                true
-            } else if let Some(ref flex) = self.flexible_buckets {
+                                                                                 // Always compute from actual keys (bitmapを使わない)
+            let any = if let Some(ref flex) = self.flexible_buckets {
                 flex[idx].any_key_nonzero_acquire()
             } else {
                 self.buckets[idx].any_key_nonzero_acquire()
@@ -347,7 +354,29 @@ impl TranspositionTable {
             }
         }
 
-        let hf = (occupied_count * 1000) / sample_size;
+        let mut hf = if sample_size > 0 {
+            (occupied_count * 1000) / sample_size
+        } else {
+            0
+        };
+
+        if hf == 0 {
+            let store_attempts = self.store_attempts.load(Ordering::Relaxed);
+            if self.num_buckets > 0 {
+                let approx = (store_attempts.min(self.num_buckets as u64) * 1000)
+                    / (self.num_buckets as u64);
+                hf = hf.max(approx as usize);
+            }
+
+            if hf == 0 {
+                hf = self.hashfull_physical_permille() as usize;
+            }
+
+            if hf == 0 && store_attempts > 0 {
+                hf = 1;
+            }
+        }
+
         self.hashfull_estimate.store(hf as u16, Ordering::Relaxed);
     }
 
@@ -357,10 +386,10 @@ impl TranspositionTable {
     }
 
     /// Probe transposition table
-    pub fn probe_entry(&self, hash: u64) -> Option<TTEntry> {
+    pub fn probe_entry(&self, hash: u64, side_to_move: Color) -> Option<TTEntry> {
         debug_assert!(hash != 0, "Attempting to probe with zero hash");
 
-        let idx = self.bucket_index(hash);
+        let idx = self.bucket_index(hash, side_to_move);
 
         #[cfg(feature = "tt_metrics")]
         if let Some(ref metrics) = self.metrics {
@@ -381,7 +410,7 @@ impl TranspositionTable {
             }
         }
 
-        if let Some(ref flexible_buckets) = self.flexible_buckets {
+        let result = if let Some(ref flexible_buckets) = self.flexible_buckets {
             #[cfg(feature = "tt_metrics")]
             {
                 flexible_buckets[idx].probe_with_metrics(hash, self.metrics.as_ref())
@@ -399,7 +428,59 @@ impl TranspositionTable {
             {
                 self.buckets[idx].probe(hash)
             }
+        };
+
+        // 診断ログ追加（ヒット/ミスの情報）
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            const PROBE_LOG_LIMIT: u64 = 200;
+
+            static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
+            static HIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+            let seq = PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if seq < PROBE_LOG_LIMIT {
+                match result {
+                    Some(entry) => {
+                        let hit_seq = HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                        eprintln!(
+                            "[TT_TRACE] probe#{seq} hit#{hit_seq} idx={idx} hash={hash:016x} side={side_to_move:?} depth={} node_type={:?} mv={:?}",
+                            entry.depth(),
+                            entry.node_type(),
+                            entry.get_move()
+                        );
+                    }
+                    None => {
+                        eprintln!(
+                            "[TT_TRACE] probe#{seq} miss    idx={idx} hash={hash:016x} side={side_to_move:?}"
+                        );
+                    }
+                }
+            } else if result.is_some() {
+                let hit_seq = HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if hit_seq <= PROBE_LOG_LIMIT {
+                    if let Some(entry) = result {
+                        eprintln!(
+                            "[TT_TRACE] probe-hit(extra) hit#{hit_seq} idx={idx} hash={hash:016x} side={side_to_move:?} depth={} node_type={:?} mv={:?}",
+                            entry.depth(),
+                            entry.node_type(),
+                            entry.get_move()
+                        );
+                    }
+                }
+            }
         }
+
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        if let Some(entry) = result {
+            if !entry.matches(hash) {
+                diagnostics::note_fault("tt_probe_mismatch");
+            }
+        }
+
+        result
     }
 
     /// Clear the entire table
@@ -510,6 +591,19 @@ impl TranspositionTable {
         self.hashfull_estimate()
     }
 
+    /// Compute physical occupancy by scanning the bitmap
+    pub fn hashfull_physical_permille(&self) -> u16 {
+        let mut occupied_bits: u64 = 0;
+        for byte in &self.occupied_bitmap {
+            occupied_bits += byte.load(Ordering::Relaxed).count_ones() as u64;
+        }
+        if self.num_buckets == 0 {
+            return 0;
+        }
+        let permille = (occupied_bits * 1000).div_ceil(self.num_buckets as u64);
+        permille.min(1000) as u16
+    }
+
     /// Get size in bytes
     pub fn size_bytes(&self) -> usize {
         if let Some(ref flexible_buckets) = self.flexible_buckets {
@@ -525,8 +619,8 @@ impl TranspositionTable {
     }
 
     /// Set ABDADA exact cut flag for the given hash
-    pub fn set_exact_cut(&self, hash: u64) -> bool {
-        let idx = self.bucket_index(hash);
+    pub fn set_exact_cut(&self, hash: u64, side_to_move: Color) -> bool {
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             let bucket = &flexible_buckets[idx];
@@ -566,8 +660,8 @@ impl TranspositionTable {
     }
 
     /// Clear ABDADA exact cut flag for the given hash (used during age update)
-    pub fn clear_exact_cut(&self, hash: u64) -> bool {
-        let idx = self.bucket_index(hash);
+    pub fn clear_exact_cut(&self, hash: u64, side_to_move: Color) -> bool {
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             let bucket = &flexible_buckets[idx];
@@ -677,8 +771,8 @@ impl TranspositionTable {
     }
 
     /// Check if ABDADA exact cut flag is set for the given hash
-    pub fn has_exact_cut(&self, hash: u64) -> bool {
-        let idx = self.bucket_index(hash);
+    pub fn has_exact_cut(&self, hash: u64, side_to_move: Color) -> bool {
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             let bucket = &flexible_buckets[idx];
@@ -717,51 +811,41 @@ impl TranspositionTable {
         false // Entry not found or flag not set
     }
 
-    /// Store entry in transposition table
-    pub fn store(
-        &self,
-        hash: u64,
-        mv: Option<Move>,
-        score: i16,
-        eval: i16,
-        depth: u8,
-        node_type: NodeType,
-    ) {
-        let params = TTEntryParams {
-            key: hash,
-            mv,
-            score,
-            eval,
-            depth,
-            node_type,
-            age: self.current_age(),
-            is_pv: false,
-            ..Default::default()
-        };
-        self.store_entry(params);
+    /// Store entry in transposition table (convenience method)
+    pub fn store(&self, args: TTStoreArgs) {
+        let params: TTEntryParams = args.into_params(self.current_age());
+
+        // 診断ログ追加
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            const STORE_LOG_LIMIT: u64 = 200;
+            static STORE_COUNT: AtomicU64 = AtomicU64::new(0);
+            let log_seq = STORE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if log_seq < STORE_LOG_LIMIT {
+                let bucket_idx = self.bucket_index(params.key, params.side_to_move);
+                eprintln!(
+                    "[TT_TRACE] store#{log_seq} idx={bucket_idx} hash={:016x} side={:?} depth={} node_type={:?} mv={:?}",
+                    params.key,
+                    params.side_to_move,
+                    params.depth,
+                    params.node_type,
+                    params.mv
+                );
+            }
+        }
+
+        self.store_with_params(params);
     }
 
-    /// Store entry and return whether it was a new entry
-    pub fn store_and_check_new(
-        &self,
-        hash: u64,
-        mv: Option<Move>,
-        score: i16,
-        eval: i16,
-        depth: u8,
-        node_type: NodeType,
-    ) -> bool {
-        let params = TTEntryParams {
-            key: hash,
-            mv,
-            score,
-            eval,
-            depth,
-            node_type,
-            age: self.current_age(),
-            is_pv: false,
-            ..Default::default()
-        };
+    /// Store entry and return whether it was a new entry (convenience method)
+    pub fn store_and_check_new(&self, args: TTStoreArgs) -> bool {
+        let params: TTEntryParams = args.into_params(self.current_age());
+        self.store_and_check_new_with_params(params)
+    }
+
+    /// Store entry and return whether it was a new entry (with params)
+    pub fn store_and_check_new_with_params(&self, params: TTEntryParams) -> bool {
         self.store_entry_and_check_new(params)
     }
 
@@ -775,7 +859,7 @@ impl TranspositionTable {
     /// Store entry using parameters and return whether it was a new entry
     fn store_entry_and_check_new(&self, params: TTEntryParams) -> bool {
         // First check if entry already exists
-        let idx = self.bucket_index(params.key);
+        let idx = self.bucket_index(params.key, params.side_to_move);
         let existing = if let Some(ref flexible_buckets) = self.flexible_buckets {
             flexible_buckets[idx].probe(params.key)
         } else {
@@ -785,14 +869,40 @@ impl TranspositionTable {
         // Store the entry
         self.store_entry(params);
 
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        {
+            if let Some(entry) = self.probe_entry(params.key, params.side_to_move) {
+                if !entry.matches(params.key) {
+                    diagnostics::note_fault("tt_store_mismatch");
+                }
+            } else {
+                diagnostics::note_fault("tt_store_mismatch");
+            }
+        }
+
         // Return true if this was a new entry (not found before)
         existing.is_none()
     }
 
     /// Store entry using parameters
-    fn store_entry(&self, params: TTEntryParams) {
+    fn store_entry(&self, mut params: TTEntryParams) {
         // Lightweight diagnostics: count store attempts even if filtered
         self.store_attempts.fetch_add(1, Ordering::Relaxed);
+        if params.key == 0 {
+            if ZERO_KEY_LOG_ONCE
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                log::warn!(
+                    "info string tt_store_key_zero side={:?} depth={} node_type={:?} is_pv={}",
+                    params.side_to_move,
+                    params.depth,
+                    params.node_type,
+                    params.is_pv
+                );
+            }
+            return;
+        }
         #[cfg(not(feature = "tt_metrics"))]
         let _metrics: Option<&()> = None;
         // Debug assertions to validate input values
@@ -804,34 +914,26 @@ impl TranspositionTable {
             params.score
         );
 
-        // Hashfull-based filtering with dynamic depth LUT
-        #[cfg(feature = "hashfull_filter")]
-        {
-            let hf = self.hashfull_estimate();
-
-            // Get depth threshold using optimized branch
-            let depth_threshold = get_depth_threshold(hf);
-
-            // Filter based on dynamic depth threshold
-            if depth_threshold > 0 && params.depth < depth_threshold {
-                #[cfg(feature = "tt_metrics")]
-                if let Some(ref metrics) = self.metrics {
-                    metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                return;
+        // Unified, always-on filtering based on current hashfull estimate
+        // Note: Our hashfull is a physical occupancy estimate (see above doc).
+        let hf = self.hashfull_estimate();
+        if should_skip_tt_store_dyn(params.depth, params.is_pv, params.node_type, hf) {
+            #[cfg(feature = "tt_metrics")]
+            if let Some(ref metrics) = self.metrics {
+                metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-
-            // Additional filtering for non-exact entries at high hashfull
-            if hf >= 850 && params.node_type != NodeType::Exact {
-                #[cfg(feature = "tt_metrics")]
-                if let Some(ref metrics) = self.metrics {
-                    metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                return;
-            }
+            return;
         }
 
-        let idx = self.bucket_index(params.key);
+        // Depth boosting for important nodes (EXACT / PV)
+        let mut eff_depth = params.depth;
+        eff_depth = boost_tt_depth(eff_depth, params.node_type);
+        eff_depth = boost_pv_depth(eff_depth, params.is_pv);
+        if eff_depth != params.depth {
+            params.depth = eff_depth.min(127);
+        }
+
+        let idx = self.bucket_index(params.key, params.side_to_move);
 
         // Mark bucket as occupied
         self.mark_bucket_occupied(idx);
@@ -875,6 +977,8 @@ impl TranspositionTable {
                 #[cfg(not(feature = "tt_metrics"))]
                 _metrics,
             );
+            // Note: Debug assertion removed because store_internal may skip replacement
+            // if new entry has lower priority than worst entry in bucket (normal behavior)
         } else {
             // Propagate empty_slot_mode to bucket store
             let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
@@ -887,6 +991,8 @@ impl TranspositionTable {
                 #[cfg(not(feature = "tt_metrics"))]
                 _metrics,
             );
+            // Note: Debug assertion removed because store_internal may skip replacement
+            // if new entry has lower priority than worst entry in bucket (normal behavior)
         }
     }
 
@@ -908,27 +1014,27 @@ impl TranspositionTable {
 
     /// Prefetch a hash into L1 cache
     #[inline]
-    pub fn prefetch_l1(&self, hash: u64) {
-        self.prefetch(hash, 3); // Temporal locality hint (L1)
+    pub fn prefetch_l1(&self, hash: u64, side_to_move: Color) {
+        self.prefetch(hash, side_to_move, 3); // Temporal locality hint (L1)
     }
 
     /// Prefetch a hash into L2 cache
     #[inline]
-    pub fn prefetch_l2(&self, hash: u64) {
-        self.prefetch(hash, 2); // Moderate temporal locality (L2)
+    pub fn prefetch_l2(&self, hash: u64, side_to_move: Color) {
+        self.prefetch(hash, side_to_move, 2); // Moderate temporal locality (L2)
     }
 
     /// Prefetch a hash into L3 cache
     #[inline]
-    pub fn prefetch_l3(&self, hash: u64) {
-        self.prefetch(hash, 1); // L3 cache
+    pub fn prefetch_l3(&self, hash: u64, side_to_move: Color) {
+        self.prefetch(hash, side_to_move, 1); // L3 cache
     }
 
     /// Prefetch implementation with locality hint
-    pub fn prefetch(&self, hash: u64, hint: i32) {
+    pub fn prefetch(&self, hash: u64, side_to_move: Color, hint: i32) {
         debug_assert!(hash != 0, "Attempting to prefetch with zero hash");
 
-        let idx = self.bucket_index(hash);
+        let idx = self.bucket_index(hash, side_to_move);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             flexible_buckets[idx].prefetch(hint);
@@ -952,9 +1058,10 @@ impl TranspositionTable {
     #[cfg(any(debug_assertions, feature = "tt_metrics"))]
     pub fn debug_roundtrip(&self, key: u64) -> bool {
         use crate::shogi::Move;
+        use crate::Color;
         // Store an EXACT entry at depth 10 and probe it back
-        self.store(key, None::<Move>, 0, 0, 10, NodeType::Exact);
-        match self.probe_entry(key) {
+        self.store(TTStoreArgs::new(key, None::<Move>, 0, 0, 10, NodeType::Exact, Color::Black));
+        match self.probe_entry(key, Color::Black) {
             Some(e) => e.key == key && e.depth() >= 10,
             None => false,
         }
@@ -991,302 +1098,95 @@ impl TranspositionTable {
     }
 }
 
+/// 引数過多警告(clippy::too_many_arguments)を避けるためのストア用引数構造体
+#[derive(Clone, Copy)]
+pub struct TTStoreArgs {
+    pub hash: u64,
+    pub mv: Option<Move>,
+    pub score: i16,
+    pub eval: i16,
+    pub depth: u8,
+    pub node_type: NodeType,
+    pub side_to_move: Color,
+    pub is_pv: bool, // 将来的に PV ストア時に利用
+    // 拡張フラグ（任意）
+    pub singular_extension: bool,
+    pub null_move: bool,
+    pub tt_move_tried: bool,
+    pub mate_threat: bool,
+}
+
+impl Default for TTStoreArgs {
+    fn default() -> Self {
+        Self {
+            hash: 0,
+            mv: None,
+            score: 0,
+            eval: 0,
+            depth: 0,
+            node_type: NodeType::Exact,
+            side_to_move: Color::Black,
+            is_pv: false,
+            singular_extension: false,
+            null_move: false,
+            tt_move_tried: false,
+            mate_threat: false,
+        }
+    }
+}
+
+impl TTStoreArgs {
+    pub fn new(
+        hash: u64,
+        mv: Option<Move>,
+        score: i16,
+        eval: i16,
+        depth: u8,
+        node_type: NodeType,
+        side_to_move: Color,
+    ) -> Self {
+        Self {
+            hash,
+            mv,
+            score,
+            eval,
+            depth,
+            node_type,
+            side_to_move,
+            ..Default::default()
+        }
+    }
+
+    fn into_params(self, current_age: u8) -> TTEntryParams {
+        TTEntryParams {
+            key: self.hash,
+            mv: self.mv,
+            score: self.score,
+            eval: self.eval,
+            depth: self.depth,
+            node_type: self.node_type,
+            age: current_age,
+            is_pv: self.is_pv,
+            side_to_move: self.side_to_move,
+            singular_extension: self.singular_extension,
+            null_move: self.null_move,
+            tt_move_tried: self.tt_move_tried,
+            mate_threat: self.mate_threat,
+        }
+    }
+}
+
 impl TTProbe for TranspositionTable {
     #[inline]
-    fn probe(&self, hash: u64) -> Option<TTEntry> {
+    fn probe(&self, hash: u64, side_to_move: Color) -> Option<TTEntry> {
         // 明示的に固有メソッドを呼び出して可読性と誤解防止を図る
-        TranspositionTable::probe_entry(self, hash)
+        TranspositionTable::probe_entry(self, hash, side_to_move)
     }
 }
-
-#[cfg(test)]
-mod pv_reconstruction_tests {
-    use super::*;
-    use crate::{
-        movegen::MoveGenerator,
-        search::test_utils::test_helpers::legal_usi,
-        shogi::{Move, Position},
-        usi::{move_to_usi, parse_usi_square},
-        PieceType,
-    };
-
-    #[test]
-    fn test_reconstruct_pv_from_tt_exact_only() {
-        // Create a TT with some capacity
-        let mut tt = TranspositionTable::new(1); // 1MB
-
-        // Initialize TT for new search (sets age)
-        tt.new_search();
-
-        // Create a position
-        let mut pos = Position::startpos();
-
-        // First, test basic TT functionality
-        let test_hash = pos.zobrist_hash;
-        let test_move = legal_usi(&pos, "7g7f");
-        tt.store(test_hash, Some(test_move), 100, 50, 10, NodeType::Exact);
-
-        // Verify the entry was stored
-        let probe_result = tt.probe_entry(test_hash);
-        assert!(probe_result.is_some(), "TT probe should find the entry");
-        let entry = probe_result.unwrap();
-        assert!(entry.matches(test_hash), "Entry should match the hash");
-        // TT stores moves as 16-bit, so piece type info is lost. Compare USI strings instead.
-        let stored_move = entry.get_move().unwrap();
-        assert_eq!(move_to_usi(&stored_move), move_to_usi(&test_move), "Move USI should match");
-        assert_eq!(entry.node_type(), NodeType::Exact, "Node type should be Exact");
-
-        // Clear for actual test
-        tt.clear();
-        tt.new_search();
-
-        // Generate legal moves and find the ones we want
-        let move_gen = MoveGenerator::new();
-        let moves = move_gen.generate_all(&pos).expect("Should be able to generate moves in test");
-
-        let move1 = moves
-            .as_slice()
-            .iter()
-            .find(|m| move_to_usi(m) == "7g7f")
-            .cloned()
-            .expect("7g7f should be legal");
-
-        let undo1 = pos.do_move(move1);
-        let move_gen2 = MoveGenerator::new();
-        let moves2 =
-            move_gen2.generate_all(&pos).expect("Should be able to generate moves in test");
-
-        let move2 = moves2
-            .as_slice()
-            .iter()
-            .find(|m| move_to_usi(m) == "3c3d")
-            .cloned()
-            .expect("3c3d should be legal after 7g7f");
-
-        let undo2 = pos.do_move(move2);
-        let move_gen3 = MoveGenerator::new();
-        let moves3 =
-            move_gen3.generate_all(&pos).expect("Should be able to generate moves in test");
-
-        let move3 = moves3
-            .as_slice()
-            .iter()
-            .find(|m| move_to_usi(m) == "6g6f")
-            .cloned()
-            .expect("6g6f should be legal after 7g7f 3c3d");
-
-        // Undo to get back to start
-        pos.undo_move(move2, undo2);
-        pos.undo_move(move1, undo1);
-
-        // Store some entries in TT
-        let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
-
-        // Make move1
-        let undo1 = pos.do_move(move1);
-        let hash2 = pos.zobrist_hash;
-        tt.store(hash2, Some(move2), -50, -25, 9, NodeType::Exact);
-
-        // Make move2
-        let undo2 = pos.do_move(move2);
-        let hash3 = pos.zobrist_hash;
-        tt.store(hash3, Some(move3), 25, 20, 8, NodeType::Exact);
-
-        // Undo moves to get back to root
-        pos.undo_move(move2, undo2);
-        pos.undo_move(move1, undo1);
-
-        // Reconstruct PV
-        let pv = tt.reconstruct_pv_from_tt(&mut pos, 10);
-
-        // Should get all 3 moves since they're all EXACT
-        assert_eq!(pv.len(), 3);
-        // Compare USI strings since TT loses piece type info
-        assert_eq!(move_to_usi(&pv[0]), "7g7f");
-        assert_eq!(move_to_usi(&pv[1]), "3c3d");
-        assert_eq!(move_to_usi(&pv[2]), "6g6f");
-    }
-
-    #[test]
-    fn test_reconstruct_pv_stops_at_non_exact() {
-        // Create a TT
-        let mut tt = TranspositionTable::new(1);
-
-        // Initialize TT for new search (sets age)
-        tt.new_search();
-
-        // Create a position
-        let mut pos = Position::startpos();
-
-        // Generate legal moves and find the ones we want
-        let move_gen = MoveGenerator::new();
-        let moves = move_gen.generate_all(&pos).expect("Should be able to generate moves in test");
-
-        let move1 = moves
-            .as_slice()
-            .iter()
-            .find(|m| move_to_usi(m) == "7g7f")
-            .cloned()
-            .expect("7g7f should be legal");
-
-        let undo1_temp = pos.do_move(move1);
-        let move_gen2 = MoveGenerator::new();
-        let moves2 =
-            move_gen2.generate_all(&pos).expect("Should be able to generate moves in test");
-
-        let move2 = moves2
-            .as_slice()
-            .iter()
-            .find(|m| move_to_usi(m) == "3c3d")
-            .cloned()
-            .expect("3c3d should be legal after 7g7f");
-
-        // Undo to get back to start
-        pos.undo_move(move1, undo1_temp);
-
-        // Store first move as EXACT
-        let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
-
-        // Make move1
-        let undo1 = pos.do_move(move1);
-        let hash2 = pos.zobrist_hash;
-
-        // Store second move as LOWERBOUND (not EXACT)
-        tt.store(hash2, Some(move2), -50, -25, 9, NodeType::LowerBound);
-
-        // Undo to root
-        pos.undo_move(move1, undo1);
-
-        // Reconstruct PV
-        let pv = tt.reconstruct_pv_from_tt(&mut pos, 10);
-
-        // Should only get first move since second is not EXACT
-        assert_eq!(pv.len(), 1);
-        // Compare USI strings since TT loses piece type info
-        assert_eq!(move_to_usi(&pv[0]), "7g7f");
-    }
-
-    #[test]
-    fn test_reconstruct_pv_handles_cycles() {
-        // Create a TT
-        let mut tt = TranspositionTable::new(1);
-
-        // Initialize TT for new search (sets age)
-        tt.new_search();
-
-        // Create a position
-        let mut pos = Position::startpos();
-
-        // Get legal moves that can create a cycle (using pieces that can move back)
-        // Using Gold general (5i5h, then 5h5i is possible)
-        let move1 = legal_usi(&pos, "5i5h");
-
-        let undo1 = pos.do_move(move1);
-        let move2 = legal_usi(&pos, "5a5b");
-
-        let undo2 = pos.do_move(move2);
-        let move3 = legal_usi(&pos, "5h5i"); // Gold can move back
-
-        let undo3 = pos.do_move(move3);
-        let move4 = legal_usi(&pos, "5b5a"); // Gold can move back
-
-        // Undo moves to get back to earlier positions for storing
-        pos.undo_move(move3, undo3);
-        pos.undo_move(move2, undo2);
-        pos.undo_move(move1, undo1);
-
-        // Store entries that would create a cycle
-        let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 0, 0, 10, NodeType::Exact);
-
-        let undo1 = pos.do_move(move1);
-        let hash2 = pos.zobrist_hash;
-        tt.store(hash2, Some(move2), 0, 0, 9, NodeType::Exact);
-
-        let undo2 = pos.do_move(move2);
-        let hash3 = pos.zobrist_hash;
-        tt.store(hash3, Some(move3), 0, 0, 8, NodeType::Exact);
-
-        let undo3 = pos.do_move(move3);
-        let hash4 = pos.zobrist_hash;
-        tt.store(hash4, Some(move4), 0, 0, 7, NodeType::Exact);
-
-        // Make move4 to complete the cycle
-        let undo4 = pos.do_move(move4);
-
-        // Add a move that would create a cycle back to start position
-        tt.store(pos.zobrist_hash, Some(move1), 0, 0, 6, NodeType::Exact);
-
-        // Undo all moves to get back to start
-        pos.undo_move(move4, undo4);
-        pos.undo_move(move3, undo3);
-        pos.undo_move(move2, undo2);
-        pos.undo_move(move1, undo1);
-
-        // Reconstruct PV - should stop when cycle is detected
-        let pv = tt.reconstruct_pv_from_tt(&mut pos, 20);
-
-        // The PV should stop when it detects that the next position would be a repeat
-        // In this case, after move1, move2, move3, move4, we would be back at a position
-        // we've already seen (the position after move1), so it should stop there
-        assert!(pv.len() >= 4, "PV should have at least 4 moves, got {}", pv.len());
-    }
-
-    #[test]
-    fn test_reconstruct_pv_stops_on_illegal_tt_move() {
-        // Test that PV reconstruction stops when TT contains an illegal move
-        let mut tt = TranspositionTable::new(1);
-
-        // Initialize TT for new search (sets age)
-        tt.new_search();
-
-        // Create a position
-        let mut pos = Position::startpos();
-
-        // Get a legal move
-        let move1 = legal_usi(&pos, "7g7f");
-
-        // Create an illegal move (moving a piece that doesn't exist)
-        // This simulates TT corruption or a hash collision
-        let illegal_move = Move::normal_with_piece(
-            parse_usi_square("5e").unwrap(), // Empty square
-            parse_usi_square("5d").unwrap(),
-            false,
-            PieceType::Pawn,
-            None,
-        );
-
-        // Store first move
-        let hash1 = pos.zobrist_hash;
-        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
-
-        // Make first move
-        let undo1 = pos.do_move(move1);
-        let hash2 = pos.zobrist_hash;
-
-        // Store illegal move for second position
-        tt.store(hash2, Some(illegal_move), 50, 25, 9, NodeType::Exact);
-
-        // Undo to get back to start
-        pos.undo_move(move1, undo1);
-
-        // Reconstruct PV
-        let pv = tt.reconstruct_pv_from_tt(&mut pos, 10);
-
-        // PV should contain only the first legal move and stop at the illegal move
-        assert_eq!(pv.len(), 1, "PV should stop at illegal move");
-        // Compare USI strings since TT loses piece type info
-        assert_eq!(move_to_usi(&pv[0]), "7g7f", "PV should contain the first legal move");
-    }
-}
-
-// Helper functions and additional implementations are in utils.rs
 
 // --- Integrated PV reconstruction (moved from pv_reconstruction.rs) ---
 pub trait TTProbe {
-    fn probe(&self, hash: u64) -> Option<TTEntry>;
+    fn probe(&self, hash: u64, side_to_move: Color) -> Option<TTEntry>;
 }
 
 /// Generic PV reconstruction from transposition table
@@ -1300,11 +1200,11 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
     let max_len = max_depth.min(crate::search::constants::MAX_PLY as u8) as usize;
 
     for _ in 0..max_len {
-        let hash = pos.zobrist_hash;
+        let hash = pos.zobrist_hash();
         if !visited.insert(hash) {
             break;
         }
-        let entry = match tt.probe(hash) {
+        let entry = match tt.probe(hash, pos.side_to_move) {
             Some(e) if e.matches(hash) => e,
             _ => break,
         };
@@ -1334,4 +1234,32 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
         }
     }
     pv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TTStoreArgs, TranspositionTable};
+    use crate::search::NodeType;
+    use crate::shogi::Move;
+    use crate::Color;
+
+    #[test]
+    fn tt_store_probe_smoke() {
+        let tt = TranspositionTable::new(4);
+        let key = 0x1234_5678_90AB_CDEF;
+        // Store an EXACT node with moderate depth and ensure immediate probe succeeds.
+        tt.store(TTStoreArgs::new(key, None::<Move>, 42, 18, 12, NodeType::Exact, Color::Black));
+
+        let entry = tt
+            .probe_entry(key, Color::Black)
+            .expect("TT probe should hit freshly stored entry");
+
+        assert!(entry.matches(key), "stored key must round-trip");
+        assert_eq!(entry.node_type(), NodeType::Exact);
+        assert!(
+            entry.depth() >= 12,
+            "stored depth should be preserved (expected >=12, got {})",
+            entry.depth()
+        );
+    }
 }

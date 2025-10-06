@@ -199,6 +199,7 @@ impl<'a> PonderManager<'a> {
             depth: pending_limits.depth,
             nodes: pending_limits.nodes,
             time_parameters: pending_limits.time_parameters,
+            random_time_ms: pending_limits.random_time_ms,
         }
     }
 }

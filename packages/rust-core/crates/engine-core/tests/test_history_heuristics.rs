@@ -3,6 +3,9 @@
 //! This is a simple smoke test to ensure the history heuristic code paths
 //! are being exercised. Full integration testing happens through the search tests.
 
+use engine_core::search::ab::ordering::constants::{
+    CAP_HISTORY_AGING_SHIFT, QUIET_HISTORY_AGING_SHIFT,
+};
 use engine_core::search::history::History;
 use engine_core::shogi::Move;
 use engine_core::usi::parse_usi_square;
@@ -54,18 +57,21 @@ fn test_capture_history_functionality() {
     let color = Color::Black;
     let attacker = PieceType::Knight;
     let victim = PieceType::Silver;
+    let target = parse_usi_square("5e").unwrap();
 
     // Initial score should be 0
-    assert_eq!(history.capture.get(color, attacker, victim), 0);
+    assert_eq!(history.capture.get(color, attacker, victim, target), 0);
 
     // Update with good capture
-    history.capture.update_good(color, attacker, victim, 4);
-    let score = history.capture.get(color, attacker, victim);
+    history.capture.update_good(color, attacker, victim, target, 4);
+    let score = history.capture.get(color, attacker, victim, target);
     assert!(score > 0);
 
     // Age the scores
     history.age_all();
-    assert_eq!(history.capture.get(color, attacker, victim), score / 2);
+    let aged = history.capture.get(color, attacker, victim, target);
+    let expected = score - (score >> CAP_HISTORY_AGING_SHIFT);
+    assert_eq!(aged, expected);
 }
 
 #[test]
@@ -124,5 +130,6 @@ fn test_history_aging() {
     history.age_all();
 
     let score_after = history.get_score(color, mv, None);
-    assert_eq!(score_after, score_before / 2);
+    let expected = score_before - (score_before >> QUIET_HISTORY_AGING_SHIFT);
+    assert_eq!(score_after, expected);
 }

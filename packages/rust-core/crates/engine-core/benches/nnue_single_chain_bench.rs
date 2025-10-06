@@ -59,7 +59,7 @@ fn bench_single_chain(c: &mut Criterion) {
                         (pos, acc)
                     },
                     // 黒→評価→Undo を n 回繰り返す
-                    |(mut pos, mut acc)| {
+                    |(mut pos, acc)| {
                         for _ in 0..n {
                             // 黒手（子局面は白番）。戻して原状復帰。
                             let acc1 = engine_core::evaluation::nnue::single_state::SingleAcc::apply_update(
@@ -78,7 +78,6 @@ fn bench_single_chain(c: &mut Criterion) {
                             // 最適化除け
                             black_box(eval);
                             pos.undo_move(m_black, undo_b);
-                            acc = acc; // 原状復帰（acc1 は破棄）
                         }
                         black_box(pos);
                     },

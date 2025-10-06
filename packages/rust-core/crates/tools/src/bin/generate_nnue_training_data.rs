@@ -281,6 +281,7 @@ struct ProcEnv<'a> {
     opts: &'a Opts,
     shared: &'a GenShared,
     global_stop: Arc<AtomicBool>,
+    cancel_requested: Arc<AtomicBool>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -289,12 +290,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     // Global cancellation flag (Ctrl-C)
     let global_stop = Arc::new(AtomicBool::new(false));
+    let cancel_requested = Arc::new(AtomicBool::new(false));
     {
         let stop = global_stop.clone();
+        let cancel = cancel_requested.clone();
         let installed = ctrlc::set_handler(move || {
             if !stop.swap(true, Ordering::Relaxed) {
                 eprintln!("Received Ctrl-C: requesting graceful stop ...");
             }
+            cancel.store(true, Ordering::Release);
         });
         if let Err(e) = installed {
             eprintln!("Warning: failed to install Ctrl-C handler: {}", e);
@@ -1464,7 +1468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut total_ms: u64 = 0;
                 let sample_n = calib_samples.len().min(opts.calibrate_sample.max(10));
                 for (i, sfen) in calib_samples.iter().take(sample_n).enumerate() {
-                    if global_stop.load(Ordering::Relaxed) {
+                    if cancel_requested.load(Ordering::Relaxed) {
                         break;
                     }
                     if i % 25 == 0 {
@@ -1486,6 +1490,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .build();
                     let start = std::time::Instant::now();
                     let result = engine.search(&mut pos, limits);
+                    if !cancel_requested.load(Ordering::Acquire) {
+                        global_stop.store(false, Ordering::Release);
+                    }
                     let elapsed = start.elapsed();
                     total_nodes = total_nodes.saturating_add(result.stats.nodes);
                     total_ms = total_ms.saturating_add(elapsed.as_millis() as u64);
@@ -1574,6 +1581,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opts: &opts,
         shared: &shared,
         global_stop: global_stop.clone(),
+        cancel_requested: cancel_requested.clone(),
     };
 
     // Overall timer for elapsed seconds in summary
@@ -1588,7 +1596,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let total_batches = remaining_positions.div_ceil(batch_size);
         let mut batch_idx: usize = 0;
         loop {
-            if global_stop.load(Ordering::Relaxed) {
+            if cancel_requested.load(Ordering::Relaxed) {
                 break;
             }
             line.clear();
@@ -2394,6 +2402,9 @@ fn process_position_with_engine(
     env: &ProcEnv<'_>,
     eng: &mut Engine,
 ) -> Option<String> {
+    if env.cancel_requested.load(Ordering::Acquire) {
+        return None;
+    }
     let position = match engine_core::usi::parse_sfen(sfen) {
         Ok(pos) => pos,
         Err(e) => {
@@ -2429,6 +2440,9 @@ fn process_position_with_engine(
 
     let mut pos_clone = position.clone();
     let result = eng.search(&mut pos_clone, limits);
+    if !env.cancel_requested.load(Ordering::Acquire) {
+        env.global_stop.store(false, Ordering::Release);
+    }
     let elapsed_stats_ms = result.stats.elapsed.as_millis() as u64;
     let k2_time_ms = elapsed_stats_ms;
     let k2_nodes = result.stats.nodes;
@@ -2899,6 +2913,7 @@ mod tests {
             pv: smallvec![],
             nodes: None,
             time_ms: None,
+            nps: None,
             exact_exhausted: false,
             exhaust_reason: None,
             mate_distance: None,
