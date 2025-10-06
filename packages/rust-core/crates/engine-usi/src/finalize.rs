@@ -477,6 +477,21 @@ pub fn finalize_and_send(
             stop_meta.hard_ms, stop_meta.soft_ms, stop_meta.reason_label
         ));
 
+        if let Some(dup) = res.stats.duplication_percentage {
+            info_string(format!("duplication_pct={dup:.2}"));
+        }
+        if let Some(heur) = res.stats.heuristics.as_ref() {
+            let summary = heur.summary();
+            info_string(format!(
+                "heuristics quiet_max={} cont_max={} capture_max={} counter_filled={} lmr_trials={}",
+                summary.quiet_max,
+                summary.continuation_max,
+                summary.capture_max,
+                summary.counter_filled,
+                summary.lmr_trials
+            ));
+        }
+
         if let Some(tt_hits) = res.stats.tt_hits {
             let nodes = res.stats.nodes;
             let hit_pct = if nodes > 0 {

@@ -46,6 +46,8 @@ pub struct SearchLimits {
     pub qnodes_counter: Option<Arc<AtomicU64>>,
     /// Optional jitter seed for helper threads (parallel search)
     pub root_jitter_seed: Option<u64>,
+    /// Whether heuristics snapshots should be retained for diagnostics
+    pub store_heuristics: bool,
     /// Skip quiescence search at depth 0 and return immediate evaluation
     /// This is useful for extremely time-constrained situations
     pub immediate_eval_at_depth_zero: bool,
@@ -84,6 +86,7 @@ impl Default for SearchLimits {
             ponder_hit_flag: None,
             qnodes_counter: None,
             root_jitter_seed: None,
+            store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
@@ -167,6 +170,7 @@ pub struct SearchLimitsBuilder {
     enable_fail_safe: bool,
     fallback_deadlines: Option<FallbackDeadlines>,
     root_jitter_seed: Option<u64>,
+    store_heuristics: bool,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -194,6 +198,7 @@ impl Default for SearchLimitsBuilder {
             enable_fail_safe: false,
             fallback_deadlines: None,
             root_jitter_seed: None,
+            store_heuristics: false,
         }
     }
 }
@@ -398,6 +403,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Enable or disable heuristics snapshot storage (diagnostic use only)
+    pub fn store_heuristics(mut self, enable: bool) -> Self {
+        self.store_heuristics = enable;
+        self
+    }
+
     /// Set session ID for OOB finalize coordination
     ///
     /// This is typically set by Engine::start_search() and must match the session ID
@@ -448,6 +459,7 @@ impl SearchLimitsBuilder {
             ponder_hit_flag: self.ponder_hit_flag,
             qnodes_counter: None,
             root_jitter_seed: self.root_jitter_seed,
+            store_heuristics: self.store_heuristics,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
@@ -490,6 +502,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             ponder_hit_flag: None,
             qnodes_counter: None,
             root_jitter_seed: None,
+            store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,

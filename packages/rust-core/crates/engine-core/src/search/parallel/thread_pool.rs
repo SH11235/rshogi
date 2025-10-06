@@ -65,7 +65,7 @@ where
             let worker_id = idx + 1;
             let _ = worker.sender.send(WorkerCommand::Start {
                 worker_id,
-                job,
+                job: Box::new(job),
                 result_tx: result_tx.clone(),
             });
         }
@@ -99,7 +99,7 @@ struct Worker {
 enum WorkerCommand {
     Start {
         worker_id: usize,
-        job: SearchJob,
+        job: Box<SearchJob>,
         result_tx: Sender<(usize, SearchResult)>,
     },
     Shutdown,
@@ -116,7 +116,7 @@ where
                 job,
                 result_tx,
             } => {
-                let SearchJob { position, limits } = job;
+                let SearchJob { position, limits } = *job;
                 let result = backend.think_blocking(&position, &limits, None);
                 let _ = result_tx.send((worker_id, result));
             }

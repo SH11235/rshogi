@@ -111,6 +111,7 @@ fn main() {
         nodes: u64,
         nps: u64,
         hashfull: u16,
+        duplication_pct: f64,
         score: i32,
         tt_hits: u64,
         lmr: u64,
@@ -122,6 +123,10 @@ fn main() {
         tt_root_depth: u8,
         root_tt_hint_exists: u64,
         root_tt_hint_used: u64,
+        heur_quiet_max: i16,
+        heur_cont_max: i16,
+        heur_capture_max: i16,
+        heur_counter_filled: u32,
     }
     let mut rows: Vec<Row> = Vec::new();
     for (name, sfen) in tests {
@@ -241,6 +246,9 @@ fn main() {
             let beta = res.stats.root_fail_high_count.unwrap_or(0);
             let asp_fail_high = asp_fail_high.load(Ordering::Relaxed);
             let asp_fail_low = asp_fail_low.load(Ordering::Relaxed);
+            let duplication = res.stats.duplication_percentage.unwrap_or(0.0);
+            let heur_summary =
+                res.stats.heuristics.as_ref().map(|h| h.summary()).unwrap_or_default();
             // Probe TT at root to check adoption
             let (tt_root_match, tt_root_depth) = {
                 let entry = tt.probe(pos.zobrist_hash(), pos.side_to_move);
@@ -254,11 +262,12 @@ fn main() {
             };
             if args.format == "text" {
                 println!(
-                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}",
+                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  dup {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
                     depth,
                     res.stats.nodes,
                     nps,
                     hf,
+                    duplication,
                     res.score,
                     tt_hits,
                     lmr,
@@ -269,7 +278,11 @@ fn main() {
                     res.stats.root_tt_hint_exists.unwrap_or(0),
                     res.stats.root_tt_hint_used.unwrap_or(0),
                     tt_root_match,
-                    tt_root_depth
+                    tt_root_depth,
+                    heur_summary.quiet_max,
+                    heur_summary.continuation_max,
+                    heur_summary.capture_max,
+                    heur_summary.counter_filled
                 );
             } else {
                 rows.push(Row {
@@ -279,6 +292,7 @@ fn main() {
                     nodes: res.stats.nodes,
                     nps,
                     hashfull: hf,
+                    duplication_pct: duplication,
                     score: res.score,
                     tt_hits,
                     lmr,
@@ -290,6 +304,10 @@ fn main() {
                     tt_root_depth,
                     root_tt_hint_exists: res.stats.root_tt_hint_exists.unwrap_or(0),
                     root_tt_hint_used: res.stats.root_tt_hint_used.unwrap_or(0),
+                    heur_quiet_max: heur_summary.quiet_max,
+                    heur_cont_max: heur_summary.continuation_max,
+                    heur_capture_max: heur_summary.capture_max,
+                    heur_counter_filled: heur_summary.counter_filled,
                 });
             }
         }
@@ -299,16 +317,17 @@ fn main() {
     if args.format == "csv" || args.format == "json" {
         if args.format == "csv" {
             let mut out = String::new();
-            out.push_str("name,sfen,depth,nodes,nps,hashfull,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth\n");
+            out.push_str("name,sfen,depth,nodes,nps,hashfull,duplication_pct,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n");
             for r in &rows {
                 out.push_str(&format!(
-                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    "{},{},{},{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                     r.name,
                     r.sfen,
                     r.depth,
                     r.nodes,
                     r.nps,
                     r.hashfull,
+                    r.duplication_pct,
                     r.score,
                     r.tt_hits,
                     r.lmr,
@@ -319,7 +338,11 @@ fn main() {
                     r.root_tt_hint_exists,
                     r.root_tt_hint_used,
                     r.tt_root_match,
-                    r.tt_root_depth
+                    r.tt_root_depth,
+                    r.heur_quiet_max,
+                    r.heur_cont_max,
+                    r.heur_capture_max,
+                    r.heur_counter_filled
                 ));
             }
             if let Some(p) = args.out {
