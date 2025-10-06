@@ -253,7 +253,23 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         return Ok(());
     }
 
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    // Reuse existing stop_flag to allow ParallelSearcher to detect rewiring needs
+    // Reset the flag value if reusing
+    let stop_flag = if let Some(existing) = &state.stop_flag {
+        info_string(format!(
+            "stop_flag_reuse state_has_existing=1 addr={:p}",
+            Arc::as_ptr(existing)
+        ));
+        existing.store(false, std::sync::atomic::Ordering::Release);
+        Arc::clone(existing)
+    } else {
+        let new_flag = Arc::new(AtomicBool::new(false));
+        info_string(format!(
+            "stop_flag_create state_has_existing=0 addr={:p}",
+            Arc::as_ptr(&new_flag)
+        ));
+        new_flag
+    };
     let ponder_flag = if state.opts.ponder {
         Some(Arc::new(AtomicBool::new(false)))
     } else {
@@ -412,13 +428,15 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.searching = true;
     state.stop_flag = Some(Arc::clone(&stop_flag));
     state.ponder_hit_flag = ponder_flag;
+    let session_id = session.session_id();
     state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
     state.current_root_hash = Some(search_position.zobrist_hash());
     state.bestmove_emitted = false;
     info_string(format!(
-        "search_started root={} gui={} ponder={} stoch={}",
+        "search_started sid={} root={} gui={} ponder={} stoch={}",
+        session_id,
         fmt_hash(search_position.zobrist_hash()),
         fmt_hash(state.position.zobrist_hash()),
         gp.ponder,
@@ -427,7 +445,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     // Enhanced diagnostics for time loss investigation
     let threads = state.opts.threads;
-    info_string(format!("search_diagnostics threads={}", threads));
+    info_string(format!("search_diagnostics sid={} threads={}", session_id, threads));
 
     Ok(())
 }
@@ -444,7 +462,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
             TryResult::Ok(result) => {
                 // Search completed, clean up state
                 state.searching = false;
-                state.stop_flag = None;
+                // Keep stop_flag for reuse in next session (don't set to None)
                 state.ponder_hit_flag = None;
                 state.search_session = None;
                 state.notify_idle();
@@ -524,7 +542,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 ));
 
                 state.searching = false;
-                state.stop_flag = None;
+                // Keep stop_flag for reuse in next session (don't set to None)
                 state.ponder_hit_flag = None;
                 state.search_session = None;
                 state.current_time_control = None;

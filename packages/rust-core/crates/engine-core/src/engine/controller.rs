@@ -430,10 +430,13 @@ impl Engine {
     ///
     /// This is the preferred method for normal game play, as it follows the yanerau-o
     /// design pattern of non-blocking search initiation.
-    pub fn start_search(&mut self, pos: Position, limits: SearchLimits) -> SearchSession {
+    pub fn start_search(&mut self, pos: Position, mut limits: SearchLimits) -> SearchSession {
         // Generate unique session ID
         let session_id = self.next_session_id();
         debug!("Starting async search session {session_id}");
+
+        // Set session ID in limits for OOB coordination
+        limits.session_id = session_id;
 
         // Apply pending configuration
         self.apply_pending_thread_count();
@@ -702,6 +705,7 @@ impl Engine {
                     args.stop_bridge.clone(),
                 ));
             }
+
             guard.take().expect("searcher must be Some after initialization")
         }; // Lock released here
 
@@ -713,7 +717,7 @@ impl Engine {
         if let Ok(mut guard) = nnue_parallel_searcher.lock() {
             if guard.is_none() {
                 *guard = Some(searcher);
-            } // If already filled by concurrent operation, drop this instance
+            }
         }
 
         result

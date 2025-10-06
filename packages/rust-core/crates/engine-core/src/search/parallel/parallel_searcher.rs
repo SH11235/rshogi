@@ -320,6 +320,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             nodes: limits.nodes,
                             qnodes_limit: limits.qnodes_limit,
                             time_parameters: limits.time_parameters,
+                            session_id: limits.session_id, // Propagate session_id
                             stop_flag: limits.stop_flag.clone(),
                             info_callback: None, // Don't need callback for TimeManager
                             info_string_callback: None,
@@ -516,6 +517,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                         batch_idx += 1;
                     }
+
+                    // Log enqueue summary for this iteration
+                    if batch_idx > 0 {
+                        let pending_now = self.pending_work_items.load(Ordering::Acquire);
+                        let gen = self.shared_state.generation();
+                        if log::log_enabled!(log::Level::Debug) {
+                            debug!(
+                                "enqueue_root_batches gen={} iter={} batch_count={} pending={}",
+                                gen, iteration, batch_idx, pending_now
+                            );
+                        }
+                    }
                 }
             }
         } else {
@@ -570,6 +583,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 };
 
                 if self.shared_state.work_queues_closed() {
+                    let gen = self.shared_state.generation();
+                    info!(
+                        "drop_enqueue reason=closed gen={} iter={} helper={}",
+                        gen, iteration, helper_id
+                    );
                     break;
                 }
 
@@ -591,6 +609,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     self.queues.injector.push(work);
                 }
             }
+
+            // Log enqueue summary for FullPosition mode
+            let pending_now = self.pending_work_items.load(Ordering::Acquire);
+            let gen = self.shared_state.generation();
+            info!(
+                "enqueue_full_position gen={} iter={} helpers={} pending={}",
+                gen,
+                iteration,
+                self.num_threads - 1,
+                pending_now
+            );
         }
     }
 
@@ -953,27 +982,112 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Wire external stop_flag (from USI) into SharedSearchState for this search session.
         // Without this, GUI-issued `stop` does not propagate to parallel workers,
         // and the frontend may time out and fall back to fast finalize.
+
+        // IMPORTANT: Each ParallelSearcher instance is created fresh per search by Engine,
+        // so generation always starts at 0. We must ALWAYS wire the ext_stop.
         if let Some(ext_stop) = limits.stop_flag.clone() {
-            // Recreate shared_state with the provided stop flag so that all workers
-            // and the TimeManager observe the same flag as the USI layer.
-            self.shared_state =
-                Arc::new(SharedSearchState::with_threads(Arc::clone(&ext_stop), self.num_threads));
+            // Log pre-reset state
+            let pre_gen = self.shared_state.generation();
+            let pre_ext_stop = ext_stop.load(Ordering::Acquire);
+            let pre_shared_stop = self.shared_state.should_stop();
+            let pre_queues_closed = self.shared_state.work_queues_closed();
+            let needs_rewire = !Arc::ptr_eq(&self.shared_state.stop_flag, &ext_stop);
+            let searcher_addr = self as *const _ as usize;
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "pre_reset sid={} gen={} ext_stop={} shared_stop={} queues_closed={} needs_rewire={} searcher_addr=0x{:x}",
+                    limits.session_id, pre_gen, pre_ext_stop, pre_shared_stop, pre_queues_closed, needs_rewire as u8, searcher_addr
+                ),
+            );
+
+            // IMPORTANT: Ensure ext_stop is false before resetting
+            ext_stop.store(false, Ordering::Release);
+
+            // Only recreate SharedSearchState if we need to wire a different stop flag
+            // Otherwise, reuse existing SharedSearchState to keep workers alive
+            if needs_rewire {
+                // Recreate shared_state with the provided stop flag
+                self.shared_state = Arc::new(SharedSearchState::with_threads(
+                    Arc::clone(&ext_stop),
+                    self.num_threads,
+                ));
+            }
+
+            // reset() increments generation and clears counters
+            // This will cause old workers (if any) to exit via generation mismatch
+            self.shared_state.reset();
             self.shared_state.reopen_work_queues();
+
+            // Log post-reset state
+            let post_gen = self.shared_state.generation();
+            let post_shared_stop = self.shared_state.should_stop();
+            let post_queues_closed = self.shared_state.work_queues_closed();
+            let arc_eq = Arc::ptr_eq(&ext_stop, &self.shared_state.stop_flag) as u8;
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "post_reset sid={} gen={} shared_stop={} queues_closed={} arc_eq={}",
+                    limits.session_id, post_gen, post_shared_stop, post_queues_closed, arc_eq
+                ),
+            );
+
             self.stop_bridge.publish_session(
                 &self.shared_state,
                 &self.pending_work_items,
                 Some(&ext_stop),
-                self.shared_state.generation(),
+                limits.session_id, // Use session_id from limits (set by Engine)
+            );
+
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "session_published sid={} gen={} finalizer_present=1",
+                    limits.session_id, post_gen
+                ),
             );
         } else {
+            // Log pre-reset state
+            let pre_gen = self.shared_state.generation();
+            let pre_shared_stop = self.shared_state.should_stop();
+            let pre_queues_closed = self.shared_state.work_queues_closed();
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "pre_reset sid={} gen={} shared_stop={} queues_closed={} no_ext_stop=1",
+                    limits.session_id, pre_gen, pre_shared_stop, pre_queues_closed
+                ),
+            );
+
             // Ensure clean state when no external flag is provided.
             self.shared_state.reset();
             self.shared_state.reopen_work_queues();
+
+            // Log post-reset state
+            let post_gen = self.shared_state.generation();
+            let post_shared_stop = self.shared_state.should_stop();
+            let post_queues_closed = self.shared_state.work_queues_closed();
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "post_reset sid={} gen={} shared_stop={} queues_closed={} no_ext_stop=1",
+                    limits.session_id, post_gen, post_shared_stop, post_queues_closed
+                ),
+            );
+
             self.stop_bridge.publish_session(
                 &self.shared_state,
                 &self.pending_work_items,
                 Some(&self.shared_state.stop_flag),
-                self.shared_state.generation(),
+                limits.session_id, // Use session_id from limits (set by Engine)
+            );
+
+            self.emit_info_string(
+                &limits,
+                format!(
+                    "session_published sid={} gen={} finalizer_present=0",
+                    limits.session_id, post_gen
+                ),
             );
         }
 
@@ -1068,6 +1182,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             };
             handles.push(start_worker_with(config));
         }
+
+        // Log worker spawn completion
+        self.emit_info_string(
+            &limits,
+            format!(
+                "workers_spawned sid={} gen={} count={} should_stop={}",
+                limits.session_id,
+                self.shared_state.generation(),
+                handles.len(),
+                self.shared_state.should_stop()
+            ),
+        );
 
         // Start time management if needed
         let mut time_handle = {
@@ -1258,6 +1384,28 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Iterative deepening
         for iteration in 1.. {
+            if iteration == 1 {
+                let stop_flag_value = limits
+                    .stop_flag
+                    .as_ref()
+                    .map(|flag| flag.load(Ordering::Acquire))
+                    .unwrap_or(false);
+                let shared_stop = self.shared_state.should_stop();
+                let pending = self.pending_work_items.load(Ordering::Acquire);
+                let active = self.active_workers.load(Ordering::Acquire);
+                self.emit_info_string(
+                    &limits,
+                    format!(
+                        "id_loop_start sid={} gen={} stop_flag={} shared_stop={} pending={} active={}",
+                        limits.session_id,
+                        self.shared_state.generation(),
+                        stop_flag_value,
+                        shared_stop,
+                        pending,
+                        active
+                    ),
+                );
+            }
             if limits
                 .stop_flag
                 .as_ref()
