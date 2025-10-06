@@ -38,6 +38,25 @@ enum Stage {
     Done,
 }
 
+impl Stage {
+    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+    fn label(self) -> &'static str {
+        match self {
+            Stage::Tt => "tt",
+            Stage::GoodCaptures => "good_captures",
+            Stage::Killers => "killers",
+            Stage::Quiets => "quiets",
+            Stage::BadCaptures => "bad_captures",
+            Stage::Evasions => "evasions",
+            Stage::QGood => "q_good",
+            Stage::QChecks => "q_checks",
+            Stage::QBad => "q_bad",
+            Stage::ProbCut => "probcut",
+            Stage::Done => "done",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ScoredMove {
     mv: Move,
@@ -78,6 +97,7 @@ pub struct MovePicker<'a> {
     deferred_bad_captures: SmallVec<[CaptureEntry; 32]>,
     returned: SmallVec<[u32; 128]>,
     probcut_threshold: Option<i32>,
+    epoch: u64,
 }
 
 impl<'a> MovePicker<'a> {
@@ -204,11 +224,19 @@ impl<'a> MovePicker<'a> {
             deferred_bad_captures: SmallVec::new(),
             returned: SmallVec::new(),
             probcut_threshold,
+            epoch: pos.state_epoch(),
         }
     }
 
     pub fn next(&mut self, heur: &Heuristics) -> Option<Move> {
         loop {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            {
+                if self.epoch != self.pos.state_epoch() {
+                    crate::search::ab::diagnostics::note_fault("move_picker_epoch_mismatch");
+                    return None;
+                }
+            }
             match self.stage {
                 Stage::Tt => {
                     self.advance_after_tt();
@@ -343,10 +371,16 @@ impl<'a> MovePicker<'a> {
                 self.used_tt = true;
                 return None;
             }
+            if self.targets_enemy_king(mv) {
+                self.used_tt = true;
+                return None;
+            }
             if !self.pos.is_legal_move(mv) {
                 self.used_tt = true;
                 return None;
             }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
             self.used_tt = true;
             self.record_return(mv);
             return Some(mv);
@@ -396,6 +430,8 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
             let mut key = 2_000_000_i64 + (entry.see as i64) * 10;
             if self.pos.gives_check(mv) {
                 key += 5_000;
@@ -425,6 +461,8 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
             let mut key = 100_000_i64 + (entry.see as i64);
             if self.pos.gives_check(mv) {
                 key += 1_000;
@@ -454,6 +492,8 @@ impl<'a> MovePicker<'a> {
             if mv.is_capture_hint() {
                 continue;
             }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
             let mut key = 1_000_000_i64
                 + (heur.history.get(self.pos.side_to_move, mv) as i64) * (quiet_weight as i64);
             if let Some(prev) = self.history_prev_move {
@@ -504,6 +544,8 @@ impl<'a> MovePicker<'a> {
                 if self.should_skip(mv) {
                     continue;
                 }
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
                 let mut key = 1_500_000_i64;
                 if mv.is_capture_hint() {
                     key += (self.pos.see(mv) as i64) * 10;
@@ -534,6 +576,8 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
             let mut key = 1_800_000_i64 + (entry.see as i64) * 10;
             if self.pos.gives_check(mv) {
                 key += 5_000;
@@ -565,6 +609,8 @@ impl<'a> MovePicker<'a> {
                 if self.should_skip(mv) || !self.pos.gives_check(mv) {
                     continue;
                 }
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
                 let key = 1_200_000_i64 + (heur.history.get(self.pos.side_to_move, mv) as i64);
                 debug_assert!(key.abs() < 2_000_000, "qsearch quiet-check key overflow: {key}");
                 self.buf.push(ScoredMove {
@@ -594,6 +640,8 @@ impl<'a> MovePicker<'a> {
                 if see < threshold {
                     continue;
                 }
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
                 self.buf.push(ScoredMove {
                     mv,
                     key: Self::clamp_key(2_000_000_i64 + (see as i64) * 10),
@@ -618,9 +666,14 @@ impl<'a> MovePicker<'a> {
             if mv.is_capture_hint() {
                 continue;
             }
+            if self.targets_enemy_king(mv) {
+                continue;
+            }
             if !self.pos.is_legal_move(mv) {
                 continue;
             }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
             self.record_return(mv);
             return Some(mv);
         }
@@ -634,6 +687,11 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
+            if self.targets_enemy_king(mv) {
+                continue;
+            }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
             if !self.pos.is_legal_move(mv) {
                 continue;
             }
@@ -641,6 +699,17 @@ impl<'a> MovePicker<'a> {
             return Some(mv);
         }
         None
+    }
+
+    fn targets_enemy_king(&self, mv: Move) -> bool {
+        if mv.is_drop() {
+            return false;
+        }
+        if let Some(king_sq) = self.pos.board.king_square(self.pos.side_to_move.opposite()) {
+            mv.to() == king_sq
+        } else {
+            false
+        }
     }
 
     fn should_skip(&self, mv: Move) -> bool {
@@ -657,6 +726,10 @@ impl<'a> MovePicker<'a> {
 
     fn record_return(&mut self, mv: Move) {
         self.returned.push(mv.to_u32());
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        crate::search::ab::diagnostics::record_stage(self.stage.label());
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        diagnostics::warn_quiet_destination_enemy_king(self.pos, mv, self.stage);
     }
 
     #[inline]
@@ -681,6 +754,111 @@ impl<'a> MovePicker<'a> {
     #[inline]
     fn clamp_key(key: i64) -> i32 {
         key.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+mod diagnostics {
+    use super::Stage;
+    use crate::search::ab::diagnostics as ab_diag;
+    use crate::shogi::{Move, PieceType};
+    use crate::usi::{move_to_usi, position_to_sfen};
+    use crate::Position;
+    use log::warn;
+    use std::collections::HashSet;
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    fn should_panic_on_enemy_king_capture() -> bool {
+        static PANIC_ON_GUARD: OnceLock<bool> = OnceLock::new();
+        *PANIC_ON_GUARD.get_or_init(|| match env::var("SHOGI_PANIC_ON_KING_CAPTURE") {
+            Ok(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                !(normalized == "0"
+                    || normalized == "false"
+                    || normalized == "no"
+                    || normalized == "off")
+            }
+            Err(_) => true,
+        })
+    }
+
+    pub(super) fn guard_enemy_king_capture(pos: &Position, mv: Move, stage: Stage) {
+        let king_sq = match pos.board.king_square(pos.side_to_move.opposite()) {
+            Some(sq) => sq,
+            None => return,
+        };
+        if mv.to() != king_sq {
+            return;
+        }
+
+        static REPORTED: OnceLock<Mutex<HashSet<(u64, u32)>>> = OnceLock::new();
+        let mut guard = REPORTED
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .expect("poisoned mutex");
+        let key = (pos.hash, mv.to_u32());
+        if !guard.insert(key) {
+            return;
+        }
+
+        drop(guard);
+
+        let sfen = position_to_sfen(pos);
+        let mv_str = move_to_usi(&mv);
+        ab_diag::dump("move_picker_guard", pos, Some(mv));
+        warn!(
+            "[move_picker] enemy king capture candidate detected: stage={} depth_ply={} move={} side={:?} sfen={}",
+            stage.label(),
+            pos.ply,
+            mv_str,
+            pos.side_to_move,
+            sfen
+        );
+        ab_diag::note_fault("king_capture_detected");
+        if should_panic_on_enemy_king_capture() {
+            panic!(
+                "MovePicker generated move capturing opponent king ({} at stage {})",
+                mv_str,
+                stage.label()
+            );
+        }
+    }
+
+    pub(super) fn warn_quiet_destination_enemy_king(pos: &Position, mv: Move, stage: Stage) {
+        if mv.is_capture_hint() || mv.is_drop() {
+            return;
+        }
+        let Some(piece) = pos.board.piece_on(mv.to()) else {
+            return;
+        };
+        if piece.piece_type != PieceType::King || piece.color == pos.side_to_move {
+            return;
+        }
+
+        static REPORTED: OnceLock<Mutex<HashSet<(u64, u32)>>> = OnceLock::new();
+        let mut guard = REPORTED
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .expect("quiet king guard mutex poisoned");
+        if !guard.insert((pos.hash, mv.to_u32())) {
+            return;
+        }
+        drop(guard);
+
+        let mv_str = move_to_usi(&mv);
+        let sfen = position_to_sfen(pos);
+        ab_diag::dump("quiet_enemy_king", pos, Some(mv));
+        warn!(
+            "[move_picker] quiet move targets enemy king square: stage={} depth_ply={} move={} side={:?} piece={:?} sfen={}",
+            stage.label(),
+            pos.ply,
+            mv_str,
+            pos.side_to_move,
+            piece,
+            sfen
+        );
+        ab_diag::note_fault("king_capture_detected");
     }
 }
 
@@ -874,5 +1052,31 @@ mod tests {
         }
 
         assert_eq!(returned_checks, 2, "quiet check limit must cap returned moves");
+    }
+
+    #[test]
+    fn regression_move_picker_no_enemy_king_capture() {
+        let sfen = "ln1g1g2l/1r1sks3/ppppppnpp/6p2/9/3P1P3/PPP1P1PPP/3S3R1/LN1GKGSNL b b 7";
+        let pos = Position::from_sfen(sfen).expect("valid SFEN");
+        let their_king_sq = pos
+            .board
+            .king_square(pos.side_to_move.opposite())
+            .expect("opponent king must exist");
+
+        let mut picker = MovePicker::new_normal(&pos, None, None, [None, None], None, None);
+        let heur = Heuristics::default();
+        let mut offending = Vec::new();
+
+        while let Some(mv) = picker.next(&heur) {
+            if mv.to() == their_king_sq {
+                offending.push(crate::usi::move_to_usi(&mv).to_string());
+            }
+        }
+
+        assert!(
+            offending.is_empty(),
+            "move picker produced moves capturing enemy king: {:?}",
+            offending
+        );
     }
 }

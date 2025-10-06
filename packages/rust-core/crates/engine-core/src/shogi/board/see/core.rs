@@ -35,18 +35,42 @@ impl Position {
     /// Returns the expected material gain from the move
     /// If threshold is provided and SEE value cannot reach it, returns early
     fn see_internal(&self, mv: Move, threshold: i32) -> i32 {
+        #[cfg(debug_assertions)]
+        let epoch_before = self.state_epoch();
+        #[cfg(debug_assertions)]
+        let hash_before = self.zobrist_hash();
+        #[cfg(debug_assertions)]
+        let check_state = |label: &str, pos: &Position, epoch: u64, hash: u64| {
+            debug_assert_eq!(
+                pos.state_epoch(),
+                epoch,
+                "see_internal mutated position state ({label})"
+            );
+            debug_assert_eq!(
+                pos.zobrist_hash(),
+                hash,
+                "see_internal mutated zobrist hash ({label})"
+            );
+        };
+
         let to = mv.to();
 
         // Not a capture
         let captured = match self.board.piece_on(to) {
             Some(piece) => piece,
-            None => return 0,
+            None => {
+                #[cfg(debug_assertions)]
+                check_state("non_capture", self, epoch_before, hash_before);
+                return 0;
+            }
         };
 
         let captured_value = Self::see_piece_value(captured);
 
         // For drops, we assume the piece is safe
         if mv.is_drop() {
+            #[cfg(debug_assertions)]
+            check_state("drop", self, epoch_before, hash_before);
             return captured_value;
         }
 
@@ -55,6 +79,8 @@ impl Position {
         let from = match mv.from() {
             Some(sq) => sq,
             None => {
+                #[cfg(debug_assertions)]
+                check_state("missing_from", self, epoch_before, hash_before);
                 return if threshold != 0 {
                     threshold - 1
                 } else {
@@ -69,6 +95,8 @@ impl Position {
         let attacker = match self.board.piece_on(from) {
             Some(p) => p,
             None => {
+                #[cfg(debug_assertions)]
+                check_state("missing_attacker", self, epoch_before, hash_before);
                 return if threshold != 0 {
                     threshold - 1
                 } else {
@@ -87,6 +115,8 @@ impl Position {
             let initial_pins = self.calculate_pins_for_color(self.side_to_move);
             if !initial_pins.can_move(from, to) {
                 // 閾値比較を考慮し、到達不能にする十分小さい値を返す
+                #[cfg(debug_assertions)]
+                check_state("pinned_attacker", self, epoch_before, hash_before);
                 return if threshold != 0 {
                     threshold - 1
                 } else {
@@ -114,6 +144,8 @@ impl Position {
         // Only apply for see_ge calls (threshold != 0)
         if threshold != 0 && (captured_value + promotion_bonus) < threshold {
             // Best case is just capturing the target piece + promotion bonus
+            #[cfg(debug_assertions)]
+            check_state("delta_prune", self, epoch_before, hash_before);
             return captured_value + promotion_bonus;
         }
 
@@ -195,6 +227,8 @@ impl Position {
 
                         // Early termination if we can't reach threshold
                         if max_possible_gain < threshold {
+                            #[cfg(debug_assertions)]
+                            check_state("delta_prune_loop", self, epoch_before, hash_before);
                             return current_eval;
                         }
                     }
@@ -246,6 +280,9 @@ impl Position {
         if depth & 1 == 1 {
             gain[0] = -gain[0];
         }
+
+        #[cfg(debug_assertions)]
+        check_state("final", self, epoch_before, hash_before);
 
         gain[0]
     }

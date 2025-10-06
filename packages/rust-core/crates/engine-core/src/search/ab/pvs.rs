@@ -15,6 +15,9 @@ use crate::search::types::NodeType;
 #[cfg(feature = "diagnostics")]
 use super::qsearch::record_qnodes_peak;
 
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+use super::diagnostics;
+
 pub(crate) struct SearchContext<'a> {
     pub(crate) limits: &'a SearchLimits,
     pub(crate) start_time: &'a std::time::Instant,
@@ -48,6 +51,10 @@ impl<'a> SearchContext<'a> {
 
     #[inline]
     pub(crate) fn time_up(&self) -> bool {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        if diagnostics::should_abort_now() {
+            return true;
+        }
         let should_poll = |mask: u64| (*self.nodes & mask) == 0;
         let time_limit_expired = || {
             if let Some(limit) = self.limits.time_limit() {
@@ -91,6 +98,10 @@ impl<'a> SearchContext<'a> {
 
     #[inline]
     pub(crate) fn time_up_fast(&self) -> bool {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        if diagnostics::should_abort_now() {
+            return true;
+        }
         if let Some(tm) = self.limits.time_manager.as_ref() {
             if let Some(flag) = self.limits.stop_flag.as_ref() {
                 if flag.load(std::sync::atomic::Ordering::Acquire) {
@@ -145,17 +156,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             beta_cuts,
             lmr_counter,
         } = args;
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        diagnostics::record_ab_enter(pos, depth, alpha, beta, is_pv, "ab_enter");
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_enter");
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        if diagnostics::should_abort_now() {
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+            return (self.evaluator.evaluate(pos), None);
+        }
         if (ply as usize) >= crate::search::constants::MAX_PLY {
             let eval = self.evaluator.evaluate(pos);
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (eval, None);
         }
         if ctx.time_up() || Self::should_stop(ctx.limits) {
             let eval = self.evaluator.evaluate(pos);
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (eval, None);
         }
         ctx.tick(ply);
         if depth <= 0 {
             let qs = self.qsearch(pos, alpha, beta, ctx, ply);
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (qs, None);
         }
 
@@ -167,16 +193,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut used_alpha = alpha;
         let mut used_beta = beta;
         if crate::search::mate_distance_pruning(&mut used_alpha, &mut used_beta, ply as u8) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (used_alpha, None);
         }
         alpha = used_alpha;
         let beta = used_beta;
 
         if self.should_static_beta_prune(&self.profile.prune, depth, pos, beta, static_eval) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (static_eval, None);
         }
 
         if let Some(r) = self.razor_prune(&self.profile.prune, depth, pos, alpha, ctx, ply) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (r, None);
         }
 
@@ -194,6 +226,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter: &mut *lmr_counter,
             ctx,
         }) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (score, None);
         }
 
@@ -212,12 +246,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 tt_depth_ok = entry.depth() as i32 >= depth - 2;
                 match entry.node_type() {
                     NodeType::LowerBound if sufficient && score >= beta => {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
                         return (score, entry.get_move());
                     }
                     NodeType::UpperBound if sufficient && score <= alpha => {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
                         return (score, entry.get_move());
                     }
                     NodeType::Exact if sufficient => {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
                         return (score, entry.get_move());
                     }
                     _ => {
@@ -258,6 +298,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter: &mut *lmr_counter,
             ctx,
         }) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (score, Some(mv));
         }
 
@@ -274,6 +316,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         stack[ply as usize].clear_for_new_node();
         stack[ply as usize].in_check = pos.is_in_check();
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_cleared");
         let mut best_mv = None;
         let mut best = i32::MIN / 2;
         let mut moveno: usize = 0;
@@ -323,6 +367,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 next_depth -= reduction;
                 *lmr_counter += 1;
             }
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_move_pick(
+                pos,
+                depth,
+                alpha,
+                beta,
+                is_pv,
+                moveno,
+                mv,
+                gives_check,
+                is_capture,
+                reduction,
+            );
             let pv_move = !first_move_done;
             let score = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
@@ -445,13 +502,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         if aborted {
             // 中断時は現時点のベスト値（非PV手は探索済み）か静的評価をそのまま返す。
             // 上位では stop 判定と組み合わせて結果を採用/破棄するため、TT へは書き込まない。
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             if first_move_done {
                 return (best, best_mv);
             } else {
                 return (static_eval, None);
             }
         }
-        if best == i32::MIN / 2 {
+        let result = if best == i32::MIN / 2 {
             let qs = self.qsearch(pos, alpha, beta, ctx, ply);
             (qs, None)
         } else {
@@ -517,6 +576,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             (best, best_mv)
-        }
+        };
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+        result
     }
 }

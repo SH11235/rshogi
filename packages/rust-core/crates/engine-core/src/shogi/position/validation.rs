@@ -418,6 +418,11 @@ impl Position {
     /// # Panics
     /// May panic if the move source doesn't contain a piece of the correct color.
     pub fn gives_check(&self, mv: Move) -> bool {
+        #[cfg(debug_assertions)]
+        let epoch_before = self.state_epoch();
+        #[cfg(debug_assertions)]
+        let hash_before = self.zobrist_hash();
+
         debug_assert!(
             !mv.is_drop()
                 || mv.from().is_none()
@@ -433,6 +438,20 @@ impl Position {
 
         // Undo the move
         tmp.undo_move(mv, undo_info);
+
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(
+                self.state_epoch(),
+                epoch_before,
+                "gives_check mutated original position state"
+            );
+            debug_assert_eq!(
+                self.zobrist_hash(),
+                hash_before,
+                "gives_check mutated original zobrist hash"
+            );
+        }
 
         gives
     }

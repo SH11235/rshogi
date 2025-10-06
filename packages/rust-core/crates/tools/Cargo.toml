@@ -36,6 +36,8 @@ bincode = "1.3"
 default = []
 zstd = ["dep:zstd"]
 plots = ["dep:plotters"]
+# Enable engine-core diagnostics (instrumentation-only)
+diagnostics = ["engine-core/diagnostics"]
 # engine-core feature passthroughs for A/B
 fast-fma = ["engine-core/nnue_fast_fma"]
 diff-agg-hash = ["engine-core/diff_agg_hash"]

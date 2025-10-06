@@ -6,6 +6,9 @@ mod pv_extract;
 mod pvs;
 mod qsearch;
 
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+pub mod diagnostics;
+
 pub use driver::ClassicBackend;
 #[cfg(any(test, feature = "bench-move-picker"))]
 pub use ordering::{Heuristics, MovePicker};
