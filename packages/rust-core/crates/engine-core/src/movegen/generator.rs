@@ -2,6 +2,7 @@ use crate::shogi::attacks::{
     between_bb, gold_attacks, king_attacks, knight_attacks, lance_attacks, pawn_attacks,
     silver_attacks, sliding_attacks, HAND_ORDER,
 };
+use crate::shogi::board::NUM_PIECE_TYPES;
 use crate::shogi::board_constants::{
     FILE_MASKS, RANK_1_2_MASK, RANK_1_MASK, RANK_8_9_MASK, RANK_9_MASK, SHOGI_BOARD_SIZE,
 };
@@ -72,6 +73,8 @@ struct MoveGenImpl<'a> {
     our_pieces: Bitboard,
     their_pieces: Bitboard,
     occupied: Bitboard,
+    enemy_king_bb: Bitboard,
+    their_king_sq: Option<Square>,
 }
 
 impl<'a> MoveGenImpl<'a> {
@@ -82,6 +85,9 @@ impl<'a> MoveGenImpl<'a> {
 
         // Find king square
         let king_sq = pos.board.king_square(us).ok_or(MoveGenError::KingNotFound(us))?;
+
+        let enemy_king_bb = pos.board.piece_bb[them as usize][PieceType::King as usize];
+        let their_king_sq = enemy_king_bb.lsb().or_else(|| pos.board.king_square(them));
 
         let our_pieces = pos.board.occupied_bb[us as usize];
         let their_pieces = pos.board.occupied_bb[them as usize];
@@ -104,10 +110,50 @@ impl<'a> MoveGenImpl<'a> {
             our_pieces,
             their_pieces,
             occupied,
+            enemy_king_bb,
+            their_king_sq,
         };
 
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        {
+            let mut combined_from_piece_bb = Bitboard::EMPTY;
+            for &color in &[Color::Black, Color::White] {
+                let mut union = Bitboard::EMPTY;
+                for piece_idx in 0..NUM_PIECE_TYPES {
+                    union |= pos.board.piece_bb[color as usize][piece_idx];
+                }
+                debug_assert_eq!(
+                    union, pos.board.occupied_bb[color as usize],
+                    "occupied_bb mismatch for {:?}",
+                    color
+                );
+                combined_from_piece_bb |= union;
+            }
+            debug_assert!(
+                (pos.board.occupied_bb[Color::Black as usize]
+                    & pos.board.occupied_bb[Color::White as usize])
+                    .is_empty(),
+                "overlapping occupancy bitboards detected"
+            );
+            debug_assert_eq!(
+                combined_from_piece_bb, pos.board.all_bb,
+                "all_bb mismatch vs combined piece bitboards"
+            );
+            if let Some(king_sq) = gen.their_king_sq {
+                debug_assert!(
+                    gen.enemy_king_bb.test(king_sq),
+                    "enemy_king_bb missing king square {:?}",
+                    king_sq
+                );
+            }
+        }
+
+        if !gen.enemy_king_bb.is_empty() {
+            gen.non_king_check_mask &= !gen.enemy_king_bb;
+        }
+
         // Always exclude enemy king square from non_king_check_mask
-        if let Some(their_king_sq) = pos.board.king_square(them) {
+        if let Some(their_king_sq) = gen.their_king_sq {
             gen.non_king_check_mask &= !Bitboard::from_square(their_king_sq);
         }
 
@@ -124,7 +170,7 @@ impl<'a> MoveGenImpl<'a> {
 
                 // Exclude enemy king square to prevent illegal king capture
                 // (Already excluded in initialization, but we need to re-apply after setting to checkers)
-                if let Some(their_king_sq) = gen.pos.board.king_square(them) {
+                if let Some(their_king_sq) = gen.their_king_sq {
                     gen.non_king_check_mask &= !Bitboard::from_square(their_king_sq);
                 }
 
@@ -159,6 +205,18 @@ impl<'a> MoveGenImpl<'a> {
     #[inline]
     fn get_captured_type(&self, to: Square) -> Option<PieceType> {
         self.pos.board.piece_on(to).map(|p| p.piece_type)
+    }
+
+    #[inline]
+    fn filter_enemy_king(&self, targets: Bitboard) -> Bitboard {
+        let filtered = targets & !self.enemy_king_bb;
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        {
+            if filtered != targets && !self.enemy_king_bb.is_empty() {
+                crate::search::ab::diagnostics::note_fault("movegen_enemy_king_filtered");
+            }
+        }
+        filtered
     }
 
     /// Generate all legal moves
@@ -258,7 +316,8 @@ impl<'a> MoveGenImpl<'a> {
     /// Generate king moves
     fn generate_king_moves(&mut self, moves: &mut MoveList) {
         let attacks = king_attacks(self.king_sq);
-        let valid_targets = attacks & !self.our_pieces & !self.king_danger_squares;
+        let mut valid_targets = attacks & !self.our_pieces & !self.king_danger_squares;
+        valid_targets = self.filter_enemy_king(valid_targets);
 
         for to_sq in valid_targets {
             // Check if king would be safe on this square
@@ -351,7 +410,7 @@ impl<'a> MoveGenImpl<'a> {
                 // Check for drop pawn mate (打ち歩詰め)
                 // Only need to check squares where pawn would give check
                 let them = us.opposite();
-                if let Some(their_king_sq) = self.pos.board.king_square(them) {
+                if let Some(their_king_sq) = self.their_king_sq {
                     #[cfg(test)]
                     println!("Checking drop pawn mate: their_king at {}", their_king_sq);
                     let potential_check_sq = match us {
@@ -435,7 +494,7 @@ impl<'a> MoveGenImpl<'a> {
     /// Generate only king quiet moves
     fn generate_king_quiet(&mut self, moves: &mut MoveList) {
         let attacks = king_attacks(self.king_sq);
-        let quiet = attacks & !self.occupied;
+        let quiet = self.filter_enemy_king(attacks & !self.occupied);
 
         for to_sq in quiet {
             if !self.is_attacked_by(to_sq, self.them) {
@@ -498,7 +557,8 @@ impl<'a> MoveGenImpl<'a> {
     /// Check if king has any escape move
     fn has_king_escape(&self) -> bool {
         let attacks = king_attacks(self.king_sq);
-        let valid_targets = attacks & !self.our_pieces;
+        let mut valid_targets = attacks & !self.our_pieces;
+        valid_targets = self.filter_enemy_king(valid_targets);
 
         for to_sq in valid_targets {
             if !self.is_attacked_by(to_sq, self.them) {
@@ -881,7 +941,7 @@ impl<'a> MoveGenImpl<'a> {
         }
 
         // Check gold attacks (including promoted pieces)
-        let gold_attacks = gold_attacks(sq, by);
+        let gold_attacks = gold_attacks(sq, by.opposite());
         let enemy_golds = self.pos.board.piece_bb[by as usize][PieceType::Gold as usize];
         let promoted_pieces = self.pos.board.promoted_bb & attackers_bb;
         let gold_movers = enemy_golds
@@ -895,7 +955,7 @@ impl<'a> MoveGenImpl<'a> {
         }
 
         // Check silver attacks
-        let silver_attacks = silver_attacks(sq, by);
+        let silver_attacks = silver_attacks(sq, by.opposite());
         let enemy_silvers = self.pos.board.piece_bb[by as usize][PieceType::Silver as usize]
             & !self.pos.board.promoted_bb;
         if !(silver_attacks & enemy_silvers).is_empty() {
@@ -968,7 +1028,8 @@ impl<'a> MoveGenImpl<'a> {
 
         // Handle unpromoted pawns
         for from in unpromoted_pawns {
-            let to_bb = pawn_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            let mut to_bb = pawn_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
             for to in to_bb {
                 // Check if pawn is pinned
                 if self.pinned.test(from) {
@@ -1040,7 +1101,8 @@ impl<'a> MoveGenImpl<'a> {
         let us = self.pos.side_to_move;
         let our_pieces = self.pos.board.occupied_bb[us as usize];
 
-        let to_bb = gold_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+        let mut to_bb = gold_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+        to_bb = self.filter_enemy_king(to_bb);
         for to in to_bb {
             if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
                 continue;
@@ -1061,50 +1123,39 @@ impl<'a> MoveGenImpl<'a> {
 
         // Handle unpromoted lances
         for from in unpromoted_lances {
-            // Lance moves forward until blocked
-            let attacks = lance_attacks(from, us);
-            let blockers = attacks & self.pos.board.all_bb;
+            let file = from.file();
+            let mut rank = from.rank();
+            let mut ray = Bitboard::EMPTY;
 
-            // Find valid moves for lance
-            let to_bb = if !blockers.is_empty() {
-                // Find first blocker using bitboard operations
-                let blocker_sq = match us {
+            loop {
+                match us {
                     Color::Black => {
-                        // Black lance moves up (towards rank 0)
-                        // Find the highest rank (closest to from) blocker
-                        let blockers_on_path = blockers & attacks;
-                        // Get the last bit set (highest rank = closest to from)
-                        blockers_on_path.into_iter().last()
+                        if rank == 0 {
+                            break;
+                        }
+                        rank -= 1;
                     }
                     Color::White => {
-                        // White lance moves down (towards rank 8)
-                        // Find the lowest rank (closest to from) blocker
-                        let blockers_on_path = blockers & attacks;
-                        // Get the first bit set (lowest rank = closest to from)
-                        blockers_on_path.lsb()
+                        if rank == 8 {
+                            break;
+                        }
+                        rank += 1;
                     }
-                };
-
-                if let Some(blocker_sq) = blocker_sq {
-                    // Get all squares between from and blocker
-                    let moves_between = between_bb(from, blocker_sq);
-
-                    // Include blocker square only if it contains an enemy piece
-                    if self.their_pieces.test(blocker_sq) {
-                        moves_between | Bitboard::from_square(blocker_sq)
-                    } else {
-                        moves_between
-                    }
-                } else {
-                    // Fallback: no valid blocker found, use all attacks
-                    attacks
                 }
-            } else {
-                // No blockers, can move to all attacked squares
-                attacks
-            };
 
-            for to in to_bb & self.non_king_check_mask {
+                let target = Square::new(file, rank);
+                if self.our_pieces.test(target) {
+                    break;
+                }
+                ray.set(target);
+                if self.their_pieces.test(target) {
+                    break;
+                }
+            }
+
+            let mut to_bb = ray & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
+            for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
                     continue;
                 }
@@ -1171,7 +1222,8 @@ impl<'a> MoveGenImpl<'a> {
 
         // Handle unpromoted knights
         for from in unpromoted_knights {
-            let to_bb = knight_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            let mut to_bb = knight_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
                     continue;
@@ -1239,7 +1291,8 @@ impl<'a> MoveGenImpl<'a> {
 
         // Handle unpromoted silvers
         for from in unpromoted_silvers {
-            let to_bb = silver_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            let mut to_bb = silver_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
                     continue;
@@ -1306,7 +1359,8 @@ impl<'a> MoveGenImpl<'a> {
         // Handle unpromoted bishops
         for from in unpromoted_bishops {
             let attacks = sliding_attacks(from, self.occupied, PieceType::Bishop);
-            let to_bb = attacks & !our_pieces & self.non_king_check_mask;
+            let mut to_bb = attacks & !our_pieces & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
 
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
@@ -1350,7 +1404,8 @@ impl<'a> MoveGenImpl<'a> {
         for from in promoted_bishops {
             // Bishop sliding moves
             let bishop_attacks = sliding_attacks(from, self.occupied, PieceType::Bishop);
-            let to_bb = bishop_attacks & !our_pieces & self.non_king_check_mask;
+            let mut to_bb = bishop_attacks & !our_pieces & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
 
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
@@ -1369,7 +1424,8 @@ impl<'a> MoveGenImpl<'a> {
 
             // King-like moves
             let king_attacks = king_attacks(from);
-            let king_targets = king_attacks & !our_pieces & self.non_king_check_mask;
+            let mut king_targets = king_attacks & !our_pieces & self.non_king_check_mask;
+            king_targets = self.filter_enemy_king(king_targets);
 
             for to in king_targets {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
@@ -1400,7 +1456,8 @@ impl<'a> MoveGenImpl<'a> {
         // Handle unpromoted rooks
         for from in unpromoted_rooks {
             let attacks = sliding_attacks(from, self.occupied, PieceType::Rook);
-            let to_bb = attacks & !our_pieces & self.non_king_check_mask;
+            let mut to_bb = attacks & !our_pieces & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
 
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
@@ -1444,7 +1501,8 @@ impl<'a> MoveGenImpl<'a> {
         for from in promoted_rooks {
             // Rook sliding moves
             let rook_attacks = sliding_attacks(from, self.occupied, PieceType::Rook);
-            let to_bb = rook_attacks & !our_pieces & self.non_king_check_mask;
+            let mut to_bb = rook_attacks & !our_pieces & self.non_king_check_mask;
+            to_bb = self.filter_enemy_king(to_bb);
 
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
@@ -1463,7 +1521,8 @@ impl<'a> MoveGenImpl<'a> {
 
             // King-like moves
             let king_attacks = king_attacks(from);
-            let king_targets = king_attacks & !our_pieces & self.non_king_check_mask;
+            let mut king_targets = king_attacks & !our_pieces & self.non_king_check_mask;
+            king_targets = self.filter_enemy_king(king_targets);
 
             for to in king_targets {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
@@ -1582,7 +1641,7 @@ impl<'a> MoveGenImpl<'a> {
     /// Check if dropping a pawn at 'to' would be checkmate (illegal)
     fn is_drop_pawn_mate(&self, to: Square, them: Color) -> bool {
         // Get the enemy king square
-        let their_king_sq = match self.pos.board.king_square(them) {
+        let their_king_sq = match self.their_king_sq {
             Some(sq) => sq,
             None => return false, // No king?
         };
@@ -1601,14 +1660,6 @@ impl<'a> MoveGenImpl<'a> {
                 "=== is_drop_pawn_mate called for pawn at {} with king at {} ===",
                 to, their_king_sq
             );
-        }
-
-        // Early return if the pawn is not supported (king can just capture it)
-        let pawn_support = self.attackers_to_with_occupancy(to, us, self.pos.board.all_bb);
-        if pawn_support.is_empty() {
-            #[cfg(test)]
-            log::debug!("Pawn at {} is not supported", to);
-            return false;
         }
 
         // Simulate position after pawn drop
@@ -1976,6 +2027,8 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shogi::board::Piece;
+    use crate::usi::parse_usi_square;
 
     #[test]
     fn test_move_generator_creation() {
@@ -2035,5 +2088,237 @@ mod tests {
             moves.iter().any(|&m| m == legal_drop),
             "Drop pawn check should be allowed when not mate"
         );
+    }
+
+    #[test]
+    fn regression_no_enemy_king_capture_generated() {
+        // SFEN extracted from runtime logs where探索中に敵玉捕獲手が混入していた疑いがある局面。
+        let sfen = "ln1g1g2l/1r1sks3/ppppppnpp/6p2/9/3P1P3/PPP1P1PPP/3S3R1/LN1GKGSNL b b 7";
+        let pos = Position::from_sfen(sfen).expect("valid SFEN");
+        let their_king_sq = pos
+            .board
+            .king_square(pos.side_to_move.opposite())
+            .expect("opponent king must exist");
+
+        let gen = MoveGenerator::new();
+        let moves = gen.generate_all(&pos).expect("move generation should succeed");
+
+        let offending: Vec<_> =
+            moves.as_slice().iter().copied().filter(|m| m.to() == their_king_sq).collect();
+
+        assert!(
+            offending.is_empty(),
+            "generator produced moves capturing enemy king: {:?}",
+            offending
+                .into_iter()
+                .map(|m| crate::usi::move_to_usi(&m).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn build_empty_position(side: Color) -> Position {
+        let mut pos = Position::empty();
+        pos.side_to_move = side;
+        pos
+    }
+
+    #[test]
+    fn is_attacked_by_matches_attackers_to_for_gold_and_silver() {
+        let mut pos = build_empty_position(Color::Black);
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("4d").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+
+        let gen = MoveGenImpl::new(&pos).expect("generator init");
+        let target = parse_usi_square("5e").unwrap();
+        let attackers = gen.attackers_to_with_occupancy(target, Color::White, pos.board.all_bb);
+        assert!(gen.is_attacked_by(target, Color::White));
+        assert!(!attackers.is_empty());
+        assert_eq!(attackers.is_empty(), !gen.is_attacked_by(target, Color::White));
+    }
+
+    #[test]
+    fn drop_pawn_mate_detects_unsupported_mat() {
+        let candidate_pieces = [
+            ("4h", PieceType::Rook),
+            ("5h", PieceType::Rook),
+            ("6h", PieceType::Rook),
+            ("7c", PieceType::Knight),
+            ("3c", PieceType::Knight),
+            ("5c", PieceType::Gold),
+            ("7e", PieceType::Knight),
+            ("3e", PieceType::Knight),
+            ("4c", PieceType::Gold),
+            ("6c", PieceType::Gold),
+            ("4e", PieceType::Bishop),
+            ("6e", PieceType::Bishop),
+        ];
+        let drop_sq = parse_usi_square("5b").unwrap();
+        let mut found = None;
+
+        for mask in 0usize..(1 << candidate_pieces.len()) {
+            let mut pos = build_empty_position(Color::Black);
+            pos.board.put_piece(
+                parse_usi_square("5i").unwrap(),
+                Piece::new(PieceType::King, Color::Black),
+            );
+            pos.board.put_piece(
+                parse_usi_square("5a").unwrap(),
+                Piece::new(PieceType::King, Color::White),
+            );
+
+            for (idx, (sq, kind)) in candidate_pieces.iter().enumerate() {
+                if (mask & (1 << idx)) != 0 {
+                    pos.board
+                        .put_piece(parse_usi_square(sq).unwrap(), Piece::new(*kind, Color::Black));
+                }
+            }
+
+            pos.hash = pos.compute_hash();
+            pos.zobrist_hash = pos.hash;
+
+            let gen = match MoveGenImpl::new(&pos) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+
+            if !gen
+                .attackers_to_with_occupancy(drop_sq, Color::Black, pos.board.all_bb)
+                .is_empty()
+            {
+                continue;
+            }
+
+            if gen.is_drop_pawn_mate(drop_sq, Color::White) {
+                found = Some(mask);
+                break;
+            }
+        }
+
+        assert!(
+            found.is_some(),
+            "failed to find unsupported drop mate configuration from candidate set"
+        );
+    }
+
+    #[test]
+    fn debug_find_unsupported_drop_mate() {
+        let squares = ["4a", "4b", "4c", "5c", "6a", "6b", "6c", "5d"];
+        let piece_options = [
+            PieceType::Gold,
+            PieceType::Silver,
+            PieceType::Rook,
+            PieceType::Bishop,
+            PieceType::Knight,
+        ];
+        let drop_sq = parse_usi_square("5b").unwrap();
+
+        for (i, &sq0) in squares.iter().enumerate() {
+            for &piece0 in &piece_options {
+                if let Some(config) = try_drop_mate(&[(sq0, piece0)], drop_sq) {
+                    println!("Found placement:");
+                    for (sq, kind) in config {
+                        println!("  {} {:?}", sq, kind);
+                    }
+                    return;
+                }
+            }
+            for j in (i + 1)..squares.len() {
+                let sq1 = squares[j];
+                for &piece0 in &piece_options {
+                    for &piece1 in &piece_options {
+                        if let Some(config) = try_drop_mate(&[(sq0, piece0), (sq1, piece1)], drop_sq) {
+                            println!("Found placement:");
+                            for (sq, kind) in config {
+                                println!("  {} {:?}", sq, kind);
+                            }
+                            return;
+                        }
+                    }
+                }
+                for k in (j + 1)..squares.len() {
+                    let sq2 = squares[k];
+                    for &piece0 in &piece_options {
+                        for &piece1 in &piece_options {
+                            for &piece2 in &piece_options {
+                                if let Some(config) = try_drop_mate(
+                                    &[(sq0, piece0), (sq1, piece1), (sq2, piece2)],
+                                    drop_sq,
+                                ) {
+                                    println!("Found placement:");
+                                    for (sq, kind) in config {
+                                        println!("  {} {:?}", sq, kind);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("No unsupported drop mate found");
+    }
+
+    #[test]
+    fn king_escape_ignores_enemy_king_square() {
+        let mut pos = build_empty_position(Color::Black);
+        pos.board
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::King, Color::White));
+        for sq in ["4e", "6e", "4f", "6f", "4d", "5d", "6d"] {
+            pos.board.put_piece(
+                parse_usi_square(sq).unwrap(),
+                Piece::new(PieceType::Pawn, Color::Black),
+            );
+        }
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+
+        let gen = MoveGenImpl::new(&pos).expect("generator init");
+        assert!(gen.checkers.is_empty());
+        assert!(!gen.has_king_escape());
+    }
+
+    fn try_drop_mate(config: &[(&str, PieceType)], drop_sq: Square) -> Option<Vec<(String, PieceType)>> {
+        let mut pos = build_empty_position(Color::Black);
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        for (sq, kind) in config {
+            pos.board
+                .put_piece(parse_usi_square(sq).unwrap(), Piece::new(*kind, Color::Black));
+        }
+
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+
+        let gen = MoveGenImpl::new(&pos).ok()?;
+
+        if !gen
+            .attackers_to_with_occupancy(drop_sq, Color::Black, pos.board.all_bb)
+            .is_empty()
+        {
+            return None;
+        }
+
+        if gen.is_drop_pawn_mate(drop_sq, Color::White) {
+            return Some(config.iter().map(|(sq, kind)| (sq.to_string(), *kind)).collect());
+        }
+
+        None
     }
 }

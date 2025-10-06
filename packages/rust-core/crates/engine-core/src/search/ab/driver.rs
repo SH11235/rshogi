@@ -297,6 +297,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         #[cfg(feature = "diagnostics")]
         reset_qsearch_diagnostics();
 
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        {
+            super::diagnostics::clear();
+            super::diagnostics::configure_abort_handles(
+                limits.stop_controller.clone(),
+                limits.stop_flag.clone(),
+            );
+        }
+
         let mut final_lines: Option<SmallVec<[RootLine; 4]>> = None;
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
@@ -346,6 +355,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         });
 
         for d in 1..=max_depth {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            if super::diagnostics::should_abort_now() {
+                last_deadline_hit = Some(DeadlineHit::Stop);
+                break;
+            }
             #[cfg(feature = "diagnostics")]
             reset_qsearch_diagnostics();
             if let Some(cb) = limits.info_string_callback.as_ref() {
@@ -517,6 +531,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             }
                         }
                     }
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    if super::diagnostics::should_abort_now() {
+                        last_deadline_hit = Some(DeadlineHit::Stop);
+                        break;
+                    }
                     if active_moves.is_empty() {
                         break;
                     }
@@ -525,6 +544,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
                     for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        if super::diagnostics::should_abort_now() {
+                            last_deadline_hit = Some(DeadlineHit::Stop);
+                            break;
+                        }
                         if let Some(hit) = Self::deadline_hit(
                             t0,
                             soft_deadline,
@@ -658,6 +682,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
 
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    if super::diagnostics::should_abort_now() {
+                        break;
+                    }
+
                     if let Some(hit) = Self::deadline_hit(
                         t0,
                         soft_deadline,
@@ -708,6 +737,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         continue;
                     }
                     break; // success within window
+                }
+
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                if super::diagnostics::should_abort_now() {
+                    last_deadline_hit = Some(DeadlineHit::Stop);
+                    break;
                 }
 
                 // Counters aggregate

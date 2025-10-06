@@ -34,6 +34,8 @@ pub mod prefetch;
 pub mod utils;
 use crate::search::tt::filter::{boost_pv_depth, boost_tt_depth, should_skip_tt_store_dyn};
 
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+use crate::search::ab::diagnostics;
 use crate::Position;
 use crate::{search::SEARCH_INF, shogi::Move, Color};
 use bucket::TTBucket;
@@ -471,6 +473,13 @@ impl TranspositionTable {
             }
         }
 
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        if let Some(entry) = result {
+            if !entry.matches(hash) {
+                diagnostics::note_fault("tt_probe_mismatch");
+            }
+        }
+
         result
     }
 
@@ -859,6 +868,17 @@ impl TranspositionTable {
 
         // Store the entry
         self.store_entry(params);
+
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        {
+            if let Some(entry) = self.probe_entry(params.key, params.side_to_move) {
+                if !entry.matches(params.key) {
+                    diagnostics::note_fault("tt_store_mismatch");
+                }
+            } else {
+                diagnostics::note_fault("tt_store_mismatch");
+            }
+        }
 
         // Return true if this was a new entry (not found before)
         existing.is_none()

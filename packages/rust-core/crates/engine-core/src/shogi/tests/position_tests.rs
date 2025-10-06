@@ -268,6 +268,7 @@ fn test_do_move_special_promotion_cases() {
     let mv2 = Move::normal(parse_usi_square("5b").unwrap(), parse_usi_square("5a").unwrap(), true);
     // Note: This move would capture the king, so we need a different setup
     pos.board.remove_piece(parse_usi_square("5a").unwrap());
+    pos.board.remove_piece(parse_usi_square("9a").unwrap());
     pos.board
         .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
     pos.board.rebuild_occupancy_bitboards();

@@ -3,7 +3,7 @@
 //! This module contains the Position struct definition and basic methods
 //! for creating and querying positions.
 
-use crate::shogi::board::{Board, Color, Piece, PieceType, Square};
+use crate::shogi::board::{Bitboard, Board, Color, Piece, PieceType, Square};
 use crate::shogi::NUM_HAND_PIECE_TYPES;
 
 /// Information needed to undo a move
@@ -17,6 +17,27 @@ pub struct UndoInfo {
     pub previous_hash: u64,
     /// Previous ply count
     pub previous_ply: u16,
+    /// Square the piece moved from (None for drops/null moves)
+    pub moved_from: Option<Square>,
+    /// Square the piece moved to (None for null moves)
+    pub moved_to: Option<Square>,
+    /// Piece type that moved (None for null moves)
+    pub moved_piece_type: Option<PieceType>,
+    /// Color of the moving piece (None for null moves)
+    pub moved_piece_color: Option<Color>,
+    /// Whether the move was a king move
+    pub king_moved: bool,
+    /// King bitboards before the move (indexed by color as usize)
+    pub king_bb_before: [Bitboard; 2],
+    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+    /// Diagnostic: original from-square for undo verification
+    pub diag_from: Option<Square>,
+    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+    /// Diagnostic: piece type that moved from the source square
+    pub diag_piece_type: Option<PieceType>,
+    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+    /// Diagnostic: king squares snapshot prior to the move
+    pub diag_kings: [Option<Square>; 2],
 }
 
 /// Position structure
@@ -41,6 +62,9 @@ pub struct Position {
 
     /// History for repetition detection
     pub history: Vec<u64>,
+
+    /// Epoch counter that increments whenever the position state changes.
+    state_epoch: u64,
 }
 
 impl Position {
@@ -54,6 +78,7 @@ impl Position {
             hash: 0,
             zobrist_hash: 0,
             history: Vec::new(),
+            state_epoch: 0,
         }
     }
 
@@ -196,6 +221,18 @@ impl Position {
         pos.ply = 0;
 
         pos
+    }
+
+    /// 現在の state epoch を取得する。
+    #[inline]
+    pub fn state_epoch(&self) -> u64 {
+        self.state_epoch
+    }
+
+    #[inline]
+    pub(crate) fn bump_epoch(&mut self) {
+        // 64bit ラップアラウンドは実用上問題とならない。
+        self.state_epoch = self.state_epoch.wrapping_add(1);
     }
 
     /// Create position from SFEN string
