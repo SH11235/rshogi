@@ -1,137 +1,91 @@
 # エンジンタイプ選択ガイド
 
-## 概要
+このドキュメントは、`EngineType` の選び方と `SearchProfile`/`SearchParams` の連携をまとめた最新ガイドです。すべての EngineType は `ClassicBackend` 上で動作し、評価器とプロファイルを組み合わせて性格付けしています。
 
-本将棋エンジンは4つのエンジンタイプを提供しており、用途に応じて選択できます。
+---
 
-## エンジンタイプ一覧
+## 1. エンジンタイプ概要
 
-| タイプ | 探索アルゴリズム | 評価関数 | 推奨用途 |
-|--------|-----------------|----------|----------|
-| **EnhancedNnue** | Enhanced (高度な枝刈り) | NNUE | **最強設定・対局** |
-| **Nnue** | Basic (シンプル) | NNUE | 高速分析・検証 |
-| **Enhanced** | Enhanced (高度な枝刈り) | 駒割り | 軽量環境・学習 |
-| **Material** | Basic (シンプル) | 駒割り | デバッグ・テスト |
+| EngineType | Evaluator | SearchProfile | 代表用途 | 備考 |
+|------------|-----------|---------------|----------|------|
+| Material | MaterialEvaluator | `basic_material()` | デバッグ・テスト | 枝刈り最小 / 駒割り評価 |
+| Enhanced | MaterialEvaluator | `enhanced_material()` | 省メモリ・学習 | フル枝刈り + 駒割り評価 |
+| Nnue | NNUEEvaluatorProxy | `basic_nnue()` | 高速分析 | NNUE 評価 + 基本枝刈り |
+| EnhancedNnue | NNUEEvaluatorProxy | `enhanced_nnue()` | 対局・最強設定 | NNUE 評価 + フル枝刈り |
 
-## 詳細説明
+`Engine::set_engine_type()` を呼ぶと、該当する `SearchProfile` が `SearchParams` のランタイム値を既定にリセットします。個別チューニングを残したい場合は、切り替え後に `setoption name SearchParams.*` を再送してください。
+
+---
+
+## 2. SearchProfile と SearchParams の連携
+
+`SearchProfile` は枝刈りトグルと数値パラメータを束ねたテンプレートです。EngineType 切り替え時に `SearchProfile::apply_runtime_defaults()` が呼ばれ、以下のパラメータが既定値へ更新されます。
+
+- LMR/LMP/HP/SBP/ProbCut/IID などの数値 (`SearchParams.LMR_K_x100`, `LMP_D{1,2,3}`, `HP_Threshold`, `SBP_{D1,D2}`, `ProbCut_{D5,D6P}`, `IID_MinDepth`)
+- 枝刈りトグル (`EnableNMP`, `EnableIID`, `EnableProbCut`, `EnableStaticBeta`, `Razor`, `QSearchChecks`)
+
+### プロファイルごとの主な差分
+
+| SearchProfileKind | 特徴 | 無効化される枝刈り | Razor / Quiet-Check |
+|-------------------|------|----------------------|---------------------|
+| `BasicMaterial` | 駒割り評価 + 基本枝刈り | IID / ProbCut / Razor | Razor Off / Quiet On |
+| `BasicNnue` | NNUE 評価 + 基本枝刈り | IID / ProbCut / Razor | Razor Off / Quiet On |
+| `EnhancedMaterial` | 駒割り評価 + フル枝刈り | ― | Razor On / Quiet On |
+| `EnhancedNnue` | NNUE 評価 + フル枝刈り | ― | Razor On / Quiet On |
+
+Runtime で枝刈りを止めたいときは、例として `setoption name SearchParams.EnableNMP value false` を送信します。プロファイルを切り替えると再び既定値に戻る点に注意してください。
+
+> **メモ:** SearchProfile が無効化している枝刈りをランタイムで `On` にしても有効にならない場合があります。その際は USI `info string pruning_note=...` が通知されます。基本プロファイルは `EnableIID/ProbCut/Razor` を `false` にしているため、ランタイムで `On` にしても警告が出るのが正常です。
+
+---
+
+## 3. 各エンジンタイプの詳細
 
 ### EnhancedNnue（推奨）
-- **最強の組み合わせ**
-- 高度な探索技術（Null Move Pruning、LMR、Futility Pruning等）
-- NNUE評価関数による精密な局面評価
-- トランスポジションテーブル（16MB）による効率化
-- 深い読みが可能（同じ時間でより多くの手を読める）
-
-```
-setoption name EngineType value EnhancedNnue
-```
+- NNUE 評価 + フル枝刈りにより最大の棋力。
+- 推奨設定例
+  ```
+  setoption name EngineType value EnhancedNnue
+  setoption name USI_Hash value 256
+  setoption name Threads value 4
+  ```
 
 ### Nnue
-- シンプルな探索 + NNUE評価
-- 安定した動作
-- 評価関数の性能を純粋に活用
-- 浅い探索では高速
-
-```
-setoption name EngineType value Nnue
-```
+- NNUE 評価 + 基本枝刈り。
+- 浅い探索を高速に回す用途に適しています。
 
 ### Enhanced
-- 高度な探索技術 + シンプルな駒割り評価
-- メモリ効率が良い（NNUE不要）
-- 探索技術の学習に適している
-- 軽量環境での使用に適している
-
-```
-setoption name EngineType value Enhanced
-```
+- 駒割り評価 + フル枝刈り。
+- NNUE を使わずに深く読みたい場合や省メモリ環境向け。
 
 ### Material
-- 最もシンプルな実装
-- デバッグやテストに最適
-- 動作が予測可能
-- 教育目的に適している
+- 駒割り評価 + 基本枝刈り。
+- デバッグや学習用途に最適。（低コストで挙動が追いやすい）
 
-```
-setoption name EngineType value Material
-```
+## 4. シナリオ別推奨設定
 
-## 性能比較（目安）
+| シナリオ | 推奨 EngineType | 主なオプション例 |
+|----------|-----------------|-------------------|
+| 競技対局・長考 | EnhancedNnue | `USI_Hash=256`, `Threads>=4`, 必要なら `EvalFile` 設定 |
+| 高速検討・短考 | Nnue | `USI_Hash=128`, `Threads=2` |
+| 省メモリ環境 | Enhanced | `USI_Hash=16`, `Threads=1` |
+| デバッグ／教育 | Material | `USI_Hash=16`, `Threads=1` |
 
-同じ思考時間での相対的な強さ（Material = 1.0として）：
+`SearchParams` を手動でいじった場合は、切り替え前に `SearchParams.Dump` を実装予定（TODO）とするなど、再適用の手順を決めておくと管理が楽になります。
 
-| エンジンタイプ | 相対強度 | 探索深度 | メモリ使用量 |
-|---------------|---------|----------|--------------|
-| EnhancedNnue | 4.0-5.0 | 深い（10-15手） | 大（200MB+） |
-| Nnue | 2.5-3.0 | 標準（6-10手） | 中（170MB） |
-| Enhanced | 2.0-2.5 | 深い（8-12手） | 小（20MB） |
-| Material | 1.0 | 標準（5-8手） | 最小（5MB） |
+---
 
-## 使用シーン別推奨設定
+## 5. 技術メモ
 
-### 対局・大会
-```
-setoption name EngineType value EnhancedNnue
-setoption name USI_Hash value 256
-setoption name Threads value 4
-```
+- **Enhanced 系枝刈り**: Null Move、LMR、Futility、ProbCut、IID などを段階的に適用。`SearchProfile` が既定の有効/無効を決め、`SearchParams` で細かく調整可能。
+- **NNUE 評価**: HalfKP 256x2-32-32-1 アーキテクチャ。重みファイルが必要なため `setoption name EvalFile value <path>` を忘れずに。
+- **スタック/メモリ**: 深い探索を行う場合は `export RUST_MIN_STACK=8388608` などスタックサイズを確保。TT サイズは `setoption name USI_Hash` で調整します。
+- **Threads オプション**: 現状 ClassicBackend は単スレ実装です。`setoption name Threads` を受理した際は `info string` で「現時点では無効」などの通知を出しています（将来 LazySMP 導入予定）。
 
-### 高速分析
-```
-setoption name EngineType value Nnue
-setoption name USI_Hash value 128
-setoption name Threads value 2
-```
+---
 
-### 省メモリ環境
-```
-setoption name EngineType value Enhanced
-setoption name USI_Hash value 16
-setoption name Threads value 1
-```
+## 6. まとめ
 
-### デバッグ・開発
-```
-setoption name EngineType value Material
-setoption name USI_Hash value 16
-setoption name Threads value 1
-```
-
-## 技術詳細
-
-### Enhanced探索の特徴
-- **Null Move Pruning**: 相手に2手連続で指させて早期枝刈り
-- **Late Move Reductions (LMR)**: 後半の手を浅く探索
-- **Futility Pruning**: 明らかに悪い手を探索しない
-- **Transposition Table**: 同一局面の探索結果をキャッシュ
-- **History Heuristics**: 過去の探索で良かった手を優先
-- **Aspiration Window**: 前回の評価値を基に探索窓を狭める
-
-### NNUE評価関数の特徴
-- **HalfKP 256x2-32-32-1アーキテクチャ**
-- 王の位置を基準とした特徴量抽出
-- 差分計算による高速更新
-- 学習済み重みファイルが必要
-
-## 注意事項
-
-1. **スタックサイズ**: EnhancedNnueは大きなスタックを必要とする場合があります
-   ```bash
-   export RUST_MIN_STACK=8388608
-   ```
-
-2. **NNUE重みファイル**: Nnue/EnhancedNnueを使用する場合は重みファイルが必要です
-   ```
-   setoption name EvalFile value path/to/weights.nnue
-   ```
-
-3. **メモリ使用量**: EnhancedタイプはTransposition Tableのため追加メモリを使用します
-
-## まとめ
-
-- **最強を求める場合**: EnhancedNnue
-- **バランス重視**: Nnue
-- **軽量環境**: Enhanced
-- **学習・デバッグ**: Material
-
-基本的には**EnhancedNnue**の使用を推奨します。これは高度な探索技術とNNUE評価関数の組み合わせにより、最も強力な棋力を発揮します。
+1. EngineType と SearchProfile が 1:1 で対応し、切り替え時に `SearchParams` が既定値へ戻る。
+2. いつでも `setoption name SearchParams.*` で個別調整が可能だが、EngineType を変えたら再送が必要。
+迷ったら「EnhancedNnue + 十分な TT（≥256MB） + 必要な Threads（現状 1 thread 固定）」を基本形にし、用途に応じて Material / Enhanced / Nnue を選択してください。

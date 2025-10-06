@@ -268,6 +268,7 @@ fn test_do_move_special_promotion_cases() {
     let mv2 = Move::normal(parse_usi_square("5b").unwrap(), parse_usi_square("5a").unwrap(), true);
     // Note: This move would capture the king, so we need a different setup
     pos.board.remove_piece(parse_usi_square("5a").unwrap());
+    pos.board.remove_piece(parse_usi_square("9a").unwrap());
     pos.board
         .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
     pos.board.rebuild_occupancy_bitboards();
@@ -620,8 +621,6 @@ fn test_do_null_move_undo_null_move() {
     assert_eq!(pos.ply, pos_after_move.ply);
 }
 
-// ========= Drop restriction tests (migrated from MovePicker tests) =========
-
 #[test]
 fn test_pawn_drop_restrictions() {
     // Test nifu (double pawn) restriction
@@ -825,8 +824,6 @@ fn test_knight_drop_last_two_ranks_restrictions() {
     let legal_drop = Move::drop(PieceType::Knight, parse_usi_square("5g").unwrap()); // 5g
     assert!(pos.is_legal_move(legal_drop), "White should be able to drop knight on rank 6");
 }
-
-// ========= Uchifuzume tests (migrated from MovePicker tests) =========
 
 #[test]
 fn test_uchifuzume_restriction() {

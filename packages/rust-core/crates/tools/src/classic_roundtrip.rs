@@ -1001,7 +1001,7 @@ mod tests {
         file.write_all(b"NNUE").unwrap();
         file.write_all(&1u32.to_le_bytes()).unwrap();
         file.write_all(&CLASSIC_V1_ARCH_ID.to_le_bytes()).unwrap();
-        file.write_all(&(total_size as u32).to_le_bytes()).unwrap();
+        file.write_all(&total_size.to_le_bytes()).unwrap();
 
         let ft_weights: [i16; 8] = [32, 16, 20, 8, 12, 24, 10, 6];
         for v in ft_weights.iter() {
@@ -1239,8 +1239,7 @@ mod tests {
         assert_eq!(loaded.output_bias, output_bias);
 
         let features_us: Vec<usize> = vec![0, 1];
-        let features_them: Vec<usize> =
-            features_us.iter().map(|&f| flip_us_them(f) as usize).collect();
+        let features_them: Vec<usize> = features_us.iter().map(|&f| flip_us_them(f)).collect();
         let outputs_loaded = loaded.forward(&features_us, &features_them);
         assert!(outputs_loaded.output.is_finite());
     }
@@ -1252,11 +1251,11 @@ mod tests {
 
         let ft_weights = vec![0i16; 8];
         let ft_biases = vec![0i32; 2];
-        let hidden1_weights = vec![0i8; 8];
+        let hidden1_weights = [0i8; 8];
         let hidden1_biases = vec![0i32; 2];
-        let hidden2_weights = vec![0i8; 2];
+        let hidden2_weights = [0i8; 2];
         let hidden2_biases = vec![0i32; 1];
-        let output_weights = vec![0i8; 1];
+        let output_weights = [0i8; 1];
         let output_bias = 0i32;
 
         {
@@ -1545,7 +1544,7 @@ mod tests {
 
         let mut value: serde_json::Value =
             serde_json::from_reader(File::open(&scales_path).unwrap()).unwrap();
-        let canonical = (SHOGI_BOARD_SIZE * FE_END + 1) as usize;
+        let canonical = SHOGI_BOARD_SIZE * FE_END + 1;
         value["input_dim"] = serde_json::json!(canonical);
         serde_json::to_writer_pretty(File::create(&scales_path).unwrap(), &value).unwrap();
 

@@ -2,21 +2,28 @@
 //!
 //! Tracks the success rate of moves in different contexts to improve move ordering
 
+use crate::search::ab::ordering::constants::{
+    CAP_HISTORY_AGING_SHIFT, CAP_HISTORY_BONUS_FACTOR, CAP_HISTORY_MAX, CAP_HISTORY_SHIFT,
+    CONT_HISTORY_AGING_SHIFT, CONT_HISTORY_BONUS_FACTOR, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT,
+    QUIET_HISTORY_AGING_SHIFT, QUIET_HISTORY_BONUS_FACTOR, QUIET_HISTORY_MAX, QUIET_HISTORY_SHIFT,
+};
 use crate::shogi::board::NUM_PIECE_TYPES;
+use crate::shogi::piece_constants::NUM_HAND_PIECE_TYPES;
 use crate::shogi::SHOGI_BOARD_SIZE;
 use crate::{shogi::Move, Color, PieceType, Square};
 
-/// Maximum history score
-const MAX_HISTORY_SCORE: i32 = 10000;
-
-/// History aging divisor (applied periodically to prevent overflow)
-const HISTORY_AGING_DIVISOR: i32 = 2;
-
 /// Counter move history - tracks which moves work well after specific moves
+const COUNTER_DROP_DIM: usize = NUM_HAND_PIECE_TYPES;
+const COUNTER_FROM_DIM: usize = SHOGI_BOARD_SIZE + COUNTER_DROP_DIM;
+/// Offset to the dedicated "drop-from" slots (one per hand piece type).
+const COUNTER_DROP_BASE: usize = SHOGI_BOARD_SIZE;
+const CONT_PREV_DROP_DIM: usize = 2;
+const CONT_CURR_DROP_DIM: usize = 2;
+
 #[derive(Clone)]
 pub struct CounterMoveHistory {
-    /// [color][from_square][to_square] -> counter move
-    table: [[[Option<Move>; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+    /// [color][from_square_or_drop][to_square] -> counter move
+    table: [[[Option<Move>; SHOGI_BOARD_SIZE]; COUNTER_FROM_DIM]; 2],
 }
 
 impl Default for CounterMoveHistory {
@@ -29,45 +36,63 @@ impl CounterMoveHistory {
     /// Create new counter move history
     pub fn new() -> Self {
         CounterMoveHistory {
-            table: [[[None; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+            table: [[[None; SHOGI_BOARD_SIZE]; COUNTER_FROM_DIM]; 2],
         }
     }
 
     /// Get counter move for previous move
+    #[inline]
     pub fn get(&self, color: Color, prev_move: Move) -> Option<Move> {
-        if prev_move.is_drop() {
-            // For drops, use a special index (e.g., square 0)
-            self.table[color as usize][0][prev_move.to().index()]
+        let from_idx = if prev_move.is_drop() {
+            drop_from_index(prev_move)
         } else {
-            let from = prev_move.from().unwrap();
-            let to = prev_move.to();
-            self.table[color as usize][from.index()][to.index()]
-        }
+            prev_move.from().unwrap().index()
+        };
+        let to = prev_move.to();
+        self.table[color as usize][from_idx][to.index()]
     }
 
     /// Update counter move
+    #[inline]
     pub fn update(&mut self, color: Color, prev_move: Move, counter_move: Move) {
-        if prev_move.is_drop() {
-            self.table[color as usize][0][prev_move.to().index()] = Some(counter_move);
+        let from_idx = if prev_move.is_drop() {
+            drop_from_index(prev_move)
         } else {
-            let from = prev_move.from().unwrap();
-            let to = prev_move.to();
-            self.table[color as usize][from.index()][to.index()] = Some(counter_move);
-        }
+            prev_move.from().unwrap().index()
+        };
+        let to = prev_move.to();
+        self.table[color as usize][from_idx][to.index()] = Some(counter_move);
     }
 
     /// Clear all counter moves
     pub fn clear(&mut self) {
-        self.table = [[[None; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2];
+        self.table = [[[None; SHOGI_BOARD_SIZE]; COUNTER_FROM_DIM]; 2];
     }
+}
+
+#[inline]
+fn drop_from_index(mv: Move) -> usize {
+    debug_assert!(mv.is_drop(), "drop_from_index called with non-drop move");
+    mv.drop_piece_type()
+        .hand_index()
+        .map(|hand_idx| COUNTER_DROP_BASE + hand_idx)
+        .unwrap_or_else(|| panic!("CounterMoveHistory: drop piece must have hand index (mv={mv})"))
 }
 
 /// Butterfly history - tracks move success by from-to squares
 #[derive(Clone)]
 pub struct ButterflyHistory {
-    /// [color][from_square][to_square] -> score
-    scores: [[[i32; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+    /// [color][from_square_or_drop][to_square] -> score
+    scores: [[[i16; SHOGI_BOARD_SIZE]; BUTTERFLY_FROM_DIM]; 2],
 }
+
+const BUTTERFLY_FROM_DIM: usize = SHOGI_BOARD_SIZE + 1;
+/// Shared "drop-from" slot for all piece types (non-overlapping with board squares).
+const BUTTERFLY_DROP_INDEX: usize = SHOGI_BOARD_SIZE;
+const _: () = {
+    // Ensure drop slot remains disjoint from board squares.
+    assert!(BUTTERFLY_DROP_INDEX == SHOGI_BOARD_SIZE);
+};
 
 impl Default for ButterflyHistory {
     fn default() -> Self {
@@ -79,57 +104,53 @@ impl ButterflyHistory {
     /// Create new butterfly history
     pub fn new() -> Self {
         ButterflyHistory {
-            scores: [[[0; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
+            scores: [[[0; SHOGI_BOARD_SIZE]; BUTTERFLY_FROM_DIM]; 2],
         }
     }
 
     /// Get history score for a move
+    #[inline]
     pub fn get(&self, color: Color, mv: Move) -> i32 {
-        if mv.is_drop() {
-            // For drops, use a special scoring
-            self.scores[color as usize][0][mv.to().index()]
+        let raw = if mv.is_drop() {
+            self.scores[color as usize][BUTTERFLY_DROP_INDEX][mv.to().index()]
         } else {
             let from = mv.from().unwrap();
             let to = mv.to();
             self.scores[color as usize][from.index()][to.index()]
-        }
+        };
+        i32::from(raw)
     }
 
     /// Update history score with bonus
     pub fn update_good(&mut self, color: Color, mv: Move, depth: i32) {
-        let bonus = depth * depth; // Quadratic bonus based on depth
+        let bonus = scaled_bonus(depth, QUIET_HISTORY_BONUS_FACTOR);
         self.add_bonus(color, mv, bonus);
     }
 
     /// Update history score with penalty
     pub fn update_bad(&mut self, color: Color, mv: Move, depth: i32) {
-        let penalty = -(depth * depth); // Quadratic penalty based on depth
+        let penalty = -scaled_bonus(depth, QUIET_HISTORY_BONUS_FACTOR);
         self.add_bonus(color, mv, penalty);
     }
 
     /// Add bonus/penalty to history score
     fn add_bonus(&mut self, color: Color, mv: Move, bonus: i32) {
         let (from_idx, to_idx) = if mv.is_drop() {
-            (0, mv.to().index())
+            (BUTTERFLY_DROP_INDEX, mv.to().index())
         } else {
             (mv.from().unwrap().index(), mv.to().index())
         };
 
         let score = &mut self.scores[color as usize][from_idx][to_idx];
-
-        // Use a formula that prevents overflow and maintains relative ordering
-        *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
-
-        // Clamp to maximum
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        apply_history_update(score, bonus, QUIET_HISTORY_MAX, QUIET_HISTORY_SHIFT);
     }
 
-    /// Age all history scores (divide by 2) to prevent overflow
+    /// Age all history scores to prevent drift and overflow
     pub fn age_scores(&mut self) {
         for color_scores in &mut self.scores {
             for from_scores in color_scores {
                 for score in from_scores {
-                    *score /= HISTORY_AGING_DIVISOR;
+                    age_value(score, QUIET_HISTORY_AGING_SHIFT);
                 }
             }
         }
@@ -137,17 +158,52 @@ impl ButterflyHistory {
 
     /// Clear all history scores
     pub fn clear(&mut self) {
-        self.scores = [[[0; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2];
+        self.scores = [[[0; SHOGI_BOARD_SIZE]; BUTTERFLY_FROM_DIM]; 2];
     }
 }
 
 /// Continuation history - tracks move success in context of previous moves
 #[derive(Clone)]
 pub struct ContinuationHistory {
-    /// [color][piece_moved_2_ply_ago][to_square_2_ply_ago][piece_to_move][to_square] -> score
-    /// Using simplified indexing for memory efficiency
-    scores: Vec<i32>,
+    /// [color][prev_piece][prev_to][prev_is_drop?][curr_piece][curr_to][curr_is_drop?] -> score
+    /// Stored as i16 to reduce footprint（約6.7MB）
+    scores: Vec<i16>,
     size: usize,
+}
+
+/// 2手継続（Continuation）ヒストリ参照キー
+#[derive(Copy, Clone, Debug)]
+pub struct ContinuationKey {
+    pub color: Color,
+    pub prev_piece: usize,
+    pub prev_to: Square,
+    pub prev_is_drop: bool,
+    pub curr_piece: usize,
+    pub curr_to: Square,
+    pub curr_is_drop: bool,
+}
+
+impl ContinuationKey {
+    #[inline]
+    pub fn new(
+        color: Color,
+        prev_piece: usize,
+        prev_to: Square,
+        prev_is_drop: bool,
+        curr_piece: usize,
+        curr_to: Square,
+        curr_is_drop: bool,
+    ) -> Self {
+        Self {
+            color,
+            prev_piece,
+            prev_to,
+            prev_is_drop,
+            curr_piece,
+            curr_to,
+            curr_is_drop,
+        }
+    }
 }
 
 impl Default for ContinuationHistory {
@@ -159,89 +215,76 @@ impl Default for ContinuationHistory {
 impl ContinuationHistory {
     /// Create new continuation history
     pub fn new() -> Self {
-        // Simplified: 2 colors * 16 piece types * N squares * 16 piece types * N squares
-        // This is large but manageable (~3.4MB)
-        let size = 2 * 16 * SHOGI_BOARD_SIZE * 16 * SHOGI_BOARD_SIZE;
+        let piece_dim = NUM_PIECE_TYPES;
+        // 2 (colors) * CONT_PREV_DROP_DIM * piece_dim * N * CONT_CURR_DROP_DIM * piece_dim * N ≒ 6.7MB at i16
+        let size = 2
+            * CONT_PREV_DROP_DIM
+            * piece_dim
+            * SHOGI_BOARD_SIZE
+            * CONT_CURR_DROP_DIM
+            * piece_dim
+            * SHOGI_BOARD_SIZE;
         ContinuationHistory {
-            scores: vec![0; size],
+            scores: vec![0i16; size],
             size,
         }
     }
 
     /// Calculate index for continuation history
-    fn index(
-        &self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-    ) -> usize {
-        let color_idx = color as usize;
+    fn index(&self, key: &ContinuationKey) -> usize {
+        let color_idx = key.color as usize;
         let n = SHOGI_BOARD_SIZE;
-        let idx = color_idx * (16 * n * 16 * n)
-            + prev_piece * (n * 16 * n)
-            + prev_to.index() * (16 * n)
-            + curr_piece * n
-            + curr_to.index();
+        let piece_dim = NUM_PIECE_TYPES;
+        let prev_drop_idx = if key.prev_is_drop { 1 } else { 0 };
+        let curr_drop_idx = if key.curr_is_drop { 1 } else { 0 };
+
+        let stride_prev_drop = piece_dim * n * CONT_CURR_DROP_DIM * piece_dim * n;
+        let stride_prev_piece = n * CONT_CURR_DROP_DIM * piece_dim * n;
+        let stride_prev_to = CONT_CURR_DROP_DIM * piece_dim * n;
+        let stride_curr_drop = piece_dim * n;
+        let stride_curr_piece = n;
+
+        let mut idx = color_idx * CONT_PREV_DROP_DIM * stride_prev_drop;
+        idx += prev_drop_idx * stride_prev_drop;
+        idx += key.prev_piece * stride_prev_piece;
+        idx += key.prev_to.index() * stride_prev_to;
+        idx += curr_drop_idx * stride_curr_drop;
+        idx += key.curr_piece * stride_curr_piece;
+        idx += key.curr_to.index();
 
         debug_assert!(idx < self.size);
         idx
     }
 
     /// Get continuation history score
-    pub fn get(
-        &self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-    ) -> i32 {
-        let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-        self.scores[idx]
+    pub fn get(&self, key: ContinuationKey) -> i32 {
+        let idx = self.index(&key);
+        i32::from(self.scores[idx])
     }
 
     /// Update continuation history with bonus
-    pub fn update_good(
-        &mut self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-        depth: i32,
-    ) {
-        let bonus = depth * depth;
-        let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
-
-        let score = &mut self.scores[idx];
-        *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+    pub fn update_good(&mut self, key: ContinuationKey, depth: i32) {
+        self.apply_update(key, depth, true);
     }
 
-    /// Update continuation history with penalty
-    pub fn update_bad(
-        &mut self,
-        color: Color,
-        prev_piece: usize,
-        prev_to: Square,
-        curr_piece: usize,
-        curr_to: Square,
-        depth: i32,
-    ) {
-        let penalty = -(depth * depth);
-        let idx = self.index(color, prev_piece, prev_to, curr_piece, curr_to);
+    /// Update continuation history with penalty (bad move)
+    pub fn update_bad(&mut self, key: ContinuationKey, depth: i32) {
+        self.apply_update(key, depth, false);
+    }
 
+    #[inline]
+    fn apply_update(&mut self, key: ContinuationKey, depth: i32, good: bool) {
+        let bonus = scaled_bonus(depth, CONT_HISTORY_BONUS_FACTOR);
+        let delta = if good { bonus } else { -bonus };
+        let idx = self.index(&key);
         let score = &mut self.scores[idx];
-        *score += penalty - (*score * penalty.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        apply_history_update(score, delta, CONT_HISTORY_MAX, CONT_HISTORY_SHIFT);
     }
 
     /// Age all continuation history scores
     pub fn age_scores(&mut self) {
         for score in &mut self.scores {
-            *score /= HISTORY_AGING_DIVISOR;
+            age_value(score, CONT_HISTORY_AGING_SHIFT);
         }
     }
 
@@ -251,11 +294,11 @@ impl ContinuationHistory {
     }
 }
 
-/// Capture history - tracks success of captures by piece types
+/// Capture history - tracks success of captures by attacker/victim/to square
 #[derive(Clone)]
 pub struct CaptureHistory {
-    /// [color][attacker_piece][victim_piece] -> score
-    scores: [[[i32; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
+    /// [color][attacker_piece][victim_piece][to_square] -> score
+    scores: [[[[i16; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
 }
 
 impl Default for CaptureHistory {
@@ -268,13 +311,13 @@ impl CaptureHistory {
     /// Create new capture history
     pub fn new() -> Self {
         CaptureHistory {
-            scores: [[[0; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
+            scores: [[[[0; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
         }
     }
 
     /// Get capture history score
-    pub fn get(&self, color: Color, attacker: PieceType, victim: PieceType) -> i32 {
-        self.scores[color as usize][attacker as usize][victim as usize]
+    pub fn get(&self, color: Color, attacker: PieceType, victim: PieceType, to: Square) -> i32 {
+        i32::from(self.scores[color as usize][attacker as usize][victim as usize][to.index()])
     }
 
     /// Update capture history with bonus
@@ -283,28 +326,38 @@ impl CaptureHistory {
         color: Color,
         attacker: PieceType,
         victim: PieceType,
+        to: Square,
         depth: i32,
     ) {
-        let bonus = depth * depth;
-        let score = &mut self.scores[color as usize][attacker as usize][victim as usize];
-        *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+        let bonus = scaled_bonus(depth, CAP_HISTORY_BONUS_FACTOR);
+        let score =
+            &mut self.scores[color as usize][attacker as usize][victim as usize][to.index()];
+        apply_history_update(score, bonus, CAP_HISTORY_MAX, CAP_HISTORY_SHIFT);
     }
 
     /// Update capture history with penalty
-    pub fn update_bad(&mut self, color: Color, attacker: PieceType, victim: PieceType, depth: i32) {
-        let penalty = -(depth * depth);
-        let score = &mut self.scores[color as usize][attacker as usize][victim as usize];
-        *score += penalty - (*score * penalty.abs() / MAX_HISTORY_SCORE);
-        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+    pub fn update_bad(
+        &mut self,
+        color: Color,
+        attacker: PieceType,
+        victim: PieceType,
+        to: Square,
+        depth: i32,
+    ) {
+        let penalty = -scaled_bonus(depth, CAP_HISTORY_BONUS_FACTOR);
+        let score =
+            &mut self.scores[color as usize][attacker as usize][victim as usize][to.index()];
+        apply_history_update(score, penalty, CAP_HISTORY_MAX, CAP_HISTORY_SHIFT);
     }
 
     /// Age all capture history scores
     pub fn age_scores(&mut self) {
         for color_scores in &mut self.scores {
             for attacker_scores in color_scores {
-                for score in attacker_scores {
-                    *score /= HISTORY_AGING_DIVISOR;
+                for victim_scores in attacker_scores {
+                    for score in victim_scores {
+                        age_value(score, CAP_HISTORY_AGING_SHIFT);
+                    }
                 }
             }
         }
@@ -312,7 +365,13 @@ impl CaptureHistory {
 
     /// Clear all capture history
     pub fn clear(&mut self) {
-        self.scores = [[[0; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2];
+        for color_scores in &mut self.scores {
+            for attacker_scores in color_scores {
+                for victim_scores in attacker_scores {
+                    victim_scores.fill(0);
+                }
+            }
+        }
     }
 }
 
@@ -353,18 +412,18 @@ impl History {
         // Add continuation history if we have context
         if let Some(prev_mv) = prev_move {
             if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
-                // Ensure prev_move was not a drop (needs a destination square)
-                if !prev_mv.is_drop() {
-                    let prev_to = prev_mv.to();
-                    let curr_to = mv.to();
-                    score += self.continuation.get(
-                        color,
-                        prev_piece as usize,
-                        prev_to,
-                        curr_piece as usize,
-                        curr_to,
-                    );
-                }
+                let prev_to = prev_mv.to();
+                let curr_to = mv.to();
+                let key = ContinuationKey::new(
+                    color,
+                    prev_piece as usize,
+                    prev_to,
+                    prev_mv.is_drop(),
+                    curr_piece as usize,
+                    curr_to,
+                    mv.is_drop(),
+                );
+                score += self.continuation.get(key);
             }
         }
 
@@ -378,18 +437,18 @@ impl History {
         // Update continuation history if we have piece type info
         if let Some(prev_mv) = prev_move {
             if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
-                if !prev_mv.is_drop() && !mv.is_drop() {
-                    let prev_to = prev_mv.to();
-                    let curr_to = mv.to();
-                    self.continuation.update_good(
-                        color,
-                        prev_piece as usize,
-                        prev_to,
-                        curr_piece as usize,
-                        curr_to,
-                        depth,
-                    );
-                }
+                let prev_to = prev_mv.to();
+                let curr_to = mv.to();
+                let key = ContinuationKey::new(
+                    color,
+                    prev_piece as usize,
+                    prev_to,
+                    prev_mv.is_drop(),
+                    curr_piece as usize,
+                    curr_to,
+                    mv.is_drop(),
+                );
+                self.continuation.update_good(key, depth);
             }
         }
     }
@@ -401,23 +460,26 @@ impl History {
         // Update continuation history if we have piece type info
         if let Some(prev_mv) = prev_move {
             if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
-                if !prev_mv.is_drop() && !mv.is_drop() {
-                    let prev_to = prev_mv.to();
-                    let curr_to = mv.to();
-                    self.continuation.update_bad(
-                        color,
-                        prev_piece as usize,
-                        prev_to,
-                        curr_piece as usize,
-                        curr_to,
-                        depth,
-                    );
-                }
+                let prev_to = prev_mv.to();
+                let curr_to = mv.to();
+                let key = ContinuationKey::new(
+                    color,
+                    prev_piece as usize,
+                    prev_to,
+                    prev_mv.is_drop(),
+                    curr_piece as usize,
+                    curr_to,
+                    mv.is_drop(),
+                );
+                self.continuation.update_bad(key, depth);
             }
         }
     }
 
     /// Age all history scores periodically
+    ///
+    /// Note: counter moveテーブルは「直近ヒットのみ保持」する設計なので
+    /// aging の対象にはしていない。
     pub fn age_all(&mut self) {
         self.butterfly.age_scores();
         self.continuation.age_scores();
@@ -433,8 +495,39 @@ impl History {
     }
 }
 
+fn scaled_bonus(depth: i32, factor: i32) -> i32 {
+    let d = depth.max(1);
+    let sq = d.saturating_mul(d);
+    sq.saturating_mul(factor)
+}
+
+fn apply_history_update(value: &mut i16, bonus: i32, max: i16, shift: u32) {
+    let current = i32::from(*value);
+    let delta = if shift == 0 {
+        bonus - current
+    } else {
+        (bonus - current) >> shift
+    };
+    let next = current.saturating_add(delta);
+    let limit = i32::from(max);
+    *value = next.clamp(-limit, limit) as i16;
+}
+
+fn age_value(value: &mut i16, shift: u32) {
+    if shift == 0 {
+        return;
+    }
+    let current = i32::from(*value);
+    let delta = current >> shift;
+    let next = current - delta;
+    *value = next as i16;
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::search::ab::ordering::constants::{
+        CAP_HISTORY_MAX, CONT_HISTORY_MAX, QUIET_HISTORY_MAX,
+    };
     use crate::{usi::parse_usi_square, Color, PieceType};
 
     use super::*;
@@ -451,17 +544,21 @@ mod tests {
 
         // Update with good move
         history.update_good(color, mv, 5);
-        assert!(history.get(color, mv) > 0);
+        let after_good = history.get(color, mv);
+        assert!(after_good > 0);
+        assert!(after_good <= i32::from(QUIET_HISTORY_MAX));
 
         // Update with bad move
         history.update_bad(color, mv, 3);
-        let score = history.get(color, mv);
-        assert!(score < 25); // Should be reduced but still positive
+        let after_bad = history.get(color, mv);
+        assert!(after_bad <= after_good);
+        assert!(after_bad >= -i32::from(QUIET_HISTORY_MAX));
 
         // Test aging
-        let old_score = history.get(color, mv);
+        let magnitude_before = after_bad.abs();
         history.age_scores();
-        assert_eq!(history.get(color, mv), old_score / 2);
+        let aged = history.get(color, mv);
+        assert!(aged.abs() <= magnitude_before);
     }
 
     #[test]
@@ -483,6 +580,80 @@ mod tests {
     }
 
     #[test]
+    fn test_counter_move_drop_piece_type_separation() {
+        let mut history = CounterMoveHistory::new();
+        let color = Color::Black;
+
+        let drop_square = parse_usi_square("5e").unwrap();
+        let board_from_files = ["1a", "2a", "3a", "4a", "5a", "6a", "7a"];
+        let board_to_files = ["1b", "2b", "3b", "4b", "5b", "6b", "7b"];
+
+        for hand_idx in 0..NUM_HAND_PIECE_TYPES {
+            let piece = PieceType::from_hand_index(hand_idx).expect("hand index maps to piece");
+            let drop = Move::drop(piece, drop_square);
+            let counter = Move::normal(
+                parse_usi_square(board_from_files[hand_idx]).unwrap(),
+                parse_usi_square(board_to_files[hand_idx]).unwrap(),
+                false,
+            );
+            history.update(color, drop, counter);
+            assert_eq!(history.get(color, drop), Some(counter));
+        }
+
+        // 再度ループして他駒種の学習結果が混ざっていないことを確認
+        for hand_idx in 0..NUM_HAND_PIECE_TYPES {
+            let piece = PieceType::from_hand_index(hand_idx).expect("hand index maps to piece");
+            let drop = Move::drop(piece, drop_square);
+            let expected = Move::normal(
+                parse_usi_square(board_from_files[hand_idx]).unwrap(),
+                parse_usi_square(board_to_files[hand_idx]).unwrap(),
+                false,
+            );
+            assert_eq!(history.get(color, drop), Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_counter_move_drop_isolated_from_board_index_zero() {
+        let mut history = CounterMoveHistory::new();
+        let color = Color::Black;
+
+        let drop_prev = Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
+        let drop_counter =
+            Move::normal(parse_usi_square("5h").unwrap(), parse_usi_square("5g").unwrap(), false);
+
+        let normal_prev =
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false);
+        let normal_counter =
+            Move::normal(parse_usi_square("8a").unwrap(), parse_usi_square("8b").unwrap(), false);
+
+        history.update(color, drop_prev, drop_counter);
+        history.update(color, normal_prev, normal_counter);
+
+        assert_eq!(history.get(color, drop_prev), Some(drop_counter));
+        assert_eq!(history.get(color, normal_prev), Some(normal_counter));
+    }
+
+    #[test]
+    fn test_butterfly_drop_separate_slot() {
+        let mut history = ButterflyHistory::new();
+        let color = Color::Black;
+
+        let drop_mv = Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
+        let board_mvs = [
+            Move::normal(parse_usi_square("1a").unwrap(), parse_usi_square("1b").unwrap(), false),
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false),
+        ];
+
+        history.update_good(color, drop_mv, 3);
+
+        assert!(history.get(color, drop_mv) > 0);
+        for mv in board_mvs {
+            assert_eq!(history.get(color, mv), 0);
+        }
+    }
+
+    #[test]
     fn test_continuation_history() {
         let mut history = ContinuationHistory::new();
         let color = Color::Black;
@@ -493,11 +664,65 @@ mod tests {
         let curr_to = parse_usi_square("1e").unwrap();
 
         // Initial score should be 0
-        assert_eq!(history.get(color, prev_piece, prev_to, curr_piece, curr_to), 0);
+        assert_eq!(
+            history.get(ContinuationKey::new(
+                color, prev_piece, prev_to, false, curr_piece, curr_to, false
+            )),
+            0
+        );
 
         // Update with good continuation
-        history.update_good(color, prev_piece, prev_to, curr_piece, curr_to, 4);
-        assert!(history.get(color, prev_piece, prev_to, curr_piece, curr_to) > 0);
+        history.update_good(
+            ContinuationKey::new(color, prev_piece, prev_to, false, curr_piece, curr_to, false),
+            4,
+        );
+        let after_good = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
+        assert!(after_good > 0);
+        assert!(after_good <= i32::from(CONT_HISTORY_MAX));
+
+        // Apply penalty and ensure値が縮む
+        history.update_bad(
+            ContinuationKey::new(color, prev_piece, prev_to, false, curr_piece, curr_to, false),
+            2,
+        );
+        let after_bad = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
+        assert!(after_bad.abs() <= after_good.abs());
+
+        let magnitude_before = after_bad.abs();
+        history.age_scores();
+        let aged = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
+        assert!(aged.abs() <= magnitude_before);
+    }
+    #[test]
+    fn test_continuation_history_handles_drop() {
+        let mut history = ContinuationHistory::new();
+        let color = Color::Black;
+
+        let prev_piece = PieceType::Pawn as usize;
+        let prev_to = parse_usi_square("5e").unwrap();
+        let curr_piece = PieceType::Pawn as usize;
+        let curr_to = parse_usi_square("5d").unwrap();
+
+        // Update drop vs non-drop to ensure indices differ
+        history.update_good(
+            ContinuationKey::new(color, prev_piece, prev_to, true, curr_piece, curr_to, true),
+            3,
+        );
+        let drop_score = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, true, curr_piece, curr_to, true,
+        ));
+        assert!(drop_score > 0);
+
+        let normal_score = history.get(ContinuationKey::new(
+            color, prev_piece, prev_to, false, curr_piece, curr_to, false,
+        ));
+        assert_eq!(normal_score, 0);
     }
 
     #[test]
@@ -512,8 +737,8 @@ mod tests {
             history.update_good(color, mv, 10);
         }
 
-        // Score should be clamped to MAX_HISTORY_SCORE
-        assert!(history.get(color, mv) <= MAX_HISTORY_SCORE);
+        // Score should remain within the configured quiet-history bounds
+        assert!(history.get(color, mv).abs() <= i32::from(QUIET_HISTORY_MAX));
     }
 
     #[test]
@@ -522,22 +747,27 @@ mod tests {
         let color = Color::Black;
         let attacker = PieceType::Knight;
         let victim = PieceType::Silver;
+        let target = parse_usi_square("5e").unwrap();
 
         // Initial score should be 0
-        assert_eq!(history.get(color, attacker, victim), 0);
+        assert_eq!(history.get(color, attacker, victim, target), 0);
 
         // Update with good capture
-        history.update_good(color, attacker, victim, 4);
-        assert!(history.get(color, attacker, victim) > 0);
+        history.update_good(color, attacker, victim, target, 4);
+        let after_good = history.get(color, attacker, victim, target);
+        assert!(after_good > 0);
+        assert!(after_good <= i32::from(CAP_HISTORY_MAX));
 
         // Update with bad capture
-        history.update_bad(color, attacker, victim, 2);
-        let score = history.get(color, attacker, victim);
-        assert!(score > 0); // Should still be positive but reduced
+        history.update_bad(color, attacker, victim, target, 2);
+        let after_bad = history.get(color, attacker, victim, target);
+        assert!(after_bad.abs() <= after_good.abs());
+        assert!(after_bad.abs() <= i32::from(CAP_HISTORY_MAX));
 
         // Test aging
-        let old_score = history.get(color, attacker, victim);
+        let magnitude_before = after_bad.abs();
         history.age_scores();
-        assert_eq!(history.get(color, attacker, victim), old_score / 2);
+        let aged = history.get(color, attacker, victim, target);
+        assert!(aged.abs() <= magnitude_before);
     }
 }

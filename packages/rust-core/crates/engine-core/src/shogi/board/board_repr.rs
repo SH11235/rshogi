@@ -4,9 +4,11 @@
 
 use super::bitboard::Bitboard;
 use super::types::{Color, Piece, PieceType, Square};
+#[cfg(feature = "diagnostics")]
+use crate::search::ab::diagnostics as ab_diagnostics;
 use crate::shogi::board::types::NUM_PIECE_TYPES;
 use crate::shogi::board_constants::SHOGI_BOARD_SIZE;
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
 use log::warn;
 
 /// Board representation
@@ -60,6 +62,12 @@ impl Board {
 
     /// Place piece on board
     pub fn put_piece(&mut self, sq: Square, piece: Piece) {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        let king_bb_before = [
+            self.piece_bb[Color::Black as usize][PieceType::King as usize],
+            self.piece_bb[Color::White as usize][PieceType::King as usize],
+        ];
+
         let color = piece.color as usize;
         let piece_type = piece.piece_type as usize;
 
@@ -75,10 +83,43 @@ impl Board {
 
         // Update square info
         self.squares[sq.index()] = Some(piece);
+
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        {
+            let king_bb_after = [
+                self.piece_bb[Color::Black as usize][PieceType::King as usize],
+                self.piece_bb[Color::White as usize][PieceType::King as usize],
+            ];
+            if king_bb_before != king_bb_after {
+                let delta_black =
+                    king_bb_before[Color::Black as usize] ^ king_bb_after[Color::Black as usize];
+                let delta_white =
+                    king_bb_before[Color::White as usize] ^ king_bb_after[Color::White as usize];
+                warn!(
+                    "king_bb mutated in put_piece: sq={:?} piece={:?} delta_black={:?} delta_white={:?} before={:?} after={:?}",
+                    sq,
+                    piece,
+                    delta_black,
+                    delta_white,
+                    king_bb_before,
+                    king_bb_after
+                );
+                #[cfg(feature = "diagnostics")]
+                if piece.piece_type != PieceType::King {
+                    ab_diagnostics::note_fault("board_put_piece_king_bb_corrupt");
+                }
+            }
+        }
     }
 
     /// Remove piece from board
     pub fn remove_piece(&mut self, sq: Square) -> Option<Piece> {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        let king_bb_before = [
+            self.piece_bb[Color::Black as usize][PieceType::King as usize],
+            self.piece_bb[Color::White as usize][PieceType::King as usize],
+        ];
+
         if let Some(piece) = self.squares[sq.index()] {
             let color = piece.color as usize;
             let piece_type = piece.piece_type as usize;
@@ -95,6 +136,33 @@ impl Board {
 
             // Clear square info
             self.squares[sq.index()] = None;
+
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            {
+                let king_bb_after = [
+                    self.piece_bb[Color::Black as usize][PieceType::King as usize],
+                    self.piece_bb[Color::White as usize][PieceType::King as usize],
+                ];
+                if king_bb_before != king_bb_after {
+                    let delta_black = king_bb_before[Color::Black as usize]
+                        ^ king_bb_after[Color::Black as usize];
+                    let delta_white = king_bb_before[Color::White as usize]
+                        ^ king_bb_after[Color::White as usize];
+                    warn!(
+                        "king_bb mutated in remove_piece: sq={:?} piece={:?} delta_black={:?} delta_white={:?} before={:?} after={:?}",
+                        sq,
+                        piece,
+                        delta_black,
+                        delta_white,
+                        king_bb_before,
+                        king_bb_after
+                    );
+                    #[cfg(feature = "diagnostics")]
+                    if piece.piece_type != PieceType::King {
+                        ab_diagnostics::note_fault("board_remove_piece_king_bb_corrupt");
+                    }
+                }
+            }
 
             Some(piece)
         } else {

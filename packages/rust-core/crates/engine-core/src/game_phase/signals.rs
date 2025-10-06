@@ -58,9 +58,9 @@ fn compute_material_signal(pos: &Position, weights: &PhaseWeights) -> f32 {
 
     // Normalize to 0.0-1.0 (inverted: 0.0 = full material, 1.0 = no material)
     let initial_total = weights.initial_total();
-    debug_assert!(total <= initial_total, "Material total exceeds initial");
-
-    1.0 - (total as f32 / initial_total as f32)
+    // Be robust to malformed SFEN or extreme hand counts in diagnostics: clamp to initial
+    let capped = total.min(initial_total);
+    1.0 - (capped as f32 / initial_total as f32)
 }
 
 /// Compute ply-based signal (0.0 = early game, 1.0 = late game)

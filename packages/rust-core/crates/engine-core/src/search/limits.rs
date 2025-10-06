@@ -1,12 +1,13 @@
 //! Unified search limits for both basic and enhanced search
 
-use crate::time_management::{TimeControl, TimeParameters};
+use crate::search::parallel::StopController;
+use crate::time_management::{TimeControl, TimeManager, TimeParameters};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
-use super::types::{InfoCallback, InfoStringCallback, IterationCallback};
+use super::types::{InfoStringCallback, IterationCallback};
 
 /// Unified search limits combining time control with other constraints
 pub struct SearchLimits {
@@ -16,14 +17,23 @@ pub struct SearchLimits {
     pub nodes: Option<u64>,
     pub qnodes_limit: Option<u64>,
     pub time_parameters: Option<TimeParameters>,
+    pub random_time_ms: Option<u64>,
     /// Session ID for OOB (out-of-band) finalize coordination
     /// This must match the Engine's session_id for proper snapshot reception
     /// Default: 0 (tests and legacy code), should be set by Engine::start_search()
     pub session_id: u64,
+    /// Wall-clock instant when search started (used for diagnostics / elapsed derivations)
+    pub start_time: Instant,
+    /// Optional panic time scale for extending soft deadlines after aspiration failures etc.
+    pub panic_time_scale: Option<f64>,
+    /// Optional contempt value in centipawns (positive favors side to move)
+    pub contempt: Option<i32>,
+    /// Whether this search is running in ponder mode (go ponder)
+    pub is_ponder: bool,
     /// Stop flag for interrupting search (temporarily kept for compatibility)
     pub stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress (temporarily kept for compatibility)
-    pub info_callback: Option<InfoCallback>,
+    pub info_callback: Option<crate::search::api::InfoEventCallback>,
     /// Callback for textual diagnostics routed as `info string`
     pub info_string_callback: Option<InfoStringCallback>,
     /// Iteration callback for committed iteration results
@@ -44,6 +54,10 @@ pub struct SearchLimits {
     pub enable_fail_safe: bool,
     /// Local deadlines used as a fallback when time manager / OOB finalize is unavailable
     pub fallback_deadlines: Option<FallbackDeadlines>,
+    /// Time manager coordinating soft/hard limits (None during ponder/infinite)
+    pub time_manager: Option<Arc<TimeManager>>,
+    /// Stop controller used for OOB finalize coordination
+    pub stop_controller: Option<Arc<StopController>>,
 }
 
 impl Default for SearchLimits {
@@ -55,7 +69,12 @@ impl Default for SearchLimits {
             nodes: None,
             qnodes_limit: None,
             time_parameters: None,
+            random_time_ms: None,
             session_id: 0, // Default for tests, should be set by Engine::start_search()
+            start_time: Instant::now(),
+            panic_time_scale: None,
+            contempt: None,
+            is_ponder: false,
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -66,6 +85,8 @@ impl Default for SearchLimits {
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
+            time_manager: None,
+            stop_controller: None,
         }
     }
 }
@@ -127,9 +148,14 @@ pub struct SearchLimitsBuilder {
     nodes: Option<u64>,
     qnodes_limit: Option<u64>,
     time_parameters: Option<TimeParameters>,
+    random_time_ms: Option<u64>,
     session_id: u64,
+    start_time: Instant,
+    panic_time_scale: Option<f64>,
+    contempt: Option<i32>,
+    is_ponder: bool,
     stop_flag: Option<Arc<AtomicBool>>,
-    info_callback: Option<InfoCallback>,
+    info_callback: Option<crate::search::api::InfoEventCallback>,
     info_string_callback: Option<InfoStringCallback>,
     iteration_callback: Option<IterationCallback>,
     ponder_hit_flag: Option<Arc<AtomicBool>>,
@@ -148,7 +174,12 @@ impl Default for SearchLimitsBuilder {
             nodes: None,
             qnodes_limit: None,
             time_parameters: None,
+            random_time_ms: None,
             session_id: 0, // Default for tests, should be overridden by Engine
+            start_time: Instant::now(),
+            panic_time_scale: None,
+            contempt: None,
+            is_ponder: false,
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -218,11 +249,21 @@ impl SearchLimitsBuilder {
         self
     }
 
-    /// Set Ponder mode (legacy - loses time control information)
-    pub fn ponder(mut self) -> Self {
-        // Create a dummy inner time control for backward compatibility
-        let inner = Box::new(TimeControl::Infinite);
-        self.time_control = TimeControl::Ponder(inner);
+    /// Override search start time (defaults to Instant::now() during build)
+    pub fn start_time(mut self, instant: Instant) -> Self {
+        self.start_time = instant;
+        self
+    }
+
+    /// Set panic time scale for soft deadline extension (1.0 = no change)
+    pub fn panic_time_scale(mut self, scale: f64) -> Self {
+        self.panic_time_scale = Some(scale);
+        self
+    }
+
+    /// Set contempt value in centipawns (positive favors side to move)
+    pub fn contempt(mut self, cp: i32) -> Self {
+        self.contempt = Some(cp);
         self
     }
 
@@ -232,12 +273,14 @@ impl SearchLimitsBuilder {
         // Take the current time control and wrap it in Ponder
         let inner = Box::new(self.time_control.clone());
         self.time_control = TimeControl::Ponder(inner);
+        self.is_ponder = true;
         self
     }
 
     /// Set Infinite time control
     pub fn infinite(mut self) -> Self {
         self.time_control = TimeControl::Infinite;
+        self.is_ponder = false;
         self
     }
 
@@ -271,6 +314,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set random time override (go rtime)
+    pub fn random_time_ms(mut self, ms: u64) -> Self {
+        self.random_time_ms = Some(ms);
+        self
+    }
+
     /// Set stop flag
     pub fn stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.stop_flag = Some(flag);
@@ -278,7 +327,7 @@ impl SearchLimitsBuilder {
     }
 
     /// Set info callback
-    pub fn info_callback(mut self, callback: InfoCallback) -> Self {
+    pub fn info_callback(mut self, callback: crate::search::api::InfoEventCallback) -> Self {
         self.info_callback = Some(callback);
         self
     }
@@ -381,7 +430,12 @@ impl SearchLimitsBuilder {
             nodes: self.nodes,
             qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
+            random_time_ms: self.random_time_ms,
             session_id: self.session_id,
+            start_time: self.start_time,
+            panic_time_scale: self.panic_time_scale,
+            contempt: self.contempt,
+            is_ponder: self.is_ponder,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
             info_string_callback: self.info_string_callback,
@@ -392,6 +446,8 @@ impl SearchLimitsBuilder {
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
             fallback_deadlines: self.fallback_deadlines,
+            time_manager: None,
+            stop_controller: None,
         }
     }
 }
@@ -406,6 +462,8 @@ impl SearchLimitsBuilder {
 /// set separately if needed for search control.
 impl From<crate::time_management::TimeLimits> for SearchLimits {
     fn from(tm: crate::time_management::TimeLimits) -> Self {
+        let is_ponder = matches!(tm.time_control, TimeControl::Ponder(_));
+
         SearchLimits {
             time_control: tm.time_control,
             moves_to_go: tm.moves_to_go,
@@ -413,7 +471,12 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             nodes: tm.nodes,
             qnodes_limit: None,
             time_parameters: tm.time_parameters,
+            random_time_ms: tm.random_time_ms,
             session_id: 0, // Default, should be set by Engine
+            start_time: Instant::now(),
+            panic_time_scale: None,
+            contempt: None,
+            is_ponder,
             stop_flag: None,
             info_callback: None,
             info_string_callback: None,
@@ -424,6 +487,8 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
+            time_manager: None,
+            stop_controller: None,
         }
     }
 }
@@ -450,31 +515,7 @@ impl From<SearchLimits> for crate::time_management::TimeLimits {
             depth: unified.depth.map(|d| d as u32),
             nodes: unified.nodes,
             time_parameters: unified.time_parameters,
-        }
-    }
-}
-
-/// Manual Clone implementation for SearchLimits
-impl Clone for SearchLimits {
-    fn clone(&self) -> Self {
-        Self {
-            time_control: self.time_control.clone(),
-            moves_to_go: self.moves_to_go,
-            depth: self.depth,
-            nodes: self.nodes,
-            qnodes_limit: self.qnodes_limit,
-            time_parameters: self.time_parameters,
-            session_id: self.session_id,
-            stop_flag: self.stop_flag.clone(),
-            info_callback: self.info_callback.clone(), // Arc can be cloned
-            info_string_callback: self.info_string_callback.clone(),
-            iteration_callback: self.iteration_callback.clone(),
-            ponder_hit_flag: self.ponder_hit_flag.clone(),
-            qnodes_counter: self.qnodes_counter.clone(),
-            immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
-            multipv: self.multipv,
-            enable_fail_safe: self.enable_fail_safe,
-            fallback_deadlines: self.fallback_deadlines,
+            random_time_ms: unified.random_time_ms,
         }
     }
 }
@@ -492,7 +533,12 @@ impl std::fmt::Debug for SearchLimits {
             .field("nodes", &self.nodes)
             .field("qnodes_limit", &self.qnodes_limit)
             .field("time_parameters", &self.time_parameters)
+            .field("random_time_ms", &self.random_time_ms)
             .field("session_id", &self.session_id)
+            .field("start_time", &self.start_time)
+            .field("panic_time_scale", &self.panic_time_scale)
+            .field("contempt", &self.contempt)
+            .field("is_ponder", &self.is_ponder)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
             .field("info_string_callback", &self.info_string_callback.is_some())
@@ -503,6 +549,8 @@ impl std::fmt::Debug for SearchLimits {
             .field("multipv", &self.multipv)
             .field("enable_fail_safe", &self.enable_fail_safe)
             .field("fallback_deadlines", &self.fallback_deadlines.is_some())
+            .field("time_manager", &self.time_manager.is_some())
+            .field("stop_controller", &self.stop_controller.is_some())
             .finish()
     }
 }
@@ -632,6 +680,10 @@ mod tests {
 
     #[test]
     fn test_info_callback_cloning() {
+        use crate::search::api::{InfoEvent, InfoEventCallback};
+        use crate::search::types::RootLine;
+        use crate::shogi::Move;
+        use smallvec::SmallVec;
         use std::sync::atomic::{AtomicU64, Ordering};
 
         // Create a shared counter
@@ -639,27 +691,48 @@ mod tests {
         let counter_clone = counter.clone();
 
         // Create an info callback that increments the counter
-        let info_callback: InfoCallback =
-            Arc::new(move |_depth, _score, _nodes, _time, _pv, _extra| {
+        let info_callback: InfoEventCallback = Arc::new(move |event| {
+            if matches!(event, InfoEvent::PV { .. }) {
                 counter_clone.fetch_add(1, Ordering::Relaxed);
-            });
+            }
+        });
 
-        // Create SearchLimits with the callback
-        let limits1 = SearchLimits::builder().info_callback(info_callback).build();
-
-        // Clone the limits
-        let limits2 = limits1.clone();
+        // Create SearchLimits instances sharing the same callback Arc
+        let callback_arc = info_callback;
+        let limits1 = SearchLimits::builder().info_callback(Arc::clone(&callback_arc)).build();
+        let limits2 = SearchLimits::builder().info_callback(callback_arc).build();
 
         // Both should have the callback
         assert!(limits1.info_callback.is_some());
         assert!(limits2.info_callback.is_some());
 
         // Call both callbacks and verify they share the same counter
+        let make_line = |depth: u32, nodes: Option<u64>, idx: u8| RootLine {
+            multipv_index: idx,
+            root_move: Move::null(),
+            score_internal: 0,
+            score_cp: 0,
+            bound: NodeType::Exact,
+            depth,
+            seldepth: Some(depth as u8),
+            pv: SmallVec::new(),
+            nodes,
+            time_ms: Some(1),
+            nps: Some(1),
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
         if let Some(cb1) = &limits1.info_callback {
-            cb1(1, 0, 100, Duration::from_millis(10), &[], NodeType::Exact);
+            cb1(InfoEvent::PV {
+                line: Arc::new(make_line(1, Some(100), 1)),
+            });
         }
         if let Some(cb2) = &limits2.info_callback {
-            cb2(2, 0, 200, Duration::from_millis(20), &[], NodeType::Exact);
+            cb2(InfoEvent::PV {
+                line: Arc::new(make_line(2, Some(200), 2)),
+            });
         }
 
         // Both callbacks should have incremented the same counter
@@ -717,12 +790,12 @@ mod tests {
     }
 
     #[test]
-    fn test_multipv_clone() {
-        let original = SearchLimits::builder().multipv(7).depth(15).build();
-        let cloned = original.clone();
+    fn test_multipv_repeated_builder_creates_equivalent_values() {
+        let limits_a = SearchLimits::builder().multipv(7).depth(15).build();
+        let limits_b = SearchLimits::builder().multipv(7).depth(15).build();
 
-        assert_eq!(cloned.multipv, original.multipv);
-        assert_eq!(cloned.depth, original.depth);
+        assert_eq!(limits_a.multipv, limits_b.multipv);
+        assert_eq!(limits_a.depth, limits_b.depth);
     }
 
     #[test]

@@ -1,8 +1,14 @@
 //! Position extensions for move legality checking
 
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+use crate::search::ab::diagnostics as ab_diagnostics;
 use crate::shogi::attacks;
 use crate::shogi::board::{Bitboard, Color, PieceType, Square};
 use crate::shogi::moves::Move;
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+use crate::usi::{move_to_usi, position_to_sfen};
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+use log::warn;
 
 use super::Position;
 
@@ -217,6 +223,13 @@ impl Position {
                         if to_piece.color == self.side_to_move {
                             return false;
                         }
+
+                        if to_piece.piece_type == PieceType::King {
+                            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                            diagnostics::report_enemy_king_capture(self, mv, "is_legal_move");
+                            // Capturing the opponent king is illegal in Shogi and indicates a generator bug.
+                            return false;
+                        }
                     }
                 } else {
                     return false;
@@ -234,5 +247,58 @@ impl Position {
         let king_in_check = test_pos.is_check(self.side_to_move);
 
         !king_in_check
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "diagnostics"))]
+mod diagnostics {
+    use super::*;
+    use crate::search::ab::diagnostics as ab_diag;
+    use crate::shogi::Move;
+    use std::collections::HashSet;
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    static REPORTED: OnceLock<Mutex<HashSet<(u64, u32)>>> = OnceLock::new();
+    static PANIC_ON_GUARD: OnceLock<bool> = OnceLock::new();
+
+    fn should_panic_on_enemy_king_capture() -> bool {
+        *PANIC_ON_GUARD.get_or_init(|| match env::var("SHOGI_PANIC_ON_KING_CAPTURE") {
+            Ok(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                !(normalized == "0"
+                    || normalized == "false"
+                    || normalized == "no"
+                    || normalized == "off")
+            }
+            Err(_) => true,
+        })
+    }
+
+    pub(super) fn report_enemy_king_capture(pos: &Position, mv: Move, origin: &str) {
+        let mut guard = REPORTED
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .expect("report mutex poisoned");
+        let key = (pos.hash, mv.to_u32());
+        if !guard.insert(key) {
+            return;
+        }
+        drop(guard);
+
+        let sfen = position_to_sfen(pos);
+        let mv_str = move_to_usi(&mv);
+        ab_diag::dump("legality_guard", pos, Some(mv));
+        warn!(
+            "[legality] enemy king capture blocked: origin={} move={} side={:?} ply={} sfen={}",
+            origin, mv_str, pos.side_to_move, pos.ply, sfen
+        );
+        super::ab_diagnostics::note_fault("king_capture_detected");
+        if should_panic_on_enemy_king_capture() {
+            panic!(
+                "Position::is_legal_move detected enemy king capture attempt ({} from {})",
+                mv_str, origin
+            );
+        }
     }
 }

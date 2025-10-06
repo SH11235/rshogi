@@ -331,26 +331,6 @@ impl FlexibleTTBucket {
         None
     }
 
-    /// Store entry with metrics tracking
-    #[cfg(test)]
-    pub(crate) fn store_with_metrics(
-        &self,
-        new_entry: TTEntry,
-        current_age: u8,
-        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
-        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
-    ) {
-        self.store_with_metrics_and_mode(
-            new_entry,
-            current_age,
-            false,
-            #[cfg(feature = "tt_metrics")]
-            metrics,
-            #[cfg(not(feature = "tt_metrics"))]
-            None,
-        );
-    }
-
     /// Store entry with metrics tracking and explicit empty_slot_mode
     pub(crate) fn store_with_metrics_and_mode(
         &self,

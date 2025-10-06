@@ -114,8 +114,8 @@ mod tests {
     #[test]
     fn test_rank_masks() {
         // Test that each rank mask covers exactly 9 squares
-        for rank in 0..BOARD_RANKS {
-            let mask = Bitboard(RANK_MASKS[rank]);
+        for (rank, &mask_val) in RANK_MASKS.iter().enumerate() {
+            let mask = Bitboard(mask_val);
             assert_eq!(mask.count_ones(), 9);
 
             // Verify correct squares are set
@@ -129,8 +129,8 @@ mod tests {
     #[test]
     fn test_file_masks() {
         // Test that each file mask covers exactly 9 squares
-        for file in 0..BOARD_FILES {
-            let mask = Bitboard(FILE_MASKS[file]);
+        for (file, &mask_val) in FILE_MASKS.iter().enumerate() {
+            let mask = Bitboard(mask_val);
             assert_eq!(mask.count_ones(), 9);
 
             // Verify correct squares are set

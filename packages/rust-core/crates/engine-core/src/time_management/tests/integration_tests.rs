@@ -16,6 +16,7 @@ fn create_test_limits() -> TimeLimits {
         depth: None,
         nodes: None,
         time_parameters: None,
+        random_time_ms: None,
     }
 }
 

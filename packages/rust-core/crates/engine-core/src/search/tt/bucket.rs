@@ -239,26 +239,6 @@ impl TTBucket {
         None
     }
 
-    /// Store entry in bucket with metrics tracking
-    #[cfg(test)]
-    pub(crate) fn store_with_metrics(
-        &self,
-        new_entry: TTEntry,
-        current_age: u8,
-        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
-        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
-    ) {
-        self.store_with_metrics_and_mode(
-            new_entry,
-            current_age,
-            false, // empty_slot_mode = false
-            #[cfg(feature = "tt_metrics")]
-            metrics,
-            #[cfg(not(feature = "tt_metrics"))]
-            None,
-        );
-    }
-
     /// Store entry in bucket with explicit empty_slot_mode control
     pub(crate) fn store_with_mode(
         &self,
@@ -294,12 +274,6 @@ impl TTBucket {
         self.store_internal(new_entry, current_age, empty_slot_mode, None)
     }
 
-    /// Store entry in bucket (used in tests)
-    #[cfg(test)]
-    pub(crate) fn store(&self, new_entry: TTEntry, current_age: u8) {
-        self.store_internal(new_entry, current_age, false, None)
-    }
-
     /// Try to update an existing entry with depth filtering
     #[inline]
     fn try_update_entry(
@@ -326,6 +300,21 @@ impl TTBucket {
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
+        // 診断ログ追加（first pass開始）
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+            static FIRST_PASS_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = FIRST_PASS_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+            if count < 30 {
+                eprintln!(
+                    "[TT_DIAG] STORE_FIRST_PASS #{count}: new_key={:016x} new_depth={}",
+                    new_entry.key,
+                    new_entry.depth()
+                );
+            }
+        }
+
         // First pass: look for exact match or empty slot
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
@@ -347,7 +336,33 @@ impl TTBucket {
                 #[cfg(not(feature = "tt_metrics"))]
                 let update_result = self.try_update_entry(idx, old_key, &new_entry, None);
                 match update_result {
-                    UpdateResult::Updated | UpdateResult::Filtered => return,
+                    UpdateResult::Updated => {
+                        #[cfg(feature = "diagnostics")]
+                        {
+                            use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+                            static UPDATE_COUNT: AtomicU64 = AtomicU64::new(0);
+                            let count = UPDATE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                            if count < 30 {
+                                eprintln!("[TT_DIAG] UPDATED: key={:016x} slot={i}", new_entry.key);
+                            }
+                        }
+                        return;
+                    }
+                    UpdateResult::Filtered => {
+                        #[cfg(feature = "diagnostics")]
+                        {
+                            use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+                            static FILTER_COUNT: AtomicU64 = AtomicU64::new(0);
+                            let count = FILTER_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                            if count < 30 {
+                                eprintln!(
+                                    "[TT_DIAG] FILTERED: key={:016x} (depth too low)",
+                                    new_entry.key
+                                );
+                            }
+                        }
+                        return;
+                    }
                     UpdateResult::NotFound => {} // Continue to next check
                 }
 
@@ -358,6 +373,16 @@ impl TTBucket {
 
                     // Then publish key with Release ordering to ensure data is visible
                     self.entries[idx].store(new_entry.key, Ordering::Release);
+
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+                        static EMPTY_SLOT_COUNT: AtomicU64 = AtomicU64::new(0);
+                        let count = EMPTY_SLOT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        if count < 30 {
+                            eprintln!("[TT_DIAG] EMPTY_SLOT: key={:016x} slot={i}", new_entry.key);
+                        }
+                    }
 
                     // Record metrics
                     #[cfg(feature = "tt_metrics")]
@@ -384,6 +409,20 @@ impl TTBucket {
             return;
         }
 
+        // 診断ログ追加（second pass到達）
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+            static SECOND_PASS_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = SECOND_PASS_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+            if count < 30 {
+                eprintln!(
+                    "[TT_DIAG] SECOND_PASS #{count}: new_key={:016x} (bucket full)",
+                    new_entry.key
+                );
+            }
+        }
+
         // Second pass: replace worst entry if beneficial.
         // 早期 skip により置換が流れてしまうケースを減らすため、
         // バケット内で最大1回だけ再評価・再試行を行う。
@@ -397,7 +436,32 @@ impl TTBucket {
             };
 
             // 2) 新規の方が価値が高いなら置換へ
-            if new_entry.priority_score(current_age) > worst_score {
+            let new_score = new_entry.priority_score(current_age);
+
+            // 診断ログ追加
+            #[cfg(feature = "diagnostics")]
+            {
+                use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+                static REPLACE_COUNT: AtomicU64 = AtomicU64::new(0);
+                static SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
+                let skip_count = SKIP_COUNT.load(AtomicOrdering::Relaxed);
+
+                if new_score > worst_score {
+                    let count = REPLACE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                    if count < 50 {
+                        eprintln!("[TT_DIAG] REPLACE: new_score={new_score} > worst_score={worst_score} new_depth={} worst_idx={worst_idx}",
+                            new_entry.depth());
+                    }
+                } else {
+                    let count = SKIP_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                    if count < 50 {
+                        eprintln!("[TT_DIAG] SKIP_REPLACE: new_score={new_score} <= worst_score={worst_score} new_depth={} (total_skips={skip_count})",
+                            new_entry.depth());
+                    }
+                }
+            }
+
+            if new_score > worst_score {
                 let idx = worst_idx * 2;
                 let old_key = self.entries[idx].load(Ordering::Relaxed);
 

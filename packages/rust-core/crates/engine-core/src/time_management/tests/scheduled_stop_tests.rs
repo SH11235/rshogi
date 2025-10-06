@@ -162,6 +162,46 @@ fn test_round_up_with_network_delay() {
 }
 
 #[test]
+fn test_random_time_override_keeps_identical_limits() {
+    mock_set_time(0);
+
+    let mut params = TimeParametersBuilder::new().overhead_ms(50).unwrap().build();
+    params.min_think_ms = 0;
+
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 1_000 },
+        time_parameters: Some(params),
+        random_time_ms: Some(700),
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::Opening);
+
+    assert_eq!(tm.soft_limit_ms(), 700);
+    assert_eq!(tm.hard_limit_ms(), 700);
+    assert_eq!(tm.opt_limit_ms(), 700);
+}
+
+#[test]
+fn test_random_time_override_with_ply_variation_increases_budget() {
+    mock_set_time(5);
+
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 1_000 },
+        random_time_ms: Some(800),
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::Black, 30, GamePhase::MiddleGame);
+    let soft = tm.soft_limit_ms();
+    let hard = tm.hard_limit_ms();
+
+    assert!(soft >= 800);
+    assert_eq!(soft, hard);
+    assert!(soft <= 800 + 400);
+}
+
+#[test]
 fn test_safety_margin_behavior() {
     // Test safety margin behavior indirectly through scheduling
     // Since calculate_safety_margin is private, we test its effect

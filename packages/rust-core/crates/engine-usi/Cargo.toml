@@ -40,3 +40,10 @@ pv_debug_logs = ["engine-core/pv_debug_logs"]
 experiments = [
     "engine-core/diff_agg_hash",
 ]
+
+# USI ログの冗長出力を有効化
+verbose_usi = []
+
+[dev-dependencies]
+assert_cmd = "2.0"
+smallvec = { workspace = true }

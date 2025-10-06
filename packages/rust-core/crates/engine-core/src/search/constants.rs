@@ -18,9 +18,8 @@ pub const SEARCH_INTERRUPTED: i32 = SEARCH_INF + 1;
 pub const MAX_PLY: usize = 127;
 
 /// Default search depth when not specified
-/// Based on USI protocol default (depth 6) for compatibility
-/// This value can be overridden by engine configuration if needed
-pub const DEFAULT_SEARCH_DEPTH: u8 = 6;
+/// Raised to 32 so MinThink を満たすまで反復が継続できるようにする
+pub const DEFAULT_SEARCH_DEPTH: u8 = 32;
 
 /// Relative maximum depth for quiescence search
 /// This is the primary limit for qsearch recursion depth
@@ -31,10 +30,6 @@ pub const MAX_QPLY: u8 = 32;
 /// Safety limit to prevent stack overflow in extreme cases
 /// This is now a secondary safeguard, increased from 32 to allow deeper main searches
 pub const MAX_QUIESCE_DEPTH: u16 = 96;
-
-/// Quiescence search evaluation penalty for check positions
-/// Applied when in check at depth limit to make evaluation slightly pessimistic
-pub const QUIESCE_CHECK_EVAL_PENALTY: i32 = 50;
 
 /// Aspiration window constants
 ///
@@ -76,7 +71,10 @@ pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
 /// Default quiescence search node limit (1 million nodes)
 /// This prevents explosion in complex positions with many captures.
 /// Can be overridden with SearchLimits::builder().qnodes_limit()
-pub const DEFAULT_QNODES_LIMIT: u64 = 1_000_000;
+pub const DEFAULT_QNODES_LIMIT: u64 = 300_000;
+pub const MIN_QNODES_LIMIT: u64 = 10_000;
+pub const QNODES_PER_MS: u64 = 10;
+pub const QNODES_DEPTH_BONUS_PCT: u64 = 5;
 
 /// Near-deadline window (ms) used by lightweight time polling to increase
 /// responsiveness as we approach either the hard limit or a scheduled

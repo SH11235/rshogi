@@ -727,12 +727,14 @@ name = "engine-usi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "assert_cmd",
  "engine-core",
  "env_logger",
  "log",
  "regex",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]

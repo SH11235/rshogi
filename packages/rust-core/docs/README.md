@@ -25,7 +25,7 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - Streaming smoke: `cat docs/reports/fixtures/psv_sample.psv | <generate_cmd> ...`
 
 ### 🏗️ Architecture & Design
-- [**統一探索フレームワーク設計**](unified-searcher-design.md) - const genericsを活用した探索エンジン設計
+- [**ClassicBackend モジュール構成**](engine-search-redesign.md) - 探索リデザインの設計メモ
 - [**ABDADA実装**](abdada-implementation.md) - 並列探索の重複作業削減技術
 - [**座標系の説明**](coordinate-system.md) - 将棋盤の座標表現
 - [**SIMD アーキテクチャ**](simd-architecture.md) - SIMD最適化の設計
@@ -69,7 +69,7 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 
 | カテゴリ | ドキュメント | 状態 | 最終更新 | 備考 |
 |---------|------------|------|----------|------|
-| **Architecture** | unified-searcher-design.md | ✅ Active | 2025-08 | 実装完了 |
+| **Architecture** | engine-search-redesign.md | ✅ Active | 2025-10 | ClassicBackend 再設計メモ |
 | **Architecture** | abdada-implementation.md | ✅ Active | 2025-08 | 実装済み |
 | **Architecture** | game-phase-module-guide.md | ✅ Active | 2025-08 | Phase 4実装完了 |
 | **Performance** | parallel-benchmark-guide.md | ✅ Active | 2025-08-09 | 新機能反映済み |

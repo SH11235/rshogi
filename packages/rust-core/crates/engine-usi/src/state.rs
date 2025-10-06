@@ -1,13 +1,14 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Condvar;
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Instant;
 
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::engine::session::SearchSession;
-use engine_core::search::parallel::EngineStopBridge;
-use engine_core::search::parallel::FinalizerMsg;
+use engine_core::search::parallel::{FinalizerMsg, StopController};
 use engine_core::shogi::Position;
-use engine_core::time_management::TimeControl;
+use engine_core::time_management::{TimeControl, TimeManager, TimeState};
+use engine_core::Color;
 
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
@@ -41,8 +42,11 @@ pub struct UsiOptions {
     pub mate_early_stop: bool,
     // Stop bounded wait time
     pub stop_wait_ms: u64,
+    // Main-loop watchdog polling interval (ms)
+    pub watchdog_poll_ms: u64,
     // 純秒読みでGUIの厳格締切より少し手前で確実に返すための追加リード（ms）
-    // network_delay2_ms に加算して最終化を前倒しする。既定: 300ms
+    // network_delay2_ms に加算して最終化を前倒しする。手番側 main=0 でも適用。
+    // 既定: 300ms
     pub byoyomi_deadline_lead_ms: u64,
     // MultiPV lines
     pub multipv: u8,
@@ -80,7 +84,8 @@ impl Default for UsiOptions {
             stochastic_ponder: false,
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
-            stop_wait_ms: 0,
+            stop_wait_ms: 200,
+            watchdog_poll_ms: 2,
             byoyomi_deadline_lead_ms: 300,
             multipv: 1,
             gameover_sends_bestmove: false,
@@ -105,6 +110,7 @@ pub struct GoParams {
     pub byoyomi: Option<u64>,
     pub periods: Option<u32>,
     pub moves_to_go: Option<u32>,
+    pub rtime: Option<u64>,
 }
 
 pub struct EngineState {
@@ -134,12 +140,17 @@ pub struct EngineState {
     pub bestmove_emitted: bool,
     // Current (inner) time control for stop/gameover policy decisions
     pub current_time_control: Option<TimeControl>,
-    pub stop_bridge: Arc<EngineStopBridge>,
-    // OOB finalize channel (from engine-core time manager via StopBridge)
+    pub stop_controller: Arc<StopController>,
+    // OOB finalize channel (from engine-core time manager via StopController)
     pub finalizer_rx: Option<mpsc::Receiver<FinalizerMsg>>,
     // Current engine-core session id (epoch) for matching finalize requests
     pub current_session_core_id: Option<u64>,
     pub idle_sync: Arc<IdleSync>,
+    // Deadlines for OOB finalize enforcement (computed at search start)
+    pub deadline_hard: Option<Instant>,
+    pub deadline_near: Option<Instant>,
+    pub deadline_near_notified: bool,
+    pub active_time_manager: Option<Arc<TimeManager>>,
 }
 
 impl EngineState {
@@ -150,10 +161,10 @@ impl EngineState {
         let mut engine = Engine::new(EngineType::Material);
         engine.set_threads(1);
         engine.set_hash_size(1024);
-        let stop_bridge = engine.stop_bridge_handle();
-        // Register OOB finalizer channel
+        let stop_controller = engine.stop_controller_handle();
+        // Register OOB finalizer channel（StopController 経由に統一）
         let (fin_tx, fin_rx) = mpsc::channel();
-        stop_bridge.register_finalizer(fin_tx);
+        stop_controller.register_finalizer(fin_tx.clone());
 
         let idle_sync = Arc::new(IdleSync::default());
 
@@ -177,10 +188,53 @@ impl EngineState {
             current_search_id: 0,
             bestmove_emitted: false,
             current_time_control: None,
-            stop_bridge,
+            stop_controller,
             finalizer_rx: Some(fin_rx),
             current_session_core_id: None,
             idle_sync,
+            deadline_hard: None,
+            deadline_near: None,
+            deadline_near_notified: false,
+            active_time_manager: None,
+        }
+    }
+
+    /// 探索終了後に TimeManager::update_after_move へ渡す TimeState を計算する
+    ///
+    /// Byoyomi では go コマンドの残り時間と経過時間から推定し、それ以外は NonByoyomi を返す。
+    pub fn time_state_for_update(&self, elapsed_ms: u64) -> TimeState {
+        if let Some(TimeControl::Byoyomi { main_time_ms, .. }) = &self.current_time_control {
+            let side_to_move = self.position.side_to_move;
+            let from_go = self.last_go_params.as_ref().and_then(|gp| match side_to_move {
+                Color::Black => gp.btime,
+                Color::White => gp.wtime,
+            });
+
+            let main_before = from_go.unwrap_or(*main_time_ms);
+
+            if main_before == 0 {
+                return TimeState::Byoyomi { main_left_ms: 0 };
+            }
+
+            let remaining = main_before.saturating_sub(elapsed_ms);
+            if remaining > 0 {
+                return TimeState::Main {
+                    main_left_ms: remaining,
+                };
+            }
+
+            return TimeState::Byoyomi { main_left_ms: 0 };
+        }
+
+        TimeState::NonByoyomi
+    }
+
+    /// 現在保持している TimeManager に消費時間を通知した上で破棄する
+    pub fn finalize_time_manager(&mut self) {
+        if let Some(tm) = self.active_time_manager.take() {
+            let elapsed_ms = tm.elapsed_ms();
+            let time_state = self.time_state_for_update(elapsed_ms);
+            tm.update_after_move(elapsed_ms, time_state);
         }
     }
 
@@ -198,5 +252,47 @@ pub struct IdleSync {
 impl IdleSync {
     pub fn notify_all(&self) {
         self.condvar.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_state_defaults_to_main_without_go_params() {
+        let mut state = EngineState::new();
+        state.current_time_control = Some(TimeControl::Byoyomi {
+            main_time_ms: 60_000,
+            byoyomi_ms: 1_000,
+            periods: 3,
+        });
+        state.last_go_params = None;
+
+        match state.time_state_for_update(1_000) {
+            TimeState::Main { main_left_ms } => assert_eq!(main_left_ms, 59_000),
+            other => panic!("unexpected time state: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn time_state_respects_zero_main_time_from_go() {
+        let mut state = EngineState::new();
+        state.current_time_control = Some(TimeControl::Byoyomi {
+            main_time_ms: 60_000,
+            byoyomi_ms: 1_000,
+            periods: 3,
+        });
+        let go = GoParams {
+            btime: Some(0),
+            wtime: Some(0),
+            ..Default::default()
+        };
+        state.last_go_params = Some(go);
+
+        match state.time_state_for_update(500) {
+            TimeState::Byoyomi { main_left_ms } => assert_eq!(main_left_ms, 0),
+            other => panic!("unexpected time state: {:?}", other),
+        }
     }
 }
