@@ -1,5 +1,0 @@
-[build]
-# Optimize code generation for the local machine.
-# Warning: binaries built with this setting may not run on older CPUs.
-rustflags = ["-C", "target-cpu=native"]
-

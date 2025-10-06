@@ -30,9 +30,11 @@ qs_checks_force_on  = ["engine-core/qs_checks_force_on"]
 diagnostics = [
     "engine-core/tt_metrics",
     "engine-core/nnue_telemetry",
-    "engine-core/pv_debug_logs",
     "engine-core/diagnostics",
 ]
+
+# PV debug logs (separate feature for verbose PV debugging)
+pv_debug_logs = ["engine-core/pv_debug_logs"]
 
 # メタフィーチャー（任意）: 実験系を一括ON
 experiments = [

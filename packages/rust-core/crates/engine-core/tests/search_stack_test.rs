@@ -25,6 +25,7 @@ fn test_search_stack_integration() {
         qnodes_counter: None,
         moves_to_go: None,
         time_parameters: None,
+        session_id: 0, // Test default
         stop_flag: None,
         info_callback: None,
         info_string_callback: None,
@@ -69,6 +70,7 @@ fn test_search_stack_killers() {
         qnodes_counter: None,
         moves_to_go: None,
         time_parameters: None,
+        session_id: 0, // Test default
         stop_flag: None,
         info_callback: None,
         info_string_callback: None,
@@ -105,6 +107,7 @@ fn test_search_stack_static_eval_cache() {
         qnodes_counter: None,
         moves_to_go: None,
         time_parameters: None,
+        session_id: 0, // Test default
         stop_flag: None,
         info_callback: None,
         info_string_callback: None,
