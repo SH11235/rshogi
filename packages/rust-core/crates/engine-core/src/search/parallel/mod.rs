@@ -15,6 +15,13 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
+fn jitter_enabled() -> bool {
+    match std::env::var("SHOGI_TEST_FORCE_JITTER") {
+        Ok(val) => val != "0",
+        Err(_) => true,
+    }
+}
+
 pub struct ParallelSearcher<E>
 where
     E: Evaluator + Send + Sync + 'static,
@@ -66,7 +73,6 @@ where
     pub fn search(&mut self, pos: &mut Position, mut limits: SearchLimits) -> SearchResult {
         let threads = self.threads.max(1);
         limits.stop_controller.get_or_insert_with(|| Arc::clone(&self.stop_controller));
-        let inserted_stop_flag = limits.stop_flag.is_none();
         let stop_flag =
             limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
 
@@ -106,8 +112,12 @@ where
             worker_limits.iteration_callback = None;
             worker_limits.qnodes_counter = Some(Arc::clone(&qnodes_counter));
             worker_limits.stop_controller = None;
-            worker_limits.root_jitter_seed =
-                Some(compute_jitter_seed(session_id, helper_count, worker_index + 1, root_key));
+            if jitter_enabled() {
+                worker_limits.root_jitter_seed =
+                    Some(compute_jitter_seed(session_id, helper_count, worker_index + 1, root_key));
+            } else {
+                worker_limits.root_jitter_seed = None;
+            }
             jobs.push(SearchJob {
                 position: pos.clone(),
                 limits: worker_limits,
@@ -121,7 +131,7 @@ where
         let main_result = self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
         results.push((0usize, main_result));
 
-        let stop_flag_was_set = stop_flag
+        let we_set_stop_flag = stop_flag
             .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
             .is_ok();
 
@@ -133,15 +143,13 @@ where
             }
         }
 
-        if stop_flag_was_set {
+        if we_set_stop_flag {
             let _ = stop_flag.compare_exchange(
                 true,
                 false,
                 AtomicOrdering::AcqRel,
                 AtomicOrdering::Relaxed,
             );
-        } else if inserted_stop_flag {
-            stop_flag.store(false, AtomicOrdering::Release);
         }
         if inserted_qnodes {
             qnodes_counter.store(0, AtomicOrdering::Release);
@@ -201,9 +209,10 @@ fn combine_results(
     final_result.seldepth = max_seldepth;
     final_result.stats.seldepth = Some(final_result.seldepth.min(u32::from(u8::MAX)) as u8);
     if total_nodes > 0 {
-        let duplication =
+        // 便宜的に duplication と呼んでいた値だが、実際には「ヘルパースレッドが担当したノード割合」。
+        let helper_share =
             (total_nodes.saturating_sub(primary_nodes)) as f64 / (total_nodes as f64) * 100.0;
-        final_result.stats.duplication_percentage = Some(duplication);
+        final_result.stats.duplication_percentage = Some(helper_share);
     }
     if let Some(info) = final_result.stop_info.as_mut() {
         info.nodes = total_nodes;
@@ -213,21 +222,33 @@ fn combine_results(
     final_result.hashfull = tt.hashfull_permille() as u32;
     final_result.refresh_summary();
 
-    let mut merged_heuristics = final_result.stats.heuristics.as_ref().map(|arc| (**arc).clone());
-    for (worker_id, res) in &results {
-        if *worker_id == 0 {
-            continue;
-        }
-        if let Some(h) = res.stats.heuristics.as_ref() {
-            if let Some(acc) = merged_heuristics.as_mut() {
-                acc.merge_from(&*h);
-            } else {
-                merged_heuristics = Some((**h).clone());
+    let primary_heuristics = results
+        .iter()
+        .find(|(id, _)| *id == 0)
+        .and_then(|(_, r)| r.stats.heuristics.as_ref());
+    let helpers_have_heuristics =
+        results.iter().any(|(id, r)| *id != 0 && r.stats.heuristics.is_some());
+
+    if helpers_have_heuristics {
+        let mut merged = final_result
+            .stats
+            .heuristics
+            .as_ref()
+            .map(|arc| (**arc).clone())
+            .or_else(|| primary_heuristics.map(|arc| (**arc).clone()))
+            .unwrap_or_default();
+
+        for (_, res) in &results {
+            if let Some(h) = res.stats.heuristics.as_ref() {
+                merged.merge_from(h);
             }
         }
-    }
-    if let Some(merged) = merged_heuristics {
+
         final_result.stats.heuristics = Some(Arc::new(merged));
+    } else if final_result.stats.heuristics.is_none() {
+        if let Some(primary) = primary_heuristics {
+            final_result.stats.heuristics = Some(Arc::clone(primary));
+        }
     }
 
     if let Some(dup) = final_result.stats.duplication_percentage {
@@ -267,6 +288,10 @@ fn prefers(candidate: &(usize, SearchResult), current: &(usize, SearchResult)) -
     candidate.0 < current.0
 }
 
+/// Create a shallow copy of `SearchLimits` for helper workers.
+///
+/// 呼び出し側で stop_controller やコールバック類を `None` に差し替える前提のため、
+/// 共有ハンドルの複製のみを行う。必要に応じて後段でフィールドを無効化すること。
 fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
     SearchLimits {
         time_control: base.time_control.clone(),
@@ -304,11 +329,123 @@ fn compute_jitter_seed(
     worker_id: usize,
     root_key: u64,
 ) -> u64 {
-    let wid = worker_id as u64;
-    let hc = helper_count as u64;
-    session_id.wrapping_mul(0x9E37_79B1_85EB_CA87)
-        ^ root_key.rotate_left(((wid ^ hc) as u32) & 31)
-        ^ (wid << 32)
-        ^ (hc << 48)
-        ^ wid
+    #[inline]
+    fn mix64(x: u64) -> u64 {
+        // SplitMix64 由来の軽量ミキサ。入力ビットを高速に拡散させる。
+        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    let mut seed = mix64(session_id ^ root_key);
+    seed = mix64(seed ^ (helper_count as u64));
+    seed = mix64(seed ^ (worker_id as u64));
+    seed = mix64(seed ^ root_key.rotate_left((worker_id as u32) & 31));
+    seed
+}
+
+#[cfg(test)]
+pub(crate) fn compute_jitter_seed_for_test(
+    session_id: u64,
+    helper_count: usize,
+    worker_id: usize,
+    root_key: u64,
+) -> u64 {
+    compute_jitter_seed(session_id, helper_count, worker_id, root_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::{SearchLimitsBuilder, SearchResult, TranspositionTable};
+    use crate::shogi::Position;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn helper_share(result: &SearchResult) -> f64 {
+        result.stats.duplication_percentage.unwrap_or(0.0)
+    }
+
+    #[test]
+    fn helper_share_bounds_single_and_multi_thread() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt_single = Arc::new(TranspositionTable::new(8));
+        let stop_single = Arc::new(StopController::new());
+        let mut single = ParallelSearcher::<MaterialEvaluator>::new(
+            Arc::clone(&evaluator),
+            Arc::clone(&tt_single),
+            1,
+            Arc::clone(&stop_single),
+        );
+
+        let mut pos_single = Position::startpos();
+        let limits_single = SearchLimitsBuilder::default().fixed_nodes(256).depth(3).build();
+        let single_result = single.search(&mut pos_single, limits_single);
+        assert!(helper_share(&single_result) <= f64::EPSILON);
+
+        let tt_multi = Arc::new(TranspositionTable::new(8));
+        let stop_multi = Arc::new(StopController::new());
+        let mut multi = ParallelSearcher::<MaterialEvaluator>::new(
+            evaluator,
+            Arc::clone(&tt_multi),
+            2,
+            Arc::clone(&stop_multi),
+        );
+        let mut pos_multi = Position::startpos();
+        let limits_multi = SearchLimitsBuilder::default().fixed_nodes(1024).depth(4).build();
+        let multi_result = multi.search(&mut pos_multi, limits_multi);
+        let share = helper_share(&multi_result);
+        assert!(share > 0.0, "multi-thread helper share should be positive");
+        assert!(share <= 100.0, "helper share must not exceed 100%");
+    }
+
+    #[test]
+    fn search_respects_external_stop_flag_true() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(8));
+        let stop_ctrl = Arc::new(StopController::new());
+        let mut searcher = ParallelSearcher::<MaterialEvaluator>::new(
+            evaluator,
+            Arc::clone(&tt),
+            2,
+            Arc::clone(&stop_ctrl),
+        );
+        let mut pos = Position::startpos();
+        let external_flag = Arc::new(AtomicBool::new(true));
+        let limits = SearchLimitsBuilder::default()
+            .fixed_nodes(256)
+            .depth(2)
+            .stop_flag(Arc::clone(&external_flag))
+            .build();
+
+        let _ = searcher.search(&mut pos, limits);
+        assert!(external_flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn jitter_seed_deterministic_and_varies() {
+        let seed_a = compute_jitter_seed_for_test(42, 3, 1, 0x1234_5678_9ABC_DEF0);
+        let seed_b = compute_jitter_seed_for_test(42, 3, 1, 0x1234_5678_9ABC_DEF0);
+        assert_eq!(seed_a, seed_b);
+
+        let seed_worker = compute_jitter_seed_for_test(42, 3, 2, 0x1234_5678_9ABC_DEF0);
+        assert_ne!(seed_a, seed_worker);
+
+        let seed_root = compute_jitter_seed_for_test(42, 3, 1, 0xFFFF_0000_1234_5678);
+        assert_ne!(seed_a, seed_root);
+    }
+
+    #[test]
+    fn compute_jitter_seed_collision_smoke() {
+        let mut seen = HashSet::new();
+        let mut key = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..512 {
+            key = key.wrapping_mul(0xBF58_476D_1CE4_E5B9).wrapping_add(0x94D0_49BB_1331_11EB);
+            let seed = compute_jitter_seed_for_test(7, 4, 1, key);
+            assert!(seen.insert(seed), "duplicate jitter seed generated");
+        }
+    }
 }

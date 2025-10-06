@@ -111,7 +111,7 @@ fn main() {
         nodes: u64,
         nps: u64,
         hashfull: u16,
-        duplication_pct: f64,
+        helper_share_pct: f64,
         score: i32,
         tt_hits: u64,
         lmr: u64,
@@ -246,7 +246,7 @@ fn main() {
             let beta = res.stats.root_fail_high_count.unwrap_or(0);
             let asp_fail_high = asp_fail_high.load(Ordering::Relaxed);
             let asp_fail_low = asp_fail_low.load(Ordering::Relaxed);
-            let duplication = res.stats.duplication_percentage.unwrap_or(0.0);
+            let helper_share = res.stats.duplication_percentage.unwrap_or(0.0);
             let heur_summary =
                 res.stats.heuristics.as_ref().map(|h| h.summary()).unwrap_or_default();
             // Probe TT at root to check adoption
@@ -262,12 +262,12 @@ fn main() {
             };
             if args.format == "text" {
                 println!(
-                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  dup {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
+                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  helper_share {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
                     depth,
                     res.stats.nodes,
                     nps,
                     hf,
-                    duplication,
+                    helper_share,
                     res.score,
                     tt_hits,
                     lmr,
@@ -292,7 +292,7 @@ fn main() {
                     nodes: res.stats.nodes,
                     nps,
                     hashfull: hf,
-                    duplication_pct: duplication,
+                    helper_share_pct: helper_share,
                     score: res.score,
                     tt_hits,
                     lmr,
@@ -317,7 +317,7 @@ fn main() {
     if args.format == "csv" || args.format == "json" {
         if args.format == "csv" {
             let mut out = String::new();
-            out.push_str("name,sfen,depth,nodes,nps,hashfull,duplication_pct,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n");
+            out.push_str("name,sfen,depth,nodes,nps,hashfull,helper_share_pct,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n");
             for r in &rows {
                 out.push_str(&format!(
                     "{},{},{},{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
@@ -327,7 +327,7 @@ fn main() {
                     r.nodes,
                     r.nps,
                     r.hashfull,
-                    r.duplication_pct,
+                    r.helper_share_pct,
                     r.score,
                     r.tt_hits,
                     r.lmr,

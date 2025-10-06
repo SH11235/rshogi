@@ -477,18 +477,20 @@ pub fn finalize_and_send(
             stop_meta.hard_ms, stop_meta.soft_ms, stop_meta.reason_label
         ));
 
-        if let Some(dup) = res.stats.duplication_percentage {
-            info_string(format!("duplication_pct={dup:.2}"));
+        if let Some(helper_share) = res.stats.duplication_percentage {
+            // helper_share_pct は従来の duplication_pct と同値だが、実際の含意に合わせて名称を明確化する。
+            info_string(format!("helper_share_pct={helper_share:.2}"));
         }
         if let Some(heur) = res.stats.heuristics.as_ref() {
             let summary = heur.summary();
+            let lmr_trials = res.stats.lmr_trials.unwrap_or(summary.lmr_trials);
             info_string(format!(
                 "heuristics quiet_max={} cont_max={} capture_max={} counter_filled={} lmr_trials={}",
                 summary.quiet_max,
                 summary.continuation_max,
                 summary.capture_max,
                 summary.counter_filled,
-                summary.lmr_trials
+                lmr_trials
             ));
         }
 

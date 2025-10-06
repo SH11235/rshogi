@@ -123,7 +123,14 @@ impl Heuristics {
 
 impl fmt::Debug for Heuristics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Heuristics").field("lmr_trials", &self.lmr_trials).finish()
+        let summary = self.summary();
+        f.debug_struct("Heuristics")
+            .field("lmr_trials", &self.lmr_trials)
+            .field("quiet_max", &summary.quiet_max)
+            .field("continuation_max", &summary.continuation_max)
+            .field("capture_max", &summary.capture_max)
+            .field("counter_filled", &summary.counter_filled)
+            .finish()
     }
 }
 
