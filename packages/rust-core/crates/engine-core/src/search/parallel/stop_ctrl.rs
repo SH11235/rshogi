@@ -727,6 +727,58 @@ mod tests {
     }
 
     #[test]
+    fn root_snapshot_progress_is_monotonic() {
+        use crate::search::types::{Bound, RootLine};
+        use crate::shogi::Move;
+        use smallvec::SmallVec;
+
+        let ctrl = StopController::new();
+        ctrl.publish_session(None, 77);
+        ctrl.prime_stop_info(StopInfo::default());
+
+        let mut pv = SmallVec::<[Move; 32]>::new();
+        pv.push(Move::null());
+
+        let make_line = |depth: u32, nodes: u64, time_ms: u64| RootLine {
+            multipv_index: 1,
+            root_move: Move::null(),
+            score_internal: 0,
+            score_cp: 32,
+            bound: Bound::Exact,
+            depth,
+            seldepth: Some(depth as u8),
+            pv: pv.clone(),
+            nodes: Some(nodes),
+            time_ms: Some(time_ms),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
+        let updates = [(8, 1_000u64, 20u64), (12, 5_000, 60), (15, 12_000, 120)];
+        let mut last_depth = 0;
+        let mut last_nodes = 0;
+        let mut last_time = 0;
+
+        for (depth, nodes, elapsed) in updates {
+            ctrl.publish_root_line(77, 0xAA55_AA55, &make_line(depth, nodes, elapsed));
+            let snapshot = ctrl.try_read_snapshot().expect("snapshot present");
+            assert!(snapshot.depth >= last_depth);
+            assert!(snapshot.nodes >= last_nodes);
+            assert!(snapshot.elapsed_ms >= last_time);
+            last_depth = snapshot.depth;
+            last_nodes = snapshot.nodes;
+            last_time = snapshot.elapsed_ms;
+
+            let stop_info = ctrl.try_read_stop_info().expect("stop info present");
+            assert!(stop_info.depth_reached >= last_depth);
+            assert!(stop_info.nodes >= last_nodes);
+            assert!(stop_info.elapsed_ms >= last_time);
+        }
+    }
+
+    #[test]
     fn request_stop_flag_only_keeps_stop_info_reason() {
         let ctrl = StopController::new();
         let info = StopInfo {
