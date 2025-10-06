@@ -3,9 +3,8 @@
 //! Provides a unified interface for stopping searches, publishing snapshots,
 //! and issuing finalize requests with priority handling.
 
-use crate::search::snapshot::{RootSnapshot, RootSnapshotPublisher};
-use crate::search::types::StopInfo;
-use smallvec::SmallVec;
+use crate::search::snapshot::{RootSnapshot, RootSnapshotSlot, SnapshotSource};
+use crate::search::types::{Bound, StopInfo};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -51,7 +50,7 @@ pub struct StopSnapshot {
 #[derive(Clone, Default)]
 pub struct StopController {
     inner: Inner,
-    publisher: Arc<RootSnapshotPublisher>,
+    snapshot_slot: RootSnapshotSlot,
 }
 
 #[derive(Default, Clone)]
@@ -70,7 +69,7 @@ impl StopController {
     pub fn new() -> Self {
         Self {
             inner: Inner::default(),
-            publisher: Arc::new(RootSnapshotPublisher::new()),
+            snapshot_slot: RootSnapshotSlot::new(),
         }
     }
 
@@ -82,6 +81,7 @@ impl StopController {
         self.inner.session_id.store(session_id, std::sync::atomic::Ordering::Release);
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
         self.inner.finalize_priority.store(0, Ordering::Release);
+        self.snapshot_slot.clear();
         if let Some(tx) = self.inner.finalizer_tx.lock().unwrap().as_ref() {
             let _ = tx.send(FinalizerMsg::SessionStart { session_id });
         }
@@ -156,6 +156,7 @@ impl StopController {
         *guard = None;
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
         self.inner.finalize_priority.store(0, Ordering::Release);
+        self.snapshot_slot.clear();
     }
 
     /// Force clear references (advances session epoch).
@@ -176,6 +177,7 @@ impl StopController {
         self.inner.finalize_claimed.store(false, std::sync::atomic::Ordering::Release);
         self.inner.finalize_priority.store(0, Ordering::Release);
         self.inner.session_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.snapshot_slot.clear();
     }
 
     /// Request immediate stop (best-effort broadcast).
@@ -278,7 +280,7 @@ impl StopController {
 
     /// Try reading a consistent root snapshot for the active session.
     pub fn try_read_snapshot(&self) -> Option<crate::search::snapshot::RootSnapshot> {
-        self.publisher.try_read()
+        self.snapshot_slot.load()
     }
 
     /// Publish a root snapshot from a PV line (called by Engine controller on InfoEvent::PV).
@@ -320,36 +322,14 @@ impl StopController {
             return;
         }
 
-        let current_snapshot = self.publisher.try_read();
-        let depth_u8 = (line.depth as u8).min(127);
-        // Publish only if we do NOT have an existing snapshot for this session whose depth is already deeper.
-        // equal depth オーバーライトは PV/score/nodes の更新を許容する目的で許可する。
-        let should_publish = !matches!(
-            current_snapshot.as_ref(),
-            Some(existing)
-                if existing.search_id == session_id && existing.depth > depth_u8
-        );
+        let candidate =
+            RootSnapshot::from_line(session_id, root_key, line, SnapshotSource::Partial);
+        self.consider_snapshot(candidate);
 
+        let depth_u8 = line.depth as u8;
         let total_nodes = line.nodes.unwrap_or(0);
         let total_time_ms = line.time_ms.unwrap_or(0);
 
-        if should_publish {
-            let mut snap = RootSnapshot {
-                search_id: session_id,
-                root_key,
-                best: Some(line.root_move),
-                ..Default::default()
-            };
-            // Copy PV (SmallVec expected)
-            let mut pv_copy: SmallVec<[crate::shogi::Move; 64]> = SmallVec::new();
-            pv_copy.extend_from_slice(&line.pv);
-            snap.pv = pv_copy;
-            snap.depth = depth_u8;
-            snap.score_cp = line.score_cp;
-            snap.nodes = total_nodes;
-            snap.elapsed_ms = total_time_ms.min(u32::MAX as u64) as u32;
-            self.publisher.publish(&snap);
-        }
         // Update StopInfo snapshot (best-effort)
         let mut guard = self.inner.stop_info.lock().unwrap();
         let mut si = guard.take().unwrap_or_default();
@@ -359,6 +339,96 @@ impl StopController {
         // note: request_finalize/request_stop が reason/hard_timeout を確定させる。
         // publish_root_line は進捗値のみ更新し、理由フラグは上書きしない。
         *guard = Some(si);
+    }
+
+    pub fn publish_committed_snapshot(
+        &self,
+        session_id: u64,
+        root_key: u64,
+        lines: &[crate::search::types::RootLine],
+        nodes: u64,
+        elapsed_ms: u64,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        let expected_sid = self.inner.session_id.load(Ordering::Acquire);
+        if expected_sid != session_id {
+            if STRICT_SESSION_ASSERT {
+                debug_assert_eq!(
+                    expected_sid, session_id,
+                    "publish_committed_snapshot received mismatched session_id"
+                );
+            }
+            static WARN_FILTER: OnceLock<Mutex<HashSet<(u64, u64, u64)>>> = OnceLock::new();
+            let should_warn = {
+                let guard = WARN_FILTER.get_or_init(|| Mutex::new(HashSet::new()));
+                let mut cache = guard.lock().unwrap();
+                if cache.len() > 1024 {
+                    cache.clear();
+                }
+                cache.insert((expected_sid, session_id, root_key))
+            };
+            if should_warn {
+                log::warn!(
+                    "publish_committed_snapshot session_id mismatch expected={} got={} root_key={:016x}",
+                    expected_sid,
+                    session_id,
+                    root_key
+                );
+            }
+            return;
+        }
+
+        let all_exact = lines.iter().all(|line| matches!(line.bound, Bound::Exact));
+        if !all_exact {
+            return;
+        }
+
+        let snapshot = RootSnapshot::from_lines(
+            session_id,
+            root_key,
+            lines,
+            nodes,
+            elapsed_ms,
+            SnapshotSource::Stable,
+        );
+        self.consider_snapshot(snapshot);
+
+        if let Some(first) = lines.first() {
+            let mut guard = self.inner.stop_info.lock().unwrap();
+            let mut si = guard.take().unwrap_or_default();
+            let depth_u8 = first.depth as u8;
+            si.elapsed_ms = si.elapsed_ms.max(elapsed_ms);
+            si.nodes = si.nodes.max(nodes);
+            si.depth_reached = si.depth_reached.max(depth_u8);
+            *guard = Some(si);
+        }
+    }
+
+    fn consider_snapshot(&self, candidate: RootSnapshot) {
+        let should_publish = match self.snapshot_slot.load() {
+            Some(existing)
+                if existing.search_id == candidate.search_id
+                    && existing.root_key == candidate.root_key =>
+            {
+                match (existing.source, candidate.source) {
+                    (SnapshotSource::Stable, SnapshotSource::Partial) => false,
+                    (SnapshotSource::Stable, SnapshotSource::Stable) => {
+                        candidate.depth >= existing.depth
+                    }
+                    (SnapshotSource::Partial, SnapshotSource::Stable) => true,
+                    (SnapshotSource::Partial, SnapshotSource::Partial) => {
+                        candidate.depth >= existing.depth
+                    }
+                }
+            }
+            _ => true,
+        };
+
+        if should_publish {
+            self.snapshot_slot.commit(candidate);
+        }
     }
 }
 

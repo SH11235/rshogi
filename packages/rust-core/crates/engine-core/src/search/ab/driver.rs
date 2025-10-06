@@ -23,6 +23,7 @@ use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
 #[cfg(feature = "diagnostics")]
 use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
+use crate::search::snapshot::SnapshotSource;
 use crate::search::tt::TTProbe;
 use crate::time_management::TimeControl;
 
@@ -260,6 +261,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut best_score = 0;
         let mut nodes: u64 = 0;
         let t0 = Instant::now();
+        let session_id = limits.session_id;
+        let root_key = root.zobrist_hash();
         let deadlines = limits.fallback_deadlines;
         let (soft_deadline, hard_deadline) = if let Some(dl) = deadlines {
             (
@@ -310,6 +313,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
         let mut final_seldepth_raw: Option<u32> = None;
+        let mut incomplete_depth: Option<u8> = None;
         let mut iterative_heur = Heuristics::default();
         let stop_controller = limits.stop_controller.clone();
         let mut finalize_soft_sent = false;
@@ -358,6 +362,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             if super::diagnostics::should_abort_now() {
                 last_deadline_hit = Some(DeadlineHit::Stop);
+                if incomplete_depth.is_none() {
+                    incomplete_depth = Some(d as u8);
+                }
                 break;
             }
             #[cfg(feature = "diagnostics")]
@@ -379,6 +386,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             {
                 notify_deadline(hit, nodes);
                 last_deadline_hit = Some(hit);
+                if incomplete_depth.is_none() {
+                    incomplete_depth = Some(d as u8);
+                }
                 break;
             }
             let mut seldepth: u32 = 0;
@@ -388,16 +398,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // Build root move list for CurrMove events and basic ordering
             let mg = MoveGenerator::new();
             let Ok(list) = mg.generate_all(root) else {
+                if incomplete_depth.is_none() {
+                    incomplete_depth = Some(d as u8);
+                }
                 break;
             };
             // Root TT hint boost（存在すれば大ボーナス）
             let mut root_tt_hint_mv: Option<crate::shogi::Move> = None;
-            let root_hash = root.zobrist_hash();
             if let Some(tt) = &self.tt {
                 if dynp::tt_prefetch_enabled() {
-                    tt.prefetch_l2(root_hash, root.side_to_move);
+                    tt.prefetch_l2(root_key, root.side_to_move);
                 }
-                if let Some(entry) = tt.probe(root_hash, root.side_to_move) {
+                if let Some(entry) = tt.probe(root_key, root.side_to_move) {
                     if let Some(ttm) = entry.get_move() {
                         root_tt_hint_mv = Some(ttm);
                     }
@@ -411,6 +423,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 root_moves.push((mv, key));
             }
             if root_moves.is_empty() {
+                if incomplete_depth.is_none() {
+                    incomplete_depth = Some(d as u8);
+                }
                 break;
             }
             let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
@@ -846,7 +861,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     .clamp(i16::MIN as i32, i16::MAX as i32)
                                     as i16;
                             let mut args = crate::search::tt::TTStoreArgs::new(
-                                root_hash,
+                                root_key,
                                 Some(best_mv_root),
                                 store_score,
                                 root_static_eval_i16,
@@ -886,6 +901,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             iterative_heur = shared_heur;
             final_seldepth_reached = Some(capped_seldepth);
             final_seldepth_raw = Some(seldepth);
+            if let Some(ctrl) = stop_controller.as_ref() {
+                ctrl.publish_committed_snapshot(
+                    session_id,
+                    root_key,
+                    depth_lines.as_slice(),
+                    nodes,
+                    t0.elapsed().as_millis() as u64,
+                );
+            }
 
             let mut lead_ms = 10u64;
 
@@ -971,14 +995,107 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.root_fail_high_count = Some(cum_beta_cuts);
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
-        if let Some(first_line) = final_lines.as_ref().and_then(|lines| lines.first()) {
+        stats.incomplete_depth = incomplete_depth;
+
+        let final_lines_opt = final_lines.clone();
+        if let Some(first_line) = final_lines_opt.as_ref().and_then(|lines| lines.first()) {
             stats.pv = first_line.pv.iter().copied().collect();
         }
-        let mut result = SearchResult::new(best, best_score, stats);
-        if let Some(lines) = final_lines {
-            result.lines = Some(lines);
-            result.refresh_summary();
+
+        let snapshot_any = stop_controller
+            .as_ref()
+            .and_then(|ctrl| ctrl.try_read_snapshot())
+            .filter(|snap| snap.search_id == session_id && snap.root_key == root_key);
+        let stable_snapshot = snapshot_any
+            .as_ref()
+            .and_then(|snap| (snap.source == SnapshotSource::Stable).then(|| snap.clone()));
+
+        let mut result_lines: Option<SmallVec<[RootLine; 4]>> = None;
+        let mut best_move_out = best;
+        let mut score_out = best_score;
+        let mut node_type_out = NodeType::Exact;
+        let mut report_source: Option<SnapshotSource> = None;
+        let mut snapshot_version = None;
+        let mut stable_depth = None;
+
+        if let Some(snap) = stable_snapshot {
+            best_move_out = snap.best;
+            score_out = snap.score_cp;
+            node_type_out = snap.node_type;
+            result_lines = Some(snap.lines.clone());
+            stats.depth = snap.depth;
+            stats.seldepth = snap.seldepth;
+            stats.raw_seldepth = snap.seldepth.map(|v| v as u16);
+            stats.pv = snap.pv.iter().copied().collect();
+            report_source = Some(SnapshotSource::Stable);
+            snapshot_version = Some(snap.version);
+            stable_depth = Some(snap.depth);
+        } else if let Some(lines) = final_lines_opt.as_ref() {
+            if let Some(first) = lines.first() {
+                best_move_out = Some(first.root_move);
+                score_out = first.score_cp;
+                node_type_out = first.bound;
+                stats.pv = first.pv.iter().copied().collect();
+            }
+            result_lines = final_lines_opt.clone();
+            if result_lines.is_some() {
+                report_source = Some(SnapshotSource::Stable);
+                stable_depth = Some(final_depth_reached);
+            }
+        } else if let Some(snap) = snapshot_any.clone() {
+            best_move_out = snap.best;
+            score_out = snap.score_cp;
+            node_type_out = snap.node_type;
+            result_lines = Some(snap.lines.clone());
+            stats.depth = snap.depth;
+            stats.seldepth = snap.seldepth;
+            stats.raw_seldepth = snap.seldepth.map(|v| v as u16);
+            stats.pv = snap.pv.iter().copied().collect();
+            report_source = Some(snap.source);
+            snapshot_version = Some(snap.version);
+            if snap.source == SnapshotSource::Stable {
+                stable_depth = Some(snap.depth);
+            }
         }
+
+        if best_move_out.is_none() {
+            if let Some(first) = stats.pv.first() {
+                best_move_out = Some(*first);
+            }
+        }
+        if best_move_out.is_none() {
+            let mg = MoveGenerator::new();
+            if let Ok(list) = mg.generate_all(root) {
+                best_move_out = list.as_slice().first().copied();
+            }
+        }
+
+        if report_source.is_none() {
+            report_source = Some(SnapshotSource::Partial);
+        }
+        stats.root_report_source = report_source;
+        stats.snapshot_version = snapshot_version;
+        stats.stable_depth = stable_depth;
+
+        if stats.pv.is_empty() {
+            if let Some(lines) = result_lines.as_ref().and_then(|lines| lines.first()) {
+                stats.pv = lines.pv.iter().copied().collect();
+            } else if let Some(mv) = best_move_out {
+                stats.pv.push(mv);
+            }
+        }
+
+        final_depth_reached = stats.depth;
+
+        let mut result = SearchResult::compose(
+            best_move_out,
+            score_out,
+            stats,
+            node_type_out,
+            None,
+            result_lines.clone(),
+        );
+
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;
         }

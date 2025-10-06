@@ -1,5 +1,6 @@
 //! Common types for search algorithms
 
+use crate::search::snapshot::SnapshotSource;
 use crate::shogi::Move;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -70,6 +71,14 @@ pub struct SearchStats {
     pub root_tt_hint_exists: Option<u64>,
     /// Root TT hint was used as the final best move in the final iteration (diagnostic 0/1)
     pub root_tt_hint_used: Option<u64>,
+    /// Depth of the last stable snapshot (if published)
+    pub stable_depth: Option<u8>,
+    /// Depth where the search aborted mid-iteration
+    pub incomplete_depth: Option<u8>,
+    /// Snapshot source used for the final result
+    pub root_report_source: Option<SnapshotSource>,
+    /// Snapshot version identifier
+    pub snapshot_version: Option<u64>,
 }
 
 impl SearchStats {

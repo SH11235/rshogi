@@ -1,9 +1,7 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
 use engine_core::search::parallel::FinalizeReason;
-use engine_core::search::{
-    types::{NodeType, StopInfo},
-    SearchResult,
-};
+use engine_core::search::snapshot::SnapshotSource;
+use engine_core::search::{types::StopInfo, SearchResult};
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
@@ -58,11 +56,35 @@ fn prepare_stop_meta(
     gather_stop_meta(controller_info, result_stop_info, finalize_reason)
 }
 
-fn emit_finalize_event(state: &EngineState, label: &str, mode: &str, stop_meta: &StopMeta) {
+struct FinalizeEventParams {
+    reported_depth: u8,
+    stable_depth: Option<u8>,
+    incomplete_depth: Option<u8>,
+    report_source: SnapshotSource,
+    snapshot_version: Option<u64>,
+}
+
+fn emit_finalize_event(
+    state: &EngineState,
+    label: &str,
+    mode: &str,
+    stop_meta: &StopMeta,
+    params: &FinalizeEventParams,
+) {
     let sid = state.current_session_core_id.unwrap_or(0);
+    let stable = params.stable_depth.unwrap_or(0);
+    let incomplete = params.incomplete_depth.unwrap_or(0);
+    let source_str = match params.report_source {
+        SnapshotSource::Stable => "stable",
+        SnapshotSource::Partial => "partial",
+    };
+    let version = params.snapshot_version.unwrap_or(0);
     info_string(format!(
-        "finalize_event label={} mode={} reason={} sid={} soft_ms={} hard_ms={}",
-        label, mode, stop_meta.reason_label, sid, stop_meta.soft_ms, stop_meta.hard_ms
+        "finalize_event label={label} mode={mode} reason={} sid={sid} soft_ms={} hard_ms={} reported_depth={} stable_depth={stable} incomplete_depth={incomplete} source={source_str} snapshot_version={version}",
+        stop_meta.reason_label,
+        stop_meta.soft_ms,
+        stop_meta.hard_ms,
+        params.reported_depth
     ));
 }
 
@@ -322,27 +344,29 @@ pub fn finalize_and_send(
         sid_ok && root_ok
     });
     let snapshot_committed = snapshot_valid.as_ref().and_then(|snap| {
-        snap.best.map(|best| {
-            let mut pv: Vec<_> = snap.pv.iter().copied().collect();
-            if pv.first().is_none_or(|mv| !mv.equals_without_piece_type(&best)) {
-                pv.insert(0, best);
-            }
-            engine_core::search::CommittedIteration {
-                depth: snap.depth,
-                seldepth: None,
-                score: snap.score_cp,
-                pv,
-                node_type: NodeType::Exact,
-                nodes: snap.nodes,
-                elapsed: Duration::from_millis(snap.elapsed_ms as u64),
-            }
+        if snap.source != SnapshotSource::Stable {
+            return None;
+        }
+        snap.lines.first().map(|line| engine_core::search::CommittedIteration {
+            depth: snap.depth,
+            seldepth: snap.seldepth,
+            score: line.score_cp,
+            pv: line.pv.iter().copied().collect(),
+            node_type: line.bound,
+            nodes: snap.nodes,
+            elapsed: Duration::from_millis(snap.elapsed_ms),
         })
     });
     if let Some(snap) = snapshot_valid.as_ref() {
         if snapshot_committed.is_some() {
             diag_info_string(format!(
-                "{label}_snapshot_pref sid={} depth={} nodes={} elapsed_ms={}",
-                snap.search_id, snap.depth, snap.nodes, snap.elapsed_ms
+                "{label}_snapshot_pref sid={} depth={} nodes={} elapsed_ms={} source={:?} version={}",
+                snap.search_id,
+                snap.depth,
+                snap.nodes,
+                snap.elapsed_ms,
+                snap.source,
+                snap.version
             ));
         }
     }
@@ -360,24 +384,68 @@ pub fn finalize_and_send(
     let stop_meta = prepare_stop_meta(
         label,
         controller_stop_info,
-        result.and_then(|r| r.stop_info.as_ref()),
+        result.as_ref().and_then(|r| r.stop_info.as_ref()),
         finalize_reason,
     );
 
-    emit_finalize_event(state, label, "joined", &stop_meta);
+    let (reported_depth, report_source, stable_depth_stat, incomplete_depth_stat, snapshot_version) =
+        if let Some(res) = result.as_ref() {
+            (
+                res.stats.depth,
+                res.stats.root_report_source.unwrap_or(SnapshotSource::Partial),
+                res.stats.stable_depth,
+                res.stats.incomplete_depth,
+                res.stats.snapshot_version,
+            )
+        } else if let Some(snap) = snapshot_valid.as_ref() {
+            (
+                snap.depth,
+                snap.source,
+                (snap.source == SnapshotSource::Stable).then_some(snap.depth),
+                None,
+                Some(snap.version),
+            )
+        } else {
+            (0, SnapshotSource::Partial, None, None, None)
+        };
+
+    emit_finalize_event(
+        state,
+        label,
+        "joined",
+        &stop_meta,
+        &FinalizeEventParams {
+            reported_depth,
+            stable_depth: stable_depth_stat,
+            incomplete_depth: incomplete_depth_stat,
+            report_source,
+            snapshot_version,
+        },
+    );
 
     if let Some(res) = result {
         let best_usi =
             res.best_move.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
         let pv0_usi = res.stats.pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string());
+        let source_label = res
+            .stats
+            .root_report_source
+            .map(|src| match src {
+                SnapshotSource::Stable => "stable",
+                SnapshotSource::Partial => "partial",
+            })
+            .unwrap_or("partial");
+        let snap_version = res.stats.snapshot_version.unwrap_or(0);
         diag_info_string(format!(
-            "finalize_snapshot best={} pv0={} depth={} nodes={} elapsed_ms={} stop_reason={}",
+            "finalize_snapshot best={} pv0={} depth={} nodes={} elapsed_ms={} stop_reason={} source={} snapshot_version={}",
             best_usi,
             pv0_usi,
             res.stats.depth,
             res.stats.nodes,
             res.stats.elapsed.as_millis(),
-            stop_meta.reason_label
+            stop_meta.reason_label,
+            source_label,
+            snap_version
         ));
 
         // 極小Byoyomi対策の可視化: ハード/ソフト上限と停止理由
@@ -679,14 +747,39 @@ pub fn finalize_and_send_fast(
         ));
     }
 
+    let snapshot_any = state.stop_controller.try_read_snapshot();
+
     let stop_meta = prepare_stop_meta(label, controller_stop_info, None, finalize_reason);
-    emit_finalize_event(state, label, "fast", &stop_meta);
+    let (reported_depth, report_source, stable_depth_stat, snapshot_version) =
+        if let Some(snap) = snapshot_any.as_ref() {
+            (
+                snap.depth,
+                snap.source,
+                (snap.source == SnapshotSource::Stable).then_some(snap.depth),
+                Some(snap.version),
+            )
+        } else {
+            (0, SnapshotSource::Partial, None, None)
+        };
+    emit_finalize_event(
+        state,
+        label,
+        "fast",
+        &stop_meta,
+        &FinalizeEventParams {
+            reported_depth,
+            stable_depth: stable_depth_stat,
+            incomplete_depth: None,
+            report_source,
+            snapshot_version,
+        },
+    );
     diag_info_string(format!("{}_fast_reason reason={}", label, stop_meta.reason_label));
 
     let root_key_hex = fmt_hash(state.position.zobrist_hash());
 
     // Try snapshot first to avoid engine lock when possible
-    if let Some(snap) = state.stop_controller.try_read_snapshot() {
+    if let Some(snap) = snapshot_any.clone().or_else(|| state.stop_controller.try_read_snapshot()) {
         // SessionStart より先に Finalize が届く場合は root_key 側で裏取りする。
         let sid_ok = state.current_session_core_id.map(|sid| sid == snap.search_id).unwrap_or(true);
         let rk_ok = snap.root_key == state.position.zobrist_hash();
@@ -694,8 +787,8 @@ pub fn finalize_and_send_fast(
             if let Some(best) = snap.best {
                 let shallow =
                     snap.depth < FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT || snap.pv.is_empty();
-                let budget_ms =
-                    compute_tt_probe_budget_ms(stop_meta.info.as_ref(), snap.elapsed_ms);
+                let elapsed_ms_u32 = snap.elapsed_ms.min(u32::MAX as u64) as u32;
+                let budget_ms = compute_tt_probe_budget_ms(stop_meta.info.as_ref(), elapsed_ms_u32);
                 if shallow {
                     let snapshot_emit = if let Some((eng_guard, spent_ms, spent_us)) =
                         try_lock_engine_with_budget(&state.engine, budget_ms)
@@ -733,17 +826,19 @@ pub fn finalize_and_send_fast(
                         snapshot_emit
                     {
                         diag_info_string(format!(
-                            "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=1 tt_probe_src=snapshot tt_probe_budget_ms={} tt_probe_spent_ms={}",
-                            label,
-                            snap.search_id,
-                            fmt_hash(snap.root_key),
-                            snap.depth,
-                            snap.nodes,
-                            snap.elapsed_ms,
-                            snap.pv.len(),
-                            budget_ms,
-                            spent_ms
-                        ));
+                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} source={:?} snapshot_version={} tt_probe=1 tt_probe_src=snapshot tt_probe_budget_ms={} tt_probe_spent_ms={}",
+                    label,
+                    snap.search_id,
+                    fmt_hash(snap.root_key),
+                    snap.depth,
+                    snap.nodes,
+                    snap.elapsed_ms,
+                    snap.pv.len(),
+                    snap.source,
+                    snap.version,
+                    budget_ms,
+                    spent_ms
+                ));
                         diag_info_string(format!(
                             "{}_fast_snapshot_tt sid={} root_key={} tt_probe_spent_us={}",
                             label,
@@ -770,7 +865,7 @@ pub fn finalize_and_send_fast(
                     None
                 };
                 diag_info_string(format!(
-                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} tt_probe=0 tt_probe_src=snapshot tt_probe_budget_ms={} note=depth_sufficient",
+                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} source={:?} snapshot_version={} tt_probe=0 tt_probe_src=snapshot tt_probe_budget_ms={} note=depth_sufficient",
                     label,
                     snap.search_id,
                     fmt_hash(snap.root_key),
@@ -778,6 +873,8 @@ pub fn finalize_and_send_fast(
                     snap.nodes,
                     snap.elapsed_ms,
                     snap.pv.len(),
+                    snap.source,
+                    snap.version,
                     budget_ms
                 ));
                 log_and_emit_final_selection(
