@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::evaluation::evaluate::{Evaluator, MaterialEvaluator};
 use crate::movegen::MoveGenerator;
 use crate::search::ab::ordering::{Heuristics, MovePicker};
-use crate::search::api::SearcherBackend;
+use crate::search::api::{InfoEvent, SearcherBackend};
 use crate::search::constants::SEARCH_INF;
 use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
-use crate::search::types::TerminationReason;
+use crate::search::snapshot::SnapshotSource;
+use crate::search::types::{NodeType, TerminationReason};
 use crate::search::{SearchLimits, SearchStack};
 use crate::shogi::{Color, Move, Piece, PieceType};
 use crate::time_management::{
@@ -851,6 +852,51 @@ fn panic_in_search_thread_returns_error_result_with_stop_info() {
         stats_elapsed.abs_diff(info.elapsed_ms)
     );
     assert_eq!(active_counter.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn stop_returns_latest_committed_root_line() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        Arc::new(ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced()));
+
+    let mut limits = SearchLimitsBuilder::default().fixed_time_ms(1500).build();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    limits.stop_flag = Some(Arc::clone(&stop_flag));
+
+    let captured: Arc<Mutex<Vec<crate::search::types::RootLine>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let captured_cb = Arc::clone(&captured);
+    limits.info_callback = Some(Arc::new(move |event: InfoEvent| {
+        if let InfoEvent::PV { line } = event {
+            captured_cb.lock().unwrap().push((*line).clone());
+        }
+    }));
+
+    let active_counter = Arc::new(AtomicUsize::new(0));
+    let task = backend.start_async(Position::startpos(), limits, None, Arc::clone(&active_counter));
+    let (stop_handle, rx, handle) = task.into_parts();
+
+    thread::sleep(Duration::from_millis(150));
+    stop_handle.request_stop();
+
+    let result = rx.recv_timeout(Duration::from_secs(2)).expect("search result after stop");
+
+    if let Some(handle) = handle {
+        handle.join().expect("search thread join");
+    }
+    assert_eq!(active_counter.load(Ordering::SeqCst), 0);
+
+    assert!(result.stats.nodes > 0, "expected the search to explore nodes");
+    let stable_line = result
+        .lines
+        .as_ref()
+        .and_then(|lines| lines.first())
+        .cloned()
+        .expect("expected stable root line in result");
+    assert!(matches!(stable_line.bound, NodeType::Exact));
+    assert_eq!(result.best_move, Some(stable_line.root_move));
+    assert_eq!(result.stats.root_report_source, Some(SnapshotSource::Stable));
 }
 
 #[test]
