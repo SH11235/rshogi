@@ -44,6 +44,8 @@ pub struct SearchLimits {
     /// This is set by ParallelSearcher and not exposed in the builder
     #[doc(hidden)]
     pub qnodes_counter: Option<Arc<AtomicU64>>,
+    /// Optional jitter seed for helper threads (parallel search)
+    pub root_jitter_seed: Option<u64>,
     /// Skip quiescence search at depth 0 and return immediate evaluation
     /// This is useful for extremely time-constrained situations
     pub immediate_eval_at_depth_zero: bool,
@@ -81,6 +83,7 @@ impl Default for SearchLimits {
             iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
+            root_jitter_seed: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
@@ -163,6 +166,7 @@ pub struct SearchLimitsBuilder {
     multipv: u8,
     enable_fail_safe: bool,
     fallback_deadlines: Option<FallbackDeadlines>,
+    root_jitter_seed: Option<u64>,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -189,6 +193,7 @@ impl Default for SearchLimitsBuilder {
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
+            root_jitter_seed: None,
         }
     }
 }
@@ -442,6 +447,7 @@ impl SearchLimitsBuilder {
             iteration_callback: self.iteration_callback,
             ponder_hit_flag: self.ponder_hit_flag,
             qnodes_counter: None,
+            root_jitter_seed: self.root_jitter_seed,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
@@ -483,6 +489,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
+            root_jitter_seed: None,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,

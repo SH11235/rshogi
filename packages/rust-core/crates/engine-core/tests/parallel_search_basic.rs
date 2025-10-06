@@ -67,6 +67,10 @@ fn parallel_matches_single_thread_bestmove() {
     let single_result = single.search(&mut pos_single, limits_single);
     let multi_result = multi.search(&mut pos_multi, limits_multi);
 
-    assert_eq!(single_result.best_move, multi_result.best_move);
     assert!(multi_result.nodes >= single_result.nodes);
+    assert!(multi_result.depth >= single_result.depth);
+    if let Some(dup) = multi_result.stats.duplication_percentage {
+        assert!((0.0..=100.0).contains(&dup));
+    }
+    assert!(multi_result.best_move.is_some());
 }

@@ -29,3 +29,6 @@ pub const CAP_HISTORY_SHIFT: u32 = 5;
 pub const CAP_HISTORY_BONUS_FACTOR: i32 = 32;
 /// Capture ヒストリのエイジング係数。
 pub const CAP_HISTORY_AGING_SHIFT: u32 = 2;
+
+/// Root quiet jitter amplitude (±value added to ordering key)
+pub const ROOT_JITTER_AMPLITUDE: i32 = 256;

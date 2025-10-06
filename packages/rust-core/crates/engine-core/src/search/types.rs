@@ -1,5 +1,6 @@
 //! Common types for search algorithms
 
+use crate::search::ab::ordering::Heuristics;
 use crate::search::snapshot::SnapshotSource;
 use crate::shogi::Move;
 use smallvec::SmallVec;
@@ -79,6 +80,8 @@ pub struct SearchStats {
     pub root_report_source: Option<SnapshotSource>,
     /// Snapshot version identifier
     pub snapshot_version: Option<u64>,
+    /// Heuristics snapshot produced during search (optional)
+    pub heuristics: Option<Arc<Heuristics>>,
 }
 
 impl SearchStats {

@@ -1,3 +1,5 @@
+use rand::{rngs::SmallRng, Rng, SeedableRng};
+
 use crate::search::params::{
     root_multipv_bonus, root_prev_score_scale, root_tt_bonus, ROOT_BASE_KEY, ROOT_PREV_SCORE_CLAMP,
 };
@@ -17,13 +19,32 @@ pub struct RootPicker {
     cursor: usize,
 }
 
+#[derive(Clone, Copy)]
+pub struct RootJitter {
+    pub seed: u64,
+    pub amplitude: i32,
+}
+
+impl RootJitter {
+    pub const fn new(seed: u64, amplitude: i32) -> Self {
+        Self { seed, amplitude }
+    }
+}
+
 impl RootPicker {
     pub fn new(
         pos: &Position,
         moves: &[Move],
         tt_move: Option<Move>,
         prev_lines: Option<&[RootLine]>,
+        jitter: Option<RootJitter>,
     ) -> Self {
+        let (mut rng_opt, jitter_amplitude) = match jitter {
+            Some(cfg) if cfg.amplitude != 0 => {
+                (Some(SmallRng::seed_from_u64(cfg.seed)), cfg.amplitude.abs())
+            }
+            _ => (None, 0),
+        };
         let mut scored = Vec::with_capacity(moves.len());
         for (idx, &mv) in moves.iter().enumerate() {
             let is_check = pos.gives_check(mv) as i32;
@@ -48,6 +69,13 @@ impl RootPicker {
                 let clamped = prev.score_cp.clamp(-ROOT_PREV_SCORE_CLAMP, ROOT_PREV_SCORE_CLAMP);
                 key += root_prev_score_scale() * clamped;
                 key += root_multipv_bonus(prev.multipv_index);
+            }
+
+            if let Some(rng) = rng_opt.as_mut() {
+                if jitter_amplitude > 0 && !mv.is_capture_hint() && is_check == 0 {
+                    let jitter = rng.random_range(-jitter_amplitude..=jitter_amplitude);
+                    key = key.saturating_add(jitter);
+                }
             }
 
             let scored_move = RootScoredMove {
@@ -108,7 +136,7 @@ mod tests {
             parse_usi_move("2g2f").unwrap(),
         ];
         let tt_move = parse_usi_move("2g2f").expect("valid tt move");
-        let mut picker = RootPicker::new(&pos, &moves, Some(tt_move), None);
+        let mut picker = RootPicker::new(&pos, &moves, Some(tt_move), None, None);
         let first = picker.next().unwrap();
         assert!(first.0.equals_without_piece_type(&tt_move));
     }
@@ -120,7 +148,7 @@ mod tests {
         let mv_b = parse_usi_move("2g2f").unwrap();
         let moves = [mv_a, mv_b];
         let prev_lines = [make_root_line(1, mv_b, 150), make_root_line(2, mv_a, -50)];
-        let mut picker = RootPicker::new(&pos, &moves, None, Some(&prev_lines));
+        let mut picker = RootPicker::new(&pos, &moves, None, Some(&prev_lines), None);
         let first = picker.next().unwrap();
         assert!(first.0.equals_without_piece_type(&mv_b));
     }
@@ -132,7 +160,7 @@ mod tests {
         let mv_b = parse_usi_move("2g2f").unwrap();
         let moves = [mv_a, mv_b];
         let prev_lines = [make_root_line(2, mv_a, 0), make_root_line(1, mv_b, 0)];
-        let mut picker = RootPicker::new(&pos, &moves, None, Some(&prev_lines));
+        let mut picker = RootPicker::new(&pos, &moves, None, Some(&prev_lines), None);
         let first = picker.next().unwrap();
         assert!(first.0.equals_without_piece_type(&mv_b));
     }
