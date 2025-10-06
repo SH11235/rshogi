@@ -3,6 +3,7 @@ mod guards;
 mod move_picker;
 mod root_picker;
 
+use std::fmt;
 use std::sync::OnceLock;
 
 use crate::search::history::{
@@ -16,6 +17,7 @@ pub(crate) use guards::{EvalMoveGuard, EvalNullGuard};
 pub use move_picker::MovePicker;
 #[cfg(not(any(test, feature = "bench-move-picker")))]
 pub(crate) use move_picker::MovePicker;
+pub use root_picker::RootJitter;
 pub(crate) use root_picker::RootPicker;
 
 const MOVENO_LOG_TABLE_SIZE: usize = 512;
@@ -63,7 +65,7 @@ fn ln_moveno(moveno: usize) -> f32 {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Heuristics {
     pub(crate) history: ButterflyHistory,
     pub(crate) counter: CounterMoveHistory,
@@ -86,6 +88,20 @@ impl Heuristics {
         self.continuation.clear();
         self.capture.clear();
         self.lmr_trials = 0;
+    }
+
+    pub fn merge_from(&mut self, other: &Self) {
+        self.history.merge_from(&other.history);
+        self.counter.merge_from(&other.counter);
+        self.continuation.merge_from(&other.continuation);
+        self.capture.merge_from(&other.capture);
+        self.lmr_trials = self.lmr_trials.saturating_add(other.lmr_trials);
+    }
+}
+
+impl fmt::Debug for Heuristics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Heuristics").field("lmr_trials", &self.lmr_trials).finish()
     }
 }
 

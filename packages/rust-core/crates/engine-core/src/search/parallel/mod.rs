@@ -1,16 +1,18 @@
 pub mod stop_ctrl;
+mod thread_pool;
 pub use stop_ctrl::{FinalizeReason, FinalizerMsg, StopController, StopSnapshot};
 
+use self::thread_pool::{SearchJob, ThreadPool};
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::Position;
-use log::warn;
+use log::{debug, warn};
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
 
 pub struct ParallelSearcher<E>
@@ -21,6 +23,7 @@ where
     tt: Arc<TranspositionTable>,
     stop_controller: Arc<StopController>,
     threads: usize,
+    thread_pool: ThreadPool<E>,
 }
 
 impl<E> ParallelSearcher<E>
@@ -44,68 +47,100 @@ where
             Arc::clone(&tt),
             profile.clone(),
         );
+        let backend = Arc::new(backend);
+        let helper_threads = threads.max(1).saturating_sub(1);
+        let thread_pool = ThreadPool::new(Arc::clone(&backend), helper_threads);
 
         Self {
-            backend: Arc::new(backend),
+            backend,
             tt,
             stop_controller: stop_ctrl,
             threads: threads.max(1),
+            thread_pool,
         }
     }
 
     pub fn adjust_thread_count(&mut self, threads: usize) {
         self.threads = threads.max(1);
+        let helper = self.threads.saturating_sub(1);
+        self.thread_pool.resize(helper);
     }
 
     pub fn search(&mut self, pos: &mut Position, mut limits: SearchLimits) -> SearchResult {
         let threads = self.threads.max(1);
         limits.stop_controller.get_or_insert_with(|| Arc::clone(&self.stop_controller));
-        let stop_flag =
-            limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
+        let stop_flag = if let Some(flag) = &limits.stop_flag {
+            Arc::clone(flag)
+        } else {
+            let flag = Arc::new(AtomicBool::new(false));
+            limits.stop_flag = Some(Arc::clone(&flag));
+            flag
+        };
 
-        let qnodes_counter =
-            limits.qnodes_counter.get_or_insert_with(|| Arc::new(AtomicU64::new(0))).clone();
+        let inserted_qnodes = limits.qnodes_counter.is_none();
+        let qnodes_counter = if let Some(counter) = &limits.qnodes_counter {
+            Arc::clone(counter)
+        } else {
+            let counter = Arc::new(AtomicU64::new(0));
+            limits.qnodes_counter = Some(Arc::clone(&counter));
+            counter
+        };
+        let session_id = limits.session_id;
+        let root_key = pos.zobrist_hash();
+        limits.root_jitter_seed = None;
         let start = Instant::now();
 
         if threads == 1 {
             let mut result =
                 self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
             finish_single_result(&self.tt, &mut result, start);
+            if inserted_qnodes {
+                qnodes_counter.store(0, AtomicOrdering::Release);
+            }
             return result;
         }
 
-        let mut handles = Vec::with_capacity(threads - 1);
-        for worker_id in 1..threads {
-            let backend = Arc::clone(&self.backend);
+        let helper_count = threads.saturating_sub(1);
+        self.thread_pool.resize(helper_count);
+
+        let mut jobs = Vec::with_capacity(helper_count);
+        for worker_id in 1..=helper_count {
             let mut worker_limits = clone_limits_for_worker(&limits);
             worker_limits.info_callback = None;
             worker_limits.info_string_callback = None;
             worker_limits.iteration_callback = None;
             worker_limits.qnodes_counter = Some(Arc::clone(&qnodes_counter));
-            let worker_pos = pos.clone();
-            handles.push(thread::spawn(move || {
-                let result = backend.think_blocking(&worker_pos, &worker_limits, None);
-                (worker_id, result)
-            }));
+            worker_limits.stop_controller = None;
+            worker_limits.root_jitter_seed =
+                Some(compute_jitter_seed(session_id, worker_id, root_key));
+            jobs.push(SearchJob {
+                position: pos.clone(),
+                limits: worker_limits,
+            });
         }
+
+        let (result_tx, result_rx) = mpsc::channel();
+        self.thread_pool.dispatch(jobs, &result_tx);
 
         let mut results = Vec::with_capacity(threads);
         let main_result = self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
         results.push((0usize, main_result));
 
-        // Signal helpers to wind down once primary completes.
+        let original_stop = stop_flag.load(AtomicOrdering::Acquire);
         stop_flag.store(true, AtomicOrdering::Release);
 
-        for handle in handles {
-            match handle.join() {
+        drop(result_tx);
+        for _ in 0..helper_count {
+            match result_rx.recv() {
                 Ok(res) => results.push(res),
-                Err(_) => warn!("parallel worker panicked; ignoring result"),
+                Err(_) => warn!("parallel worker failed to send result"),
             }
         }
 
-        // Reset stop flag so future searches start clean.
-        stop_flag.store(false, AtomicOrdering::Release);
-        qnodes_counter.store(0, AtomicOrdering::Release);
+        stop_flag.store(original_stop, AtomicOrdering::Release);
+        if inserted_qnodes {
+            qnodes_counter.store(0, AtomicOrdering::Release);
+        }
 
         combine_results(&self.tt, results, start)
     }
@@ -142,11 +177,14 @@ fn combine_results(
     }
 
     let total_nodes: u64 = results.iter().map(|(_, r)| r.nodes).sum();
-    let total_qnodes: u64 = results.iter().map(|(_, r)| r.stats.qnodes).sum();
+    let total_qnodes: u64 = results.iter().map(|(_, r)| r.stats.qnodes).max().unwrap_or(0);
     let max_depth = results.iter().map(|(_, r)| r.depth).max().unwrap_or(0);
-    let max_seldepth_opt =
-        results.iter().filter_map(|(_, r)| r.stats.seldepth.map(|v| v as u32)).max();
-    let primary_nodes = results[best_idx].1.nodes;
+    let max_seldepth = results.iter().map(|(_, r)| r.seldepth).max().unwrap_or(max_depth);
+    let primary_nodes = results
+        .iter()
+        .find(|(id, _)| *id == 0)
+        .map(|(_, r)| r.nodes)
+        .unwrap_or(results[best_idx].1.nodes);
 
     let mut final_result = results.swap_remove(best_idx).1;
 
@@ -155,15 +193,41 @@ fn combine_results(
     final_result.stats.qnodes = total_qnodes;
     final_result.stats.depth = max_depth.min(u32::from(u8::MAX)) as u8;
     final_result.depth = max_depth;
-    final_result.stats.seldepth = max_seldepth_opt.map(|v| v.min(u32::from(u8::MAX)) as u8);
-    final_result.seldepth = max_seldepth_opt.unwrap_or(max_depth);
+    final_result.seldepth = max_seldepth;
+    final_result.stats.seldepth = Some(final_result.seldepth.min(u32::from(u8::MAX)) as u8);
     if total_nodes > 0 {
         let duplication =
             (total_nodes.saturating_sub(primary_nodes)) as f64 / (total_nodes as f64) * 100.0;
         final_result.stats.duplication_percentage = Some(duplication);
     }
+    if let Some(info) = final_result.stop_info.as_mut() {
+        info.nodes = total_nodes;
+        info.elapsed_ms = elapsed.as_millis() as u64;
+        info.depth_reached = max_depth.min(u32::from(u8::MAX)) as u8;
+    }
     final_result.hashfull = tt.hashfull() as u32;
     final_result.refresh_summary();
+
+    let mut merged_heuristics = final_result.stats.heuristics.as_ref().map(|arc| (**arc).clone());
+    for (_, res) in &results {
+        if let Some(h) = res.stats.heuristics.as_ref() {
+            let snapshot = (**h).clone();
+            if let Some(acc) = merged_heuristics.as_mut() {
+                acc.merge_from(&snapshot);
+            } else {
+                merged_heuristics = Some(snapshot);
+            }
+        }
+    }
+    if let Some(merged) = merged_heuristics {
+        final_result.stats.heuristics = Some(Arc::new(merged));
+    }
+
+    if let Some(dup) = final_result.stats.duplication_percentage {
+        if dup > 75.0 {
+            debug!("lazy_smp duplication {:.2}%", dup);
+        }
+    }
 
     final_result
 }
@@ -216,6 +280,7 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         iteration_callback: base.iteration_callback.clone(),
         ponder_hit_flag: base.ponder_hit_flag.clone(),
         qnodes_counter: base.qnodes_counter.clone(),
+        root_jitter_seed: base.root_jitter_seed,
         immediate_eval_at_depth_zero: base.immediate_eval_at_depth_zero,
         multipv: base.multipv,
         enable_fail_safe: base.enable_fail_safe,
@@ -223,4 +288,12 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         time_manager: base.time_manager.clone(),
         stop_controller: base.stop_controller.clone(),
     }
+}
+
+fn compute_jitter_seed(session_id: u64, worker_id: usize, root_key: u64) -> u64 {
+    let wid = worker_id as u64;
+    session_id.wrapping_mul(0x9E37_79B1_85EB_CA87)
+        ^ root_key.rotate_left((wid as u32) & 31)
+        ^ (wid << 32)
+        ^ wid
 }

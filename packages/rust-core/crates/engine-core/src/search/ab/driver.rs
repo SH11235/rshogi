@@ -423,8 +423,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                 }
             }
-            let mut root_picker =
-                ordering::RootPicker::new(root, list.as_slice(), root_tt_hint_mv, prev_root_lines);
+            let root_jitter = limits.root_jitter_seed.map(|seed| {
+                ordering::RootJitter::new(seed, ordering::constants::ROOT_JITTER_AMPLITUDE)
+            });
+            let mut root_picker = ordering::RootPicker::new(
+                root,
+                list.as_slice(),
+                root_tt_hint_mv,
+                prev_root_lines,
+                root_jitter,
+            );
             let mut root_moves: Vec<(crate::shogi::Move, i32)> =
                 Vec::with_capacity(list.as_slice().len());
             while let Some((mv, key)) = root_picker.next() {
@@ -876,6 +884,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     };
                     let node_type_for_store = line.bound;
                     let line_arc = Arc::new(line);
+                    if let Some(ctrl) = stop_controller.as_ref() {
+                        let mut ctrl_line = (*line_arc).clone();
+                        ctrl_line.nodes = Some(nodes);
+                        let elapsed_total_ms = elapsed_ms_total;
+                        ctrl_line.time_ms = Some(elapsed_total_ms);
+                        ctrl_line.nps = if elapsed_total_ms > 0 {
+                            Some(nodes.saturating_mul(1000) / elapsed_total_ms.max(1))
+                        } else {
+                            None
+                        };
+                        ctrl.publish_root_line(session_id, root_key, &ctrl_line);
+                    }
                     if let Some(cb) = info {
                         cb(InfoEvent::PV {
                             line: Arc::clone(&line_arc),
@@ -1052,6 +1072,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.re_searches = Some(cumulative_researches);
         stats.pv_changed = Some(cumulative_pv_changed);
         stats.incomplete_depth = incomplete_depth;
+        stats.heuristics = Some(Arc::new(iterative_heur.clone()));
 
         let final_lines_opt = final_lines.clone();
         if let Some(first_line) = final_lines_opt.as_ref().and_then(|lines| lines.first()) {
