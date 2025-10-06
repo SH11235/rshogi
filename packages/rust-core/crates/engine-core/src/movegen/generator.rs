@@ -433,13 +433,6 @@ impl<'a> MoveGenImpl<'a> {
                     };
 
                     if let Some(check_sq) = potential_check_sq {
-                        #[cfg(test)]
-                        println!(
-                            "Potential check square: {}, valid: {}",
-                            check_sq,
-                            valid.test(check_sq)
-                        );
-
                         if valid.test(check_sq) && self.is_drop_pawn_mate(check_sq, them) {
                             valid.clear(check_sq);
                         }

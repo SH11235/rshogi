@@ -27,6 +27,24 @@ use super::pruning::NullMovePruneParams;
 use super::pvs::SearchContext;
 use super::SearchProfile;
 
+fn position_after_moves(moves: &[&str]) -> Position {
+    let mut pos = Position::startpos();
+    for usi in moves {
+        let mv = parse_usi_move(usi).expect("valid usi move");
+        assert!(pos.is_legal_move(mv), "illegal move in sequence: {}", usi);
+        pos.do_move(mv);
+    }
+    pos
+}
+
+fn make_aspiration_stress_position() -> Position {
+    const MOVES: &[&str] = &[
+        "7i6h", "3c3d", "1i1h", "4a3b", "9g9f", "3a4b", "2h5h", "4b3c", "8h9g", "5a4b", "6i7h",
+        "8c8d",
+    ];
+    position_after_moves(MOVES)
+}
+
 #[test]
 fn qsearch_detects_mate_when_evasion_missing() {
     let evaluator = Arc::new(MaterialEvaluator);
@@ -897,6 +915,118 @@ fn stop_returns_latest_committed_root_line() {
     assert!(matches!(stable_line.bound, NodeType::Exact));
     assert_eq!(result.best_move, Some(stable_line.root_move));
     assert_eq!(result.stats.root_report_source, Some(SnapshotSource::Stable));
+}
+
+#[test]
+fn stop_during_aspiration_returns_stable_snapshot() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        Arc::new(ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced()));
+    let base_position = make_aspiration_stress_position();
+
+    let active_counter = Arc::new(AtomicUsize::new(0));
+    let mut result = None;
+    let mut last_failures = 0u32;
+
+    for attempt in 0..6 {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let flag_for_callback = stop_flag.clone();
+        let limits = SearchLimitsBuilder::default()
+            .fixed_time_ms(1500)
+            .info_string_callback(Arc::new(move |msg: &str| {
+                if msg.contains("aspiration fail") {
+                    flag_for_callback.store(true, Ordering::Release);
+                }
+            }))
+            .build();
+        let mut limits = limits;
+        limits.stop_flag = Some(stop_flag.clone());
+
+        let task = backend.clone().start_async(
+            base_position.clone(),
+            limits,
+            None,
+            Arc::clone(&active_counter),
+        );
+        let (stop_handle, rx, handle) = task.into_parts();
+
+        // Fallback stop to avoid hangs if aspiration never fails in this attempt.
+        let fallback_flag = stop_handle.flag();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(600));
+            fallback_flag.store(true, Ordering::Release);
+        });
+
+        let attempt_result = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("search result after aspiration stop");
+
+        if let Some(handle) = handle {
+            handle.join().expect("search thread join");
+        }
+
+        last_failures = attempt_result.stats.aspiration_failures.unwrap_or_default();
+        result = Some(attempt_result);
+
+        if last_failures > 0 || attempt == 5 {
+            break;
+        }
+    }
+
+    let result = result.expect("search attempts should produce a result");
+    assert!(last_failures > 0, "aspiration failures expected within attempts");
+    assert_eq!(active_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(result.stats.root_report_source, Some(SnapshotSource::Stable));
+    assert_eq!(result.stats.stable_depth, Some(result.stats.depth));
+    assert!(result.stats.incomplete_depth.is_some());
+    assert!(result.stats.aspiration_failures.expect("aspiration failure counter present") > 0);
+}
+
+#[test]
+fn multipv_incomplete_iteration_falls_back_to_stable_snapshot() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        Arc::new(ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced()));
+    let base_position = make_aspiration_stress_position();
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let flag_for_cb = stop_flag.clone();
+    let limits = SearchLimitsBuilder::default()
+        .fixed_time_ms(1500)
+        .multipv(3)
+        .info_string_callback(Arc::new(move |msg: &str| {
+            if msg.contains("iter_start depth=4") {
+                flag_for_cb.store(true, Ordering::Release);
+            }
+        }))
+        .build();
+    let mut limits = limits;
+    limits.stop_flag = Some(stop_flag);
+
+    let active_counter = Arc::new(AtomicUsize::new(0));
+    let task = backend.start_async(base_position, limits, None, Arc::clone(&active_counter));
+    let (stop_handle, rx, handle) = task.into_parts();
+
+    // Backup timeout to ensure completion even if callback didn't fire.
+    let fallback_flag = stop_handle.flag();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(600));
+        fallback_flag.store(true, Ordering::Release);
+    });
+
+    let result = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("search result after multipv stop");
+
+    if let Some(handle) = handle {
+        handle.join().expect("search thread join");
+    }
+    assert_eq!(active_counter.load(Ordering::SeqCst), 0);
+
+    let lines = result.lines.expect("stable lines present");
+    assert_eq!(lines.len(), 1, "incomplete depth should fall back to previous stable PV");
+    assert_eq!(result.stats.root_report_source, Some(SnapshotSource::Stable));
+    assert!(result.stats.incomplete_depth.is_some());
 }
 
 #[test]
