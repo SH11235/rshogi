@@ -1115,10 +1115,38 @@ mod tests {
     use super::*;
     use crate::state::EngineState;
     use engine_core::engine::controller::{Engine, EngineType};
+    use engine_core::movegen::MoveGenerator;
     use engine_core::search::parallel::FinalizeReason;
     use engine_core::search::types::{NodeType, RootLine};
     use engine_core::usi::parse_usi_move;
     use smallvec::SmallVec;
+
+    fn build_root_line(
+        root_move: engine_core::shogi::Move,
+        depth: u32,
+        nodes: u64,
+        time_ms: u64,
+        score_cp: i32,
+    ) -> RootLine {
+        let mut pv: SmallVec<[engine_core::shogi::Move; 32]> = SmallVec::new();
+        pv.push(root_move);
+        RootLine {
+            multipv_index: 1,
+            root_move,
+            score_internal: score_cp,
+            score_cp,
+            bound: NodeType::Exact,
+            depth,
+            seldepth: Some(depth.min(u8::MAX as u32) as u8),
+            pv,
+            nodes: Some(nodes),
+            time_ms: Some(time_ms),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        }
+    }
 
     #[test]
     fn tt_probe_budget_respects_stop_info_and_snapshot_elapsed() {
@@ -1247,6 +1275,92 @@ mod tests {
             .expect("captured bestmove output")
             .replace("bestmove ", "");
         assert_eq!(emitted, move_to_usi(&expected));
+    }
+
+    #[test]
+    fn finalize_fast_emits_partial_snapshot_bestmove() {
+        let mut state = EngineState::new();
+        let session_id = 1;
+        state.current_session_core_id = Some(session_id);
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, session_id);
+        state.stop_controller.prime_stop_info(StopInfo::default());
+
+        let best_move = parse_usi_move("7g7f").unwrap();
+        let line = build_root_line(best_move, 4, 256, 10, 80);
+        super::take_last_emitted_bestmove();
+        state.stop_controller.publish_root_line(session_id, root_key, &line);
+
+        finalize_and_send_fast(&mut state, "partial_fast_unit", Some(FinalizeReason::Hard));
+        assert!(state.bestmove_emitted);
+        let emitted = super::take_last_emitted_bestmove().expect("bestmove emitted");
+        assert_eq!(emitted, format!("bestmove {}", move_to_usi(&best_move)));
+
+        // Subsequent fast finalize should be a no-op.
+        super::take_last_emitted_bestmove();
+        finalize_and_send_fast(&mut state, "partial_fast_unit_repeat", Some(FinalizeReason::Hard));
+        assert!(super::take_last_emitted_bestmove().is_none());
+    }
+
+    #[test]
+    fn finalize_fast_prefers_latest_partial_snapshot() {
+        let mut state = EngineState::new();
+        let session_id = 2;
+        state.current_session_core_id = Some(session_id);
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, session_id);
+        state.stop_controller.prime_stop_info(StopInfo::default());
+
+        let first_move = parse_usi_move("7g7f").unwrap();
+        let second_move = parse_usi_move("2g2f").unwrap();
+
+        let shallow = build_root_line(first_move, 3, 200, 12, 60);
+        let deeper = build_root_line(second_move, 5, 400, 20, 90);
+
+        super::take_last_emitted_bestmove();
+        state.stop_controller.publish_root_line(session_id, root_key, &shallow);
+        state.stop_controller.publish_root_line(session_id, root_key, &deeper);
+
+        finalize_and_send_fast(&mut state, "partial_fast_latest", Some(FinalizeReason::Hard));
+        let emitted = super::take_last_emitted_bestmove().expect("bestmove emitted");
+        assert_eq!(emitted, format!("bestmove {}", move_to_usi(&second_move)));
+    }
+
+    #[test]
+    fn finalize_fast_ignores_partial_snapshot_from_other_session() {
+        let mut state = EngineState::new();
+        let session_id = 3;
+        state.current_session_core_id = Some(session_id);
+        state.stop_controller.publish_session(None, session_id);
+        state.stop_controller.prime_stop_info(StopInfo::default());
+
+        let fallback = {
+            let eng = state.engine.lock().unwrap();
+            let final_best = eng.choose_final_bestmove(&state.position, None);
+            final_best.best_move.expect("legal fallback expected")
+        };
+        let fallback_usi = move_to_usi(&fallback);
+
+        let mg = MoveGenerator::new();
+        let legal_moves = mg.generate_all(&state.position).expect("legal moves");
+        let alternate = legal_moves
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|mv| move_to_usi(mv) != fallback_usi)
+            .expect("alternate legal move exists");
+        let line = build_root_line(alternate, 4, 256, 15, 100);
+
+        super::take_last_emitted_bestmove();
+        state.stop_controller.publish_root_line(
+            session_id + 1,
+            state.position.zobrist_hash(),
+            &line,
+        );
+
+        finalize_and_send_fast(&mut state, "partial_fast_ignore", Some(FinalizeReason::Hard));
+        let emitted = super::take_last_emitted_bestmove().expect("bestmove emitted");
+        assert_eq!(emitted, format!("bestmove {}", fallback_usi));
     }
 
     #[test]

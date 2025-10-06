@@ -261,8 +261,13 @@ fn main() {
                 }
             };
             if args.format == "text" {
+                if depth == args.depth_min {
+                    println!(
+                        "  columns: depth nodes nps hashfull helper_share(%) score tt_hits lmr lmr_trials beta_cuts aspFH aspFL root_hint_exist root_hint_used tt_root_match tt_root_depth heur_quiet_max heur_cont_max heur_capture_max heur_counter"
+                    );
+                }
                 println!(
-                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  helper_share {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
+                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  helper_share(%) {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
                     depth,
                     res.stats.nodes,
                     nps,

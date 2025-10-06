@@ -6,9 +6,12 @@ use self::thread_pool::{SearchJob, ThreadPool};
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
+use crate::search::types::RootLine;
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
+use crate::shogi::Move;
 use crate::Position;
 use log::{debug, warn};
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
@@ -21,6 +24,8 @@ fn jitter_enabled() -> bool {
         Err(_) => true,
     }
 }
+
+const HELPER_PUBLISH_MIN_DEPTH: u32 = 3;
 
 pub struct ParallelSearcher<E>
 where
@@ -73,6 +78,7 @@ where
     pub fn search(&mut self, pos: &mut Position, mut limits: SearchLimits) -> SearchResult {
         let threads = self.threads.max(1);
         limits.stop_controller.get_or_insert_with(|| Arc::clone(&self.stop_controller));
+        let inserted_stop_flag = limits.stop_flag.is_none();
         let stop_flag =
             limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
 
@@ -138,12 +144,21 @@ where
         drop(result_tx);
         for _ in 0..helper_count {
             match result_rx.recv() {
-                Ok(res) => results.push(res),
+                Ok((worker_id, res)) => {
+                    publish_helper_snapshot(
+                        &self.stop_controller,
+                        session_id,
+                        root_key,
+                        worker_id,
+                        &res,
+                    );
+                    results.push((worker_id, res));
+                }
                 Err(_) => warn!("parallel worker failed to send result"),
             }
         }
 
-        if we_set_stop_flag {
+        if we_set_stop_flag && inserted_stop_flag {
             let _ = stop_flag.compare_exchange(
                 true,
                 false,
@@ -177,7 +192,7 @@ fn combine_results(
             ..Default::default()
         };
         let mut fallback = SearchResult::new(None, 0, stats);
-        fallback.hashfull = tt.hashfull() as u32;
+        fallback.hashfull = tt.hashfull_permille() as u32;
         fallback.refresh_summary();
         return fallback;
     }
@@ -253,7 +268,7 @@ fn combine_results(
 
     if let Some(dup) = final_result.stats.duplication_percentage {
         if dup > 65.0 {
-            debug!("lazy_smp duplication {:.2}%", dup);
+            debug!("lazy_smp helper_share_pct {:.2}%", dup);
         }
     }
 
@@ -353,6 +368,62 @@ pub(crate) fn compute_jitter_seed_for_test(
     root_key: u64,
 ) -> u64 {
     compute_jitter_seed(session_id, helper_count, worker_id, root_key)
+}
+
+fn publish_helper_snapshot(
+    stop_controller: &StopController,
+    session_id: u64,
+    root_key: u64,
+    worker_id: usize,
+    result: &SearchResult,
+) {
+    if worker_id == 0 {
+        return;
+    }
+    if result.depth < HELPER_PUBLISH_MIN_DEPTH {
+        return;
+    }
+    if let Some(existing) = stop_controller.try_read_snapshot() {
+        if result.depth <= u32::from(existing.depth) {
+            return;
+        }
+    }
+
+    let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
+    pv.extend(result.stats.pv.iter().copied());
+    if pv.is_empty() {
+        if let Some(best) = result.best_move {
+            pv.push(best);
+        } else {
+            return;
+        }
+    }
+
+    let root_move = pv[0];
+    let seldepth = result
+        .stats
+        .seldepth
+        .or_else(|| Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+    let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+
+    let line = RootLine {
+        multipv_index: 1,
+        root_move,
+        score_internal: result.score,
+        score_cp: result.score,
+        bound: result.node_type,
+        depth: result.depth,
+        seldepth,
+        pv,
+        nodes: Some(result.nodes),
+        time_ms: Some(elapsed_ms),
+        nps: Some(result.nps),
+        exact_exhausted: false,
+        exhaust_reason: None,
+        mate_distance: None,
+    };
+
+    stop_controller.publish_root_line(session_id, root_key, &line);
 }
 
 #[cfg(test)]
