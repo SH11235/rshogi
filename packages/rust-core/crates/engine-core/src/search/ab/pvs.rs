@@ -368,7 +368,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 *lmr_counter += 1;
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::record_move_pick(
+            diagnostics::record_move_pick(diagnostics::MovePickContext {
                 pos,
                 depth,
                 alpha,
@@ -379,7 +379,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 gives_check,
                 is_capture,
                 reduction,
-            );
+            });
             let pv_move = !first_move_done;
             let score = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
