@@ -9,8 +9,29 @@ use crate::io::{diag_info_string, info_string, usi_println};
 use crate::state::EngineState;
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+static LAST_EMITTED_BESTMOVE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+#[cfg(test)]
+fn test_record_bestmove(final_usi: &str, ponder: Option<&str>) {
+    let entry = LAST_EMITTED_BESTMOVE.get_or_init(|| Mutex::new(None));
+    let mut guard = entry.lock().unwrap();
+    let mut payload = format!("bestmove {}", final_usi);
+    if let Some(p) = ponder {
+        payload.push_str(&format!(" ponder {}", p));
+    }
+    *guard = Some(payload);
+}
+
+#[cfg(test)]
+pub fn take_last_emitted_bestmove() -> Option<String> {
+    LAST_EMITTED_BESTMOVE.get_or_init(|| Mutex::new(None)).lock().unwrap().take()
+}
 
 #[inline]
 pub fn fmt_hash(h: u64) -> String {
@@ -182,6 +203,8 @@ pub fn emit_bestmove_once<S: Into<String>>(
 
     let final_usi = final_move.into();
     let ponder = sanitize_ponder_for_bestmove(&final_usi, ponder);
+    #[cfg(test)]
+    test_record_bestmove(&final_usi, ponder.as_deref());
     emit_bestmove(&final_usi, ponder);
 
     state.bestmove_emitted = true;
@@ -864,8 +887,13 @@ pub fn finalize_and_send_fast(
                 } else {
                     None
                 };
+                let note = if shallow {
+                    "shallow_tt_probe_missed"
+                } else {
+                    "depth_sufficient"
+                };
                 diag_info_string(format!(
-                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} source={:?} snapshot_version={} tt_probe=0 tt_probe_src=snapshot tt_probe_budget_ms={} note=depth_sufficient",
+                    "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} source={:?} snapshot_version={} tt_probe=0 tt_probe_src=snapshot tt_probe_budget_ms={} note={}",
                     label,
                     snap.search_id,
                     fmt_hash(snap.root_key),
@@ -875,7 +903,8 @@ pub fn finalize_and_send_fast(
                     snap.pv.len(),
                     snap.source,
                     snap.version,
-                    budget_ms
+                    budget_ms,
+                    note
                 ));
                 log_and_emit_final_selection(
                     state,
@@ -1062,7 +1091,7 @@ pub fn finalize_and_send_fast(
         }
     }
 }
-const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 2;
+const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 3;
 
 #[cfg(test)]
 mod tests {
@@ -1070,6 +1099,9 @@ mod tests {
     use crate::state::EngineState;
     use engine_core::engine::controller::{Engine, EngineType};
     use engine_core::search::parallel::FinalizeReason;
+    use engine_core::search::types::{NodeType, RootLine};
+    use engine_core::usi::parse_usi_move;
+    use smallvec::SmallVec;
 
     #[test]
     fn tt_probe_budget_respects_stop_info_and_snapshot_elapsed() {
@@ -1145,6 +1177,59 @@ mod tests {
         finalize_and_send_fast(&mut state, "test_guard_fast", Some(FinalizeReason::Hard));
         assert!(!state.bestmove_emitted);
         assert!(state.stop_controller.try_claim_finalize());
+    }
+
+    #[test]
+    fn finalize_fast_uses_tt_probe_for_shallow_snapshot() {
+        let mut state = EngineState::new();
+        let session_id = 99;
+        state.current_session_core_id = Some(session_id);
+        state.stop_controller.publish_session(None, session_id);
+        state.stop_controller.prime_stop_info(StopInfo::default());
+
+        let best_move = parse_usi_move("5g5f").unwrap();
+        let mut pv: SmallVec<[engine_core::shogi::Move; 32]> = SmallVec::new();
+        pv.push(best_move);
+        let shallow_line = RootLine {
+            multipv_index: 1,
+            root_move: best_move,
+            score_internal: 120,
+            score_cp: 120,
+            bound: NodeType::Exact,
+            depth: 2,
+            seldepth: Some(2),
+            pv,
+            nodes: Some(128),
+            time_ms: Some(5),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
+        state.stop_controller.publish_committed_snapshot(
+            session_id,
+            state.position.zobrist_hash(),
+            std::slice::from_ref(&shallow_line),
+            128,
+            5,
+        );
+
+        let expected = {
+            let eng = state.engine.lock().unwrap();
+            let fb = eng.choose_final_bestmove(&state.position, None);
+            fb.best_move.expect("legal fallback expected")
+        };
+
+        super::take_last_emitted_bestmove();
+
+        finalize_and_send_fast(&mut state, "fast_snapshot_unit", Some(FinalizeReason::Hard));
+        assert!(state.bestmove_emitted, "bestmove must be emitted");
+
+        let emitted = super::take_last_emitted_bestmove()
+            .expect("captured bestmove output")
+            .replace("bestmove ", "");
+        assert_eq!(emitted, move_to_usi(&expected));
     }
 
     #[test]

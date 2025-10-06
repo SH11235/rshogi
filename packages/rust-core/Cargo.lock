@@ -734,6 +734,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]

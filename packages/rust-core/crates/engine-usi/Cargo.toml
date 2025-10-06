@@ -46,3 +46,4 @@ verbose_usi = []
 
 [dev-dependencies]
 assert_cmd = "2.0"
+smallvec = { workspace = true }

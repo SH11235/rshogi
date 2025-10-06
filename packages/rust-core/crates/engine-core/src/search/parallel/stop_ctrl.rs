@@ -326,7 +326,7 @@ impl StopController {
             RootSnapshot::from_line(session_id, root_key, line, SnapshotSource::Partial);
         self.consider_snapshot(candidate);
 
-        let depth_u8 = line.depth as u8;
+        let depth_u8 = line.depth.min(u8::MAX as u32) as u8;
         let total_nodes = line.nodes.unwrap_or(0);
         let total_time_ms = line.time_ms.unwrap_or(0);
 
@@ -380,8 +380,10 @@ impl StopController {
             return;
         }
 
-        let all_exact = lines.iter().all(|line| matches!(line.bound, Bound::Exact));
-        if !all_exact {
+        let Some(first) = lines.first() else {
+            return;
+        };
+        if !matches!(first.bound, Bound::Exact) {
             return;
         }
 
@@ -395,15 +397,13 @@ impl StopController {
         );
         self.consider_snapshot(snapshot);
 
-        if let Some(first) = lines.first() {
-            let mut guard = self.inner.stop_info.lock().unwrap();
-            let mut si = guard.take().unwrap_or_default();
-            let depth_u8 = first.depth as u8;
-            si.elapsed_ms = si.elapsed_ms.max(elapsed_ms);
-            si.nodes = si.nodes.max(nodes);
-            si.depth_reached = si.depth_reached.max(depth_u8);
-            *guard = Some(si);
-        }
+        let mut guard = self.inner.stop_info.lock().unwrap();
+        let mut si = guard.take().unwrap_or_default();
+        let depth_u8 = first.depth.min(u8::MAX as u32) as u8;
+        si.elapsed_ms = si.elapsed_ms.max(elapsed_ms);
+        si.nodes = si.nodes.max(nodes);
+        si.depth_reached = si.depth_reached.max(depth_u8);
+        *guard = Some(si);
     }
 
     fn consider_snapshot(&self, candidate: RootSnapshot) {
@@ -419,6 +419,9 @@ impl StopController {
                     }
                     (SnapshotSource::Partial, SnapshotSource::Stable) => true,
                     (SnapshotSource::Partial, SnapshotSource::Partial) => {
+                        // 同深さ Partial → Partial は PV 先頭手が変わらなくても診断メトリクス
+                        // 更新を優先する。ログの揺れは増えるが、進捗監視の粒度を落とさないため
+                        // のポリシー。より安定表示が必要になった場合はここで手番比較などを追加。
                         candidate.depth >= existing.depth
                     }
                 }
@@ -783,9 +786,14 @@ mod tests {
         }
 
         assert!(reasons.contains(&FinalizeReason::Hard));
-        assert!(reasons.iter().rfind(|&&r| r == FinalizeReason::Hard).is_some());
-        if let Some(last) = reasons.last() {
-            assert_eq!(*last, FinalizeReason::Hard, "highest priority finalize must be last");
+        if let Some(idx) = reasons.iter().position(|&r| r == FinalizeReason::Hard) {
+            for r in &reasons[idx..] {
+                assert_eq!(
+                    *r,
+                    FinalizeReason::Hard,
+                    "no lower-priority finalize should appear after Hard",
+                );
+            }
         }
     }
 
@@ -848,5 +856,51 @@ mod tests {
             assert_eq!(info.nodes, 100);
             assert_eq!(info.elapsed_ms, 40);
         }
+    }
+
+    #[test]
+    fn snapshot_depth_is_clamped_to_u8_max() {
+        use crate::search::types::{Bound, RootLine};
+        use crate::shogi::Move;
+        use smallvec::SmallVec;
+
+        let ctrl = StopController::new();
+        let external = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&external), 4242);
+        ctrl.prime_stop_info(StopInfo::default());
+
+        let mut pv = SmallVec::<[Move; 32]>::new();
+        pv.push(Move::null());
+        let deep_line = RootLine {
+            multipv_index: 1,
+            root_move: Move::null(),
+            score_internal: 0,
+            score_cp: 0,
+            bound: Bound::Exact,
+            depth: 300,
+            seldepth: Some(64),
+            pv: pv.clone(),
+            nodes: Some(42_000),
+            time_ms: Some(120),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
+        ctrl.publish_root_line(4242, 0xDEADBEEF, &deep_line);
+        let partial_info =
+            ctrl.try_read_stop_info().expect("stop info present after partial publish");
+        assert_eq!(partial_info.depth_reached, u8::MAX, "depth must saturate at u8::MAX");
+
+        let mut lines = SmallVec::<[RootLine; 4]>::new();
+        lines.push(deep_line.clone());
+        ctrl.publish_committed_snapshot(4242, 0xDEADBEEF, lines.as_slice(), 42_000, 180);
+
+        let stable = ctrl.try_read_snapshot().expect("stable snapshot should be published");
+        assert_eq!(stable.depth, u8::MAX, "snapshot depth should be clamped");
+        let stable_info =
+            ctrl.try_read_stop_info().expect("stop info present after stable publish");
+        assert_eq!(stable_info.depth_reached, u8::MAX, "StopInfo depth should remain clamped");
     }
 }

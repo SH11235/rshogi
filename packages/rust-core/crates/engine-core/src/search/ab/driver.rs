@@ -314,6 +314,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_seldepth_reached: Option<u8> = None;
         let mut final_seldepth_raw: Option<u32> = None;
         let mut incomplete_depth: Option<u8> = None;
+        let mut cumulative_pv_changed: u32 = 0;
+        let mut cumulative_asp_failures: u32 = 0;
+        let mut cumulative_asp_hits: u32 = 0;
+        let mut cumulative_researches: u32 = 0;
         let mut iterative_heur = Heuristics::default();
         let stop_controller = limits.stop_controller.clone();
         let mut finalize_soft_sent = false;
@@ -392,6 +396,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 break;
             }
             let mut seldepth: u32 = 0;
+            let mut iteration_asp_failures: u32 = 0;
+            let mut iteration_asp_hits: u32 = 0;
+            let mut iteration_researches: u32 = 0;
+            let prev_best_move_for_iteration = best;
             let throttle_ms = Self::currmove_throttle_ms();
             let mut last_currmove_emit = Instant::now();
             let prev_root_lines = final_lines.as_ref().map(|lines| lines.as_slice());
@@ -722,35 +730,56 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                     if local_best <= old_alpha {
+                        let new_alpha = old_alpha.saturating_sub(2 * delta).max(i32::MIN / 2);
+                        let new_beta = old_beta;
                         if let Some(cb) = info {
                             cb(InfoEvent::Aspiration {
                                 outcome: crate::search::api::AspirationOutcome::FailLow,
                                 old_alpha,
                                 old_beta,
-                                new_alpha: old_alpha.saturating_sub(2 * delta),
-                                new_beta: old_beta,
+                                new_alpha,
+                                new_beta,
                             });
                         }
-                        alpha = old_alpha.saturating_sub(2 * delta).max(i32::MIN / 2);
-                        beta = old_beta;
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "aspiration fail-low old=[{},{}] new=[{},{}]",
+                                old_alpha, old_beta, new_alpha, new_beta
+                            ));
+                        }
+                        iteration_asp_failures = iteration_asp_failures.saturating_add(1);
+                        iteration_researches = iteration_researches.saturating_add(1);
+                        alpha = new_alpha;
+                        beta = new_beta;
                         delta = (delta * 2).min(ASP_DELTA_MAX);
                         continue;
                     }
                     if local_best >= old_beta {
+                        let new_alpha = old_alpha;
+                        let new_beta = old_beta.saturating_add(2 * delta).min(i32::MAX / 2);
                         if let Some(cb) = info {
                             cb(InfoEvent::Aspiration {
                                 outcome: crate::search::api::AspirationOutcome::FailHigh,
                                 old_alpha,
                                 old_beta,
-                                new_alpha: old_alpha,
-                                new_beta: old_beta.saturating_add(2 * delta),
+                                new_alpha,
+                                new_beta,
                             });
                         }
-                        alpha = old_alpha;
-                        beta = old_beta.saturating_add(2 * delta).min(i32::MAX / 2);
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "aspiration fail-high old=[{},{}] new=[{},{}]",
+                                old_alpha, old_beta, new_alpha, new_beta
+                            ));
+                        }
+                        iteration_asp_failures = iteration_asp_failures.saturating_add(1);
+                        iteration_researches = iteration_researches.saturating_add(1);
+                        alpha = new_alpha;
+                        beta = new_beta;
                         delta = (delta * 2).min(ASP_DELTA_MAX);
                         continue;
                     }
+                    iteration_asp_hits = iteration_asp_hits.saturating_add(1);
                     break; // success within window
                 }
 
@@ -788,6 +817,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if let Some(m) = local_best_mv {
                     // 次反復のAspiration用に pv_idx==1 を採用
                     if pv_idx == 1 {
+                        if prev_best_move_for_iteration.map(|b| b.to_u32()) != Some(m.to_u32()) {
+                            cumulative_pv_changed = cumulative_pv_changed.saturating_add(1);
+                        }
                         best = Some(m);
                         best_score = local_best;
                         prev_score = local_best;
@@ -842,6 +874,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         exhaust_reason: None,
                         mate_distance: None,
                     };
+                    let node_type_for_store = line.bound;
                     let line_arc = Arc::new(line);
                     if let Some(cb) = info {
                         cb(InfoEvent::PV {
@@ -852,10 +885,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         Ok(line) => line,
                         Err(arc) => (*arc).clone(),
                     });
-                    // TT保存は 1行目のみ（Exact, PV=true）
-                    if pv_idx == 1 {
+                    // TT 保存は 1 行目かつ Exact のときのみ行う。
+                    // Aspiration 成功時にのみ Exact が確定する前提なので、将来の窓調整変更で
+                    // 誤って Lower/Upper を保存しないよう明示的にガードしておく。
+                    if pv_idx == 1
+                        && matches!(node_type_for_store, NodeType::Exact)
+                        && best.is_some()
+                    {
                         if let (Some(tt), Some(best_mv_root)) = (&self.tt, best) {
-                            let node_type = NodeType::Exact;
                             let store_score =
                                 crate::search::common::adjust_mate_score_for_tt(best_score, 0)
                                     .clamp(i16::MIN as i32, i16::MAX as i32)
@@ -866,7 +903,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 store_score,
                                 root_static_eval_i16,
                                 d as u8,
-                                node_type,
+                                node_type_for_store,
                                 root.side_to_move,
                             );
                             args.is_pv = true;
@@ -892,26 +929,38 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // 反復ごとのrootヒント統計（最終反復で掲載）
             stats_hint_exists = depth_hint_exists;
             stats_hint_used = depth_hint_used;
-            // この深さのMultiPV行を最終結果候補として保持
-            final_lines = Some(depth_lines.clone());
-            final_depth_reached = d as u8;
             let capped_seldepth =
                 seldepth.min(d as u32 + SELDEPTH_EXTRA_MARGIN).min(u8::MAX as u32) as u8;
 
+            let iteration_complete = depth_lines.len() >= required_multipv_lines;
+
             iterative_heur = shared_heur;
-            final_seldepth_reached = Some(capped_seldepth);
-            final_seldepth_raw = Some(seldepth);
-            if let Some(ctrl) = stop_controller.as_ref() {
-                ctrl.publish_committed_snapshot(
-                    session_id,
-                    root_key,
-                    depth_lines.as_slice(),
-                    nodes,
-                    t0.elapsed().as_millis() as u64,
-                );
+
+            if iteration_complete {
+                final_lines = Some(depth_lines.clone());
+                final_depth_reached = d as u8;
+                final_seldepth_reached = Some(capped_seldepth);
+                final_seldepth_raw = Some(seldepth);
+                if let Some(ctrl) = stop_controller.as_ref() {
+                    ctrl.publish_committed_snapshot(
+                        session_id,
+                        root_key,
+                        depth_lines.as_slice(),
+                        nodes,
+                        t0.elapsed().as_millis() as u64,
+                    );
+                }
+            } else if incomplete_depth.is_none() {
+                // iteration が完了しなかった場合は未完了深さとして記録する。
+                incomplete_depth = Some(d as u8);
             }
 
             let mut lead_ms = 10u64;
+
+            cumulative_asp_failures =
+                cumulative_asp_failures.saturating_add(iteration_asp_failures);
+            cumulative_asp_hits = cumulative_asp_hits.saturating_add(iteration_asp_hits);
+            cumulative_researches = cumulative_researches.saturating_add(iteration_researches);
 
             if let Some(cb) = limits.info_string_callback.as_ref() {
                 let elapsed_ms = t0.elapsed().as_millis();
@@ -930,6 +979,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         "stop_flag_break depth={} elapsed_ms={} nodes={}",
                         d, elapsed, nodes
                     ));
+                }
+                if incomplete_depth.is_none() {
+                    incomplete_depth = Some(d as u8);
                 }
                 break;
             }
@@ -995,6 +1047,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.root_fail_high_count = Some(cum_beta_cuts);
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
+        stats.aspiration_failures = Some(cumulative_asp_failures);
+        stats.aspiration_hits = Some(cumulative_asp_hits);
+        stats.re_searches = Some(cumulative_researches);
+        stats.pv_changed = Some(cumulative_pv_changed);
         stats.incomplete_depth = incomplete_depth;
 
         let final_lines_opt = final_lines.clone();
@@ -1018,7 +1074,25 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut snapshot_version = None;
         let mut stable_depth = None;
 
-        if let Some(snap) = stable_snapshot {
+        if let Some(lines) = final_lines_opt.as_ref() {
+            if let Some(first) = lines.first() {
+                best_move_out = Some(first.root_move);
+                score_out = first.score_cp;
+                node_type_out = first.bound;
+                stats.pv = first.pv.iter().copied().collect();
+            }
+            let mut published_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
+            if incomplete_depth.is_some() && !lines.is_empty() {
+                published_lines.push(lines[0].clone());
+            } else {
+                published_lines.extend(lines.iter().cloned());
+            }
+            result_lines = Some(published_lines);
+            if result_lines.is_some() {
+                report_source = Some(SnapshotSource::Stable);
+                stable_depth = Some(final_depth_reached);
+            }
+        } else if let Some(snap) = stable_snapshot {
             best_move_out = snap.best;
             score_out = snap.score_cp;
             node_type_out = snap.node_type;
@@ -1030,18 +1104,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             report_source = Some(SnapshotSource::Stable);
             snapshot_version = Some(snap.version);
             stable_depth = Some(snap.depth);
-        } else if let Some(lines) = final_lines_opt.as_ref() {
-            if let Some(first) = lines.first() {
-                best_move_out = Some(first.root_move);
-                score_out = first.score_cp;
-                node_type_out = first.bound;
-                stats.pv = first.pv.iter().copied().collect();
-            }
-            result_lines = final_lines_opt.clone();
-            if result_lines.is_some() {
-                report_source = Some(SnapshotSource::Stable);
-                stable_depth = Some(final_depth_reached);
-            }
         } else if let Some(snap) = snapshot_any.clone() {
             best_move_out = snap.best;
             score_out = snap.score_cp;
