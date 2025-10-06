@@ -80,6 +80,20 @@ impl CounterMoveHistory {
             }
         }
     }
+
+    pub(crate) fn filled_count(&self) -> u32 {
+        let mut count = 0u32;
+        for color in 0..2 {
+            for from in 0..COUNTER_FROM_DIM {
+                for to in 0..SHOGI_BOARD_SIZE {
+                    if self.table[color][from][to].is_some() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
 }
 
 #[inline]
@@ -185,6 +199,21 @@ impl ButterflyHistory {
                 }
             }
         }
+    }
+
+    pub(crate) fn max_abs(&self) -> i16 {
+        let mut max_val = 0i16;
+        for color in 0..2 {
+            for from in 0..BUTTERFLY_FROM_DIM {
+                for to in 0..SHOGI_BOARD_SIZE {
+                    let val = self.scores[color][from][to].abs();
+                    if val > max_val {
+                        max_val = val;
+                    }
+                }
+            }
+        }
+        max_val
     }
 }
 
@@ -324,6 +353,10 @@ impl ContinuationHistory {
             merge_history_value(dst, *src, CONT_HISTORY_MAX);
         }
     }
+
+    pub(crate) fn max_abs(&self) -> i16 {
+        self.scores.iter().map(|v| v.abs()).max().unwrap_or(0)
+    }
 }
 
 /// Capture history - tracks success of captures by attacker/victim/to square
@@ -420,6 +453,23 @@ impl CaptureHistory {
                 }
             }
         }
+    }
+
+    pub(crate) fn max_abs(&self) -> i16 {
+        let mut max_val = 0i16;
+        for color in 0..2 {
+            for attacker in 0..NUM_PIECE_TYPES {
+                for victim in 0..NUM_PIECE_TYPES {
+                    for to in 0..SHOGI_BOARD_SIZE {
+                        let val = self.scores[color][attacker][victim][to].abs();
+                        if val > max_val {
+                            max_val = val;
+                        }
+                    }
+                }
+            }
+        }
+        max_val
     }
 }
 

@@ -1072,7 +1072,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.re_searches = Some(cumulative_researches);
         stats.pv_changed = Some(cumulative_pv_changed);
         stats.incomplete_depth = incomplete_depth;
-        stats.heuristics = Some(Arc::new(iterative_heur.clone()));
+        if limits.store_heuristics {
+            stats.heuristics = Some(Arc::new(iterative_heur.clone()));
+        }
 
         let final_lines_opt = final_lines.clone();
         if let Some(first_line) = final_lines_opt.as_ref().and_then(|lines| lines.first()) {

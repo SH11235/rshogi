@@ -42,11 +42,8 @@ where
         let evaluator = evaluator.into();
         let profile = SearchProfile::default();
         profile.apply_runtime_defaults();
-        let backend = ClassicBackend::with_profile_and_tt(
-            Arc::clone(&evaluator),
-            Arc::clone(&tt),
-            profile.clone(),
-        );
+        let backend =
+            ClassicBackend::with_profile_and_tt(Arc::clone(&evaluator), Arc::clone(&tt), profile);
         let backend = Arc::new(backend);
         let helper_threads = threads.max(1).saturating_sub(1);
         let thread_pool = ThreadPool::new(Arc::clone(&backend), helper_threads);
@@ -69,13 +66,9 @@ where
     pub fn search(&mut self, pos: &mut Position, mut limits: SearchLimits) -> SearchResult {
         let threads = self.threads.max(1);
         limits.stop_controller.get_or_insert_with(|| Arc::clone(&self.stop_controller));
-        let stop_flag = if let Some(flag) = &limits.stop_flag {
-            Arc::clone(flag)
-        } else {
-            let flag = Arc::new(AtomicBool::new(false));
-            limits.stop_flag = Some(Arc::clone(&flag));
-            flag
-        };
+        let inserted_stop_flag = limits.stop_flag.is_none();
+        let stop_flag =
+            limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
 
         let inserted_qnodes = limits.qnodes_counter.is_none();
         let qnodes_counter = if let Some(counter) = &limits.qnodes_counter {
@@ -87,6 +80,7 @@ where
         };
         let session_id = limits.session_id;
         let root_key = pos.zobrist_hash();
+        limits.store_heuristics = true;
         limits.root_jitter_seed = None;
         let start = Instant::now();
 
@@ -104,15 +98,16 @@ where
         self.thread_pool.resize(helper_count);
 
         let mut jobs = Vec::with_capacity(helper_count);
-        for worker_id in 1..=helper_count {
+        for worker_index in 0..helper_count {
             let mut worker_limits = clone_limits_for_worker(&limits);
+            worker_limits.store_heuristics = false;
             worker_limits.info_callback = None;
             worker_limits.info_string_callback = None;
             worker_limits.iteration_callback = None;
             worker_limits.qnodes_counter = Some(Arc::clone(&qnodes_counter));
             worker_limits.stop_controller = None;
             worker_limits.root_jitter_seed =
-                Some(compute_jitter_seed(session_id, worker_id, root_key));
+                Some(compute_jitter_seed(session_id, helper_count, worker_index + 1, root_key));
             jobs.push(SearchJob {
                 position: pos.clone(),
                 limits: worker_limits,
@@ -126,8 +121,9 @@ where
         let main_result = self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
         results.push((0usize, main_result));
 
-        let original_stop = stop_flag.load(AtomicOrdering::Acquire);
-        stop_flag.store(true, AtomicOrdering::Release);
+        let stop_flag_was_set = stop_flag
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_ok();
 
         drop(result_tx);
         for _ in 0..helper_count {
@@ -137,7 +133,16 @@ where
             }
         }
 
-        stop_flag.store(original_stop, AtomicOrdering::Release);
+        if stop_flag_was_set {
+            let _ = stop_flag.compare_exchange(
+                true,
+                false,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Relaxed,
+            );
+        } else if inserted_stop_flag {
+            stop_flag.store(false, AtomicOrdering::Release);
+        }
         if inserted_qnodes {
             qnodes_counter.store(0, AtomicOrdering::Release);
         }
@@ -148,7 +153,7 @@ where
 
 fn finish_single_result(tt: &TranspositionTable, result: &mut SearchResult, start: Instant) {
     result.stats.elapsed = start.elapsed();
-    result.hashfull = tt.hashfull() as u32;
+    result.hashfull = tt.hashfull_permille() as u32;
     result.refresh_summary();
 }
 
@@ -205,17 +210,19 @@ fn combine_results(
         info.elapsed_ms = elapsed.as_millis() as u64;
         info.depth_reached = max_depth.min(u32::from(u8::MAX)) as u8;
     }
-    final_result.hashfull = tt.hashfull() as u32;
+    final_result.hashfull = tt.hashfull_permille() as u32;
     final_result.refresh_summary();
 
     let mut merged_heuristics = final_result.stats.heuristics.as_ref().map(|arc| (**arc).clone());
-    for (_, res) in &results {
+    for (worker_id, res) in &results {
+        if *worker_id == 0 {
+            continue;
+        }
         if let Some(h) = res.stats.heuristics.as_ref() {
-            let snapshot = (**h).clone();
             if let Some(acc) = merged_heuristics.as_mut() {
-                acc.merge_from(&snapshot);
+                acc.merge_from(&*h);
             } else {
-                merged_heuristics = Some(snapshot);
+                merged_heuristics = Some((**h).clone());
             }
         }
     }
@@ -224,7 +231,7 @@ fn combine_results(
     }
 
     if let Some(dup) = final_result.stats.duplication_percentage {
-        if dup > 75.0 {
+        if dup > 65.0 {
             debug!("lazy_smp duplication {:.2}%", dup);
         }
     }
@@ -267,7 +274,7 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         depth: base.depth,
         nodes: base.nodes,
         qnodes_limit: base.qnodes_limit,
-        time_parameters: base.time_parameters.clone(),
+        time_parameters: base.time_parameters,
         random_time_ms: base.random_time_ms,
         session_id: base.session_id,
         start_time: base.start_time,
@@ -281,6 +288,7 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         ponder_hit_flag: base.ponder_hit_flag.clone(),
         qnodes_counter: base.qnodes_counter.clone(),
         root_jitter_seed: base.root_jitter_seed,
+        store_heuristics: base.store_heuristics,
         immediate_eval_at_depth_zero: base.immediate_eval_at_depth_zero,
         multipv: base.multipv,
         enable_fail_safe: base.enable_fail_safe,
@@ -290,10 +298,17 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
     }
 }
 
-fn compute_jitter_seed(session_id: u64, worker_id: usize, root_key: u64) -> u64 {
+fn compute_jitter_seed(
+    session_id: u64,
+    helper_count: usize,
+    worker_id: usize,
+    root_key: u64,
+) -> u64 {
     let wid = worker_id as u64;
+    let hc = helper_count as u64;
     session_id.wrapping_mul(0x9E37_79B1_85EB_CA87)
-        ^ root_key.rotate_left((wid as u32) & 31)
+        ^ root_key.rotate_left(((wid ^ hc) as u32) & 31)
         ^ (wid << 32)
+        ^ (hc << 48)
         ^ wid
 }

@@ -11,7 +11,6 @@ use crate::search::history::{
 };
 use crate::search::params as dynp;
 use crate::search::types::SearchStack;
-
 pub(crate) use guards::{EvalMoveGuard, EvalNullGuard};
 #[cfg(any(test, feature = "bench-move-picker"))]
 pub use move_picker::MovePicker;
@@ -74,6 +73,15 @@ pub struct Heuristics {
     pub(crate) lmr_trials: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeuristicsSummary {
+    pub quiet_max: i16,
+    pub continuation_max: i16,
+    pub capture_max: i16,
+    pub counter_filled: u32,
+    pub lmr_trials: u64,
+}
+
 impl Heuristics {
     pub fn age_all(&mut self) {
         self.history.age_scores();
@@ -96,6 +104,20 @@ impl Heuristics {
         self.continuation.merge_from(&other.continuation);
         self.capture.merge_from(&other.capture);
         self.lmr_trials = self.lmr_trials.saturating_add(other.lmr_trials);
+    }
+
+    pub fn summary(&self) -> HeuristicsSummary {
+        HeuristicsSummary {
+            quiet_max: self.history.max_abs(),
+            continuation_max: self.continuation.max_abs(),
+            capture_max: self.capture.max_abs(),
+            counter_filled: self.counter.filled_count(),
+            lmr_trials: self.lmr_trials,
+        }
+    }
+
+    pub fn lmr_trials(&self) -> u64 {
+        self.lmr_trials
     }
 }
 
