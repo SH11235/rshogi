@@ -244,38 +244,40 @@ pub(crate) fn record_iid_event(
     });
 }
 
-pub(crate) fn record_move_pick(
-    pos: &Position,
-    depth: i32,
-    alpha: i32,
-    beta: i32,
-    is_pv: bool,
-    moveno: usize,
-    mv: crate::shogi::Move,
-    gives_check: bool,
-    is_capture: bool,
-    reduction: i32,
-) {
-    if !within_trace_window(pos.ply) {
+pub(crate) struct MovePickContext<'a> {
+    pub pos: &'a Position,
+    pub depth: i32,
+    pub alpha: i32,
+    pub beta: i32,
+    pub is_pv: bool,
+    pub moveno: usize,
+    pub mv: crate::shogi::Move,
+    pub gives_check: bool,
+    pub is_capture: bool,
+    pub reduction: i32,
+}
+
+pub(crate) fn record_move_pick(ctx: MovePickContext) {
+    if !within_trace_window(ctx.pos.ply) {
         return;
     }
     let stage = take_stage();
-    let mv_str = move_to_usi(&mv);
+    let mv_str = move_to_usi(&ctx.mv);
     let extra = format!(
         "moveno={} gives_check={} capture={} reduction={}",
-        moveno, gives_check, is_capture, reduction
+        ctx.moveno, ctx.gives_check, ctx.is_capture, ctx.reduction
     );
     push_event(RingEvent {
         tag: "move",
-        ply: pos.ply as u32,
-        depth,
-        alpha,
-        beta,
-        is_pv,
-        side: pos.side_to_move,
-        hash: pos.hash,
+        ply: ctx.pos.ply as u32,
+        depth: ctx.depth,
+        alpha: ctx.alpha,
+        beta: ctx.beta,
+        is_pv: ctx.is_pv,
+        side: ctx.pos.side_to_move,
+        hash: ctx.pos.hash,
         stage,
-        moveno: Some(moveno),
+        moveno: Some(ctx.moveno),
         mv: Some(mv_str),
         extra: Some(extra),
     });

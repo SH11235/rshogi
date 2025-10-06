@@ -2147,127 +2147,45 @@ mod tests {
     }
 
     #[test]
-    fn drop_pawn_mate_detects_unsupported_mat() {
-        let candidate_pieces = [
-            ("4h", PieceType::Rook),
-            ("5h", PieceType::Rook),
-            ("6h", PieceType::Rook),
-            ("7c", PieceType::Knight),
-            ("3c", PieceType::Knight),
-            ("5c", PieceType::Gold),
-            ("7e", PieceType::Knight),
-            ("3e", PieceType::Knight),
-            ("4c", PieceType::Gold),
-            ("6c", PieceType::Gold),
-            ("4e", PieceType::Bishop),
-            ("6e", PieceType::Bishop),
-        ];
-        let drop_sq = parse_usi_square("5b").unwrap();
-        let mut found = None;
+    fn drop_pawn_mate_detects_edge_case() {
+        let mut pos = build_empty_position(Color::Black);
+        pos.board
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("2a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("1c").unwrap(), Piece::new(PieceType::Gold, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
-        for mask in 0usize..(1 << candidate_pieces.len()) {
-            let mut pos = build_empty_position(Color::Black);
-            pos.board.put_piece(
-                parse_usi_square("5i").unwrap(),
-                Piece::new(PieceType::King, Color::Black),
-            );
-            pos.board.put_piece(
-                parse_usi_square("5a").unwrap(),
-                Piece::new(PieceType::King, Color::White),
-            );
+        pos.board.rebuild_occupancy_bitboards();
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
 
-            for (idx, (sq, kind)) in candidate_pieces.iter().enumerate() {
-                if (mask & (1 << idx)) != 0 {
-                    pos.board
-                        .put_piece(parse_usi_square(sq).unwrap(), Piece::new(*kind, Color::Black));
-                }
-            }
-
-            pos.hash = pos.compute_hash();
-            pos.zobrist_hash = pos.hash;
-
-            let gen = match MoveGenImpl::new(&pos) {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-
-            if !gen
-                .attackers_to_with_occupancy(drop_sq, Color::Black, pos.board.all_bb)
-                .is_empty()
-            {
-                continue;
-            }
-
-            if gen.is_drop_pawn_mate(drop_sq, Color::White) {
-                found = Some(mask);
-                break;
-            }
-        }
-
-        assert!(
-            found.is_some(),
-            "failed to find unsupported drop mate configuration from candidate set"
-        );
+        let gen = MoveGenImpl::new(&pos).expect("generator init");
+        let drop_sq = parse_usi_square("1b").unwrap();
+        assert!(gen.is_drop_pawn_mate(drop_sq, Color::White));
     }
 
     #[test]
-    fn debug_find_unsupported_drop_mate() {
-        let squares = ["4a", "4b", "4c", "5c", "6a", "6b", "6c", "5d"];
-        let piece_options = [
-            PieceType::Gold,
-            PieceType::Silver,
-            PieceType::Rook,
-            PieceType::Bishop,
-            PieceType::Knight,
-        ];
-        let drop_sq = parse_usi_square("5b").unwrap();
+    fn drop_pawn_mate_allows_safe_capture() {
+        let mut pos = build_empty_position(Color::Black);
+        pos.board
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
-        for (i, &sq0) in squares.iter().enumerate() {
-            for &piece0 in &piece_options {
-                if let Some(config) = try_drop_mate(&[(sq0, piece0)], drop_sq) {
-                    println!("Found placement:");
-                    for (sq, kind) in config {
-                        println!("  {} {:?}", sq, kind);
-                    }
-                    return;
-                }
-            }
-            for j in (i + 1)..squares.len() {
-                let sq1 = squares[j];
-                for &piece0 in &piece_options {
-                    for &piece1 in &piece_options {
-                        if let Some(config) = try_drop_mate(&[(sq0, piece0), (sq1, piece1)], drop_sq) {
-                            println!("Found placement:");
-                            for (sq, kind) in config {
-                                println!("  {} {:?}", sq, kind);
-                            }
-                            return;
-                        }
-                    }
-                }
-                for k in (j + 1)..squares.len() {
-                    let sq2 = squares[k];
-                    for &piece0 in &piece_options {
-                        for &piece1 in &piece_options {
-                            for &piece2 in &piece_options {
-                                if let Some(config) = try_drop_mate(
-                                    &[(sq0, piece0), (sq1, piece1), (sq2, piece2)],
-                                    drop_sq,
-                                ) {
-                                    println!("Found placement:");
-                                    for (sq, kind) in config {
-                                        println!("  {} {:?}", sq, kind);
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        pos.board.rebuild_occupancy_bitboards();
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
 
-        println!("No unsupported drop mate found");
+        let gen = MoveGenImpl::new(&pos).expect("generator init");
+        let drop_sq = parse_usi_square("1b").unwrap();
+        assert!(!gen.is_drop_pawn_mate(drop_sq, Color::White));
     }
 
     #[test]
@@ -2289,36 +2207,5 @@ mod tests {
         let gen = MoveGenImpl::new(&pos).expect("generator init");
         assert!(gen.checkers.is_empty());
         assert!(!gen.has_king_escape());
-    }
-
-    fn try_drop_mate(config: &[(&str, PieceType)], drop_sq: Square) -> Option<Vec<(String, PieceType)>> {
-        let mut pos = build_empty_position(Color::Black);
-        pos.board
-            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
-
-        for (sq, kind) in config {
-            pos.board
-                .put_piece(parse_usi_square(sq).unwrap(), Piece::new(*kind, Color::Black));
-        }
-
-        pos.hash = pos.compute_hash();
-        pos.zobrist_hash = pos.hash;
-
-        let gen = MoveGenImpl::new(&pos).ok()?;
-
-        if !gen
-            .attackers_to_with_occupancy(drop_sq, Color::Black, pos.board.all_bb)
-            .is_empty()
-        {
-            return None;
-        }
-
-        if gen.is_drop_pawn_mate(drop_sq, Color::White) {
-            return Some(config.iter().map(|(sq, kind)| (sq.to_string(), *kind)).collect());
-        }
-
-        None
     }
 }
