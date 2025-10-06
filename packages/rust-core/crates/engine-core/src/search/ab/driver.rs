@@ -170,7 +170,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         *POLICY.get_or_init(|| match env::var("SHOGI_CURRMOVE_THROTTLE_MS") {
             Ok(val) => {
                 let val = val.trim().to_ascii_lowercase();
-                if val == "off" || val == "0" {
+                if val == "off" || val == "0" || val == "false" {
                     None
                 } else {
                     val.parse::<u64>().ok().filter(|v| *v > 0)
