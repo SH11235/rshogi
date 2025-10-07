@@ -10,7 +10,6 @@ mod qsearch;
 pub mod diagnostics;
 
 pub use driver::ClassicBackend;
-pub(crate) use driver::{seed_thread_heuristics, take_thread_heuristics};
 #[cfg(any(test, feature = "bench-move-picker"))]
 pub use ordering::{Heuristics, MovePicker};
 pub use profile::{PruneToggles, SearchProfile};
