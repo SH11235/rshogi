@@ -1,7 +1,6 @@
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::ordering::Heuristics;
@@ -61,22 +60,23 @@ impl WorkerLocal {
         session_id: u64,
         root_key: u64,
         worker_id: usize,
+        helper_total: usize,
         jitter_seed: Option<u64>,
     ) {
         // Prefer externally provided jitter_seed; if None, derive a deterministic fallback.
         // Note: In practice, ParallelSearcher always provides jitter_seed via SearchLimits,
         // so the fallback path is primarily for defensive coding and standalone testing.
-        let base = jitter_seed
-            .unwrap_or_else(|| super::compute_jitter_seed(session_id, 1, worker_id, root_key));
+        let base = jitter_seed.unwrap_or_else(|| {
+            super::compute_jitter_seed(session_id, helper_total, worker_id, root_key)
+        });
         let seed128 = Self::seed128_from_base(base);
         self.rng = Xoshiro128PlusPlus::from_seed(seed128);
         self.last_seed = base;
         self.scratch.clear();
-        // Heuristics は helpers ジョブごとにクリア（決定性・メモリ上限確保）。
-        self.heur.clear_all();
+        // Heuristics はジョブ間で再利用（helpers 用最適化）。
+        // 呼び出し側が TLS シード前に prepare_for_job を呼ぶため、ここでは clear しない。
     }
 
-    #[allow(dead_code)]
     fn on_idle(&mut self) {
         // Placeholder: could age heuristics or recycle buffers here.
     }
@@ -91,6 +91,7 @@ where
     // Shared task queue (pull model). Envelope carries job + result channel.
     task_tx: crossbeam::channel::Sender<TaskEnvelope>,
     task_rx: crossbeam::channel::Receiver<TaskEnvelope>,
+
     task_hi_tx: crossbeam::channel::Sender<TaskEnvelope>,
     task_hi_rx: crossbeam::channel::Receiver<TaskEnvelope>,
 }
@@ -105,6 +106,7 @@ struct TaskEnvelope {
     result_tx: Sender<(usize, SearchResult)>,
     // Future YBWC hooks (unused for now):
     priority: u8,
+
     split: Option<u64>,
 }
 
@@ -133,19 +135,17 @@ where
             let backend = Arc::clone(&self.backend);
             let task_rx = self.task_rx.clone();
             let task_hi_rx = self.task_hi_rx.clone();
-            let (ctrl_tx, ctrl_rx) = mpsc::channel();
+            let (ctrl_tx, ctrl_rx) = crossbeam::channel::unbounded();
             let builder = thread::Builder::new().name(format!("lazy-smp-worker-{id}"));
             #[cfg(feature = "large-stack-tests")]
-            {
-                // Deep AB recursion in tests may need a larger stack.
-                builder = builder.stack_size(8 * 1024 * 1024);
-            }
+            let builder = builder.stack_size(8 * 1024 * 1024);
             let handle = builder
-                .spawn(move || worker_loop(backend, task_hi_rx, task_rx, ctrl_rx, id))
+                .spawn(move || worker_loop(backend, task_hi_rx, task_rx, ctrl_rx, id, desired))
                 .expect("spawn lazy smp worker");
             self.workers.push(Worker {
                 ctrl: ctrl_tx,
                 handle: Some(handle),
+                helper_total: desired,
             });
         }
 
@@ -195,8 +195,10 @@ where
 }
 
 struct Worker {
-    ctrl: Sender<WorkerCommand>,
+    ctrl: crossbeam::channel::Sender<WorkerCommand>,
     handle: Option<JoinHandle<()>>,
+
+    helper_total: usize,
 }
 
 enum WorkerCommand {
@@ -207,21 +209,24 @@ fn worker_loop<E>(
     backend: Arc<ClassicBackend<E>>,
     task_hi_rx: crossbeam::channel::Receiver<TaskEnvelope>,
     task_rx: crossbeam::channel::Receiver<TaskEnvelope>,
-    ctrl_rx: Receiver<WorkerCommand>,
+    ctrl_rx: crossbeam::channel::Receiver<WorkerCommand>,
     worker_id: usize,
+    helper_total: usize,
 ) where
     E: Evaluator + Send + Sync + 'static,
 {
     let mut local = WorkerLocal::new();
     loop {
-        if let Ok(WorkerCommand::Shutdown) = ctrl_rx.try_recv() {
-            break;
-        }
-
         let envelope = crossbeam::select! {
+            recv(ctrl_rx) -> msg => {
+                if matches!(msg, Ok(WorkerCommand::Shutdown)) {
+                    break;
+                }
+                None
+            }
             recv(task_hi_rx) -> msg => msg.ok(),
             recv(task_rx)    -> msg => msg.ok(),
-            default(Duration::from_millis(20)) => None,
+            default => None,
         };
 
         let Some(TaskEnvelope {
@@ -234,10 +239,16 @@ fn worker_loop<E>(
         };
 
         let root_key = position.zobrist_hash();
-        local.prepare_for_job(limits.session_id, root_key, worker_id, limits.root_jitter_seed);
-        let start = Instant::now();
-        // Heuristics を TLS にシード（helpers fast-path）
+        // Heuristics を TLS にシード（helpers fast-path）— prepare の前に呼ぶことでジョブ間再利用
         crate::search::ab::seed_thread_heuristics(std::mem::take(&mut local.heur));
+        local.prepare_for_job(
+            limits.session_id,
+            root_key,
+            worker_id,
+            helper_total,
+            limits.root_jitter_seed,
+        );
+        let start = Instant::now();
         let mut result = backend.think_with_ctx(&position, &limits, &mut local, None);
         // 探索後に Heuristics を取り戻す（次ジョブで再利用）
         if let Some(h) = crate::search::ab::take_thread_heuristics() {
@@ -257,6 +268,7 @@ mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
     use crate::search::{SearchLimitsBuilder, TranspositionTable};
+    use std::sync::mpsc;
 
     /// Verify that ThreadPool's shared queue correctly processes jobs exceeding worker count.
     ///
@@ -303,16 +315,74 @@ mod tests {
         // Directly exercise WorkerLocal API (module-private) to ensure deterministic reseed/clear.
         let mut wl = WorkerLocal::new();
         // First prepare
-        wl.prepare_for_job(42, 0x1234_5678_9ABC_DEF0, 1, Some(0xCAFEBABE));
+        wl.prepare_for_job(42, 0x1234_5678_9ABC_DEF0, 1, 2, Some(0xCAFEBABE));
         let seed1 = wl.last_seed;
         assert_eq!(seed1, 0xCAFEBABE);
         // Use scratch and ensure it's cleared on next prepare
         wl.scratch.extend_from_slice(&[1, 2, 3, 4]);
-        wl.prepare_for_job(42, 0x1234_5678_9ABC_DEF0, 2, Some(0xDEAD_BEEF_F00D));
+        wl.prepare_for_job(42, 0x1234_5678_9ABC_DEF0, 2, 2, Some(0xDEAD_BEEF_F00D));
         let seed2 = wl.last_seed;
         assert_eq!(seed2, 0xDEAD_BEEF_F00D);
         assert!(wl.scratch.is_empty());
         assert_ne!(seed1, seed2);
+    }
+
+    #[test]
+    fn shutdown_response_time() {
+        // Verify that shutdown completes within 30ms (guideline from review).
+        let backend = Arc::new(ClassicBackend::with_tt(
+            Arc::new(MaterialEvaluator),
+            Arc::new(TranspositionTable::new(2)),
+        ));
+        let mut pool = ThreadPool::new(backend, 4);
+
+        let shutdown_start = Instant::now();
+        pool.shutdown();
+        let shutdown_elapsed = shutdown_start.elapsed();
+
+        // Shutdown should complete quickly (target <30ms, allow some margin for CI).
+        assert!(
+            shutdown_elapsed.as_millis() < 100,
+            "shutdown took {shutdown_elapsed:?}, expected <100ms"
+        );
+    }
+
+    #[test]
+    fn heuristics_reuse_across_jobs() {
+        // Verify that Heuristics are reused across jobs (policy A from review).
+        // We test this by running 2 sequential jobs on a single-worker pool and ensuring both complete.
+        // Direct verification of heur non-empty is not feasible from outside, so we rely on:
+        // - No panics/errors (if reuse were broken, TLS seed/take logic might fail)
+        // - Both jobs complete successfully
+        let backend = Arc::new(ClassicBackend::with_tt(
+            Arc::new(MaterialEvaluator),
+            Arc::new(TranspositionTable::new(2)),
+        ));
+        let pool = ThreadPool::new(backend, 1); // Single worker for deterministic job sequencing
+
+        let (tx, rx) = mpsc::channel();
+        let pos = crate::shogi::Position::startpos();
+        let limits1 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+        let limits2 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+
+        let job1 = SearchJob {
+            position: pos.clone(),
+            limits: limits1,
+        };
+        let job2 = SearchJob {
+            position: pos,
+            limits: limits2,
+        };
+
+        pool.dispatch(vec![job1, job2], &tx);
+
+        // Receive both results
+        let (_, res1) = rx.recv().expect("job1 result");
+        let (_, res2) = rx.recv().expect("job2 result");
+
+        assert!(res1.stats.nodes > 0, "job1 should have searched nodes");
+        assert!(res2.stats.nodes > 0, "job2 should have searched nodes");
+        // If Heuristics reuse is working correctly, both jobs complete without issues.
     }
 
     #[test]
