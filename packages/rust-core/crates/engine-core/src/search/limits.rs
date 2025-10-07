@@ -2,12 +2,142 @@
 
 use crate::search::parallel::StopController;
 use crate::time_management::{TimeControl, TimeManager, TimeParameters};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
 use super::types::{InfoStringCallback, IterationCallback};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootSplit {
+    offset: u8,
+    stride: u8,
+    skip_pv: bool,
+}
+
+impl RootSplit {
+    pub fn new(offset: usize, stride: usize, skip_pv: bool) -> Option<Self> {
+        if stride == 0 || offset >= stride || stride > u8::MAX as usize {
+            return None;
+        }
+        Some(Self {
+            offset: offset as u8,
+            stride: stride as u8,
+            skip_pv,
+        })
+    }
+
+    #[inline]
+    pub fn offset(&self) -> usize {
+        self.offset as usize
+    }
+
+    #[inline]
+    pub fn stride(&self) -> usize {
+        self.stride as usize
+    }
+
+    #[inline]
+    pub fn skip_pv(&self) -> bool {
+        self.skip_pv
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RootWorkQueue {
+    claims: OnceLock<Arc<[AtomicU8]>>,
+}
+
+impl RootWorkQueue {
+    pub fn new() -> Self {
+        Self {
+            claims: OnceLock::new(),
+        }
+    }
+
+    pub fn ensure_initialized(&self, len: usize) -> Arc<[AtomicU8]> {
+        if len == 0 {
+            return Arc::from(Vec::<AtomicU8>::new().into_boxed_slice());
+        }
+        self.claims
+            .get_or_init(|| {
+                let mut entries: Vec<AtomicU8> = Vec::with_capacity(len);
+                for _ in 0..len {
+                    entries.push(AtomicU8::new(0));
+                }
+                Arc::from(entries.into_boxed_slice())
+            })
+            .clone()
+    }
+
+    pub fn try_claim(&self, idx: usize) -> bool {
+        if let Some(claims) = self.claims.get() {
+            if idx >= claims.len() {
+                return false;
+            }
+            let slot = &claims[idx];
+            loop {
+                let current = slot.load(Ordering::Acquire);
+                match current {
+                    0 => match slot.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
+                        Ok(_) => return true,
+                        Err(next) => {
+                            if next == 2 {
+                                return false;
+                            }
+                            continue;
+                        }
+                    },
+                    1 | 2 => return false,
+                    _ => return false,
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn is_claimed(&self, idx: usize) -> bool {
+        if let Some(claims) = self.claims.get() {
+            if idx >= claims.len() {
+                return true;
+            }
+            return claims[idx].load(Ordering::Acquire) != 0;
+        }
+        false
+    }
+
+    pub fn is_done(&self, idx: usize) -> bool {
+        if let Some(claims) = self.claims.get() {
+            if idx >= claims.len() {
+                return true;
+            }
+            return claims[idx].load(Ordering::Acquire) == 2;
+        }
+        false
+    }
+
+    pub fn mark_done(&self, idx: usize) {
+        if let Some(claims) = self.claims.get() {
+            if idx < claims.len() {
+                claims[idx].store(2, Ordering::Release);
+            }
+        }
+    }
+
+    pub fn release(&self, idx: usize) {
+        if let Some(claims) = self.claims.get() {
+            if idx < claims.len() {
+                let slot = &claims[idx];
+                if slot.load(Ordering::Acquire) == 1 {
+                    slot.store(0, Ordering::Release);
+                }
+            }
+        }
+    }
+}
 
 /// Unified search limits combining time control with other constraints
 pub struct SearchLimits {
@@ -49,6 +179,12 @@ pub struct SearchLimits {
     /// Test/bench/diagnostics: override helper jitter on/off (None = follow env/default)
     /// 本番経路では通常 None のまま。互換性と単純化のため常時フィールドを保持する。
     pub jitter_override: Option<bool>,
+    /// Optional root move split configuration (parallel helpers)
+    pub root_split: Option<RootSplit>,
+    /// Shared root work queue for helper work stealing
+    pub root_work_queue: Option<Arc<RootWorkQueue>>,
+    /// Whether this search instance runs as helper worker in LazySMP
+    pub helper_role: bool,
     /// Whether heuristics snapshots should be retained for diagnostics
     pub store_heuristics: bool,
     /// Skip quiescence search at depth 0 and return immediate evaluation
@@ -90,6 +226,9 @@ impl Default for SearchLimits {
             qnodes_counter: None,
             root_jitter_seed: None,
             jitter_override: None,
+            root_split: None,
+            root_work_queue: None,
+            helper_role: false,
             store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
@@ -175,6 +314,9 @@ pub struct SearchLimitsBuilder {
     fallback_deadlines: Option<FallbackDeadlines>,
     root_jitter_seed: Option<u64>,
     jitter_override: Option<bool>,
+    root_split: Option<RootSplit>,
+    root_work_queue: Option<Arc<RootWorkQueue>>,
+    helper_role: bool,
     store_heuristics: bool,
 }
 
@@ -204,6 +346,9 @@ impl Default for SearchLimitsBuilder {
             fallback_deadlines: None,
             root_jitter_seed: None,
             jitter_override: None,
+            root_split: None,
+            root_work_queue: None,
+            helper_role: false,
             store_heuristics: false,
         }
     }
@@ -343,6 +488,24 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Configure root move splitting (parallel helpers only)
+    pub fn root_split(mut self, offset: usize, stride: usize, skip_pv: bool) -> Self {
+        self.root_split = RootSplit::new(offset, stride, skip_pv);
+        self
+    }
+
+    /// Attach a shared root work queue for helper work-stealing
+    pub fn root_work_queue(mut self, queue: Arc<RootWorkQueue>) -> Self {
+        self.root_work_queue = Some(queue);
+        self
+    }
+
+    /// Mark this search limits as helper role
+    pub fn helper_role(mut self, helper: bool) -> Self {
+        self.helper_role = helper;
+        self
+    }
+
     /// Set stop flag
     pub fn stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.stop_flag = Some(flag);
@@ -473,6 +636,9 @@ impl SearchLimitsBuilder {
             qnodes_counter: None,
             root_jitter_seed: self.root_jitter_seed,
             jitter_override: self.jitter_override,
+            root_split: self.root_split,
+            root_work_queue: self.root_work_queue,
+            helper_role: self.helper_role,
             store_heuristics: self.store_heuristics,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
@@ -517,6 +683,9 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             qnodes_counter: None,
             root_jitter_seed: None,
             jitter_override: None,
+            root_split: None,
+            root_work_queue: None,
+            helper_role: false,
             store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
@@ -582,6 +751,9 @@ impl std::fmt::Debug for SearchLimits {
             .field("qnodes_counter", &self.qnodes_counter.is_some())
             .field("root_jitter_seed", &self.root_jitter_seed)
             .field("jitter_override", &self.jitter_override)
+            .field("root_split", &self.root_split)
+            .field("root_work_queue", &self.root_work_queue.is_some())
+            .field("helper_role", &self.helper_role)
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .field("multipv", &self.multipv)
             .field("enable_fail_safe", &self.enable_fail_safe)

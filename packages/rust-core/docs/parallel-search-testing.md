@@ -330,17 +330,27 @@ fn main_worker_result_priority() {
 #### ベンチマークコマンド
 ```bash
 # 1,2,4スレッドで固定時間探索、NPS比較
-RUST_LOG=warn ./target/release/lazy_smp_benchmark \
+cargo run --release --bin lazy_smp_benchmark -- \
   --threads 1,2,4 \
   --fixed-total-ms 200 \
-  --iterations 3
+  --iterations 3 \
+  --tt-mb 64 \
+  --json results/lazy_smp_20251007.json
 ```
+
+- `--sfens <file>` で任意のベンチ用SFENセットを指定可能（未指定時は組み込み5局面）。
+- `--tt-mb` のデフォルトは64MB（ベンチ用途は32〜64MBを推奨）。
+- `--jitter on/off` でヘルパースレッドの乱択ヒューリスティクスを制御。
+- JSON を指定すると平均NPSや効率が保存される（`efficiency_pct` は1スレッド基準）。
 
 **出力例**:
 ```
-threads=1: avg_nps=450000, total_nodes=90000
-threads=2: avg_nps=820000, total_nodes=164000  (効率: 91%)
-threads=4: avg_nps=1500000, total_nodes=300000 (効率: 83%)
+threads= 1 | searches=  5 | avg_nps= 482000 | elapsed= 1000.3 ms | max_depth=12 | helper_share=N/A
+             efficiency vs baseline: 100.0%
+threads= 2 | searches= 10 | avg_nps= 905000 | elapsed= 1012.7 ms | max_depth=13 | helper_share=35.42%
+             efficiency vs baseline: 93.9%
+threads= 4 | searches= 20 | avg_nps=1645000 | elapsed= 1015.4 ms | max_depth=13 | helper_share=68.10%
+             efficiency vs baseline: 85.3%
 ```
 
 #### 期待される効率
