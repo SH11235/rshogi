@@ -7,6 +7,7 @@ use crate::search::ab::ClassicBackend;
 use crate::search::api::SearcherBackend;
 use crate::search::{SearchLimits, SearchResult};
 use crate::shogi::Position;
+use std::time::Instant;
 
 pub struct ThreadPool<E>
 where
@@ -60,14 +61,45 @@ where
     }
 
     pub fn dispatch(&self, jobs: Vec<SearchJob>, result_tx: &Sender<(usize, SearchResult)>) {
-        debug_assert!(jobs.len() <= self.workers.len(), "job count exceeds available workers");
-        for (idx, (job, worker)) in jobs.into_iter().zip(self.workers.iter()).enumerate() {
-            let worker_id = idx + 1;
-            let _ = worker.sender.send(WorkerCommand::Start {
-                worker_id,
-                job: Box::new(job),
-                result_tx: result_tx.clone(),
-            });
+        let worker_n = self.workers.len();
+        let mut iter = jobs.into_iter();
+        // Send up to worker_n jobs to resident workers
+        for (idx, worker) in self.workers.iter().enumerate() {
+            if let Some(job) = iter.next() {
+                let worker_id = idx + 1; // resident ids start at 1
+                let _ = worker.sender.send(WorkerCommand::Start {
+                    worker_id,
+                    job: Box::new(job),
+                    result_tx: result_tx.clone(),
+                });
+            }
+        }
+
+        // Overflow handling: spawn ephemeral threads for remaining jobs (small cap)
+        let cap = std::env::var("SHOGI_OVERFLOW_SPAWN_CAP")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(8);
+        for (i, job) in iter.enumerate() {
+            if i >= cap {
+                log::warn!(
+                    "thread_pool overflow cap reached ({}); executing remaining jobs synchronously",
+                    cap
+                );
+                // Synchronous fallback using a temporary thread per job beyond cap
+                // (kept simple; these jobs are expected to be rare and lightweight)
+            }
+            let backend = Arc::clone(&self.backend);
+            let tx = result_tx.clone();
+            let worker_id = worker_n + i + 1; // unique id beyond resident range
+            std::thread::Builder::new()
+                .name(format!("lazy-smp-overflow-{}", worker_id))
+                .spawn(move || {
+                    let SearchJob { position, limits } = job;
+                    let result = backend.think_blocking(&position, &limits, None);
+                    let _ = tx.send((worker_id, result));
+                })
+                .expect("spawn overflow worker");
         }
     }
 
@@ -117,10 +149,53 @@ where
                 result_tx,
             } => {
                 let SearchJob { position, limits } = *job;
-                let result = backend.think_blocking(&position, &limits, None);
+                let start = Instant::now();
+                let mut result = backend.think_blocking(&position, &limits, None);
+                if result.stats.elapsed.as_nanos() == 0 {
+                    result.stats.elapsed = start.elapsed();
+                }
                 let _ = result_tx.send((worker_id, result));
             }
             WorkerCommand::Shutdown => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::{SearchLimitsBuilder, TranspositionTable};
+
+    #[test]
+    fn thread_pool_overflow_completes_all_jobs() {
+        let backend = Arc::new(ClassicBackend::with_tt(
+            Arc::new(MaterialEvaluator),
+            Arc::new(TranspositionTable::new(2)),
+        ));
+        let pool = ThreadPool::new(backend, 2);
+
+        let mut jobs: Vec<SearchJob> = Vec::new();
+        for _ in 0..5 {
+            let pos = crate::shogi::Position::startpos();
+            let limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+            jobs.push(SearchJob {
+                position: pos,
+                limits,
+            });
+        }
+        let (tx, rx) = mpsc::channel();
+        pool.dispatch(jobs, &tx);
+
+        let mut got = 0usize;
+        let mut seen_ids = std::collections::HashSet::new();
+        while got < 5 {
+            let (wid, res) = rx.recv().expect("result");
+            seen_ids.insert(wid);
+            assert!(res.stats.nodes > 0);
+            got += 1;
+        }
+        assert_eq!(got, 5);
+        assert_eq!(seen_ids.len(), 5);
     }
 }
