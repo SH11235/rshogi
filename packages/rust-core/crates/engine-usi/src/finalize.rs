@@ -119,11 +119,17 @@ fn finalize_sanity_check(
         None
     };
     let mut alt_from_pv2 = false;
-    if let (Some(res), Some(mv0)) = (result, best_alt) {
-        if let Some(lines) = &res.lines {
-            if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
-                if l2.pv.first().is_some_and(|m| *m == mv0) {
-                    alt_from_pv2 = true;
+    // PV2 候補の合法性確認（擬似合法の可能性を排除）
+    if let Some(mv0) = best_alt {
+        if !state.position.is_legal_move(mv0) {
+            info_string("sanity_pv2_illegal=1 fallback=see_best");
+            best_alt = None; // SEE ベストへフォールバック
+        } else if let (Some(res), Some(mv0)) = (result, best_alt) {
+            if let Some(lines) = &res.lines {
+                if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
+                    if l2.pv.first().is_some_and(|m| *m == mv0) {
+                        alt_from_pv2 = true;
+                    }
                 }
             }
         }
