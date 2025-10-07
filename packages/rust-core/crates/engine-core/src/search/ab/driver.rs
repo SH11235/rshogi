@@ -905,7 +905,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         depth_hint_exists = root_tt_hint_exists;
                         depth_hint_used = root_tt_hint_used;
-                        local_best_for_next_iter = Some((m, local_best));
                     }
                     // 可能ならTTからPVを復元し、だめなら軽量再探索へフォールバック
                     let mut pv = self.reconstruct_root_pv_from_tt(root, d, m).unwrap_or_default();
