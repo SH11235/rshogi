@@ -322,6 +322,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // Aspiration window parameters (from constants.rs)
         use crate::search::constants::{ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX};
         const SELDEPTH_EXTRA_MARGIN: u32 = 32;
+        const HELPER_ASPIRATION_BONUS: i32 = 30;
 
         // Cumulative counters for diagnostics
         let mut cum_tt_hits: u64 = 0;
@@ -359,6 +360,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut last_deadline_hit: Option<DeadlineHit> = None;
         let mut lead_window_soft_break = false;
         let mut finalize_hard_sent = false;
+        let is_helper = limits.helper_role;
         let mut notify_deadline = |hit: DeadlineHit, nodes_now: u64| {
             if let Some(cb) = limits.info_string_callback.as_ref() {
                 let elapsed = t0.elapsed().as_millis();
@@ -428,11 +430,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
             {
                 notify_deadline(hit, nodes);
-                last_deadline_hit = Some(hit);
-                if incomplete_depth.is_none() {
-                    incomplete_depth = Some(d as u8);
+                match hit {
+                    DeadlineHit::Stop | DeadlineHit::Hard => {
+                        last_deadline_hit = Some(hit);
+                        if incomplete_depth.is_none() {
+                            incomplete_depth = Some(d as u8);
+                        }
+                        break;
+                    }
+                    DeadlineHit::Soft => {
+                        last_deadline_hit = Some(hit);
+                        if is_helper {
+                            if incomplete_depth.is_none() {
+                                incomplete_depth = Some(d as u8);
+                            }
+                            break;
+                        }
+                        lead_window_soft_break = true;
+                        // Primary continues current iteration to commit PV.
+                    }
                 }
-                break;
             }
             let mut seldepth: u32 = 0;
             let mut iteration_asp_failures: u32 = 0;
@@ -484,17 +501,25 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let root_jitter = limits.root_jitter_seed.map(|seed| {
                 ordering::RootJitter::new(seed, ordering::constants::ROOT_JITTER_AMPLITUDE)
             });
-            let mut root_picker = ordering::RootPicker::new(
-                root,
-                list.as_slice(),
-                hint_for_picker,
-                prev_root_lines,
-                root_jitter,
-            );
-            let mut root_moves: Vec<(crate::shogi::Move, i32)> =
+            let work_queue = limits.root_work_queue.as_ref().map(|queue| {
+                queue.ensure_initialized(list.as_slice().len());
+                Arc::clone(queue)
+            });
+
+            let mut root_picker = ordering::RootPicker::new(ordering::RootPickerConfig {
+                pos: root,
+                moves: list.as_slice(),
+                tt_move: hint_for_picker,
+                prev_lines: prev_root_lines,
+                jitter: root_jitter,
+                split: limits.root_split,
+                work_queue,
+                use_queue_claims: limits.helper_role,
+            });
+            let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
                 Vec::with_capacity(list.as_slice().len());
-            while let Some((mv, key)) = root_picker.next() {
-                root_moves.push((mv, key));
+            while let Some((mv, key, idx)) = root_picker.next() {
+                root_moves.push((mv, key, idx));
             }
             if root_moves.is_empty() {
                 if incomplete_depth.is_none() {
@@ -502,7 +527,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
                 break;
             }
-            let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
+            let root_rank: Vec<crate::shogi::Move> =
+                root_moves.iter().map(|(m, _, _)| *m).collect();
             let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
             for (idx, mv) in root_rank.iter().enumerate() {
                 rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
@@ -538,6 +564,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut shared_heur = std::mem::take(heur_state);
             shared_heur.lmr_trials = 0;
             for pv_idx in 1..=k {
+                if is_helper && lead_window_soft_break {
+                    if incomplete_depth.is_none() {
+                        incomplete_depth = Some(d as u8);
+                    }
+                    break;
+                }
                 if let Some(hit) = Self::deadline_hit(
                     t0,
                     soft_deadline,
@@ -551,9 +583,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     match hit {
                         DeadlineHit::Stop | DeadlineHit::Hard => break,
                         DeadlineHit::Soft => {
-                            if depth_lines.len() >= required_multipv_lines {
+                            if is_helper || depth_lines.len() >= required_multipv_lines {
+                                if is_helper && incomplete_depth.is_none() {
+                                    incomplete_depth = Some(d as u8);
+                                }
                                 break;
                             }
+                            lead_window_soft_break = true;
                         }
                     }
                 }
@@ -592,7 +628,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 } else {
                     aspiration_center + ASPIRATION_DELTA_INITIAL
                 };
+                if is_helper && d > 1 {
+                    alpha = alpha.saturating_sub(HELPER_ASPIRATION_BONUS);
+                    beta = beta.saturating_add(HELPER_ASPIRATION_BONUS);
+                }
                 let mut delta = ASPIRATION_DELTA_INITIAL;
+                if is_helper && d > 1 {
+                    delta = (delta + HELPER_ASPIRATION_BONUS).min(ASPIRATION_DELTA_MAX);
+                }
                 let mut window_alpha = alpha;
                 let mut window_beta = beta;
 
@@ -605,14 +648,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut root_tt_hint_used: u64 = 0;
                 let mut qnodes: u64 = 0;
                 let qnodes_limit = Self::compute_qnodes_limit(limits, d, pv_idx);
+                let mut claimed_indices: SmallVec<[usize; 64]> = SmallVec::new();
 
                 // 作業用root move配列（excludedを除外）
                 let excluded_keys: SmallVec<[u32; 32]> =
                     excluded.iter().map(|m| m.to_u32()).collect();
-                let active_moves: SmallVec<[(crate::shogi::Move, i32); 64]> = root_moves
+                let active_moves: SmallVec<[(crate::shogi::Move, i32, usize); 64]> = root_moves
                     .iter()
                     .copied()
-                    .filter(|(m, _)| {
+                    .filter(|(m, _, _)| {
                         let key = m.to_u32();
                         // MultiPV では完全一致の手のみ除外し、昇成・不成などの派生は別ラインとして扱う。
                         !excluded_keys.contains(&key)
@@ -636,9 +680,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
                             DeadlineHit::Soft => {
-                                if depth_lines.len() >= required_multipv_lines {
+                                if is_helper || depth_lines.len() >= required_multipv_lines {
+                                    if is_helper && incomplete_depth.is_none() {
+                                        incomplete_depth = Some(d as u8);
+                                    }
                                     break;
                                 }
+                                lead_window_soft_break = true;
                             }
                         }
                     }
@@ -654,7 +702,30 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
-                    for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
+                    'root_move: for (idx, (mv, _, root_idx)) in
+                        active_moves.iter().copied().enumerate()
+                    {
+                        let mut claimed_this_move = is_helper;
+                        if !is_helper {
+                            if let Some(queue) = limits.root_work_queue.as_ref() {
+                                if queue.try_claim(root_idx) {
+                                    claimed_this_move = true;
+                                } else {
+                                    continue 'root_move;
+                                }
+                            } else {
+                                claimed_this_move = true;
+                            }
+                        }
+                        if !claimed_this_move {
+                            continue 'root_move;
+                        }
+                        if claimed_this_move
+                            && limits.root_work_queue.is_some()
+                            && !claimed_indices.contains(&root_idx)
+                        {
+                            claimed_indices.push(root_idx);
+                        }
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
                         if super::diagnostics::should_abort_now() {
                             last_deadline_hit = Some(DeadlineHit::Stop);
@@ -673,9 +744,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             match hit {
                                 DeadlineHit::Stop | DeadlineHit::Hard => break,
                                 DeadlineHit::Soft => {
-                                    if depth_lines.len() >= required_multipv_lines {
+                                    if is_helper || depth_lines.len() >= required_multipv_lines {
+                                        if is_helper && incomplete_depth.is_none() {
+                                            incomplete_depth = Some(d as u8);
+                                        }
                                         break;
                                     }
+                                    lead_window_soft_break = true;
                                 }
                             }
                         }
@@ -788,6 +863,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > alpha {
                             alpha = score;
                         }
+                        if let Some(queue) = limits.root_work_queue.as_ref() {
+                            if is_helper && claimed_this_move {
+                                queue.mark_done(root_idx);
+                            }
+                        }
                         if alpha >= beta {
                             break; // fail-high
                         }
@@ -811,9 +891,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
                             DeadlineHit::Soft => {
-                                if depth_lines.len() >= required_multipv_lines {
+                                if is_helper || depth_lines.len() >= required_multipv_lines {
+                                    if is_helper && incomplete_depth.is_none() {
+                                        incomplete_depth = Some(d as u8);
+                                    }
                                     break;
                                 }
+                                lead_window_soft_break = true;
                             }
                         }
                     }
@@ -840,6 +924,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         alpha = new_alpha;
                         beta = new_beta;
                         delta = (delta * 2).min(ASPIRATION_DELTA_MAX);
+                        if let Some(queue) = limits.root_work_queue.as_ref() {
+                            for idx_claimed in claimed_indices.iter().copied() {
+                                queue.release(idx_claimed);
+                            }
+                        }
+                        claimed_indices.clear();
                         continue;
                     }
                     if local_best >= old_beta {
@@ -865,7 +955,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         alpha = new_alpha;
                         beta = new_beta;
                         delta = (delta * 2).min(ASPIRATION_DELTA_MAX);
+                        if let Some(queue) = limits.root_work_queue.as_ref() {
+                            for idx_claimed in claimed_indices.iter().copied() {
+                                queue.release(idx_claimed);
+                            }
+                        }
+                        claimed_indices.clear();
                         continue;
+                    }
+                    if let Some(queue) = limits.root_work_queue.as_ref() {
+                        if is_helper {
+                            for idx_claimed in claimed_indices.iter().copied() {
+                                queue.mark_done(idx_claimed);
+                            }
+                        }
                     }
                     iteration_asp_hits = iteration_asp_hits.saturating_add(1);
                     break; // success within window

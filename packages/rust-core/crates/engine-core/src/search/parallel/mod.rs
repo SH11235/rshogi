@@ -7,6 +7,7 @@ use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
 use crate::search::constants::HELPER_SNAPSHOT_MIN_DEPTH;
+use crate::search::limits::RootSplit;
 use crate::search::types::{clamp_score_cp, RootLine};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Move;
@@ -93,6 +94,9 @@ where
         let root_key = pos.zobrist_hash();
         limits.store_heuristics = true;
         limits.root_jitter_seed = None;
+        limits.helper_role = false;
+        limits.root_split = None;
+        limits.root_work_queue = None;
         let start = Instant::now();
 
         if threads == 1 {
@@ -108,6 +112,12 @@ where
         let helper_count = threads.saturating_sub(1);
         self.thread_pool.resize(helper_count);
 
+        let root_work_queue = if helper_count > 0 {
+            Some(Arc::new(crate::search::limits::RootWorkQueue::new()))
+        } else {
+            None
+        };
+
         let mut jobs = Vec::with_capacity(helper_count);
         for worker_index in 0..helper_count {
             let mut worker_limits = clone_limits_for_worker(&limits);
@@ -117,6 +127,11 @@ where
             worker_limits.iteration_callback = None;
             worker_limits.qnodes_counter = Some(Arc::clone(&qnodes_counter));
             worker_limits.stop_controller = None;
+            worker_limits.helper_role = true;
+            worker_limits.root_split = RootSplit::new(worker_index + 1, threads, true);
+            if let Some(queue) = root_work_queue.as_ref() {
+                worker_limits.root_work_queue = Some(Arc::clone(queue));
+            }
             let jitter_on = limits.jitter_override.unwrap_or_else(jitter_enabled);
             if jitter_on {
                 worker_limits.root_jitter_seed =
@@ -334,6 +349,9 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         qnodes_counter: base.qnodes_counter.clone(),
         root_jitter_seed: base.root_jitter_seed,
         jitter_override: base.jitter_override,
+        root_split: base.root_split,
+        root_work_queue: base.root_work_queue.clone(),
+        helper_role: base.helper_role,
         store_heuristics: base.store_heuristics,
         immediate_eval_at_depth_zero: base.immediate_eval_at_depth_zero,
         multipv: base.multipv,
