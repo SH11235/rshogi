@@ -473,6 +473,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     None
                 }
             });
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                if let Some(hm) = hint_for_picker {
+                    cb(&format!("root_hint_applied=1 move={}", crate::usi::move_to_usi(&hm)));
+                } else {
+                    cb("root_hint_applied=0");
+                }
+            }
 
             let root_jitter = limits.root_jitter_seed.map(|seed| {
                 ordering::RootJitter::new(seed, ordering::constants::ROOT_JITTER_AMPLITUDE)

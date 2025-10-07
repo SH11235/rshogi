@@ -91,6 +91,17 @@ fn within_trace_window(ply: u16) -> bool {
     ply >= STACK_TRACE_PLY_THRESHOLD
 }
 
+fn echo_tags_enabled() -> bool {
+    static ECHO: OnceLock<bool> = OnceLock::new();
+    *ECHO.get_or_init(|| match env::var("DIAG_ECHO_TAGS") {
+        Ok(val) => {
+            let s = val.trim().to_ascii_lowercase();
+            !(s == "0" || s == "off" || s == "false" || s == "no")
+        }
+        Err(_) => false,
+    })
+}
+
 pub(crate) fn configure_abort_handles(
     stop_controller: Option<Arc<StopController>>,
     stop_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -326,6 +337,9 @@ pub(crate) fn record_stack_state(pos: &Position, stack: &SearchStack, tag: &'sta
 pub(crate) fn record_tag(pos: &Position, tag: &'static str, extra: Option<String>) {
     if !within_trace_window(pos.ply) {
         return;
+    }
+    if echo_tags_enabled() {
+        warn!("[diag] {tag} {}", extra.as_deref().unwrap_or("-"));
     }
     push_event(RingEvent {
         tag,

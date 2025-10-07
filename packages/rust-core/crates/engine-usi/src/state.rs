@@ -58,6 +58,12 @@ pub struct UsiOptions {
     pub simd_max_level: Option<String>,
     // NNUE SIMD clamp (runtime). None = Auto
     pub nnue_simd: Option<String>,
+    // Finalize sanity (PV1の軽いチェックでタダ損抑止)
+    pub finalize_sanity_enabled: bool,
+    pub finalize_sanity_budget_ms: u64,
+    pub finalize_sanity_mini_depth: u8,
+    pub finalize_sanity_see_min_cp: i32,
+    pub finalize_sanity_switch_margin_cp: i32,
 }
 
 impl Default for UsiOptions {
@@ -92,6 +98,11 @@ impl Default for UsiOptions {
             fail_safe_guard: false,
             simd_max_level: None,
             nnue_simd: None,
+            finalize_sanity_enabled: true,
+            finalize_sanity_budget_ms: 2,
+            finalize_sanity_mini_depth: 2,
+            finalize_sanity_see_min_cp: -90,
+            finalize_sanity_switch_margin_cp: 80,
         }
     }
 }

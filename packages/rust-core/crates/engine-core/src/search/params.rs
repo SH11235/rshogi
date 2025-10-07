@@ -18,6 +18,11 @@ pub const HP_THRESHOLD: i32 = -2000;
 // Static Beta Pruning margins (cp)
 pub const SBP_MARGIN_D1: i32 = 200;
 pub const SBP_MARGIN_D2: i32 = 300;
+// Dynamic SBP/Futility margins (Phase3) — base/slope (safeモードで使用)
+pub const SBP_MARGIN_BASE: i32 = 120;
+pub const SBP_MARGIN_SLOPE: i32 = 60; // per depth (clamped <=12)
+pub const FUT_MARGIN_BASE: i32 = 100;
+pub const FUT_MARGIN_SLOPE: i32 = 80; // per depth (clamped <=8)
 
 // Razor: enabled depth==1 (no explicit margin here; we use qsearch(alpha, alpha+1))
 pub const RAZOR_ENABLED: bool = true;
@@ -60,17 +65,30 @@ static RUNTIME_LMP_D1: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D1);
 static RUNTIME_LMP_D2: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D2);
 static RUNTIME_LMP_D3: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D3);
 static RUNTIME_HP_THRESHOLD: AtomicI32 = AtomicI32::new(HP_THRESHOLD);
+/// HP の深さ比例スケール（safeモード時のみ使用）。
+/// 例: history < -HP_DEPTH_SCALE * depth
+static RUNTIME_HP_DEPTH_SCALE: AtomicI32 = AtomicI32::new(4361);
 static RUNTIME_SBP_D1: AtomicI32 = AtomicI32::new(SBP_MARGIN_D1);
 static RUNTIME_SBP_D2: AtomicI32 = AtomicI32::new(SBP_MARGIN_D2);
+static RUNTIME_SBP_BASE: AtomicI32 = AtomicI32::new(SBP_MARGIN_BASE);
+static RUNTIME_SBP_SLOPE: AtomicI32 = AtomicI32::new(SBP_MARGIN_SLOPE);
+static RUNTIME_FUT_BASE: AtomicI32 = AtomicI32::new(FUT_MARGIN_BASE);
+static RUNTIME_FUT_SLOPE: AtomicI32 = AtomicI32::new(FUT_MARGIN_SLOPE);
 static RUNTIME_PROBCUT_D5: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D5);
 static RUNTIME_PROBCUT_D6P: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D6P);
 static RUNTIME_ENABLE_NMP: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_IID: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_PROBCUT: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_STATIC_BETA: AtomicBool = AtomicBool::new(true);
+static RUNTIME_ENABLE_SBP_DYNAMIC: AtomicBool = AtomicBool::new(true);
+static RUNTIME_ENABLE_FUT_DYNAMIC: AtomicBool = AtomicBool::new(true);
 static RUNTIME_QS_CHECKS: AtomicBool = AtomicBool::new(true);
 static RUNTIME_RAZOR: AtomicBool = AtomicBool::new(RAZOR_ENABLED);
 static RUNTIME_IID_MIN_DEPTH: AtomicI32 = AtomicI32::new(6); // 既定: 6ply
+/// YO安全側ガードの有効/無効（既定ON）。
+static RUNTIME_PRUNING_SAFE_MODE: AtomicBool = AtomicBool::new(true);
+/// ProbCut: 浅層(depth<4)で検証探索を行わず（無効化）にするオプション（既定OFF）。
+static RUNTIME_PROBCUT_SKIP_VERIFY_LT4: AtomicBool = AtomicBool::new(false);
 static PREFETCH_ENABLED: OnceLock<AtomicBool> = OnceLock::new();
 static RUNTIME_QUIET_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(QUIET_HISTORY_WEIGHT);
 static RUNTIME_CONT_HISTORY_WEIGHT: AtomicI32 = AtomicI32::new(CONTINUATION_HISTORY_WEIGHT);
@@ -103,6 +121,23 @@ pub fn hp_threshold() -> i32 {
     RUNTIME_HP_THRESHOLD.load(Ordering::Relaxed)
 }
 
+/// HPの深さ比例しきい値（safeモード時）
+#[inline]
+pub fn hp_depth_scale() -> i32 {
+    RUNTIME_HP_DEPTH_SCALE.load(Ordering::Relaxed)
+}
+
+/// 現在の設定に応じたHPしきい値を返す。
+/// safeモード時は depth 係数付きの厳しめ（=より負側）のしきい値を返す。
+#[inline]
+pub fn hp_threshold_for_depth(depth: i32) -> i32 {
+    if pruning_safe_mode() {
+        -(hp_depth_scale()).saturating_mul(depth.max(1))
+    } else {
+        hp_threshold()
+    }
+}
+
 #[inline]
 pub fn sbp_margin_d1() -> i32 {
     RUNTIME_SBP_D1.load(Ordering::Relaxed)
@@ -110,6 +145,23 @@ pub fn sbp_margin_d1() -> i32 {
 #[inline]
 pub fn sbp_margin_d2() -> i32 {
     RUNTIME_SBP_D2.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn sbp_margin_base() -> i32 {
+    RUNTIME_SBP_BASE.load(Ordering::Relaxed)
+}
+#[inline]
+pub fn sbp_margin_slope() -> i32 {
+    RUNTIME_SBP_SLOPE.load(Ordering::Relaxed)
+}
+#[inline]
+pub fn fut_margin_base() -> i32 {
+    RUNTIME_FUT_BASE.load(Ordering::Relaxed)
+}
+#[inline]
+pub fn fut_margin_slope() -> i32 {
+    RUNTIME_FUT_SLOPE.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -139,6 +191,15 @@ pub fn probcut_enabled() -> bool {
 #[inline]
 pub fn static_beta_enabled() -> bool {
     RUNTIME_ENABLE_STATIC_BETA.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn sbp_dynamic_enabled() -> bool {
+    RUNTIME_ENABLE_SBP_DYNAMIC.load(Ordering::Relaxed)
+}
+#[inline]
+pub fn fut_dynamic_enabled() -> bool {
+    RUNTIME_ENABLE_FUT_DYNAMIC.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -219,6 +280,16 @@ pub fn iid_min_depth() -> i32 {
     RUNTIME_IID_MIN_DEPTH.load(Ordering::Relaxed)
 }
 
+#[inline]
+pub fn pruning_safe_mode() -> bool {
+    RUNTIME_PRUNING_SAFE_MODE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn probcut_skip_verify_lt4() -> bool {
+    RUNTIME_PROBCUT_SKIP_VERIFY_LT4.load(Ordering::Relaxed)
+}
+
 // Setter API（USI側から更新）
 pub fn set_lmr_k_x100(v: u32) {
     RUNTIME_LMR_K_X100.store(v.max(1), Ordering::Relaxed);
@@ -234,6 +305,9 @@ pub fn set_lmp_d3(v: usize) {
 }
 pub fn set_hp_threshold(v: i32) {
     RUNTIME_HP_THRESHOLD.store(v, Ordering::Relaxed);
+}
+pub fn set_hp_depth_scale(v: i32) {
+    RUNTIME_HP_DEPTH_SCALE.store(v.max(0), Ordering::Relaxed);
 }
 pub fn set_sbp_d1(v: i32) {
     RUNTIME_SBP_D1.store(v, Ordering::Relaxed);
@@ -259,6 +333,12 @@ pub fn set_probcut_enabled(b: bool) {
 pub fn set_static_beta_enabled(b: bool) {
     RUNTIME_ENABLE_STATIC_BETA.store(b, Ordering::Relaxed);
 }
+pub fn set_sbp_dynamic_enabled(b: bool) {
+    RUNTIME_ENABLE_SBP_DYNAMIC.store(b, Ordering::Relaxed);
+}
+pub fn set_fut_dynamic_enabled(b: bool) {
+    RUNTIME_ENABLE_FUT_DYNAMIC.store(b, Ordering::Relaxed);
+}
 pub fn set_qs_checks_enabled(b: bool) {
     RUNTIME_QS_CHECKS.store(b, Ordering::Relaxed);
 }
@@ -276,6 +356,19 @@ pub fn set_qs_bad_capture_min(v: i32) {
 pub fn set_qs_check_prune_margin(v: i32) {
     let clamped = v.clamp(0, 5000);
     RUNTIME_QS_CHECK_PRUNE_MARGIN.store(clamped, Ordering::Relaxed);
+}
+
+pub fn set_sbp_base(v: i32) {
+    RUNTIME_SBP_BASE.store(v, Ordering::Relaxed);
+}
+pub fn set_sbp_slope(v: i32) {
+    RUNTIME_SBP_SLOPE.store(v, Ordering::Relaxed);
+}
+pub fn set_fut_base(v: i32) {
+    RUNTIME_FUT_BASE.store(v, Ordering::Relaxed);
+}
+pub fn set_fut_slope(v: i32) {
+    RUNTIME_FUT_SLOPE.store(v, Ordering::Relaxed);
 }
 
 pub fn set_quiet_history_weight(v: i32) {
@@ -317,6 +410,13 @@ pub fn set_razor_enabled(b: bool) {
 pub fn set_iid_min_depth(v: i32) {
     RUNTIME_IID_MIN_DEPTH.store(v.max(0), Ordering::Relaxed);
 }
+pub fn set_pruning_safe_mode(on: bool) {
+    RUNTIME_PRUNING_SAFE_MODE.store(on, Ordering::Relaxed);
+}
+
+pub fn set_probcut_skip_verify_lt4(on: bool) {
+    RUNTIME_PROBCUT_SKIP_VERIFY_LT4.store(on, Ordering::Relaxed);
+}
 
 #[cfg(test)]
 pub fn __test_override_tt_prefetch_enabled(on: bool) {
@@ -335,6 +435,7 @@ pub fn __test_reset_runtime_values() {
     set_lmp_d2(LMP_LIMIT_D2);
     set_lmp_d3(LMP_LIMIT_D3);
     set_hp_threshold(HP_THRESHOLD);
+    set_hp_depth_scale(4361);
     set_sbp_d1(SBP_MARGIN_D1);
     set_sbp_d2(SBP_MARGIN_D2);
     set_probcut_d5(PROBCUT_MARGIN_D5);
@@ -343,6 +444,8 @@ pub fn __test_reset_runtime_values() {
     set_iid_enabled(true);
     set_probcut_enabled(true);
     set_static_beta_enabled(true);
+    set_sbp_dynamic_enabled(true);
+    set_fut_dynamic_enabled(true);
     set_qs_checks_enabled(true);
     set_quiet_history_weight(QUIET_HISTORY_WEIGHT);
     set_continuation_history_weight(CONTINUATION_HISTORY_WEIGHT);
@@ -353,6 +456,8 @@ pub fn __test_reset_runtime_values() {
     set_root_multipv_bonus(2, ROOT_MULTIPV_BONUS_2);
     set_razor_enabled(RAZOR_ENABLED);
     set_iid_min_depth(6);
+    set_pruning_safe_mode(true);
+    set_probcut_skip_verify_lt4(false);
     set_tt_prefetch_enabled_runtime(default_prefetch_value());
 }
 
