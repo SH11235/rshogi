@@ -318,7 +318,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             limits.time_parameters.as_ref().map(|tp| tp.min_think_ms).unwrap_or(0)
         };
         let _last_hashfull_emit_ms = 0u64;
-        let mut prev_score = 0;
+        let mut prev_score: i32 = 0;
         // Aspiration window parameters (from constants.rs)
         use crate::search::constants::{ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX};
         const SELDEPTH_EXTRA_MARGIN: u32 = 32;
@@ -555,8 +555,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // smooth the aspiration center: center = (7*prev_score + 3*hint_score)/10
                 let aspiration_center = if d > 1 && prev_root_lines.is_none() {
                     if let Some((_, hint_score)) = best_hint_next_iter {
-                        // Weighted average: 70% prev_score, 30% hint_score
-                        (7 * prev_score + 3 * hint_score) / 10
+                        // Skip smoothing near mate scores to preserve mate distance integrity
+                        use crate::search::constants::MATE_SCORE;
+                        if prev_score.abs() >= MATE_SCORE - 100
+                            || hint_score.abs() >= MATE_SCORE - 100
+                        {
+                            prev_score
+                        } else {
+                            // Weighted average with i64 intermediate calculation to prevent overflow
+                            // in case SEARCH_INF or coefficients are changed in the future
+                            let c =
+                                (7_i64 * prev_score as i64 + 3_i64 * hint_score as i64) / 10_i64;
+                            c.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                        }
                     } else {
                         prev_score
                     }
@@ -925,9 +936,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     } else {
                         None
                     };
-                    let alpha = window_alpha;
-                    let beta = window_beta;
-                    let bound = Self::classify_root_bound(local_best, alpha, beta);
+                    let orig_alpha = window_alpha;
+                    let orig_beta = window_beta;
+                    let bound = Self::classify_root_bound(local_best, orig_alpha, orig_beta);
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
@@ -1040,8 +1051,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 incomplete_depth = Some(d as u8);
             }
 
-            // Update hint for next iteration if we have a best move from this iteration
-            best_hint_next_iter = local_best_for_next_iter;
+            // Update hint for next iteration only if we obtained a best move from this iteration.
+            // This preserves hints from previous iterations when current iteration is incomplete
+            // (e.g., early cutoff before pv_idx==1 is reached).
+            if let Some(h) = local_best_for_next_iter {
+                best_hint_next_iter = Some(h);
+            }
 
             let mut lead_ms = 10u64;
 
