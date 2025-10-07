@@ -6,6 +6,7 @@ use self::thread_pool::{SearchJob, ThreadPool};
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
+use crate::search::constants::HELPER_SNAPSHOT_MIN_DEPTH;
 use crate::search::types::{clamp_score_cp, RootLine};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Move;
@@ -24,9 +25,6 @@ fn jitter_enabled() -> bool {
         Err(_) => true,
     }
 }
-
-// NOTE: Must match engine-usi's FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT (currently 3)
-const HELPER_PUBLISH_MIN_DEPTH: u32 = 3;
 
 pub struct ParallelSearcher<E>
 where
@@ -207,8 +205,10 @@ fn combine_results(
     }
 
     let total_nodes: u64 = results.iter().map(|(_, r)| r.nodes).sum();
-    // Shared qnodes_counter across workers → summing would double count.
-    // Take the maximum as the global final value.
+    // qnodes aggregation: Use max instead of sum because all workers share the same
+    // Arc<AtomicU64> qnodes_counter. Each worker increments this shared counter,
+    // so summing individual worker results would count the same qnodes multiple times.
+    // Taking the max gives us the true global qnodes count from the shared counter.
     let total_qnodes: u64 = results.iter().map(|(_, r)| r.stats.qnodes).max().unwrap_or(0);
     let max_depth = results.iter().map(|(_, r)| r.depth).max().unwrap_or(0);
     let max_seldepth = results.iter().map(|(_, r)| r.seldepth).max().unwrap_or(max_depth);
@@ -231,7 +231,7 @@ fn combine_results(
         // 便宜的に duplication と呼んでいた値だが、実際には「ヘルパースレッドが担当したノード割合」。
         let helper_share =
             (total_nodes.saturating_sub(primary_nodes)) as f64 / (total_nodes as f64) * 100.0;
-        final_result.stats.duplication_percentage = Some(helper_share);
+        final_result.stats.helper_share_pct = Some(helper_share);
     }
     if let Some(info) = final_result.stop_info.as_mut() {
         info.nodes = total_nodes;
@@ -270,7 +270,7 @@ fn combine_results(
         }
     }
 
-    if let Some(dup) = final_result.stats.duplication_percentage {
+    if let Some(dup) = final_result.stats.helper_share_pct {
         if dup > 65.0 {
             debug!("lazy_smp helper_share_pct {:.2}%", dup);
         }
@@ -379,7 +379,7 @@ fn publish_helper_snapshot(
     if worker_id == 0 {
         return;
     }
-    if result.depth < HELPER_PUBLISH_MIN_DEPTH {
+    if result.depth < HELPER_SNAPSHOT_MIN_DEPTH {
         return;
     }
     if let Some(existing) = stop_controller.try_read_snapshot() {
@@ -394,8 +394,15 @@ fn publish_helper_snapshot(
         }
     }
 
+    // Prefer PV from result.lines[0] (often higher quality from full search),
+    // fall back to result.stats.pv, then to best_move if all else fails.
+    // This improves interim USI reporting quality.
     let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
-    pv.extend(result.stats.pv.iter().copied());
+    if let Some(line_pv) = result.lines.as_ref().and_then(|ls| ls.first()).map(|l| &l.pv) {
+        pv.extend(line_pv.iter().copied());
+    } else {
+        pv.extend(result.stats.pv.iter().copied());
+    }
     if pv.len() > 32 {
         pv.truncate(32);
     }
@@ -442,7 +449,7 @@ mod tests {
     use std::sync::Arc;
 
     fn helper_share(result: &SearchResult) -> f64 {
-        result.stats.duplication_percentage.unwrap_or(0.0)
+        result.stats.helper_share_pct.unwrap_or(0.0)
     }
 
     #[test]
@@ -549,10 +556,10 @@ mod tests {
 
         let _ = searcher.search(&mut pos, limits);
 
-        // After search, snapshot should exist with depth >= HELPER_PUBLISH_MIN_DEPTH.
+        // After search, snapshot should exist with depth >= HELPER_SNAPSHOT_MIN_DEPTH.
         if let Some(snapshot) = stop_ctrl.try_read_snapshot() {
             assert!(
-                snapshot.depth >= HELPER_PUBLISH_MIN_DEPTH as u8,
+                snapshot.depth >= HELPER_SNAPSHOT_MIN_DEPTH as u8,
                 "snapshot depth should be >= min publish depth"
             );
             assert_eq!(snapshot.search_id, session_id, "snapshot should have correct session_id");

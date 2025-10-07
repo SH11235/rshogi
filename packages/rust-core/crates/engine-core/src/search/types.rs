@@ -54,7 +54,7 @@ pub struct SearchStats {
     /// Number of times PV head changed (root)
     pub pv_changed: Option<u32>,
     /// Duplication percentage for parallel search (0-100)
-    pub duplication_percentage: Option<f64>,
+    pub helper_share_pct: Option<f64>,
     /// Number of check extensions applied
     pub check_extensions: Option<u64>,
     /// Number of king move extensions applied

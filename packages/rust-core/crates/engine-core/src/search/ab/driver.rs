@@ -209,7 +209,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     val.parse::<u64>().ok().filter(|v| *v > 0)
                 }
             }
-            Err(_) => Some(150),
+            // Default: 100ms provides good responsiveness in parallel search with multiple
+            // helpers while avoiding excessive USI output spam.
+            Err(_) => Some(100),
         })
     }
 
@@ -835,7 +837,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 depth_lmr_counter = depth_lmr_counter.saturating_add(lmr_counter);
                 depth_lmr_trials = depth_lmr_trials
                     .saturating_add(heur.lmr_trials.saturating_sub(lmr_trials_checkpoint));
-                *heur_state = heur;
+                // Pass heuristics update back to shared state for next PV/iteration.
+                // This ensures heuristics learned during this PV search are not lost.
+                shared_heur = heur;
 
                 // 発火: Depth / Hashfull（深さ1回の発火で十分）
                 if pv_idx == 1 {

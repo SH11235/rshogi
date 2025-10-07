@@ -94,6 +94,12 @@ pub const MAIN_NEAR_DEADLINE_WINDOW_MS: u64 = 500;
 /// the current best move and exit without waiting for GUI stop.
 pub const NEAR_HARD_FINALIZE_MS: u64 = 500;
 
+/// Minimum depth for helper thread snapshot publication.
+/// Helper snapshots shallower than this are suppressed to reduce USI noise
+/// and avoid reporting low-quality partial results.
+/// This constant is shared between engine-core (parallel search) and engine-usi (finalize).
+pub const HELPER_SNAPSHOT_MIN_DEPTH: u32 = 3;
+
 /// Validate that constants maintain proper relationships
 #[cfg(test)]
 mod tests {
