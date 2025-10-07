@@ -110,7 +110,6 @@ pub(crate) fn should_abort_now() -> bool {
     ABORT_NOW.load(Ordering::Acquire)
 }
 
-#[allow(dead_code)]
 pub fn last_fault_tag() -> Option<String> {
     LAST_FAULT
         .get_or_init(|| Mutex::new(None))
