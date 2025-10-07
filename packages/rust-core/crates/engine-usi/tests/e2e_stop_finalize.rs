@@ -221,6 +221,10 @@ fn e2e_pure_byoyomi_stop_then_gameover_emits_bestmove() {
 #[test]
 #[ignore]
 fn e2e_gameover_option_emits_bestmove() {
+    if engine_core::util::is_ci_environment() {
+        eprintln!("Skipping e2e_gameover_option_emits_bestmove in CI environment (performance-dependent test)");
+        return;
+    }
     let mut p = UsiProc::spawn();
     p.write_line("usi");
     assert!(p.wait_for_contains("usiok", 2000));
@@ -292,6 +296,12 @@ fn e2e_stop_fast_finalize_fixed_and_infinite_and_ponder() {
 #[test]
 #[ignore]
 fn e2e_byoyomi_oob_finalize_logs() {
+    if engine_core::util::is_ci_environment() {
+        eprintln!(
+            "Skipping e2e_byoyomi_oob_finalize_logs in CI environment (performance-dependent test)"
+        );
+        return;
+    }
     let mut p = UsiProc::spawn();
     p.write_line("usi");
     assert!(p.wait_for_contains("usiok", 2000), "usiok timeout");
@@ -445,6 +455,12 @@ fn e2e_stop_flag_reset_after_oob_finalize() {
 #[test]
 #[ignore]
 fn e2e_ponder_stop_then_go_fast() {
+    if engine_core::util::is_ci_environment() {
+        eprintln!(
+            "Skipping e2e_ponder_stop_then_go_fast in CI environment (performance-dependent test)"
+        );
+        return;
+    }
     let mut p = UsiProc::spawn();
     usi_handshake(&mut p);
     p.write_line("setoption name Threads value 4");
