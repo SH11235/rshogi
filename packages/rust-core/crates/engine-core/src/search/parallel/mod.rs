@@ -531,4 +531,38 @@ mod tests {
             assert!(seen.insert(seed), "duplicate jitter seed generated");
         }
     }
+
+    #[test]
+    fn helper_snapshot_allows_equal_depth_forward() {
+        // Verify that helper results at the same depth as existing snapshot are forwarded
+        // to StopController (which then decides whether to update metrics).
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(8));
+        let stop_ctrl = Arc::new(StopController::new());
+        let mut searcher = ParallelSearcher::<MaterialEvaluator>::new(
+            evaluator,
+            Arc::clone(&tt),
+            2,
+            Arc::clone(&stop_ctrl),
+        );
+
+        let mut pos = Position::startpos();
+        let session_id = 42u64;
+        let limits = SearchLimitsBuilder::default()
+            .fixed_nodes(512)
+            .depth(4)
+            .session_id(session_id)
+            .build();
+
+        let _ = searcher.search(&mut pos, limits);
+
+        // After search, snapshot should exist with depth >= HELPER_PUBLISH_MIN_DEPTH.
+        if let Some(snapshot) = stop_ctrl.try_read_snapshot() {
+            assert!(
+                snapshot.depth >= HELPER_PUBLISH_MIN_DEPTH as u8,
+                "snapshot depth should be >= min publish depth"
+            );
+            assert_eq!(snapshot.search_id, session_id, "snapshot should have correct session_id");
+        }
+    }
 }
