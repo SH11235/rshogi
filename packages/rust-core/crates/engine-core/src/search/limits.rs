@@ -580,6 +580,8 @@ impl std::fmt::Debug for SearchLimits {
             .field("iteration_callback", &self.iteration_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
             .field("qnodes_counter", &self.qnodes_counter.is_some())
+            .field("root_jitter_seed", &self.root_jitter_seed)
+            .field("jitter_override", &self.jitter_override)
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .field("multipv", &self.multipv)
             .field("enable_fail_safe", &self.enable_fail_safe)
