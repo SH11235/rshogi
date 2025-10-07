@@ -42,7 +42,6 @@ static SEARCH_THREAD_SEQ: AtomicU64 = AtomicU64::new(1);
 // Helpers経路だけでなく main でも安全に機能するが、挙動は不変（内容は毎回 Default で埋め直し）。
 thread_local! {
     static STACK_CACHE: RefCell<Vec<SearchStack>> = const { RefCell::new(Vec::new()) };
-    static HEUR_CACHE: RefCell<Option<super::ordering::Heuristics>> = const { RefCell::new(None) };
 }
 
 #[inline]
@@ -70,18 +69,6 @@ fn return_stack_cache(buf: Vec<SearchStack>) {
     });
 }
 
-#[inline]
-pub(crate) fn seed_thread_heuristics(heur: super::ordering::Heuristics) {
-    HEUR_CACHE.with(|cell| {
-        *cell.borrow_mut() = Some(heur);
-    });
-}
-
-#[inline]
-pub(crate) fn take_thread_heuristics() -> Option<super::ordering::Heuristics> {
-    HEUR_CACHE.with(|cell| cell.borrow_mut().take())
-}
-
 #[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     pub(super) evaluator: Arc<E>,
@@ -90,23 +77,6 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
-    /// Optional context-aware entry point reserved for future reuse of worker-local buffers.
-    ///
-    /// 現段階では `think_blocking` にフォールバックします。helpers 側で WorkerLocal を
-    /// 使った最適化を導入する際、この関数を拡張して `ctx` を消費する実装に差し替えます。
-    #[inline]
-    pub fn think_with_ctx<Ctx: ?Sized>(
-        &self,
-        root: &Position,
-        limits: &SearchLimits,
-        _ctx: &mut Ctx,
-        info: Option<crate::search::api::InfoEventCallback>,
-    ) -> SearchResult {
-        // WorkerLocal からヒューリスティクスを流し込みたい場合はスレッドローカル経由で受け渡し。
-        // 現状は `stack` の TLS 再利用のみ行い、`heuristics` は必要に応じて caller 側が
-        // `seed_thread_heuristics` を呼ぶことで初期値を提供可能。
-        self.think_blocking(root, limits, info)
-    }
     #[inline]
     fn is_byoyomi_active(limits: &SearchLimits) -> bool {
         matches!(limits.time_control, TimeControl::Byoyomi { .. })
@@ -313,10 +283,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         false
     }
 
-    pub(super) fn iterative(
+    fn iterative_with_buffers(
         &self,
         root: &Position,
         limits: &SearchLimits,
+        stack: &mut [SearchStack],
+        heur_state: &mut Heuristics,
         info: Option<&InfoEventCallback>,
     ) -> SearchResult {
         let max_depth = limits.depth_limit_u8() as i32;
@@ -381,7 +353,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cumulative_asp_failures: u32 = 0;
         let mut cumulative_asp_hits: u32 = 0;
         let mut cumulative_researches: u32 = 0;
-        let mut iterative_heur = Heuristics::default();
         let stop_controller = limits.stop_controller.clone();
         let mut finalize_soft_sent = false;
         let mut last_deadline_hit: Option<DeadlineHit> = None;
@@ -538,15 +509,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut line_nodes_checkpoint = nodes;
             let mut line_time_checkpoint = t0.elapsed().as_millis() as u64;
             if d % 2 == 0 {
-                iterative_heur.age_all();
+                heur_state.age_all();
             }
-            // 初回深さの手前で TLS に流れてきた Heuristics があれば採用（helpers 用 fast-path）。
-            if d == 1 {
-                if let Some(seed) = take_thread_heuristics() {
-                    iterative_heur = seed;
-                }
-            }
-            let mut shared_heur = std::mem::take(&mut iterative_heur);
+            let mut shared_heur = std::mem::take(heur_state);
             shared_heur.lmr_trials = 0;
             for pv_idx in 1..=k {
                 if let Some(hit) = Self::deadline_hit(
@@ -583,8 +548,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut window_alpha = alpha;
                 let mut window_beta = beta;
 
-                // 検索用 stack を TLS から取得（alloc 回避）。
-                let mut stack = take_stack_cache();
                 let mut heur = std::mem::take(&mut shared_heur);
                 let lmr_trials_checkpoint = heur.lmr_trials;
                 let mut tt_hits: u64 = 0;
@@ -705,7 +668,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         beta: -alpha,
                                         ply: 1,
                                         is_pv: true,
-                                        stack: &mut stack,
+                                        stack,
                                         heur: &mut heur,
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
@@ -731,7 +694,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         beta: -alpha,
                                         ply: 1,
                                         is_pv: false,
-                                        stack: &mut stack,
+                                        stack,
                                         heur: &mut heur,
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
@@ -757,7 +720,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             beta: -alpha,
                                             ply: 1,
                                             is_pv: true,
-                                            stack: &mut stack,
+                                            stack,
                                             heur: &mut heur,
                                             tt_hits: &mut tt_hits,
                                             beta_cuts: &mut beta_cuts,
@@ -872,9 +835,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 depth_lmr_counter = depth_lmr_counter.saturating_add(lmr_counter);
                 depth_lmr_trials = depth_lmr_trials
                     .saturating_add(heur.lmr_trials.saturating_sub(lmr_trials_checkpoint));
-                // stack を返却して次反復の alloc を避ける
-                return_stack_cache(stack);
-                shared_heur = heur;
+                *heur_state = heur;
 
                 // 発火: Depth / Hashfull（深さ1回の発火で十分）
                 if pv_idx == 1 {
@@ -1025,7 +986,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
             let iteration_complete = depth_lines.len() >= required_multipv_lines;
 
-            iterative_heur = shared_heur;
+            *heur_state = shared_heur;
 
             if iteration_complete {
                 final_lines = Some(depth_lines.clone());
@@ -1144,7 +1105,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.pv_changed = Some(cumulative_pv_changed);
         stats.incomplete_depth = incomplete_depth;
         if limits.store_heuristics {
-            stats.heuristics = Some(Arc::new(iterative_heur.clone()));
+            stats.heuristics = Some(Arc::new(heur_state.clone()));
         }
 
         let final_lines_opt = final_lines.clone();
@@ -1256,9 +1217,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             result.hashfull = tt.hashfull_permille() as u32;
         }
 
-        // 次ジョブの初期値として Heuristics を TLS に返却（helpers のみ実質的に再利用）。
-        seed_thread_heuristics(iterative_heur);
-
         if result.stop_info.is_none() {
             if let Some(tm) = limits.time_manager.as_ref() {
                 let elapsed = tm.elapsed_ms();
@@ -1366,6 +1324,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ));
         }
         result
+    }
+
+    pub(super) fn iterative(
+        &self,
+        root: &Position,
+        limits: &SearchLimits,
+        info: Option<&InfoEventCallback>,
+    ) -> SearchResult {
+        let mut stack = take_stack_cache();
+        let mut heur_state = Heuristics::default();
+        let result =
+            self.iterative_with_buffers(root, limits, &mut stack[..], &mut heur_state, info);
+        return_stack_cache(stack);
+        result
+    }
+
+    pub fn think_with_ctx(
+        &self,
+        root: &Position,
+        limits: &SearchLimits,
+        stack: &mut [SearchStack],
+        heur: &mut Heuristics,
+        info: Option<crate::search::api::InfoEventCallback>,
+    ) -> SearchResult {
+        let info_ref = info.as_ref();
+        self.iterative_with_buffers(root, limits, stack, heur, info_ref)
     }
 }
 

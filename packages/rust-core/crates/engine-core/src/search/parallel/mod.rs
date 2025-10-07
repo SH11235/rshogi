@@ -122,7 +122,7 @@ where
             let jitter_on = limits.jitter_override.unwrap_or_else(jitter_enabled);
             if jitter_on {
                 worker_limits.root_jitter_seed =
-                    Some(compute_jitter_seed(session_id, helper_count, worker_index + 1, root_key));
+                    Some(compute_jitter_seed(session_id, worker_index + 1, root_key));
             } else {
                 worker_limits.root_jitter_seed = None;
             }
@@ -344,12 +344,7 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
     }
 }
 
-fn compute_jitter_seed(
-    session_id: u64,
-    helper_count: usize,
-    worker_id: usize,
-    root_key: u64,
-) -> u64 {
+fn compute_jitter_seed(session_id: u64, worker_id: usize, root_key: u64) -> u64 {
     #[inline]
     fn mix64(x: u64) -> u64 {
         // SplitMix64 由来の軽量ミキサ。入力ビットを高速に拡散させる。
@@ -360,7 +355,6 @@ fn compute_jitter_seed(
     }
 
     let mut seed = mix64(session_id ^ root_key);
-    seed = mix64(seed ^ (helper_count as u64));
     seed = mix64(seed ^ (worker_id as u64));
     seed = mix64(seed ^ root_key.rotate_left((worker_id as u32) & 31));
     seed
@@ -369,11 +363,10 @@ fn compute_jitter_seed(
 #[cfg(test)]
 pub(crate) fn compute_jitter_seed_for_test(
     session_id: u64,
-    helper_count: usize,
     worker_id: usize,
     root_key: u64,
 ) -> u64 {
-    compute_jitter_seed(session_id, helper_count, worker_id, root_key)
+    compute_jitter_seed(session_id, worker_id, root_key)
 }
 
 fn publish_helper_snapshot(
@@ -510,14 +503,14 @@ mod tests {
 
     #[test]
     fn jitter_seed_deterministic_and_varies() {
-        let seed_a = compute_jitter_seed_for_test(42, 3, 1, 0x1234_5678_9ABC_DEF0);
-        let seed_b = compute_jitter_seed_for_test(42, 3, 1, 0x1234_5678_9ABC_DEF0);
+        let seed_a = compute_jitter_seed_for_test(42, 1, 0x1234_5678_9ABC_DEF0);
+        let seed_b = compute_jitter_seed_for_test(42, 1, 0x1234_5678_9ABC_DEF0);
         assert_eq!(seed_a, seed_b);
 
-        let seed_worker = compute_jitter_seed_for_test(42, 3, 2, 0x1234_5678_9ABC_DEF0);
+        let seed_worker = compute_jitter_seed_for_test(42, 2, 0x1234_5678_9ABC_DEF0);
         assert_ne!(seed_a, seed_worker);
 
-        let seed_root = compute_jitter_seed_for_test(42, 3, 1, 0xFFFF_0000_1234_5678);
+        let seed_root = compute_jitter_seed_for_test(42, 1, 0xFFFF_0000_1234_5678);
         assert_ne!(seed_a, seed_root);
     }
 
@@ -527,7 +520,7 @@ mod tests {
         let mut key = 0x9E37_79B9_7F4A_7C15u64;
         for _ in 0..512 {
             key = key.wrapping_mul(0xBF58_476D_1CE4_E5B9).wrapping_add(0x94D0_49BB_1331_11EB);
-            let seed = compute_jitter_seed_for_test(7, 4, 1, key);
+            let seed = compute_jitter_seed_for_test(7, 1, key);
             assert!(seen.insert(seed), "duplicate jitter seed generated");
         }
     }
