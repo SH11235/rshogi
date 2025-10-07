@@ -6,7 +6,7 @@ use self::thread_pool::{SearchJob, ThreadPool};
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
-use crate::search::types::RootLine;
+use crate::search::types::{clamp_score_cp, RootLine};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Move;
 use crate::Position;
@@ -25,6 +25,7 @@ fn jitter_enabled() -> bool {
     }
 }
 
+// NOTE: Must match engine-usi's FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT (currently 3)
 const HELPER_PUBLISH_MIN_DEPTH: u32 = 3;
 
 pub struct ParallelSearcher<E>
@@ -118,7 +119,8 @@ where
             worker_limits.iteration_callback = None;
             worker_limits.qnodes_counter = Some(Arc::clone(&qnodes_counter));
             worker_limits.stop_controller = None;
-            if jitter_enabled() {
+            let jitter_on = limits.jitter_override.unwrap_or_else(jitter_enabled);
+            if jitter_on {
                 worker_limits.root_jitter_seed =
                     Some(compute_jitter_seed(session_id, helper_count, worker_index + 1, root_key));
             } else {
@@ -205,6 +207,8 @@ fn combine_results(
     }
 
     let total_nodes: u64 = results.iter().map(|(_, r)| r.nodes).sum();
+    // Shared qnodes_counter across workers → summing would double count.
+    // Take the maximum as the global final value.
     let total_qnodes: u64 = results.iter().map(|(_, r)| r.stats.qnodes).max().unwrap_or(0);
     let max_depth = results.iter().map(|(_, r)| r.depth).max().unwrap_or(0);
     let max_seldepth = results.iter().map(|(_, r)| r.seldepth).max().unwrap_or(max_depth);
@@ -300,6 +304,7 @@ fn prefers(candidate: &(usize, SearchResult), current: &(usize, SearchResult)) -
         Ordering::Equal => {}
     }
 
+    // Fully equal: prefer smaller worker id (primary=0 wins).
     candidate.0 < current.0
 }
 
@@ -328,6 +333,7 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         ponder_hit_flag: base.ponder_hit_flag.clone(),
         qnodes_counter: base.qnodes_counter.clone(),
         root_jitter_seed: base.root_jitter_seed,
+        jitter_override: base.jitter_override,
         store_heuristics: base.store_heuristics,
         immediate_eval_at_depth_zero: base.immediate_eval_at_depth_zero,
         multipv: base.multipv,
@@ -384,13 +390,22 @@ fn publish_helper_snapshot(
         return;
     }
     if let Some(existing) = stop_controller.try_read_snapshot() {
-        if result.depth <= u32::from(existing.depth) {
+        // Only suppress when the existing snapshot is for the same session and root,
+        // and strictly deeper than our helper result. Equal depth updates are
+        // forwarded and left to StopController's policy (it refreshes metrics).
+        if existing.search_id == session_id
+            && existing.root_key == root_key
+            && result.depth < u32::from(existing.depth)
+        {
             return;
         }
     }
 
     let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
     pv.extend(result.stats.pv.iter().copied());
+    if pv.len() > 32 {
+        pv.truncate(32);
+    }
     if pv.is_empty() {
         if let Some(best) = result.best_move {
             pv.push(best);
@@ -400,17 +415,14 @@ fn publish_helper_snapshot(
     }
 
     let root_move = pv[0];
-    let seldepth = result
-        .stats
-        .seldepth
-        .or_else(|| Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+    let seldepth = result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
     let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
 
     let line = RootLine {
         multipv_index: 1,
         root_move,
         score_internal: result.score,
-        score_cp: result.score,
+        score_cp: clamp_score_cp(result.score),
         bound: result.node_type,
         depth: result.depth,
         seldepth,

@@ -13,6 +13,13 @@ pub type IterationCallback = Arc<dyn Fn(&CommittedIteration) + Send + Sync>;
 /// Callback type for lightweight `info string` diagnostics.
 pub type InfoStringCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Clamp score for cp-oriented displays/logs. Internal score (mate/fail-soft) は保持しつつ、
+/// 表示上の極端値を避けたい場面で使用する簡易クリップ。
+#[inline]
+pub fn clamp_score_cp(score: i32) -> i32 {
+    score.clamp(-30_000, 30_000)
+}
+
 /// Search statistics
 #[derive(Clone, Debug, Default)]
 pub struct SearchStats {

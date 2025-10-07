@@ -46,6 +46,9 @@ pub struct SearchLimits {
     pub qnodes_counter: Option<Arc<AtomicU64>>,
     /// Optional jitter seed for helper threads (parallel search)
     pub root_jitter_seed: Option<u64>,
+    /// Test/bench/diagnostics: override helper jitter on/off (None = follow env/default)
+    /// 本番経路では通常 None のまま。互換性と単純化のため常時フィールドを保持する。
+    pub jitter_override: Option<bool>,
     /// Whether heuristics snapshots should be retained for diagnostics
     pub store_heuristics: bool,
     /// Skip quiescence search at depth 0 and return immediate evaluation
@@ -86,6 +89,7 @@ impl Default for SearchLimits {
             ponder_hit_flag: None,
             qnodes_counter: None,
             root_jitter_seed: None,
+            jitter_override: None,
             store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
@@ -170,6 +174,7 @@ pub struct SearchLimitsBuilder {
     enable_fail_safe: bool,
     fallback_deadlines: Option<FallbackDeadlines>,
     root_jitter_seed: Option<u64>,
+    jitter_override: Option<bool>,
     store_heuristics: bool,
 }
 
@@ -198,6 +203,7 @@ impl Default for SearchLimitsBuilder {
             enable_fail_safe: false,
             fallback_deadlines: None,
             root_jitter_seed: None,
+            jitter_override: None,
             store_heuristics: false,
         }
     }
@@ -330,6 +336,13 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Test/bench-only: override helper jitter on/off.
+    /// None (default) means follow environment/default behavior.
+    pub fn jitter_override(mut self, enable: bool) -> Self {
+        self.jitter_override = Some(enable);
+        self
+    }
+
     /// Set stop flag
     pub fn stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.stop_flag = Some(flag);
@@ -459,6 +472,7 @@ impl SearchLimitsBuilder {
             ponder_hit_flag: self.ponder_hit_flag,
             qnodes_counter: None,
             root_jitter_seed: self.root_jitter_seed,
+            jitter_override: self.jitter_override,
             store_heuristics: self.store_heuristics,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
@@ -502,6 +516,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             ponder_hit_flag: None,
             qnodes_counter: None,
             root_jitter_seed: None,
+            jitter_override: None,
             store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
