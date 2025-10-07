@@ -31,31 +31,20 @@ pub const MAX_QPLY: u8 = 32;
 /// This is now a secondary safeguard, increased from 32 to allow deeper main searches
 pub const MAX_QUIESCE_DEPTH: u16 = 96;
 
-/// Aspiration window constants
+/// Aspiration window constants used in iterative deepening
 ///
 /// These values control the alpha-beta window narrowing optimization:
-/// - Initial window: 25 centipawns provides a good balance between search reduction
-///   and re-search frequency. Narrower windows (10-20) cause more re-searches,
-///   wider windows (50+) reduce the optimization benefit.
-/// - Delta: Minimum expansion of 25 ensures progress even with small score changes
-/// - Expansion factor: 1.5x provides geometric growth that adapts to score volatility
-/// - Retry limit: 3 attempts prevents excessive re-searching in volatile positions
+/// - Initial delta: 30 centipawns provides a good balance between search reduction
+///   and re-search frequency for Shogi positions
+/// - Maximum delta: 350 centipawns caps the window expansion to prevent
+///   excessively wide windows in volatile positions
 ///
-/// These values are derived from:
-/// 1. Empirical testing showing 20-30 cp windows work well for Shogi
-/// 2. Common practice in strong engines (Stockfish, Komodo use similar ranges)
-/// 3. The principle that window size should scale with position complexity
-pub const ASPIRATION_WINDOW_INITIAL: i32 = 25; // 25 centipawns (0.25 pawn)
-pub const ASPIRATION_WINDOW_DELTA: i32 = 25; // Minimum expansion step
-pub const ASPIRATION_WINDOW_EXPANSION: f32 = 1.5; // Geometric growth rate
-pub const ASPIRATION_RETRY_LIMIT: u32 = 3; // Max retries before full window
-
-/// Maximum window adjustment based on volatility (prevents extreme windows)
-pub const ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT: i32 = 100; // 1 pawn max adjustment
-
-/// Maximum aspiration window size (4x initial window)
-/// Prevents excessively wide windows that negate the optimization benefit
-pub const ASPIRATION_WINDOW_MAX: i32 = 100;
+/// The window starts narrow and expands geometrically on fail-high/fail-low,
+/// providing good performance across diverse position types.
+///
+/// These values are empirically tuned for the ClassicBackend implementation.
+pub const ASPIRATION_DELTA_INITIAL: i32 = 30; // Initial window half-width (centipawns)
+pub const ASPIRATION_DELTA_MAX: i32 = 350; // Maximum window expansion limit
 
 /// Time pressure threshold for search decisions
 /// When remaining time < elapsed time * threshold, enter time pressure mode
@@ -121,12 +110,9 @@ mod tests {
         // Ensure draw score is neutral
         assert_eq!(DRAW_SCORE, 0);
 
-        // Ensure aspiration window constants are reasonable
-        assert!(ASPIRATION_WINDOW_INITIAL > 0);
-        assert!(ASPIRATION_WINDOW_DELTA > 0);
-        assert!(ASPIRATION_WINDOW_MAX >= ASPIRATION_WINDOW_INITIAL);
-        assert!(ASPIRATION_WINDOW_EXPANSION > 1.0);
-        assert!(ASPIRATION_RETRY_LIMIT > 0);
+        // Ensure aspiration delta constants are reasonable
+        assert!(ASPIRATION_DELTA_INITIAL > 0);
+        assert!(ASPIRATION_DELTA_MAX >= ASPIRATION_DELTA_INITIAL);
     }
 
     #[test]

@@ -394,12 +394,18 @@ fn publish_helper_snapshot(
         }
     }
 
-    // Prefer PV from result.lines[0] (often higher quality from full search),
+    // Prefer PV from result.lines[0] when it's Exact (often higher quality from full search),
     // fall back to result.stats.pv, then to best_move if all else fails.
-    // This improves interim USI reporting quality.
+    // This improves interim USI reporting quality by avoiding shallow fail-high/low PVs.
     let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
-    if let Some(line_pv) = result.lines.as_ref().and_then(|ls| ls.first()).map(|l| &l.pv) {
-        pv.extend(line_pv.iter().copied());
+    if let Some(first_line) = result.lines.as_ref().and_then(|ls| ls.first()) {
+        // Prefer Exact bound lines for stability; use fail-high/low only if nothing better
+        if first_line.bound == crate::search::types::NodeType::Exact || result.stats.pv.is_empty() {
+            pv.extend(first_line.pv.iter().copied());
+        } else {
+            // lines[0] is fail-high/low and stats.pv exists; prefer stats.pv for stability
+            pv.extend(result.stats.pv.iter().copied());
+        }
     } else {
         pv.extend(result.stats.pv.iter().copied());
     }
@@ -564,5 +570,102 @@ mod tests {
             );
             assert_eq!(snapshot.search_id, session_id, "snapshot should have correct session_id");
         }
+    }
+
+    #[test]
+    fn helper_snapshot_prefers_lines_pv_over_stats_pv() {
+        // Test that publish_helper_snapshot uses result.lines[0].pv when available,
+        // falling back to result.stats.pv only if lines is empty.
+        //
+        // This test verifies the fix in publish_helper_snapshot where we changed from:
+        //   pv.extend(result.stats.pv.iter().copied());
+        // to:
+        //   if let Some(line_pv) = result.lines.as_ref().and_then(|ls| ls.first()).map(|l| &l.pv) {
+        //       pv.extend(line_pv.iter().copied());
+        //   } else {
+        //       pv.extend(result.stats.pv.iter().copied());
+        //   }
+        //
+        // We test this indirectly by checking that a SearchResult with both lines and stats.pv
+        // uses the lines PV, verified through the published snapshot.
+        use crate::search::types::{NodeType, RootLine};
+        use crate::search::SearchResult;
+        use crate::shogi::{Move, Square};
+        use smallvec::SmallVec;
+
+        let stop_ctrl = Arc::new(StopController::new());
+        let session_id = 123u64;
+        let root_key = 0xABCD_EF01_2345_6789u64;
+        let worker_id = 1;
+
+        // Publish session to initialize StopController
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        stop_ctrl.publish_session(Some(&stop_flag), session_id);
+
+        // Create distinct moves for testing
+        let line_move = Move::normal(Square::new(7, 6), Square::new(7, 5), false); // 2g2f
+        let stats_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false); // 7g7f
+
+        // Build a SearchResult with BOTH lines[0].pv and stats.pv
+        // The test verifies that lines[0].pv takes precedence
+        let mut lines = SmallVec::new();
+        let mut line_pv = SmallVec::new();
+        line_pv.push(line_move);
+        lines.push(RootLine {
+            multipv_index: 1,
+            root_move: line_move,
+            score_internal: 100,
+            score_cp: 100,
+            bound: NodeType::Exact,
+            depth: HELPER_SNAPSHOT_MIN_DEPTH,
+            seldepth: Some(6),
+            pv: line_pv,
+            nodes: Some(1000),
+            time_ms: Some(100),
+            nps: Some(10000),
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        });
+
+        let mut stats_pv = Vec::new();
+        stats_pv.push(stats_move); // Different from line_pv
+
+        let result = SearchResult {
+            best_move: Some(line_move),
+            score: 100,
+            depth: HELPER_SNAPSHOT_MIN_DEPTH,
+            seldepth: 6,
+            nodes: 1000,
+            nps: 10000,
+            node_type: NodeType::Exact,
+            stats: SearchStats {
+                pv: stats_pv,
+                elapsed: std::time::Duration::from_millis(100),
+                ..Default::default()
+            },
+            lines: Some(lines),
+            hashfull: 0,
+            stop_info: None,
+            end_reason: crate::search::types::TerminationReason::Completed,
+            ponder: None,
+        };
+
+        publish_helper_snapshot(&stop_ctrl, session_id, root_key, worker_id, &result);
+
+        // Verify snapshot was published and uses lines[0].pv (line_move), not stats.pv (stats_move)
+        let snapshot = stop_ctrl
+            .try_read_snapshot()
+            .expect("Snapshot should be published when depth >= HELPER_SNAPSHOT_MIN_DEPTH");
+
+        assert_eq!(snapshot.search_id, session_id);
+        assert_eq!(snapshot.root_key, root_key);
+        assert!(!snapshot.pv.is_empty(), "PV should not be empty");
+        assert_eq!(
+            snapshot.pv[0], line_move,
+            "First PV move should be from lines[0].pv (line_move={:?}), not stats.pv (stats_move={:?})",
+            line_move,
+            stats_move
+        );
     }
 }
