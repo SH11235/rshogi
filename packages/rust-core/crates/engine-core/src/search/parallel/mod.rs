@@ -397,14 +397,23 @@ fn publish_helper_snapshot(
     // Prefer PV from result.lines[0] when it's Exact (often higher quality from full search),
     // fall back to result.stats.pv, then to best_move if all else fails.
     // This improves interim USI reporting quality by avoiding shallow fail-high/low PVs.
+    // Important: bound and score must match the chosen PV source for consistency.
     let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
+    let mut chosen_bound = result.node_type;
+    let mut chosen_score = result.score;
+
     if let Some(first_line) = result.lines.as_ref().and_then(|ls| ls.first()) {
         // Prefer Exact bound lines for stability; use fail-high/low only if nothing better
-        if first_line.bound == crate::search::types::NodeType::Exact || result.stats.pv.is_empty() {
+        let use_lines0 =
+            first_line.bound == crate::search::types::NodeType::Exact || result.stats.pv.is_empty();
+        if use_lines0 {
             pv.extend(first_line.pv.iter().copied());
+            chosen_bound = first_line.bound;
+            chosen_score = first_line.score_cp;
         } else {
             // lines[0] is fail-high/low and stats.pv exists; prefer stats.pv for stability
             pv.extend(result.stats.pv.iter().copied());
+            // chosen_bound and chosen_score remain as result.node_type and result.score
         }
     } else {
         pv.extend(result.stats.pv.iter().copied());
@@ -427,9 +436,9 @@ fn publish_helper_snapshot(
     let line = RootLine {
         multipv_index: 1,
         root_move,
-        score_internal: result.score,
-        score_cp: clamp_score_cp(result.score),
-        bound: result.node_type,
+        score_internal: chosen_score,
+        score_cp: clamp_score_cp(chosen_score),
+        bound: chosen_bound,
         depth: result.depth,
         seldepth,
         pv,
@@ -666,6 +675,100 @@ mod tests {
             "First PV move should be from lines[0].pv (line_move={:?}), not stats.pv (stats_move={:?})",
             line_move,
             stats_move
+        );
+    }
+
+    #[test]
+    fn helper_snapshot_falls_back_to_stats_pv_when_lines_not_exact() {
+        // Test that when lines[0].bound is not Exact and stats.pv is available,
+        // publish_helper_snapshot falls back to stats.pv and uses result.node_type for bound.
+        use crate::search::types::{NodeType, RootLine};
+        use crate::search::SearchResult;
+        use crate::shogi::{Move, Square};
+        use smallvec::SmallVec;
+
+        let stop_ctrl = Arc::new(StopController::new());
+        let session_id = 456u64;
+        let root_key = 0x1234_5678_9ABC_DEF0u64;
+        let worker_id = 2;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        stop_ctrl.publish_session(Some(&stop_flag), session_id);
+
+        // Create distinct moves
+        let line_move = Move::normal(Square::new(7, 6), Square::new(7, 5), false); // 2g2f (fail-high)
+        let stats_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false); // 7g7f (from stats)
+
+        // Build lines[0] with LowerBound (fail-high)
+        let mut lines = SmallVec::new();
+        let mut line_pv = SmallVec::new();
+        line_pv.push(line_move);
+        lines.push(RootLine {
+            multipv_index: 1,
+            root_move: line_move,
+            score_internal: 150,
+            score_cp: 150,
+            bound: NodeType::LowerBound, // Not Exact!
+            depth: HELPER_SNAPSHOT_MIN_DEPTH,
+            seldepth: Some(6),
+            pv: line_pv,
+            nodes: Some(1000),
+            time_ms: Some(100),
+            nps: Some(10000),
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        });
+
+        // stats.pv with different move
+        let mut stats_pv = Vec::new();
+        stats_pv.push(stats_move);
+
+        let result = SearchResult {
+            best_move: Some(stats_move),
+            score: 120,
+            depth: HELPER_SNAPSHOT_MIN_DEPTH,
+            seldepth: 6,
+            nodes: 1000,
+            nps: 10000,
+            node_type: NodeType::Exact, // result's node_type
+            stats: SearchStats {
+                pv: stats_pv,
+                elapsed: std::time::Duration::from_millis(100),
+                ..Default::default()
+            },
+            lines: Some(lines),
+            hashfull: 0,
+            stop_info: None,
+            end_reason: crate::search::types::TerminationReason::Completed,
+            ponder: None,
+        };
+
+        publish_helper_snapshot(&stop_ctrl, session_id, root_key, worker_id, &result);
+
+        let snapshot = stop_ctrl.try_read_snapshot().expect("Snapshot should be published");
+
+        assert_eq!(snapshot.search_id, session_id);
+        assert_eq!(snapshot.root_key, root_key);
+        assert!(!snapshot.pv.is_empty(), "PV should not be empty");
+
+        // Should use stats.pv (stats_move) instead of lines[0].pv (line_move)
+        assert_eq!(
+            snapshot.pv[0], stats_move,
+            "Should fall back to stats.pv when lines[0].bound is not Exact"
+        );
+
+        // Bound should match result.node_type (Exact), not lines[0].bound (LowerBound)
+        assert_eq!(
+            snapshot.node_type,
+            NodeType::Exact,
+            "Bound should be result.node_type when using stats.pv fallback"
+        );
+
+        // Score should match result.score (120), not lines[0].score (150)
+        assert_eq!(
+            snapshot.score_cp, 120,
+            "Score should be result.score when using stats.pv fallback"
         );
     }
 }

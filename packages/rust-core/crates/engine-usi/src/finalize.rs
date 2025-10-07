@@ -478,7 +478,6 @@ pub fn finalize_and_send(
         ));
 
         if let Some(helper_share) = res.stats.helper_share_pct {
-            // helper_share_pct は従来の duplication_pct と同値だが、実際の含意に合わせて名称を明確化する。
             info_string(format!("helper_share_pct={helper_share:.2}"));
         }
         if let Some(heur) = res.stats.heuristics.as_ref() {
