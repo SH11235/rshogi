@@ -162,7 +162,14 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(t) = v.parse::<usize>() {
                     state.opts.threads = t;
-                    info_string("threads_note=ClassicBackend currently runs single-threaded");
+                    if t == 1 {
+                        info_string("threads_note=Single-threaded search mode");
+                    } else {
+                        info_string(format!(
+                            "threads_note=LazySMP parallel search with {} threads",
+                            t
+                        ));
+                    }
                 }
             }
         }
