@@ -360,7 +360,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // 明示的に i16 範囲へクランプ（将来の係数変更でも安全）
                 h = h.clamp(i16::MIN as i32, i16::MAX as i32);
                 let is_counter = counter_mv.is_some_and(|cm| cm.equals_without_piece_type(&mv));
-                let hp_thresh = dynp::hp_threshold_for_depth(depth);
+                // しきい値も i16 範囲にクランプして型域を整合（depth≥8 での無効化を防ぐ）
+                let mut hp_thresh = dynp::hp_threshold_for_depth(depth);
+                hp_thresh = hp_thresh.clamp(i16::MIN as i32, i16::MAX as i32);
                 // 遅手のみHP対象（move_no>3）。TT手/カウンター/キラー/チェック静止は除外。
                 let is_late = moveno > 3;
                 if is_late
@@ -517,6 +519,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     );
                     let mut s = -sc_nw;
                     if s > alpha {
+                        // 再探索条件: 減深が入っている(reduction>0) か、β未到達の上振れ(s<beta) の場合に必ずフル窓
                         // 安全側: 減深が入っている静止手のnull-window上振れは必ずフル窓で検証
                         // （従来は s<beta のときのみ再探索）
                         if (reduction > 0 || s < beta)

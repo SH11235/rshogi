@@ -435,13 +435,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut picker = MovePicker::new_probcut(pos, excluded, prev_move, see_threshold);
             let mut attempts = 0usize;
             while let Some(mv) = picker.next(&*heur) {
-                // SEE良手のみに限定（過剰トリガー抑制）
-                if pos.see(mv) < 0 {
+                // SEE≥see_threshold を明示的に強制（仕様の二重保証）
+                let see = pos.see(mv);
+                if see < see_threshold {
                     #[cfg(any(debug_assertions, feature = "diagnostics"))]
                     super::diagnostics::record_tag(
                         pos,
-                        "pc_see_neg_skip",
-                        Some("mode=safe".to_string()),
+                        "pc_see_lt_thresh_skip",
+                        Some(format!("see={} thresh={} mode=safe", see, see_threshold)),
                     );
                     continue;
                 }
