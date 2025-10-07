@@ -698,11 +698,12 @@ fn extract_pv_returns_consistent_line() {
 #[test]
 fn search_profile_basic_disables_advanced_pruning() {
     let profile = SearchProfile::basic();
-    assert!(profile.prune.enable_nmp);
+    // Basic profile (Material/Nnue) disables all advanced pruning techniques
+    assert!(!profile.prune.enable_nmp);
     assert!(!profile.prune.enable_iid);
     assert!(!profile.prune.enable_razor);
-    assert!(profile.prune.enable_probcut);
-    assert!(profile.prune.enable_static_beta_pruning);
+    assert!(!profile.prune.enable_probcut);
+    assert!(!profile.prune.enable_static_beta_pruning);
 }
 
 struct RecordingEvaluator {

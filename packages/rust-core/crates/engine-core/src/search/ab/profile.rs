@@ -117,11 +117,11 @@ impl SearchProfile {
         Self {
             kind: SearchProfileKind::BasicMaterial,
             prune: PruneToggles {
-                enable_nmp: true,
+                enable_nmp: false,
                 enable_iid: false,
                 enable_razor: false,
-                enable_probcut: true,
-                enable_static_beta_pruning: true,
+                enable_probcut: false,
+                enable_static_beta_pruning: false,
             },
             tuning: SearchTuning::material_basic(),
         }
@@ -131,11 +131,11 @@ impl SearchProfile {
         Self {
             kind: SearchProfileKind::BasicNnue,
             prune: PruneToggles {
-                enable_nmp: true,
+                enable_nmp: false,
                 enable_iid: false,
                 enable_razor: false,
-                enable_probcut: true,
-                enable_static_beta_pruning: true,
+                enable_probcut: false,
+                enable_static_beta_pruning: false,
             },
             tuning: SearchTuning::nnue_basic(),
         }
@@ -178,6 +178,8 @@ impl SearchProfile {
         params::set_lmp_d2(self.tuning.lmp_limits[1]);
         params::set_lmp_d3(self.tuning.lmp_limits[2]);
         params::set_hp_threshold(self.tuning.hp_threshold);
+        // Safeモード用のHP深さスケール（デフォルト）
+        params::set_hp_depth_scale(4361);
         params::set_sbp_d1(self.tuning.sbp_margin_d1);
         params::set_sbp_d2(self.tuning.sbp_margin_d2);
         params::set_probcut_d5(self.tuning.probcut_margin_d5);
@@ -194,6 +196,8 @@ impl SearchProfile {
         params::set_iid_enabled(self.prune.enable_iid);
         params::set_probcut_enabled(self.prune.enable_probcut);
         params::set_static_beta_enabled(self.prune.enable_static_beta_pruning);
+        // YO安全側ガードは既定ON
+        params::set_pruning_safe_mode(true);
     }
 }
 

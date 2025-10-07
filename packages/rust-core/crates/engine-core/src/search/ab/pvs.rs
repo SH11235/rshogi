@@ -200,13 +200,31 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         alpha = used_alpha;
         let beta = used_beta;
 
-        if self.should_static_beta_prune(&self.profile.prune, depth, pos, beta, static_eval) {
+        if self.should_static_beta_prune(super::pruning::StaticBetaPruneParams {
+            toggles: &self.profile.prune,
+            depth,
+            pos,
+            beta,
+            static_eval,
+            is_pv,
+            ply,
+            stack: &*stack,
+        }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (static_eval, None);
         }
 
-        if let Some(r) = self.razor_prune(&self.profile.prune, depth, pos, alpha, ctx, ply) {
+        if let Some(r) = self.razor_prune(super::pruning::RazorPruneParams {
+            toggles: &self.profile.prune,
+            depth,
+            pos,
+            alpha,
+            static_eval,
+            ctx,
+            ply,
+            is_pv,
+        }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (r, None);
@@ -291,6 +309,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             beta,
             static_eval,
             ply,
+            is_pv,
             stack: &mut *stack,
             heur: &mut *heur,
             tt_hits: &mut *tt_hits,
@@ -336,10 +355,30 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
 
-            if depth <= 3 && is_quiet {
-                let h = heur.history.get(pos.side_to_move, mv);
+            if depth < 14 && is_quiet {
+                let mut h = heur.history.get(pos.side_to_move, mv);
+                // 明示的に i16 範囲へクランプ（将来の係数変更でも安全）
+                h = h.clamp(i16::MIN as i32, i16::MAX as i32);
                 let is_counter = counter_mv.is_some_and(|cm| cm.equals_without_piece_type(&mv));
-                if h < dynp::hp_threshold() && !stack[ply as usize].is_killer(mv) && !is_counter {
+                let hp_thresh = dynp::hp_threshold_for_depth(depth);
+                // 遅手のみHP対象（move_no>3）。TT手/カウンター/キラー/チェック静止は除外。
+                let is_late = moveno > 3;
+                if is_late
+                    && !gives_check
+                    && h < hp_thresh
+                    && !stack[ply as usize].is_killer(mv)
+                    && !is_counter
+                {
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        pos,
+                        match depth {
+                            1 => "hp_skip_d1",
+                            2..=3 => "hp_skip_d2",
+                            _ => "hp_skip_d3",
+                        },
+                        Some(format!("moveno={}", moveno)),
+                    );
                     continue;
                 }
             }
@@ -350,8 +389,52 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     continue;
                 }
             }
+            // Futility（alpha側）: 静止のみ・チェック静止/良捕獲/昇は除外、depth<=8
+            if dynp::pruning_safe_mode()
+                && dynp::fut_dynamic_enabled()
+                && depth <= 8
+                && is_quiet
+                && !pos.is_in_check()
+            {
+                use crate::search::constants::MATE_SCORE;
+                if alpha.abs() >= MATE_SCORE - 100 { /* mate帯近傍では futility 無効 */ }
+                let improving = if ply >= 2 {
+                    let idx = (ply - 2) as usize;
+                    stack
+                        .get(idx)
+                        .and_then(|st| st.static_eval)
+                        .is_some_and(|prev2| static_eval >= prev2 - 10)
+                } else {
+                    false
+                };
+                let d = depth.clamp(1, 8);
+                let mut margin = dynp::fut_margin_base() + dynp::fut_margin_slope() * d;
+                if improving {
+                    margin -= 30;
+                }
+                if alpha.abs() < MATE_SCORE - 100 && static_eval + margin <= alpha {
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    {
+                        super::diagnostics::record_tag(
+                            pos,
+                            "fut_skip",
+                            Some(format!("d={} marg={}", d, margin)),
+                        );
+                        super::diagnostics::record_tag(
+                            pos,
+                            match d {
+                                1..=2 => "fut_skip_d1_2",
+                                3..=5 => "fut_skip_d3_5",
+                                _ => "fut_skip_d6_8",
+                            },
+                            None,
+                        );
+                    }
+                    continue;
+                }
+            }
             let mut next_depth = depth - 1;
-            let reduction = ordering::late_move_reduction(LateMoveReductionParams {
+            let mut reduction = ordering::late_move_reduction(LateMoveReductionParams {
                 lmr_trials: &mut heur.lmr_trials,
                 depth,
                 moveno,
@@ -363,6 +446,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 ply,
                 stack: &*stack,
             });
+            // 特例ガード: 直前が回避直後の静止 or TT強ヒント → 減深を1段弱める
+            if reduction > 0 && is_quiet {
+                let prev_in_check = if ply > 0 {
+                    stack[(ply - 1) as usize].in_check
+                } else {
+                    false
+                };
+                if prev_in_check || tt_depth_ok {
+                    reduction = (reduction - 1).max(0);
+                }
+            }
             if reduction > 0 {
                 next_depth -= reduction;
                 *lmr_counter += 1;
@@ -381,6 +475,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 reduction,
             });
             let pv_move = !first_move_done;
+            let mut did_fullwin_research = false;
             let score = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                 let mut child = pos.clone();
@@ -421,24 +516,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         ctx,
                     );
                     let mut s = -sc_nw;
-                    if s > alpha && s < beta {
-                        let (sc_fw, _) = self.alphabeta(
-                            ABArgs {
-                                pos: &child,
-                                depth: next_depth,
-                                alpha: -beta,
-                                beta: -alpha,
-                                ply: ply + 1,
-                                is_pv: true,
-                                stack,
-                                heur,
-                                tt_hits,
-                                beta_cuts,
-                                lmr_counter,
-                            },
-                            ctx,
-                        );
-                        s = -sc_fw;
+                    if s > alpha {
+                        // 安全側: 減深が入っている静止手のnull-window上振れは必ずフル窓で検証
+                        // （従来は s<beta のときのみ再探索）
+                        if (reduction > 0 || s < beta)
+                            && !std::mem::replace(&mut did_fullwin_research, true)
+                        {
+                            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                            super::diagnostics::record_tag(pos, "lmr_fullwin_re", None);
+                            let (sc_fw, _) = self.alphabeta(
+                                ABArgs {
+                                    pos: &child,
+                                    depth: next_depth,
+                                    alpha: -beta,
+                                    beta: -alpha,
+                                    ply: ply + 1,
+                                    is_pv: true,
+                                    stack,
+                                    heur,
+                                    tt_hits,
+                                    beta_cuts,
+                                    lmr_counter,
+                                },
+                                ctx,
+                            );
+                            s = -sc_fw;
+                        }
                     }
                     s
                 }

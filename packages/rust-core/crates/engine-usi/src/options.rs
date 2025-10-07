@@ -26,25 +26,29 @@ fn current_profile(state: &EngineState) -> Option<SearchProfile> {
 }
 
 fn profile_allows_iid(state: &EngineState) -> bool {
-    use EngineType::Enhanced;
-    if matches!(state.opts.engine_type, Enhanced) {
-        false
-    } else {
-        current_profile(state).map(|p| p.prune.enable_iid).unwrap_or(true)
-    }
+    // IID is allowed for all engine types except when disabled by SearchProfile
+    current_profile(state).map(|p| p.prune.enable_iid).unwrap_or(true)
 }
 
 fn profile_allows_probcut(state: &EngineState) -> bool {
-    use EngineType::{Enhanced, Material};
-    if matches!(state.opts.engine_type, Material | Enhanced) {
-        false
-    } else {
+    use EngineType::{Enhanced, EnhancedNnue};
+    // ProbCut is an advanced search technique available in Enhanced engines
+    // Basic engines (Material, Nnue) use simpler search without ProbCut
+    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
         current_profile(state).map(|p| p.prune.enable_probcut).unwrap_or(true)
+    } else {
+        false
     }
 }
 
 fn profile_allows_razor(state: &EngineState) -> bool {
-    current_profile(state).map(|p| p.prune.enable_razor).unwrap_or(true)
+    use EngineType::{Enhanced, EnhancedNnue};
+    // Razor is an advanced pruning technique available in Enhanced engines
+    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
+        current_profile(state).map(|p| p.prune.enable_razor).unwrap_or(true)
+    } else {
+        false
+    }
 }
 
 fn profile_allows_qs_checks(state: &EngineState) -> bool {
@@ -52,7 +56,25 @@ fn profile_allows_qs_checks(state: &EngineState) -> bool {
 }
 
 fn profile_allows_nmp(state: &EngineState) -> bool {
-    current_profile(state).map(|p| p.prune.enable_nmp).unwrap_or(true)
+    use EngineType::{Enhanced, EnhancedNnue};
+    // Null Move Pruning is an advanced technique available in Enhanced engines
+    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
+        current_profile(state).map(|p| p.prune.enable_nmp).unwrap_or(true)
+    } else {
+        false
+    }
+}
+
+fn profile_allows_static_beta(state: &EngineState) -> bool {
+    use EngineType::{Enhanced, EnhancedNnue};
+    // Static Beta Pruning (Futility Pruning) is available in Enhanced engines
+    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
+        current_profile(state)
+            .map(|p| p.prune.enable_static_beta_pruning)
+            .unwrap_or(true)
+    } else {
+        false
+    }
 }
 
 pub fn send_id_and_options(opts: &UsiOptions) {
@@ -93,6 +115,12 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     );
     usi_println("option name SearchParams.SBP_D1 type spin default 200 min 0 max 2000");
     usi_println("option name SearchParams.SBP_D2 type spin default 300 min 0 max 2000");
+    usi_println("option name SearchParams.SBP_Dyn_Enable type check default true");
+    usi_println("option name SearchParams.SBP_Dyn_Base type spin default 120 min 0 max 2000");
+    usi_println("option name SearchParams.SBP_Dyn_Slope type spin default 60 min 0 max 500");
+    usi_println("option name SearchParams.FUT_Dyn_Enable type check default true");
+    usi_println("option name SearchParams.FUT_Dyn_Base type spin default 100 min 0 max 2000");
+    usi_println("option name SearchParams.FUT_Dyn_Slope type spin default 80 min 0 max 500");
     usi_println("option name SearchParams.ProbCut_D5 type spin default 250 min 0 max 2000");
     usi_println("option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000");
     usi_println("option name SearchParams.IID_MinDepth type spin default 6 min 0 max 20");
@@ -101,11 +129,20 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.EnableIID type check default true");
     usi_println("option name SearchParams.EnableProbCut type check default true");
     usi_println("option name SearchParams.EnableStaticBeta type check default true");
+    usi_println("option name SearchParams.ProbCut_SkipVerifyLt4 type check default false");
+    // Finalize sanity (light guard before emitting bestmove)
+    usi_println("option name FinalizeSanity.Enabled type check default true");
+    usi_println("option name FinalizeSanity.BudgetMs type spin default 2 min 0 max 10");
+    usi_println("option name FinalizeSanity.MiniDepth type spin default 2 min 1 max 3");
+    usi_println("option name FinalizeSanity.SEE_MinCp type spin default -90 min -1000 max 1000");
+    usi_println("option name FinalizeSanity.SwitchMarginCp type spin default 80 min 0 max 500");
+    usi_println("option name SearchParams.SafePruning type check default true");
     usi_println("option name SearchParams.QS_MarginCapture type spin default 150 min 0 max 5000");
     usi_println("option name SearchParams.QS_BadCaptureMin type spin default 450 min 0 max 5000");
     usi_println(
         "option name SearchParams.QS_CheckPruneMargin type spin default 150 min 0 max 5000",
     );
+    usi_println("option name SearchParams.HP_DepthScale type spin default 4361 min 0 max 20000");
     usi_println("option name SearchParams.QuietHistoryWeight type spin default 4 min -64 max 64");
     usi_println(
         "option name SearchParams.ContinuationHistoryWeight type spin default 2 min -32 max 32",
@@ -326,6 +363,46 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "SearchParams.SBP_Dyn_Enable" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_sbp_dynamic_enabled(on);
+            }
+        }
+        "SearchParams.SBP_Dyn_Base" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_sbp_base(x);
+                }
+            }
+        }
+        "SearchParams.SBP_Dyn_Slope" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_sbp_slope(x);
+                }
+            }
+        }
+        "SearchParams.FUT_Dyn_Enable" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_fut_dynamic_enabled(on);
+            }
+        }
+        "SearchParams.FUT_Dyn_Base" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_fut_base(x);
+                }
+            }
+        }
+        "SearchParams.FUT_Dyn_Slope" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_fut_slope(x);
+                }
+            }
+        }
         "SearchParams.ProbCut_D5" => {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
@@ -351,9 +428,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_razor(state) {
-                    info_string(
-                        "pruning_note=Razor pruning is disabled by the active SearchProfile",
-                    );
+                    use EngineType::{Enhanced, EnhancedNnue};
+                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
+                        "Razor is disabled by the active SearchProfile"
+                    } else {
+                        "Razor is only available in Enhanced/EnhancedNnue engine types"
+                    };
+                    info_string(format!("pruning_note={}", reason));
                 }
                 engine_core::search::params::set_razor_enabled(on);
             }
@@ -362,7 +443,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_nmp(state) {
-                    info_string("pruning_note=NMP is disabled by the active SearchProfile");
+                    use EngineType::{Enhanced, EnhancedNnue};
+                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
+                        "NMP is disabled by the active SearchProfile"
+                    } else {
+                        "NMP is only available in Enhanced/EnhancedNnue engine types"
+                    };
+                    info_string(format!("pruning_note={}", reason));
                 }
                 engine_core::search::params::set_nmp_enabled(on);
             }
@@ -380,7 +467,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_probcut(state) {
-                    info_string("pruning_note=ProbCut is disabled by the active SearchProfile");
+                    use EngineType::{Enhanced, EnhancedNnue};
+                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
+                        "ProbCut is disabled by the active SearchProfile"
+                    } else {
+                        "ProbCut is only available in Enhanced/EnhancedNnue engine types"
+                    };
+                    info_string(format!("pruning_note={}", reason));
                 }
                 engine_core::search::params::set_probcut_enabled(on);
             }
@@ -388,7 +481,78 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "SearchParams.EnableStaticBeta" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                if on && !profile_allows_static_beta(state) {
+                    use EngineType::{Enhanced, EnhancedNnue};
+                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
+                        "StaticBeta is disabled by the active SearchProfile"
+                    } else {
+                        "StaticBeta is only available in Enhanced/EnhancedNnue engine types"
+                    };
+                    info_string(format!("pruning_note={}", reason));
+                }
                 engine_core::search::params::set_static_beta_enabled(on);
+            }
+        }
+        "SearchParams.ProbCut_SkipVerifyLt4" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_probcut_skip_verify_lt4(on);
+                info_string(if on {
+                    "pc_skip_verify_lt4=On"
+                } else {
+                    "pc_skip_verify_lt4=Off"
+                });
+            }
+        }
+        // --- Finalize sanity options ---
+        "FinalizeSanity.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                state.opts.finalize_sanity_enabled = on;
+                info_string(if on {
+                    "finalize_sanity=On"
+                } else {
+                    "finalize_sanity=Off"
+                });
+            }
+        }
+        "FinalizeSanity.BudgetMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u64>() {
+                    state.opts.finalize_sanity_budget_ms = x.min(10);
+                }
+            }
+        }
+        "FinalizeSanity.MiniDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u8>() {
+                    state.opts.finalize_sanity_mini_depth = x.clamp(1, 3);
+                }
+            }
+        }
+        "FinalizeSanity.SEE_MinCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_sanity_see_min_cp = x.clamp(-2000, 2000);
+                }
+            }
+        }
+        "FinalizeSanity.SwitchMarginCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_sanity_switch_margin_cp = x.clamp(0, 1000);
+                }
+            }
+        }
+        "SearchParams.SafePruning" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_pruning_safe_mode(on);
+                info_string(if on {
+                    "pruning_safe_mode=On"
+                } else {
+                    "pruning_safe_mode=Off"
+                });
             }
         }
         "SearchParams.QS_MarginCapture" => {
@@ -409,6 +573,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     engine_core::search::params::set_qs_check_prune_margin(x);
+                }
+            }
+        }
+        "SearchParams.HP_DepthScale" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_hp_depth_scale(x);
                 }
             }
         }

@@ -3,6 +3,7 @@ use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{types::StopInfo, SearchResult};
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
+// use engine_core::util::search_helpers::quick_search_move; // not used in current impl
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
 use crate::io::{diag_info_string, info_string, usi_println};
@@ -66,6 +67,163 @@ fn log_and_emit_final_selection(
         stop_meta.hard_ms
     ));
     let _ = emit_bestmove_once(state, final_move.to_string(), ponder);
+}
+
+fn finalize_sanity_check(
+    state: &mut EngineState,
+    stop_meta: &StopMeta,
+    final_best: &FinalBest,
+    result: Option<&SearchResult>,
+) -> Option<engine_core::shogi::Move> {
+    if !state.opts.finalize_sanity_enabled || state.current_is_ponder {
+        return None;
+    }
+    if state.position.is_in_check() {
+        return None;
+    }
+    let pv1 = final_best.best_move?;
+    // Mate/draw guard: if PV1 score is mate帯 or (近似的に)ドロー評価に近いならスイッチ禁止
+    if let Some(res) = result {
+        use engine_core::search::constants::MATE_SCORE;
+        let sc = res.score;
+        if sc.abs() >= MATE_SCORE - 100 || sc.abs() <= 10 {
+            return None;
+        }
+    }
+    // SEE gate
+    let see = state.position.see(pv1);
+    let see_min = state.opts.finalize_sanity_see_min_cp;
+    let diag_base = format!("sanity_checked=1 see={}", see);
+    if see >= see_min {
+        info_string(format!("{} switched=0 reason=see_ok", diag_base));
+        return None;
+    }
+    // Candidate: prefer PV2 if available and legal; fallback to best SEE>=0 (または最高SEE)
+    let mg = MoveGenerator::new();
+    let Ok(list) = mg.generate_all(&state.position) else {
+        info_string("sanity_checked=1 switched=0 reason=no_moves");
+        return None;
+    };
+    // Prefer PV2 (from SearchResult lines, if available)
+    let mut best_alt = if let Some(res) = result {
+        if let Some(lines) = &res.lines {
+            if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
+                l2.pv.first().copied().filter(|m| Some(*m) != final_best.best_move)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut alt_from_pv2 = false;
+    if let (Some(res), Some(mv0)) = (result, best_alt) {
+        if let Some(lines) = &res.lines {
+            if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
+                if l2.pv.first().is_some_and(|m| *m == mv0) {
+                    alt_from_pv2 = true;
+                }
+            }
+        }
+    }
+    let mut best_alt_see = i32::MIN;
+    for &mv in list.as_slice() {
+        if Some(mv) == final_best.best_move {
+            continue;
+        }
+        if !state.position.is_legal_move(mv) {
+            continue;
+        }
+        let s = state.position.see(mv);
+        if best_alt.is_none() {
+            // if PV2 wasn’t set, pick SEE-best candidate
+            if s > best_alt_see {
+                best_alt_see = s;
+                best_alt = Some(mv);
+            }
+        }
+    }
+    let Some(alt) = best_alt else {
+        info_string(format!("{} switched=0 reason=no_alt", diag_base));
+        return None;
+    };
+    // Budget
+    let budget_max = state.opts.finalize_sanity_budget_ms;
+    let total_budget = compute_tt_probe_budget_ms(stop_meta.info.as_ref(), 0).min(budget_max);
+    // Split budget across both mini searches（合計上限を厳守）
+    let per_budget = if total_budget >= 2 {
+        total_budget / 2
+    } else {
+        total_budget
+    };
+    if total_budget == 0 {
+        return None;
+    }
+    // Mini search (depth 1-2) for pv1 vs alt
+    let mini_depth = state.opts.finalize_sanity_mini_depth;
+    let switch_margin = state.opts.finalize_sanity_switch_margin_cp;
+    let (s1, s2);
+    let (mv1, mv2) = (pv1, alt);
+    // Lock engine with small budget
+    if let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, total_budget) {
+        // Evaluate child of pv1
+        let mut pos1 = state.position.clone();
+        pos1.do_move(mv1);
+        s1 = eng
+            .search(
+                &mut pos1,
+                engine_core::search::SearchLimits::builder()
+                    .depth(mini_depth)
+                    .fixed_time_ms(per_budget)
+                    .build(),
+            )
+            .score;
+
+        // Evaluate child of alt
+        let mut pos2 = state.position.clone();
+        pos2.do_move(mv2);
+        s2 = eng
+            .search(
+                &mut pos2,
+                engine_core::search::SearchLimits::builder()
+                    .depth(mini_depth)
+                    .fixed_time_ms(per_budget)
+                    .build(),
+            )
+            .score;
+    } else {
+        return None;
+    }
+    let switched = s2 > s1 + switch_margin;
+    if switched {
+        info_string(format!(
+            "{} alt={} s1={} s2={} margin={} switched=1 origin={} total_budget_ms={} per_ms={}",
+            diag_base,
+            move_to_usi(&alt),
+            s1,
+            s2,
+            switch_margin,
+            if alt_from_pv2 { "pv2" } else { "see_best" },
+            total_budget,
+            per_budget,
+        ));
+    } else {
+        info_string(format!(
+            "{} alt={} s1={} s2={} margin={} switched=0",
+            diag_base,
+            move_to_usi(&alt),
+            s1,
+            s2,
+            switch_margin,
+        ));
+    }
+    if switched {
+        Some(alt)
+    } else {
+        None
+    }
 }
 
 fn prepare_stop_meta(
@@ -698,13 +856,18 @@ pub fn finalize_and_send(
         }
     }
 
-    let final_usi = final_best
-        .best_move
-        .map(|m| move_to_usi(&m))
-        .unwrap_or_else(|| "resign".to_string());
+    // Optional finalize sanity check (may switch PV1)
+    let maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result);
+    let (chosen_mv, chosen_src) = if let Some(m) = maybe_switch {
+        (Some(m), FinalBestSource::Committed)
+    } else {
+        (final_best.best_move, final_best.source)
+    };
+
+    let final_usi = chosen_mv.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
     let ponder_mv = if state.opts.ponder {
         final_best.pv.get(1).map(move_to_usi).or_else(|| {
-            final_best.best_move.and_then(|bm| {
+            chosen_mv.and_then(|bm| {
                 let eng = state.engine.lock().unwrap();
                 eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
             })
@@ -712,14 +875,7 @@ pub fn finalize_and_send(
     } else {
         None
     };
-    log_and_emit_final_selection(
-        state,
-        label,
-        final_best.source,
-        &final_usi,
-        ponder_mv,
-        &stop_meta,
-    );
+    log_and_emit_final_selection(state, label, chosen_src, &final_usi, ponder_mv, &stop_meta);
 }
 
 fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_permille: u16) {
