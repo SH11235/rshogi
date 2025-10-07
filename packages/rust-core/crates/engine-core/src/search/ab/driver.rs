@@ -1257,7 +1257,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         // 次ジョブの初期値として Heuristics を TLS に返却（helpers のみ実質的に再利用）。
-        seed_thread_heuristics(iterative_heur.clone());
+        seed_thread_heuristics(iterative_heur);
 
         if result.stop_info.is_none() {
             if let Some(tm) = limits.time_manager.as_ref() {
