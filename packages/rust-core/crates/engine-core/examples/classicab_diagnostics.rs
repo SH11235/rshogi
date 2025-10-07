@@ -246,7 +246,7 @@ fn main() {
             let beta = res.stats.root_fail_high_count.unwrap_or(0);
             let asp_fail_high = asp_fail_high.load(Ordering::Relaxed);
             let asp_fail_low = asp_fail_low.load(Ordering::Relaxed);
-            let helper_share = res.stats.duplication_percentage.unwrap_or(0.0);
+            let helper_share = res.stats.helper_share_pct.unwrap_or(0.0);
             let heur_summary =
                 res.stats.heuristics.as_ref().map(|h| h.summary()).unwrap_or_default();
             // Probe TT at root to check adoption

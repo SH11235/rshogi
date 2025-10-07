@@ -8,23 +8,6 @@ use engine_core::{
 };
 use std::sync::Arc;
 
-fn run_helper_share(threads: usize) -> f64 {
-    let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(TranspositionTable::new(16));
-    let stop = Arc::new(StopController::new());
-    let mut searcher = ParallelSearcher::<MaterialEvaluator>::new(
-        Arc::clone(&evaluator),
-        Arc::clone(&tt),
-        threads,
-        Arc::clone(&stop),
-    );
-
-    let mut position = Position::startpos();
-    let limits = SearchLimitsBuilder::default().fixed_nodes(8_192).depth(4).build();
-    let result = searcher.search(&mut position, limits);
-    result.stats.duplication_percentage.unwrap_or(0.0)
-}
-
 #[test]
 fn helper_share_increases_when_jitter_enabled() {
     let share_off = run_helper_share_with(3, false);
@@ -55,5 +38,5 @@ fn run_helper_share_with(threads: usize, jitter: bool) -> f64 {
         .jitter_override(jitter)
         .build();
     let result = searcher.search(&mut position, limits);
-    result.stats.duplication_percentage.unwrap_or(0.0)
+    result.stats.helper_share_pct.unwrap_or(0.0)
 }

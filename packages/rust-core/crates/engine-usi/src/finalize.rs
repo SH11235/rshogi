@@ -477,7 +477,7 @@ pub fn finalize_and_send(
             stop_meta.hard_ms, stop_meta.soft_ms, stop_meta.reason_label
         ));
 
-        if let Some(helper_share) = res.stats.duplication_percentage {
+        if let Some(helper_share) = res.stats.helper_share_pct {
             // helper_share_pct は従来の duplication_pct と同値だが、実際の含意に合わせて名称を明確化する。
             info_string(format!("helper_share_pct={helper_share:.2}"));
         }
@@ -523,7 +523,7 @@ pub fn finalize_and_send(
                 res.stats.raw_seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
             let dup = res
                 .stats
-                .duplication_percentage
+                .helper_share_pct
                 .map(|d| format!("{:.1}", d))
                 .unwrap_or_else(|| "-".to_string());
             let rfhi = res.stats.root_fail_high_count.unwrap_or(0);
@@ -825,8 +825,9 @@ pub fn finalize_and_send_fast(
         let rk_ok = snap.root_key == state.position.zobrist_hash();
         if sid_ok && rk_ok {
             if let Some(best) = snap.best {
-                let shallow =
-                    snap.depth < FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT || snap.pv.is_empty();
+                let shallow = snap.depth
+                    < engine_core::search::constants::HELPER_SNAPSHOT_MIN_DEPTH as u8
+                    || snap.pv.is_empty();
                 let elapsed_ms_u32 = snap.elapsed_ms.min(u32::MAX as u64) as u32;
                 let budget_ms = compute_tt_probe_budget_ms(stop_meta.info.as_ref(), elapsed_ms_u32);
                 if shallow {
@@ -1108,7 +1109,6 @@ pub fn finalize_and_send_fast(
         }
     }
 }
-const FAST_SNAPSHOT_MIN_DEPTH_FOR_DIRECT_EMIT: u8 = 3;
 
 #[cfg(test)]
 mod tests {

@@ -106,6 +106,12 @@ impl WorkerLocal {
                 *s = SearchStack::default();
             }
         }
+        // Verify stack length invariant in debug builds to catch any logic errors
+        debug_assert_eq!(
+            self.stack.len(),
+            MAX_PLY + 1,
+            "WorkerLocal stack must maintain exactly MAX_PLY+1 elements"
+        );
     }
 
     fn on_idle(&mut self) {
