@@ -281,10 +281,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if tt_arc.has_exact_cut(pos_hash, pos.side_to_move) {
                     // 減深は最大1ply、過度な弱体化を避ける
                     if depth > 1 {
-                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                        if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
-                            cb(&format!("abdada_cut_reduction=1 depth={} -> {}", depth, depth - 1));
-                        }
                         // 実際の減深はこの後の next_depth 計算で反映（abdada_guard.active && is_quiet のとき −1ply）。
                         // ここでは深さ本体は変更しない。
                     }
@@ -513,6 +509,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 *lmr_counter += 1;
             }
             if abdada_guard.active && is_quiet && next_depth > 0 {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
+                    cb(&format!(
+                        "abdada_cut_reduction=1 next_depth={} -> {}",
+                        next_depth,
+                        next_depth - 1
+                    ));
+                }
                 next_depth -= 1;
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]

@@ -191,9 +191,11 @@ pub(crate) fn try_update_entry_generic(
         && !new_entry.is_pv()
         && !matches!(new_entry.node_type(), crate::search::NodeType::Exact)
     {
-        // Diagnostics: block Non-PV bound from overwriting PV Exact
+        // Diagnostics: block Non-PV bound from overwriting PV Exact（局面キー短縮付き）
+        let key_short = format!("{:016x}", new_entry.key());
         log::info!(
-            "info string tt_pv_exact_overwrite_blocked=1 old_depth={} new_depth={} old_nt={:?} new_nt={:?}",
+            "info string tt_pv_exact_overwrite_blocked=1 key={} old_depth={} new_depth={} old_nt={:?} new_nt={:?}",
+            key_short,
             old_depth,
             new_entry.depth(),
             old_node_type,
