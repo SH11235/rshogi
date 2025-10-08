@@ -1773,11 +1773,7 @@ mod tests {
 
         // 先取り claim 数を検証
         let expected = 5usize.min(root_moves.len());
-        let claimed = claims
-            .iter()
-            .map(|s| s.load(Ordering::Acquire))
-            .filter(|&v| v != 0)
-            .count();
+        let claimed = claims.iter().map(|s| s.load(Ordering::Acquire)).filter(|&v| v != 0).count();
         // env を戻す
         std::env::remove_var("SHOGI_ROOT_OPEN_UPTO");
 

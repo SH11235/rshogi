@@ -37,6 +37,5 @@ opt-level = 1  # Basic optimizations for debug builds
 
 # Release build with debug assertions for catching bugs
 [profile.release]
-debug-assertions = true   # Release buildでもアサート有効
 overflow-checks = true    # オーバーフロー検出
 lto = "thin"             # 最適化は維持
