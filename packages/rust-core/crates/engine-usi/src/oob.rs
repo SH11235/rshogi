@@ -45,6 +45,9 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if !state.searching || state.bestmove_emitted {
                     continue;
                 }
+                // Suppress OOB finalize during ponder (except UserStop).
+                // Note: FinalizeReason::PonderToMove is handled directly by handle_ponderhit
+                // in the USI layer, so it is suppressed here to avoid duplicate finalize.
                 if state.current_is_ponder && !matches!(reason, FinalizeReason::UserStop) {
                     let root =
                         state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
@@ -91,6 +94,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     FinalizeReason::Hard => "oob_hard_finalize",
                     FinalizeReason::NearHard => "oob_near_hard_finalize",
                     FinalizeReason::Planned => "oob_planned_finalize",
+                    FinalizeReason::PonderToMove => "oob_ponder_to_move_finalize",
                     FinalizeReason::TimeManagerStop => "oob_tm_finalize",
                     FinalizeReason::UserStop => "oob_user_finalize",
                 };

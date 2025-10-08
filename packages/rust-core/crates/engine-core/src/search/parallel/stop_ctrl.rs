@@ -24,6 +24,8 @@ pub enum FinalizeReason {
     TimeManagerStop,
     /// User/GUI stop propagation (for consistency)
     UserStop,
+    /// Ponder to move transition (ponderhit with search already completed)
+    PonderToMove,
 }
 
 /// Messages delivered to the USI layer to coordinate exactly-once bestmove emission.
@@ -126,6 +128,7 @@ impl StopController {
             FinalizeReason::Hard => 5,
             FinalizeReason::NearHard => 4,
             FinalizeReason::Planned => 3,
+            FinalizeReason::PonderToMove => 3,
             FinalizeReason::TimeManagerStop => 2,
             FinalizeReason::UserStop => 1,
         }
@@ -238,6 +241,7 @@ impl StopController {
             }
             FinalizeReason::NearHard
             | FinalizeReason::Planned
+            | FinalizeReason::PonderToMove
             | FinalizeReason::TimeManagerStop => {
                 si.reason = TerminationReason::TimeLimit;
                 si.hard_timeout = false;
