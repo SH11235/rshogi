@@ -702,25 +702,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
-                    'root_move: for (idx, (mv, _, root_idx)) in
-                        active_moves.iter().copied().enumerate()
-                    {
-                        let mut claimed_this_move = is_helper;
-                        if !is_helper {
-                            if let Some(queue) = limits.root_work_queue.as_ref() {
-                                if queue.try_claim(root_idx) {
-                                    claimed_this_move = true;
-                                } else {
-                                    continue 'root_move;
-                                }
-                            } else {
-                                claimed_this_move = true;
-                            }
-                        }
-                        if !claimed_this_move {
-                            continue 'root_move;
-                        }
-                        if claimed_this_move
+                    for (idx, (mv, _, root_idx)) in active_moves.iter().copied().enumerate() {
+                        if is_helper
                             && limits.root_work_queue.is_some()
                             && !claimed_indices.contains(&root_idx)
                         {
@@ -863,8 +846,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > alpha {
                             alpha = score;
                         }
-                        if let Some(queue) = limits.root_work_queue.as_ref() {
-                            if is_helper && claimed_this_move {
+                        if is_helper {
+                            if let Some(queue) = limits.root_work_queue.as_ref() {
                                 queue.mark_done(root_idx);
                             }
                         }
@@ -924,9 +907,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         alpha = new_alpha;
                         beta = new_beta;
                         delta = (delta * 2).min(ASPIRATION_DELTA_MAX);
-                        if let Some(queue) = limits.root_work_queue.as_ref() {
-                            for idx_claimed in claimed_indices.iter().copied() {
-                                queue.release(idx_claimed);
+                        if is_helper {
+                            if let Some(queue) = limits.root_work_queue.as_ref() {
+                                for idx_claimed in claimed_indices.iter().copied() {
+                                    queue.release(idx_claimed);
+                                }
                             }
                         }
                         claimed_indices.clear();
@@ -963,8 +948,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         claimed_indices.clear();
                         continue;
                     }
-                    if let Some(queue) = limits.root_work_queue.as_ref() {
-                        if is_helper {
+                    if is_helper {
+                        if let Some(queue) = limits.root_work_queue.as_ref() {
                             for idx_claimed in claimed_indices.iter().copied() {
                                 queue.mark_done(idx_claimed);
                             }
@@ -1654,8 +1639,10 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
 mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
-    use crate::search::{SearchLimitsBuilder, TranspositionTable};
+    use crate::movegen::MoveGenerator;
+    use crate::search::{limits::RootWorkQueue, SearchLimitsBuilder, TranspositionTable};
     use crate::shogi::Position;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     #[test]
@@ -1707,6 +1694,39 @@ mod tests {
                 summary.continuation_max,
                 summary.capture_max,
                 summary.counter_filled
+            );
+        }
+    }
+
+    #[test]
+    fn primary_search_does_not_touch_root_work_queue() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+        let backend = ClassicBackend::with_tt(evaluator, tt);
+
+        let mut pos = Position::startpos();
+        let mover = MoveGenerator::new();
+        let root_moves = mover
+            .generate_all(&pos)
+            .expect("move generation should succeed");
+
+        let queue = Arc::new(RootWorkQueue::new());
+        let claims = queue.ensure_initialized(root_moves.len());
+
+        let limits = SearchLimitsBuilder::default()
+            .depth(3)
+            .root_work_queue(Arc::clone(&queue))
+            .build();
+
+        // helper_role はデフォルトで false（primary）。
+        let _ = backend.think_blocking(&mut pos, &limits, None);
+
+        // primary パスでは RootWorkQueue を操作しないため、全スロットは未使用のまま。
+        for slot in claims.iter() {
+            assert_eq!(
+                slot.load(Ordering::Acquire),
+                0,
+                "primary search must not claim root work queue entries"
             );
         }
     }
