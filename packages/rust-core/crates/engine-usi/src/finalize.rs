@@ -328,6 +328,10 @@ fn gather_stop_meta(
         reason_label.push_str(tm_tag);
     }
 
+    if finalize_reason.is_some_and(|r| matches!(r, FinalizeReason::PonderToMove)) {
+        reason_label.push_str("|tm=n/a");
+    }
+
     let chosen_info = result_info.map(copy_stop_info).or(controller_info.take());
 
     let (soft_ms, hard_ms) = chosen_info
@@ -941,31 +945,54 @@ pub fn finalize_and_send_fast(
     // Prioritize pending_ponder_result if available (ponderhit-instant-finalize)
     if let Some(pr) = state.pending_ponder_result.take() {
         // Verify session and position match to prevent stale buffer usage
-        let session_match = pr
-            .session_id
-            .map(|sid| state.current_session_core_id.map(|cur| sid == cur).unwrap_or(true))
-            .unwrap_or(true);
+        // Relaxed session_id check: allow None on receiver side (late-bind)
+        let sid_match = match (pr.session_id, state.current_session_core_id) {
+            (Some(a), Some(b)) => a == b,
+            (_, None) => true, // Receiver side not yet initialized -> allow
+            _ => false,
+        };
         let position_match = pr.root_hash == state.position.zobrist_hash()
             || state.current_root_hash.map(|h| h == pr.root_hash).unwrap_or(false);
 
-        if session_match && position_match {
+        // Prioritize position_match; late-bind session_id if needed
+        if position_match && !state.searching {
+            if !sid_match && pr.session_id.is_some() {
+                state.current_session_core_id = pr.session_id;
+                info_string("ponderhit_cached_sid_late_bind=1");
+            }
             if let Some(best) = pr.best_move {
                 info_string(format!(
                     "ponderhit_cached=1 depth={} nodes={} elapsed_ms={} sid_match={} pos_match={}",
-                    pr.depth, pr.nodes, pr.elapsed_ms, session_match, position_match
+                    pr.depth, pr.nodes, pr.elapsed_ms, sid_match, position_match
                 ));
+                // Emit finalize_event for consistent logging
+                emit_finalize_event(
+                    state,
+                    label,
+                    "cached",
+                    &gather_stop_meta(None, None, Some(FinalizeReason::PonderToMove)),
+                    &FinalizeEventParams {
+                        reported_depth: pr.depth,
+                        stable_depth: Some(pr.depth),
+                        incomplete_depth: None,
+                        report_source: SnapshotSource::Stable,
+                        snapshot_version: None,
+                    },
+                );
                 let ponder_hint = pr.pv_second;
                 let _ = emit_bestmove_once(state, best, ponder_hint);
+                // Clear buffer after successful emission
                 state.pending_ponder_result = None;
                 return;
             }
         } else {
             info_string(format!(
-                "ponderhit_cached_stale=1 sid_match={} pos_match={}",
-                session_match, position_match
+                "ponderhit_cached_stale=1 sid_match={} pos_match={} searching={}",
+                sid_match, position_match, state.searching
             ));
         }
     }
+    // Defense-in-depth: clear stale buffer to prevent unintended reuse
     state.pending_ponder_result = None;
 
     let controller_stop_info = state.stop_controller.try_read_stop_info();
