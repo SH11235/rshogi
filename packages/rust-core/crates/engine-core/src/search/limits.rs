@@ -26,6 +26,7 @@ pub struct SearchLimits {
     /// Wall-clock instant when search started (used for diagnostics / elapsed derivations)
     pub start_time: Instant,
     /// Optional panic time scale for extending soft deadlines after aspiration failures etc.
+    /// TODO: Currently unused in pure LazySMP pipeline; retained for future policy experiments.
     pub panic_time_scale: Option<f64>,
     /// Optional contempt value in centipawns (positive favors side to move)
     pub contempt: Option<i32>,

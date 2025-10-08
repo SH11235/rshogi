@@ -13,6 +13,7 @@ use crate::shogi::Position;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro128PlusPlus;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::mpsc as std_mpsc;
 use std::time::Instant;
 
 // Worker-local scratch/state. Lives entirely on each worker thread.
@@ -137,6 +138,9 @@ where
     #[allow(dead_code)]
     task_hi_tx: crossbeam::channel::Sender<TaskEnvelope>,
     task_hi_rx: crossbeam::channel::Receiver<TaskEnvelope>,
+    // Reaper thread to join helper joiner threads on timeout to avoid leaking OS threads
+    reaper_tx: std_mpsc::Sender<std::thread::JoinHandle<()>>,
+    reaper_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct SearchJob {
@@ -161,6 +165,13 @@ where
     pub fn new(backend: Arc<ClassicBackend<E>>, size: usize) -> Self {
         let (task_tx, task_rx) = crossbeam::channel::unbounded();
         let (task_hi_tx, task_hi_rx) = crossbeam::channel::unbounded();
+        let (reaper_tx, reaper_rx) = std_mpsc::channel::<std::thread::JoinHandle<()>>();
+        let reaper_handle = std::thread::spawn(move || {
+            // Join any joiner threads handed over after timeout
+            while let Ok(h) = reaper_rx.recv() {
+                let _ = h.join();
+            }
+        });
         let mut pool = Self {
             backend,
             workers: Vec::new(),
@@ -168,6 +179,8 @@ where
             task_rx,
             task_hi_tx,
             task_hi_rx,
+            reaper_tx,
+            reaper_handle: Some(reaper_handle),
         };
         pool.resize(size);
         pool
@@ -291,7 +304,7 @@ where
             if let Some(handle) = worker.handle.take() {
                 let (tx, rx) = channel::<()>();
                 // Move join into a helper thread so we can time out without blocking.
-                thread::spawn(move || {
+                let joiner = thread::spawn(move || {
                     let _ = handle.join();
                     let _ = tx.send(());
                 });
@@ -300,10 +313,16 @@ where
                     .unwrap_or_else(|| std::time::Duration::from_millis(0));
                 match rx.recv_timeout(remaining) {
                     Ok(()) => {
+                        // Join the joiner to avoid stray threads
+                        let _ = joiner.join();
                         joined += 1;
                     }
                     Err(RecvTimeoutError::Timeout) => {
-                        log::warn!("thread_pool: join timeout; worker still exiting in background");
+                        log::warn!(
+                            "thread_pool: join timeout; worker still exiting in background (handing to reaper)"
+                        );
+                        // Hand the joiner thread to reaper for out-of-band joining
+                        let _ = self.reaper_tx.send(joiner);
                     }
                     Err(RecvTimeoutError::Disconnected) => {
                         joined += 1; // already finished
@@ -327,6 +346,14 @@ where
 {
     fn drop(&mut self) {
         self.shutdown();
+        // Close reaper channel by dropping sender, then join the reaper thread.
+        // Replace the sender with a fresh one and drop the old to ensure the channel closes now.
+        let (tmp_tx, _tmp_rx) = std_mpsc::channel::<std::thread::JoinHandle<()>>();
+        let old_tx = std::mem::replace(&mut self.reaper_tx, tmp_tx);
+        drop(old_tx);
+        if let Some(h) = self.reaper_handle.take() {
+            let _ = h.join();
+        }
     }
 }
 

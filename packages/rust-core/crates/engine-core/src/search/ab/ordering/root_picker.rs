@@ -16,6 +16,7 @@ struct RootScoredMove {
 
 pub struct RootPicker {
     scored: Vec<RootScoredMove>,
+    // Reserved for future YBWC/PV-first integration. Currently we only use fallback (scored order).
     primary: Vec<usize>,
     fallback: Vec<usize>,
     primary_cursor: usize,
