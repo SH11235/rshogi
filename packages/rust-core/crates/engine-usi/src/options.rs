@@ -105,6 +105,7 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name MateEarlyStop type check default true");
     // Parallel policy knobs (LazySMP)
     usi_println("option name BenchAllRun type check default false");
+    usi_println("option name BenchStopOnMate type check default true");
     usi_println("option name HelperAspiration type combo default Wide var Off var Wide");
     usi_println("option name HelperAspirationDelta type spin default 350 min 50 max 600");
     usi_println("option name Abdada type check default false");
@@ -234,7 +235,20 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 } else {
                     std::env::remove_var("SHOGI_PAR_BENCH_ALLRUN");
                 }
+                engine_core::search::policy::set_bench_allrun(on);
                 info_string(format!("bench_allrun={}", if on { 1 } else { 0 }));
+            }
+        }
+        "BenchStopOnMate" => {
+            if let Some(v) = value_ref {
+                let on = !matches!(v.to_lowercase().as_str(), "false" | "0" | "off");
+                if on {
+                    std::env::remove_var("SHOGI_BENCH_STOP_ON_MATE"); // default on
+                } else {
+                    std::env::set_var("SHOGI_BENCH_STOP_ON_MATE", "0");
+                }
+                engine_core::search::policy::set_bench_stop_on_mate(on);
+                info_string(format!("bench_stop_on_mate={}", if on { 1 } else { 0 }));
             }
         }
         "HelperAspiration" => {
@@ -243,12 +257,15 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 match mode.as_str() {
                     "off" => {
                         std::env::set_var("SHOGI_HELPER_ASP_MODE", "off");
-                        engine_core::search::policy::set_helper_asp_mode(0);
+                        // 一括 setter（delta -> mode の順）で整合性を担保
+                        let delta = engine_core::search::policy::helper_asp_delta_value();
+                        engine_core::search::policy::set_helper_asp(0, delta);
                         info_string("helper_asp_mode=off");
                     }
                     _ => {
                         std::env::set_var("SHOGI_HELPER_ASP_MODE", "wide");
-                        engine_core::search::policy::set_helper_asp_mode(1);
+                        let delta = engine_core::search::policy::helper_asp_delta_value();
+                        engine_core::search::policy::set_helper_asp(1, delta);
                         info_string("helper_asp_mode=wide");
                     }
                 }
@@ -259,7 +276,9 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 if let Ok(delta) = v.parse::<i32>() {
                     let clamped = delta.clamp(50, 600);
                     std::env::set_var("SHOGI_HELPER_ASP_DELTA", clamped.to_string());
-                    engine_core::search::policy::set_helper_asp_delta(clamped);
+                    // 一括 setter（delta -> mode の順）で整合性を担保
+                    let mode = engine_core::search::policy::helper_asp_mode_value();
+                    engine_core::search::policy::set_helper_asp(mode, clamped);
                     info_string(format!("helper_asp_delta={}", clamped));
                 }
             }

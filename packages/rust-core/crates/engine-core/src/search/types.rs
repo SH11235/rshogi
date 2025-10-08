@@ -90,6 +90,14 @@ pub struct SearchStats {
     pub snapshot_version: Option<u64>,
     /// Heuristics snapshot produced during search (optional)
     pub heuristics: Option<Arc<Heuristics>>,
+    /// MultipV merge detail (primary/helper) — diagnostics only
+    pub multipv_primary_lines: Option<u8>,
+    pub multipv_helper_lines: Option<u8>,
+    /// ABDADA diagnostics (counts)
+    #[cfg(feature = "diagnostics")]
+    pub abdada_busy_detected: Option<u64>,
+    #[cfg(feature = "diagnostics")]
+    pub abdada_busy_set: Option<u64>,
 }
 
 impl SearchStats {

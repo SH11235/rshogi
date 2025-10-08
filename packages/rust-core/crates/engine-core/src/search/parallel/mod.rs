@@ -242,24 +242,13 @@ where
         }
 
         let desired_k = limits.multipv.max(1);
-        // 期待の primary 採用本数（primary.lines が少なければその数だけ）
-        let primary_lines_len = results
-            .iter()
-            .find(|(id, _)| *id == 0)
-            .and_then(|(_, r)| r.lines.as_ref().map(|ls| ls.len()))
-            .unwrap_or(0);
-        let primary_expected = (primary_lines_len as u8).min(desired_k) as usize;
-
         let final_result = combine_results(&self.tt, results, start, desired_k);
 
         if let Some(cb) = limits.info_string_callback.as_ref() {
-            if let Some(lines) = final_result.lines.as_ref() {
-                let total = lines.len();
-                let helpers = total.saturating_sub(primary_expected);
-                cb(&format!(
-                    "multipv_merge_detail=primary_x+helpers_y={}+{}",
-                    primary_expected, helpers
-                ));
+            let px = final_result.stats.multipv_primary_lines.unwrap_or_default();
+            let hx = final_result.stats.multipv_helper_lines.unwrap_or_default();
+            if px + hx > 0 {
+                cb(&format!("multipv_merge_detail=primary_x+helpers_y={}+{}", px, hx));
             }
         }
 
@@ -370,6 +359,8 @@ fn combine_results(
     }
 
     // --- MultiPV 統合: primary の行を起点に、不足分のみ helpers で補完する ---
+    let mut multipv_primary_added: u8 = 0;
+    let mut multipv_helper_added: u8 = 0;
     if desired_multipv > 1 {
         let k = desired_multipv as usize;
         let mut merged: SmallVec<[RootLine; 16]> = SmallVec::new();
@@ -390,6 +381,7 @@ fn combine_results(
                 let key = ln.root_move.to_u32();
                 if seen.insert(key) {
                     merged.push(ln.clone());
+                    multipv_primary_added = multipv_primary_added.saturating_add(1);
                 }
             }
         }
@@ -472,6 +464,7 @@ fn combine_results(
                 let key = cand.line.root_move.to_u32();
                 if seen.insert(key) {
                     merged.push(cand.line);
+                    multipv_helper_added = multipv_helper_added.saturating_add(1);
                 }
             }
         }
@@ -484,6 +477,8 @@ fn combine_results(
             let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
             out.extend(merged);
             final_result.lines = Some(out);
+            final_result.stats.multipv_primary_lines = Some(multipv_primary_added);
+            final_result.stats.multipv_helper_lines = Some(multipv_helper_added);
             // MultiPV 統合後に派生フィールド（depth/seldepth/nps/ponder 等）を再集計
             final_result.refresh_summary();
         }
