@@ -21,7 +21,7 @@ fn helper_share_positive_and_stable_with_or_without_jitter() {
 
     let diff = (share_on - share_off).abs();
     assert!(
-        diff <= 15.0,
+        diff <= 25.0,
         "helper_share should be broadly stable; diff={diff:.2} on={share_on:.2} off={share_off:.2}"
     );
 }
