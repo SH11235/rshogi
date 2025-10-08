@@ -77,6 +77,9 @@ where
 
     pub fn search(&mut self, pos: &mut Position, mut limits: SearchLimits) -> SearchResult {
         let threads = self.threads.max(1);
+        // Expose threads to downstream (primary-first open_upto auto) via env for this search scope.
+        // Best-effort: global env; acceptable for diagnostics and light policy wiring.
+        std::env::set_var("SHOGI_THREADS", threads.to_string());
         limits.stop_controller.get_or_insert_with(|| Arc::clone(&self.stop_controller));
         let inserted_stop_flag = limits.stop_flag.is_none();
         let stop_flag =
@@ -190,6 +193,23 @@ where
         if inserted_qnodes {
             qnodes_counter.store(0, AtomicOrdering::Release);
         }
+        // --- Info: best source（primary/helper）を info string 化 ---
+        if let Some(cb) = limits.info_string_callback.as_ref() {
+            if !results.is_empty() {
+                let mut best_idx = 0usize;
+                for idx in 1..results.len() {
+                    if prefers(&results[idx], &results[best_idx]) {
+                        best_idx = idx;
+                    }
+                }
+                let (wid, best_res) = (&results[best_idx].0, &results[best_idx].1);
+                let src = if *wid == 0 { "primary" } else { "helper" };
+                cb(&format!(
+                    "parallel_best_source={} worker_id={} depth={} nodes={}",
+                    src, wid, best_res.depth, best_res.nodes
+                ));
+            }
+        }
 
         combine_results(&self.tt, results, start)
     }
@@ -240,20 +260,6 @@ fn combine_results(
         .unwrap_or(results[best_idx].1.nodes);
 
     // Diagnostics: best source (primary=0 / helper>0)
-    if best_idx != 0 {
-        log::info!(
-            "info string parallel_best_source=helper worker_id={} depth={} nodes={}",
-            results[best_idx].0,
-            results[best_idx].1.depth,
-            results[best_idx].1.nodes
-        );
-    } else {
-        log::info!(
-            "info string parallel_best_source=primary depth={} nodes={}",
-            results[best_idx].1.depth,
-            results[best_idx].1.nodes
-        );
-    }
     let mut final_result = results.swap_remove(best_idx).1;
 
     final_result.stats.elapsed = elapsed;
