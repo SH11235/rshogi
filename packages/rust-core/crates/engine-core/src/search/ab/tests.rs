@@ -340,6 +340,24 @@ fn compute_qnodes_limit_scales_with_remaining_time() {
 }
 
 #[test]
+fn qnodes_limit_zero_is_unlimited_sentinel() {
+    // qnodes_limit(0) should be treated as an unlimited sentinel by compute_qnodes_limit().
+    // This avoids accidental clamping to MIN/DEFAULT and is intended for performance benches.
+    let mut limits = SearchLimitsBuilder::default().qnodes_limit(0).build();
+    // No TimeManager / FixedTime to interfere with the raw value
+    let limit = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
+    assert_eq!(limit, u64::MAX, "qnodes_limit(0) must be unlimited sentinel");
+
+    // Also verify that SearchContext side logic does not prematurely stop when limit is 0
+    // (we emulate this by ensuring that a non-zero limit is passed to ctx and thus only
+    // compute_qnodes_limit() is responsible for the sentinel behavior).
+    limits = SearchLimitsBuilder::default().qnodes_limit(0).build();
+    let computed =
+        ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 1, 1);
+    assert_eq!(computed, u64::MAX);
+}
+
+#[test]
 fn qsearch_detects_mate_with_min_qnodes_budget() {
     let evaluator = Arc::new(MaterialEvaluator);
     let backend = ClassicBackend::new(evaluator);

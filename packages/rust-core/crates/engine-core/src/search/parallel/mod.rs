@@ -182,24 +182,93 @@ where
         };
 
         drop(result_tx);
-        // Cancel helpers and join bounded, then drain remaining results.
-        let _joined = self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
-        // Non-blocking drain first
-        while let Ok((worker_id, res)) = result_rx.try_recv() {
-            publish_helper_snapshot(
-                &self.stop_controller,
-                session_id,
-                root_key,
-                worker_id,
-                &res,
-                limits.info_string_callback.as_ref(),
-            );
-            results.push((worker_id, res));
-        }
-        // Then a couple of short waits to catch stragglers arriving right after join
-        for _ in 0..3 {
-            match result_rx.recv_timeout(std::time::Duration::from_millis(15)) {
-                Ok((worker_id, res)) => {
+        // Helpers の停止/待機ポリシー:
+        // - BenchAllRun=On かつ 非メイト: helpers をキャンセルせず、全件ブロッキングで待機（253da0cc 相当）。
+        // - それ以外: stop_flag を立てた上で、必要に応じてキャンセル/短時間ドレイン。
+        let mut canceled = false;
+        if bench_allrun && !primary_is_mate {
+            // 全件待機：ハング防止のため recv_timeout + 期限超過時にフォールバック
+            let wait_start = Instant::now();
+            let expected = helper_count;
+            let mut received = 0usize;
+            let mut canceled = false;
+
+            // 期限（ms）を導出：明示指定 > TimeManager/FixedTime 由来 > 既定 3000ms
+            let derive_budget_ms = || -> u64 {
+                if let Some(ms) = crate::search::policy::bench_join_timeout_ms() {
+                    return ms;
+                }
+                if let Some(tm) = limits.time_manager.as_ref() {
+                    let hard = tm.hard_limit_ms();
+                    let soft = tm.soft_limit_ms();
+                    if hard != u64::MAX && hard > 0 {
+                        return hard;
+                    }
+                    if soft > 0 {
+                        // 余裕+1000ms を付与
+                        return soft.saturating_add(1000);
+                    }
+                } else if let Some(limit) = limits.time_limit() {
+                    let base = (limit.as_millis() as u64).saturating_add(1000);
+                    return base;
+                }
+                3000
+            }();
+            // 残余時間 = 期限 - 経過
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            let mut remaining_ms = derive_budget_ms.saturating_sub(elapsed_ms);
+
+            // まず即時ドレイン
+            while let Ok((worker_id, res)) = result_rx.try_recv() {
+                publish_helper_snapshot(
+                    &self.stop_controller,
+                    session_id,
+                    root_key,
+                    worker_id,
+                    &res,
+                    limits.info_string_callback.as_ref(),
+                );
+                results.push((worker_id, res));
+                received += 1;
+                if received >= expected {
+                    break;
+                }
+            }
+
+            while received < expected && remaining_ms > 0 {
+                let slice = std::time::Duration::from_millis(remaining_ms.min(250));
+                match result_rx.recv_timeout(slice) {
+                    Ok((worker_id, res)) => {
+                        publish_helper_snapshot(
+                            &self.stop_controller,
+                            session_id,
+                            root_key,
+                            worker_id,
+                            &res,
+                            limits.info_string_callback.as_ref(),
+                        );
+                        results.push((worker_id, res));
+                        received += 1;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // 期限へ向けて残余を縮める
+                        let now_ms = wait_start.elapsed().as_millis() as u64;
+                        let spent_ms = now_ms;
+                        remaining_ms =
+                            derive_budget_ms.saturating_sub(elapsed_ms.saturating_add(spent_ms));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break;
+                    }
+                }
+            }
+
+            if received < expected {
+                // 期限超過・欠落時はキャンセルにフォールバック（安全側）
+                let _ = self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
+                canceled = true;
+                // 最後に即時ドレイン
+                while let Ok((worker_id, res)) = result_rx.try_recv() {
                     publish_helper_snapshot(
                         &self.stop_controller,
                         session_id,
@@ -209,9 +278,77 @@ where
                         limits.info_string_callback.as_ref(),
                     );
                     results.push((worker_id, res));
+                    received += 1;
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                Err(_) => break,
+            }
+
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                let ms = wait_start.elapsed().as_millis();
+                cb(&format!(
+                    "helpers_join_ms={} received={}/{} canceled={}",
+                    ms,
+                    received,
+                    expected,
+                    if canceled { 1 } else { 0 }
+                ));
+            }
+        } else {
+            // 通常対局/メイト時: 既存動作を踏襲しつつ、キャンセルはポリシーで切替可能にする
+            let cancel_on_primary = crate::search::policy::cancel_on_primary_enabled();
+            if cancel_on_primary {
+                let _joined =
+                    self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
+                canceled = true;
+            }
+
+            // 非ブロッキングの即時ドレイン → 予算時間内での recv_timeout
+            while let Ok((worker_id, res)) = result_rx.try_recv() {
+                publish_helper_snapshot(
+                    &self.stop_controller,
+                    session_id,
+                    root_key,
+                    worker_id,
+                    &res,
+                    limits.info_string_callback.as_ref(),
+                );
+                results.push((worker_id, res));
+            }
+
+            let budget_ms = crate::search::policy::stop_drain_budget_ms();
+            if budget_ms > 0 {
+                let drain_start = Instant::now();
+                loop {
+                    let spent = drain_start.elapsed().as_millis() as u64;
+                    if spent >= budget_ms {
+                        break;
+                    }
+                    let slice_ms = (budget_ms - spent).min(15);
+                    match result_rx.recv_timeout(std::time::Duration::from_millis(slice_ms)) {
+                        Ok((worker_id, res)) => {
+                            publish_helper_snapshot(
+                                &self.stop_controller,
+                                session_id,
+                                root_key,
+                                worker_id,
+                                &res,
+                                limits.info_string_callback.as_ref(),
+                            );
+                            results.push((worker_id, res));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(_) => break,
+                    }
+                }
+            }
+            if bench_allrun {
+                // bench_allrun=On かつ メイトで打ち切ったケースでは観測用にログする
+                if let Some(cb) = limits.info_string_callback.as_ref() {
+                    cb(&format!(
+                        "helpers_join_ms=0 received={} canceled={}",
+                        results.len().saturating_sub(1), // primaryを除いた概数
+                        if canceled { 1 } else { 0 }
+                    ));
+                }
             }
         }
 
