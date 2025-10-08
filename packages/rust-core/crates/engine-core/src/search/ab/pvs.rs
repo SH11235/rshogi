@@ -252,6 +252,54 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut tt_hint: Option<crate::shogi::Move> = None;
         let mut tt_depth_ok = false;
         let pos_hash = pos.zobrist_hash();
+        // --- ABDADA (in-progress) 簡易版：重複探索の緩和（Non-PV/非王手/十分深い）
+        struct AbdadaGuard {
+            tt: Option<std::sync::Arc<crate::search::TranspositionTable>>,
+            hash: u64,
+            side: crate::Color,
+            active: bool,
+        }
+        impl Drop for AbdadaGuard {
+            fn drop(&mut self) {
+                if self.active {
+                    if let Some(tt) = &self.tt {
+                        tt.clear_exact_cut(self.hash, self.side);
+                    }
+                }
+            }
+        }
+        let mut abdada_guard = AbdadaGuard {
+            tt: None,
+            hash: pos_hash,
+            side: pos.side_to_move,
+            active: false,
+        };
+        const ABDADA_MIN_DEPTH: i32 = 6;
+        if !is_pv && depth >= ABDADA_MIN_DEPTH && !pos.is_in_check() {
+            if let Some(tt_arc) = &self.tt {
+                // すでに busy なら軽い減深で合流（同深重複を避ける）
+                if tt_arc.has_exact_cut(pos_hash, pos.side_to_move) {
+                    // 減深は最大1ply、過度な弱体化を避ける
+                    if depth > 1 {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
+                            cb(&format!("abdada_cut_reduction=1 depth={} -> {}", depth, depth - 1));
+                        }
+                        // 実際の減深はこの後の next_depth 計算で反映（abdada_guard.active && is_quiet のとき −1ply）。
+                        // ここでは深さ本体は変更しない。
+                    }
+                } else {
+                    // busy 設定（Dropでクリア）
+                    tt_arc.set_exact_cut(pos_hash, pos.side_to_move);
+                    abdada_guard = AbdadaGuard {
+                        tt: Some(std::sync::Arc::clone(tt_arc)),
+                        hash: pos_hash,
+                        side: pos.side_to_move,
+                        active: true,
+                    };
+                }
+            }
+        }
         if let Some(tt) = &self.tt {
             if depth >= 3 && dynp::tt_prefetch_enabled() {
                 tt.prefetch_l2(pos_hash, pos.side_to_move);
@@ -459,9 +507,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     reduction = (reduction - 1).max(0);
                 }
             }
+            // ABDADA軽減: busy中は追加で1段だけ減深（静止手のみ）
             if reduction > 0 {
                 next_depth -= reduction;
                 *lmr_counter += 1;
+            }
+            if abdada_guard.active && is_quiet && next_depth > 0 {
+                next_depth -= 1;
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_move_pick(diagnostics::MovePickContext {
@@ -631,17 +683,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let store_score = crate::search::common::adjust_mate_score_for_tt(best, ply as u8)
                     .clamp(i16::MIN as i32, i16::MAX as i32);
                 let static_eval_i16 = static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                let mut args = crate::search::tt::TTStoreArgs::new(
-                    pos_hash,
-                    best_mv,
-                    store_score as i16,
-                    static_eval_i16,
-                    depth as u8,
-                    node_type,
-                    pos.side_to_move,
-                );
-                args.is_pv = is_pv;
-                tt.store(args);
+                // A/B1: Helper の根近傍（ply<=2）の非Exact/非PVの保存を抑制してTT汚染を軽減
+                let suppress_helper_near_root = ctx.limits.helper_role
+                    && (ply <= 2)
+                    && !is_pv
+                    && !matches!(node_type, NodeType::Exact);
+                if !suppress_helper_near_root {
+                    let mut args = crate::search::tt::TTStoreArgs::new(
+                        pos_hash,
+                        best_mv,
+                        store_score as i16,
+                        static_eval_i16,
+                        depth as u8,
+                        node_type,
+                        pos.side_to_move,
+                    );
+                    args.is_pv = is_pv;
+                    tt.store(args);
+                } else {
+                    // Diagnostics via info_string_callback (root-scope): suppress helper near root
+                    if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
+                        cb(&format!(
+                            "tt_store_suppressed_helper_near_root=1 ply={} node_type={:?} depth={}",
+                            ply, node_type, depth
+                        ));
+                    }
+                }
             }
             for &cmv in &tried_captures {
                 if Some(cmv) != best_mv {

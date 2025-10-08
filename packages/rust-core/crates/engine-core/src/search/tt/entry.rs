@@ -244,6 +244,11 @@ impl TTEntry {
             priority += 16;
         }
 
+        // A/B2: わずかなペナルティで Non-PV の bound を優先度で抑制
+        if !self.is_pv() && self.node_type() != NodeType::Exact {
+            priority -= 2;
+        }
+
         priority
     }
 }
