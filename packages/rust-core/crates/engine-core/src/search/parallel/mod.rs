@@ -254,7 +254,8 @@ where
                         // 期限へ向けて残余を縮める
                         let now_ms = wait_start.elapsed().as_millis() as u64;
                         let spent_ms = now_ms;
-                        remaining_ms = derive_budget_ms.saturating_sub(elapsed_ms.saturating_add(spent_ms));
+                        remaining_ms =
+                            derive_budget_ms.saturating_sub(elapsed_ms.saturating_add(spent_ms));
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         break;
@@ -264,9 +265,7 @@ where
 
             if received < expected {
                 // 期限超過・欠落時はキャンセルにフォールバック（安全側）
-                let _ = self
-                    .thread_pool
-                    .cancel_all_join(std::time::Duration::from_millis(500));
+                let _ = self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
                 canceled = true;
                 // 最後に即時ドレイン
                 while let Ok((worker_id, res)) = result_rx.try_recv() {
@@ -297,9 +296,8 @@ where
             // 通常対局/メイト時: 既存動作を踏襲しつつ、キャンセルはポリシーで切替可能にする
             let cancel_on_primary = crate::search::policy::cancel_on_primary_enabled();
             if cancel_on_primary {
-                let _joined = self
-                    .thread_pool
-                    .cancel_all_join(std::time::Duration::from_millis(500));
+                let _joined =
+                    self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
                 canceled = true;
             }
 

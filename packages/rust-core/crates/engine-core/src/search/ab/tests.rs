@@ -352,7 +352,8 @@ fn qnodes_limit_zero_is_unlimited_sentinel() {
     // (we emulate this by ensuring that a non-zero limit is passed to ctx and thus only
     // compute_qnodes_limit() is responsible for the sentinel behavior).
     limits = SearchLimitsBuilder::default().qnodes_limit(0).build();
-    let computed = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 1, 1);
+    let computed =
+        ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 1, 1);
     assert_eq!(computed, u64::MAX);
 }
 
