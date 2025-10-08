@@ -83,6 +83,40 @@ pub const MAIN_NEAR_DEADLINE_WINDOW_MS: u64 = 500;
 /// the current best move and exit without waiting for GUI stop.
 pub const NEAR_HARD_FINALIZE_MS: u64 = 500;
 
+/// Extract mate distance from a score, returning None if not a mate score.
+///
+/// # Returns
+/// - `Some(distance)` if score represents mate (positive: we mate opponent, negative: we get mated)
+/// - `None` if score is not in mate range
+///
+/// # Examples
+/// ```
+/// use engine_core::search::constants::{mate_distance, MATE_SCORE};
+///
+/// // Mate in 3 moves (score = MATE_SCORE - 3000)
+/// assert_eq!(mate_distance(MATE_SCORE - 3000), Some(3));
+///
+/// // Getting mated in 5 moves (score = -(MATE_SCORE - 5000))
+/// assert_eq!(mate_distance(-(MATE_SCORE - 5000)), Some(-5));
+///
+/// // Not a mate score
+/// assert_eq!(mate_distance(100), None);
+/// ```
+pub fn mate_distance(score: i32) -> Option<i32> {
+    let abs_score = score.abs();
+    // Mate scores are encoded as MATE_SCORE - (distance * 1000)
+    // The furthest mate is MAX_PLY plies, so minimum mate score is MATE_SCORE - MAX_PLY*1000
+    // However, since MAX_PLY=127, this gives negative values, which is correct for deep mates
+    // We check if score is in the mate range by comparing to a reasonable lower bound
+    const MATE_LOWER_BOUND: i32 = 20_000; // Scores above this (in absolute value) are mate scores
+    if (MATE_LOWER_BOUND..=MATE_SCORE).contains(&abs_score) {
+        let distance = (MATE_SCORE - abs_score) / 1000;
+        Some(if score > 0 { distance } else { -distance })
+    } else {
+        None
+    }
+}
+
 /// Minimum depth for helper thread snapshot publication.
 /// Helper snapshots shallower than this are suppressed to reduce USI noise
 /// and avoid reporting low-quality partial results.
