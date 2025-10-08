@@ -103,6 +103,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name Stochastic_Ponder type check default false");
     usi_println("option name ForceTerminateOnHardDeadline type check default true");
     usi_println("option name MateEarlyStop type check default true");
+    // Parallel policy knobs (LazySMP)
+    usi_println("option name BenchAllRun type check default false");
+    usi_println("option name HelperAspiration type combo default Wide var Off var Wide");
+    usi_println("option name HelperAspirationDelta type spin default 350 min 50 max 600");
     // Diagnostics / policy knobs
     usi_println("option name QSearchChecks type combo default On var On var Off");
     // Search parameter knobs (runtime-adjustable)
@@ -219,6 +223,41 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let v = v.to_lowercase();
                 state.opts.ponder = matches!(v.as_str(), "true" | "1" | "on");
+            }
+        }
+        "BenchAllRun" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                if on {
+                    std::env::set_var("SHOGI_PAR_BENCH_ALLRUN", "1");
+                } else {
+                    std::env::remove_var("SHOGI_PAR_BENCH_ALLRUN");
+                }
+                info_string(format!("bench_allrun={}", if on { 1 } else { 0 }));
+            }
+        }
+        "HelperAspiration" => {
+            if let Some(v) = value_ref {
+                let mode = v.to_ascii_lowercase();
+                match mode.as_str() {
+                    "off" => {
+                        std::env::set_var("SHOGI_HELPER_ASP_MODE", "off");
+                        info_string("helper_asp_mode=off");
+                    }
+                    _ => {
+                        std::env::set_var("SHOGI_HELPER_ASP_MODE", "wide");
+                        info_string("helper_asp_mode=wide");
+                    }
+                }
+            }
+        }
+        "HelperAspirationDelta" => {
+            if let Some(v) = value_ref {
+                if let Ok(delta) = v.parse::<i32>() {
+                    let clamped = delta.clamp(50, 600);
+                    std::env::set_var("SHOGI_HELPER_ASP_DELTA", clamped.to_string());
+                    info_string(format!("helper_asp_delta={}", clamped));
+                }
             }
         }
         "MultiPV" => {

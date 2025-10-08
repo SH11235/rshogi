@@ -253,6 +253,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut tt_depth_ok = false;
         let pos_hash = pos.zobrist_hash();
         // --- ABDADA (in-progress) 簡易版：重複探索の緩和（Non-PV/非王手/十分深い）
+        let use_abdada = abdada_enabled();
         struct AbdadaGuard {
             tt: Option<std::sync::Arc<crate::search::TranspositionTable>>,
             hash: u64,
@@ -277,7 +278,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // ABDADA: busy検知側にのみ減深を適用するためのフラグ
         let mut abdada_reduce = false;
         const ABDADA_MIN_DEPTH: i32 = 6;
-        if !is_pv && depth >= ABDADA_MIN_DEPTH && !pos.is_in_check() {
+        if use_abdada && !is_pv && depth >= ABDADA_MIN_DEPTH && !pos.is_in_check() {
             if let Some(tt_arc) = &self.tt {
                 // すでに busy なら“後着側”として軽い減深で合流（同深重複を避ける）
                 if tt_arc.has_exact_cut(pos_hash, pos.side_to_move) {
@@ -511,7 +512,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 *lmr_counter += 1;
             }
             // 後着（busy検知）時のみ、静止手に限って追加で −1ply 合流
-            if abdada_reduce && is_quiet && next_depth > 0 {
+            if use_abdada && abdada_reduce && is_quiet && next_depth > 0 {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
                 if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
                     cb(&format!(
@@ -761,5 +762,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         #[cfg(any(debug_assertions, feature = "diagnostics"))]
         diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
         result
+    }
+}
+#[inline]
+fn abdada_enabled() -> bool {
+    match std::env::var("SHOGI_ABDADA") {
+        Ok(s) => matches!(s.as_str(), "1" | "true" | "on"),
+        Err(_) => false,
     }
 }

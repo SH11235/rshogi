@@ -2,9 +2,9 @@
 
 use crate::search::parallel::StopController;
 use crate::time_management::{TimeControl, TimeManager, TimeParameters};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
-use std::sync::OnceLock;
+// OnceLock unused after RootWorkQueue removal
 use std::time::{Duration, Instant};
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
@@ -42,100 +42,6 @@ impl RootSplit {
     #[inline]
     pub fn skip_pv(&self) -> bool {
         self.skip_pv
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct RootWorkQueue {
-    claims: OnceLock<Arc<[AtomicU8]>>,
-}
-
-impl RootWorkQueue {
-    pub fn new() -> Self {
-        Self {
-            claims: OnceLock::new(),
-        }
-    }
-
-    pub fn ensure_initialized(&self, len: usize) -> Arc<[AtomicU8]> {
-        if len == 0 {
-            return Arc::from(Vec::<AtomicU8>::new().into_boxed_slice());
-        }
-        self.claims
-            .get_or_init(|| {
-                let mut entries: Vec<AtomicU8> = Vec::with_capacity(len);
-                for _ in 0..len {
-                    entries.push(AtomicU8::new(0));
-                }
-                Arc::from(entries.into_boxed_slice())
-            })
-            .clone()
-    }
-
-    pub fn try_claim(&self, idx: usize) -> bool {
-        if let Some(claims) = self.claims.get() {
-            if idx >= claims.len() {
-                return false;
-            }
-            let slot = &claims[idx];
-            loop {
-                let current = slot.load(Ordering::Acquire);
-                match current {
-                    0 => match slot.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
-                        Ok(_) => return true,
-                        Err(next) => {
-                            if next == 2 {
-                                return false;
-                            }
-                            continue;
-                        }
-                    },
-                    1 | 2 => return false,
-                    _ => return false,
-                }
-            }
-        } else {
-            false
-        }
-    }
-
-    pub fn is_claimed(&self, idx: usize) -> bool {
-        if let Some(claims) = self.claims.get() {
-            if idx >= claims.len() {
-                return true;
-            }
-            return claims[idx].load(Ordering::Acquire) != 0;
-        }
-        false
-    }
-
-    pub fn is_done(&self, idx: usize) -> bool {
-        if let Some(claims) = self.claims.get() {
-            if idx >= claims.len() {
-                return true;
-            }
-            return claims[idx].load(Ordering::Acquire) == 2;
-        }
-        false
-    }
-
-    pub fn mark_done(&self, idx: usize) {
-        if let Some(claims) = self.claims.get() {
-            if idx < claims.len() {
-                claims[idx].store(2, Ordering::Release);
-            }
-        }
-    }
-
-    pub fn release(&self, idx: usize) {
-        if let Some(claims) = self.claims.get() {
-            if idx < claims.len() {
-                let slot = &claims[idx];
-                if slot.load(Ordering::Acquire) == 1 {
-                    slot.store(0, Ordering::Release);
-                }
-            }
-        }
     }
 }
 
@@ -181,8 +87,7 @@ pub struct SearchLimits {
     pub jitter_override: Option<bool>,
     /// Optional root move split configuration (parallel helpers)
     pub root_split: Option<RootSplit>,
-    /// Shared root work queue for helper work stealing
-    pub root_work_queue: Option<Arc<RootWorkQueue>>,
+    // RootWorkQueue: removed (pure LazySMP)
     /// Whether this search instance runs as helper worker in LazySMP
     pub helper_role: bool,
     /// Whether heuristics snapshots should be retained for diagnostics
@@ -227,7 +132,7 @@ impl Default for SearchLimits {
             root_jitter_seed: None,
             jitter_override: None,
             root_split: None,
-            root_work_queue: None,
+
             helper_role: false,
             store_heuristics: false,
             immediate_eval_at_depth_zero: false,
@@ -315,7 +220,7 @@ pub struct SearchLimitsBuilder {
     root_jitter_seed: Option<u64>,
     jitter_override: Option<bool>,
     root_split: Option<RootSplit>,
-    root_work_queue: Option<Arc<RootWorkQueue>>,
+
     helper_role: bool,
     store_heuristics: bool,
 }
@@ -347,7 +252,6 @@ impl Default for SearchLimitsBuilder {
             root_jitter_seed: None,
             jitter_override: None,
             root_split: None,
-            root_work_queue: None,
             helper_role: false,
             store_heuristics: false,
         }
@@ -495,11 +399,6 @@ impl SearchLimitsBuilder {
     }
 
     /// Attach a shared root work queue for helper work-stealing
-    pub fn root_work_queue(mut self, queue: Arc<RootWorkQueue>) -> Self {
-        self.root_work_queue = Some(queue);
-        self
-    }
-
     /// Mark this search limits as helper role
     pub fn helper_role(mut self, helper: bool) -> Self {
         self.helper_role = helper;
@@ -637,7 +536,6 @@ impl SearchLimitsBuilder {
             root_jitter_seed: self.root_jitter_seed,
             jitter_override: self.jitter_override,
             root_split: self.root_split,
-            root_work_queue: self.root_work_queue,
             helper_role: self.helper_role,
             store_heuristics: self.store_heuristics,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
@@ -684,7 +582,6 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             root_jitter_seed: None,
             jitter_override: None,
             root_split: None,
-            root_work_queue: None,
             helper_role: false,
             store_heuristics: false,
             immediate_eval_at_depth_zero: false,
@@ -752,7 +649,6 @@ impl std::fmt::Debug for SearchLimits {
             .field("root_jitter_seed", &self.root_jitter_seed)
             .field("jitter_override", &self.jitter_override)
             .field("root_split", &self.root_split)
-            .field("root_work_queue", &self.root_work_queue.is_some())
             .field("helper_role", &self.helper_role)
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .field("multipv", &self.multipv)

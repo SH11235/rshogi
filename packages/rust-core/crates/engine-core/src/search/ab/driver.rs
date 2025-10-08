@@ -320,9 +320,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let _last_hashfull_emit_ms = 0u64;
         let mut prev_score: i32 = 0;
         // Aspiration window parameters (from constants.rs)
-        use crate::search::constants::{ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX};
+        use crate::search::constants::{
+            ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX, ASPIRATION_DELTA_THREADS_K,
+        };
         const SELDEPTH_EXTRA_MARGIN: u32 = 32;
-        const HELPER_ASPIRATION_BONUS: i32 = 30;
 
         // Cumulative counters for diagnostics
         let mut cum_tt_hits: u64 = 0;
@@ -501,10 +502,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let root_jitter = limits.root_jitter_seed.map(|seed| {
                 ordering::RootJitter::new(seed, ordering::constants::ROOT_JITTER_AMPLITUDE)
             });
-            let work_queue = limits.root_work_queue.as_ref().map(|queue| {
-                queue.ensure_initialized(list.as_slice().len());
-                Arc::clone(queue)
-            });
+            // 純粋 LazySMP: RootWorkQueue は使用しない
 
             let mut root_picker = ordering::RootPicker::new(ordering::RootPickerConfig {
                 pos: root,
@@ -513,53 +511,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 prev_lines: prev_root_lines,
                 jitter: root_jitter,
                 split: limits.root_split,
-                work_queue: work_queue.clone(),
-                use_queue_claims: limits.helper_role,
             });
             let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
                 Vec::with_capacity(list.as_slice().len());
             while let Some((mv, key, idx)) = root_picker.next() {
                 root_moves.push((mv, key, idx));
             }
-            // Primary-first: pre-claim top-K moves (including PV head) so helpers cannot steal them.
-            let mut root_claim_msg: Option<String> = None;
-            if !limits.helper_role {
-                if let Some(queue) = work_queue.as_ref() {
-                    // K を環境変数で指定（既定: threads+1）。threads は SHOGI_THREADS から取得、なければ9。
-                    let env_k = std::env::var("SHOGI_ROOT_OPEN_UPTO")
-                        .ok()
-                        .and_then(|s| s.parse::<usize>().ok());
-                    let auto_threads =
-                        std::env::var("SHOGI_THREADS").ok().and_then(|s| s.parse::<usize>().ok());
-                    let (open_upto, auto_flag) = match env_k {
-                        Some(v) => (v, false),
-                        None => (auto_threads.map(|t| t.saturating_add(1)).unwrap_or(9), true),
-                    };
-                    let k = open_upto.min(root_moves.len());
-                    let mut claimed = 0usize;
-                    for &(_, _, idx) in root_moves.iter().take(k) {
-                        if queue.try_claim(idx) {
-                            claimed += 1;
-                        }
-                    }
-                    let msg = if auto_flag {
-                        format!(
-                            "root_claim primary_first=1 open_upto={} (auto) claimed={}",
-                            k, claimed
-                        )
-                    } else {
-                        format!("root_claim primary_first=1 open_upto={} claimed={}", k, claimed)
-                    };
-                    // 1回目（直後）: info_string 経由（なければ logger にフォールバック）
-                    if let Some(cb) = limits.info_string_callback.as_ref() {
-                        cb(&msg);
-                    } else {
-                        log::info!("info string {}", msg);
-                    }
-                    // 再送用に保存（初回 Depth イベント付近でもう一度出す）
-                    root_claim_msg = Some(msg);
-                }
-            }
+            // 純粋 LazySMP: pre-claim は行わない
             if root_moves.is_empty() {
                 if incomplete_depth.is_none() {
                     incomplete_depth = Some(d as u8);
@@ -657,23 +615,39 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     prev_score
                 };
 
-                let mut alpha = if d == 1 {
-                    i32::MIN / 2
-                } else {
-                    aspiration_center - ASPIRATION_DELTA_INITIAL
-                };
-                let mut beta = if d == 1 {
-                    i32::MAX / 2
-                } else {
-                    aspiration_center + ASPIRATION_DELTA_INITIAL
-                };
-                if is_helper && d > 1 {
-                    alpha = alpha.saturating_sub(HELPER_ASPIRATION_BONUS);
-                    beta = beta.saturating_add(HELPER_ASPIRATION_BONUS);
-                }
+                // 初期窓とΔ（YaneuraOu準拠 + 拡張）
+                // primary: Δ0 = Δinit + K*log2(Threads)（上限あり）
+                // helper: off=フル窓 / wide=±HELPER_ASPIRATION_WIDE_DELTA
+                let threads_lg2 =
+                    match std::env::var("SHOGI_THREADS").ok().and_then(|s| s.parse::<u32>().ok()) {
+                        Some(t) if t > 1 => 31u32.saturating_sub((t - 1).leading_zeros()),
+                        _ => 0,
+                    } as i32;
                 let mut delta = ASPIRATION_DELTA_INITIAL;
-                if is_helper && d > 1 {
-                    delta = (delta + HELPER_ASPIRATION_BONUS).min(ASPIRATION_DELTA_MAX);
+                let mut alpha;
+                let mut beta;
+                if d == 1 {
+                    alpha = i32::MIN / 2;
+                    beta = i32::MAX / 2;
+                } else if is_helper {
+                    match helper_asp_mode() {
+                        HelperAspMode::Off => {
+                            delta = ASPIRATION_DELTA_MAX;
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                        }
+                        HelperAspMode::Wide => {
+                            delta = helper_asp_delta();
+                            alpha = aspiration_center - delta;
+                            beta = aspiration_center + delta;
+                        }
+                    }
+                } else {
+                    delta = (ASPIRATION_DELTA_INITIAL
+                        + ASPIRATION_DELTA_THREADS_K.saturating_mul(threads_lg2))
+                    .min(ASPIRATION_DELTA_MAX);
+                    alpha = aspiration_center - delta;
+                    beta = aspiration_center + delta;
                 }
                 let mut window_alpha = alpha;
                 let mut window_beta = beta;
@@ -687,7 +661,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut root_tt_hint_used: u64 = 0;
                 let mut qnodes: u64 = 0;
                 let qnodes_limit = Self::compute_qnodes_limit(limits, d, pv_idx);
-                let mut claimed_indices: SmallVec<[usize; 64]> = SmallVec::new();
+                // 純粋 LazySMP: ルートインデックスの claim/release 管理は不要
 
                 // 作業用root move配列（excludedを除外）
                 let excluded_keys: SmallVec<[u32; 32]> =
@@ -705,6 +679,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
+                let mut helper_retries: u32 = 0; // fail‑high のみ 1 回まで許可
                 loop {
                     if let Some(hit) = Self::deadline_hit(
                         t0,
@@ -741,13 +716,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
-                    for (idx, (mv, _, root_idx)) in active_moves.iter().copied().enumerate() {
-                        if is_helper
-                            && limits.root_work_queue.is_some()
-                            && !claimed_indices.contains(&root_idx)
-                        {
-                            claimed_indices.push(root_idx);
-                        }
+                    for (idx, (mv, _, _root_idx)) in active_moves.iter().copied().enumerate() {
+                        // 純粋 LazySMP: claim は行わない
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
                         if super::diagnostics::should_abort_now() {
                             last_deadline_hit = Some(DeadlineHit::Stop);
@@ -885,11 +855,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > alpha {
                             alpha = score;
                         }
-                        if is_helper {
-                            if let Some(queue) = limits.root_work_queue.as_ref() {
-                                queue.mark_done(root_idx);
-                            }
-                        }
+                        // 純粋 LazySMP: done 通知は行わない
                         if alpha >= beta {
                             break; // fail-high
                         }
@@ -943,18 +909,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
-                        alpha = new_alpha;
-                        beta = new_beta;
-                        delta = (delta * 2).min(ASPIRATION_DELTA_MAX);
                         if is_helper {
-                            if let Some(queue) = limits.root_work_queue.as_ref() {
-                                for idx_claimed in claimed_indices.iter().copied() {
-                                    queue.release(idx_claimed);
-                                }
-                            }
+                            // helper: fail‑low は再探索しない
+                            break;
+                        } else {
+                            alpha = new_alpha;
+                            beta = new_beta;
+                            // Δ ← Δ + Δ/3（上限あり）
+                            delta = (delta + delta / 3).min(ASPIRATION_DELTA_MAX);
+                            continue;
                         }
-                        claimed_indices.clear();
-                        continue;
                     }
                     if local_best >= old_beta {
                         let new_alpha = old_alpha;
@@ -976,24 +940,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
-                        alpha = new_alpha;
-                        beta = new_beta;
-                        delta = (delta * 2).min(ASPIRATION_DELTA_MAX);
-                        if let Some(queue) = limits.root_work_queue.as_ref() {
-                            for idx_claimed in claimed_indices.iter().copied() {
-                                queue.release(idx_claimed);
+                        if is_helper {
+                            if helper_retries == 0 {
+                                // 2 回目はフル窓で 1 回だけ再探索
+                                alpha = i32::MIN / 2;
+                                beta = i32::MAX / 2;
+                                helper_retries = 1;
+                                continue;
+                            } else {
+                                // 打ち切り
+                                break;
                             }
-                        }
-                        claimed_indices.clear();
-                        continue;
-                    }
-                    if is_helper {
-                        if let Some(queue) = limits.root_work_queue.as_ref() {
-                            for idx_claimed in claimed_indices.iter().copied() {
-                                queue.mark_done(idx_claimed);
-                            }
+                        } else {
+                            alpha = new_alpha;
+                            beta = new_beta;
+                            // Δ ← Δ + Δ/3（上限あり）
+                            delta = (delta + delta / 3).min(ASPIRATION_DELTA_MAX);
+                            continue;
                         }
                     }
+                    // 純粋 LazySMP: done 通知は不要
                     iteration_asp_hits = iteration_asp_hits.saturating_add(1);
                     break; // success within window
                 }
@@ -1028,14 +994,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             cb(InfoEvent::Hashfull(hf));
                         }
                     }
-                    // root_claim の診断は出力競合で埋もれる場合があるため、Depth発火のタイミングでもう一度だけ出力する
-                    if let Some(msg) = root_claim_msg.take() {
-                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                            cb(&msg);
-                        } else {
-                            log::info!("info string {}", msg);
-                        }
-                    }
+                    // pre-claim 診断は廃止
                 }
 
                 // PV 行の生成と発火
@@ -1102,6 +1061,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     };
                     let node_type_for_store = line.bound;
                     let line_arc = Arc::new(line);
+                    // ベンチ時のメイト即停止（冪等）: primary かつ PV1 が Exact mate の場合
+                    if !is_helper
+                        && pv_idx == 1
+                        && matches!(node_type_for_store, NodeType::Exact)
+                        && bench_stop_on_mate_enabled()
+                        && {
+                            use crate::search::common::is_mate_score;
+                            is_mate_score(local_best)
+                        }
+                    {
+                        if let Some(ctrl) = stop_controller.as_ref() {
+                            ctrl.request_stop_flag_only();
+                        }
+                    }
                     if let Some(ctrl) = stop_controller.as_ref() {
                         let mut ctrl_line = (*line_arc).clone();
                         ctrl_line.nodes = Some(nodes);
@@ -1686,10 +1659,8 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
 mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
-    use crate::movegen::MoveGenerator;
-    use crate::search::{limits::RootWorkQueue, SearchLimitsBuilder, TranspositionTable};
+    use crate::search::{SearchLimitsBuilder, TranspositionTable};
     use crate::shogi::Position;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     #[test]
@@ -1700,14 +1671,14 @@ mod tests {
         let tt = Arc::new(TranspositionTable::new(16));
         let backend = ClassicBackend::with_tt(evaluator, tt);
 
-        let mut pos = Position::startpos();
+        let pos = Position::startpos();
         let limits = SearchLimitsBuilder::default()
             .depth(5) // Use depth 5 to ensure LMR is triggered
             .multipv(2) // Use MultiPV to test across multiple PVs
             .store_heuristics(true)
             .build();
 
-        let result = backend.think_blocking(&mut pos, &limits, None);
+        let result = backend.think_blocking(&pos, &limits, None);
 
         // Verify that heuristics were captured
         assert!(
@@ -1745,42 +1716,41 @@ mod tests {
         }
     }
 
-    #[test]
-    fn primary_search_preclaims_top_k_root_work_queue() {
-        // 仕様変更（primary-first）により、primary は root の上位 K 手を先取り claim する。
-        // K は SHOGI_ROOT_OPEN_UPTO があればその値、無ければ threads+1（本テストでは env を設定して固定化）。
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
-        let backend = ClassicBackend::with_tt(evaluator, tt);
+    // RootWorkQueue/claim は純粋 LazySMP では使用しないため、関連テストは削除しました。
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelperAspMode {
+    Off,
+    Wide,
+}
 
-        let mut pos = Position::startpos();
-        let mover = MoveGenerator::new();
-        let root_moves = mover.generate_all(&pos).expect("move generation should succeed");
+fn helper_asp_mode() -> HelperAspMode {
+    match std::env::var("SHOGI_HELPER_ASP_MODE") {
+        Ok(s) => match s.to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" => HelperAspMode::Off,
+            _ => HelperAspMode::Wide,
+        },
+        Err(_) => HelperAspMode::Wide,
+    }
+}
 
-        let queue = Arc::new(RootWorkQueue::new());
-        let claims = queue.ensure_initialized(root_moves.len());
+#[inline]
+fn helper_asp_delta() -> i32 {
+    use crate::search::constants::ASPIRATION_DELTA_MAX;
 
-        // 期待 K を 5 に固定（min(K, root_moves.len()) が claim される）。
-        std::env::set_var("SHOGI_ROOT_OPEN_UPTO", "5");
+    if let Ok(s) = std::env::var("SHOGI_HELPER_ASP_DELTA") {
+        if let Ok(v) = s.parse::<i32>() {
+            let clamped = v.clamp(50, 600);
+            return clamped.min(ASPIRATION_DELTA_MAX);
+        }
+    }
+    crate::search::constants::HELPER_ASPIRATION_WIDE_DELTA.min(ASPIRATION_DELTA_MAX)
+}
 
-        let limits = SearchLimitsBuilder::default()
-            .depth(1) // 1反復に限定して、先取りK件の検証を安定化
-            .root_work_queue(Arc::clone(&queue))
-            .build();
-
-        // helper_role はデフォルトで false（primary）。
-        let _ = backend.think_blocking(&mut pos, &limits, None);
-
-        // 先取り claim 数を検証
-        let expected = 5usize.min(root_moves.len());
-        let claimed = claims.iter().map(|s| s.load(Ordering::Acquire)).filter(|&v| v != 0).count();
-        // env を戻す
-        std::env::remove_var("SHOGI_ROOT_OPEN_UPTO");
-
-        assert_eq!(
-            claimed, expected,
-            "primary should pre-claim top-K root moves (expected {}, got {})",
-            expected, claimed
-        );
+#[inline]
+fn bench_stop_on_mate_enabled() -> bool {
+    match std::env::var("SHOGI_BENCH_STOP_ON_MATE") {
+        Ok(v) => !matches!(v.as_str(), "0" | "false" | "off"),
+        Err(_) => true,
     }
 }
