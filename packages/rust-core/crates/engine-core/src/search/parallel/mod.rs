@@ -77,6 +77,9 @@ where
 
     pub fn search(&mut self, pos: &mut Position, mut limits: SearchLimits) -> SearchResult {
         let threads = self.threads.max(1);
+        // Expose threads to downstream (primary-first open_upto auto) via env for this search scope.
+        // Best-effort: global env; acceptable for diagnostics and light policy wiring.
+        std::env::set_var("SHOGI_THREADS", threads.to_string());
         limits.stop_controller.get_or_insert_with(|| Arc::clone(&self.stop_controller));
         let inserted_stop_flag = limits.stop_flag.is_none();
         let stop_flag =
@@ -148,8 +151,14 @@ where
         let (result_tx, result_rx) = mpsc::channel();
         self.thread_pool.dispatch(jobs, &result_tx);
 
+        // Primary も RootWorkQueue を共有（primary-first の先取り claim 用）
         let mut results = Vec::with_capacity(threads);
-        let main_result = self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
+        let mut primary_limits = clone_limits_for_worker(&limits);
+        if let Some(queue) = root_work_queue.as_ref() {
+            primary_limits.root_work_queue = Some(Arc::clone(queue));
+        }
+        let main_result =
+            self.backend.think_blocking(pos, &primary_limits, limits.info_callback.clone());
         results.push((0usize, main_result));
 
         let we_set_stop_flag = stop_flag
@@ -183,6 +192,23 @@ where
         }
         if inserted_qnodes {
             qnodes_counter.store(0, AtomicOrdering::Release);
+        }
+        // --- Info: best source（primary/helper）を info string 化 ---
+        if let Some(cb) = limits.info_string_callback.as_ref() {
+            if !results.is_empty() {
+                let mut best_idx = 0usize;
+                for idx in 1..results.len() {
+                    if prefers(&results[idx], &results[best_idx]) {
+                        best_idx = idx;
+                    }
+                }
+                let (wid, best_res) = (&results[best_idx].0, &results[best_idx].1);
+                let src = if *wid == 0 { "primary" } else { "helper" };
+                cb(&format!(
+                    "parallel_best_source={} worker_id={} depth={} nodes={}",
+                    src, wid, best_res.depth, best_res.nodes
+                ));
+            }
         }
 
         combine_results(&self.tt, results, start)
@@ -233,6 +259,7 @@ fn combine_results(
         .map(|(_, r)| r.nodes)
         .unwrap_or(results[best_idx].1.nodes);
 
+    // Diagnostics: best source (primary=0 / helper>0)
     let mut final_result = results.swap_remove(best_idx).1;
 
     final_result.stats.elapsed = elapsed;

@@ -28,7 +28,9 @@ impl Square {
         // Note: BOARD_FILES/BOARD_RANKS are usize; cast to u8 for comparison/arithmetic
         let files = crate::shogi::board_constants::BOARD_FILES as u8;
         let ranks = crate::shogi::board_constants::BOARD_RANKS as u8;
-        debug_assert!(file < files && rank < ranks, "Square::new called with invalid coordinates");
+        if !(file < files && rank < ranks) {
+            panic!("Square::new called with invalid coordinates");
+        }
         Square(rank * files + file)
     }
 
