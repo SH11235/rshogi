@@ -311,7 +311,8 @@ fn run_benchmark_for_threads(
                 }
             }
 
-            let mut limits = builder.build();
+            // ベンチでは qsearch ノード制限を無効化（qnodes_limit=0 センチネル）
+            let mut limits = builder.qnodes_limit(0).build();
             // SearchLimitsBuilder::build は start_time を Instant::now() で初期化済みだが、
             // 念のため再設定して計測の一貫性を保持する。
             limits.start_time = std::time::Instant::now();

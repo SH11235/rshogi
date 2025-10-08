@@ -85,6 +85,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     }
 
     fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
+        // qnodes_limit==0 を「無制限」のセンチネルとして扱う（ベンチ等での明示的解除用）
+        if let Some(0) = limits.qnodes_limit {
+            return u64::MAX;
+        }
         let mut limit =
             limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
         let byoyomi_active = Self::is_byoyomi_active(limits);
@@ -318,9 +322,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         } else {
             limits.time_parameters.as_ref().map(|tp| tp.min_think_ms).unwrap_or(0)
         };
-        let _last_hashfull_emit_ms = 0u64;
         let mut prev_score: i32 = 0;
-        // Aspiration window parameters (from constants.rs)
         use crate::search::constants::{
             ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX, ASPIRATION_DELTA_THREADS_K,
         };
@@ -1075,7 +1077,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         multipv_index: pv_idx as u8,
                         root_move: m,
                         score_internal: local_best,
-                        score_cp: local_best,
+                        score_cp: crate::search::types::clamp_score_cp(local_best),
                         bound,
                         depth: d as u32,
                         seldepth: Some(
