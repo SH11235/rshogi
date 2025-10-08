@@ -6,8 +6,11 @@ use self::thread_pool::{SearchJob, ThreadPool};
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
+use crate::search::common::is_mate_score;
 use crate::search::constants::HELPER_SNAPSHOT_MIN_DEPTH;
-use crate::search::limits::RootSplit;
+use crate::search::types::NodeType;
+// RootSplit は純粋 LazySMP では使用しないが、clone_limits_for_worker の定義上 import は残る
+// RootSplit は純粋 LazySMP では使用しない
 use crate::search::types::{clamp_score_cp, RootLine};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Move;
@@ -99,7 +102,6 @@ where
         limits.root_jitter_seed = None;
         limits.helper_role = false;
         limits.root_split = None;
-        limits.root_work_queue = None;
         let start = Instant::now();
 
         if threads == 1 {
@@ -114,12 +116,7 @@ where
 
         let helper_count = threads.saturating_sub(1);
         self.thread_pool.resize(helper_count);
-
-        let root_work_queue = if helper_count > 0 {
-            Some(Arc::new(crate::search::limits::RootWorkQueue::new()))
-        } else {
-            None
-        };
+        // 純粋 LazySMP: RootWorkQueue/stride は使用しない
 
         let mut jobs = Vec::with_capacity(helper_count);
         for worker_index in 0..helper_count {
@@ -131,10 +128,11 @@ where
             worker_limits.qnodes_counter = Some(Arc::clone(&qnodes_counter));
             worker_limits.stop_controller = None;
             worker_limits.helper_role = true;
-            worker_limits.root_split = RootSplit::new(worker_index + 1, threads, true);
-            if let Some(queue) = root_work_queue.as_ref() {
-                worker_limits.root_work_queue = Some(Arc::clone(queue));
-            }
+            // 純粋 LazySMP では root 分割も使用しない
+            worker_limits.root_split = None;
+
+            // helpers は MultiPV=1 固定
+            worker_limits.multipv = 1;
             let jitter_on = limits.jitter_override.unwrap_or_else(jitter_enabled);
             if jitter_on {
                 worker_limits.root_jitter_seed =
@@ -151,19 +149,46 @@ where
         let (result_tx, result_rx) = mpsc::channel();
         self.thread_pool.dispatch(jobs, &result_tx);
 
-        // Primary も RootWorkQueue を共有（primary-first の先取り claim 用）
         let mut results = Vec::with_capacity(threads);
-        let mut primary_limits = clone_limits_for_worker(&limits);
-        if let Some(queue) = root_work_queue.as_ref() {
-            primary_limits.root_work_queue = Some(Arc::clone(queue));
+        let primary_limits = clone_limits_for_worker(&limits);
+        // Primary も queue/split を使わない
+
+        // 検索ポリシーの概要を一度だけ出力
+        if let Some(cb) = limits.info_string_callback.as_ref() {
+            cb(&format!(
+                "smp_mode=lazy_pure bench_allrun={} helper_asp_mode={}",
+                if bench_allrun_enabled() { 1 } else { 0 },
+                helper_asp_mode_str()
+            ));
         }
         let main_result =
             self.backend.think_blocking(pos, &primary_limits, limits.info_callback.clone());
         results.push((0usize, main_result));
+        // BenchAllRun が有効でない場合は primary 完了時に helpers を停止させる。
+        // ただしベンチでもメイト検出時は例外的に停止する。
+        let bench_allrun = bench_allrun_enabled();
+        let bench_stop_on_mate = bench_stop_on_mate_enabled();
 
-        let we_set_stop_flag = stop_flag
-            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
-            .is_ok();
+        let primary_is_mate = {
+            let pr = &results[0].1;
+            is_mate_score(pr.score)
+                || pr
+                    .lines
+                    .as_ref()
+                    .and_then(|ls| ls.first())
+                    .map(|l| is_mate_score(l.score_internal))
+                    .unwrap_or(false)
+        };
+
+        let should_stop_helpers_now = !bench_allrun || (bench_stop_on_mate && primary_is_mate);
+
+        let we_set_stop_flag = if should_stop_helpers_now {
+            stop_flag
+                .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+                .is_ok()
+        } else {
+            false
+        };
 
         drop(result_tx);
         for _ in 0..helper_count {
@@ -211,7 +236,8 @@ where
             }
         }
 
-        combine_results(&self.tt, results, start)
+        let desired_k = limits.multipv.max(1);
+        combine_results(&self.tt, results, start, desired_k)
     }
 }
 
@@ -225,6 +251,7 @@ fn combine_results(
     tt: &TranspositionTable,
     mut results: Vec<(usize, SearchResult)>,
     start: Instant,
+    desired_multipv: u8,
 ) -> SearchResult {
     let elapsed = start.elapsed();
     if results.is_empty() {
@@ -318,6 +345,117 @@ fn combine_results(
         }
     }
 
+    // --- MultiPV 統合: primary の行を起点に、不足分のみ helpers で補完する ---
+    if desired_multipv > 1 {
+        let k = desired_multipv as usize;
+        let mut merged: SmallVec<[RootLine; 16]> = SmallVec::new();
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+        // 1) primary の行をそのまま採用
+        if let Some(ref lines) = final_result.lines {
+            for ln in lines.iter() {
+                if merged.len() >= k {
+                    break;
+                }
+                let key = ln.root_move.to_u32();
+                if seen.insert(key) {
+                    merged.push(ln.clone());
+                }
+            }
+        }
+
+        // 2) helpers から候補を収集（Exact > Lower > Upper、同値は score 降順 → nodes 降順）
+        if merged.len() < k {
+            #[derive(Clone)]
+            struct Cand {
+                line: RootLine,
+            }
+
+            fn bound_rank(nt: NodeType) -> u8 {
+                match nt {
+                    NodeType::Exact => 0,
+                    NodeType::LowerBound => 1,
+                    NodeType::UpperBound => 2,
+                }
+            }
+
+            let mut cands: Vec<Cand> = Vec::new();
+            for (wid, res) in &results {
+                if *wid == 0 {
+                    continue;
+                }
+                // Prefer lines[0] when present, otherwise synthesize from stats/best_move
+                if let Some(ref lines) = res.lines {
+                    if let Some(first) = lines.first() {
+                        // 補完行は time/nps/nodes を None 許容（USI全体のグローバルで提示）
+                        let mut ln = first.clone();
+                        ln.nodes = None;
+                        ln.time_ms = None;
+                        ln.nps = None;
+                        cands.push(Cand { line: ln });
+                    }
+                } else if !res.stats.pv.is_empty() || res.best_move.is_some() {
+                    // 合成 1 行を作る
+                    let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
+                    if !res.stats.pv.is_empty() {
+                        pv.extend(res.stats.pv.iter().copied());
+                    } else if let Some(m) = res.best_move {
+                        pv.push(m);
+                    }
+                    if pv.is_empty() {
+                        continue;
+                    }
+                    let root = pv[0];
+                    let ln = RootLine {
+                        multipv_index: 1,
+                        root_move: root,
+                        score_internal: res.score,
+                        score_cp: clamp_score_cp(res.score),
+                        bound: res.node_type,
+                        depth: res.depth,
+                        seldepth: res.stats.seldepth,
+                        pv,
+                        nodes: None,
+                        time_ms: None,
+                        nps: None,
+                        exact_exhausted: false,
+                        exhaust_reason: None,
+                        mate_distance: None,
+                    };
+                    cands.push(Cand { line: ln });
+                }
+            }
+
+            cands.sort_by(|a, b| {
+                let ra = bound_rank(a.line.bound);
+                let rb = bound_rank(b.line.bound);
+                ra.cmp(&rb)
+                    .then(b.line.score_cp.cmp(&a.line.score_cp))
+                    .then(b.line.nodes.unwrap_or(0).cmp(&a.line.nodes.unwrap_or(0)))
+            });
+
+            for cand in cands {
+                if merged.len() >= k {
+                    break;
+                }
+                let key = cand.line.root_move.to_u32();
+                if seen.insert(key) {
+                    merged.push(cand.line);
+                }
+            }
+        }
+
+        if !merged.is_empty() {
+            for (i, ln) in merged.iter_mut().enumerate() {
+                ln.multipv_index = (i + 1) as u8;
+            }
+            // SmallVec の型（固定容量）は元の型 [RootLine; 4] に合わせる
+            let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+            out.extend(merged);
+            final_result.lines = Some(out);
+        }
+    }
+
     final_result
 }
 
@@ -377,7 +515,7 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         root_jitter_seed: base.root_jitter_seed,
         jitter_override: base.jitter_override,
         root_split: base.root_split,
-        root_work_queue: base.root_work_queue.clone(),
+
         helper_role: base.helper_role,
         store_heuristics: base.store_heuristics,
         immediate_eval_at_depth_zero: base.immediate_eval_at_depth_zero,
@@ -424,7 +562,7 @@ fn publish_helper_snapshot(
     if worker_id == 0 {
         return;
     }
-    if result.depth < HELPER_SNAPSHOT_MIN_DEPTH {
+    if result.depth < helper_snapshot_min_depth() {
         return;
     }
     if let Some(existing) = stop_controller.try_read_snapshot() {
@@ -496,6 +634,43 @@ fn publish_helper_snapshot(
     };
 
     stop_controller.publish_root_line(session_id, root_key, &line);
+}
+
+fn helper_snapshot_min_depth() -> u32 {
+    use std::sync::OnceLock;
+    static OVERRIDE: OnceLock<u32> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        if let Ok(v) = std::env::var("SHOGI_HELPER_SNAPSHOT_MIN_DEPTH") {
+            if let Ok(n) = v.parse::<u32>() {
+                return n.max(1);
+            }
+        }
+        HELPER_SNAPSHOT_MIN_DEPTH
+    })
+}
+
+fn bench_allrun_enabled() -> bool {
+    match std::env::var("SHOGI_PAR_BENCH_ALLRUN") {
+        Ok(v) => matches!(v.as_str(), "1" | "true" | "on"),
+        Err(_) => false,
+    }
+}
+
+fn bench_stop_on_mate_enabled() -> bool {
+    match std::env::var("SHOGI_BENCH_STOP_ON_MATE") {
+        Ok(v) => !matches!(v.as_str(), "0" | "false" | "off"),
+        Err(_) => true,
+    }
+}
+
+fn helper_asp_mode_str() -> &'static str {
+    match std::env::var("SHOGI_HELPER_ASP_MODE") {
+        Ok(s) => match s.to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" => "off",
+            _ => "wide",
+        },
+        Err(_) => "wide",
+    }
 }
 
 #[cfg(test)]

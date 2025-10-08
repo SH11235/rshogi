@@ -1,13 +1,12 @@
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
-use crate::search::limits::{RootSplit, RootWorkQueue};
+use crate::search::limits::RootSplit;
 use crate::search::params::{
     root_multipv_bonus, root_prev_score_scale, root_tt_bonus, ROOT_BASE_KEY, ROOT_PREV_SCORE_CLAMP,
 };
 use crate::search::types::RootLine;
 use crate::shogi::Move;
 use crate::Position;
-use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 struct RootScoredMove {
@@ -22,9 +21,6 @@ pub struct RootPicker {
     fallback: Vec<usize>,
     primary_cursor: usize,
     fallback_cursor: usize,
-    queue: Option<Arc<RootWorkQueue>>,
-    skip_pv: bool,
-    use_queue_claims: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -46,8 +42,6 @@ pub struct RootPickerConfig<'a> {
     pub prev_lines: Option<&'a [RootLine]>,
     pub jitter: Option<RootJitter>,
     pub split: Option<RootSplit>,
-    pub work_queue: Option<Arc<RootWorkQueue>>,
-    pub use_queue_claims: bool,
 }
 
 impl RootPicker {
@@ -59,8 +53,6 @@ impl RootPicker {
             prev_lines,
             jitter,
             split,
-            work_queue,
-            use_queue_claims,
         } = config;
         let (mut rng_opt, jitter_amplitude) = match jitter {
             Some(cfg) if cfg.amplitude != 0 => {
@@ -113,9 +105,7 @@ impl RootPicker {
 
         let skip_pv = split.map(|cfg| cfg.skip_pv()).unwrap_or(false);
         let len = scored.len();
-        if let Some(queue) = work_queue.as_ref() {
-            queue.ensure_initialized(len);
-        }
+        // RootWorkQueue removed (pure LazySMP)
 
         let mut assigned_mask = vec![false; len];
         let mut primary = Vec::new();
@@ -149,66 +139,21 @@ impl RootPicker {
             fallback,
             primary_cursor: 0,
             fallback_cursor: 0,
-            queue: work_queue,
-            skip_pv,
-            use_queue_claims,
         }
     }
 
     pub fn next(&mut self) -> Option<(Move, i32, usize)> {
-        if self.use_queue_claims {
-            while self.primary_cursor < self.primary.len() {
-                let idx = self.primary[self.primary_cursor];
-                self.primary_cursor += 1;
-                if self.try_claim(idx) {
-                    if let Some(entry) = self.entry_at(idx) {
-                        return Some(entry);
-                    }
-                }
-            }
-
-            while self.fallback_cursor < self.fallback.len() {
-                let idx = self.fallback[self.fallback_cursor];
-                self.fallback_cursor += 1;
-                if self.try_claim(idx) {
-                    if let Some(entry) = self.entry_at(idx) {
-                        return Some(entry);
-                    }
-                }
-            }
-
-            if let Some(queue) = self.queue.as_ref() {
-                for entry in &self.scored {
-                    if self.skip_pv && entry.order == 0 {
-                        continue;
-                    }
-                    if queue.try_claim(entry.order) {
-                        return Some((entry.mv, entry.key, entry.order));
-                    }
-                }
-            }
-
-            None
-        } else {
-            if self.primary_cursor < self.primary.len() {
-                let idx = self.primary[self.primary_cursor];
-                self.primary_cursor += 1;
-                return self.entry_at(idx);
-            }
-            if self.fallback_cursor < self.fallback.len() {
-                let idx = self.fallback[self.fallback_cursor];
-                self.fallback_cursor += 1;
-                return self.entry_at(idx);
-            }
-            None
+        if self.primary_cursor < self.primary.len() {
+            let idx = self.primary[self.primary_cursor];
+            self.primary_cursor += 1;
+            return self.entry_at(idx);
         }
-    }
-
-    fn try_claim(&self, idx: usize) -> bool {
-        if let Some(queue) = self.queue.as_ref() {
-            return queue.try_claim(idx);
+        if self.fallback_cursor < self.fallback.len() {
+            let idx = self.fallback[self.fallback_cursor];
+            self.fallback_cursor += 1;
+            return self.entry_at(idx);
         }
-        true
+        None
     }
 
     fn entry_at(&self, idx: usize) -> Option<(Move, i32, usize)> {
@@ -261,8 +206,6 @@ mod tests {
             prev_lines: None,
             jitter: None,
             split: None,
-            work_queue: None,
-            use_queue_claims: false,
         });
         let (mv, _, _) = picker.next().unwrap();
         assert!(mv.equals_without_piece_type(&tt_move));
@@ -282,8 +225,6 @@ mod tests {
             prev_lines: Some(&prev_lines),
             jitter: None,
             split: None,
-            work_queue: None,
-            use_queue_claims: false,
         });
         let (mv, _, _) = picker.next().unwrap();
         assert!(mv.equals_without_piece_type(&mv_b));
@@ -303,8 +244,6 @@ mod tests {
             prev_lines: Some(&prev_lines),
             jitter: None,
             split: None,
-            work_queue: None,
-            use_queue_claims: false,
         });
         let (mv, _, _) = picker.next().unwrap();
         assert!(mv.equals_without_piece_type(&mv_b));
