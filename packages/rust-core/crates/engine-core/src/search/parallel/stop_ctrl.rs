@@ -20,6 +20,12 @@ pub enum FinalizeReason {
     NearHard,
     /// Planned rounded stop time reached/near
     Planned,
+    /// Planned stop due to detected short mate (distance <= K)
+    ///
+    /// Carries mate distance (plies, positive when we mate the opponent) and whether
+    /// the session was in ponder mode when triggered. Treated similarly to Planned
+    /// for priority and StopInfo semantics; primarily used for diagnostics.
+    PlannedMate { distance: i32, was_ponder: bool },
     /// Generic time-manager stop (e.g., node limit or emergency)
     TimeManagerStop,
     /// User/GUI stop propagation (for consistency)
@@ -127,6 +133,8 @@ impl StopController {
         match reason {
             FinalizeReason::Hard => 5,
             FinalizeReason::NearHard => 4,
+            // Treat PlannedMate a bit higher than generic Planned to preempt lower-priority caps
+            FinalizeReason::PlannedMate { .. } => 4,
             FinalizeReason::Planned => 3,
             FinalizeReason::PonderToMove => 3,
             FinalizeReason::TimeManagerStop => 2,
@@ -241,6 +249,7 @@ impl StopController {
             }
             FinalizeReason::NearHard
             | FinalizeReason::Planned
+            | FinalizeReason::PlannedMate { .. }
             | FinalizeReason::PonderToMove
             | FinalizeReason::TimeManagerStop => {
                 si.reason = TerminationReason::TimeLimit;
@@ -912,6 +921,27 @@ mod tests {
             assert_eq!(info.nodes, 100);
             assert_eq!(info.elapsed_ms, 40);
         }
+    }
+
+    #[test]
+    fn request_finalize_planned_mate_sets_time_limit_non_hard() {
+        use crate::search::types::TerminationReason;
+        let ctrl = StopController::new();
+        let external = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&external), 2025);
+        // Prime a default StopInfo so request_finalize updates fields
+        ctrl.prime_stop_info(StopInfo::default());
+
+        ctrl.request_finalize(FinalizeReason::PlannedMate {
+            distance: 1,
+            was_ponder: false,
+        });
+
+        let info = ctrl.try_read_stop_info().expect("stop info present");
+        assert_eq!(info.reason, TerminationReason::TimeLimit);
+        assert_eq!(info.hard_timeout, false);
+        // External stop flag should be set
+        assert!(external.load(AtomicOrdering::Acquire));
     }
 
     #[test]

@@ -894,6 +894,10 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
         }
     }
     engine_core::search::config::set_mate_early_stop_enabled(state.opts.mate_early_stop);
+    // Align engine-core early mate stop distance with USI option (InstantMateMove.MaxDistance)
+    engine_core::search::config::set_mate_early_stop_max_distance(
+        state.opts.instant_mate_move_max_distance as u8,
+    );
 }
 
 fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {

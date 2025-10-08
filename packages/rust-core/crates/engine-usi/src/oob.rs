@@ -4,6 +4,7 @@ use std::sync::mpsc;
 
 use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast, fmt_hash};
 use crate::io::diag_info_string;
+use crate::io::info_string;
 use crate::state::EngineState;
 use crate::stop::{compute_wait_budget_from_state, wait_for_result_with_budget};
 use engine_core::usi::move_to_usi;
@@ -94,6 +95,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     FinalizeReason::Hard => "oob_hard_finalize",
                     FinalizeReason::NearHard => "oob_near_hard_finalize",
                     FinalizeReason::Planned => "oob_planned_finalize",
+                    FinalizeReason::PlannedMate { .. } => "oob_planned_mate_finalize",
                     FinalizeReason::PonderToMove => "oob_ponder_to_move_finalize",
                     FinalizeReason::TimeManagerStop => "oob_tm_finalize",
                     FinalizeReason::UserStop => "oob_user_finalize",
@@ -214,6 +216,126 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 
     // Put receiver back
     state.finalizer_rx = Some(rx);
+}
+
+/// Poll StopController snapshot to detect short-mate (distance <= K) and
+/// trigger early finalize. This realizes USI-led instant-mate finalization (A案).
+pub fn poll_instant_mate(state: &mut EngineState) {
+    if !state.searching || !state.opts.instant_mate_move_enabled {
+        return;
+    }
+    // Do not act if a bestmove has already been emitted (session finished)
+    if state.bestmove_emitted {
+        return;
+    }
+
+    // Check the latest snapshot for a mate score on the primary line
+    if let Some(snapshot) = state.stop_controller.try_read_snapshot() {
+        if let Some(first) = snapshot.lines.first() {
+            use engine_core::search::constants::mate_distance;
+            if let Some(dist) = mate_distance(first.score_internal) {
+                if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
+                    let was_ponder = state.current_is_ponder;
+                    info_string(format!(
+                        "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={}",
+                        dist, was_ponder as u8, snapshot.depth, snapshot.elapsed_ms
+                    ));
+                    // Ask backend to stop promptly
+                    state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
+                        distance: dist,
+                        was_ponder,
+                    });
+
+                    // For non-ponder, emit immediately via fast path (TT/snapshot)
+                    if !was_ponder {
+                        finalize_and_send_fast(
+                            state,
+                            "instant_mate_finalize",
+                            Some(FinalizeReason::PlannedMate {
+                                distance: dist,
+                                was_ponder: false,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::finalize::take_last_emitted_bestmove;
+    use engine_core::search::types::{Bound, RootLine};
+    use engine_core::shogi::Move;
+
+    fn make_mate1_line() -> RootLine {
+        use engine_core::search::constants::MATE_SCORE;
+        RootLine {
+            multipv_index: 1,
+            root_move: Move::null(),
+            score_internal: MATE_SCORE - 1, // mate in 1 ply
+            score_cp: 30_000,               // clipped display (not used by detector)
+            bound: Bound::Exact,
+            depth: 10,
+            seldepth: Some(10),
+            pv: smallvec::smallvec![Move::null()],
+            nodes: Some(1000),
+            time_ms: Some(5),
+            nps: Some(200_000),
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: Some(1),
+        }
+    }
+
+    #[test]
+    fn instant_mate_non_ponder_emits_bestmove_once() {
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = false;
+
+        // Publish a snapshot with mate in 1
+        let sid = 4242u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        state.stop_controller.publish_root_line(sid, root_key, &make_mate1_line());
+
+        // Before: no bestmove
+        assert!(!state.bestmove_emitted);
+
+        // Trigger
+        poll_instant_mate(&mut state);
+
+        // After: bestmove must be emitted exactly once
+        assert!(state.bestmove_emitted, "bestmove should be emitted on instant mate");
+        let bm = take_last_emitted_bestmove();
+        assert!(bm.is_some(), "bestmove payload should be recorded in tests");
+    }
+
+    #[test]
+    fn instant_mate_in_ponder_does_not_emit_immediately() {
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = true;
+
+        // Publish a snapshot with mate in 1
+        let sid = 777u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        state.stop_controller.publish_root_line(sid, root_key, &make_mate1_line());
+
+        // Trigger
+        poll_instant_mate(&mut state);
+
+        // Ponder中は即送信しない（停止要求のみ）。bestmove未送信のまま。
+        assert!(!state.bestmove_emitted, "ponder mode must not emit bestmove immediately");
+    }
 }
 
 /// Enforce locally computed deadlines (USI層のみで完結するOOB finalize)

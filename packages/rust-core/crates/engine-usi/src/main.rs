@@ -18,7 +18,7 @@ use std::thread;
 use std::time::Duration;
 
 use io::{info_string, usi_println};
-use oob::{enforce_deadline, poll_oob_finalize};
+use oob::{enforce_deadline, poll_instant_mate, poll_oob_finalize};
 use options::{apply_options_to_engine, handle_setoption, send_id_and_options};
 use search::{handle_go, parse_position, poll_search_completion, tick_time_watchdog};
 use state::EngineState;
@@ -59,6 +59,8 @@ fn main() -> Result<()> {
         poll_search_completion(&mut state);
         // Handle out-of-band finalize requests emitted by time manager
         poll_oob_finalize(&mut state);
+        // USI-led instant mate detection → early finalize
+        poll_instant_mate(&mut state);
         // Enforce locally computed deadlines (USI-side OOB finalize)
         enforce_deadline(&mut state);
         // Watchdog based on TimeManager state

@@ -1090,7 +1090,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nps: line_nps,
                         exact_exhausted: false,
                         exhaust_reason: None,
-                        mate_distance: None,
+                        // Attach mate distance for diagnostics and USI snapshot consumers
+                        mate_distance: crate::search::constants::mate_distance(local_best),
                     };
                     let node_type_for_store = line.bound;
                     let line_arc = Arc::new(line);
@@ -1206,6 +1207,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nodes,
                         t0.elapsed().as_millis() as u64,
                     );
+
+                    // Thin B案: 探索側フック — 短手数詰みを検出したら早期最終化を要求
+                    if crate::search::config::mate_early_stop_enabled() {
+                        if let Some(first_line) = depth_lines.first() {
+                            let max_d =
+                                crate::search::config::mate_early_stop_max_distance() as i32;
+                            if let Some(dist) =
+                                crate::search::constants::mate_distance(first_line.score_internal)
+                            {
+                                if dist > 0 && dist <= max_d {
+                                    ctrl.request_finalize(FinalizeReason::PlannedMate {
+                                        distance: dist,
+                                        was_ponder: limits.is_ponder,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             } else if incomplete_depth.is_none() {
                 // iteration が完了しなかった場合は未完了深さとして記録する。
