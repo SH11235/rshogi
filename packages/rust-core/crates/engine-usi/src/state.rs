@@ -138,7 +138,12 @@ pub struct PonderResult {
     pub depth: u8,
     pub nodes: u64,
     pub elapsed_ms: u64,
-    pub pv_first: Option<String>,
+    /// Second move in PV (opponent's predicted response) for ponder hint
+    pub pv_second: Option<String>,
+    /// Session ID to verify this result matches the current search session
+    pub session_id: Option<u64>,
+    /// Root position hash to verify this result is for the current position
+    pub root_hash: u64,
 }
 
 pub struct EngineState {

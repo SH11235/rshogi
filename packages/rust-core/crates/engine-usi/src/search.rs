@@ -512,7 +512,11 @@ pub fn poll_search_completion(state: &mut EngineState) {
                         depth: result.stats.depth,
                         nodes: result.stats.nodes,
                         elapsed_ms: result.stats.elapsed.as_millis() as u64,
-                        pv_first: result.stats.pv.first().map(move_to_usi),
+                        pv_second: result.stats.pv.get(1).map(move_to_usi),
+                        session_id: state.current_session_core_id,
+                        root_hash: state
+                            .current_root_hash
+                            .unwrap_or_else(|| state.position.zobrist_hash()),
                     });
                     let root =
                         state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
@@ -527,19 +531,22 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     // do nothing per USI specification
                 } else {
                     // Instant finalize for short mate (if enabled and not ponder)
-                    let should_instant_finalize = if state.opts.instant_mate_move_enabled {
-                        use engine_core::search::constants::MATE_SCORE;
-                        let max_distance = state.opts.instant_mate_move_max_distance as i32;
-                        let mate_threshold = MATE_SCORE - (max_distance * 1000);
-                        result.score.abs() >= mate_threshold
-                    } else {
-                        false
-                    };
+                    // Only consider positive scores (we are mating the opponent)
+                    // Negative scores would indicate we are getting mated, which should not trigger early move
+                    let should_instant_finalize =
+                        if state.opts.instant_mate_move_enabled && result.score > 0 {
+                            use engine_core::search::constants::MATE_SCORE;
+                            let max_distance = state.opts.instant_mate_move_max_distance as i32;
+                            let mate_threshold = MATE_SCORE - (max_distance * 1000);
+                            result.score >= mate_threshold
+                        } else {
+                            false
+                        };
 
                     if should_instant_finalize {
                         use engine_core::search::constants::MATE_SCORE;
                         let max_distance = state.opts.instant_mate_move_max_distance as i32;
-                        let mate_distance = (MATE_SCORE - result.score.abs()) / 1000;
+                        let mate_distance = (MATE_SCORE - result.score) / 1000;
                         info_string(format!(
                             "instant_mate_move score={} distance={} max_distance={}",
                             result.score, mate_distance, max_distance
