@@ -280,6 +280,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // emit_bestmove_once() を用いるため、前回探索のフラグが残っていると
     // bestmove が送信されない退行が起きる。
     state.bestmove_emitted = false;
+    // Clear pending_ponder_result to avoid stale buffer from previous session
+    state.pending_ponder_result = None;
 
     let mut search_position = state.position.clone();
     let current_is_stochastic_ponder = gp.ponder && state.opts.stochastic_ponder;
@@ -563,6 +565,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     }
                     state.current_time_control = None;
                     state.current_root_hash = None;
+                    state.pending_ponder_result = None;
                     state.notify_idle();
                 }
             }
