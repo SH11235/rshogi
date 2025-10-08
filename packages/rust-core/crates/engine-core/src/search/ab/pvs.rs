@@ -268,26 +268,28 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
         }
-        let mut abdada_guard = AbdadaGuard {
+        let mut _abdada_guard = AbdadaGuard {
             tt: None,
             hash: pos_hash,
             side: pos.side_to_move,
             active: false,
         };
+        // ABDADA: busy検知側にのみ減深を適用するためのフラグ
+        let mut abdada_reduce = false;
         const ABDADA_MIN_DEPTH: i32 = 6;
         if !is_pv && depth >= ABDADA_MIN_DEPTH && !pos.is_in_check() {
             if let Some(tt_arc) = &self.tt {
-                // すでに busy なら軽い減深で合流（同深重複を避ける）
+                // すでに busy なら“後着側”として軽い減深で合流（同深重複を避ける）
                 if tt_arc.has_exact_cut(pos_hash, pos.side_to_move) {
-                    // 減深は最大1ply、過度な弱体化を避ける
-                    if depth > 1 {
-                        // 実際の減深はこの後の next_depth 計算で反映（abdada_guard.active && is_quiet のとき −1ply）。
-                        // ここでは深さ本体は変更しない。
+                    abdada_reduce = true;
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
+                        cb(&format!("abdada_busy_detected=1 depth={}", depth));
                     }
                 } else {
                     // busy 設定（Dropでクリア）
                     tt_arc.set_exact_cut(pos_hash, pos.side_to_move);
-                    abdada_guard = AbdadaGuard {
+                    _abdada_guard = AbdadaGuard {
                         tt: Some(std::sync::Arc::clone(tt_arc)),
                         hash: pos_hash,
                         side: pos.side_to_move,
@@ -508,7 +510,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 next_depth -= reduction;
                 *lmr_counter += 1;
             }
-            if abdada_guard.active && is_quiet && next_depth > 0 {
+            // 後着（busy検知）時のみ、静止手に限って追加で −1ply 合流
+            if abdada_reduce && is_quiet && next_depth > 0 {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
                 if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
                     cb(&format!(
