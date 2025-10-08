@@ -333,6 +333,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_lmr_trials: u64 = 0;
         // Aggregate qnodes across PVs/iterations for this worker result
         let mut cum_qnodes: u64 = 0;
+        #[cfg(feature = "diagnostics")]
+        let mut cum_abdada_busy_detected: u64 = 0;
+        #[cfg(feature = "diagnostics")]
+        let mut cum_abdada_busy_set: u64 = 0;
         let mut stats_hint_exists: u64 = 0;
         let mut stats_hint_used: u64 = 0;
 
@@ -785,6 +789,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     seldepth: &mut seldepth,
                                     qnodes: &mut qnodes,
                                     qnodes_limit,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_set: &mut cum_abdada_busy_set,
                                 };
                                 let (sc, _) = self.alphabeta(
                                     pvs::ABArgs {
@@ -811,6 +819,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     seldepth: &mut seldepth,
                                     qnodes: &mut qnodes,
                                     qnodes_limit,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_set: &mut cum_abdada_busy_set,
                                 };
                                 let (sc_nw, _) = self.alphabeta(
                                     pvs::ABArgs {
@@ -837,6 +849,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         seldepth: &mut seldepth,
                                         qnodes: &mut qnodes,
                                         qnodes_limit,
+                                        #[cfg(feature = "diagnostics")]
+                                        abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                        #[cfg(feature = "diagnostics")]
+                                        abdada_busy_set: &mut cum_abdada_busy_set,
                                     };
                                     let (sc_fw, _) = self.alphabeta(
                                         pvs::ABArgs {
@@ -1201,7 +1217,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 best_hint_next_iter = Some(h);
             }
 
-            let mut lead_ms = 10u64;
+            let mut lead_ms = crate::search::policy::lead_window_base_ms();
 
             cumulative_asp_failures =
                 cumulative_asp_failures.saturating_add(iteration_asp_failures);
@@ -1293,6 +1309,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);
         stats.root_fail_high_count = Some(cum_beta_cuts);
+        #[cfg(feature = "diagnostics")]
+        {
+            stats.abdada_busy_detected = Some(cum_abdada_busy_detected);
+            stats.abdada_busy_set = Some(cum_abdada_busy_set);
+        }
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
         stats.aspiration_failures = Some(cumulative_asp_failures);

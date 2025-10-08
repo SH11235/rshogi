@@ -81,6 +81,13 @@ pub fn set_helper_asp_delta(delta: i32) {
     helper_asp_delta_atomic().store(delta.clamp(50, 600), Ordering::Relaxed);
 }
 
+/// Combined setter for Helper Aspiration (write order: delta -> mode)
+#[inline]
+pub fn set_helper_asp(mode_off_wide: u8, delta: i32) {
+    set_helper_asp_delta(delta);
+    set_helper_asp_mode(mode_off_wide);
+}
+
 // --- TT suppression below depth ---
 fn tt_suppress_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
@@ -177,4 +184,29 @@ fn bench_stop_on_mate_atomic() -> &'static AtomicU8 {
 #[inline]
 pub fn bench_stop_on_mate_enabled() -> bool {
     bench_stop_on_mate_atomic().load(Ordering::Relaxed) == 1
+}
+
+#[inline]
+pub fn set_bench_allrun(enabled: bool) {
+    bench_allrun_atomic().store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_bench_stop_on_mate(enabled: bool) {
+    bench_stop_on_mate_atomic().store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+}
+
+// --- Lead window policy ---
+/// Base lead-window margin in milliseconds used when approaching deadlines.
+/// Env: SHOGI_LEAD_WINDOW_MS (default: 10)
+#[inline]
+pub fn lead_window_base_ms() -> u64 {
+    static CELL: OnceLock<u64> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        std::env::var("SHOGI_LEAD_WINDOW_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&v| v <= 5_000)
+            .unwrap_or(10)
+    })
 }

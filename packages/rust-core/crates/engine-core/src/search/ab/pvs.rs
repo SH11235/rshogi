@@ -26,6 +26,10 @@ pub(crate) struct SearchContext<'a> {
     pub(crate) seldepth: &'a mut u32,
     pub(crate) qnodes: &'a mut u64,
     pub(crate) qnodes_limit: u64,
+    #[cfg(feature = "diagnostics")]
+    pub(crate) abdada_busy_detected: &'a mut u64,
+    #[cfg(feature = "diagnostics")]
+    pub(crate) abdada_busy_set: &'a mut u64,
 }
 
 impl<'a> SearchContext<'a> {
@@ -292,6 +296,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
                         cb(&format!("abdada_busy_detected=1 depth={}", depth));
                     }
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        *ctx.abdada_busy_detected = ctx.abdada_busy_detected.saturating_add(1);
+                    }
                 } else {
                     // busy 設定（Dropでクリア）
                     tt_arc.set_exact_cut(pos_hash, pos.side_to_move);
@@ -301,6 +309,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         side: pos.side_to_move,
                         active: true,
                     };
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        *ctx.abdada_busy_set = ctx.abdada_busy_set.saturating_add(1);
+                    }
                 }
             }
         }
