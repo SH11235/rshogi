@@ -107,6 +107,7 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name BenchAllRun type check default false");
     usi_println("option name HelperAspiration type combo default Wide var Off var Wide");
     usi_println("option name HelperAspirationDelta type spin default 350 min 50 max 600");
+    usi_println("option name Abdada type check default false");
     // Diagnostics / policy knobs
     usi_println("option name QSearchChecks type combo default On var On var Off");
     // Search parameter knobs (runtime-adjustable)
@@ -258,6 +259,17 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     std::env::set_var("SHOGI_HELPER_ASP_DELTA", clamped.to_string());
                     info_string(format!("helper_asp_delta={}", clamped));
                 }
+            }
+        }
+        "Abdada" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                if on {
+                    std::env::set_var("SHOGI_ABDADA", "1");
+                } else {
+                    std::env::remove_var("SHOGI_ABDADA");
+                }
+                info_string(format!("abdada={}", if on { 1 } else { 0 }));
             }
         }
         "MultiPV" => {

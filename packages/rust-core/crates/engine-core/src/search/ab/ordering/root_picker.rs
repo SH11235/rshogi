@@ -1,6 +1,5 @@
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
-use crate::search::limits::RootSplit;
 use crate::search::params::{
     root_multipv_bonus, root_prev_score_scale, root_tt_bonus, ROOT_BASE_KEY, ROOT_PREV_SCORE_CLAMP,
 };
@@ -41,7 +40,6 @@ pub struct RootPickerConfig<'a> {
     pub tt_move: Option<Move>,
     pub prev_lines: Option<&'a [RootLine]>,
     pub jitter: Option<RootJitter>,
-    pub split: Option<RootSplit>,
 }
 
 impl RootPicker {
@@ -52,7 +50,6 @@ impl RootPicker {
             tt_move,
             prev_lines,
             jitter,
-            split,
         } = config;
         let (mut rng_opt, jitter_amplitude) = match jitter {
             Some(cfg) if cfg.amplitude != 0 => {
@@ -103,34 +100,11 @@ impl RootPicker {
 
         scored.sort_unstable_by(|a, b| b.key.cmp(&a.key).then_with(|| a.order.cmp(&b.order)));
 
-        let skip_pv = split.map(|cfg| cfg.skip_pv()).unwrap_or(false);
         let len = scored.len();
-        // RootWorkQueue removed (pure LazySMP)
-
-        let mut assigned_mask = vec![false; len];
-        let mut primary = Vec::new();
-        if let Some(split_cfg) = split {
-            let stride = split_cfg.stride().max(1);
-            let offset = split_cfg.offset().min(stride - 1);
-            for (idx, entry) in scored.iter().enumerate() {
-                if skip_pv && idx == 0 {
-                    continue;
-                }
-                if stride == 1 || idx % stride == offset {
-                    primary.push(entry.order);
-                    assigned_mask[idx] = true;
-                }
-            }
-        }
-
+        let primary = Vec::new();
         let mut fallback = Vec::with_capacity(len);
-        for (idx, entry) in scored.iter().enumerate() {
-            if skip_pv && idx == 0 {
-                continue;
-            }
-            if !assigned_mask[idx] {
-                fallback.push(entry.order);
-            }
+        for entry in &scored {
+            fallback.push(entry.order);
         }
 
         Self {
@@ -205,7 +179,6 @@ mod tests {
             tt_move: Some(tt_move),
             prev_lines: None,
             jitter: None,
-            split: None,
         });
         let (mv, _, _) = picker.next().unwrap();
         assert!(mv.equals_without_piece_type(&tt_move));
@@ -224,7 +197,6 @@ mod tests {
             tt_move: None,
             prev_lines: Some(&prev_lines),
             jitter: None,
-            split: None,
         });
         let (mv, _, _) = picker.next().unwrap();
         assert!(mv.equals_without_piece_type(&mv_b));
@@ -243,7 +215,6 @@ mod tests {
             tt_move: None,
             prev_lines: Some(&prev_lines),
             jitter: None,
-            split: None,
         });
         let (mv, _, _) = picker.next().unwrap();
         assert!(mv.equals_without_piece_type(&mv_b));
