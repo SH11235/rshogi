@@ -915,7 +915,7 @@ fn abdada_no_reduction_for_owner_side() {
     let tt = Arc::new(TranspositionTable::new(16));
     let backend = super::driver::ClassicBackend::with_tt(Arc::clone(&evaluator), Arc::clone(&tt));
 
-    let mut pos = Position::startpos();
+    let pos = Position::startpos();
 
     let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let logs_cb = Arc::clone(&logs);
@@ -926,7 +926,7 @@ fn abdada_no_reduction_for_owner_side() {
         }))
         .build();
 
-    let _ = backend.think_blocking(&mut pos, &limits, None);
+    let _ = backend.think_blocking(&pos, &limits, None);
 
     let collected = logs.lock().unwrap();
     let saw_reduce = collected.iter().any(|l| l.contains("abdada_cut_reduction=1 next_depth="));
@@ -943,7 +943,7 @@ fn abdada_no_reduction_when_depth_below_threshold() {
     let tt = Arc::new(TranspositionTable::new(16));
     let backend = super::driver::ClassicBackend::with_tt(Arc::clone(&evaluator), Arc::clone(&tt));
 
-    let mut pos = Position::startpos();
+    let pos = Position::startpos();
     let hash = pos.zobrist_hash();
     tt.store(crate::search::tt::TTStoreArgs::new(
         hash,
@@ -965,7 +965,7 @@ fn abdada_no_reduction_when_depth_below_threshold() {
         }))
         .build();
 
-    let _ = backend.think_blocking(&mut pos, &limits, None);
+    let _ = backend.think_blocking(&pos, &limits, None);
 
     let collected = logs.lock().unwrap();
     let saw_reduce = collected.iter().any(|l| l.contains("abdada_cut_reduction=1 next_depth="));
