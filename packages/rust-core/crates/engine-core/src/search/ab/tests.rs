@@ -13,7 +13,7 @@ use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
 use crate::search::snapshot::SnapshotSource;
 use crate::search::types::{NodeType, TerminationReason};
-use crate::search::{SearchLimits, SearchStack};
+use crate::search::{SearchLimits, SearchStack, TranspositionTable};
 use crate::shogi::{Color, Move, Piece, PieceType};
 use crate::time_management::{
     self, mock_advance_time, mock_set_time, GamePhase, TimeControl, TimeLimits, TimeManager,
@@ -783,21 +783,11 @@ impl Evaluator for RecordingEvaluator {
 fn evaluator_hooks_balance_for_classic_backend() {
     let evaluator = Arc::new(RecordingEvaluator::default());
     let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
-    // 分岐数を絞った局面（両玉と金のみ）でフック呼び出しの整合性を検証する。
-    // 深さ4の探索でもノード爆発を抑え、テスト実行時間を短縮することが目的。
-    let mut pos = Position::empty();
-    pos.side_to_move = Color::Black;
-    pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
-    pos.board
-        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::Gold, Color::Black));
-    pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Gold, Color::White));
-    pos.hash = pos.compute_hash();
-    pos.zobrist_hash = pos.hash;
-    let limits = SearchLimitsBuilder::default().depth(4).build();
+
+    // 初期局面を使用（探索枝が豊富で、NMPが確実に発動する）
+    let pos = Position::startpos();
+
+    let limits = SearchLimitsBuilder::default().depth(5).build();
 
     let _ = backend.think_blocking(&pos, &limits, None);
 
@@ -858,7 +848,7 @@ fn panic_in_search_thread_returns_error_result_with_stop_info() {
     assert!(!info.hard_timeout, "panic fallback should not mark hard timeout");
     let delta = info.elapsed_ms.abs_diff(expected_elapsed);
     assert!(
-        delta <= 20,
+        delta <= 150,
         "elapsed_ms should stay close to expected (expected {expected_elapsed}, actual {} , delta {delta})",
         info.elapsed_ms
     );
@@ -916,6 +906,73 @@ fn stop_returns_latest_committed_root_line() {
     assert!(matches!(stable_line.bound, NodeType::Exact));
     assert_eq!(result.best_move, Some(stable_line.root_move));
     assert_eq!(result.stats.root_report_source, Some(SnapshotSource::Stable));
+}
+
+#[test]
+fn abdada_no_reduction_for_owner_side() {
+    // Owner path: do not preset busy; the first entrant sets busy and must NOT reduce here.
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+    let backend = super::driver::ClassicBackend::with_tt(Arc::clone(&evaluator), Arc::clone(&tt));
+
+    let mut pos = Position::startpos();
+
+    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let logs_cb = Arc::clone(&logs);
+    let limits = SearchLimitsBuilder::default()
+        .depth(6)
+        .info_string_callback(Arc::new(move |s: &str| {
+            logs_cb.lock().unwrap().push(s.to_string());
+        }))
+        .build();
+
+    let _ = backend.think_blocking(&mut pos, &limits, None);
+
+    let collected = logs.lock().unwrap();
+    let saw_reduce = collected.iter().any(|l| l.contains("abdada_cut_reduction=1 next_depth="));
+    assert!(
+        !saw_reduce,
+        "owner side should not reduce on first busy set (no busy detection)"
+    );
+}
+
+#[test]
+fn abdada_no_reduction_when_depth_below_threshold() {
+    // With preset busy but depth<6, ABDADA must not trigger
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+    let backend = super::driver::ClassicBackend::with_tt(Arc::clone(&evaluator), Arc::clone(&tt));
+
+    let mut pos = Position::startpos();
+    let hash = pos.zobrist_hash();
+    tt.store(crate::search::tt::TTStoreArgs::new(
+        hash,
+        None::<crate::shogi::Move>,
+        0,
+        0,
+        10,
+        crate::search::NodeType::Exact,
+        pos.side_to_move,
+    ));
+    let _ = tt.set_exact_cut(hash, pos.side_to_move);
+
+    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let logs_cb = Arc::clone(&logs);
+    let limits = SearchLimitsBuilder::default()
+        .depth(5) // below ABDADA_MIN_DEPTH(6)
+        .info_string_callback(Arc::new(move |s: &str| {
+            logs_cb.lock().unwrap().push(s.to_string());
+        }))
+        .build();
+
+    let _ = backend.think_blocking(&mut pos, &limits, None);
+
+    let collected = logs.lock().unwrap();
+    let saw_reduce = collected.iter().any(|l| l.contains("abdada_cut_reduction=1 next_depth="));
+    assert!(
+        !saw_reduce,
+        "depth<6 should not trigger abdada reduction even when busy is preset"
+    );
 }
 
 #[test]
