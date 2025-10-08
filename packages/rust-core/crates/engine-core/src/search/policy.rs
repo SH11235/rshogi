@@ -252,3 +252,59 @@ pub fn lead_window_base_ms() -> u64 {
             .unwrap_or(10)
     })
 }
+
+// --- Bench join timeout (optional, default: derive or 3000ms) ---
+// Env: SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS
+// - >0 : 採用（ミリ秒）
+// - 0/未設定 : None（探索条件から導出 or 既定3000ms）
+#[inline]
+pub fn bench_join_timeout_ms() -> Option<u64> {
+    static CELL: OnceLock<Option<u64>> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        match std::env::var("SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS") {
+            Ok(s) => s
+                .parse::<u64>()
+                .ok()
+                .filter(|&v| v > 0)
+                .map(|v| v.min(60_000)), // sanity cap 60s
+            Err(_) => None,
+        }
+    })
+}
+
+// --- Stop drain budget for normal games (default: 45ms) ---
+// Env: SHOGI_STOP_DRAIN_MS（0でドレイン待ちをしない）
+#[inline]
+pub fn stop_drain_budget_ms() -> u64 {
+    static CELL: OnceLock<u64> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        std::env::var("SHOGI_STOP_DRAIN_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|v| v.min(5_000))
+            .unwrap_or(45)
+    })
+}
+
+// --- Cancel-on-primary policy (optional, default: Off) ---
+// Env: SHOGI_PAR_CANCEL_ON_PRIMARY = 1|true|on で有効化
+fn cancel_on_primary_atomic() -> &'static AtomicU8 {
+    static CELL: OnceLock<AtomicU8> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let on = match std::env::var("SHOGI_PAR_CANCEL_ON_PRIMARY") {
+            Ok(v) if matches!(v.as_str(), "1" | "true" | "on") => 1u8,
+            _ => 0u8,
+        };
+        AtomicU8::new(on)
+    })
+}
+
+#[inline]
+pub fn cancel_on_primary_enabled() -> bool {
+    cancel_on_primary_atomic().load(Ordering::Relaxed) == 1
+}
+
+#[inline]
+pub fn set_cancel_on_primary(enabled: bool) {
+    cancel_on_primary_atomic().store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+}

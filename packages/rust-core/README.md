@@ -221,6 +221,25 @@ Tips for reproducible results:
 - Keep the system idle during runs
 - Consider disabling turbo/CPU frequency scaling during measurement
 
+## Parallel Bench Notes (LazySMP)
+
+- BenchAllRun（全スレッド全力実行）
+  - 環境: `SHOGI_PAR_BENCH_ALLRUN=1` を指定すると、Primary 完了後も Helper を最後まで待ち合わせます。
+  - ログ: `info string helpers_join_ms=... received=X/Y canceled=0|1` を1回出力します。
+    - `received` は受信できた Helper 件数（Y=Threads-1）
+    - `canceled=1` はベンチの安全装置が働き、期限超過でフォールバックしたことを示します。
+  - 期限の決定順: `SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS` > TimeManager(hard/soft) > FixedTime+1000ms > 既定3000ms
+
+- 通常対局（BenchAllRun=0）
+  - `stop_flag` による自発停止＋短時間ドレインで即応性を重視します。
+  - ドレインの総時間は `SHOGI_STOP_DRAIN_MS`（既定45ms）で制御できます（0で無効）。
+  - 旧挙動（Primary直後にHelperをキャンセル）を比較したい場合は `SHOGI_PAR_CANCEL_ON_PRIMARY=1` を設定します。
+
+- qsearch ノード上限のセンチネル
+  - `qnodes_limit(0)` を指定すると **無制限**（センチネル）として扱われます。
+  - デフォルト上限（`DEFAULT_QNODES_LIMIT=300,000`）の影響を避けたいベンチでは `0` を明示してください。
+
+
 ## Code Quality
 
 ### Required Checks (run automatically on pre-commit)

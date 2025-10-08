@@ -49,6 +49,26 @@ fn main() {
 
 USI アプリケーションからは `engine-usi` クレートを利用することで、`setoption` → `go` → `bestmove` の一連の操作を行えます。
 
+## 検索定数と上限（補足）
+
+- Quiescence Search のノード上限
+  - 既定: `DEFAULT_QNODES_LIMIT = 300,000`
+  - センチネル: `qnodes_limit(0)` を指定すると無制限として扱います（ベンチ用途）。
+
+## 並列探索（LazySMP）
+
+- BenchAllRun（全スレッド全力）
+  - `SHOGI_PAR_BENCH_ALLRUN=1` で Primary 完了後も Helper を最後まで待機します。
+  - ログ: `info string helpers_join_ms=... received=X/Y canceled=0|1`
+    - X/Y は受信/期待Helper件数（Y=Threads-1）
+    - `canceled=1` は join 期限超過による安全装置の発火を示します。
+  - 期限の決定順: `SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS` > TimeManager(hard/soft) > FixedTime+1000ms > 既定3000ms
+
+- 通常対局（BenchAllRun=0）
+  - `stop_flag` による停止と短時間のドレインで応答性を優先します。
+  - ドレインの総時間は `SHOGI_STOP_DRAIN_MS`（既定 45ms、0で無効）で制御可能です。
+  - 旧挙動の比較が必要な場合は `SHOGI_PAR_CANCEL_ON_PRIMARY=1` を設定してください。
+
 ## エンジンタイプとプロファイル
 
 EngineType と SearchProfile の対応は次のとおりです（詳細は [docs/engine-types-guide.md](../../docs/engine-types-guide.md) を参照）。
