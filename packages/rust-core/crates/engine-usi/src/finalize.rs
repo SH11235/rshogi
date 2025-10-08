@@ -120,10 +120,11 @@ fn finalize_sanity_check(
     };
     let mut alt_from_pv2 = false;
     // PV2 候補の合法性確認（擬似合法の可能性を排除）
+    // Validate PV2 candidate legality to prevent pseudo-legal moves from being selected
     if let Some(mv0) = best_alt {
         if !state.position.is_legal_move(mv0) {
             info_string("sanity_pv2_illegal=1 fallback=see_best");
-            best_alt = None; // SEE ベストへフォールバック
+            best_alt = None; // Fallback to SEE-best candidate
         } else if let (Some(res), Some(mv0)) = (result, best_alt) {
             if let Some(lines) = &res.lines {
                 if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
@@ -934,6 +935,21 @@ pub fn finalize_and_send_fast(
         return;
     }
     diag_info_string(format!("{label}_fast_claim_success=1"));
+
+    // Prioritize pending_ponder_result if available (ponderhit-instant-finalize)
+    if let Some(pr) = state.pending_ponder_result.take() {
+        if let Some(best) = pr.best_move {
+            info_string(format!(
+                "ponderhit_cached=1 depth={} nodes={} elapsed_ms={}",
+                pr.depth, pr.nodes, pr.elapsed_ms
+            ));
+            let ponder_hint = pr.pv_first;
+            let _ = emit_bestmove_once(state, best, ponder_hint);
+            state.pending_ponder_result = None;
+            return;
+        }
+    }
+    state.pending_ponder_result = None;
 
     let controller_stop_info = state.stop_controller.try_read_stop_info();
 

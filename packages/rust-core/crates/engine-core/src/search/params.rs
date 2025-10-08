@@ -129,13 +129,16 @@ pub fn hp_depth_scale() -> i32 {
 
 /// 現在の設定に応じたHPしきい値を返す。
 /// safeモード時は depth 係数付きの厳しめ（=より負側）のしきい値を返す。
+/// History値がi16で管理されているため、しきい値もi16範囲にclampする。
 #[inline]
 pub fn hp_threshold_for_depth(depth: i32) -> i32 {
-    if pruning_safe_mode() {
+    let raw = if pruning_safe_mode() {
         -(hp_depth_scale()).saturating_mul(depth.max(1))
     } else {
         hp_threshold()
-    }
+    };
+    // Clamp to i16 range for consistency with history value domain
+    raw.clamp(i16::MIN as i32, i16::MAX as i32)
 }
 
 #[inline]
