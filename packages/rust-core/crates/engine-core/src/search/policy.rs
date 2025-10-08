@@ -262,11 +262,7 @@ pub fn bench_join_timeout_ms() -> Option<u64> {
     static CELL: OnceLock<Option<u64>> = OnceLock::new();
     *CELL.get_or_init(|| {
         match std::env::var("SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS") {
-            Ok(s) => s
-                .parse::<u64>()
-                .ok()
-                .filter(|&v| v > 0)
-                .map(|v| v.min(60_000)), // sanity cap 60s
+            Ok(s) => s.parse::<u64>().ok().filter(|&v| v > 0).map(|v| v.min(60_000)), // sanity cap 60s
             Err(_) => None,
         }
     })
