@@ -883,6 +883,8 @@ pub fn finalize_and_send(
         None
     };
     log_and_emit_final_selection(state, label, chosen_src, &final_usi, ponder_mv, &stop_meta);
+    // Clear pending_ponder_result to prevent stale buffer usage
+    state.pending_ponder_result = None;
 }
 
 fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_permille: u16) {
@@ -938,15 +940,30 @@ pub fn finalize_and_send_fast(
 
     // Prioritize pending_ponder_result if available (ponderhit-instant-finalize)
     if let Some(pr) = state.pending_ponder_result.take() {
-        if let Some(best) = pr.best_move {
+        // Verify session and position match to prevent stale buffer usage
+        let session_match = pr
+            .session_id
+            .map(|sid| state.current_session_core_id.map(|cur| sid == cur).unwrap_or(true))
+            .unwrap_or(true);
+        let position_match = pr.root_hash == state.position.zobrist_hash()
+            || state.current_root_hash.map(|h| h == pr.root_hash).unwrap_or(false);
+
+        if session_match && position_match {
+            if let Some(best) = pr.best_move {
+                info_string(format!(
+                    "ponderhit_cached=1 depth={} nodes={} elapsed_ms={} sid_match={} pos_match={}",
+                    pr.depth, pr.nodes, pr.elapsed_ms, session_match, position_match
+                ));
+                let ponder_hint = pr.pv_second;
+                let _ = emit_bestmove_once(state, best, ponder_hint);
+                state.pending_ponder_result = None;
+                return;
+            }
+        } else {
             info_string(format!(
-                "ponderhit_cached=1 depth={} nodes={} elapsed_ms={}",
-                pr.depth, pr.nodes, pr.elapsed_ms
+                "ponderhit_cached_stale=1 sid_match={} pos_match={}",
+                session_match, position_match
             ));
-            let ponder_hint = pr.pv_first;
-            let _ = emit_bestmove_once(state, best, ponder_hint);
-            state.pending_ponder_result = None;
-            return;
         }
     }
     state.pending_ponder_result = None;
