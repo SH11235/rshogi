@@ -463,6 +463,12 @@ pub fn handle_ponderhit(state: &mut EngineState) {
             state.deadline_near_notified = false;
         }
     }
+
+    // Instant finalize if search already completed (ponderhit-instant-finalize)
+    if !state.searching && !state.bestmove_emitted {
+        info_string("ponderhit_finalize=1");
+        finalize_and_send_fast(state, "ponderhit_finalize", Some(FinalizeReason::PonderToMove));
+    }
 }
 
 pub fn handle_gameover(state: &mut EngineState) {

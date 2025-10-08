@@ -503,17 +503,47 @@ pub fn poll_search_completion(state: &mut EngineState) {
                         }
                     }
                 } else if was_ponder {
+                    // Buffer the result for instant finalize on ponderhit
+                    state.pending_ponder_result = Some(crate::state::PonderResult {
+                        best_move: result.best_move.map(|m| move_to_usi(&m)),
+                        score: result.score,
+                        depth: result.stats.depth,
+                        nodes: result.stats.nodes,
+                        elapsed_ms: result.stats.elapsed.as_millis() as u64,
+                        pv_first: result.stats.pv.first().map(move_to_usi),
+                    });
                     let root =
                         state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
                     info_string(format!(
-                        "search_completion_guard=ponder sid={} root={} elapsed_ms={} nodes={}",
+                        "search_completion_guard=ponder sid={} root={} elapsed_ms={} nodes={} depth={} ponder_result_buffered=1",
                         session_id,
                         fmt_hash(root),
                         result.stats.elapsed.as_millis(),
-                        result.stats.nodes
+                        result.stats.nodes,
+                        result.stats.depth
                     ));
                     // do nothing per USI specification
                 } else {
+                    // Instant finalize for short mate (if enabled and not ponder)
+                    let should_instant_finalize = if state.opts.instant_mate_move_enabled {
+                        use engine_core::search::constants::MATE_SCORE;
+                        let max_distance = state.opts.instant_mate_move_max_distance as i32;
+                        let mate_threshold = MATE_SCORE - (max_distance * 1000);
+                        result.score.abs() >= mate_threshold
+                    } else {
+                        false
+                    };
+
+                    if should_instant_finalize {
+                        use engine_core::search::constants::MATE_SCORE;
+                        let max_distance = state.opts.instant_mate_move_max_distance as i32;
+                        let mate_distance = (MATE_SCORE - result.score.abs()) / 1000;
+                        info_string(format!(
+                            "instant_mate_move score={} distance={} max_distance={}",
+                            result.score, mate_distance, max_distance
+                        ));
+                    }
+
                     if let Some(tm) = time_manager {
                         let elapsed_ms = result.stats.elapsed.as_millis() as u64;
                         let time_state = state.time_state_for_update(elapsed_ms);
