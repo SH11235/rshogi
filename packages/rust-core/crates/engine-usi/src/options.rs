@@ -156,6 +156,9 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println(
         "option name SearchParams.RootMultiPV2 type spin default 25000 min -200000 max 200000",
     );
+    // Instant mate move options
+    usi_println("option name InstantMateMove.Enabled type check default true");
+    usi_println("option name InstantMateMove.MaxDistance type spin default 1 min 1 max 5");
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -629,6 +632,24 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     engine_core::search::params::set_root_multipv_bonus(2, x);
+                }
+            }
+        }
+        "InstantMateMove.Enabled" => {
+            if let Some(v) = value_ref {
+                let v = v.to_lowercase();
+                state.opts.instant_mate_move_enabled = matches!(v.as_str(), "true" | "1" | "on");
+                info_string(if state.opts.instant_mate_move_enabled {
+                    "instant_mate_move=On"
+                } else {
+                    "instant_mate_move=Off"
+                });
+            }
+        }
+        "InstantMateMove.MaxDistance" => {
+            if let Some(v) = value_ref {
+                if let Ok(d) = v.parse::<u32>() {
+                    state.opts.instant_mate_move_max_distance = d.clamp(1, 5);
                 }
             }
         }

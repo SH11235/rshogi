@@ -91,6 +91,7 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     FinalizeReason::Hard => "oob_hard_finalize",
                     FinalizeReason::NearHard => "oob_near_hard_finalize",
                     FinalizeReason::Planned => "oob_planned_finalize",
+                    FinalizeReason::PonderToMove => "oob_ponder_to_move_finalize",
                     FinalizeReason::TimeManagerStop => "oob_tm_finalize",
                     FinalizeReason::UserStop => "oob_user_finalize",
                 };
