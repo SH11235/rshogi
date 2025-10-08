@@ -23,8 +23,8 @@ quit
     assert!(text.contains("pruning_note=IID"), "IID note missing: {}", text);
     assert!(text.contains("pruning_note=ProbCut"), "ProbCut note missing: {}", text);
     assert!(
-        !text.contains("pruning_note=NMP"),
-        "NMP note should not be emitted when profile allows it: {}",
+        text.contains("pruning_note=NMP"),
+        "NMP note should be emitted for Material profile: {}",
         text
     );
     // Razor may be enabled by profile; ensure no unexpected warning when allowed

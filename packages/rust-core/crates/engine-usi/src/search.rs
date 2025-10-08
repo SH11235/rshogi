@@ -280,6 +280,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // emit_bestmove_once() を用いるため、前回探索のフラグが残っていると
     // bestmove が送信されない退行が起きる。
     state.bestmove_emitted = false;
+    // Clear pending_ponder_result to avoid stale buffer from previous session
+    state.pending_ponder_result = None;
 
     let mut search_position = state.position.clone();
     let current_is_stochastic_ponder = gp.ponder && state.opts.stochastic_ponder;
@@ -413,6 +415,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.stop_flag = Some(Arc::clone(&stop_flag));
     state.ponder_hit_flag = ponder_flag;
     let session_id = session.session_id();
+    // Early bind session_id to avoid race with SessionStart message from StopController
+    state.current_session_core_id = Some(session_id);
     state.active_time_manager = session.time_manager();
     if gp.ponder {
         state.active_time_manager = None;
@@ -503,17 +507,54 @@ pub fn poll_search_completion(state: &mut EngineState) {
                         }
                     }
                 } else if was_ponder {
+                    // Buffer the result for instant finalize on ponderhit
+                    // Use actual session_id from SearchSession to avoid race with SessionStart message
+                    state.pending_ponder_result = Some(crate::state::PonderResult {
+                        best_move: result.best_move.map(|m| move_to_usi(&m)),
+                        score: result.score,
+                        depth: result.stats.depth,
+                        nodes: result.stats.nodes,
+                        elapsed_ms: result.stats.elapsed.as_millis() as u64,
+                        pv_second: result.stats.pv.get(1).map(move_to_usi),
+                        session_id: Some(session_id),
+                        root_hash: state
+                            .current_root_hash
+                            .unwrap_or_else(|| state.position.zobrist_hash()),
+                    });
                     let root =
                         state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
                     info_string(format!(
-                        "search_completion_guard=ponder sid={} root={} elapsed_ms={} nodes={}",
+                        "search_completion_guard=ponder sid={} root={} elapsed_ms={} nodes={} depth={} ponder_result_buffered=1",
                         session_id,
                         fmt_hash(root),
                         result.stats.elapsed.as_millis(),
-                        result.stats.nodes
+                        result.stats.nodes,
+                        result.stats.depth
                     ));
                     // do nothing per USI specification
                 } else {
+                    // Instant finalize for short mate (if enabled and not ponder)
+                    // Only consider positive scores (we are mating the opponent)
+                    // Negative scores would indicate we are getting mated, which should not trigger early move
+                    use engine_core::search::constants::mate_distance;
+                    let should_instant_finalize = if state.opts.instant_mate_move_enabled {
+                        mate_distance(result.score)
+                            .map(|dist| {
+                                dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32
+                            })
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if should_instant_finalize {
+                        let mate_dist = mate_distance(result.score).unwrap();
+                        info_string(format!(
+                            "instant_mate_move score={} distance={} max_distance={}",
+                            result.score, mate_dist, state.opts.instant_mate_move_max_distance
+                        ));
+                    }
+
                     if let Some(tm) = time_manager {
                         let elapsed_ms = result.stats.elapsed.as_millis() as u64;
                         let time_state = state.time_state_for_update(elapsed_ms);
@@ -533,6 +574,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                     }
                     state.current_time_control = None;
                     state.current_root_hash = None;
+                    state.pending_ponder_result = None;
                     state.notify_idle();
                 }
             }

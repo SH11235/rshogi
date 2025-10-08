@@ -64,6 +64,9 @@ pub struct UsiOptions {
     pub finalize_sanity_mini_depth: u8,
     pub finalize_sanity_see_min_cp: i32,
     pub finalize_sanity_switch_margin_cp: i32,
+    // Instant mate move options
+    pub instant_mate_move_enabled: bool,
+    pub instant_mate_move_max_distance: u32,
 }
 
 impl Default for UsiOptions {
@@ -103,6 +106,8 @@ impl Default for UsiOptions {
             finalize_sanity_mini_depth: 2,
             finalize_sanity_see_min_cp: -90,
             finalize_sanity_switch_margin_cp: 80,
+            instant_mate_move_enabled: true,
+            instant_mate_move_max_distance: 1,
         }
     }
 }
@@ -122,6 +127,23 @@ pub struct GoParams {
     pub periods: Option<u32>,
     pub moves_to_go: Option<u32>,
     pub rtime: Option<u64>,
+}
+
+/// Lightweight snapshot of ponder search result for instant finalize on ponderhit.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PonderResult {
+    pub best_move: Option<String>,
+    pub score: i32,
+    pub depth: u8,
+    pub nodes: u64,
+    pub elapsed_ms: u64,
+    /// Second move in PV (opponent's predicted response) for ponder hint
+    pub pv_second: Option<String>,
+    /// Session ID to verify this result matches the current search session
+    pub session_id: Option<u64>,
+    /// Root position hash to verify this result is for the current position
+    pub root_hash: u64,
 }
 
 pub struct EngineState {
@@ -162,6 +184,8 @@ pub struct EngineState {
     pub deadline_near: Option<Instant>,
     pub deadline_near_notified: bool,
     pub active_time_manager: Option<Arc<TimeManager>>,
+    /// Ponder search result buffered for instant finalize on ponderhit
+    pub pending_ponder_result: Option<PonderResult>,
 }
 
 impl EngineState {
@@ -207,6 +231,7 @@ impl EngineState {
             deadline_near: None,
             deadline_near_notified: false,
             active_time_manager: None,
+            pending_ponder_result: None,
         }
     }
 
