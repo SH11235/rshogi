@@ -513,13 +513,52 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 prev_lines: prev_root_lines,
                 jitter: root_jitter,
                 split: limits.root_split,
-                work_queue,
+                work_queue: work_queue.clone(),
                 use_queue_claims: limits.helper_role,
             });
             let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
                 Vec::with_capacity(list.as_slice().len());
             while let Some((mv, key, idx)) = root_picker.next() {
                 root_moves.push((mv, key, idx));
+            }
+            // Primary-first: pre-claim top-K moves (including PV head) so helpers cannot steal them.
+            let mut root_claim_msg: Option<String> = None;
+            if !limits.helper_role {
+                if let Some(queue) = work_queue.as_ref() {
+                    // K を環境変数で指定（既定: threads+1）。threads は SHOGI_THREADS から取得、なければ9。
+                    let env_k = std::env::var("SHOGI_ROOT_OPEN_UPTO")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok());
+                    let auto_threads =
+                        std::env::var("SHOGI_THREADS").ok().and_then(|s| s.parse::<usize>().ok());
+                    let (open_upto, auto_flag) = match env_k {
+                        Some(v) => (v, false),
+                        None => (auto_threads.map(|t| t.saturating_add(1)).unwrap_or(9), true),
+                    };
+                    let k = open_upto.min(root_moves.len());
+                    let mut claimed = 0usize;
+                    for &(_, _, idx) in root_moves.iter().take(k) {
+                        if queue.try_claim(idx) {
+                            claimed += 1;
+                        }
+                    }
+                    let msg = if auto_flag {
+                        format!(
+                            "root_claim primary_first=1 open_upto={} (auto) claimed={}",
+                            k, claimed
+                        )
+                    } else {
+                        format!("root_claim primary_first=1 open_upto={} claimed={}", k, claimed)
+                    };
+                    // 1回目（直後）: info_string 経由（なければ logger にフォールバック）
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        cb(&msg);
+                    } else {
+                        log::info!("info string {}", msg);
+                    }
+                    // 再送用に保存（初回 Depth イベント付近でもう一度出す）
+                    root_claim_msg = Some(msg);
+                }
             }
             if root_moves.is_empty() {
                 if incomplete_depth.is_none() {
@@ -987,6 +1026,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if let Some(tt) = &self.tt {
                             let hf = tt.hashfull_permille() as u32;
                             cb(InfoEvent::Hashfull(hf));
+                        }
+                    }
+                    // root_claim の診断は出力競合で埋もれる場合があるため、Depth発火のタイミングでもう一度だけ出力する
+                    if let Some(msg) = root_claim_msg.take() {
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&msg);
+                        } else {
+                            log::info!("info string {}", msg);
                         }
                     }
                 }
@@ -1699,35 +1746,41 @@ mod tests {
     }
 
     #[test]
-    fn primary_search_does_not_touch_root_work_queue() {
+    fn primary_search_preclaims_top_k_root_work_queue() {
+        // 仕様変更（primary-first）により、primary は root の上位 K 手を先取り claim する。
+        // K は SHOGI_ROOT_OPEN_UPTO があればその値、無ければ threads+1（本テストでは env を設定して固定化）。
         let evaluator = Arc::new(MaterialEvaluator);
         let tt = Arc::new(TranspositionTable::new(16));
         let backend = ClassicBackend::with_tt(evaluator, tt);
 
         let mut pos = Position::startpos();
         let mover = MoveGenerator::new();
-        let root_moves = mover
-            .generate_all(&pos)
-            .expect("move generation should succeed");
+        let root_moves = mover.generate_all(&pos).expect("move generation should succeed");
 
         let queue = Arc::new(RootWorkQueue::new());
         let claims = queue.ensure_initialized(root_moves.len());
 
+        // 期待 K を 5 に固定（min(K, root_moves.len()) が claim される）。
+        std::env::set_var("SHOGI_ROOT_OPEN_UPTO", "5");
+
         let limits = SearchLimitsBuilder::default()
-            .depth(3)
+            .depth(1) // 1反復に限定して、先取りK件の検証を安定化
             .root_work_queue(Arc::clone(&queue))
             .build();
 
         // helper_role はデフォルトで false（primary）。
         let _ = backend.think_blocking(&mut pos, &limits, None);
 
-        // primary パスでは RootWorkQueue を操作しないため、全スロットは未使用のまま。
-        for slot in claims.iter() {
-            assert_eq!(
-                slot.load(Ordering::Acquire),
-                0,
-                "primary search must not claim root work queue entries"
-            );
-        }
+        // 先取り claim 数を検証
+        let expected = 5usize.min(root_moves.len());
+        let claimed = claims.iter().map(|s| s.load(Ordering::Acquire)).filter(|&v| v != 0).count();
+        // env を戻す
+        std::env::remove_var("SHOGI_ROOT_OPEN_UPTO");
+
+        assert_eq!(
+            claimed, expected,
+            "primary should pre-claim top-K root moves (expected {}, got {})",
+            expected, claimed
+        );
     }
 }
