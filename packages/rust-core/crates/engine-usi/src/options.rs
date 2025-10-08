@@ -159,6 +159,8 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     // Instant mate move options
     usi_println("option name InstantMateMove.Enabled type check default true");
     usi_println("option name InstantMateMove.MaxDistance type spin default 1 min 1 max 5");
+    // Opponent SEE gate for finalize sanity
+    usi_println("option name FinalizeSanity.OppSEE_MinCp type spin default 300 min 0 max 5000");
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -544,6 +546,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     state.opts.finalize_sanity_switch_margin_cp = x.clamp(0, 1000);
+                }
+            }
+        }
+        "FinalizeSanity.OppSEE_MinCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_sanity_opp_see_min_cp = x.clamp(0, 5000);
                 }
             }
         }
