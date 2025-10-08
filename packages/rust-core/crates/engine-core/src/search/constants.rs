@@ -57,7 +57,7 @@ pub const TIME_CHECK_MASK_NORMAL: u64 = 0x1FFF; // 8192 nodes - for normal time 
 pub const TIME_CHECK_MASK_BYOYOMI: u64 = 0x7FF; // 2048 nodes - more frequent for byoyomi
 pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
 
-/// Default quiescence search node limit (1 million nodes)
+/// Default quiescence search node limit (300,000 nodes)
 /// This prevents explosion in complex positions with many captures.
 /// Can be overridden with SearchLimits::builder().qnodes_limit()
 pub const DEFAULT_QNODES_LIMIT: u64 = 300_000;
@@ -85,32 +85,36 @@ pub const NEAR_HARD_FINALIZE_MS: u64 = 500;
 
 /// Extract mate distance from a score, returning None if not a mate score.
 ///
+/// Mate scores are encoded as `MATE_SCORE - distance` where distance is in plies.
+/// **Note**: 1 ply = one side's move (half-move in chess/shogi terminology).
+/// This follows YaneuraOu/Stockfish convention of 1-ply increments.
+///
 /// # Returns
 /// - `Some(distance)` if score represents mate (positive: we mate opponent, negative: we get mated)
 /// - `None` if score is not in mate range
+/// - Distance 0 is theoretically possible (immediate mate position) but rare in practice;
+///   InstantMateMove feature requires distance > 0
 ///
 /// # Examples
 /// ```
 /// use engine_core::search::constants::{mate_distance, MATE_SCORE};
 ///
-/// // Mate in 3 moves (score = MATE_SCORE - 3000)
-/// assert_eq!(mate_distance(MATE_SCORE - 3000), Some(3));
+/// // Mate in 3 plies (score = MATE_SCORE - 3)
+/// assert_eq!(mate_distance(MATE_SCORE - 3), Some(3));
 ///
-/// // Getting mated in 5 moves (score = -(MATE_SCORE - 5000))
-/// assert_eq!(mate_distance(-(MATE_SCORE - 5000)), Some(-5));
+/// // Getting mated in 5 plies (score = -(MATE_SCORE - 5))
+/// assert_eq!(mate_distance(-(MATE_SCORE - 5)), Some(-5));
 ///
 /// // Not a mate score
 /// assert_eq!(mate_distance(100), None);
 /// ```
 pub fn mate_distance(score: i32) -> Option<i32> {
     let abs_score = score.abs();
-    // Mate scores are encoded as MATE_SCORE - (distance * 1000)
-    // The furthest mate is MAX_PLY plies, so minimum mate score is MATE_SCORE - MAX_PLY*1000
-    // However, since MAX_PLY=127, this gives negative values, which is correct for deep mates
-    // We check if score is in the mate range by comparing to a reasonable lower bound
-    const MATE_LOWER_BOUND: i32 = 20_000; // Scores above this (in absolute value) are mate scores
-    if (MATE_LOWER_BOUND..=MATE_SCORE).contains(&abs_score) {
-        let distance = (MATE_SCORE - abs_score) / 1000;
+    // Mate scores are encoded as MATE_SCORE - ply (1 ply = 1 increment)
+    // The furthest mate is MAX_PLY plies away
+    let lower_bound = MATE_SCORE - MAX_PLY as i32;
+    if abs_score >= lower_bound && abs_score <= MATE_SCORE {
+        let distance = MATE_SCORE - abs_score;
         Some(if score > 0 { distance } else { -distance })
     } else {
         None
