@@ -706,6 +706,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     tt.store(args);
                 } else {
                     // Diagnostics via info_string_callback (root-scope): suppress helper near root
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
                     if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
                         cb(&format!(
                             "tt_store_suppressed_helper_near_root=1 ply={} node_type={:?} depth={}",

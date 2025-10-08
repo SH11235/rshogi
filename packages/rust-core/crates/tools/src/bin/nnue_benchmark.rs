@@ -115,6 +115,7 @@ fn parse_line_file(path: &str) -> Result<Vec<FixedCase>> {
         let mut pre_positions = Vec::new();
         let mut moves = Vec::new();
         // 任意: デバッグ時のみ合法性チェック（ライン誤記の早期検知）
+        #[cfg(debug_assertions)]
         let gen = MoveGenerator::new();
         for token in moves_part.split_whitespace() {
             let mv = parse_usi_move(token)
@@ -160,6 +161,7 @@ fn parse_fixed_line_from_args(args: &Args) -> Result<Vec<FixedCase>> {
     if let Some(ref s) = args.moves {
         let mut pre_positions = Vec::new();
         let mut moves = Vec::new();
+        #[cfg(debug_assertions)]
         let gen = MoveGenerator::new();
         for tok in s.split(',') {
             let t = tok.trim();
