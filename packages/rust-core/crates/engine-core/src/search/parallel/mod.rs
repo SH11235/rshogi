@@ -148,8 +148,14 @@ where
         let (result_tx, result_rx) = mpsc::channel();
         self.thread_pool.dispatch(jobs, &result_tx);
 
+        // Primary も RootWorkQueue を共有（primary-first の先取り claim 用）
         let mut results = Vec::with_capacity(threads);
-        let main_result = self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
+        let mut primary_limits = clone_limits_for_worker(&limits);
+        if let Some(queue) = root_work_queue.as_ref() {
+            primary_limits.root_work_queue = Some(Arc::clone(queue));
+        }
+        let main_result =
+            self.backend.think_blocking(pos, &primary_limits, limits.info_callback.clone());
         results.push((0usize, main_result));
 
         let we_set_stop_flag = stop_flag
@@ -233,6 +239,21 @@ fn combine_results(
         .map(|(_, r)| r.nodes)
         .unwrap_or(results[best_idx].1.nodes);
 
+    // Diagnostics: best source (primary=0 / helper>0)
+    if best_idx != 0 {
+        log::info!(
+            "info string parallel_best_source=helper worker_id={} depth={} nodes={}",
+            results[best_idx].0,
+            results[best_idx].1.depth,
+            results[best_idx].1.nodes
+        );
+    } else {
+        log::info!(
+            "info string parallel_best_source=primary depth={} nodes={}",
+            results[best_idx].1.depth,
+            results[best_idx].1.nodes
+        );
+    }
     let mut final_result = results.swap_remove(best_idx).1;
 
     final_result.stats.elapsed = elapsed;

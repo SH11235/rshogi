@@ -513,13 +513,39 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 prev_lines: prev_root_lines,
                 jitter: root_jitter,
                 split: limits.root_split,
-                work_queue,
+                work_queue: work_queue.clone(),
                 use_queue_claims: limits.helper_role,
             });
             let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
                 Vec::with_capacity(list.as_slice().len());
             while let Some((mv, key, idx)) = root_picker.next() {
                 root_moves.push((mv, key, idx));
+            }
+            // Primary-first: pre-claim top-K moves (including PV head) so helpers cannot steal them.
+            let mut root_claim_msg: Option<String> = None;
+            if !limits.helper_role {
+                if let Some(queue) = work_queue.as_ref() {
+                    // K を環境変数で指定（既定: threads+1 相当の 9）。
+                    let open_upto = std::env::var("SHOGI_ROOT_OPEN_UPTO")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(9);
+                    let k = open_upto.min(root_moves.len());
+                    let mut claimed = 0usize;
+                    for &(_, _, idx) in root_moves.iter().take(k) {
+                        if queue.try_claim(idx) {
+                            claimed += 1;
+                        }
+                    }
+                    let msg =
+                        format!("root_claim primary_first=1 open_upto={} claimed={}", k, claimed);
+                    // 1回目（直後）
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        cb(&msg);
+                    }
+                    // 再送用に保存（初回 Depth イベント付近でもう一度出す）
+                    root_claim_msg = Some(msg);
+                }
             }
             if root_moves.is_empty() {
                 if incomplete_depth.is_none() {
@@ -987,6 +1013,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if let Some(tt) = &self.tt {
                             let hf = tt.hashfull_permille() as u32;
                             cb(InfoEvent::Hashfull(hf));
+                        }
+                    }
+                    // root_claim の診断は出力競合で埋もれる場合があるため、Depth発火のタイミングでもう一度だけ出力する
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        if let Some(msg) = root_claim_msg.take() {
+                            cb(&msg);
                         }
                     }
                 }
@@ -1706,9 +1738,7 @@ mod tests {
 
         let mut pos = Position::startpos();
         let mover = MoveGenerator::new();
-        let root_moves = mover
-            .generate_all(&pos)
-            .expect("move generation should succeed");
+        let root_moves = mover.generate_all(&pos).expect("move generation should succeed");
 
         let queue = Arc::new(RootWorkQueue::new());
         let claims = queue.ensure_initialized(root_moves.len());
