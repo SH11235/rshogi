@@ -243,10 +243,12 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 match mode.as_str() {
                     "off" => {
                         std::env::set_var("SHOGI_HELPER_ASP_MODE", "off");
+                        engine_core::search::policy::set_helper_asp_mode(0);
                         info_string("helper_asp_mode=off");
                     }
                     _ => {
                         std::env::set_var("SHOGI_HELPER_ASP_MODE", "wide");
+                        engine_core::search::policy::set_helper_asp_mode(1);
                         info_string("helper_asp_mode=wide");
                     }
                 }
@@ -257,6 +259,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 if let Ok(delta) = v.parse::<i32>() {
                     let clamped = delta.clamp(50, 600);
                     std::env::set_var("SHOGI_HELPER_ASP_DELTA", clamped.to_string());
+                    engine_core::search::policy::set_helper_asp_delta(clamped);
                     info_string(format!("helper_asp_delta={}", clamped));
                 }
             }
@@ -269,6 +272,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 } else {
                     std::env::remove_var("SHOGI_ABDADA");
                 }
+                engine_core::search::policy::set_abdada(on);
                 info_string(format!("abdada={}", if on { 1 } else { 0 }));
             }
         }

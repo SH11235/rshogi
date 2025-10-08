@@ -2,7 +2,7 @@
 
 use crate::search::parallel::StopController;
 use crate::time_management::{TimeControl, TimeManager, TimeParameters};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 // OnceLock unused after RootWorkQueue removal
 use std::time::{Duration, Instant};
@@ -42,10 +42,6 @@ pub struct SearchLimits {
     pub iteration_callback: Option<IterationCallback>,
     /// Ponder hit flag for converting ponder search to normal search
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
-    /// Internal: Shared qnodes counter for parallel search
-    /// This is set by ParallelSearcher and not exposed in the builder
-    #[doc(hidden)]
-    pub qnodes_counter: Option<Arc<AtomicU64>>,
     /// Optional jitter seed for helper threads (parallel search)
     pub root_jitter_seed: Option<u64>,
     /// Test/bench/diagnostics: override helper jitter on/off (None = follow env/default)
@@ -95,7 +91,6 @@ impl Default for SearchLimits {
             info_string_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
-            qnodes_counter: None,
             root_jitter_seed: None,
             jitter_override: None,
 
@@ -494,7 +489,6 @@ impl SearchLimitsBuilder {
             info_string_callback: self.info_string_callback,
             iteration_callback: self.iteration_callback,
             ponder_hit_flag: self.ponder_hit_flag,
-            qnodes_counter: None,
             root_jitter_seed: self.root_jitter_seed,
             jitter_override: self.jitter_override,
             helper_role: self.helper_role,
@@ -540,7 +534,6 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             info_string_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
-            qnodes_counter: None,
             root_jitter_seed: None,
             jitter_override: None,
 
@@ -608,7 +601,6 @@ impl std::fmt::Debug for SearchLimits {
             .field("info_string_callback", &self.info_string_callback.is_some())
             .field("iteration_callback", &self.iteration_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
-            .field("qnodes_counter", &self.qnodes_counter.is_some())
             .field("root_jitter_seed", &self.root_jitter_seed)
             .field("jitter_override", &self.jitter_override)
             .field("helper_role", &self.helper_role)
