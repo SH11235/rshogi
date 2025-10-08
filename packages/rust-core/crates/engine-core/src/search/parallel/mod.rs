@@ -655,8 +655,7 @@ mod tests {
             mate_distance: None,
         });
 
-        let mut stats_pv = Vec::new();
-        stats_pv.push(stats_move); // Different from line_pv
+        let stats_pv = vec![stats_move]; // Different from line_pv
 
         let result = SearchResult {
             best_move: Some(line_move),
@@ -739,8 +738,7 @@ mod tests {
         });
 
         // stats.pv with different move
-        let mut stats_pv = Vec::new();
-        stats_pv.push(stats_move);
+        let stats_pv = vec![stats_move];
 
         let result = SearchResult {
             best_move: Some(stats_move),

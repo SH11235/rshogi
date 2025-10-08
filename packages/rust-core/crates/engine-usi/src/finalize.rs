@@ -90,11 +90,45 @@ fn finalize_sanity_check(
             return None;
         }
     }
-    // SEE gate
+    // SEE gate (own move) + Opponent capture SEE gate after PV1
     let see = state.position.see(pv1);
     let see_min = state.opts.finalize_sanity_see_min_cp;
-    let diag_base = format!("sanity_checked=1 see={}", see);
-    if see >= see_min {
+    let mut need_verify = see < see_min;
+
+    // If own SEE is fine (non-negative or above threshold), still guard
+    // against immediate opponent tactical shots after PV1.
+    // Compute max opponent capture SEE in child position and trigger
+    // mini verification if it exceeds configured threshold.
+    let mut opp_cap_see_max = 0;
+    if !need_verify {
+        let mut pos1 = state.position.clone();
+        pos1.do_move(pv1);
+        let mg2 = MoveGenerator::new();
+        if let Ok(list2) = mg2.generate_all(&pos1) {
+            let mut best = 0;
+            let opp_gate = state.opts.finalize_sanity_opp_see_min_cp.max(0);
+            for &mv in list2.as_slice() {
+                // 相手手番。捕獲ヒントかつ合法手に限定して SEE を評価
+                if mv.is_capture_hint() && pos1.is_legal_move(mv) {
+                    let g = pos1.see(mv); // opponent perspective (gain if positive)
+                    if g > best {
+                        best = g;
+                        // 閾値到達で早期打ち切り
+                        if best >= opp_gate {
+                            break;
+                        }
+                    }
+                }
+            }
+            opp_cap_see_max = best;
+            if best >= opp_gate {
+                need_verify = true;
+            }
+        }
+    }
+
+    let diag_base = format!("sanity_checked=1 see={} opp_cap_see_max={}", see, opp_cap_see_max);
+    if !need_verify {
         info_string(format!("{} switched=0 reason=see_ok", diag_base));
         return None;
     }
