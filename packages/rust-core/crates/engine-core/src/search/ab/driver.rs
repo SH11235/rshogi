@@ -562,6 +562,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             let mut shared_heur = std::mem::take(heur_state);
             shared_heur.lmr_trials = 0;
+            // qnodes フォールバック用: 最後に試行したPVのqnodesと、当該PVの行公開有無
+            let mut last_pv_qnodes: u64 = 0;
+            let mut last_pv_published: bool = false;
             for pv_idx in 1..=k {
                 if is_helper && lead_window_soft_break {
                     if incomplete_depth.is_none() {
@@ -1110,6 +1113,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     });
                     // Collect qnodes consumed for this PV head
                     cum_qnodes = cum_qnodes.saturating_add(qnodes);
+                    // フォールバック用にも記録（公開済み）
+                    last_pv_qnodes = qnodes;
+                    last_pv_published = true;
                     // TT 保存は 1 行目かつ Exact のときのみ行う。
                     // Aspiration 成功時にのみ Exact が確定する前提なので、将来の窓調整変更で
                     // 誤って Lower/Upper を保存しないよう明示的にガードしておく。
@@ -1141,8 +1147,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     line_time_checkpoint = elapsed_ms_total;
                 } else {
                     // 局面が詰み/手なし等でPVが取れない → 打ち切り
+                    // このPVで消費したqnodesをフォールバック用に記録
+                    last_pv_qnodes = qnodes;
+                    last_pv_published = false;
                     break;
                 }
+            }
+
+            // PV 行が公開されなかった場合でも、最後に試行した PV の qnodes を統計に反映
+            if !last_pv_published && last_pv_qnodes > 0 {
+                cum_qnodes = cum_qnodes.saturating_add(last_pv_qnodes);
             }
 
             // 深さ集計を累積
@@ -1741,34 +1755,21 @@ enum HelperAspMode {
 }
 
 fn helper_asp_mode() -> HelperAspMode {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<HelperAspMode> = OnceLock::new();
-    *CACHED.get_or_init(|| match std::env::var("SHOGI_HELPER_ASP_MODE") {
-        Ok(s) => match s.to_ascii_lowercase().as_str() {
-            "off" | "0" | "false" => HelperAspMode::Off,
-            _ => HelperAspMode::Wide,
-        },
-        Err(_) => HelperAspMode::Wide,
-    })
+    match crate::search::policy::helper_asp_mode_value() {
+        0 => HelperAspMode::Off,
+        _ => HelperAspMode::Wide,
+    }
 }
 
 #[inline]
 fn helper_asp_delta() -> i32 {
     use crate::search::constants::ASPIRATION_DELTA_MAX;
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<i32> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Ok(s) = std::env::var("SHOGI_HELPER_ASP_DELTA") {
-            if let Ok(v) = s.parse::<i32>() {
-                let clamped = v.clamp(50, 600);
-                return clamped.min(ASPIRATION_DELTA_MAX);
-            }
-        }
-        crate::search::constants::HELPER_ASPIRATION_WIDE_DELTA.min(ASPIRATION_DELTA_MAX)
-    })
+    crate::search::policy::helper_asp_delta_value()
+        .clamp(50, 600)
+        .min(ASPIRATION_DELTA_MAX)
 }
 
 // asp_fail_low_pct / asp_fail_high_pct: see crate::search::policy
 
 // Use shared policy getter from parallel module to avoid divergence
-use crate::search::parallel::bench_stop_on_mate_enabled;
+use crate::search::policy::bench_stop_on_mate_enabled;

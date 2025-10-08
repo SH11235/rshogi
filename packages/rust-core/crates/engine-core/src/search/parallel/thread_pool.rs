@@ -376,15 +376,37 @@ fn worker_loop<E>(
     E: Evaluator + Send + Sync + 'static,
 {
     let mut local = WorkerLocal::new();
+    let biased = matches!(
+        std::env::var("SHOGI_THREADPOOL_BIASED")
+            .map(|s| s.to_ascii_lowercase())
+            .ok()
+            .as_deref(),
+        Some("1" | "true" | "on")
+    );
     let timeout = std::time::Duration::from_millis(20);
     loop {
         // crossbeam select! に制御チャネルを組み込んで、終了要求に即時反応する。
         let tick = crossbeam::channel::after(timeout);
-        let envelope = crossbeam::select! {
-            recv(ctrl_rx) -> _ => { break; }
-            recv(task_hi_rx) -> msg => msg.ok().inspect(|_| { METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed); }),
-            recv(task_rx)    -> msg => msg.ok().inspect(|_| { METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed); }),
-            recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); None }
+        // 先に高優先度キューを非ブロッキングで吸い切る（優先処理の安定化）
+        let envelope = if biased {
+            if let Ok(env) = task_hi_rx.try_recv() {
+                METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
+                Some(env)
+            } else {
+                crossbeam::select! {
+                    recv(ctrl_rx) -> _ => { break; }
+                    recv(task_hi_rx) -> msg => msg.ok().inspect(|_| { METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed); }),
+                    recv(task_rx)    -> msg => msg.ok().inspect(|_| { METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed); }),
+                    recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); None }
+                }
+            }
+        } else {
+            crossbeam::select! {
+                recv(ctrl_rx) -> _ => { break; }
+                recv(task_hi_rx) -> msg => msg.ok().inspect(|_| { METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed); }),
+                recv(task_rx)    -> msg => msg.ok().inspect(|_| { METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed); }),
+                recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); None }
+            }
         };
 
         let Some(TaskEnvelope {

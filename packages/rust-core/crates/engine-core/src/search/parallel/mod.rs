@@ -18,7 +18,7 @@ use crate::Position;
 use log::debug;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -87,14 +87,7 @@ where
         let stop_flag =
             limits.stop_flag.get_or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
 
-        let inserted_qnodes = limits.qnodes_counter.is_none();
-        let qnodes_counter = if let Some(counter) = &limits.qnodes_counter {
-            Arc::clone(counter)
-        } else {
-            let counter = Arc::new(AtomicU64::new(0));
-            limits.qnodes_counter = Some(Arc::clone(&counter));
-            counter
-        };
+        // qnodes はローカル集計（sum）に一本化。共有カウンタ配線は行わない。
         let session_id = limits.session_id;
         let root_key = pos.zobrist_hash();
         limits.store_heuristics = true;
@@ -107,9 +100,6 @@ where
             let mut result =
                 self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
             finish_single_result(&self.tt, &mut result, start);
-            if inserted_qnodes {
-                qnodes_counter.store(0, AtomicOrdering::Release);
-            }
             return result;
         }
 
@@ -124,7 +114,7 @@ where
             worker_limits.info_callback = None;
             worker_limits.info_string_callback = None;
             worker_limits.iteration_callback = None;
-            worker_limits.qnodes_counter = Some(Arc::clone(&qnodes_counter));
+            // qnodes_counter は使用しない
             worker_limits.stop_controller = None;
             worker_limits.helper_role = true;
             // 純粋 LazySMP では root 分割も使用しない
@@ -154,10 +144,11 @@ where
         // 検索ポリシーの概要を一度だけ出力
         if let Some(cb) = limits.info_string_callback.as_ref() {
             cb(&format!(
-                "smp_mode=lazy_pure bench_allrun={} helper_asp_mode={} helper_asp_delta={} multipv_merge=primary+helpers_k={}",
-                if bench_allrun_enabled() { 1 } else { 0 },
+                "smp_mode=lazy_pure bench_allrun={} helper_asp_mode={} helper_asp_delta={} currmove_throttle_ms={} multipv_merge=primary+helpers_k={}",
+                if crate::search::policy::bench_allrun_enabled() { 1 } else { 0 },
                 helper_asp_mode_str(),
                 helper_asp_delta_str(),
+                currmove_throttle_display(),
                 limits.multipv.max(1)
             ));
         }
@@ -166,8 +157,8 @@ where
         results.push((0usize, main_result));
         // BenchAllRun が有効でない場合は primary 完了時に helpers を停止させる。
         // ただしベンチでもメイト検出時は例外的に停止する。
-        let bench_allrun = bench_allrun_enabled();
-        let bench_stop_on_mate = bench_stop_on_mate_enabled();
+        let bench_allrun = crate::search::policy::bench_allrun_enabled();
+        let bench_stop_on_mate = crate::search::policy::bench_stop_on_mate_enabled();
 
         let primary_is_mate = {
             let pr = &results[0].1;
@@ -232,9 +223,6 @@ where
                 AtomicOrdering::Relaxed,
             );
         }
-        if inserted_qnodes {
-            qnodes_counter.store(0, AtomicOrdering::Release);
-        }
         // --- Info: best source（primary/helper）を info string 化 ---
         if let Some(cb) = limits.info_string_callback.as_ref() {
             if !results.is_empty() {
@@ -254,7 +242,28 @@ where
         }
 
         let desired_k = limits.multipv.max(1);
-        combine_results(&self.tt, results, start, desired_k)
+        // 期待の primary 採用本数（primary.lines が少なければその数だけ）
+        let primary_lines_len = results
+            .iter()
+            .find(|(id, _)| *id == 0)
+            .and_then(|(_, r)| r.lines.as_ref().map(|ls| ls.len()))
+            .unwrap_or(0);
+        let primary_expected = (primary_lines_len as u8).min(desired_k) as usize;
+
+        let final_result = combine_results(&self.tt, results, start, desired_k);
+
+        if let Some(cb) = limits.info_string_callback.as_ref() {
+            if let Some(lines) = final_result.lines.as_ref() {
+                let total = lines.len();
+                let helpers = total.saturating_sub(primary_expected);
+                cb(&format!(
+                    "multipv_merge_detail=primary_x+helpers_y={}+{}",
+                    primary_expected, helpers
+                ));
+            }
+        }
+
+        final_result
     }
 }
 
@@ -475,6 +484,8 @@ fn combine_results(
             let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
             out.extend(merged);
             final_result.lines = Some(out);
+            // MultiPV 統合後に派生フィールド（depth/seldepth/nps/ponder 等）を再集計
+            final_result.refresh_summary();
         }
     }
 
@@ -533,7 +544,6 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         info_string_callback: base.info_string_callback.clone(),
         iteration_callback: base.iteration_callback.clone(),
         ponder_hit_flag: base.ponder_hit_flag.clone(),
-        qnodes_counter: base.qnodes_counter.clone(),
         root_jitter_seed: base.root_jitter_seed,
         jitter_override: base.jitter_override,
 
@@ -678,7 +688,7 @@ fn publish_helper_snapshot(
         }
     }
     // 診断: どのソースのPVを採用したか（info string 風のログ）
-    log::info!("info string snapshot_source={} depth={}", snapshot_source, result.depth);
+    log::debug!("info string snapshot_source={} depth={}", snapshot_source, result.depth);
 }
 
 fn helper_snapshot_min_depth() -> u32 {
@@ -694,36 +704,35 @@ fn helper_snapshot_min_depth() -> u32 {
     })
 }
 
-pub(crate) fn bench_allrun_enabled() -> bool {
-    match std::env::var("SHOGI_PAR_BENCH_ALLRUN") {
-        Ok(v) => matches!(v.as_str(), "1" | "true" | "on"),
-        Err(_) => false,
-    }
-}
-
-pub(crate) fn bench_stop_on_mate_enabled() -> bool {
-    match std::env::var("SHOGI_BENCH_STOP_ON_MATE") {
-        Ok(v) => !matches!(v.as_str(), "0" | "false" | "off"),
-        Err(_) => true,
-    }
-}
+// bench_allrun/stop_on_mate policy: moved to search::policy
 
 fn helper_asp_mode_str() -> &'static str {
-    match std::env::var("SHOGI_HELPER_ASP_MODE") {
-        Ok(s) => match s.to_ascii_lowercase().as_str() {
-            "off" | "0" | "false" => "off",
-            _ => "wide",
-        },
-        Err(_) => "wide",
+    match crate::search::policy::helper_asp_mode_value() {
+        0 => "off",
+        _ => "wide",
     }
 }
 
 fn helper_asp_delta_str() -> String {
-    let v = std::env::var("SHOGI_HELPER_ASP_DELTA")
-        .ok()
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(350);
-    v.clamp(50, 600).to_string()
+    crate::search::policy::helper_asp_delta_value().clamp(50, 600).to_string()
+}
+
+fn currmove_throttle_display() -> String {
+    match std::env::var("SHOGI_CURRMOVE_THROTTLE_MS") {
+        Ok(val) => {
+            let val = val.trim().to_ascii_lowercase();
+            if val == "off" || val == "0" || val == "false" {
+                "off".to_string()
+            } else {
+                val.parse::<u64>()
+                    .ok()
+                    .filter(|v| *v > 0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "100".to_string())
+            }
+        }
+        Err(_) => "100".to_string(),
+    }
 }
 
 #[cfg(test)]
