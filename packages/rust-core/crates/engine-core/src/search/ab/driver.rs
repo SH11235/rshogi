@@ -510,7 +510,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 tt_move: hint_for_picker,
                 prev_lines: prev_root_lines,
                 jitter: root_jitter,
-                split: limits.root_split,
             });
             let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
                 Vec::with_capacity(list.as_slice().len());
@@ -618,11 +617,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // 初期窓とΔ（YaneuraOu準拠 + 拡張）
                 // primary: Δ0 = Δinit + K*log2(Threads)（上限あり）
                 // helper: off=フル窓 / wide=±HELPER_ASPIRATION_WIDE_DELTA
-                let threads_lg2 =
-                    match std::env::var("SHOGI_THREADS").ok().and_then(|s| s.parse::<u32>().ok()) {
-                        Some(t) if t > 1 => 31u32.saturating_sub((t - 1).leading_zeros()),
-                        _ => 0,
-                    } as i32;
+                // floor(log2(threads)) を正しく計算（threads_hint 優先）
+                let threads_lg2: i32 = limits
+                    .threads_hint
+                    .map(|t| {
+                        if t > 0 {
+                            (u32::BITS - 1 - t.leading_zeros()) as i32
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
                 let mut delta = ASPIRATION_DELTA_INITIAL;
                 let mut alpha;
                 let mut beta;
@@ -915,8 +920,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         } else {
                             alpha = new_alpha;
                             beta = new_beta;
-                            // Δ ← Δ + Δ/3（上限あり）
-                            delta = (delta + delta / 3).min(ASPIRATION_DELTA_MAX);
+                            // 非対称拡大量（デフォルト33%）。環境変数で調整可。
+                            let add_pct = asp_fail_low_pct();
+                            let add = (delta * add_pct / 100).max(1);
+                            delta = (delta + add).min(ASPIRATION_DELTA_MAX);
                             continue;
                         }
                     }
@@ -954,8 +961,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         } else {
                             alpha = new_alpha;
                             beta = new_beta;
-                            // Δ ← Δ + Δ/3（上限あり）
-                            delta = (delta + delta / 3).min(ASPIRATION_DELTA_MAX);
+                            // 非対称拡大量（デフォルト33%）。環境変数で調整可。
+                            let add_pct = asp_fail_high_pct();
+                            let add = (delta * add_pct / 100).max(1);
+                            delta = (delta + add).min(ASPIRATION_DELTA_MAX);
                             continue;
                         }
                     }
@@ -1748,9 +1757,22 @@ fn helper_asp_delta() -> i32 {
 }
 
 #[inline]
-fn bench_stop_on_mate_enabled() -> bool {
-    match std::env::var("SHOGI_BENCH_STOP_ON_MATE") {
-        Ok(v) => !matches!(v.as_str(), "0" | "false" | "off"),
-        Err(_) => true,
-    }
+fn asp_fail_low_pct() -> i32 {
+    std::env::var("SHOGI_ASP_FAILLOW_PCT")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .map(|v| v.clamp(10, 200))
+        .unwrap_or(33)
 }
+
+#[inline]
+fn asp_fail_high_pct() -> i32 {
+    std::env::var("SHOGI_ASP_FAILHIGH_PCT")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .map(|v| v.clamp(10, 200))
+        .unwrap_or(33)
+}
+
+// Use shared policy getter from parallel module to avoid divergence
+use crate::search::parallel::bench_stop_on_mate_enabled;

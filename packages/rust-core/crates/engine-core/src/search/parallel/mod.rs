@@ -15,7 +15,7 @@ use crate::search::types::{clamp_score_cp, RootLine};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Move;
 use crate::Position;
-use log::{debug, warn};
+use log::debug;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
@@ -80,9 +80,8 @@ where
 
     pub fn search(&mut self, pos: &mut Position, mut limits: SearchLimits) -> SearchResult {
         let threads = self.threads.max(1);
-        // Expose threads to downstream (primary-first open_upto auto) via env for this search scope.
-        // Best-effort: global env; acceptable for diagnostics and light policy wiring.
-        std::env::set_var("SHOGI_THREADS", threads.to_string());
+        // Pass threads hint via limits (avoid global env dependency)
+        limits.threads_hint = Some(threads as u32);
         limits.stop_controller.get_or_insert_with(|| Arc::clone(&self.stop_controller));
         let inserted_stop_flag = limits.stop_flag.is_none();
         let stop_flag =
@@ -101,7 +100,7 @@ where
         limits.store_heuristics = true;
         limits.root_jitter_seed = None;
         limits.helper_role = false;
-        limits.root_split = None;
+
         let start = Instant::now();
 
         if threads == 1 {
@@ -129,7 +128,6 @@ where
             worker_limits.stop_controller = None;
             worker_limits.helper_role = true;
             // 純粋 LazySMP では root 分割も使用しない
-            worker_limits.root_split = None;
 
             // helpers は MultiPV=1 固定
             worker_limits.multipv = 1;
@@ -156,9 +154,10 @@ where
         // 検索ポリシーの概要を一度だけ出力
         if let Some(cb) = limits.info_string_callback.as_ref() {
             cb(&format!(
-                "smp_mode=lazy_pure bench_allrun={} helper_asp_mode={}",
+                "smp_mode=lazy_pure bench_allrun={} helper_asp_mode={} helper_asp_delta={}",
                 if bench_allrun_enabled() { 1 } else { 0 },
-                helper_asp_mode_str()
+                helper_asp_mode_str(),
+                helper_asp_delta_str()
             ));
         }
         let main_result =
@@ -191,20 +190,18 @@ where
         };
 
         drop(result_tx);
-        for _ in 0..helper_count {
-            match result_rx.recv() {
-                Ok((worker_id, res)) => {
-                    publish_helper_snapshot(
-                        &self.stop_controller,
-                        session_id,
-                        root_key,
-                        worker_id,
-                        &res,
-                    );
-                    results.push((worker_id, res));
-                }
-                Err(_) => warn!("parallel worker failed to send result"),
-            }
+        // Cancel helpers and join bounded, then drain any remaining results non-blocking
+        let _joined = self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
+        while let Ok((worker_id, res)) = result_rx.try_recv() {
+            publish_helper_snapshot(
+                &self.stop_controller,
+                session_id,
+                root_key,
+                worker_id,
+                &res,
+                limits.info_string_callback.as_ref(),
+            );
+            results.push((worker_id, res));
         }
 
         if we_set_stop_flag && inserted_stop_flag {
@@ -351,8 +348,14 @@ fn combine_results(
         let mut merged: SmallVec<[RootLine; 16]> = SmallVec::new();
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
-        // 1) primary の行をそのまま採用
-        if let Some(ref lines) = final_result.lines {
+        // 1) primary の行をそのまま採用（final_result が primary の場合も考慮）
+        let primary_lines_opt = results
+            .iter()
+            .find(|(id, _)| *id == 0)
+            .and_then(|(_, r)| r.lines.as_ref())
+            .or(final_result.lines.as_ref());
+
+        if let Some(lines) = primary_lines_opt {
             for ln in lines.iter() {
                 if merged.len() >= k {
                     break;
@@ -514,7 +517,6 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         qnodes_counter: base.qnodes_counter.clone(),
         root_jitter_seed: base.root_jitter_seed,
         jitter_override: base.jitter_override,
-        root_split: base.root_split,
 
         helper_role: base.helper_role,
         store_heuristics: base.store_heuristics,
@@ -524,6 +526,7 @@ fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         fallback_deadlines: base.fallback_deadlines,
         time_manager: base.time_manager.clone(),
         stop_controller: base.stop_controller.clone(),
+        threads_hint: base.threads_hint,
     }
 }
 
@@ -558,6 +561,7 @@ fn publish_helper_snapshot(
     root_key: u64,
     worker_id: usize,
     result: &SearchResult,
+    info_cb: Option<&crate::search::types::InfoStringCallback>,
 ) {
     if worker_id == 0 {
         return;
@@ -585,6 +589,7 @@ fn publish_helper_snapshot(
     let mut chosen_bound = result.node_type;
     let mut chosen_score = result.score;
 
+    let mut snapshot_source = "stats";
     if let Some(first_line) = result.lines.as_ref().and_then(|ls| ls.first()) {
         // Prefer Exact bound lines for stability; use fail-high/low only if nothing better
         let use_lines0 =
@@ -593,6 +598,7 @@ fn publish_helper_snapshot(
             pv.extend(first_line.pv.iter().copied());
             chosen_bound = first_line.bound;
             chosen_score = first_line.score_cp;
+            snapshot_source = "lines";
         } else {
             // lines[0] is fail-high/low and stats.pv exists; prefer stats.pv for stability
             pv.extend(result.stats.pv.iter().copied());
@@ -634,6 +640,11 @@ fn publish_helper_snapshot(
     };
 
     stop_controller.publish_root_line(session_id, root_key, &line);
+    if let Some(cb) = info_cb {
+        cb(&format!("snapshot_source={} depth={}", snapshot_source, result.depth));
+    }
+    // 診断: どのソースのPVを採用したか（info string 風のログ）
+    log::info!("info string snapshot_source={} depth={}", snapshot_source, result.depth);
 }
 
 fn helper_snapshot_min_depth() -> u32 {
@@ -649,14 +660,14 @@ fn helper_snapshot_min_depth() -> u32 {
     })
 }
 
-fn bench_allrun_enabled() -> bool {
+pub(crate) fn bench_allrun_enabled() -> bool {
     match std::env::var("SHOGI_PAR_BENCH_ALLRUN") {
         Ok(v) => matches!(v.as_str(), "1" | "true" | "on"),
         Err(_) => false,
     }
 }
 
-fn bench_stop_on_mate_enabled() -> bool {
+pub(crate) fn bench_stop_on_mate_enabled() -> bool {
     match std::env::var("SHOGI_BENCH_STOP_ON_MATE") {
         Ok(v) => !matches!(v.as_str(), "0" | "false" | "off"),
         Err(_) => true,
@@ -671,6 +682,14 @@ fn helper_asp_mode_str() -> &'static str {
         },
         Err(_) => "wide",
     }
+}
+
+fn helper_asp_delta_str() -> String {
+    let v = std::env::var("SHOGI_HELPER_ASP_DELTA")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(350);
+    v.clamp(50, 600).to_string()
 }
 
 #[cfg(test)]
@@ -879,7 +898,7 @@ mod tests {
             ponder: None,
         };
 
-        publish_helper_snapshot(&stop_ctrl, session_id, root_key, worker_id, &result);
+        publish_helper_snapshot(&stop_ctrl, session_id, root_key, worker_id, &result, None);
 
         // Verify snapshot was published and uses lines[0].pv (line_move), not stats.pv (stats_move)
         let snapshot = stop_ctrl
@@ -962,7 +981,7 @@ mod tests {
             ponder: None,
         };
 
-        publish_helper_snapshot(&stop_ctrl, session_id, root_key, worker_id, &result);
+        publish_helper_snapshot(&stop_ctrl, session_id, root_key, worker_id, &result, None);
 
         let snapshot = stop_ctrl.try_read_snapshot().expect("Snapshot should be published");
 

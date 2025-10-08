@@ -691,11 +691,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let store_score = crate::search::common::adjust_mate_score_for_tt(best, ply as u8)
                     .clamp(i16::MIN as i32, i16::MAX as i32);
                 let static_eval_i16 = static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                // A/B1: Helper の根近傍（ply<=2）の非Exact/非PVの保存を抑制してTT汚染を軽減
+                // A/B1: Helper の根近傍（ply<=2）の非Exact/非PVの保存抑制に加え、
+                // 環境で D を指定した場合は（深さ < D）も抑制対象にする。
+                let extra_suppr_depth = std::env::var("SHOGI_TT_SUPPRESS_BELOW_DEPTH")
+                    .ok()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(-1);
                 let suppress_helper_near_root = ctx.limits.helper_role
-                    && (ply <= 2)
                     && !is_pv
-                    && !matches!(node_type, NodeType::Exact);
+                    && !matches!(node_type, NodeType::Exact)
+                    && ((ply <= 2) || (extra_suppr_depth >= 0 && depth < extra_suppr_depth));
                 if !suppress_helper_near_root {
                     let mut args = crate::search::tt::TTStoreArgs::new(
                         pos_hash,

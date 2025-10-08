@@ -270,6 +270,55 @@ where
         }
         self.workers.clear();
     }
+
+    /// Request all workers to stop accepting new jobs and exit ASAP.
+    /// This is best-effort cancellation: workers currently running a job will
+    /// observe the search stop flag and exit after finishing the in-flight job.
+    pub fn cancel_all(&mut self) {
+        for worker in self.workers.iter_mut() {
+            let _ = worker.ctrl.send(WorkerCommand::Shutdown);
+        }
+    }
+
+    /// Join all worker threads with an overall timeout budget.
+    /// Returns the number of workers successfully joined.
+    pub fn join_with_timeout(&mut self, timeout: std::time::Duration) -> usize {
+        use std::sync::mpsc::channel;
+        use std::sync::mpsc::RecvTimeoutError;
+        let start = Instant::now();
+        let mut joined = 0usize;
+        for worker in self.workers.iter_mut() {
+            if let Some(handle) = worker.handle.take() {
+                let (tx, rx) = channel::<()>();
+                // Move join into a helper thread so we can time out without blocking.
+                thread::spawn(move || {
+                    let _ = handle.join();
+                    let _ = tx.send(());
+                });
+                let remaining = timeout
+                    .checked_sub(start.elapsed())
+                    .unwrap_or_else(|| std::time::Duration::from_millis(0));
+                match rx.recv_timeout(remaining) {
+                    Ok(()) => {
+                        joined += 1;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        log::warn!("thread_pool: join timeout; worker still exiting in background");
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        joined += 1; // already finished
+                    }
+                }
+            }
+        }
+        joined
+    }
+
+    /// Convenience: cancel all workers and wait for up to `timeout` for them to exit.
+    pub fn cancel_all_join(&mut self, timeout: std::time::Duration) -> usize {
+        self.cancel_all();
+        self.join_with_timeout(timeout)
+    }
 }
 
 impl<E> Drop for ThreadPool<E>
