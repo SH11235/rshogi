@@ -154,10 +154,11 @@ where
         // 検索ポリシーの概要を一度だけ出力
         if let Some(cb) = limits.info_string_callback.as_ref() {
             cb(&format!(
-                "smp_mode=lazy_pure bench_allrun={} helper_asp_mode={} helper_asp_delta={}",
+                "smp_mode=lazy_pure bench_allrun={} helper_asp_mode={} helper_asp_delta={} multipv_merge=primary+helpers_k={}",
                 if bench_allrun_enabled() { 1 } else { 0 },
                 helper_asp_mode_str(),
-                helper_asp_delta_str()
+                helper_asp_delta_str(),
+                limits.multipv.max(1)
             ));
         }
         let main_result =
@@ -190,8 +191,9 @@ where
         };
 
         drop(result_tx);
-        // Cancel helpers and join bounded, then drain any remaining results non-blocking
+        // Cancel helpers and join bounded, then drain remaining results.
         let _joined = self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
+        // Non-blocking drain first
         while let Ok((worker_id, res)) = result_rx.try_recv() {
             publish_helper_snapshot(
                 &self.stop_controller,
@@ -202,6 +204,24 @@ where
                 limits.info_string_callback.as_ref(),
             );
             results.push((worker_id, res));
+        }
+        // Then a couple of short waits to catch stragglers arriving right after join
+        for _ in 0..3 {
+            match result_rx.recv_timeout(std::time::Duration::from_millis(15)) {
+                Ok((worker_id, res)) => {
+                    publish_helper_snapshot(
+                        &self.stop_controller,
+                        session_id,
+                        root_key,
+                        worker_id,
+                        &res,
+                        limits.info_string_callback.as_ref(),
+                    );
+                    results.push((worker_id, res));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(_) => break,
+            }
         }
 
         if we_set_stop_flag && inserted_stop_flag {
@@ -270,11 +290,9 @@ fn combine_results(
     }
 
     let total_nodes: u64 = results.iter().map(|(_, r)| r.nodes).sum();
-    // qnodes aggregation: Use max instead of sum because all workers share the same
-    // Arc<AtomicU64> qnodes_counter. Each worker increments this shared counter,
-    // so summing individual worker results would count the same qnodes multiple times.
-    // Taking the max gives us the true global qnodes count from the shared counter.
-    let total_qnodes: u64 = results.iter().map(|(_, r)| r.stats.qnodes).max().unwrap_or(0);
+    // qnodes aggregation: workers report their own local qnodes; aggregate by sum.
+    // （共有カウンタ方式に切り替える場合は max/最終読み値へ変更すること）
+    let total_qnodes: u64 = results.iter().map(|(_, r)| r.stats.qnodes).sum();
     let max_depth = results.iter().map(|(_, r)| r.depth).max().unwrap_or(0);
     let max_seldepth = results.iter().map(|(_, r)| r.seldepth).max().unwrap_or(max_depth);
     let primary_nodes = results
@@ -433,6 +451,7 @@ fn combine_results(
                 let ra = bound_rank(a.line.bound);
                 let rb = bound_rank(b.line.bound);
                 ra.cmp(&rb)
+                    .then(b.line.depth.cmp(&a.line.depth))
                     .then(b.line.score_cp.cmp(&a.line.score_cp))
                     .then(b.line.nodes.unwrap_or(0).cmp(&a.line.nodes.unwrap_or(0)))
             });
@@ -642,6 +661,21 @@ fn publish_helper_snapshot(
     stop_controller.publish_root_line(session_id, root_key, &line);
     if let Some(cb) = info_cb {
         cb(&format!("snapshot_source={} depth={}", snapshot_source, result.depth));
+        #[cfg(debug_assertions)]
+        {
+            let lines_len = result.lines.as_ref().map(|ls| ls.len()).unwrap_or(0);
+            let fallback = if snapshot_source == "lines" {
+                "lines0_exact"
+            } else if result.lines.as_ref().and_then(|ls| ls.first()).is_some() {
+                "lines0_non_exact_or_stats_preferred"
+            } else {
+                "no_lines"
+            };
+            cb(&format!(
+                "snapshot_detail depth={} lines={} fallback_reason={}",
+                result.depth, lines_len, fallback
+            ));
+        }
     }
     // 診断: どのソースのPVを採用したか（info string 風のログ）
     log::info!("info string snapshot_source={} depth={}", snapshot_source, result.depth);

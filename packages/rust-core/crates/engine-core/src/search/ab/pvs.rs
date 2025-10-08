@@ -10,6 +10,7 @@ use smallvec::SmallVec;
 use super::driver::ClassicBackend;
 use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, MovePicker};
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
+use crate::search::policy::{abdada_enabled, tt_suppress_below_depth};
 use crate::search::types::NodeType;
 
 #[cfg(feature = "diagnostics")]
@@ -254,6 +255,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let pos_hash = pos.zobrist_hash();
         // --- ABDADA (in-progress) 簡易版：重複探索の緩和（Non-PV/非王手/十分深い）
         let use_abdada = abdada_enabled();
+        // ABDADA: TT 側の busy bit（"exact cut in-progress"）を set/clear するためのスコープガード。
+        // - set_exact_cut()/clear_exact_cut() は lock-free/atomic 前提（TT 実装に依存）
+        // - busy 検知側（後着）は軽い減深で合流し、先着はフル深さを維持
+        // - Drop により確実に busy bit を解放し、false positive/negative を避ける
         struct AbdadaGuard {
             tt: Option<std::sync::Arc<crate::search::TranspositionTable>>,
             hash: u64,
@@ -693,10 +698,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let static_eval_i16 = static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 // A/B1: Helper の根近傍（ply<=2）の非Exact/非PVの保存抑制に加え、
                 // 環境で D を指定した場合は（深さ < D）も抑制対象にする。
-                let extra_suppr_depth = std::env::var("SHOGI_TT_SUPPRESS_BELOW_DEPTH")
-                    .ok()
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or(-1);
+                let extra_suppr_depth = tt_suppress_below_depth().unwrap_or(-1);
                 let suppress_helper_near_root = ctx.limits.helper_role
                     && !is_pv
                     && !matches!(node_type, NodeType::Exact)
@@ -769,10 +771,4 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         result
     }
 }
-#[inline]
-fn abdada_enabled() -> bool {
-    match std::env::var("SHOGI_ABDADA") {
-        Ok(s) => matches!(s.as_str(), "1" | "true" | "on"),
-        Err(_) => false,
-    }
-}
+// abdada_enabled(): see crate::search::policy
