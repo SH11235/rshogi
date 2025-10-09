@@ -17,64 +17,34 @@ fn profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
     }
 }
 
-fn current_profile(state: &EngineState) -> Option<SearchProfile> {
-    state
-        .engine
-        .lock()
-        .ok()
-        .map(|eng| profile_for_engine_type(eng.get_engine_type()))
-}
-
 fn profile_allows_iid(state: &EngineState) -> bool {
-    // IID is allowed for all engine types except when disabled by SearchProfile
-    current_profile(state).map(|p| p.prune.enable_iid).unwrap_or(true)
+    let profile = profile_for_engine_type(state.opts.engine_type);
+    profile.prune.enable_iid
 }
 
 fn profile_allows_probcut(state: &EngineState) -> bool {
-    use EngineType::{Enhanced, EnhancedNnue};
-    // ProbCut is an advanced search technique available in Enhanced engines
-    // Basic engines (Material, Nnue) use simpler search without ProbCut
-    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-        current_profile(state).map(|p| p.prune.enable_probcut).unwrap_or(true)
-    } else {
-        false
-    }
+    let profile = profile_for_engine_type(state.opts.engine_type);
+    profile.prune.enable_probcut
 }
 
 fn profile_allows_razor(state: &EngineState) -> bool {
-    use EngineType::{Enhanced, EnhancedNnue};
-    // Razor is an advanced pruning technique available in Enhanced engines
-    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-        current_profile(state).map(|p| p.prune.enable_razor).unwrap_or(true)
-    } else {
-        false
-    }
+    let profile = profile_for_engine_type(state.opts.engine_type);
+    profile.prune.enable_razor
 }
 
 fn profile_allows_qs_checks(state: &EngineState) -> bool {
-    current_profile(state).map(|p| p.tuning.enable_qs_checks).unwrap_or(true)
+    let profile = profile_for_engine_type(state.opts.engine_type);
+    profile.tuning.enable_qs_checks
 }
 
 fn profile_allows_nmp(state: &EngineState) -> bool {
-    use EngineType::{Enhanced, EnhancedNnue};
-    // Null Move Pruning is an advanced technique available in Enhanced engines
-    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-        current_profile(state).map(|p| p.prune.enable_nmp).unwrap_or(true)
-    } else {
-        false
-    }
+    let profile = profile_for_engine_type(state.opts.engine_type);
+    profile.prune.enable_nmp
 }
 
 fn profile_allows_static_beta(state: &EngineState) -> bool {
-    use EngineType::{Enhanced, EnhancedNnue};
-    // Static Beta Pruning (Futility Pruning) is available in Enhanced engines
-    if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-        current_profile(state)
-            .map(|p| p.prune.enable_static_beta_pruning)
-            .unwrap_or(true)
-    } else {
-        false
-    }
+    let profile = profile_for_engine_type(state.opts.engine_type);
+    profile.prune.enable_static_beta_pruning
 }
 
 pub fn send_id_and_options(opts: &UsiOptions) {
@@ -542,13 +512,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_razor(state) {
-                    use EngineType::{Enhanced, EnhancedNnue};
-                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-                        "Razor is disabled by the active SearchProfile"
-                    } else {
-                        "Razor is only available in Enhanced/EnhancedNnue engine types"
-                    };
-                    info_string(format!("pruning_note={}", reason));
+                    info_string("pruning_note=Razor is disabled by the active SearchProfile");
                 }
                 engine_core::search::params::set_razor_enabled(on);
             }
@@ -557,13 +521,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_nmp(state) {
-                    use EngineType::{Enhanced, EnhancedNnue};
-                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-                        "NMP is disabled by the active SearchProfile"
-                    } else {
-                        "NMP is only available in Enhanced/EnhancedNnue engine types"
-                    };
-                    info_string(format!("pruning_note={}", reason));
+                    info_string("pruning_note=NMP is disabled by the active SearchProfile");
                 }
                 engine_core::search::params::set_nmp_enabled(on);
             }
@@ -581,13 +539,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_probcut(state) {
-                    use EngineType::{Enhanced, EnhancedNnue};
-                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-                        "ProbCut is disabled by the active SearchProfile"
-                    } else {
-                        "ProbCut is only available in Enhanced/EnhancedNnue engine types"
-                    };
-                    info_string(format!("pruning_note={}", reason));
+                    info_string("pruning_note=ProbCut is disabled by the active SearchProfile");
                 }
                 engine_core::search::params::set_probcut_enabled(on);
             }
@@ -596,13 +548,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 if on && !profile_allows_static_beta(state) {
-                    use EngineType::{Enhanced, EnhancedNnue};
-                    let reason = if matches!(state.opts.engine_type, Enhanced | EnhancedNnue) {
-                        "StaticBeta is disabled by the active SearchProfile"
-                    } else {
-                        "StaticBeta is only available in Enhanced/EnhancedNnue engine types"
-                    };
-                    info_string(format!("pruning_note={}", reason));
+                    info_string("pruning_note=StaticBeta is disabled by the active SearchProfile");
                 }
                 engine_core::search::params::set_static_beta_enabled(on);
             }
