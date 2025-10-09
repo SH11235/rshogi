@@ -70,6 +70,20 @@ pub struct UsiOptions {
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
     pub instant_mate_check_all_pv: bool,
+
+    // Root guard rails and experiment flags (DIAG/flags; default OFF)
+    // Root SEE gate: if enabled and SEE(best) < -X, hold commit (re-search/try 2nd best)
+    pub root_see_gate: bool,
+    pub x_see_cp: i32,
+    // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
+    pub post_verify: bool,
+    pub y_drop_cp: i32,
+    // Promote vs. non-promote verify and small bias for promote
+    pub promote_verify: bool,
+    pub promote_bias_cp: i32,
+    // Reproduction: warmup search before cut (ms) and previous K moves replay
+    pub warmup_ms: u64,
+    pub warmup_prev_moves: u32,
 }
 
 impl Default for UsiOptions {
@@ -113,6 +127,15 @@ impl Default for UsiOptions {
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             instant_mate_check_all_pv: false,
+            // Guard rails (default OFF) and parameters (defaults per spec)
+            root_see_gate: false,
+            x_see_cp: 100,
+            post_verify: false,
+            y_drop_cp: 300,
+            promote_verify: false,
+            promote_bias_cp: 20,
+            warmup_ms: 500,
+            warmup_prev_moves: 0,
         }
     }
 }

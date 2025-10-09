@@ -1,5 +1,6 @@
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
+use crate::movegen::generator::MoveGenerator;
 use crate::search::params::{
     root_multipv_bonus, root_prev_score_scale, root_tt_bonus, ROOT_BASE_KEY, ROOT_PREV_SCORE_CLAMP,
 };
@@ -61,7 +62,7 @@ impl RootPicker {
         let mut scored = Vec::with_capacity(moves.len());
         for (idx, &mv) in moves.iter().enumerate() {
             let is_check = pos.gives_check(mv) as i32;
-            let see = if mv.is_capture_hint() { pos.see(mv) } else { 0 };
+            let see = pos.see(mv);
             let is_promo = mv.is_promote() as i32;
             let good_capture = mv.is_capture_hint() && see >= 0;
 
@@ -69,6 +70,45 @@ impl RootPicker {
             // チェック/成りは “基礎 + 追加” の二段加点で強調している（既存順位との互換性保持）。
             key += is_check * 2_000 + see * 10 + is_promo;
             key += 500 * is_check + 300 * is_promo + 200 * (good_capture as i32);
+
+            // Root SEE Gate (flagged): heavily demote moves with SEE < -X at root
+            if crate::search::config::root_see_gate_enabled() {
+                let x_th = crate::search::config::root_see_x_cp();
+                if see < -x_th {
+                    // Large penalty to push to the end of ordering (no side effect)
+                    key = key.saturating_sub(1_000_000);
+                }
+            }
+
+            // Post‑Verify (cheap approximation at ordering stage):
+            // If opponent's best immediate capture (by SEE) is large, demote this move.
+            if crate::search::config::post_verify_enabled() {
+                // Build child and find opponent best capture by SEE
+                let mut child = pos.clone();
+                let _ = child.do_move(mv);
+                let mg = MoveGenerator::new();
+                let mut opp_best_see = i32::MIN / 2;
+                if let Ok(moves2) = mg.generate_all(&child) {
+                    for m2 in moves2 {
+                        if m2.is_capture_hint() {
+                            let v = child.see(m2);
+                            if v > opp_best_see {
+                                opp_best_see = v;
+                            }
+                        }
+                    }
+                }
+                let y_th = crate::search::config::post_verify_ydrop_cp();
+                // Our drop estimate ~ -opp_best_see
+                if opp_best_see > y_th {
+                    key = key.saturating_sub(500_000);
+                }
+            }
+
+            // Promote bias (flag): small positive bias to promotion moves
+            if crate::search::config::promote_verify_enabled() && mv.is_promote() {
+                key = key.saturating_add(crate::search::config::promote_bias_cp());
+            }
 
             if let Some(ttm) = tt_move {
                 if mv.equals_without_piece_type(&ttm) {

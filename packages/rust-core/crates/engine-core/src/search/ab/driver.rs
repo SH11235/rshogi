@@ -46,7 +46,7 @@ thread_local! {
 }
 
 #[inline]
-fn take_stack_cache() -> Vec<SearchStack> {
+pub(crate) fn take_stack_cache() -> Vec<SearchStack> {
     STACK_CACHE.with(|cell| {
         let mut v = std::mem::take(&mut *cell.borrow_mut());
         let want = MAX_PLY + 1;
@@ -64,7 +64,7 @@ fn take_stack_cache() -> Vec<SearchStack> {
 }
 
 #[inline]
-fn return_stack_cache(buf: Vec<SearchStack>) {
+pub(crate) fn return_stack_cache(buf: Vec<SearchStack>) {
     STACK_CACHE.with(|cell| {
         *cell.borrow_mut() = buf;
     });
@@ -91,7 +91,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     /// - 時間管理や固定時間がある場合は、それらに基づくダイナミック上限を適用
     /// - Byoyomi 中は深さに応じて緩やかに上限を引き上げ（浅い層では控えめ、深くなると増やす）
     /// - それ以外は既定上限 `DEFAULT_QNODES_LIMIT` を上回らないようクランプ（安全側）
-    fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
+    pub(crate) fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
         // qnodes_limit==0 は「無制限」意図。ただし実対局（時間管理あり）では
         // TM/時間上限に基づく動的縮小は残す。ベンチ用途（時間管理なし）のみ完全無制限。
         let request_unlimited = matches!(limits.qnodes_limit, Some(0));
@@ -1771,7 +1771,7 @@ mod tests {
     fn stack_cache_preserves_inner_capacity_across_iterations() {
         // Prepare a stack buffer and inflate inner quiet_moves capacity
         let mut buf = super::take_stack_cache();
-        assert_eq!(buf.len(), (crate::search::constants::MAX_PLY + 1) as usize);
+        assert_eq!(buf.len(), ((crate::search::constants::MAX_PLY + 1)));
         let idx = 8usize;
         // Inflate capacity by pushing many moves
         for _ in 0..512 {

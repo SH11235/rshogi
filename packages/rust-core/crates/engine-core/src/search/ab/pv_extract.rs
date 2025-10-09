@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smallvec::SmallVec;
 
@@ -49,7 +49,8 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
         let mut pos = root.clone();
         let mut d = depth;
         let mut seldepth_dummy = 0u32;
-        let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+        let mut stack_buf = super::driver::take_stack_cache();
+        let stack: &mut [SearchStack] = &mut stack_buf[..];
         let mut heur = Heuristics::default();
         let mut _tt_hits: u64 = 0;
         let mut _beta_cuts: u64 = 0;
@@ -57,13 +58,53 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
 
         let mut first_used = false;
         let t0 = Instant::now();
-        let mut guard_stack: SmallVec<[EvalMoveGuard<'_, E>; 32]> = SmallVec::new();
+        // Compute a conservative wall-clock micro budget (cap) and respect TM/fallback/time_limit
+        let cap_ms: u64 = std::env::var("SHOGI_PVEXTRACT_CAP_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0 && v <= 20)
+            .unwrap_or(6);
+        let mut deadline: Option<Instant> = Some(t0 + Duration::from_millis(cap_ms));
+        if let Some(tm) = limits.time_manager.as_ref() {
+            let elapsed = tm.elapsed_ms();
+            let mut rem = u64::MAX;
+            let soft = tm.soft_limit_ms();
+            let hard = tm.hard_limit_ms();
+            if soft != u64::MAX && soft > elapsed {
+                rem = rem.min(soft - elapsed);
+            }
+            if hard != u64::MAX && hard > elapsed {
+                rem = rem.min(hard - elapsed);
+            }
+            if rem != u64::MAX {
+                let cand = t0 + Duration::from_millis(rem);
+                deadline = Some(deadline.map(|d| d.min(cand)).unwrap_or(cand));
+            }
+        }
+        if let Some(dl) = limits.fallback_deadlines {
+            let mut rem = u64::MAX;
+            if dl.soft_limit_ms > 0 {
+                rem = rem.min(dl.soft_limit_ms);
+            }
+            if dl.hard_limit_ms > 0 {
+                rem = rem.min(dl.hard_limit_ms);
+            }
+            if rem != u64::MAX {
+                let cand = t0 + Duration::from_millis(rem);
+                deadline = Some(deadline.map(|d| d.min(cand)).unwrap_or(cand));
+            }
+        }
+        if let Some(limit) = limits.time_limit() {
+            let cand = t0 + limit;
+            deadline = Some(deadline.map(|d| d.min(cand)).unwrap_or(cand));
+        }
+        let mut _guard_stack_tombstone: SmallVec<[EvalMoveGuard<'_, E>; 32]> = SmallVec::new();
         while d > 0 {
             if ClassicBackend::<E>::should_stop(limits) {
                 break;
             }
-            if let Some(limit) = limits.time_limit() {
-                if t0.elapsed() >= limit {
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
                     break;
                 }
             }
@@ -71,8 +112,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                 first
             } else {
                 let mut qnodes = 0_u64;
-                let qnodes_limit =
-                    limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
+                let qnodes_limit = Self::compute_qnodes_limit(limits, d, 1);
                 #[cfg(feature = "diagnostics")]
                 let mut abdada_busy_detected: u64 = 0;
                 #[cfg(feature = "diagnostics")]
@@ -98,7 +138,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                         beta: i32::MAX / 2,
                         ply: 0,
                         is_pv: true,
-                        stack: &mut stack,
+                        stack,
                         heur: &mut heur,
                         tt_hits: &mut _tt_hits,
                         beta_cuts: &mut _beta_cuts,
@@ -113,12 +153,13 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             };
             first_used = true;
             pv.push(mv);
-            let guard = EvalMoveGuard::new(self.evaluator.as_ref(), &pos, mv);
-            guard_stack.push(guard);
-            pos.do_move(mv);
+            {
+                let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), &pos, mv);
+                pos.do_move(mv);
+            }
             d -= 1;
         }
-        while let Some(_guard) = guard_stack.pop() {}
+        super::driver::return_stack_cache(stack_buf);
         pv
     }
 }
