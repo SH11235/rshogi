@@ -812,7 +812,8 @@ impl<'a> MoveGenImpl<'a> {
                         self.extend_from_king(df, 0);
                     }
                 } else {
-                    let _ = promoted; // 接近王手等は延長しない
+                    // 接近王手（竜の斜め1歩等）や非整列・遮蔽ありのケースは延長しない。
+                    let _ = promoted;
                 }
             }
             PieceType::Bishop => {
@@ -822,7 +823,8 @@ impl<'a> MoveGenImpl<'a> {
                     let dr = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
                     self.extend_from_king(df, dr);
                 } else {
-                    let _ = promoted; // 接近王手等は延長しない
+                    // 接近王手（馬の縦横1歩等）や非整列・遮蔽ありのケースは延長しない。
+                    let _ = promoted;
                 }
             }
             PieceType::Lance => {
