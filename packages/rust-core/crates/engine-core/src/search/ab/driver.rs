@@ -539,6 +539,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 prev_lines: prev_root_lines,
                 jitter: root_jitter,
             });
+
+            #[cfg(feature = "diagnostics")]
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                cb(&format!(
+                    "root_penalty_stats see={} post={} promote={} top1_penalized={}",
+                    root_picker.stats_root_see_penalized(),
+                    root_picker.stats_postverify_penalized(),
+                    root_picker.stats_promote_bias_applied(),
+                    root_picker.stats_top1_penalized() as u8
+                ));
+            }
             let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
                 Vec::with_capacity(list.as_slice().len());
             while let Some((mv, key, idx)) = root_picker.next() {

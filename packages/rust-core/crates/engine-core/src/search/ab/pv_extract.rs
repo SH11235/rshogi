@@ -11,6 +11,8 @@ use super::ordering::{EvalMoveGuard, Heuristics};
 use super::pvs::{ABArgs, SearchContext};
 
 impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    /// Maximum PV length for UI/logging (keep in sync with TT reconstruction)
+    const PV_MAX_LEN: usize = 32;
     pub(crate) fn reconstruct_root_pv_from_tt(
         &self,
         root: &Position,
@@ -33,7 +35,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             return None;
         }
 
-        pv_vec.truncate(32);
+        pv_vec.truncate(Self::PV_MAX_LEN);
         Some(SmallVec::from_vec(pv_vec))
     }
 
@@ -70,11 +72,11 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             let mut rem = u64::MAX;
             let soft = tm.soft_limit_ms();
             let hard = tm.hard_limit_ms();
-            if soft != u64::MAX && soft > elapsed {
-                rem = rem.min(soft - elapsed);
+            if soft != u64::MAX {
+                rem = rem.min(soft.saturating_sub(elapsed));
             }
-            if hard != u64::MAX && hard > elapsed {
-                rem = rem.min(hard - elapsed);
+            if hard != u64::MAX {
+                rem = rem.min(hard.saturating_sub(elapsed));
             }
             if rem != u64::MAX {
                 let cand = t0 + Duration::from_millis(rem);
@@ -103,7 +105,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
         let mut guard_stack: SmallVec<[EvalMoveGuard<'_, E>; 32]> = SmallVec::new();
         while d > 0 {
             // Keep PV length aligned with TT reconstruction (32 moves max)
-            if pv.len() >= 32 {
+            if pv.len() >= Self::PV_MAX_LEN {
                 break;
             }
             if ClassicBackend::<E>::should_stop(limits) {
@@ -118,7 +120,8 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                 first
             } else {
                 let mut qnodes = 0_u64;
-                let qnodes_limit = Self::compute_qnodes_limit(limits, d, 1);
+                let step_depth = d.min(2);
+                let qnodes_limit = Self::compute_qnodes_limit(limits, step_depth, 1);
                 #[cfg(feature = "diagnostics")]
                 let mut abdada_busy_detected: u64 = 0;
                 #[cfg(feature = "diagnostics")]
@@ -136,7 +139,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                     #[cfg(feature = "diagnostics")]
                     abdada_busy_set: &mut abdada_busy_set,
                 };
-                // Use a shallow step depth to keep PV extraction lightweight
+                // Use a shallow step depth to keep PV extraction lightweight and deterministic
                 let step_depth = d.min(2);
                 let (_sc, mv_opt) = self.alphabeta(
                     ABArgs {

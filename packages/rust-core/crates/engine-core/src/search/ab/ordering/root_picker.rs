@@ -13,6 +13,10 @@ struct RootScoredMove {
     mv: Move,
     key: i32,
     order: usize,
+    #[cfg(feature = "diagnostics")]
+    penal_see: bool,
+    #[cfg(feature = "diagnostics")]
+    penal_post: bool,
 }
 
 pub struct RootPicker {
@@ -22,6 +26,14 @@ pub struct RootPicker {
     fallback: Vec<usize>,
     primary_cursor: usize,
     fallback_cursor: usize,
+    #[cfg(feature = "diagnostics")]
+    root_see_penalized: u32,
+    #[cfg(feature = "diagnostics")]
+    postverify_penalized: u32,
+    #[cfg(feature = "diagnostics")]
+    promote_bias_applied: u32,
+    #[cfg(feature = "diagnostics")]
+    top1_penalized: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -46,6 +58,12 @@ pub struct RootPickerConfig<'a> {
 
 impl RootPicker {
     pub fn new(config: RootPickerConfig) -> Self {
+        // NOTE:
+        // - We keep ordering lightweight; all scoring happens on a single pass with a cached
+        //   MoveGenerator for Post‑Verify to avoid repeated allocations.
+        // - Both `primary` and `fallback` store indices into `scored` so that `entry_at()` is O(1).
+        //   This layout is future‑proof for PV‑first/YBWC: primary can later be populated
+        //   without changing access semantics or complexity.
         let RootPickerConfig {
             pos,
             moves,
@@ -62,6 +80,13 @@ impl RootPicker {
         // Cache MoveGenerator outside the loop for Post-Verify optimization
         let mg = MoveGenerator::new();
         let mut scored = Vec::with_capacity(moves.len());
+        let in_check = pos.is_in_check();
+        #[cfg(feature = "diagnostics")]
+        let mut root_see_penalized = 0u32;
+        #[cfg(feature = "diagnostics")]
+        let mut postverify_penalized = 0u32;
+        #[cfg(feature = "diagnostics")]
+        let mut promote_bias_applied = 0u32;
         for (idx, &mv) in moves.iter().enumerate() {
             let is_check = pos.gives_check(mv) as i32;
             let see = pos.see(mv);
@@ -73,19 +98,30 @@ impl RootPicker {
             key += is_check * 2_000 + see * 10 + is_promo;
             key += 500 * is_check + 300 * is_promo + 200 * (good_capture as i32);
 
-            // Root SEE Gate (flagged): heavily demote moves with SEE < -X at root
-            if crate::search::config::root_see_gate_enabled() {
+            // Root SEE Gate (flagged・root限定・王手回避中は除外)
+            #[cfg(feature = "diagnostics")]
+            let mut penal_see = false;
+            if crate::search::config::root_see_gate_enabled() && !in_check {
                 let x_th = crate::search::config::root_see_x_cp();
                 if see < -x_th {
-                    // Large penalty to push to the end of ordering (no side effect)
-                    key = key.saturating_sub(1_000_000);
+                    let base = 50;
+                    let over = (-see - x_th).max(0);
+                    let mut penalty = base + over;
+                    if is_check != 0 {
+                        penalty /= 2;
+                    }
+                    key = key.saturating_sub(penalty);
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        penal_see = true;
+                    }
                 }
             }
 
-            // Post‑Verify (cheap approximation at ordering stage):
-            // If opponent's best immediate capture (by SEE) is large, demote this move.
-            // Only apply if move is not a good capture or has negative SEE to reduce overhead.
-            if crate::search::config::post_verify_enabled() && !good_capture {
+            // Post‑Verify（近似）: root限定・王手回避中のみ。
+            #[cfg(feature = "diagnostics")]
+            let mut penal_post = false;
+            if crate::search::config::post_verify_enabled() && !good_capture && !in_check {
                 // Build child and find opponent best capture by SEE
                 let mut child = pos.clone();
                 let _ = child.do_move(mv);
@@ -101,15 +137,30 @@ impl RootPicker {
                     }
                 }
                 let y_th = crate::search::config::post_verify_ydrop_cp();
-                // Our drop estimate ~ -opp_best_see
                 if opp_best_see > y_th {
-                    key = key.saturating_sub(500_000);
+                    let base = 50;
+                    let over = (opp_best_see - y_th).max(0);
+                    let mut penalty = base + over;
+                    if is_check != 0 {
+                        penalty /= 2;
+                    }
+                    key = key.saturating_sub(penalty);
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        penal_post = true;
+                    }
                 }
             }
 
             // Promote bias (flag): small positive bias to promotion moves
+            #[cfg(feature = "diagnostics")]
+            let mut promote_bias = false;
             if crate::search::config::promote_verify_enabled() && mv.is_promote() {
                 key = key.saturating_add(crate::search::config::promote_bias_cp());
+                #[cfg(feature = "diagnostics")]
+                {
+                    promote_bias = true;
+                }
             }
 
             if let Some(ttm) = tt_move {
@@ -133,10 +184,26 @@ impl RootPicker {
                 }
             }
 
+            #[cfg(feature = "diagnostics")]
+            if key_root_see_penalty_applied {
+                root_see_penalized += 1;
+            }
+            #[cfg(feature = "diagnostics")]
+            if penal_post {
+                postverify_penalized += 1;
+            }
+            #[cfg(feature = "diagnostics")]
+            if promote_bias {
+                promote_bias_applied += 1;
+            }
             let scored_move = RootScoredMove {
                 mv,
                 key,
                 order: idx,
+                #[cfg(feature = "diagnostics")]
+                penal_see: key_root_see_penalty_applied,
+                #[cfg(feature = "diagnostics")]
+                penal_post,
             };
             scored.push(scored_move);
         }
@@ -150,12 +217,26 @@ impl RootPicker {
             fallback.push(i);
         }
 
+        #[cfg(feature = "diagnostics")]
+        let top1_penalized = scored
+            .first()
+            .map(|e| (e.penal_see || e.penal_post) && !in_check)
+            .unwrap_or(false);
+
         Self {
             scored,
             primary,
             fallback,
             primary_cursor: 0,
             fallback_cursor: 0,
+            #[cfg(feature = "diagnostics")]
+            root_see_penalized,
+            #[cfg(feature = "diagnostics")]
+            postverify_penalized,
+            #[cfg(feature = "diagnostics")]
+            promote_bias_applied,
+            #[cfg(feature = "diagnostics")]
+            top1_penalized,
         }
     }
 
@@ -175,6 +256,23 @@ impl RootPicker {
 
     fn entry_at(&self, idx: usize) -> Option<(Move, i32, usize)> {
         self.scored.get(idx).map(|e| (e.mv, e.key, e.order))
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_root_see_penalized(&self) -> u32 {
+        self.root_see_penalized
+    }
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_postverify_penalized(&self) -> u32 {
+        self.postverify_penalized
+    }
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_promote_bias_applied(&self) -> u32 {
+        self.promote_bias_applied
+    }
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_top1_penalized(&self) -> bool {
+        self.top1_penalized
     }
 }
 
