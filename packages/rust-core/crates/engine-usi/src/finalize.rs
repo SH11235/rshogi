@@ -134,9 +134,10 @@ fn finalize_sanity_check(
 
     let see_min_dbg = state.opts.finalize_sanity_see_min_cp;
     let opp_gate_dbg = state.opts.finalize_sanity_opp_see_min_cp.max(0);
+    let chk_penalty_dbg = state.opts.finalize_sanity_check_penalty_cp;
     let diag_base = format!(
-        "sanity_checked=1 see={} see_min={} opp_cap_see_max={} opp_gate={}",
-        see, see_min_dbg, opp_cap_see_max, opp_gate_dbg
+        "sanity_checked=1 see={} see_min={} opp_cap_see_max={} opp_gate={} check_penalty_cp={}",
+        see, see_min_dbg, opp_cap_see_max, opp_gate_dbg, chk_penalty_dbg
     );
     if !need_verify {
         info_string(format!("{} switched=0 reason=see_ok", diag_base));
@@ -152,7 +153,7 @@ fn finalize_sanity_check(
     let mut best_alt = if let Some(res) = result {
         if let Some(lines) = &res.lines {
             if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
-                l2.pv.first().copied().filter(|m| Some(*m) != final_best.best_move)
+                l2.pv.first().copied().filter(|m| !m.equals_without_piece_type(&pv1))
             } else {
                 None
             }
@@ -169,10 +170,12 @@ fn finalize_sanity_check(
         if !state.position.is_legal_move(mv0) {
             info_string("sanity_pv2_illegal=1 fallback=see_best");
             best_alt = None; // Fallback to SEE-best candidate
+        } else if mv0.equals_without_piece_type(&pv1) {
+            best_alt = None; // 同一手は除外
         } else if let (Some(res), Some(mv0)) = (result, best_alt) {
             if let Some(lines) = &res.lines {
                 if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
-                    if l2.pv.first().is_some_and(|m| *m == mv0) {
+                    if l2.pv.first().is_some_and(|m| m.equals_without_piece_type(&mv0)) {
                         alt_from_pv2 = true;
                     }
                 }
@@ -196,6 +199,9 @@ fn finalize_sanity_check(
                     Some((m, v)) if v >= s => Some((m, v)),
                     _ => Some((mv, s)),
                 };
+            } else if best_ge0.is_some() {
+                // SEE>=0候補が確定していれば負値候補はスキップ
+                continue;
             }
             best_any = match best_any {
                 Some((m, v)) if v >= s => Some((m, v)),
@@ -238,68 +244,74 @@ fn finalize_sanity_check(
     // Mini search (depth 1-2) for pv1 vs alt
     let mini_depth = state.opts.finalize_sanity_mini_depth.max(1); // 下限ガード（options側でもclamp済だが安全側）
     let switch_margin = state.opts.finalize_sanity_switch_margin_cp;
-    let (mut s1, s2);
-    let (mv1, mv2) = (pv1, alt);
-    // Lock engine with small budget
-    if let Some((mut eng, spent_ms, _)) = try_lock_engine_with_budget(&state.engine, total_budget) {
-        // 予算厳守: ロックに消費した時間を差し引く
-        let remain_budget = total_budget.saturating_sub(spent_ms);
-        if spent_ms > (total_budget / 2) {
-            info_string(format!(
-                "sanity_lock_heavy=1 spent_ms={} total_ms={}",
-                spent_ms, total_budget
-            ));
-        }
-        if remain_budget == 0 {
+    let (s1_temp, s2, pv1_check_flag, alt_check_flag) = {
+        let (mv1, mv2) = (pv1, alt);
+        if let Some((mut eng, spent_ms, _)) =
+            try_lock_engine_with_budget(&state.engine, total_budget)
+        {
+            // 予算厳守: ロックに消費した時間を差し引く
+            let remain_budget = total_budget.saturating_sub(spent_ms);
+            if spent_ms > (total_budget / 2) {
+                info_string(format!(
+                    "sanity_lock_heavy=1 spent_ms={} total_ms={}",
+                    spent_ms, total_budget
+                ));
+            }
+            if remain_budget == 0 {
+                return None;
+            }
+            // 2回合計がremain_budgetを超えないよう逐次分配
+            let per1 = remain_budget / 2;
+            let per2 = remain_budget - per1;
+
+            // Evaluate child of pv1
+            let mut pos1 = state.position.clone();
+            pos1.do_move(mv1);
+            let mut s1_local = if per1 > 0 {
+                eng.search(
+                    &mut pos1,
+                    engine_core::search::SearchLimits::builder()
+                        .depth(mini_depth)
+                        .fixed_time_ms(per1)
+                        .build(),
+                )
+                .score
+            } else {
+                0
+            };
+            // PV1 がチェックなら微減点（浅い読みの“王手バイアス”抑制）
+            let check_penalty_cp = state.opts.finalize_sanity_check_penalty_cp.max(0);
+            let pv1_check = state.position.gives_check(mv1);
+            if pv1_check {
+                s1_local = s1_local.saturating_sub(check_penalty_cp);
+            }
+
+            // Evaluate child of alt
+            let mut pos2 = state.position.clone();
+            pos2.do_move(mv2);
+            let mut s2_local = if per2 > 0 {
+                eng.search(
+                    &mut pos2,
+                    engine_core::search::SearchLimits::builder()
+                        .depth(mini_depth)
+                        .fixed_time_ms(per2)
+                        .build(),
+                )
+                .score
+            } else {
+                0
+            };
+            // alt がチェックなら微減点（浅い読みの過大評価抑制）
+            let alt_check = state.position.gives_check(mv2);
+            if alt_check {
+                s2_local = s2_local.saturating_sub(check_penalty_cp);
+            }
+            (s1_local, s2_local, pv1_check, alt_check)
+        } else {
             return None;
         }
-        // 2回合計がremain_budgetを超えないよう逐次分配
-        let per1 = remain_budget / 2;
-        let per2 = remain_budget - per1;
-        // Evaluate child of pv1
-        let mut pos1 = state.position.clone();
-        pos1.do_move(mv1);
-        s1 = if per1 > 0 {
-            eng.search(
-                &mut pos1,
-                engine_core::search::SearchLimits::builder()
-                    .depth(mini_depth)
-                    .fixed_time_ms(per1)
-                    .build(),
-            )
-            .score
-        } else {
-            0
-        };
-        // PV1 がチェックなら微減点（浅い読みの“王手バイアス”抑制）
-        const CHECK_PENALTY_CP: i32 = 15;
-        if state.position.gives_check(mv1) {
-            s1 = s1.saturating_sub(CHECK_PENALTY_CP);
-        }
-
-        // Evaluate child of alt
-        let mut pos2 = state.position.clone();
-        pos2.do_move(mv2);
-        let mut s2_local = if per2 > 0 {
-            eng.search(
-                &mut pos2,
-                engine_core::search::SearchLimits::builder()
-                    .depth(mini_depth)
-                    .fixed_time_ms(per2)
-                    .build(),
-            )
-            .score
-        } else {
-            0
-        };
-        // alt がチェックなら微減点（浅い読みの過大評価抑制）
-        if state.position.gives_check(mv2) {
-            s2_local = s2_local.saturating_sub(CHECK_PENALTY_CP);
-        }
-        s2 = s2_local;
-    } else {
-        return None;
-    }
+    };
+    let s1 = s1_temp;
     // 相手最大捕獲SEEに応じてPV1側スコアへ軽いペナルティを付加（過大評価抑制）
     const OPP_SEE_PENALTY_NUM: i32 = 7; // λ=0.7（分数表現）
     const OPP_SEE_PENALTY_DEN: i32 = 10;
@@ -312,7 +324,7 @@ fn finalize_sanity_check(
     let switched = s2 > s1_adj + switch_margin;
     if switched {
         info_string(format!(
-            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{}",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{} pv1_check={} alt_check={}",
             diag_base,
             move_to_usi(&alt),
             s1,
@@ -323,10 +335,12 @@ fn finalize_sanity_check(
             total_budget,
             OPP_SEE_PENALTY_NUM,
             OPP_SEE_PENALTY_DEN,
+            pv1_check_flag as i32,
+            alt_check_flag as i32,
         ));
     } else {
         info_string(format!(
-            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{}",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{} pv1_check={} alt_check={}",
             diag_base,
             move_to_usi(&alt),
             s1,
@@ -335,6 +349,8 @@ fn finalize_sanity_check(
             switch_margin,
             OPP_SEE_PENALTY_NUM,
             OPP_SEE_PENALTY_DEN,
+            pv1_check_flag as i32,
+            alt_check_flag as i32,
         ));
     }
     if switched {
@@ -547,6 +563,8 @@ fn try_lock_engine_with_budget<'a>(
     let start = Instant::now();
     if let Ok(guard) = engine.try_lock() {
         let elapsed = start.elapsed();
+        // ログ: スピン0で取得（静かなケース）
+        diag_info_string(format!("tt_lock_spins=0 budget_ms={}", budget_ms));
         return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
     }
     if budget_ms == 0 {
@@ -557,6 +575,10 @@ fn try_lock_engine_with_budget<'a>(
     while Instant::now() < deadline {
         if let Ok(guard) = engine.try_lock() {
             let elapsed = start.elapsed();
+            // しきい値を超えるスピン/イールドが発生した場合のみ可視化
+            if spins > 0 {
+                info_string(format!("tt_lock_spins={} budget_ms={}", spins, budget_ms));
+            }
             return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
         }
 
@@ -1027,15 +1049,27 @@ pub fn finalize_and_send(
 
     let final_usi = chosen_mv.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
     let ponder_mv = if state.opts.ponder {
-        final_best.pv.get(1).map(move_to_usi).or_else(|| {
+        if maybe_switch.is_some() {
+            // スイッチ時は最終採用手（chosen_mv）基準でTTからのみ取得（PV1の2手目は不一致の恐れがある）
             chosen_mv.and_then(|bm| {
                 let eng = state.engine.lock().unwrap();
                 eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
             })
-        })
+        } else {
+            // スイッチなしなら従来通りPVの2手目を優先し、無ければTTから
+            final_best.pv.get(1).map(move_to_usi).or_else(|| {
+                chosen_mv.and_then(|bm| {
+                    let eng = state.engine.lock().unwrap();
+                    eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
+                })
+            })
+        }
     } else {
         None
     };
+    if maybe_switch.is_some() {
+        info_string("sanity_switch=1");
+    }
     log_and_emit_final_selection(state, label, chosen_src, &final_usi, ponder_mv, &stop_meta);
     // Clear pending_ponder_result to prevent stale buffer usage
     state.pending_ponder_result = None;

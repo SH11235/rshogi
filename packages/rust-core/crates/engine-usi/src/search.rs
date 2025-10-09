@@ -126,6 +126,12 @@ fn handle_go_mate(_cmd: &str, state: &mut EngineState, _gp: &GoParams) -> Result
     let mg = engine_core::movegen::MoveGenerator::new();
     let legal = mg.generate_all(&state.position).unwrap_or_default();
 
+    // ログでモードを明示
+    crate::io::info_string(format!(
+        "mate_mode=1 in_check={} legal_count={}",
+        in_check as u8,
+        legal.len()
+    ));
     if in_check && legal.is_empty() {
         println!("checkmate");
     } else {
