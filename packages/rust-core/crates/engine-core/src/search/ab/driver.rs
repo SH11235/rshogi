@@ -1771,7 +1771,7 @@ mod tests {
     fn stack_cache_preserves_inner_capacity_across_iterations() {
         // Prepare a stack buffer and inflate inner quiet_moves capacity
         let mut buf = super::take_stack_cache();
-        assert_eq!(buf.len(), ((crate::search::constants::MAX_PLY + 1)));
+        assert_eq!(buf.len(), (crate::search::constants::MAX_PLY + 1));
         let idx = 8usize;
         // Inflate capacity by pushing many moves
         for _ in 0..512 {

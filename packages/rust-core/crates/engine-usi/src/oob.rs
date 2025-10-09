@@ -440,7 +440,9 @@ mod tests_oob_finalize {
         let mut pv2 = make_mate1_line(); // Exact mate in 1
         pv2.multipv_index = 2; // PV2
 
-        let lines = smallvec::smallvec![pv1.clone(), pv2.clone()];
+        // SmallVec の inline 容量を明示し型推論エラー (SmallVec<_>) を解消
+        let lines: smallvec::SmallVec<[RootLine; 2]> =
+            smallvec::smallvec![pv1.clone(), pv2.clone()];
         state
             .stop_controller
             .publish_committed_snapshot(sid, root_key, &lines[..], 1000, 10);
