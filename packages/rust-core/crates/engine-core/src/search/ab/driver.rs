@@ -209,6 +209,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         None
     }
     #[inline]
+    fn retries_max(soft_deadline: Option<Duration>, start: &Instant) -> u32 {
+        if let Some(sd) = soft_deadline {
+            let elapsed = start.elapsed();
+            let remain_ms = if sd > elapsed {
+                (sd - elapsed).as_millis() as u64
+            } else {
+                0
+            };
+            if remain_ms <= 40 {
+                2
+            } else {
+                3
+            }
+        } else {
+            3
+        }
+    }
+    #[inline]
     pub(crate) fn classify_root_bound(local_best: i32, alpha_win: i32, beta_win: i32) -> NodeType {
         if local_best <= alpha_win {
             NodeType::UpperBound
@@ -968,21 +986,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         iteration_researches = iteration_researches.saturating_add(1);
                         // If re-searches are piling up on the primary, bail out to a full window
                         // to stabilize PV and avoid time loss.
-                        let retries_max = if let Some(sd) = soft_deadline {
-                            let elapsed = t0.elapsed();
-                            let remain_ms = if sd > elapsed {
-                                (sd - elapsed).as_millis() as u64
-                            } else {
-                                0
-                            };
-                            if remain_ms <= 40 {
-                                2
-                            } else {
-                                3
-                            }
-                        } else {
-                            3
-                        };
+                        let retries_max = Self::retries_max(soft_deadline, &t0);
                         if !is_helper && iteration_researches >= retries_max {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
@@ -1016,21 +1020,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
-                        let retries_max = if let Some(sd) = soft_deadline {
-                            let elapsed = t0.elapsed();
-                            let remain_ms = if sd > elapsed {
-                                (sd - elapsed).as_millis() as u64
-                            } else {
-                                0
-                            };
-                            if remain_ms <= 40 {
-                                2
-                            } else {
-                                3
-                            }
-                        } else {
-                            3
-                        };
+                        let retries_max = Self::retries_max(soft_deadline, &t0);
                         if !is_helper && iteration_researches >= retries_max {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
