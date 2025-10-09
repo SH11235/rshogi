@@ -78,6 +78,16 @@ struct MoveGenImpl<'a> {
 }
 
 impl<'a> MoveGenImpl<'a> {
+    #[inline]
+    fn extend_from_king(&mut self, df: i8, dr: i8) {
+        let mut f = self.king_sq.file() as i8 + df;
+        let mut r = self.king_sq.rank() as i8 + dr;
+        while (0..BOARD_FILES as i8).contains(&f) && (0..BOARD_RANKS as i8).contains(&r) {
+            self.king_danger_squares.set(Square::new(f as u8, r as u8));
+            f += df;
+            r += dr;
+        }
+    }
     /// Create a new move generation context
     fn new(pos: &'a Position) -> Result<Self, MoveGenError> {
         let us = pos.side_to_move;
@@ -783,17 +793,6 @@ impl<'a> MoveGenImpl<'a> {
         };
         let promoted = self.pos.board.promoted_bb.test(checker_sq);
 
-        // 便利関数: 2点が斜め一直線にあるか
-        let is_diag_aligned = |a: Square, b: Square| -> bool {
-            let fd = (a.file() as i8 - b.file() as i8).abs();
-            let rd = (a.rank() as i8 - b.rank() as i8).abs();
-            fd == rd && fd != 0
-        };
-
-        // 便利関数: 2点が同筋または同段にあるか
-        let is_orth_aligned =
-            |a: Square, b: Square| -> bool { a.file() == b.file() || a.rank() == b.rank() };
-
         // 2点間に駒が存在しないか
         let between_clear = || -> bool {
             let between = between_bb(checker_sq, self.king_sq);
@@ -802,47 +801,26 @@ impl<'a> MoveGenImpl<'a> {
 
         match checker_piece.piece_type {
             PieceType::Rook => {
-                // 竜(+R)でも滑走王手の場合は延長、接近王手の場合は延長しない。
-                if is_orth_aligned(self.king_sq, checker_sq) && between_clear() {
+                // 竜(+R)でも「直線の滑走王手」のときだけ延長。
+                // 竜の「斜め1歩（King-like）」による接近王手は延長しない。
+                if self.is_aligned_rook(self.king_sq, checker_sq) && between_clear() {
                     if self.king_sq.file() == checker_sq.file() {
-                        // 同筋: チェッカーと反対方向に延長
-                        let rank_step =
-                            (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-                        let mut r = self.king_sq.rank() as i8 + rank_step;
-                        while (0..BOARD_RANKS as i8).contains(&r) {
-                            self.king_danger_squares.set(Square::new(self.king_sq.file(), r as u8));
-                            r += rank_step;
-                        }
+                        let dr = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                        self.extend_from_king(0, dr);
                     } else {
-                        // 同段
-                        let file_step =
-                            (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
-                        let mut f = self.king_sq.file() as i8 + file_step;
-                        while (0..BOARD_FILES as i8).contains(&f) {
-                            self.king_danger_squares.set(Square::new(f as u8, self.king_sq.rank()));
-                            f += file_step;
-                        }
+                        let df = (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                        self.extend_from_king(df, 0);
                     }
                 } else {
-                    // 非整列 or 遮蔽あり = 接近王手 or 間接王手 → 延長しない
-                    let _ = promoted; // silence unused in non-debug
+                    let _ = promoted; // 接近王手等は延長しない
                 }
             }
             PieceType::Bishop => {
                 // 馬(+B)でも、斜め一直線で遮蔽なし=滑走王手のときのみ延長。
-                if is_diag_aligned(self.king_sq, checker_sq) && between_clear() {
-                    let file_step = (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
-                    let rank_step = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-
-                    let mut file = self.king_sq.file() as i8 + file_step;
-                    let mut rank = self.king_sq.rank() as i8 + rank_step;
-                    while (0..BOARD_FILES as i8).contains(&file)
-                        && (0..BOARD_RANKS as i8).contains(&rank)
-                    {
-                        self.king_danger_squares.set(Square::new(file as u8, rank as u8));
-                        file += file_step;
-                        rank += rank_step;
-                    }
+                if self.is_aligned_bishop(self.king_sq, checker_sq) && between_clear() {
+                    let df = (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                    let dr = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                    self.extend_from_king(df, dr);
                 } else {
                     let _ = promoted; // 接近王手等は延長しない
                 }
@@ -850,16 +828,14 @@ impl<'a> MoveGenImpl<'a> {
             PieceType::Lance => {
                 // 香は未成のみ滑走。成香（+L=金相当）での接近王手は延長しない。
                 if !promoted && self.king_sq.file() == checker_sq.file() && between_clear() {
-                    let rank_step = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-                    let mut r = self.king_sq.rank() as i8 + rank_step;
-                    while (0..BOARD_RANKS as i8).contains(&r) {
-                        self.king_danger_squares.set(Square::new(self.king_sq.file(), r as u8));
-                        r += rank_step;
-                    }
+                    let dr = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                    self.extend_from_king(0, dr);
                 }
             }
             _ => {}
         }
+
+        debug_assert!(!self.king_danger_squares.test(self.king_sq));
     }
 
     /// Calculate pin rays for all pinned pieces
