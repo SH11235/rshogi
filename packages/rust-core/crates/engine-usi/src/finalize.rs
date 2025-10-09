@@ -166,10 +166,12 @@ fn finalize_sanity_check(
     let mut alt_from_pv2 = false;
     // PV2 候補の合法性確認（擬似合法の可能性を排除）
     // Validate PV2 candidate legality to prevent pseudo-legal moves from being selected
+    let mut pv2_illegal = false;
     if let Some(mv0) = best_alt {
         if !state.position.is_legal_move(mv0) {
             info_string("sanity_pv2_illegal=1 fallback=see_best");
             best_alt = None; // Fallback to SEE-best candidate
+            pv2_illegal = true;
         } else if mv0.equals_without_piece_type(&pv1) {
             best_alt = None; // 同一手は除外
         } else if let (Some(res), Some(mv0)) = (result, best_alt) {
@@ -190,6 +192,10 @@ fn finalize_sanity_check(
             continue;
         }
         if !state.position.is_legal_move(mv) {
+            continue;
+        }
+        // PV1 と同一手（駒種無視）は除外（PV2と同じ基準で統一）
+        if mv.equals_without_piece_type(&pv1) {
             continue;
         }
         let s = state.position.see(mv);
@@ -331,7 +337,7 @@ fn finalize_sanity_check(
             s1_adj,
             s2,
             switch_margin,
-            if alt_from_pv2 { "pv2" } else { "see_best" },
+            if alt_from_pv2 { "pv2" } else if pv2_illegal { "pv2_illegal->see_best" } else { "see_best" },
             total_budget,
             OPP_SEE_PENALTY_NUM,
             OPP_SEE_PENALTY_DEN,
@@ -640,6 +646,7 @@ pub fn finalize_and_send(
         let mut committed_pv = res.stats.pv.clone();
         if let Some(bm) = res.best_move {
             // Use equals_without_piece_type to avoid false positives from piece type differences
+            // MSRV互換のため map_or(true, ...) を使用
             let has_mismatch =
                 committed_pv.first().is_none_or(|pv0| !pv0.equals_without_piece_type(&bm));
             if has_mismatch {
