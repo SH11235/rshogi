@@ -93,15 +93,8 @@ fn finalize_sanity_check(
             return None;
         }
     }
-    // 王手の即時性が高い場合はFinalizeSanityの軽量判定をスキップ
-    // （浅いミニ探索が過大評価しやすいため）。
-    {
-        let mut tmp = state.position.clone();
-        tmp.do_move(pv1);
-        if tmp.is_in_check() {
-            return None;
-        }
-    }
+    // 以前は「PV1が王手ならFinalizeSanityをスキップ」していたが、
+    // 対称性のためスキップは行わず、後段で微小ペナルティを適用する。
     // SEE gate (own move) + Opponent capture SEE gate after PV1
     let see = state.position.see(pv1);
     let see_min = state.opts.finalize_sanity_see_min_cp;
@@ -139,7 +132,12 @@ fn finalize_sanity_check(
         }
     }
 
-    let diag_base = format!("sanity_checked=1 see={} opp_cap_see_max={}", see, opp_cap_see_max);
+    let see_min_dbg = state.opts.finalize_sanity_see_min_cp;
+    let opp_gate_dbg = state.opts.finalize_sanity_opp_see_min_cp.max(0);
+    let diag_base = format!(
+        "sanity_checked=1 see={} see_min={} opp_cap_see_max={} opp_gate={}",
+        see, see_min_dbg, opp_cap_see_max, opp_gate_dbg
+    );
     if !need_verify {
         info_string(format!("{} switched=0 reason=see_ok", diag_base));
         return None;
@@ -238,14 +236,20 @@ fn finalize_sanity_check(
         return None;
     }
     // Mini search (depth 1-2) for pv1 vs alt
-    let mini_depth = state.opts.finalize_sanity_mini_depth;
+    let mini_depth = state.opts.finalize_sanity_mini_depth.max(1); // 下限ガード（options側でもclamp済だが安全側）
     let switch_margin = state.opts.finalize_sanity_switch_margin_cp;
-    let (s1, s2);
+    let (mut s1, s2);
     let (mv1, mv2) = (pv1, alt);
     // Lock engine with small budget
     if let Some((mut eng, spent_ms, _)) = try_lock_engine_with_budget(&state.engine, total_budget) {
         // 予算厳守: ロックに消費した時間を差し引く
         let remain_budget = total_budget.saturating_sub(spent_ms);
+        if spent_ms > (total_budget / 2) {
+            info_string(format!(
+                "sanity_lock_heavy=1 spent_ms={} total_ms={}",
+                spent_ms, total_budget
+            ));
+        }
         if remain_budget == 0 {
             return None;
         }
@@ -267,6 +271,11 @@ fn finalize_sanity_check(
         } else {
             0
         };
+        // PV1 がチェックなら微減点（浅い読みの“王手バイアス”抑制）
+        const CHECK_PENALTY_CP: i32 = 15;
+        if state.position.gives_check(mv1) {
+            s1 = s1.saturating_sub(CHECK_PENALTY_CP);
+        }
 
         // Evaluate child of alt
         let mut pos2 = state.position.clone();
@@ -284,9 +293,8 @@ fn finalize_sanity_check(
             0
         };
         // alt がチェックなら微減点（浅い読みの過大評価抑制）
-        const ALT_CHECK_PENALTY_CP: i32 = 15;
         if state.position.gives_check(mv2) {
-            s2_local = s2_local.saturating_sub(ALT_CHECK_PENALTY_CP);
+            s2_local = s2_local.saturating_sub(CHECK_PENALTY_CP);
         }
         s2 = s2_local;
     } else {
@@ -295,7 +303,7 @@ fn finalize_sanity_check(
     // 相手最大捕獲SEEに応じてPV1側スコアへ軽いペナルティを付加（過大評価抑制）
     const OPP_SEE_PENALTY_NUM: i32 = 7; // λ=0.7（分数表現）
     const OPP_SEE_PENALTY_DEN: i32 = 10;
-    let penalty_cap = state.opts.finalize_sanity_opp_see_min_cp.max(0);
+    let penalty_cap = state.opts.finalize_sanity_opp_see_penalty_cap_cp.max(0);
     let capped = opp_cap_see_max.min(penalty_cap).max(0) as i64;
     let opp_penalty_i64 =
         capped.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
@@ -951,8 +959,19 @@ pub fn finalize_and_send(
                         s.push_str(&format!(" nodes {}", line_nodes));
                         s.push_str(&format!(" nps {}", line_nps));
                         s.push_str(&format!(" hashfull {}", hf_permille));
-                        let view = score_view_with_clamp(line.score_internal);
-                        append_usi_score_and_bound(&mut s, view, line.bound);
+                        // PV1（index==1）のみ、必要ならscore/boundをStable由来で上書き
+                        let score_used = if index == 1 {
+                            info_score_override.unwrap_or(line.score_internal)
+                        } else {
+                            line.score_internal
+                        };
+                        let bound_used = if index == 1 {
+                            info_bound_override.unwrap_or(line.bound)
+                        } else {
+                            line.bound
+                        };
+                        let view = score_view_with_clamp(score_used);
+                        append_usi_score_and_bound(&mut s, view, bound_used);
                         if !line.pv.is_empty() {
                             s.push_str(" pv");
                             for m in line.pv.iter() {

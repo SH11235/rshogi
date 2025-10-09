@@ -95,13 +95,46 @@ pub fn parse_go(cmd: &str) -> GoParams {
                 gp.rtime = it.next().and_then(|v| v.parse().ok());
             }
             "movestogo" => gp.moves_to_go = it.next().and_then(|v| v.parse().ok()),
+            // USI: go mate [<limit_ms>|infinite]
             "mate" => {
-                let _ = it.next();
+                gp.mate_mode = true;
+                if let Some(next) = it.next() {
+                    if next.eq_ignore_ascii_case("infinite") {
+                        gp.mate_limit_ms = None;
+                    } else if let Ok(v) = next.parse::<u64>() {
+                        gp.mate_limit_ms = Some(v);
+                    } else {
+                        // 仕様上は数値 or infinite想定。異常値は infinite とみなす。
+                        gp.mate_limit_ms = None;
+                    }
+                } else {
+                    // 引数省略は infinite とみなす実装が一般的
+                    gp.mate_limit_ms = None;
+                }
             }
             _ => {}
         }
     }
     gp
+}
+
+fn handle_go_mate(_cmd: &str, state: &mut EngineState, _gp: &GoParams) -> Result<()> {
+    // 暫定版: 即時判定のみ（探索なし）。bestmove は絶対に出さない。
+    // 1) 王手判定 + 合法手0 → checkmate
+    // 2) それ以外 → checkmate nomate
+    let in_check = state.position.is_in_check();
+    let mg = engine_core::movegen::MoveGenerator::new();
+    let legal = mg.generate_all(&state.position).unwrap_or_default();
+
+    if in_check && legal.is_empty() {
+        println!("checkmate");
+    } else {
+        // 将来: gp.mate_limit_ms を用いた打ち切り応答や探索結果に応じて切替
+        println!("checkmate nomate");
+    }
+    // 検討経路でもアイドル通知は出す（stop連携用の内部状態を早めに戻す）
+    state.notify_idle();
+    Ok(())
 }
 
 pub fn limits_from_go(
@@ -271,6 +304,11 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     if gp.ponder && !state.opts.ponder {
         info_string("ponder_disabled_guard=1");
         gp.ponder = false;
+    }
+
+    // go mate は通常探索から完全分岐（bestmove を出さない）。
+    if gp.mate_mode {
+        return handle_go_mate(cmd, state, &gp);
     }
 
     state.last_go_params = Some(gp.clone());
