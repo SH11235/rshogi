@@ -767,69 +767,98 @@ impl<'a> MoveGenImpl<'a> {
         }
     }
 
-    /// Calculate danger squares where king cannot move when in check from sliding pieces
+    /// Calculate danger squares where king cannot move when in check from sliding pieces.
+    ///
+    /// 重要: 本関数は「滑走利きで王手されている場合」にのみ、王から
+    /// チェッカーと反対方向のレイを危険マスとして塗る。
+    /// 馬/竜の接近利き（king-like 1歩）の王手や、幾何的に整列していない
+    /// ケースでは危険マス延長を行わない。
     fn calculate_king_danger_squares(&mut self) {
-        if let Some(checker_sq) = self.checkers.lsb() {
-            if let Some(checker_piece) = self.pos.board.piece_on(checker_sq) {
-                match checker_piece.piece_type {
-                    PieceType::Rook => {
-                        // For rook, only squares along the line AWAY from the checker
-                        if self.king_sq.file() == checker_sq.file() {
-                            // Same file - move away from checker direction
-                            let rank_step =
-                                (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-                            let mut r = self.king_sq.rank() as i8 + rank_step;
-                            while (0..BOARD_RANKS as i8).contains(&r) {
-                                self.king_danger_squares
-                                    .set(Square::new(self.king_sq.file(), r as u8));
-                                r += rank_step;
-                            }
-                        } else if self.king_sq.rank() == checker_sq.rank() {
-                            // Same rank - move away from checker direction
-                            let file_step =
-                                (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
-                            let mut f = self.king_sq.file() as i8 + file_step;
-                            while (0..BOARD_FILES as i8).contains(&f) {
-                                self.king_danger_squares
-                                    .set(Square::new(f as u8, self.king_sq.rank()));
-                                f += file_step;
-                            }
-                        }
-                    }
-                    PieceType::Bishop => {
-                        // For bishop, only squares along the diagonal AWAY from the checker
-                        let file_step =
-                            (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+        let Some(checker_sq) = self.checkers.lsb() else {
+            return;
+        };
+
+        let Some(checker_piece) = self.pos.board.piece_on(checker_sq) else {
+            return;
+        };
+        let promoted = self.pos.board.promoted_bb.test(checker_sq);
+
+        // 便利関数: 2点が斜め一直線にあるか
+        let is_diag_aligned = |a: Square, b: Square| -> bool {
+            let fd = (a.file() as i8 - b.file() as i8).abs();
+            let rd = (a.rank() as i8 - b.rank() as i8).abs();
+            fd == rd && fd != 0
+        };
+
+        // 便利関数: 2点が同筋または同段にあるか
+        let is_orth_aligned =
+            |a: Square, b: Square| -> bool { a.file() == b.file() || a.rank() == b.rank() };
+
+        // 2点間に駒が存在しないか
+        let between_clear = || -> bool {
+            let between = between_bb(checker_sq, self.king_sq);
+            (between & self.occupied).is_empty()
+        };
+
+        match checker_piece.piece_type {
+            PieceType::Rook => {
+                // 竜(+R)でも滑走王手の場合は延長、接近王手の場合は延長しない。
+                if is_orth_aligned(self.king_sq, checker_sq) && between_clear() {
+                    if self.king_sq.file() == checker_sq.file() {
+                        // 同筋: チェッカーと反対方向に延長
                         let rank_step =
                             (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-
-                        // Move one step away from checker direction
-                        let mut file = self.king_sq.file() as i8 + file_step;
-                        let mut rank = self.king_sq.rank() as i8 + rank_step;
-                        while (0..BOARD_FILES as i8).contains(&file)
-                            && (0..BOARD_RANKS as i8).contains(&rank)
-                        {
-                            self.king_danger_squares.set(Square::new(file as u8, rank as u8));
-                            file += file_step;
-                            rank += rank_step;
+                        let mut r = self.king_sq.rank() as i8 + rank_step;
+                        while (0..BOARD_RANKS as i8).contains(&r) {
+                            self.king_danger_squares.set(Square::new(self.king_sq.file(), r as u8));
+                            r += rank_step;
+                        }
+                    } else {
+                        // 同段
+                        let file_step =
+                            (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                        let mut f = self.king_sq.file() as i8 + file_step;
+                        while (0..BOARD_FILES as i8).contains(&f) {
+                            self.king_danger_squares.set(Square::new(f as u8, self.king_sq.rank()));
+                            f += file_step;
                         }
                     }
-                    PieceType::Lance => {
-                        // For lance, only squares along the file AWAY from the checker
-                        if self.king_sq.file() == checker_sq.file() {
-                            let rank_step =
-                                (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-                            let mut r = self.king_sq.rank() as i8 + rank_step;
-                            while (0..BOARD_RANKS as i8).contains(&r) {
-                                self.king_danger_squares
-                                    .set(Square::new(self.king_sq.file(), r as u8));
-                                r += rank_step;
-                            }
-                        }
-                    }
-                    _ => {} // Other pieces don't have ray attacks
+                } else {
+                    // 非整列 or 遮蔽あり = 接近王手 or 間接王手 → 延長しない
+                    let _ = promoted; // silence unused in non-debug
                 }
             }
+            PieceType::Bishop => {
+                // 馬(+B)でも、斜め一直線で遮蔽なし=滑走王手のときのみ延長。
+                if is_diag_aligned(self.king_sq, checker_sq) && between_clear() {
+                    let file_step = (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                    let rank_step = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+
+                    let mut file = self.king_sq.file() as i8 + file_step;
+                    let mut rank = self.king_sq.rank() as i8 + rank_step;
+                    while (0..BOARD_FILES as i8).contains(&file)
+                        && (0..BOARD_RANKS as i8).contains(&rank)
+                    {
+                        self.king_danger_squares.set(Square::new(file as u8, rank as u8));
+                        file += file_step;
+                        rank += rank_step;
+                    }
+                } else {
+                    let _ = promoted; // 接近王手等は延長しない
+                }
+            }
+            PieceType::Lance => {
+                // 香は未成のみ滑走。成香（+L=金相当）での接近王手は延長しない。
+                if !promoted && self.king_sq.file() == checker_sq.file() && between_clear() {
+                    let rank_step = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                    let mut r = self.king_sq.rank() as i8 + rank_step;
+                    while (0..BOARD_RANKS as i8).contains(&r) {
+                        self.king_danger_squares.set(Square::new(self.king_sq.file(), r as u8));
+                        r += rank_step;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
