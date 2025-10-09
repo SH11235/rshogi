@@ -955,6 +955,39 @@ mod tests {
     }
 
     #[test]
+    fn planned_mate_tag_is_overwritten_by_hard() {
+        use crate::search::types::TerminationReason;
+        use std::sync::mpsc;
+
+        let ctrl = StopController::new();
+        let (tx, rx) = mpsc::channel();
+        ctrl.register_finalizer(tx);
+        let external = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&external), 1);
+        // Drain SessionStart
+        let _ = rx.recv();
+        ctrl.prime_stop_info(StopInfo::default());
+
+        ctrl.request_finalize(FinalizeReason::PlannedMate {
+            distance: 1,
+            was_ponder: false,
+        });
+        let _ = rx.recv();
+        {
+            let info = ctrl.try_read_stop_info().expect("present");
+            assert_eq!(info.reason, TerminationReason::TimeLimit);
+            assert!(info.stop_tag.as_deref().unwrap_or("").contains("planned_mate"));
+        }
+
+        // Hard should overwrite tag to hard_deadline
+        ctrl.request_finalize(FinalizeReason::Hard);
+        let _ = rx.recv();
+        let info = ctrl.try_read_stop_info().expect("present");
+        assert_eq!(info.reason, TerminationReason::TimeLimit);
+        assert_eq!(info.stop_tag.as_deref(), Some("hard_deadline"));
+    }
+
+    #[test]
     fn snapshot_depth_is_clamped_to_u8_max() {
         use crate::search::types::{Bound, RootLine};
         use crate::shogi::Move;
