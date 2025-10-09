@@ -968,7 +968,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         iteration_researches = iteration_researches.saturating_add(1);
                         // If re-searches are piling up on the primary, bail out to a full window
                         // to stabilize PV and avoid time loss.
-                        if !is_helper && iteration_researches >= 3 {
+                        let retries_max = if let Some(sd) = soft_deadline {
+                            let elapsed = t0.elapsed();
+                            let remain_ms = if sd > elapsed {
+                                (sd - elapsed).as_millis() as u64
+                            } else {
+                                0
+                            };
+                            if remain_ms <= 40 {
+                                2
+                            } else {
+                                3
+                            }
+                        } else {
+                            3
+                        };
+                        if !is_helper && iteration_researches >= retries_max {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1001,7 +1016,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
-                        if !is_helper && iteration_researches >= 3 {
+                        let retries_max = if let Some(sd) = soft_deadline {
+                            let elapsed = t0.elapsed();
+                            let remain_ms = if sd > elapsed {
+                                (sd - elapsed).as_millis() as u64
+                            } else {
+                                0
+                            };
+                            if remain_ms <= 40 {
+                                2
+                            } else {
+                                3
+                            }
+                        } else {
+                            3
+                        };
+                        if !is_helper && iteration_researches >= retries_max {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;

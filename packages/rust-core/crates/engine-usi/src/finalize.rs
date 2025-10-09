@@ -90,6 +90,15 @@ fn finalize_sanity_check(
             return None;
         }
     }
+    // 王手の即時性が高い場合はFinalizeSanityの軽量判定をスキップ
+    // （浅いミニ探索が過大評価しやすいため）。
+    {
+        let mut tmp = state.position.clone();
+        tmp.do_move(pv1);
+        if tmp.is_in_check() {
+            return None;
+        }
+    }
     // SEE gate (own move) + Opponent capture SEE gate after PV1
     let see = state.position.see(pv1);
     let see_min = state.opts.finalize_sanity_see_min_cp;
@@ -190,9 +199,28 @@ fn finalize_sanity_check(
         info_string(format!("{} switched=0 reason=no_alt", diag_base));
         return None;
     };
-    // Budget
+    // Budget（動的化）: remain/32 を基準に 2..10ms にクランプし、USIオプションの上限で抑制
     let budget_max = state.opts.finalize_sanity_budget_ms;
-    let total_budget = compute_tt_probe_budget_ms(stop_meta.info.as_ref(), 0).min(budget_max);
+    let dynamic_budget = if let Some(si) = stop_meta.info.as_ref() {
+        let mut limit = u64::MAX;
+        if si.soft_limit_ms > 0 {
+            limit = limit.min(si.soft_limit_ms);
+        }
+        if si.hard_limit_ms > 0 {
+            limit = limit.min(si.hard_limit_ms);
+        }
+        if limit == u64::MAX || limit == 0 || si.elapsed_ms >= limit {
+            0
+        } else {
+            let remain = limit - si.elapsed_ms;
+            let mut b = remain / 32;
+            b = b.clamp(2, 10);
+            b
+        }
+    } else {
+        0
+    };
+    let total_budget = dynamic_budget.min(budget_max);
     // Split budget across both mini searches（合計上限を厳守）
     let per_budget = if total_budget >= 2 {
         total_budget / 2
@@ -237,13 +265,18 @@ fn finalize_sanity_check(
     } else {
         return None;
     }
-    let switched = s2 > s1 + switch_margin;
+    // 相手最大捕獲SEEに応じてPV1側スコアへ軽いペナルティを付加（過大評価抑制）
+    let penalty_cap = state.opts.finalize_sanity_opp_see_min_cp.max(0);
+    let opp_penalty = (opp_cap_see_max.min(penalty_cap) * 7) / 10; // λ=0.7 相当
+    let s1_adj = s1 - opp_penalty;
+    let switched = s2 > s1_adj + switch_margin;
     if switched {
         info_string(format!(
-            "{} alt={} s1={} s2={} margin={} switched=1 origin={} total_budget_ms={} per_ms={}",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} per_ms={}",
             diag_base,
             move_to_usi(&alt),
             s1,
+            s1_adj,
             s2,
             switch_margin,
             if alt_from_pv2 { "pv2" } else { "see_best" },
@@ -252,10 +285,11 @@ fn finalize_sanity_check(
         ));
     } else {
         info_string(format!(
-            "{} alt={} s1={} s2={} margin={} switched=0",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0",
             diag_base,
             move_to_usi(&alt),
             s1,
+            s1_adj,
             s2,
             switch_margin,
         ));
@@ -536,6 +570,7 @@ pub fn finalize_and_send(
     }
     diag_info_string(format!("{label}_claim_success=1"));
 
+    let mut pv_head_mismatch_flag = false;
     let committed = if let Some(res) = result {
         let mut committed_pv = res.stats.pv.clone();
         if let Some(bm) = res.best_move {
@@ -543,6 +578,7 @@ pub fn finalize_and_send(
             let has_mismatch =
                 committed_pv.first().is_none_or(|pv0| !pv0.equals_without_piece_type(&bm));
             if has_mismatch {
+                pv_head_mismatch_flag = true;
                 diag_info_string(format!(
                     "pv_head_mismatch=1 pv0={} best={}",
                     committed_pv.first().map(move_to_usi).unwrap_or_else(|| "-".to_string()),
@@ -597,6 +633,12 @@ pub fn finalize_and_send(
             ));
         }
     }
+    // If PV頭をbest_moveへ差し替えた場合に限り、info出力のscoreをStableスナップショットのcpへ上書き
+    let info_score_override: Option<i32> = if pv_head_mismatch_flag {
+        snapshot_committed.as_ref().map(|ci| ci.score)
+    } else {
+        None
+    };
     let final_best = {
         let eng = state.engine.lock().unwrap();
         if let Some(ci) = snapshot_committed.as_ref() {
@@ -881,10 +923,10 @@ pub fn finalize_and_send(
                         usi_println(&s);
                     }
                 } else {
-                    emit_single_pv(res, &final_best, nps_agg, hf_permille);
+                    emit_single_pv(res, &final_best, nps_agg, hf_permille, info_score_override);
                 }
             } else {
-                emit_single_pv(res, &final_best, nps_agg, hf_permille);
+                emit_single_pv(res, &final_best, nps_agg, hf_permille, info_score_override);
             }
         }
     }
@@ -926,7 +968,13 @@ pub fn finalize_and_send(
     state.pending_ponder_result = None;
 }
 
-fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_permille: u16) {
+fn emit_single_pv(
+    res: &SearchResult,
+    final_best: &FinalBest,
+    nps_agg: u128,
+    hf_permille: u16,
+    score_override: Option<i32>,
+) {
     let mut s = String::from("info");
     s.push_str(&format!(" depth {}", res.stats.depth));
     if let Some(sd) = res.stats.seldepth {
@@ -937,7 +985,8 @@ fn emit_single_pv(res: &SearchResult, final_best: &FinalBest, nps_agg: u128, hf_
     s.push_str(&format!(" nps {}", nps_agg));
     s.push_str(&format!(" hashfull {}", hf_permille));
 
-    let view = score_view_with_clamp(res.score);
+    let score_to_use = score_override.unwrap_or(res.score);
+    let view = score_view_with_clamp(score_to_use);
     append_usi_score_and_bound(&mut s, view, res.node_type);
 
     let pv_ref: &[_] = if !final_best.pv.is_empty() {

@@ -122,7 +122,7 @@ impl Default for UsiOptions {
             finalize_sanity_budget_ms: 2,
             finalize_sanity_mini_depth: 2,
             finalize_sanity_see_min_cp: -90,
-            finalize_sanity_switch_margin_cp: 80,
+            finalize_sanity_switch_margin_cp: 30,
             finalize_sanity_opp_see_min_cp: 300,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
