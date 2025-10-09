@@ -82,12 +82,13 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             }
         }
         if let Some(dl) = limits.fallback_deadlines {
+            let elapsed = limits.start_time.elapsed().as_millis() as u64;
             let mut rem = u64::MAX;
-            if dl.soft_limit_ms > 0 {
-                rem = rem.min(dl.soft_limit_ms);
+            if dl.soft_limit_ms > elapsed {
+                rem = rem.min(dl.soft_limit_ms - elapsed);
             }
-            if dl.hard_limit_ms > 0 {
-                rem = rem.min(dl.hard_limit_ms);
+            if dl.hard_limit_ms > elapsed {
+                rem = rem.min(dl.hard_limit_ms - elapsed);
             }
             if rem != u64::MAX {
                 let cand = t0 + Duration::from_millis(rem);
@@ -98,7 +99,8 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             let cand = t0 + limit;
             deadline = Some(deadline.map(|d| d.min(cand)).unwrap_or(cand));
         }
-        let mut _guard_stack_tombstone: SmallVec<[EvalMoveGuard<'_, E>; 32]> = SmallVec::new();
+        // Keep evaluator in sync with `pos` while we descend the PV.
+        let mut guard_stack: SmallVec<[EvalMoveGuard<'_, E>; 32]> = SmallVec::new();
         while d > 0 {
             if ClassicBackend::<E>::should_stop(limits) {
                 break;
@@ -154,11 +156,14 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
             first_used = true;
             pv.push(mv);
             {
-                let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), &pos, mv);
+                let guard = EvalMoveGuard::new(self.evaluator.as_ref(), &pos, mv);
                 pos.do_move(mv);
+                guard_stack.push(guard);
             }
             d -= 1;
         }
+        // Drop guards to return evaluator to the root position.
+        drop(guard_stack);
         super::driver::return_stack_cache(stack_buf);
         pv
     }
