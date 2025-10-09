@@ -68,6 +68,8 @@ pub struct UsiOptions {
     pub finalize_sanity_opp_see_min_cp: i32,
     // Opponent capture SEE penalty cap (independent from opp_see_min gate)
     pub finalize_sanity_opp_see_penalty_cap_cp: i32,
+    // Check move micro penalty for finalize sanity symmetric bias suppression
+    pub finalize_sanity_check_penalty_cp: i32,
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
@@ -127,6 +129,7 @@ impl Default for UsiOptions {
             finalize_sanity_switch_margin_cp: 30,
             finalize_sanity_opp_see_min_cp: 300,
             finalize_sanity_opp_see_penalty_cap_cp: 200,
+            finalize_sanity_check_penalty_cp: 15,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             instant_mate_check_all_pv: false,

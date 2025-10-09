@@ -141,6 +141,8 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println(
         "option name FinalizeSanity.OppSEE_PenaltyCapCp type spin default 200 min 0 max 5000",
     );
+    // Symmetric check-move penalty for finalize sanity
+    usi_println("option name FinalizeSanity.CheckPenaltyCp type spin default 15 min 0 max 100");
 
     // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
     usi_println(&format!(
@@ -619,6 +621,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     state.opts.finalize_sanity_opp_see_penalty_cap_cp = x.clamp(0, 5000);
+                }
+            }
+        }
+        "FinalizeSanity.CheckPenaltyCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_sanity_check_penalty_cp = x.clamp(0, 100);
                 }
             }
         }
