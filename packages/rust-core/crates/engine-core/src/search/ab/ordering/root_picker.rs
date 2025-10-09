@@ -59,6 +59,8 @@ impl RootPicker {
             }
             _ => (None, 0),
         };
+        // Cache MoveGenerator outside the loop for Post-Verify optimization
+        let mg = MoveGenerator::new();
         let mut scored = Vec::with_capacity(moves.len());
         for (idx, &mv) in moves.iter().enumerate() {
             let is_check = pos.gives_check(mv) as i32;
@@ -82,11 +84,11 @@ impl RootPicker {
 
             // Post‑Verify (cheap approximation at ordering stage):
             // If opponent's best immediate capture (by SEE) is large, demote this move.
-            if crate::search::config::post_verify_enabled() {
+            // Only apply if move is not a good capture or has negative SEE to reduce overhead.
+            if crate::search::config::post_verify_enabled() && (!good_capture || see < 0) {
                 // Build child and find opponent best capture by SEE
                 let mut child = pos.clone();
                 let _ = child.do_move(mv);
-                let mg = MoveGenerator::new();
                 let mut opp_best_see = i32::MIN / 2;
                 if let Ok(moves2) = mg.generate_all(&child) {
                     for m2 in moves2 {
@@ -144,8 +146,8 @@ impl RootPicker {
         let len = scored.len();
         let primary = Vec::new();
         let mut fallback = Vec::with_capacity(len);
-        for entry in &scored {
-            fallback.push(entry.order);
+        for i in 0..len {
+            fallback.push(i);
         }
 
         Self {
@@ -172,10 +174,7 @@ impl RootPicker {
     }
 
     fn entry_at(&self, idx: usize) -> Option<(Move, i32, usize)> {
-        self.scored
-            .iter()
-            .find(|entry| entry.order == idx)
-            .map(|entry| (entry.mv, entry.key, entry.order))
+        self.scored.get(idx).map(|e| (e.mv, e.key, e.order))
     }
 }
 
