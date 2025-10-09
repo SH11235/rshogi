@@ -118,7 +118,7 @@ impl RootPicker {
                 }
             }
 
-            // Post‑Verify（近似）: root限定・王手回避中のみ。
+            // Post‑Verify（近似）: root限定・王手回避中は除外（!in_check のときのみ適用）
             #[cfg(feature = "diagnostics")]
             let mut penal_post = false;
             if crate::search::config::post_verify_enabled() && !good_capture && !in_check {
@@ -138,12 +138,13 @@ impl RootPicker {
                 }
                 let y_th = crate::search::config::post_verify_ydrop_cp();
                 if opp_best_see > y_th {
-                    let base = 50;
-                    let over = (opp_best_see - y_th).max(0);
-                    let mut penalty = base + over;
+                    let base_i64: i64 = 50;
+                    let over_i64: i64 = (opp_best_see - y_th).max(0) as i64;
+                    let mut penalty_i64 = base_i64 + over_i64;
                     if is_check != 0 {
-                        penalty /= 2;
+                        penalty_i64 /= 2;
                     }
+                    let penalty = penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                     key = key.saturating_sub(penalty);
                     #[cfg(feature = "diagnostics")]
                     {
@@ -185,7 +186,7 @@ impl RootPicker {
             }
 
             #[cfg(feature = "diagnostics")]
-            if key_root_see_penalty_applied {
+            if penal_see {
                 root_see_penalized += 1;
             }
             #[cfg(feature = "diagnostics")]
@@ -201,7 +202,7 @@ impl RootPicker {
                 key,
                 order: idx,
                 #[cfg(feature = "diagnostics")]
-                penal_see: key_root_see_penalty_applied,
+                penal_see,
                 #[cfg(feature = "diagnostics")]
                 penal_post,
             };
