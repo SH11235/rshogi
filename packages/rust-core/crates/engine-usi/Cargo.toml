@@ -10,6 +10,7 @@ env_logger = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smallvec = { workspace = true }
 
 engine-core = { path = "../engine-core" }
 

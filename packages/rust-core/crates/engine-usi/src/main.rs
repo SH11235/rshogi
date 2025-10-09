@@ -57,10 +57,10 @@ fn main() -> Result<()> {
 
     loop {
         poll_search_completion(&mut state);
+        // YO互換: 短手数詰みは時間配分より優先（非ponderは即返答／ponderは保持→ponderhit）
+        poll_instant_mate(&mut state);
         // Handle out-of-band finalize requests emitted by time manager
         poll_oob_finalize(&mut state);
-        // USI-led instant mate detection → early finalize
-        poll_instant_mate(&mut state);
         // Enforce locally computed deadlines (USI-side OOB finalize)
         enforce_deadline(&mut state);
         // Watchdog based on TimeManager state

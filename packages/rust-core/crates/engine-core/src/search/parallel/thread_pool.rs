@@ -104,7 +104,7 @@ impl WorkerLocal {
             self.stack.resize(MAX_PLY + 1, SearchStack::default());
         } else {
             for s in self.stack.iter_mut() {
-                *s = SearchStack::default();
+                s.reset_for_iteration();
             }
         }
         // Verify stack length invariant in debug builds to catch any logic errors

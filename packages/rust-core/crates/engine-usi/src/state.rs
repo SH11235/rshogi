@@ -69,6 +69,7 @@ pub struct UsiOptions {
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
+    pub instant_mate_check_all_pv: bool,
 }
 
 impl Default for UsiOptions {
@@ -111,6 +112,7 @@ impl Default for UsiOptions {
             finalize_sanity_opp_see_min_cp: 300,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
+            instant_mate_check_all_pv: false,
         }
     }
 }

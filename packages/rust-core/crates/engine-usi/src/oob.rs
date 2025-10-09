@@ -7,6 +7,8 @@ use crate::io::diag_info_string;
 use crate::io::info_string;
 use crate::state::EngineState;
 use crate::stop::{compute_wait_budget_from_state, wait_for_result_with_budget};
+use engine_core::search::snapshot::SnapshotSource;
+use engine_core::search::types::Bound;
 use engine_core::usi::move_to_usi;
 use std::time::Instant;
 
@@ -229,17 +231,23 @@ pub fn poll_instant_mate(state: &mut EngineState) {
         return;
     }
 
-    // Check the latest snapshot for a mate score on the primary line
+    // Check the latest snapshot for a mate score on PV(s)
     if let Some(snapshot) = state.stop_controller.try_read_snapshot() {
-        if let Some(first) = snapshot.lines.first() {
+        let mut lines_to_check: smallvec::SmallVec<[engine_core::search::types::RootLine; 4]> =
+            smallvec::SmallVec::new();
+        if state.opts.instant_mate_check_all_pv {
+            for l in snapshot.lines.iter() {
+                lines_to_check.push(l.clone());
+            }
+        } else if let Some(first) = snapshot.lines.first() {
+            lines_to_check.push(first.clone());
+        }
+        for line in lines_to_check.iter() {
             use engine_core::search::constants::mate_distance as md;
-            use engine_core::search::types::Bound;
-
-            // Prefer provided mate_distance; fall back to score_internal decoding
-            let dist_opt = first.mate_distance.or_else(|| md(first.score_internal));
-            let is_exact = matches!(snapshot.node_type, Bound::Exact);
-
-            if is_exact {
+            let dist_opt = line.mate_distance.or_else(|| md(line.score_internal));
+            let bound_ok =
+                matches!(line.bound, Bound::Exact) || snapshot.source == SnapshotSource::Stable;
+            if bound_ok {
                 if let Some(dist) = dist_opt {
                     if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
                         let was_ponder = state.current_is_ponder;
@@ -249,7 +257,7 @@ pub fn poll_instant_mate(state: &mut EngineState) {
                             was_ponder as u8,
                             snapshot.depth,
                             snapshot.elapsed_ms,
-                            snapshot.node_type,
+                            line.bound,
                             snapshot.source
                         ));
                         // Ask backend to stop promptly
@@ -269,6 +277,7 @@ pub fn poll_instant_mate(state: &mut EngineState) {
                                 }),
                             );
                         }
+                        break;
                     }
                 }
             }
@@ -376,6 +385,46 @@ mod tests_oob_finalize {
             !state.bestmove_emitted,
             "non-Exact helper snapshot must not trigger instant-mate finalize"
         );
+    }
+
+    #[test]
+    fn instant_mate_pv2_only_triggers_when_check_all_pv_enabled() {
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = false;
+
+        // Publish snapshot with PV1 non-mate, PV2 mate in 1
+        let sid = 20251u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        let mut pv1 = make_mate1_line();
+        pv1.bound = Bound::Exact;
+        pv1.mate_distance = None;
+        pv1.score_internal = 120; // not a mate
+
+        let pv2 = make_mate1_line(); // Exact mate in 1
+
+        // StopController only publishes one line per call; simulate Stable snapshot by committed publication
+        // Build a stable RootSnapshot through publish_committed_snapshot equivalent path is internal; instead
+        // push PV2 first as primary via two-step: publish pv2 then publish pv1 with index=1 override
+        // For simplicity in this unit test, we rely on CheckAllPV scanning all lines present.
+        state.stop_controller.publish_root_line(sid, root_key, &pv1);
+        state.stop_controller.publish_root_line(sid, root_key, &pv2);
+
+        // Default (CheckAllPV=false): should NOT trigger (PV1 is not mate)
+        poll_instant_mate(&mut state);
+        assert!(
+            !state.bestmove_emitted,
+            "should not trigger when only PV2 is mate and CheckAllPV=false"
+        );
+
+        // Enable CheckAllPV → now should trigger
+        state.opts.instant_mate_check_all_pv = true;
+        poll_instant_mate(&mut state);
+        assert!(state.bestmove_emitted, "CheckAllPV=true should trigger on PV2 mate");
+        let _ = take_last_emitted_bestmove();
     }
 
     #[test]
