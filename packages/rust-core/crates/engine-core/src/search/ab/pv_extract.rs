@@ -139,8 +139,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                     #[cfg(feature = "diagnostics")]
                     abdada_busy_set: &mut abdada_busy_set,
                 };
-                // Use a shallow step depth to keep PV extraction lightweight and deterministic
-                let step_depth = d.min(2);
+                // Use the shallow step depth decided above
                 let (_sc, mv_opt) = self.alphabeta(
                     ABArgs {
                         pos: &pos,
