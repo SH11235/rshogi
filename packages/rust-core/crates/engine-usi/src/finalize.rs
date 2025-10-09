@@ -1,7 +1,10 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
-use engine_core::search::{types::StopInfo, SearchResult};
+use engine_core::search::{
+    types::{NodeType, StopInfo},
+    SearchResult,
+};
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
@@ -178,7 +181,9 @@ fn finalize_sanity_check(
             }
         }
     }
-    let mut best_alt_see = i32::MIN;
+    // SEE>=0 を最優先、それが無ければ最大SEEを採用
+    let mut best_ge0: Option<(engine_core::shogi::Move, i32)> = None;
+    let mut best_any: Option<(engine_core::shogi::Move, i32)> = None;
     for &mv in list.as_slice() {
         if Some(mv) == final_best.best_move {
             continue;
@@ -188,12 +193,20 @@ fn finalize_sanity_check(
         }
         let s = state.position.see(mv);
         if best_alt.is_none() {
-            // if PV2 wasn’t set, pick SEE-best candidate
-            if s > best_alt_see {
-                best_alt_see = s;
-                best_alt = Some(mv);
+            if s >= 0 {
+                best_ge0 = match best_ge0 {
+                    Some((m, v)) if v >= s => Some((m, v)),
+                    _ => Some((mv, s)),
+                };
             }
+            best_any = match best_any {
+                Some((m, v)) if v >= s => Some((m, v)),
+                _ => Some((mv, s)),
+            };
         }
+    }
+    if best_alt.is_none() {
+        best_alt = best_ge0.map(|(m, _)| m).or(best_any.map(|(m, _)| m));
     }
     let Some(alt) = best_alt else {
         info_string(format!("{} switched=0 reason=no_alt", diag_base));
@@ -221,12 +234,6 @@ fn finalize_sanity_check(
         0
     };
     let total_budget = dynamic_budget.min(budget_max);
-    // Split budget across both mini searches（合計上限を厳守）
-    let per_budget = if total_budget >= 2 {
-        total_budget / 2
-    } else {
-        total_budget
-    };
     if total_budget == 0 {
         return None;
     }
@@ -236,43 +243,68 @@ fn finalize_sanity_check(
     let (s1, s2);
     let (mv1, mv2) = (pv1, alt);
     // Lock engine with small budget
-    if let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, total_budget) {
+    if let Some((mut eng, spent_ms, _)) = try_lock_engine_with_budget(&state.engine, total_budget) {
+        // 予算厳守: ロックに消費した時間を差し引く
+        let remain_budget = total_budget.saturating_sub(spent_ms);
+        if remain_budget == 0 {
+            return None;
+        }
+        // 2回合計がremain_budgetを超えないよう逐次分配
+        let per1 = remain_budget / 2;
+        let per2 = remain_budget - per1;
         // Evaluate child of pv1
         let mut pos1 = state.position.clone();
         pos1.do_move(mv1);
-        s1 = eng
-            .search(
+        s1 = if per1 > 0 {
+            eng.search(
                 &mut pos1,
                 engine_core::search::SearchLimits::builder()
                     .depth(mini_depth)
-                    .fixed_time_ms(per_budget)
+                    .fixed_time_ms(per1)
                     .build(),
             )
-            .score;
+            .score
+        } else {
+            0
+        };
 
         // Evaluate child of alt
         let mut pos2 = state.position.clone();
         pos2.do_move(mv2);
-        s2 = eng
-            .search(
+        let mut s2_local = if per2 > 0 {
+            eng.search(
                 &mut pos2,
                 engine_core::search::SearchLimits::builder()
                     .depth(mini_depth)
-                    .fixed_time_ms(per_budget)
+                    .fixed_time_ms(per2)
                     .build(),
             )
-            .score;
+            .score
+        } else {
+            0
+        };
+        // alt がチェックなら微減点（浅い読みの過大評価抑制）
+        const ALT_CHECK_PENALTY_CP: i32 = 15;
+        if state.position.gives_check(mv2) {
+            s2_local = s2_local.saturating_sub(ALT_CHECK_PENALTY_CP);
+        }
+        s2 = s2_local;
     } else {
         return None;
     }
     // 相手最大捕獲SEEに応じてPV1側スコアへ軽いペナルティを付加（過大評価抑制）
+    const OPP_SEE_PENALTY_NUM: i32 = 7; // λ=0.7（分数表現）
+    const OPP_SEE_PENALTY_DEN: i32 = 10;
     let penalty_cap = state.opts.finalize_sanity_opp_see_min_cp.max(0);
-    let opp_penalty = (opp_cap_see_max.min(penalty_cap) * 7) / 10; // λ=0.7 相当
-    let s1_adj = s1 - opp_penalty;
+    let capped = opp_cap_see_max.min(penalty_cap).max(0) as i64;
+    let opp_penalty_i64 =
+        capped.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
+    let opp_penalty = opp_penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    let s1_adj = s1.saturating_sub(opp_penalty);
     let switched = s2 > s1_adj + switch_margin;
     if switched {
         info_string(format!(
-            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} per_ms={}",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{}",
             diag_base,
             move_to_usi(&alt),
             s1,
@@ -281,17 +313,20 @@ fn finalize_sanity_check(
             switch_margin,
             if alt_from_pv2 { "pv2" } else { "see_best" },
             total_budget,
-            per_budget,
+            OPP_SEE_PENALTY_NUM,
+            OPP_SEE_PENALTY_DEN,
         ));
     } else {
         info_string(format!(
-            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{}",
             diag_base,
             move_to_usi(&alt),
             s1,
             s1_adj,
             s2,
             switch_margin,
+            OPP_SEE_PENALTY_NUM,
+            OPP_SEE_PENALTY_DEN,
         ));
     }
     if switched {
@@ -639,6 +674,11 @@ pub fn finalize_and_send(
     } else {
         None
     };
+    let info_bound_override: Option<NodeType> = if pv_head_mismatch_flag {
+        snapshot_committed.as_ref().map(|ci| ci.node_type)
+    } else {
+        None
+    };
     let final_best = {
         let eng = state.engine.lock().unwrap();
         if let Some(ci) = snapshot_committed.as_ref() {
@@ -923,10 +963,24 @@ pub fn finalize_and_send(
                         usi_println(&s);
                     }
                 } else {
-                    emit_single_pv(res, &final_best, nps_agg, hf_permille, info_score_override);
+                    emit_single_pv(
+                        res,
+                        &final_best,
+                        nps_agg,
+                        hf_permille,
+                        info_score_override,
+                        info_bound_override,
+                    );
                 }
             } else {
-                emit_single_pv(res, &final_best, nps_agg, hf_permille, info_score_override);
+                emit_single_pv(
+                    res,
+                    &final_best,
+                    nps_agg,
+                    hf_permille,
+                    info_score_override,
+                    info_bound_override,
+                );
             }
         }
     }
@@ -974,6 +1028,7 @@ fn emit_single_pv(
     nps_agg: u128,
     hf_permille: u16,
     score_override: Option<i32>,
+    bound_override: Option<NodeType>,
 ) {
     let mut s = String::from("info");
     s.push_str(&format!(" depth {}", res.stats.depth));
@@ -987,7 +1042,8 @@ fn emit_single_pv(
 
     let score_to_use = score_override.unwrap_or(res.score);
     let view = score_view_with_clamp(score_to_use);
-    append_usi_score_and_bound(&mut s, view, res.node_type);
+    let bound_to_use = bound_override.unwrap_or(res.node_type);
+    append_usi_score_and_bound(&mut s, view, bound_to_use);
 
     let pv_ref: &[_] = if !final_best.pv.is_empty() {
         &final_best.pv
