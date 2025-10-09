@@ -18,6 +18,9 @@ mod promotion_from_promotion_zone;
 mod underflow_test;
 
 #[cfg(test)]
+mod king_danger_squares;
+
+#[cfg(test)]
 mod lance_edge_tests {
     use crate::{
         movegen::MoveGenerator,
