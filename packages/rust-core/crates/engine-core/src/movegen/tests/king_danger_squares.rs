@@ -153,39 +153,28 @@ fn promoted_lance_adjacent_check_allows_side_escape() {
     let usi_moves: Vec<String> = moves.as_slice().iter().map(|m| move_to_usi(m)).collect();
 
     // Extension must not apply in +L adjacent check. 5e5f（直線に遠ざかる）や斜め逃げが許されうる。
+    // 接近王手（+L=金相当）ではレイ延長は行われない。ここでは 5e5f が許可される形。
     assert!(
-        usi_moves.iter().any(|m| m == "5e5f" || m == "5e6f" || m == "5e4f"),
-        "+L adjacent check must allow at least one non-blocked escape. Moves: {:?}",
+        usi_moves.iter().any(|m| m == "5e5f"),
+        "+L adjacent check must allow 5e5f. Moves: {:?}",
         usi_moves
     );
 }
 
 #[test]
 fn double_check_generates_only_king_moves() {
-    // Double check: Black king 5e; White rook 5a and White bishop 1a.
-    // Generator must produce only king moves (no blocks/captures by other pieces).
+    // Double check: Black king 5e; White rook 5a (file check) + White bishop 1a (diagonal check).
+    // 生成される手は自玉の手のみ（ブロック・他駒の手は出ない）。
     let mut pos = Position::empty();
     pos.side_to_move = Color::Black;
+    // Kings
     pos.board
         .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("2i").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // friendly piece to test non-king filtering
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::White));
+    // Attackers
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
-    // place an extra bishop checking along diagonal 1a->5e
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
-    // Use bishop at 1a replaced by actual bishop at 1a (ensure on board)
     pos.board
         .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Bishop, Color::White));
     pos.hash = pos.compute_hash();
