@@ -111,7 +111,7 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name FinalizeSanity.BudgetMs type spin default 2 min 0 max 10");
     usi_println("option name FinalizeSanity.MiniDepth type spin default 2 min 1 max 3");
     usi_println("option name FinalizeSanity.SEE_MinCp type spin default -90 min -1000 max 1000");
-    usi_println("option name FinalizeSanity.SwitchMarginCp type spin default 80 min 0 max 500");
+    usi_println("option name FinalizeSanity.SwitchMarginCp type spin default 30 min 0 max 500");
     usi_println("option name SearchParams.SafePruning type check default true");
     usi_println("option name SearchParams.QS_MarginCapture type spin default 150 min 0 max 5000");
     usi_println("option name SearchParams.QS_BadCaptureMin type spin default 450 min 0 max 5000");
