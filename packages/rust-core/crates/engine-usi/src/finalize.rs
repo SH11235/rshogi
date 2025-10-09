@@ -325,6 +325,7 @@ fn copy_stop_info(src: &StopInfo) -> StopInfo {
         hard_timeout: src.hard_timeout,
         soft_limit_ms: src.soft_limit_ms,
         hard_limit_ms: src.hard_limit_ms,
+        stop_tag: src.stop_tag.clone(),
     }
 }
 
@@ -1413,6 +1414,7 @@ mod tests {
             hard_timeout: false,
             soft_limit_ms: 2_000,
             hard_limit_ms: 2_500,
+            stop_tag: None,
         };
 
         assert_eq!(compute_tt_probe_budget_ms(Some(&si), 0), 2);
@@ -1647,6 +1649,7 @@ mod tests {
             hard_timeout: false,
             soft_limit_ms: 1_500,
             hard_limit_ms: 2_000,
+            stop_tag: None,
         };
 
         let soft_meta =

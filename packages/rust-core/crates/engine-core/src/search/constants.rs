@@ -34,23 +34,24 @@ pub const MAX_QUIESCE_DEPTH: u16 = 96;
 /// Aspiration window constants used in iterative deepening
 ///
 /// These values control the alpha-beta window narrowing optimization:
-/// - Initial delta: 30 centipawns provides a good balance between search reduction
-///   and re-search frequency for Shogi positions
-/// - Maximum delta: 350 centipawns caps the window expansion to prevent
-///   excessively wide windows in volatile positions
+/// - Initial delta: 45 centipawns provides a better balance for SMP (>=4 threads),
+///   reducing fail-low/high frequency without overly widening the window
+/// - Maximum delta: 400 centipawns caps the window expansion to prevent
+///   excessively wide windows in volatile positions while allowing faster recovery
 ///
 /// The window starts narrow and expands geometrically on fail-high/fail-low,
 /// providing good performance across diverse position types.
 ///
 /// These values are empirically tuned for the ClassicBackend implementation.
-pub const ASPIRATION_DELTA_INITIAL: i32 = 30; // Initial window half-width (centipawns)
-pub const ASPIRATION_DELTA_MAX: i32 = 350; // Maximum window expansion limit
+pub const ASPIRATION_DELTA_INITIAL: i32 = 45; // Initial window half-width (centipawns)
+pub const ASPIRATION_DELTA_MAX: i32 = 400; // Maximum window expansion limit
 
 /// Helper 用の広窓デフォルト（centipawns）
 pub const HELPER_ASPIRATION_WIDE_DELTA: i32 = 350;
 
 /// primary の初期Δ拡大係数（Δ += K * log2(Threads)）
-pub const ASPIRATION_DELTA_THREADS_K: i32 = 8;
+/// 8→12へ。8スレッド時 +36cp 程度の上乗せでSMP時の失敗率を抑制。
+pub const ASPIRATION_DELTA_THREADS_K: i32 = 12;
 
 /// Time pressure threshold for search decisions
 /// When remaining time < elapsed time * threshold, enter time pressure mode

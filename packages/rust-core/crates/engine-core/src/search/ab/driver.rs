@@ -85,10 +85,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     }
 
     fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
-        // qnodes_limit==0 を「無制限」のセンチネルとして扱う（ベンチ等での明示的解除用）
-        if let Some(0) = limits.qnodes_limit {
-            return u64::MAX;
-        }
+        // qnodes_limit==0 は「無制限」意図。ただし実対局（時間管理あり）では
+        // TM/時間上限に基づく動的縮小は残す。ベンチ用途（時間管理なし）のみ完全無制限。
+        let request_unlimited = matches!(limits.qnodes_limit, Some(0));
         let mut limit =
             limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
         let byoyomi_active = Self::is_byoyomi_active(limits);
@@ -116,6 +115,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let scaled = soft_ms.saturating_mul(crate::search::constants::QNODES_PER_MS);
                 limit = limit.min(scaled);
             }
+        }
+
+        // if time control is absent entirely (no TM, no fixed time, no deadlines),
+        // honor the unlimited request for benches; otherwise keep dynamic cap.
+        if request_unlimited
+            && limits.time_manager.is_none()
+            && limits.time_limit().is_none()
+            && limits.fallback_deadlines.is_none()
+        {
+            return u64::MAX;
         }
 
         if pv_idx > 1 {
@@ -326,6 +335,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         use crate::search::constants::{
             ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX, ASPIRATION_DELTA_THREADS_K,
         };
+        // Shallow depths are volatile; disable aspiration under this depth
+        // to avoid frequent fail-low/high thrashing and wasted re-searches.
+        const ASPIRATION_MIN_DEPTH: i32 = 5;
         const SELDEPTH_EXTRA_MARGIN: u32 = 32;
 
         // Cumulative counters for diagnostics
@@ -643,7 +655,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut delta = ASPIRATION_DELTA_INITIAL;
                 let mut alpha;
                 let mut beta;
-                if d == 1 {
+                // Gate aspiration start by depth and PV stability:
+                // use full window while the search is shallow AND previous iteration has not
+                // published any root lines. Once either (depth>=min) or (prev_root_lines.is_some())
+                // holds, allow aspiration for the primary. Helpers follow their own policy.
+                if !is_helper && d < ASPIRATION_MIN_DEPTH && prev_root_lines.is_none() {
                     alpha = i32::MIN / 2;
                     beta = i32::MAX / 2;
                 } else if is_helper {
@@ -930,14 +946,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 new_beta,
                             });
                         }
-                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                            cb(&format!(
-                                "aspiration fail-low old=[{},{}] new=[{},{}]",
-                                old_alpha, old_beta, new_alpha, new_beta
-                            ));
-                        }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
+                        // If re-searches are piling up on the primary, bail out to a full window
+                        // to stabilize PV and avoid time loss.
+                        if !is_helper && iteration_researches >= 3 {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            continue;
+                        }
                         if is_helper {
                             // helper: fail‑low は再探索しない
                             break;
@@ -963,14 +981,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 new_beta,
                             });
                         }
-                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                            cb(&format!(
-                                "aspiration fail-high old=[{},{}] new=[{},{}]",
-                                old_alpha, old_beta, new_alpha, new_beta
-                            ));
-                        }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
+                        if !is_helper && iteration_researches >= 3 {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            continue;
+                        }
                         if is_helper {
                             if helper_retries == 0 {
                                 // 2 回目はフル窓で 1 回だけ再探索
@@ -1483,6 +1501,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     hard_timeout,
                     soft_limit_ms: if soft_ms != u64::MAX { soft_ms } else { 0 },
                     hard_limit_ms: if hard_ms != u64::MAX { hard_ms } else { 0 },
+                    stop_tag: None,
                 });
                 result.end_reason = reason;
             } else if let Some(dl) = limits.fallback_deadlines {
@@ -1510,6 +1529,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     hard_timeout: hard_timeout && !lead_window_soft_break,
                     soft_limit_ms: dl.soft_limit_ms,
                     hard_limit_ms: dl.hard_limit_ms,
+                    stop_tag: None,
                 });
                 result.end_reason = reason;
             } else if let Some(limit) = limits.time_limit() {
@@ -1544,6 +1564,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     hard_timeout,
                     soft_limit_ms: cap_ms,
                     hard_limit_ms: cap_ms,
+                    stop_tag: None,
                 });
                 result.end_reason = reason;
             }
@@ -1702,6 +1723,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
                                 hard_timeout,
                                 soft_limit_ms,
                                 hard_limit_ms,
+                                stop_tag: None,
                             });
                             let _ = tx.send(fallback);
                         }

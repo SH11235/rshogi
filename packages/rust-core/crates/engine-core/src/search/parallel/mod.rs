@@ -748,7 +748,9 @@ fn publish_helper_snapshot(
     // Important: bound and score must match the chosen PV source for consistency.
     let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
     let mut chosen_bound = result.node_type;
+    // chosen_score must be the engine-internal score (mate distances retained)
     let mut chosen_score = result.score;
+    let chosen_mate: Option<i32>;
 
     let mut snapshot_source = "stats";
     if let Some(first_line) = result.lines.as_ref().and_then(|ls| ls.first()) {
@@ -758,15 +760,22 @@ fn publish_helper_snapshot(
         if use_lines0 {
             pv.extend(first_line.pv.iter().copied());
             chosen_bound = first_line.bound;
-            chosen_score = first_line.score_cp;
+            // Use internal score from lines[0] (not cp) so that downstream mate detectors
+            // can correctly recover distances.
+            chosen_score = first_line.score_internal;
+            chosen_mate = first_line
+                .mate_distance
+                .or_else(|| crate::search::constants::mate_distance(chosen_score));
             snapshot_source = "lines";
         } else {
             // lines[0] is fail-high/low and stats.pv exists; prefer stats.pv for stability
             pv.extend(result.stats.pv.iter().copied());
             // chosen_bound and chosen_score remain as result.node_type and result.score
+            chosen_mate = crate::search::constants::mate_distance(chosen_score);
         }
     } else {
         pv.extend(result.stats.pv.iter().copied());
+        chosen_mate = crate::search::constants::mate_distance(chosen_score);
     }
     if pv.len() > 32 {
         pv.truncate(32);
@@ -797,7 +806,7 @@ fn publish_helper_snapshot(
         nps: Some(result.nps),
         exact_exhausted: false,
         exhaust_reason: None,
-        mate_distance: None,
+        mate_distance: chosen_mate,
     };
 
     stop_controller.publish_root_line(session_id, root_key, &line);
