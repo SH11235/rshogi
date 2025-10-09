@@ -772,6 +772,7 @@ impl TimeManager {
             hard_timeout: hard,
             soft_limit_ms: self.soft_limit_ms(),
             hard_limit_ms: self.hard_limit_ms(),
+            stop_tag: None,
         }
     }
 

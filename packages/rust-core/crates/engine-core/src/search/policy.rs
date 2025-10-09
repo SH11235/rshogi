@@ -102,34 +102,6 @@ pub fn set_helper_asp(mode_off_wide: u8, delta: i32) {
     helper_asp_mode_atomic().store(m, Ordering::Release);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn helper_asp_setter_getter_roundtrip() {
-        // Set Off, 200 then Wide, 350 and check values reflect immediately
-        set_helper_asp(0, 200);
-        assert_eq!(helper_asp_mode_value(), 0);
-        assert_eq!(helper_asp_delta_value(), 200);
-        set_helper_asp(1, 350);
-        assert_eq!(helper_asp_mode_value(), 1);
-        assert_eq!(helper_asp_delta_value(), 350);
-    }
-
-    #[test]
-    fn bench_flags_roundtrip() {
-        set_bench_allrun(false);
-        set_bench_stop_on_mate(true);
-        assert!(!bench_allrun_enabled());
-        assert!(bench_stop_on_mate_enabled());
-        set_bench_allrun(true);
-        set_bench_stop_on_mate(false);
-        assert!(bench_allrun_enabled());
-        assert!(!bench_stop_on_mate_enabled());
-    }
-}
-
 // --- TT suppression below depth ---
 fn tt_suppress_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
@@ -303,4 +275,32 @@ pub fn cancel_on_primary_enabled() -> bool {
 #[inline]
 pub fn set_cancel_on_primary(enabled: bool) {
     cancel_on_primary_atomic().store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_asp_setter_getter_roundtrip() {
+        // Set Off, 200 then Wide, 350 and check values reflect immediately
+        set_helper_asp(0, 200);
+        assert_eq!(helper_asp_mode_value(), 0);
+        assert_eq!(helper_asp_delta_value(), 200);
+        set_helper_asp(1, 350);
+        assert_eq!(helper_asp_mode_value(), 1);
+        assert_eq!(helper_asp_delta_value(), 350);
+    }
+
+    #[test]
+    fn bench_flags_roundtrip() {
+        set_bench_allrun(false);
+        set_bench_stop_on_mate(true);
+        assert!(!bench_allrun_enabled());
+        assert!(bench_stop_on_mate_enabled());
+        set_bench_allrun(true);
+        set_bench_stop_on_mate(false);
+        assert!(bench_allrun_enabled());
+        assert!(!bench_stop_on_mate_enabled());
+    }
 }

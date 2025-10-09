@@ -246,6 +246,7 @@ impl StopController {
             FinalizeReason::Hard => {
                 si.reason = TerminationReason::TimeLimit;
                 si.hard_timeout = true;
+                si.stop_tag.get_or_insert_with(|| "hard_deadline".to_string());
             }
             FinalizeReason::NearHard
             | FinalizeReason::Planned
@@ -259,6 +260,10 @@ impl StopController {
                 si.reason = TerminationReason::UserStop;
                 si.hard_timeout = false;
             }
+        }
+        // Attach a diagnostic tag for PlannedMate if available
+        if let FinalizeReason::PlannedMate { distance, .. } = reason {
+            si.stop_tag = Some(format!("planned_mate K={}", distance));
         }
         *guard = Some(si);
     }
@@ -939,7 +944,7 @@ mod tests {
 
         let info = ctrl.try_read_stop_info().expect("stop info present");
         assert_eq!(info.reason, TerminationReason::TimeLimit);
-        assert_eq!(info.hard_timeout, false);
+        assert!(!info.hard_timeout);
         // External stop flag should be set
         assert!(external.load(AtomicOrdering::Acquire));
     }

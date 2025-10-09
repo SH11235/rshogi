@@ -401,6 +401,8 @@ pub struct StopInfo {
     pub soft_limit_ms: u64,
     /// Hard time limit in ms (0 if not applicable)
     pub hard_limit_ms: u64,
+    /// Optional diagnostic tag (e.g., "planned_mate K=1"). For logging/USI only.
+    pub stop_tag: Option<String>,
 }
 
 impl Default for StopInfo {
@@ -413,6 +415,7 @@ impl Default for StopInfo {
             hard_timeout: false,
             soft_limit_ms: 0,
             hard_limit_ms: 0,
+            stop_tag: None,
         }
     }
 }

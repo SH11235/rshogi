@@ -232,30 +232,43 @@ pub fn poll_instant_mate(state: &mut EngineState) {
     // Check the latest snapshot for a mate score on the primary line
     if let Some(snapshot) = state.stop_controller.try_read_snapshot() {
         if let Some(first) = snapshot.lines.first() {
-            use engine_core::search::constants::mate_distance;
-            if let Some(dist) = mate_distance(first.score_internal) {
-                if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
-                    let was_ponder = state.current_is_ponder;
-                    info_string(format!(
-                        "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={}",
-                        dist, was_ponder as u8, snapshot.depth, snapshot.elapsed_ms
-                    ));
-                    // Ask backend to stop promptly
-                    state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
-                        distance: dist,
-                        was_ponder,
-                    });
+            use engine_core::search::constants::mate_distance as md;
+            use engine_core::search::types::Bound;
 
-                    // For non-ponder, emit immediately via fast path (TT/snapshot)
-                    if !was_ponder {
-                        finalize_and_send_fast(
-                            state,
-                            "instant_mate_finalize",
-                            Some(FinalizeReason::PlannedMate {
-                                distance: dist,
-                                was_ponder: false,
-                            }),
-                        );
+            // Prefer provided mate_distance; fall back to score_internal decoding
+            let dist_opt = first.mate_distance.or_else(|| md(first.score_internal));
+            let is_exact = matches!(snapshot.node_type, Bound::Exact);
+
+            if is_exact {
+                if let Some(dist) = dist_opt {
+                    if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
+                        let was_ponder = state.current_is_ponder;
+                        info_string(format!(
+                            "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?}",
+                            dist,
+                            was_ponder as u8,
+                            snapshot.depth,
+                            snapshot.elapsed_ms,
+                            snapshot.node_type,
+                            snapshot.source
+                        ));
+                        // Ask backend to stop promptly
+                        state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
+                            distance: dist,
+                            was_ponder,
+                        });
+
+                        // For non-ponder, emit immediately via fast path (TT/snapshot)
+                        if !was_ponder {
+                            finalize_and_send_fast(
+                                state,
+                                "instant_mate_finalize",
+                                Some(FinalizeReason::PlannedMate {
+                                    distance: dist,
+                                    was_ponder: false,
+                                }),
+                            );
+                        }
                     }
                 }
             }
@@ -264,7 +277,7 @@ pub fn poll_instant_mate(state: &mut EngineState) {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_oob_finalize {
     use super::*;
     use crate::finalize::take_last_emitted_bestmove;
     use engine_core::search::types::{Bound, RootLine};
@@ -335,6 +348,58 @@ mod tests {
 
         // Ponder中は即送信しない（停止要求のみ）。bestmove未送信のまま。
         assert!(!state.bestmove_emitted, "ponder mode must not emit bestmove immediately");
+    }
+
+    #[test]
+    fn instant_mate_helper_non_exact_does_not_trigger() {
+        use engine_core::search::constants::MATE_SCORE;
+        use engine_core::search::types::Bound;
+
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = false;
+
+        // Publish a snapshot with mate score but non-Exact bound (LowerBound)
+        let sid = 8888u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        let mut line = make_mate1_line();
+        line.bound = Bound::LowerBound;
+        // still keep internal mate score to verify guard works
+        line.score_internal = MATE_SCORE - 1;
+        state.stop_controller.publish_root_line(sid, root_key, &line);
+
+        poll_instant_mate(&mut state);
+        assert!(
+            !state.bestmove_emitted,
+            "non-Exact helper snapshot must not trigger instant-mate finalize"
+        );
+    }
+
+    #[test]
+    fn instant_mate_prefers_mate_distance_field_when_available() {
+        use engine_core::search::types::Bound;
+
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 2;
+        state.searching = true;
+        state.current_is_ponder = false;
+
+        let sid = 9999u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        let mut line = make_mate1_line();
+        line.bound = Bound::Exact;
+        // publish
+        state.stop_controller.publish_root_line(sid, root_key, &line);
+
+        poll_instant_mate(&mut state);
+        assert!(state.bestmove_emitted, "Exact helper snapshot with mate must trigger");
+        let bm = take_last_emitted_bestmove();
+        assert!(bm.is_some());
     }
 }
 
