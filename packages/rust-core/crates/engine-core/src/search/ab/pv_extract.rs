@@ -73,6 +73,11 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                 let mut qnodes = 0_u64;
                 let qnodes_limit =
                     limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
+                #[cfg(feature = "diagnostics")]
+                let mut abdada_busy_detected: u64 = 0;
+                #[cfg(feature = "diagnostics")]
+                let mut abdada_busy_set: u64 = 0;
+
                 let mut ctx = SearchContext {
                     limits,
                     start_time: &t0,
@@ -80,6 +85,10 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                     seldepth: &mut seldepth_dummy,
                     qnodes: &mut qnodes,
                     qnodes_limit,
+                    #[cfg(feature = "diagnostics")]
+                    abdada_busy_detected: &mut abdada_busy_detected,
+                    #[cfg(feature = "diagnostics")]
+                    abdada_busy_set: &mut abdada_busy_set,
                 };
                 let (_sc, mv_opt) = self.alphabeta(
                     ABArgs {
