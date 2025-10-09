@@ -233,22 +233,53 @@ pub fn poll_instant_mate(state: &mut EngineState) {
 
     // Check the latest snapshot for a mate score on PV(s)
     if let Some(snapshot) = state.stop_controller.try_read_snapshot() {
-        // Iterate by reference to avoid cloning lines
-        let mut iter: Box<dyn Iterator<Item = &engine_core::search::types::RootLine>> = if state
-            .opts
-            .instant_mate_check_all_pv
-        {
-            Box::new(snapshot.lines.iter())
-        } else {
-            Box::new(snapshot.lines.iter().take(1))
-        };
-        for line in iter.by_ref() {
+        if state.opts.instant_mate_check_all_pv {
+            for line in &snapshot.lines {
+                use engine_core::search::constants::mate_distance as md;
+                let dist_opt = line.mate_distance.or_else(|| {
+                    (matches!(line.bound, Bound::Exact)).then(|| md(line.score_internal)).flatten()
+                });
+                let bound_ok = matches!(line.bound, Bound::Exact)
+                    || (snapshot.source == SnapshotSource::Stable && line.mate_distance.is_some());
+                if bound_ok {
+                    if let Some(dist) = dist_opt {
+                        if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
+                            let was_ponder = state.current_is_ponder;
+                            info_string(format!(
+                                "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?} sid={} root={}",
+                                dist,
+                                was_ponder as u8,
+                                snapshot.depth,
+                                snapshot.elapsed_ms,
+                                line.bound,
+                                snapshot.source,
+                                snapshot.search_id,
+                                fmt_hash(snapshot.root_key)
+                            ));
+                            state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
+                                distance: dist,
+                                was_ponder,
+                            });
+                            if !was_ponder {
+                                fast_finalize_no_detach(
+                                    state,
+                                    "instant_mate_finalize",
+                                    Some(FinalizeReason::PlannedMate {
+                                        distance: dist,
+                                        was_ponder: false,
+                                    }),
+                                );
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if let Some(line) = snapshot.lines.first() {
             use engine_core::search::constants::mate_distance as md;
-            // Prefer provided mate_distance; only derive from score when the bound is Exact
-            let dist_opt = line
-                .mate_distance
-                .or_else(|| (matches!(line.bound, Bound::Exact)).then(|| md(line.score_internal)).flatten());
-            // Guard: Exact lines always allowed; Stable snapshots allow non-Exact only when distance is explicit
+            let dist_opt = line.mate_distance.or_else(|| {
+                (matches!(line.bound, Bound::Exact)).then(|| md(line.score_internal)).flatten()
+            });
             let bound_ok = matches!(line.bound, Bound::Exact)
                 || (snapshot.source == SnapshotSource::Stable && line.mate_distance.is_some());
             if bound_ok {
@@ -266,13 +297,10 @@ pub fn poll_instant_mate(state: &mut EngineState) {
                             snapshot.search_id,
                             fmt_hash(snapshot.root_key)
                         ));
-                        // Ask backend to stop promptly
                         state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
                             distance: dist,
                             was_ponder,
                         });
-
-                        // For non-ponder, emit immediately via fast path (TT/snapshot)
                         if !was_ponder {
                             fast_finalize_no_detach(
                                 state,
@@ -283,7 +311,6 @@ pub fn poll_instant_mate(state: &mut EngineState) {
                                 }),
                             );
                         }
-                        break;
                     }
                 }
             }
@@ -401,7 +428,7 @@ mod tests_oob_finalize {
         state.searching = true;
         state.current_is_ponder = false;
 
-        // Publish snapshot with PV1 non-mate, PV2 mate in 1
+        // Publish a stable snapshot with PV1 non-mate and PV2 mate in 1
         let sid = 20251u64;
         let root_key = state.position.zobrist_hash();
         state.stop_controller.publish_session(None, sid);
@@ -410,14 +437,13 @@ mod tests_oob_finalize {
         pv1.mate_distance = None;
         pv1.score_internal = 120; // not a mate
 
-        let pv2 = make_mate1_line(); // Exact mate in 1
+        let mut pv2 = make_mate1_line(); // Exact mate in 1
+        pv2.multipv_index = 2; // PV2
 
-        // StopController only publishes one line per call; simulate Stable snapshot by committed publication
-        // Build a stable RootSnapshot through publish_committed_snapshot equivalent path is internal; instead
-        // push PV2 first as primary via two-step: publish pv2 then publish pv1 with index=1 override
-        // For simplicity in this unit test, we rely on CheckAllPV scanning all lines present.
-        state.stop_controller.publish_root_line(sid, root_key, &pv1);
-        state.stop_controller.publish_root_line(sid, root_key, &pv2);
+        let lines = smallvec::smallvec![pv1.clone(), pv2.clone()];
+        state
+            .stop_controller
+            .publish_committed_snapshot(sid, root_key, &lines[..], 1000, 10);
 
         // Default (CheckAllPV=false): should NOT trigger (PV1 is not mate)
         poll_instant_mate(&mut state);

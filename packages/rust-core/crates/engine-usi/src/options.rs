@@ -167,6 +167,41 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name InstantMateMove.MaxDistance type spin default 1 min 1 max 5");
     // Opponent SEE gate for finalize sanity
     usi_println("option name FinalizeSanity.OppSEE_MinCp type spin default 300 min 0 max 5000");
+
+    // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
+    usi_println(&format!(
+        "option name RootSeeGate type check default {}",
+        if opts.root_see_gate { "true" } else { "false" }
+    ));
+    usi_println(&format!(
+        "option name RootSeeGate.XSEE type spin default {} min -2000 max 5000",
+        opts.x_see_cp
+    ));
+    usi_println(&format!(
+        "option name PostVerify type check default {}",
+        if opts.post_verify { "true" } else { "false" }
+    ));
+    usi_println(&format!(
+        "option name PostVerify.YDrop type spin default {} min 0 max 5000",
+        opts.y_drop_cp
+    ));
+    usi_println(&format!(
+        "option name PromoteVerify type check default {}",
+        if opts.promote_verify { "true" } else { "false" }
+    ));
+    usi_println(&format!(
+        "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
+        opts.promote_bias_cp
+    ));
+    // Reproduction helpers
+    usi_println(&format!(
+        "option name Warmup.Ms type spin default {} min 0 max 60000",
+        opts.warmup_ms
+    ));
+    usi_println(&format!(
+        "option name Warmup.PrevMoves type spin default {} min 0 max 20",
+        opts.warmup_prev_moves
+    ));
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -742,6 +777,63 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 state.opts.instant_mate_check_all_pv = matches!(v.as_str(), "true" | "1" | "on");
             }
         }
+        // --- Root guard rails & warmup knobs
+        "RootSeeGate" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.root_see_gate = on;
+                info_string(format!("root_see_gate={}", on as u8));
+            }
+        }
+        "RootSeeGate.XSEE" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.x_see_cp = x.clamp(-2000, 5000);
+                }
+            }
+        }
+        "PostVerify" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.post_verify = on;
+                info_string(format!("post_verify={}", on as u8));
+            }
+        }
+        "PostVerify.YDrop" => {
+            if let Some(v) = value_ref {
+                if let Ok(y) = v.parse::<i32>() {
+                    state.opts.y_drop_cp = y.clamp(0, 5000);
+                }
+            }
+        }
+        "PromoteVerify" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.promote_verify = on;
+                info_string(format!("promote_verify={}", on as u8));
+            }
+        }
+        "PromoteVerify.BiasCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(b) = v.parse::<i32>() {
+                    state.opts.promote_bias_cp = b.clamp(-1000, 1000);
+                }
+            }
+        }
+        "Warmup.Ms" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.warmup_ms = ms.min(60000);
+                }
+            }
+        }
+        "Warmup.PrevMoves" => {
+            if let Some(v) = value_ref {
+                if let Ok(k) = v.parse::<u32>() {
+                    state.opts.warmup_prev_moves = k.min(20);
+                }
+            }
+        }
         "OverheadMs" => {
             if let Some(v) = value_ref {
                 if let Ok(ms) = v.parse::<u64>() {
@@ -904,6 +996,13 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     engine_core::search::config::set_mate_early_stop_max_distance(
         state.opts.instant_mate_move_max_distance as u8,
     );
+    // Root guard rails & verify parameters (global config)
+    engine_core::search::config::set_root_see_gate_enabled(state.opts.root_see_gate);
+    engine_core::search::config::set_root_see_x_cp(state.opts.x_see_cp);
+    engine_core::search::config::set_post_verify_enabled(state.opts.post_verify);
+    engine_core::search::config::set_post_verify_ydrop_cp(state.opts.y_drop_cp);
+    engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
+    engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
 }
 
 fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {

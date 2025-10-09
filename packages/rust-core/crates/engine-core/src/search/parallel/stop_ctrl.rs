@@ -246,7 +246,7 @@ impl StopController {
             FinalizeReason::Hard => {
                 si.reason = TerminationReason::TimeLimit;
                 si.hard_timeout = true;
-                si.stop_tag.get_or_insert_with(|| "hard_deadline".to_string());
+                let _ = si.stop_tag.get_or_insert_with(|| "hard_deadline".to_string());
             }
             FinalizeReason::NearHard
             | FinalizeReason::Planned
