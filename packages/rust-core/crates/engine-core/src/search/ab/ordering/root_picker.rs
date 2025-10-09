@@ -85,7 +85,7 @@ impl RootPicker {
             // Post‑Verify (cheap approximation at ordering stage):
             // If opponent's best immediate capture (by SEE) is large, demote this move.
             // Only apply if move is not a good capture or has negative SEE to reduce overhead.
-            if crate::search::config::post_verify_enabled() && (!good_capture || see < 0) {
+            if crate::search::config::post_verify_enabled() && !good_capture {
                 // Build child and find opponent best capture by SEE
                 let mut child = pos.clone();
                 let _ = child.do_move(mv);

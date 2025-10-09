@@ -358,6 +358,23 @@ fn qnodes_limit_zero_is_unlimited_sentinel() {
 }
 
 #[test]
+fn extract_pv_is_limited_to_32_moves() {
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(Arc::clone(&evaluator));
+    let pos = Position::startpos();
+    // Choose a legal first move
+    let first = {
+        let mg = MoveGenerator::new();
+        mg.generate_all(&pos).unwrap()[0]
+    };
+    let limits = SearchLimitsBuilder::default().time_control(TimeControl::Infinite).build();
+    let mut nodes = 0u64;
+    let pv = backend.extract_pv(&pos, 128, first, &limits, &mut nodes);
+    assert!(pv.len() <= 32, "PV length must be capped at 32, got {}", pv.len());
+}
+
+#[test]
 fn qsearch_detects_mate_with_min_qnodes_budget() {
     let evaluator = Arc::new(MaterialEvaluator);
     let backend = ClassicBackend::new(evaluator);

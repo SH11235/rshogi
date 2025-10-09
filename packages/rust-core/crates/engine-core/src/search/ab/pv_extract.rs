@@ -84,11 +84,11 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
         if let Some(dl) = limits.fallback_deadlines {
             let elapsed = limits.start_time.elapsed().as_millis() as u64;
             let mut rem = u64::MAX;
-            if dl.soft_limit_ms > elapsed {
-                rem = rem.min(dl.soft_limit_ms - elapsed);
+            if dl.soft_limit_ms > 0 {
+                rem = rem.min(dl.soft_limit_ms.saturating_sub(elapsed));
             }
-            if dl.hard_limit_ms > elapsed {
-                rem = rem.min(dl.hard_limit_ms - elapsed);
+            if dl.hard_limit_ms > 0 {
+                rem = rem.min(dl.hard_limit_ms.saturating_sub(elapsed));
             }
             if rem != u64::MAX {
                 let cand = t0 + Duration::from_millis(rem);
@@ -102,6 +102,10 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
         // Keep evaluator in sync with `pos` while we descend the PV.
         let mut guard_stack: SmallVec<[EvalMoveGuard<'_, E>; 32]> = SmallVec::new();
         while d > 0 {
+            // Keep PV length aligned with TT reconstruction (32 moves max)
+            if pv.len() >= 32 {
+                break;
+            }
             if ClassicBackend::<E>::should_stop(limits) {
                 break;
             }
@@ -132,10 +136,12 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                     #[cfg(feature = "diagnostics")]
                     abdada_busy_set: &mut abdada_busy_set,
                 };
+                // Use a shallow step depth to keep PV extraction lightweight
+                let step_depth = d.min(2);
                 let (_sc, mv_opt) = self.alphabeta(
                     ABArgs {
                         pos: &pos,
-                        depth: d,
+                        depth: step_depth,
                         alpha: i32::MIN / 2,
                         beta: i32::MAX / 2,
                         ply: 0,
