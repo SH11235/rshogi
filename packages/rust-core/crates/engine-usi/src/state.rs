@@ -66,6 +66,8 @@ pub struct UsiOptions {
     pub finalize_sanity_switch_margin_cp: i32,
     // Opponent capture SEE gate after PV1 (positive cp threshold)
     pub finalize_sanity_opp_see_min_cp: i32,
+    // Opponent capture SEE penalty cap (independent from opp_see_min gate)
+    pub finalize_sanity_opp_see_penalty_cap_cp: i32,
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
@@ -124,6 +126,7 @@ impl Default for UsiOptions {
             finalize_sanity_see_min_cp: -90,
             finalize_sanity_switch_margin_cp: 30,
             finalize_sanity_opp_see_min_cp: 300,
+            finalize_sanity_opp_see_penalty_cap_cp: 200,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             instant_mate_check_all_pv: false,
@@ -155,6 +158,10 @@ pub struct GoParams {
     pub periods: Option<u32>,
     pub moves_to_go: Option<u32>,
     pub rtime: Option<u64>,
+    // go mate サポート（暫定: 即時判定のみ）
+    pub mate_mode: bool,
+    /// None = infinite（停止が来るまで） / Some(ms) = タイムアウト（将来の実探索向け）
+    pub mate_limit_ms: Option<u64>,
 }
 
 /// Lightweight snapshot of ponder search result for instant finalize on ponderhit.

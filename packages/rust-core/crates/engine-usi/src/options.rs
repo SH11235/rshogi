@@ -137,6 +137,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name InstantMateMove.MaxDistance type spin default 1 min 1 max 5");
     // Opponent SEE gate for finalize sanity
     usi_println("option name FinalizeSanity.OppSEE_MinCp type spin default 300 min 0 max 5000");
+    // Independent penalty cap for opponent capture SEE in finalize sanity
+    usi_println(
+        "option name FinalizeSanity.OppSEE_PenaltyCapCp type spin default 200 min 0 max 5000",
+    );
 
     // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
     usi_println(&format!(
@@ -608,6 +612,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     state.opts.finalize_sanity_opp_see_min_cp = x.clamp(0, 5000);
+                }
+            }
+        }
+        "FinalizeSanity.OppSEE_PenaltyCapCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_sanity_opp_see_penalty_cap_cp = x.clamp(0, 5000);
                 }
             }
         }
