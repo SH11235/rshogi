@@ -233,32 +233,38 @@ pub fn poll_instant_mate(state: &mut EngineState) {
 
     // Check the latest snapshot for a mate score on PV(s)
     if let Some(snapshot) = state.stop_controller.try_read_snapshot() {
-        let mut lines_to_check: smallvec::SmallVec<[engine_core::search::types::RootLine; 4]> =
-            smallvec::SmallVec::new();
-        if state.opts.instant_mate_check_all_pv {
-            for l in snapshot.lines.iter() {
-                lines_to_check.push(l.clone());
-            }
-        } else if let Some(first) = snapshot.lines.first() {
-            lines_to_check.push(first.clone());
-        }
-        for line in lines_to_check.iter() {
+        // Iterate by reference to avoid cloning lines
+        let mut iter: Box<dyn Iterator<Item = &engine_core::search::types::RootLine>> = if state
+            .opts
+            .instant_mate_check_all_pv
+        {
+            Box::new(snapshot.lines.iter())
+        } else {
+            Box::new(snapshot.lines.iter().take(1))
+        };
+        for line in iter.by_ref() {
             use engine_core::search::constants::mate_distance as md;
-            let dist_opt = line.mate_distance.or_else(|| md(line.score_internal));
-            let bound_ok =
-                matches!(line.bound, Bound::Exact) || snapshot.source == SnapshotSource::Stable;
+            // Prefer provided mate_distance; only derive from score when the bound is Exact
+            let dist_opt = line
+                .mate_distance
+                .or_else(|| (matches!(line.bound, Bound::Exact)).then(|| md(line.score_internal)).flatten());
+            // Guard: Exact lines always allowed; Stable snapshots allow non-Exact only when distance is explicit
+            let bound_ok = matches!(line.bound, Bound::Exact)
+                || (snapshot.source == SnapshotSource::Stable && line.mate_distance.is_some());
             if bound_ok {
                 if let Some(dist) = dist_opt {
                     if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
                         let was_ponder = state.current_is_ponder;
                         info_string(format!(
-                            "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?}",
+                            "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?} sid={} root={}",
                             dist,
                             was_ponder as u8,
                             snapshot.depth,
                             snapshot.elapsed_ms,
                             line.bound,
-                            snapshot.source
+                            snapshot.source,
+                            snapshot.search_id,
+                            fmt_hash(snapshot.root_key)
                         ));
                         // Ask backend to stop promptly
                         state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
@@ -268,7 +274,7 @@ pub fn poll_instant_mate(state: &mut EngineState) {
 
                         // For non-ponder, emit immediately via fast path (TT/snapshot)
                         if !was_ponder {
-                            finalize_and_send_fast(
+                            fast_finalize_no_detach(
                                 state,
                                 "instant_mate_finalize",
                                 Some(FinalizeReason::PlannedMate {

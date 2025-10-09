@@ -945,6 +945,11 @@ mod tests {
         let info = ctrl.try_read_stop_info().expect("stop info present");
         assert_eq!(info.reason, TerminationReason::TimeLimit);
         assert!(!info.hard_timeout);
+        // Stop tag should record planned_mate with distance
+        assert!(
+            info.stop_tag.as_deref().unwrap_or("").contains("planned_mate"),
+            "stop_tag should contain planned_mate"
+        );
         // External stop flag should be set
         assert!(external.load(AtomicOrdering::Acquire));
     }
