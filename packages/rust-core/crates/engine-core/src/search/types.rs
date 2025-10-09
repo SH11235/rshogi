@@ -259,7 +259,8 @@ impl SearchResult {
             let mv = first.pv.first().copied().or(Some(first.root_move));
             // Publish PV into stats for backward compatibility
             stats.pv = first.pv.iter().copied().collect();
-            (mv, first.score_cp, first.bound)
+            // 統一方針: SearchResult::score は内部スコア（mate距離保持）
+            (mv, first.score_internal, first.bound)
         } else {
             (None, 0, NodeType::Exact)
         };
@@ -476,6 +477,26 @@ impl SearchStack {
             ply,
             ..Default::default()
         }
+    }
+
+    /// 反復開始時の軽量リセット（容量は保持）
+    #[inline]
+    pub fn reset_for_iteration(&mut self) {
+        self.ply = 0;
+        self.current_move = None;
+        self.static_eval = None;
+        self.killers = [None, None];
+        self.move_count = 0;
+        self.pv = false;
+        self.null_move = false;
+        self.in_check = false;
+        self.threat_move = None;
+        self.history_score = 0;
+        self.excluded_move = None;
+        self.counter_move = None;
+        self.quiet_moves.clear(); // 容量保持
+        self.consecutive_checks = 0;
+        self.pv_line.clear(); // SmallVec の容量保持
     }
 
     /// Update killers (convenience method)

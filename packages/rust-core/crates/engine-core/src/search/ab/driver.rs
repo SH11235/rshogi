@@ -54,9 +54,9 @@ fn take_stack_cache() -> Vec<SearchStack> {
             v.clear();
             v.resize(want, SearchStack::default());
         } else {
-            // 既存メモリを再利用。各要素を Default でリセット。
+            // 既存メモリを再利用。各要素の内部バッファ容量は保持したまま中身をクリア。
             for e in v.iter_mut() {
-                *e = SearchStack::default();
+                e.reset_for_iteration();
             }
         }
         v
@@ -84,6 +84,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             || limits.time_manager.as_ref().is_some_and(|tm| tm.is_in_byoyomi())
     }
 
+    /// Compute qsearch node limit for the current context.
+    ///
+    /// ポリシー要点:
+    /// - `qnodes_limit == Some(0)` かつ 時間管理や固定時間が無いベンチ系では無制限（`u64::MAX`）
+    /// - 時間管理や固定時間がある場合は、それらに基づくダイナミック上限を適用
+    /// - Byoyomi 中は深さに応じて緩やかに上限を引き上げ（浅い層では控えめ、深くなると増やす）
+    /// - それ以外は既定上限 `DEFAULT_QNODES_LIMIT` を上回らないようクランプ（安全側）
     fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
         // qnodes_limit==0 は「無制限」意図。ただし実対局（時間管理あり）では
         // TM/時間上限に基づく動的縮小は残す。ベンチ用途（時間管理なし）のみ完全無制限。
@@ -1388,7 +1395,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         if let Some(lines) = final_lines_opt.as_ref() {
             if let Some(first) = lines.first() {
                 best_move_out = Some(first.root_move);
-                score_out = first.score_cp;
+                // Internal score（mate距離保持）を採用。UI向けは必要時にclamp。
+                score_out = first.score_internal;
                 node_type_out = first.bound;
                 stats.pv = first.pv.iter().copied().collect();
             }
@@ -1405,6 +1413,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         } else if let Some(snap) = stable_snapshot {
             best_move_out = snap.best;
+            // スナップショットはcpのみ保持のため、この経路ではcpを使用（互換維持）
             score_out = snap.score_cp;
             node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
@@ -1417,6 +1426,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stable_depth = Some(snap.depth);
         } else if let Some(snap) = snapshot_any.clone() {
             best_move_out = snap.best;
+            // 同上（Partial/Stable snapshot経路）
             score_out = snap.score_cp;
             node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
@@ -1758,6 +1768,32 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn stack_cache_preserves_inner_capacity_across_iterations() {
+        // Prepare a stack buffer and inflate inner quiet_moves capacity
+        let mut buf = super::take_stack_cache();
+        assert_eq!(buf.len(), (crate::search::constants::MAX_PLY + 1) as usize);
+        let idx = 8usize;
+        // Inflate capacity by pushing many moves
+        for _ in 0..512 {
+            buf[idx].quiet_moves.push(crate::shogi::Move::null());
+        }
+        let cap_before = buf[idx].quiet_moves.capacity();
+        // Return to cache (would be reused next take)
+        super::return_stack_cache(buf);
+
+        // Take again (new iteration). Implementation should clear but keep capacity
+        let buf2 = super::take_stack_cache();
+        let cap_after = buf2[idx].quiet_moves.capacity();
+        assert!(
+            cap_after >= cap_before,
+            "inner Vec capacity should be preserved across iterations (before={}, after={})",
+            cap_before,
+            cap_after
+        );
+        super::return_stack_cache(buf2);
+    }
+
+    #[test]
     fn heuristics_carryover_across_pvs_and_iterations() {
         // Test that heuristics (lmr_trials) grow across PVs and iterations,
         // ensuring the fix (shared_heur = heur at PV tail) works correctly.
@@ -1808,6 +1844,24 @@ mod tests {
                 summary.counter_filled
             );
         }
+    }
+
+    #[test]
+    fn qnodes_unlimited_when_no_time_and_limit_zero() {
+        let limits = SearchLimitsBuilder::default()
+            .time_control(TimeControl::Infinite)
+            .qnodes_limit(0)
+            .build();
+        let got = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
+        assert_eq!(got, u64::MAX, "bench/unlimited path should yield u64::MAX");
+    }
+
+    #[test]
+    fn qnodes_default_clamped_without_time_and_no_override() {
+        use crate::search::constants::DEFAULT_QNODES_LIMIT;
+        let limits = SearchLimitsBuilder::default().time_control(TimeControl::Infinite).build();
+        let got = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
+        assert_eq!(got, DEFAULT_QNODES_LIMIT, "should clamp to default when no override");
     }
 
     // RootWorkQueue/claim は純粋 LazySMP では使用しないため、関連テストは削除しました。

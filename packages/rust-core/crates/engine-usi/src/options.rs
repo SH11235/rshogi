@@ -736,6 +736,12 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "InstantMateMove.CheckAllPV" => {
+            if let Some(v) = value_ref {
+                let v = v.to_lowercase();
+                state.opts.instant_mate_check_all_pv = matches!(v.as_str(), "true" | "1" | "on");
+            }
+        }
         "OverheadMs" => {
             if let Some(v) = value_ref {
                 if let Ok(ms) = v.parse::<u64>() {
@@ -1037,4 +1043,6 @@ fn print_time_policy_options(opts: &UsiOptions) {
             "false"
         }
     ));
+    // Instant-mate detection policy (USI-led)
+    usi_println("option name InstantMateMove.CheckAllPV type check default false");
 }
