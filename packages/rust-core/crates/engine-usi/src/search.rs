@@ -282,6 +282,8 @@ pub fn limits_from_go(
 }
 
 pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
+    // 入口診断ログ（go発行直後にプロセスが落ちるケースの切り分け用）
+    crate::io::info_string(format!("go_enter cmd={}", cmd));
     // 新しい go を受理する前に、前回探索から残っている OOB finalize 要求を掃除しておく。
     // SessionStart が届く前の Finalize を握りつぶすことで stale=1 ログを抑止する。
     poll_oob_finalize(state);
