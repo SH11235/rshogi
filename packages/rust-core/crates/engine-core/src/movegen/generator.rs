@@ -2143,7 +2143,8 @@ mod tests {
         let attackers = gen.attackers_to_with_occupancy(target, Color::White, pos.board.all_bb);
         assert!(gen.is_attacked_by(target, Color::White));
         assert!(!attackers.is_empty());
-        assert_eq!(attackers.is_empty(), !gen.is_attacked_by(target, Color::White));
+        let is_attacked = gen.is_attacked_by(target, Color::White);
+        assert_eq!(attackers.is_empty(), !is_attacked);
     }
 
     #[test]
