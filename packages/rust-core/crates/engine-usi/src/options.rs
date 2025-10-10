@@ -111,7 +111,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.ProbCut_SkipVerifyLt4 type check default false");
     // Finalize sanity (light guard before emitting bestmove)
     usi_println("option name FinalizeSanity.Enabled type check default true");
-    usi_println("option name FinalizeSanity.BudgetMs type spin default 2 min 0 max 10");
+    usi_println(&format!(
+        "option name FinalizeSanity.BudgetMs type spin default {} min 0 max 10",
+        opts.finalize_sanity_budget_ms
+    ));
     usi_println("option name FinalizeSanity.MiniDepth type spin default 2 min 1 max 3");
     usi_println("option name FinalizeSanity.SEE_MinCp type spin default -90 min -1000 max 1000");
     usi_println("option name FinalizeSanity.SwitchMarginCp type spin default 30 min 0 max 500");
@@ -139,7 +142,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name InstantMateMove.Enabled type check default true");
     usi_println("option name InstantMateMove.MaxDistance type spin default 1 min 1 max 5");
     // Opponent SEE gate for finalize sanity
-    usi_println("option name FinalizeSanity.OppSEE_MinCp type spin default 300 min 0 max 5000");
+    usi_println(&format!(
+        "option name FinalizeSanity.OppSEE_MinCp type spin default {} min 0 max 5000",
+        opts.finalize_sanity_opp_see_min_cp
+    ));
     // Independent penalty cap for opponent capture SEE in finalize sanity
     usi_println(
         "option name FinalizeSanity.OppSEE_PenaltyCapCp type spin default 200 min 0 max 5000",
@@ -182,7 +188,17 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         opts.warmup_prev_moves
     ));
     // Profile controls (GUIで自動既定を明示適用)
-    usi_println("option name Profile.Mode type combo default Auto var Auto var T1 var T8 var Off");
+    // Profile.Mode default is now taken from opts to avoid drift
+    let profile_mode_default = match opts.profile_mode {
+        crate::state::ProfileMode::Auto => "Auto",
+        crate::state::ProfileMode::T1 => "T1",
+        crate::state::ProfileMode::T8 => "T8",
+        crate::state::ProfileMode::Off => "Off",
+    };
+    usi_println(&format!(
+        "option name Profile.Mode type combo default {} var Auto var T1 var T8 var Off",
+        profile_mode_default
+    ));
     usi_println("option name Profile.ApplyAutoDefaults type button");
 }
 

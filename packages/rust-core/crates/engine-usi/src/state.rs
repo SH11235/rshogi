@@ -167,8 +167,7 @@ impl Default for UsiOptions {
             promote_bias_cp: 20,
             warmup_ms: 500,
             warmup_prev_moves: 0,
-            // 自動プロファイルを無効化し、静的なT8相当の既定値を適用する
-            profile_mode: ProfileMode::Off,
+            profile_mode: ProfileMode::Auto,
         }
     }
 }

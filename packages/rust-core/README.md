@@ -150,6 +150,79 @@ setoption name ByoyomiPeriods value default
 go byoyomi 30000 periods 5  # 30秒×5回
 ```
 
+### InstantMateMove（短手数詰みの即時確定）
+
+詰みが「確定」したときに、探索を待たず即座にbestmoveを返す機能です。誤発火（Partial/浅深度の暫定PVによる即指し）を防ぐため、ゲートと軽検証を追加しています。
+
+- 代表オプション（既定値）
+  - `InstantMateMove.Enabled`（true）: 機能の有効/無効。疑義のある環境では false 推奨。
+  - `InstantMateMove.MaxDistance`（1）: 「詰みまでの手数」しきい値（plies）。1=1手詰め相当のみ即確定。
+  - `InstantMateMove.CheckAllPV`（true）: MultiPV全行の詰みを確認（falseでPV1のみ）。
+  - `InstantMateMove.RequiredSnapshot`（Stable）: Stableスナップショットのみで発火（Partialは不発）。
+  - `InstantMateMove.MinDepth`（0）: 追加の深さゲート。0で無効（YaneuraOu流: 証明重視）。
+  - `InstantMateMove.VerifyMode`（CheckOnly）: 軽検証モード。
+    - Off: 検証なし
+    - CheckOnly: 候補手を仮指し→相手合法手が0なら確定
+    - QSearch: 将来の軽qsearch用フック（現状はCheckOnly相当）
+  - `InstantMateMove.VerifyNodes`（0）: 軽qsearch用の上限ノード（将来使用）。
+  - `InstantMateMove.RespectMinThinkMs`（true）: 最小思考時間の尊重を有効化。
+  - `InstantMateMove.MinRespectMs`（8）: fast finalize 前に最低限使う思考時間（ms）。
+
+- 運用の勘所
+  - まず安全に止める: `setoption name InstantMateMove.Enabled value false`
+- 代替として誤検知を減らす: `InstantMateMove.CheckAllPV value true`（既定でtrue）
+  - 既定は「Stable限定＋軽検証（CheckOnly）＋最小思考時間8ms尊重」で、Partial・浅深度での誤発火を抑止します。
+
+例: 既定強化（明示）
+
+```bash
+setoption name InstantMateMove.Enabled value true
+setoption name InstantMateMove.RequiredSnapshot value Stable
+setoption name InstantMateMove.CheckAllPV value true
+setoption name InstantMateMove.VerifyMode value CheckOnly
+setoption name InstantMateMove.RespectMinThinkMs value true
+setoption name InstantMateMove.MinRespectMs value 8
+```
+
+例: 一時的に完全無効化
+
+```bash
+setoption name InstantMateMove.Enabled value false
+```
+
+### Threads連動の自動既定（T8/T1 プロファイル）
+
+エンジンは `Threads` を見て、対局安全寄りの既定（プロファイル）を自動で適用します。GUI から明示の `setoption` があればそれを最優先し、自動既定は上書きしません。
+
+- 適用条件（Profile.Mode=Auto の既定）
+  - `Threads ≥ 4` → T8 プロファイル
+  - `Threads = 1` → T1 プロファイル
+
+- 既定値（要点のみ）
+  - T8（Threads≥4）
+    - RootSeeGate=On（XSEE=100）
+    - PostVerify=On（YDrop=250）
+    - Finalize: SwitchMargin=30 / OppSEE_Min=100 / BudgetMs=8
+    - MultiPV=1
+  - T1（Threads=1）
+    - RootSeeGate=On（XSEE=100）
+    - PostVerify=On（YDrop=225）
+    - Finalize: SwitchMargin=35 / OppSEE_Min=120 / BudgetMs=4
+    - MultiPV=1
+
+- ログ（探索開始時）
+
+```text
+info string effective_profile mode=Auto resolved=T8 threads=8 multipv=1 \
+  root_see_gate=1 xsee=100 post_verify=1 ydrop=250 \
+  finalize_enabled=1 finalize_switch=30 finalize_oppsee=100 finalize_budget=8 \
+  overrides=- threads_overridden=0
+```
+
+メモ:
+- `effective_profile` は「最終的に有効な設定」を1行で可視化します。GUIの `setoption` で上書きされたキーは `overrides` に列挙されます。
+- `Profile.Mode` を `T1`/`T8`/`Off` に切り替えることで、自動既定を明示固定または無効化できます。
+
 ## Building
 
 ### From project root

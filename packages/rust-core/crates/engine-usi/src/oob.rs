@@ -244,13 +244,6 @@ pub fn poll_instant_mate(state: &mut EngineState) {
         {
             return;
         }
-        // Gate 3: Respect small minimum think time for fast finalize
-        if state.opts.instant_mate_respect_min_think_ms
-            && snapshot.elapsed_ms < state.opts.instant_mate_min_respect_ms
-        {
-            return;
-        }
-
         let mut try_lines: smallvec::SmallVec<[&engine_core::search::types::RootLine; 4]> =
             smallvec::SmallVec::new();
         if state.opts.instant_mate_check_all_pv {
@@ -262,6 +255,15 @@ pub fn poll_instant_mate(state: &mut EngineState) {
         }
 
         for line in try_lines {
+            // Gate 3 (per-line): Respect minimum think time for fast finalize
+            if state.opts.instant_mate_respect_min_think_ms {
+                // InstantMateではMinRespectMsのみを尊重（MinThinkMsは見ない）
+                let want_ms = state.opts.instant_mate_min_respect_ms;
+                let elapsed = snapshot.elapsed_ms.max(line.time_ms.unwrap_or(0));
+                if elapsed < want_ms {
+                    continue;
+                }
+            }
             use engine_core::search::constants::mate_distance as md;
             // Gate 4: bound must be Exact（fail-high/lowは不発）
             if !matches!(line.bound, Bound::Exact) {
@@ -271,9 +273,24 @@ pub fn poll_instant_mate(state: &mut EngineState) {
             if !(dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32) {
                 continue;
             }
-            // Candidate move (prefer PV[0], fallback to root_move / snapshot.best)
-            let cand = line.pv.first().copied().or(Some(line.root_move)).or(snapshot.best);
-            let Some(best_mv) = cand else { continue };
+            // Candidate move (prefer PV[0], fallback to root_move / snapshot.best), null除外
+            let non_null = |m: engine_core::shogi::Move| if m.is_null() { None } else { Some(m) };
+            let cand = line
+                .pv
+                .first()
+                .copied()
+                .and_then(non_null)
+                .or_else(|| non_null(line.root_move))
+                .or_else(|| snapshot.best.and_then(non_null));
+            let Some(best_mv) = cand else {
+                info_string("instant_mate_verify_fail=1 reason=no_candidate");
+                continue;
+            };
+            // Gate 5: candidate must be legal in current position（TT起源/古いPVの混入対策）
+            if !state.position.is_legal_move(best_mv) {
+                info_string("instant_mate_verify_fail=1 reason=illegal_best");
+                continue;
+            }
             // Position must match snapshot root
             let pos_hash = state.position.zobrist_hash();
             if pos_hash != snapshot.root_key {
@@ -286,21 +303,44 @@ pub fn poll_instant_mate(state: &mut EngineState) {
                 crate::state::InstantMateVerifyMode::CheckOnly => {
                     let mut pos1 = state.position.clone();
                     let _ = pos1.do_move(best_mv);
+                    let in_check = pos1.is_in_check();
                     let mg = MoveGenerator::new();
-                    match mg.generate_all(&pos1) {
+                    let no_legal_moves = match mg.generate_all(&pos1) {
                         Ok(list) => list.as_slice().iter().all(|&m| !pos1.is_legal_move(m)),
                         Err(_) => false,
+                    };
+                    if !(in_check && no_legal_moves) {
+                        let reason = if !in_check {
+                            "not_in_check"
+                        } else {
+                            "has_escape"
+                        };
+                        info_string(format!("instant_mate_verify_fail=1 reason={}", reason));
                     }
+                    in_check && no_legal_moves
                 }
                 crate::state::InstantMateVerifyMode::QSearch => {
-                    // TODO: implement tiny qsearch verification (node-limited). For now fallback to CheckOnly.
+                    // TODO(verify): implement tiny qsearch verification
+                    // - TTへの書き込みは行わない（副作用ゼロ）
+                    // - ノード上限（opts.instant_mate_verify_nodes）で早期停止
+                    // - ここでは暫定としてCheckOnly相当の in_check && no_legal_moves を用いる
                     let mut pos1 = state.position.clone();
                     let _ = pos1.do_move(best_mv);
+                    let in_check = pos1.is_in_check();
                     let mg = MoveGenerator::new();
-                    match mg.generate_all(&pos1) {
+                    let no_legal_moves = match mg.generate_all(&pos1) {
                         Ok(list) => list.as_slice().iter().all(|&m| !pos1.is_legal_move(m)),
                         Err(_) => false,
+                    };
+                    if !(in_check && no_legal_moves) {
+                        let reason = if !in_check {
+                            "not_in_check"
+                        } else {
+                            "has_escape"
+                        };
+                        info_string(format!("instant_mate_verify_fail=1 reason={}", reason));
                     }
+                    in_check && no_legal_moves
                 }
             };
             if !verify_passed {
@@ -344,18 +384,20 @@ mod tests_oob_finalize {
     use crate::finalize::take_last_emitted_bestmove;
     use engine_core::search::types::{Bound, RootLine};
     use engine_core::shogi::Move;
+    use engine_core::usi::parse_usi_move;
 
     fn make_mate1_line() -> RootLine {
         use engine_core::search::constants::MATE_SCORE;
         RootLine {
             multipv_index: 1,
-            root_move: Move::null(),
+            // 3g3f（7g7f）: 開始局面で合法な先手の一手
+            root_move: parse_usi_move("3g3f").unwrap_or_else(|_| Move::null()),
             score_internal: MATE_SCORE - 1, // mate in 1 ply
             score_cp: 30_000,               // clipped display (not used by detector)
             bound: Bound::Exact,
             depth: 10,
             seldepth: Some(10),
-            pv: smallvec::smallvec![Move::null()],
+            pv: smallvec::smallvec![parse_usi_move("3g3f").unwrap_or_else(|_| Move::null())],
             nodes: Some(1000),
             time_ms: Some(5),
             nps: Some(200_000),
@@ -373,7 +415,11 @@ mod tests_oob_finalize {
         state.searching = true;
         state.current_is_ponder = false;
 
-        // Publish a snapshot with mate in 1
+        // 試験では Stable ゲートを外し、VerifyもOFFにしてトリガ条件のみ検査
+        state.opts.instant_mate_require_stable = false;
+        state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
+
+        // Publish a snapshot with mate in 1（Partial）
         let sid = 4242u64;
         let root_key = state.position.zobrist_hash();
         state.stop_controller.publish_session(None, sid);
@@ -457,8 +503,11 @@ mod tests_oob_finalize {
         pv1.mate_distance = None;
         pv1.score_internal = 120; // not a mate
 
-        let mut pv2 = make_mate1_line(); // Exact mate in 1
+        let mut pv2 = make_mate1_line(); // Exact mate in 1 (legal move already set)
         pv2.multipv_index = 2; // PV2
+
+        // 検証はOFFにして MultiPVの挙動だけを見る
+        state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
 
         // SmallVec の inline 容量を明示し型推論エラー (SmallVec<_>) を解消
         let lines: smallvec::SmallVec<[RootLine; 2]> =
@@ -490,6 +539,10 @@ mod tests_oob_finalize {
         state.opts.instant_mate_move_max_distance = 2;
         state.searching = true;
         state.current_is_ponder = false;
+
+        // Partialでも発火させるためStableゲートをOFF、検証もOFF
+        state.opts.instant_mate_require_stable = false;
+        state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
 
         let sid = 9999u64;
         let root_key = state.position.zobrist_hash();
