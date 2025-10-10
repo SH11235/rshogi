@@ -364,3 +364,30 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 ## License
 
 MIT
+
+## Threads連動の自動既定（T1/T8プロファイル）
+
+探索開始時に `Threads` に応じた安全側の既定値を自動適用します。GUI/ユーザーが `setoption` で明示設定した値は最優先で、その項目には自動既定を上書きしません（干渉しません）。検索開始時には、実際に有効になっているプロファイルと主要パラメータを1行で出力します。
+
+- Threads ≥ 4（T8プロファイル）
+  - RootSeeGate=On, RootSeeGate.XSEE=100
+  - PostVerify=On, PostVerify.YDrop=250
+  - FinalizeSanity.SwitchMarginCp=30, FinalizeSanity.OppSEE_MinCp=100, FinalizeSanity.BudgetMs=8
+  - MultiPV=1
+- Threads = 1（T1プロファイル）
+  - RootSeeGate=On, RootSeeGate.XSEE=100
+  - PostVerify=On, PostVerify.YDrop=225
+  - FinalizeSanity.SwitchMarginCp=35, FinalizeSanity.OppSEE_MinCp=120, FinalizeSanity.BudgetMs=4
+  - MultiPV=1
+
+出力例（検索開始時）:
+
+```
+info string effective_profile profile=T8 threads=8 multipv=1 root_see_gate=1 xsee=100 post_verify=1 ydrop=250 finalize_switch=30 finalize_oppsee=100 finalize_budget=8 overrides=-
+```
+
+備考:
+- すべてのオプションをGUIから明示的に`setoption`で流すタイプのGUIでは、自動既定は「そのままでは」当たりません。必要に応じて、以下のプロファイル操作を利用してください。
+  - `Profile.Mode`（Auto/T1/T8/Off）: 自動既定の適用モードを選択
+  - `Profile.ApplyAutoDefaults`（Button）: 主要キーの「ユーザー上書き」印をクリアし、選択中のプロファイルで自動既定を即時適用
+- 超短秒（≤2秒）の局面ではcpの悪化が出やすい既知の限界があります。今後、Root Post‑Verifyのqsearch化や、finalize時のscore整合、qsearchへの「条件付き・非捕獲成り」導入で改善予定です。

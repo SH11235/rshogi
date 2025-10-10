@@ -6,7 +6,10 @@ use engine_core::evaluation::nnue::error::NNUEError;
 use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
-use crate::state::{EngineState, UsiOptions};
+use crate::state::{EngineState, ProfileMode, UsiOptions};
+fn mark_override(state: &mut EngineState, key: &str) {
+    state.user_overrides.insert(key.to_string());
+}
 
 fn profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
     match engine_type {
@@ -178,6 +181,9 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name Warmup.PrevMoves type spin default {} min 0 max 20",
         opts.warmup_prev_moves
     ));
+    // Profile controls (GUIで自動既定を明示適用)
+    usi_println("option name Profile.Mode type combo default Auto var Auto var T1 var T8 var Off");
+    usi_println("option name Profile.ApplyAutoDefaults type button");
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -231,6 +237,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     }
                 }
             }
+            mark_override(state, "Threads");
         }
         "USI_Ponder" => {
             if let Some(v) = value_ref {
@@ -315,6 +322,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     }
                 }
             }
+            mark_override(state, "MultiPV");
         }
         "MinThinkMs" => {
             if let Some(v) = value_ref {
@@ -588,6 +596,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.finalize_sanity_budget_ms = x.min(10);
                 }
             }
+            mark_override(state, "FinalizeSanity.BudgetMs");
         }
         "FinalizeSanity.MiniDepth" => {
             if let Some(v) = value_ref {
@@ -609,6 +618,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.finalize_sanity_switch_margin_cp = x.clamp(0, 1000);
                 }
             }
+            mark_override(state, "FinalizeSanity.SwitchMarginCp");
         }
         "FinalizeSanity.OppSEE_MinCp" => {
             if let Some(v) = value_ref {
@@ -616,6 +626,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.finalize_sanity_opp_see_min_cp = x.clamp(0, 5000);
                 }
             }
+            mark_override(state, "FinalizeSanity.OppSEE_MinCp");
         }
         "FinalizeSanity.OppSEE_PenaltyCapCp" => {
             if let Some(v) = value_ref {
@@ -750,6 +761,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 state.opts.root_see_gate = on;
                 info_string(format!("root_see_gate={}", on as u8));
             }
+            mark_override(state, "RootSeeGate");
         }
         "RootSeeGate.XSEE" => {
             if let Some(v) = value_ref {
@@ -757,6 +769,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.x_see_cp = x.clamp(-2000, 5000);
                 }
             }
+            mark_override(state, "RootSeeGate.XSEE");
         }
         "PostVerify" => {
             if let Some(v) = value_ref {
@@ -764,6 +777,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 state.opts.post_verify = on;
                 info_string(format!("post_verify={}", on as u8));
             }
+            mark_override(state, "PostVerify");
         }
         "PostVerify.YDrop" => {
             if let Some(v) = value_ref {
@@ -771,6 +785,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.y_drop_cp = y.clamp(0, 5000);
                 }
             }
+            mark_override(state, "PostVerify.YDrop");
         }
         "PromoteVerify" => {
             if let Some(v) = value_ref {
@@ -932,6 +947,42 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 state.opts.fail_safe_guard = matches!(v.as_str(), "true" | "1" | "on");
             }
         }
+        // --- Profile controls (GUI)
+        "Profile.Mode" => {
+            if let Some(v) = value_ref {
+                match v.to_ascii_lowercase().as_str() {
+                    "auto" => state.opts.profile_mode = ProfileMode::Auto,
+                    "t1" => state.opts.profile_mode = ProfileMode::T1,
+                    "t8" => state.opts.profile_mode = ProfileMode::T8,
+                    "off" => state.opts.profile_mode = ProfileMode::Off,
+                    _ => {}
+                }
+                info_string(match state.opts.profile_mode {
+                    ProfileMode::Auto => "profile_mode=Auto".to_string(),
+                    ProfileMode::T1 => "profile_mode=T1".to_string(),
+                    ProfileMode::T8 => "profile_mode=T8".to_string(),
+                    ProfileMode::Off => "profile_mode=Off".to_string(),
+                });
+            }
+        }
+        "Profile.ApplyAutoDefaults" => {
+            // Clear overrides and (re)apply thread/profile-based defaults immediately
+            for k in [
+                "RootSeeGate",
+                "RootSeeGate.XSEE",
+                "PostVerify",
+                "PostVerify.YDrop",
+                "FinalizeSanity.SwitchMarginCp",
+                "FinalizeSanity.OppSEE_MinCp",
+                "FinalizeSanity.BudgetMs",
+                "MultiPV",
+            ] {
+                state.user_overrides.remove(k);
+            }
+            maybe_apply_thread_based_defaults(state);
+            apply_options_to_engine(state);
+            info_string("profile_applied=1");
+        }
         _ => {}
     }
 
@@ -969,6 +1020,95 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     engine_core::search::config::set_post_verify_ydrop_cp(state.opts.y_drop_cp);
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
+}
+
+/// Apply Threads-dependent auto-defaults unless the user explicitly overrode the values.
+/// This function does NOT print options; it only updates `state.opts`.
+pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
+    let is_t8 = match state.opts.profile_mode {
+        ProfileMode::T1 => false,
+        ProfileMode::T8 => true,
+        ProfileMode::Off => return, // 明示OFF
+        ProfileMode::Auto => state.opts.threads >= 4,
+    };
+    // Helper: set if not overridden by user
+    let set_if_absent = |key: &str, apply: &mut dyn FnMut()| {
+        if !state.user_overrides.contains(key) {
+            apply();
+        }
+    };
+    if is_t8 {
+        set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
+        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 100);
+        set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
+        set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 250);
+        set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
+            state.opts.finalize_sanity_switch_margin_cp = 30
+        });
+        set_if_absent("FinalizeSanity.OppSEE_MinCp", &mut || {
+            state.opts.finalize_sanity_opp_see_min_cp = 100
+        });
+        set_if_absent("FinalizeSanity.BudgetMs", &mut || state.opts.finalize_sanity_budget_ms = 8);
+        set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
+    } else {
+        // T1 profile
+        set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
+        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 100);
+        set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
+        set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
+        set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
+            state.opts.finalize_sanity_switch_margin_cp = 35
+        });
+        set_if_absent("FinalizeSanity.OppSEE_MinCp", &mut || {
+            state.opts.finalize_sanity_opp_see_min_cp = 120
+        });
+        set_if_absent("FinalizeSanity.BudgetMs", &mut || state.opts.finalize_sanity_budget_ms = 4);
+        set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
+    }
+}
+
+/// Emit a one-line info string with the effective profile and key parameters.
+pub fn log_effective_profile(state: &EngineState) {
+    let profile = match state.opts.profile_mode {
+        ProfileMode::T1 => "T1",
+        ProfileMode::T8 => "T8",
+        ProfileMode::Off | ProfileMode::Auto => {
+            if state.opts.threads >= 4 {
+                "T8"
+            } else {
+                "T1"
+            }
+        }
+    };
+    let mut overrides: Vec<&str> = Vec::new();
+    for k in [
+        "RootSeeGate",
+        "RootSeeGate.XSEE",
+        "PostVerify",
+        "PostVerify.YDrop",
+        "FinalizeSanity.SwitchMarginCp",
+        "FinalizeSanity.OppSEE_MinCp",
+        "FinalizeSanity.BudgetMs",
+        "MultiPV",
+    ] {
+        if state.user_overrides.contains(k) {
+            overrides.push(k);
+        }
+    }
+    info_string(format!(
+        "effective_profile profile={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_switch={} finalize_oppsee={} finalize_budget={} overrides={}",
+        profile,
+        state.opts.threads,
+        state.opts.multipv,
+        state.opts.root_see_gate as u8,
+        state.opts.x_see_cp,
+        state.opts.post_verify as u8,
+        state.opts.y_drop_cp,
+        state.opts.finalize_sanity_switch_margin_cp,
+        state.opts.finalize_sanity_opp_see_min_cp,
+        state.opts.finalize_sanity_budget_ms,
+        if overrides.is_empty() { "-".to_string() } else { overrides.join(",") }
+    ));
 }
 
 fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {
