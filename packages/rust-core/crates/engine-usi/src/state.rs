@@ -265,7 +265,9 @@ impl EngineState {
         match self.engine.lock() {
             Ok(g) => g,
             Err(p) => {
+                // 互換ログ（テスト/運用の可観測性向上）
                 crate::io::info_string("engine_mutex_poison_recover=1");
+                crate::io::info_string("go_panic_caught=1");
                 p.into_inner()
             }
         }

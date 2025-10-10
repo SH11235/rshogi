@@ -1,5 +1,6 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
 use engine_core::search::common::is_mate_score;
+use engine_core::search::constants::mate_distance as md;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
@@ -82,8 +83,10 @@ fn finalize_sanity_check(
     if !state.opts.finalize_sanity_enabled || state.current_is_ponder {
         return None;
     }
-    if state.position.is_in_check() {
-        return None;
+    // 方針A: 王手中でもミニ検証を行う（過大評価抑制）。ログのみ付与。
+    let in_check_now = state.position.is_in_check();
+    if in_check_now {
+        diag_info_string("sanity_in_check=1");
     }
     let pv1 = final_best.best_move?;
     // Mate/draw guard: if PV1 score is mate帯 or (近似的に)ドロー評価に近いならスイッチ禁止
@@ -733,15 +736,17 @@ pub fn finalize_and_send(
             let exact = matches!(res.node_type, engine_core::search::types::NodeType::Exact);
             let stable_ok = res.stats.stable_depth.map(|d| d >= 5).unwrap_or(false);
             if !exact || !stable_ok {
+                let dist = md(res.score).unwrap_or(0);
                 info_string(format!(
-                    "mate_gate_blocked=1 bound={} stable_ok={} depth={}",
+                    "mate_gate_blocked=1 bound={} stable_ok={} depth={} mate_dist={}",
                     match res.node_type {
                         engine_core::search::types::NodeType::LowerBound => "lb",
                         engine_core::search::types::NodeType::UpperBound => "ub",
                         _ => "pv",
                     },
                     stable_ok as u8,
-                    res.stats.depth
+                    res.stats.depth,
+                    dist
                 ));
                 mate_rejected = true;
             }
@@ -827,10 +832,12 @@ pub fn finalize_and_send(
                     let in_check = pos1.is_in_check();
                     let no_legal = list.as_slice().is_empty();
                     if !(in_check && no_legal) {
+                        let dist = md(res.score).unwrap_or(0);
                         info_string(format!(
-                            "mate_postverify_reject=1 replies={} in_check={}",
+                            "mate_postverify_reject=1 replies={} in_check={} mate_dist={}",
                             list.len(),
-                            in_check as u8
+                            in_check as u8,
+                            dist
                         ));
                         mate_rejected = true;
                     }
@@ -1156,7 +1163,17 @@ pub fn finalize_and_send(
         None
     };
     if maybe_switch.is_some() {
+        let reason = if mate_rejected {
+            "mate_gate|postverify"
+        } else {
+            "sanity"
+        };
+        let prev = final_best.best_move.map(|m| move_to_usi(&m)).unwrap_or_else(|| "-".to_string());
         info_string("sanity_switch=1");
+        info_string(format!(
+            "final_select move={} switched_from={} reason={}",
+            final_usi, prev, reason
+        ));
     }
     log_and_emit_final_selection(state, label, chosen_src, &final_usi, ponder_mv, &stop_meta);
     // Clear pending_ponder_result to prevent stale buffer usage
@@ -1335,23 +1352,27 @@ pub fn finalize_and_send_fast(
                 // Mate fast gating: ignore shallow/inexact mate lines
                 let mut blocked_by_mate_gate = false;
                 if let Some(line0) = snap.lines.first() {
-                    if engine_core::search::common::is_mate_score(line0.score_internal) {
-                        let exact =
-                            matches!(line0.bound, engine_core::search::types::NodeType::Exact);
-                        let stable_ok = snap.depth >= 5 || snap.elapsed_ms >= 30;
-                        if !exact || !stable_ok {
-                            info_string(format!(
-                                "mate_fast_gate_blocked=1 bound={} depth={} elapsed_ms={}",
-                                match line0.bound {
-                                    engine_core::search::types::NodeType::LowerBound => "lb",
-                                    engine_core::search::types::NodeType::UpperBound => "ub",
-                                    _ => "pv",
-                                },
-                                snap.depth,
-                                snap.elapsed_ms
-                            ));
-                            blocked_by_mate_gate = true;
-                        }
+                    if engine_core::search::common::is_mate_score(line0.score_internal)
+                        && mate_gate_should_block(
+                            line0.bound,
+                            Some(snap.depth),
+                            snap.depth,
+                            snap.elapsed_ms,
+                        )
+                    {
+                        let dist = md(line0.score_internal).unwrap_or(0);
+                        info_string(format!(
+                            "mate_fast_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
+                            match line0.bound {
+                                engine_core::search::types::NodeType::LowerBound => "lb",
+                                engine_core::search::types::NodeType::UpperBound => "ub",
+                                _ => "pv",
+                            },
+                            snap.depth,
+                            snap.elapsed_ms,
+                            dist
+                        ));
+                        blocked_by_mate_gate = true;
                     }
                 }
 
@@ -1633,6 +1654,18 @@ pub fn finalize_and_send_fast(
             );
         }
     }
+}
+#[inline]
+fn mate_gate_should_block(
+    bound: NodeType,
+    stable_depth: Option<u8>,
+    depth: u8,
+    elapsed_ms: u64,
+) -> bool {
+    let exact = matches!(bound, NodeType::Exact);
+    let stable_ok = stable_depth.map(|d| d >= 5).unwrap_or(false);
+    let fast_ok = depth >= 5 || elapsed_ms >= 30;
+    !exact || !(stable_ok || fast_ok)
 }
 
 #[cfg(test)]
