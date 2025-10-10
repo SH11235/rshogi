@@ -34,16 +34,30 @@ fn emit_fallback_bestmove(state: &mut EngineState, note: &str) {
         info_string(format!("fallback_skip already_emitted=1 note={note}"));
         return;
     }
-    // エンジンから安全な最終手を取得（TT/合法手）。Poison時も救済。
+    // エンジンから安全な最終手を取得（TT/合法手）。Poison時や内部panicも救済。
     let best = match state.engine.lock() {
         Ok(eng) => {
-            let fb = eng.choose_final_bestmove(&state.position, None);
-            fb.best_move.map(|mv| move_to_usi(&mv))
+            match catch_unwind(AssertUnwindSafe(|| {
+                eng.choose_final_bestmove(&state.position, None)
+            })) {
+                Ok(fb) => fb.best_move.map(|mv| move_to_usi(&mv)),
+                Err(_) => {
+                    info_string("fallback_tt_panic_caught=1");
+                    None
+                }
+            }
         }
         Err(poison) => {
             let eng = poison.into_inner();
-            let fb = eng.choose_final_bestmove(&state.position, None);
-            fb.best_move.map(|mv| move_to_usi(&mv))
+            match catch_unwind(AssertUnwindSafe(|| {
+                eng.choose_final_bestmove(&state.position, None)
+            })) {
+                Ok(fb) => fb.best_move.map(|mv| move_to_usi(&mv)),
+                Err(_) => {
+                    info_string("fallback_tt_panic_caught=1");
+                    None
+                }
+            }
         }
     }
     .or_else(|| {
