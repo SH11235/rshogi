@@ -34,8 +34,10 @@ futures = "0.3"  # Force latest futures version
 # TT operations with SIMD and CAS loops are extremely slow without optimization
 [profile.dev]
 opt-level = 1  # Basic optimizations for debug builds
+panic = "unwind"
 
 # Release build with debug assertions for catching bugs
 [profile.release]
 overflow-checks = true    # オーバーフロー検出
 lto = "thin"             # 最適化は維持
+panic = "unwind"

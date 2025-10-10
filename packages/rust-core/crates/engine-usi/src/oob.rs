@@ -417,6 +417,8 @@ mod tests_oob_finalize {
 
         // 試験では Stable ゲートを外し、VerifyもOFFにしてトリガ条件のみ検査
         state.opts.instant_mate_require_stable = false;
+        // 最小思考時間の尊重を無効化（テストを安定化）
+        state.opts.instant_mate_respect_min_think_ms = false;
         state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
 
         // Publish a snapshot with mate in 1（Partial）
@@ -493,6 +495,8 @@ mod tests_oob_finalize {
         state.opts.instant_mate_move_max_distance = 1;
         state.searching = true;
         state.current_is_ponder = false;
+        // まずは PV1 のみを見る（デフォルトが true の環境に合わせる）
+        state.opts.instant_mate_check_all_pv = false;
 
         // Publish a stable snapshot with PV1 non-mate and PV2 mate in 1
         let sid = 20251u64;
@@ -542,6 +546,8 @@ mod tests_oob_finalize {
 
         // Partialでも発火させるためStableゲートをOFF、検証もOFF
         state.opts.instant_mate_require_stable = false;
+        // 最小思考時間の尊重を無効化（line.time_ms が小さくても通す）
+        state.opts.instant_mate_respect_min_think_ms = false;
         state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
 
         let sid = 9999u64;

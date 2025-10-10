@@ -107,6 +107,23 @@ cargo run -p engine-usi --release --features fast-fma
 
 起動時に `info string core_features=engine-core:...` を出力します（再現性・ログ用途）。
 
+### Panic ハンドリング方針（engine-usi は panic=unwind 前提）
+
+- 本エンジンの USI バイナリ（`engine-usi`）は、異常時にプロセスを落とさず復旧するため、Rust の `panic = "unwind"` を前提としています。
+  - `Cargo.toml`（workspace の `[profile.dev]` / `[profile.release]`）で `panic = "unwind"` を明示済み。
+  - これにより、`go`/`position`/`setoption` 等のハンドラ内部で発生したパニックは `catch_unwind` により捕捉され、ログ出力とフォールバック経路（必要に応じて `bestmove`）で継続します。
+- もし配布ポリシー等で `panic = "abort"` を使用する場合、この安全化は無効化されます。対局用途では `unwind` を強く推奨します。
+
+運用ログ（例）:
+
+```
+info string go_dispatch_enter
+info string go_enter cmd=go btime 0 wtime 0 byoyomi 10000
+info string go_panic_caught=1
+info string fallback_bestmove_emit=1 reason=go_panic move=... sid=... root=...
+bestmove ...
+```
+
 ### USI出力（診断強化）
 - 探索中の`info`行に`hashfull <permille>`を常時付与します。
 - 終局時（finalize/stop）に、MultiPV未使用でも`info multipv 1 ... hashfull ... pv ...`を必ず1本出力します（SinglePVの可視化）。

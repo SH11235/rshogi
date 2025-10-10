@@ -17,7 +17,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crate::finalize::emit_bestmove_once;
+use crate::finalize::{emit_bestmove_once, fmt_hash};
+use engine_core::movegen::MoveGenerator;
 use engine_core::usi::move_to_usi;
 use io::{info_string, usi_println};
 use oob::{enforce_deadline, poll_instant_mate, poll_oob_finalize};
@@ -33,15 +34,83 @@ fn emit_fallback_bestmove(state: &mut EngineState, note: &str) {
         info_string(format!("fallback_skip already_emitted=1 note={note}"));
         return;
     }
-    // エンジンから安全な最終手を取得（TT/合法手）
-    let best = {
-        let eng = state.engine.lock().unwrap();
-        let fb = eng.choose_final_bestmove(&state.position, None);
-        fb.best_move.map(|mv| move_to_usi(&mv)).unwrap_or_else(|| "resign".to_string())
-    };
-    info_string(format!("fallback_bestmove_emit=1 reason={note} move={}", best));
+    // エンジンから安全な最終手を取得（TT/合法手）。Poison時も救済。
+    let best = match state.engine.lock() {
+        Ok(eng) => {
+            let fb = eng.choose_final_bestmove(&state.position, None);
+            fb.best_move.map(|mv| move_to_usi(&mv))
+        }
+        Err(poison) => {
+            let eng = poison.into_inner();
+            let fb = eng.choose_final_bestmove(&state.position, None);
+            fb.best_move.map(|mv| move_to_usi(&mv))
+        }
+    }
+    .or_else(|| {
+        let mg = MoveGenerator::new();
+        if let Ok(list) = mg.generate_all(&state.position) {
+            list.as_slice().first().map(move_to_usi)
+        } else {
+            None
+        }
+    })
+    .unwrap_or_else(|| "resign".to_string());
+    let root = fmt_hash(state.position.zobrist_hash());
+    let sid = state.current_session_core_id.unwrap_or(0);
+    info_string(format!(
+        "fallback_bestmove_emit=1 reason={note} move={} sid={} root={}",
+        best, sid, root
+    ));
     let _ = emit_bestmove_once(state, best, None);
     state.notify_idle();
+}
+
+fn force_cleanup_after_go_failure(state: &mut EngineState) {
+    // Signal stop to any ongoing search
+    if let Some(flag) = &state.stop_flag {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    if let Some(session) = state.search_session.take() {
+        // Try to request stop via StopController if available
+        let stop_ctrl = {
+            match state.engine.lock() {
+                Ok(eng) => Some(eng.stop_controller_handle()),
+                Err(poison) => Some(poison.into_inner().stop_controller_handle()),
+            }
+        };
+
+        if let Some(sc) = stop_ctrl {
+            let _ =
+                session.request_stop_and_wait(sc.as_ref(), std::time::Duration::from_millis(300));
+        }
+
+        // Join only if completed or disconnected; otherwise detach to avoid hangs
+        use engine_core::engine::TryResult;
+        match session.try_poll() {
+            TryResult::Pending => {
+                info_string("go_failure_join_skipped pending=1");
+                // drop without join to detach
+            }
+            _ => {
+                session.join_blocking();
+            }
+        }
+    }
+
+    // Reset search-related state to idle
+    state.searching = false;
+    state.stop_flag = None;
+    state.ponder_hit_flag = None;
+    state.active_time_manager = None;
+    state.current_is_ponder = false;
+    state.current_is_stochastic_ponder = false;
+    state.deadline_hard = None;
+    state.deadline_near = None;
+    state.deadline_near_notified = false;
+    state.current_root_hash = None;
+    state.current_time_control = None;
+    state.pending_ponder_result = None;
 }
 
 fn main() -> Result<()> {
@@ -151,12 +220,30 @@ fn main() -> Result<()> {
             }
 
             if cmd.starts_with("setoption ") {
-                handle_setoption(cmd, &mut state)?;
+                // setoption の安全ラップ（パニック・エラーを吸収し、ログのみ残す）
+                match catch_unwind(AssertUnwindSafe(|| handle_setoption(cmd, &mut state))) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        info_string(format!("setoption_error err={}", e));
+                    }
+                    Err(_) => {
+                        info_string("setoption_panic_caught=1");
+                    }
+                }
                 continue;
             }
 
             if cmd.starts_with("position ") {
-                parse_position(cmd, &mut state)?;
+                // position の安全ラップ（パニック・エラーを吸収し、旧局面を保持）
+                match catch_unwind(AssertUnwindSafe(|| parse_position(cmd, &mut state))) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        info_string(format!("position_error err={}", e));
+                    }
+                    Err(_) => {
+                        info_string("position_panic_caught=1");
+                    }
+                }
                 continue;
             }
 
@@ -207,19 +294,42 @@ fn main() -> Result<()> {
             if cmd.starts_with("go") {
                 // go 実行の安全ラッパー。パニック/エラー伝播でプロセスが落ちないようにする。
                 info_string("go_dispatch_enter");
-                match catch_unwind(AssertUnwindSafe(|| handle_go(cmd, &mut state))) {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    // テスト用: デバッグビルド時のみ、環境変数でpanicを強制
+                    #[cfg(debug_assertions)]
+                    if std::env::var("USI_TEST_GO_PANIC").ok().as_deref() == Some("1") {
+                        panic!("testhook: forced panic before handle_go");
+                    }
+                    handle_go(cmd, &mut state)
+                })) {
                     Ok(Ok(())) => {
                         // 正常終了
                     }
                     Ok(Err(e)) => {
                         info_string(format!("go_error err={}", e));
+                        force_cleanup_after_go_failure(&mut state);
                         emit_fallback_bestmove(&mut state, "go_error");
                     }
                     Err(_) => {
                         info_string("go_panic_caught=1");
+                        force_cleanup_after_go_failure(&mut state);
                         emit_fallback_bestmove(&mut state, "go_panic");
                     }
                 }
+                continue;
+            }
+
+            // テスト用: エンジンMutexをPoisonさせる隠しコマンド（デバッグビルド限定）
+            #[cfg(debug_assertions)]
+            if cmd == "debug_poison_engine" {
+                let engine = state.engine.clone();
+                std::thread::spawn(move || {
+                    let _guard = engine.lock().unwrap();
+                    panic!("testhook: poison engine mutex");
+                })
+                .join()
+                .ok();
+                info_string("debug_poison_engine_done=1");
                 continue;
             }
 
