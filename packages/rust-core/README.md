@@ -123,7 +123,7 @@ cargo run -p engine-usi --release --features fast-fma
 
 | Option | Type | Default | Range | Description |
 |--------|------|---------|-------|-------------|
-| USI_Hash | Spin | 16 | 1-1024 | Hash table size in MB |
+| USI_Hash | Spin | 1024 | 1-1024 | Hash table size in MB |
 | Threads | Spin | 1 | 1-256 | Number of search threads |
 | USI_Ponder | Check | true | true/false | Enable pondering (thinking on opponent's time) |
 | EngineType | Combo | Material | Material/Nnue/Enhanced/EnhancedNnue | Engine evaluation and search type |
@@ -131,21 +131,23 @@ cargo run -p engine-usi --release --features fast-fma
 
 > Note: `ByoyomiPeriods` accepts the literal `default` to reset to the initial value (the engine handles this as a special case).
 
-#### ByoyomiPeriods Option
+#### ByoyomiPeriods オプション
 
-Controls the number of byoyomi periods when using byoyomi time control:
+秒読みの回数（period数）を制御します。`USI_ByoyomiPeriods` はエイリアスとして同じ意味で利用できます。`value default` を指定すると初期値（1）に戻ります。
+
+例:
 
 ```bash
-# Set default number of periods (used when not specified in go command)
+# デフォルト回数（goでperiods未指定のときに使われる）
 setoption name ByoyomiPeriods value 3
-# or using the alias
+# エイリアス（同等）
 setoption name USI_ByoyomiPeriods value 3
 
-# Reset to default (1 period)
+# 既定（1）に戻す
 setoption name ByoyomiPeriods value default
 
-# Override in go command
-go byoyomi 30000 periods 5  # 5 periods of 30 seconds each
+# goコマンド側で上書き
+go byoyomi 30000 periods 5  # 30秒×5回
 ```
 
 ## Building
@@ -364,3 +366,44 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 ## License
 
 MIT
+
+## Threads連動の自動既定（T1/T8プロファイル）
+
+探索開始時に `Threads` に応じた安全側の既定値を自動適用します。GUI/ユーザーが `setoption` で明示設定した値は最優先で、その項目には自動既定を上書きしません（干渉しません）。検索開始時には、実際に有効になっているプロファイルと主要パラメータを1行で出力します。
+
+- Threads ≥ 4（T8プロファイル）
+  - RootSeeGate=On, RootSeeGate.XSEE=100
+  - PostVerify=On, PostVerify.YDrop=250
+  - FinalizeSanity.SwitchMarginCp=30, FinalizeSanity.OppSEE_MinCp=100, FinalizeSanity.BudgetMs=8
+  - MultiPV=1
+- Threads = 1（T1プロファイル）
+  - RootSeeGate=On, RootSeeGate.XSEE=100
+  - PostVerify=On, PostVerify.YDrop=225
+  - FinalizeSanity.SwitchMarginCp=35, FinalizeSanity.OppSEE_MinCp=120, FinalizeSanity.BudgetMs=4
+  - MultiPV=1
+
+出力例（検索開始時）:
+
+```
+info string effective_profile mode=Auto resolved=T8 threads=8 multipv=1 \
+  root_see_gate=1 xsee=100 post_verify=1 ydrop=250 \
+  finalize_enabled=1 finalize_switch=30 finalize_oppsee=100 finalize_budget=8 \
+  overrides=- threads_overridden=0
+```
+
+Offモードの例（自動既定を無効化）:
+
+```
+info string effective_profile mode=Off resolved=- threads=8 multipv=1 \
+  root_see_gate=0 xsee=100 post_verify=0 ydrop=300 \
+  finalize_enabled=1 finalize_switch=30 finalize_oppsee=300 finalize_budget=2 \
+  overrides=RootSeeGate,PostVerify threads_overridden=1
+```
+
+備考:
+- すべてのオプションをGUIから明示的に`setoption`で流すタイプのGUIでは、自動既定は「そのままでは」当たりません。必要に応じて、以下のプロファイル操作を利用してください。
+  - `Profile.Mode`（Auto/T1/T8/Off）: 自動既定の適用モードを選択
+  - `Profile.ApplyAutoDefaults`（Button）: 主要キーの「ユーザー上書き」印をクリアし、選択中のプロファイルで自動既定を即時適用
+- 超短秒（≤2秒）の局面ではcpの悪化が出やすい既知の限界があります。今後、Root Post‑Verifyのqsearch化や、finalize時のscore整合、qsearchへの「条件付き・非捕獲成り」導入で改善予定です。
+
+秒読みの前倒しについて: `ByoyomiOverheadMs` は基礎オーバーヘッド（ネット/GUI遅延の見積り）、`ByoyomiDeadlineLeadMs` はその上に加えるリード（締切前倒し）として用いられます。純秒読み（`btime=wtime=0` かつ `byoyomi>0`）では両者の和を使って締切を計算し、`deadline_lead_applied=1` をログ出力します。

@@ -9,6 +9,7 @@ use engine_core::search::parallel::{FinalizerMsg, StopController};
 use engine_core::shogi::Position;
 use engine_core::time_management::{TimeControl, TimeManager, TimeState};
 use engine_core::Color;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
@@ -46,7 +47,7 @@ pub struct UsiOptions {
     pub watchdog_poll_ms: u64,
     // 純秒読みでGUIの厳格締切より少し手前で確実に返すための追加リード（ms）
     // network_delay2_ms に加算して最終化を前倒しする。手番側 main=0 でも適用。
-    // 既定: 300ms
+    // 既定: 150ms
     pub byoyomi_deadline_lead_ms: u64,
     // MultiPV lines
     pub multipv: u8,
@@ -88,6 +89,8 @@ pub struct UsiOptions {
     // Reproduction: warmup search before cut (ms) and previous K moves replay
     pub warmup_ms: u64,
     pub warmup_prev_moves: u32,
+    // Profile selector for auto defaults (GUI override)
+    pub profile_mode: ProfileMode,
 }
 
 impl Default for UsiOptions {
@@ -123,25 +126,27 @@ impl Default for UsiOptions {
             simd_max_level: None,
             nnue_simd: None,
             finalize_sanity_enabled: true,
-            finalize_sanity_budget_ms: 2,
+            finalize_sanity_budget_ms: 8,
             finalize_sanity_mini_depth: 2,
             finalize_sanity_see_min_cp: -90,
             finalize_sanity_switch_margin_cp: 30,
-            finalize_sanity_opp_see_min_cp: 300,
+            finalize_sanity_opp_see_min_cp: 100,
             finalize_sanity_opp_see_penalty_cap_cp: 200,
             finalize_sanity_check_penalty_cp: 15,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             instant_mate_check_all_pv: false,
             // Guard rails (default OFF) and parameters (defaults per spec)
-            root_see_gate: false,
+            root_see_gate: true,
             x_see_cp: 100,
-            post_verify: false,
-            y_drop_cp: 300,
+            post_verify: true,
+            y_drop_cp: 250,
             promote_verify: false,
             promote_bias_cp: 20,
             warmup_ms: 500,
             warmup_prev_moves: 0,
+            // 自動プロファイルを無効化し、静的なT8相当の既定値を適用する
+            profile_mode: ProfileMode::Off,
         }
     }
 }
@@ -224,6 +229,9 @@ pub struct EngineState {
     pub active_time_manager: Option<Arc<TimeManager>>,
     /// Ponder search result buffered for instant finalize on ponderhit
     pub pending_ponder_result: Option<PonderResult>,
+    /// Names of USI options explicitly overridden by the user via `setoption`.
+    /// Auto defaults (Threads連動) はここに含まれないキーに対してのみ適用される。
+    pub user_overrides: HashSet<String>,
 }
 
 impl EngineState {
@@ -270,6 +278,7 @@ impl EngineState {
             deadline_near_notified: false,
             active_time_manager: None,
             pending_ponder_result: None,
+            user_overrides: HashSet::new(),
         }
     }
 
@@ -316,6 +325,15 @@ impl EngineState {
     pub fn notify_idle(&self) {
         self.idle_sync.notify_all();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ProfileMode {
+    #[default]
+    Auto,
+    T1,
+    T8,
+    Off,
 }
 
 #[derive(Default)]

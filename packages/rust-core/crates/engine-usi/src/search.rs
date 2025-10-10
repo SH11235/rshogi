@@ -319,6 +319,12 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
     state.last_go_params = Some(gp.clone());
 
+    // Threads連動の自動既定をここでも適用（手動 setoption は尊重）。
+    // 検索直前の適用により、`isready` 後の setoption 変更も反映される。
+    crate::options::maybe_apply_thread_based_defaults(state);
+    crate::options::apply_options_to_engine(state);
+    crate::options::log_effective_profile(state);
+
     // 新しい go セッションに入る前に bestmove の送信状態をリセットしておく。
     // 早期リターン経路（合法手 0/1 件）では search_session を作成せずに
     // emit_bestmove_once() を用いるため、前回探索のフラグが残っていると
