@@ -1,4 +1,5 @@
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
+use engine_core::search::common::is_mate_score;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
@@ -717,13 +718,35 @@ pub fn finalize_and_send(
         None
     };
     let final_best = {
-        let eng = state.engine.lock().unwrap();
+        let eng = state.lock_engine();
         if let Some(ci) = snapshot_committed.as_ref() {
             eng.choose_final_bestmove(&state.position, Some(ci))
         } else {
             eng.choose_final_bestmove(&state.position, committed.as_ref())
         }
     };
+
+    // Mate gating (YO流): Lower/Upper の mate距離では確定扱いしない。安定条件不足も抑止。
+    let mut mate_rejected = false;
+    if let Some(res) = result.as_ref() {
+        if is_mate_score(res.score) {
+            let exact = matches!(res.node_type, engine_core::search::types::NodeType::Exact);
+            let stable_ok = res.stats.stable_depth.map(|d| d >= 5).unwrap_or(false);
+            if !exact || !stable_ok {
+                info_string(format!(
+                    "mate_gate_blocked=1 bound={} stable_ok={} depth={}",
+                    match res.node_type {
+                        engine_core::search::types::NodeType::LowerBound => "lb",
+                        engine_core::search::types::NodeType::UpperBound => "ub",
+                        _ => "pv",
+                    },
+                    stable_ok as u8,
+                    res.stats.depth
+                ));
+                mate_rejected = true;
+            }
+        }
+    }
 
     let controller_stop_info = state.stop_controller.try_read_stop_info();
 
@@ -793,6 +816,27 @@ pub fn finalize_and_send(
             source_label,
             snap_version
         ));
+
+        // PostVerify for mate距離: bestを1手進めて“相手が詰み回避できない=応手0”かを軽確認。
+        if state.opts.post_verify && is_mate_score(res.score) {
+            if let Some(bm) = res.best_move {
+                let mut pos1 = state.position.clone();
+                let _ = pos1.do_move(bm);
+                let mg = MoveGenerator::new();
+                if let Ok(list) = mg.generate_all(&pos1) {
+                    let in_check = pos1.is_in_check();
+                    let no_legal = list.as_slice().is_empty();
+                    if !(in_check && no_legal) {
+                        info_string(format!(
+                            "mate_postverify_reject=1 replies={} in_check={}",
+                            list.len(),
+                            in_check as u8
+                        ));
+                        mate_rejected = true;
+                    }
+                }
+            }
+        }
 
         // 極小Byoyomi対策の可視化: ハード/ソフト上限と停止理由
         diag_info_string(format!(
@@ -930,7 +974,7 @@ pub fn finalize_and_send(
     if let Some(res) = result {
         if !stale {
             let hf_permille = {
-                let eng = state.engine.lock().unwrap();
+                let eng = state.lock_engine();
                 eng.tt_hashfull_permille()
             };
             let nps_agg: u128 = if res.stats.elapsed.as_millis() > 0 {
@@ -943,7 +987,7 @@ pub fn finalize_and_send(
             // Emit TT diagnostics snapshot (address/size/hf/attempts)
             {
                 let dbg = {
-                    let eng = state.engine.lock().unwrap();
+                    let eng = state.lock_engine();
                     eng.tt_debug_info()
                 };
                 diag_info_string(format!(
@@ -961,7 +1005,7 @@ pub fn finalize_and_send(
             {
                 let root_hash = state.position.zobrist_hash();
                 let ok = {
-                    let eng = state.engine.lock().unwrap();
+                    let eng = state.lock_engine();
                     eng.tt_roundtrip_test(root_hash)
                 };
                 diag_info_string(format!("tt_roundtrip root={}", ok));
@@ -1036,7 +1080,7 @@ pub fn finalize_and_send(
     #[cfg(feature = "tt_metrics")]
     {
         let summary_opt = {
-            let eng = state.engine.lock().unwrap();
+            let eng = state.lock_engine();
             eng.tt_metrics_summary()
         };
         if let Some(sum) = summary_opt {
@@ -1047,7 +1091,44 @@ pub fn finalize_and_send(
     }
 
     // Optional finalize sanity check (may switch PV1)
-    let maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result);
+    let mut maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result);
+
+    // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
+    if mate_rejected {
+        let pv1 = final_best.best_move;
+        let mut forced_alt: Option<engine_core::shogi::Move> = None;
+        if let Some(snap) = snapshot_valid.as_ref() {
+            if let Some(line2) = snap.lines.get(1) {
+                if let Some(&m2) = line2.pv.first() {
+                    if pv1 != Some(m2) && state.position.is_legal_move(m2) {
+                        forced_alt = Some(m2);
+                    }
+                }
+            }
+        }
+        if forced_alt.is_none() {
+            let mg = MoveGenerator::new();
+            if let Ok(list) = mg.generate_all(&state.position) {
+                let mut best_mv: Option<engine_core::shogi::Move> = None;
+                let mut best_see = i32::MIN;
+                for &mv in list.as_slice() {
+                    if Some(mv) == pv1 {
+                        continue;
+                    }
+                    let s = state.position.see(mv);
+                    if s > best_see {
+                        best_see = s;
+                        best_mv = Some(mv);
+                    }
+                }
+                forced_alt = best_mv;
+            }
+        }
+        if let Some(alt) = forced_alt {
+            info_string(format!("mate_switch=1 alt={}", move_to_usi(&alt)));
+            maybe_switch = Some(alt);
+        }
+    }
     let (chosen_mv, chosen_src) = if let Some(m) = maybe_switch {
         (Some(m), FinalBestSource::Committed)
     } else {
@@ -1059,14 +1140,14 @@ pub fn finalize_and_send(
         if maybe_switch.is_some() {
             // スイッチ時は最終採用手（chosen_mv）基準でTTからのみ取得（PV1の2手目は不一致の恐れがある）
             chosen_mv.and_then(|bm| {
-                let eng = state.engine.lock().unwrap();
+                let eng = state.lock_engine();
                 eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
             })
         } else {
             // スイッチなしなら従来通りPVの2手目を優先し、無ければTTから
             final_best.pv.get(1).map(move_to_usi).or_else(|| {
                 chosen_mv.and_then(|bm| {
-                    let eng = state.engine.lock().unwrap();
+                    let eng = state.lock_engine();
                     eng.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
                 })
             })
@@ -1251,7 +1332,30 @@ pub fn finalize_and_send_fast(
                     || snap.pv.is_empty();
                 let elapsed_ms_u32 = snap.elapsed_ms.min(u32::MAX as u64) as u32;
                 let budget_ms = compute_tt_probe_budget_ms(stop_meta.info.as_ref(), elapsed_ms_u32);
-                if shallow {
+                // Mate fast gating: ignore shallow/inexact mate lines
+                let mut blocked_by_mate_gate = false;
+                if let Some(line0) = snap.lines.first() {
+                    if engine_core::search::common::is_mate_score(line0.score_internal) {
+                        let exact =
+                            matches!(line0.bound, engine_core::search::types::NodeType::Exact);
+                        let stable_ok = snap.depth >= 5 || snap.elapsed_ms >= 30;
+                        if !exact || !stable_ok {
+                            info_string(format!(
+                                "mate_fast_gate_blocked=1 bound={} depth={} elapsed_ms={}",
+                                match line0.bound {
+                                    engine_core::search::types::NodeType::LowerBound => "lb",
+                                    engine_core::search::types::NodeType::UpperBound => "ub",
+                                    _ => "pv",
+                                },
+                                snap.depth,
+                                snap.elapsed_ms
+                            ));
+                            blocked_by_mate_gate = true;
+                        }
+                    }
+                }
+
+                if shallow || blocked_by_mate_gate {
                     let snapshot_emit = if let Some((eng_guard, spent_ms, spent_us)) =
                         try_lock_engine_with_budget(&state.engine, budget_ms)
                     {
@@ -1683,7 +1787,7 @@ mod tests {
         );
 
         let expected = {
-            let eng = state.engine.lock().unwrap();
+            let eng = state.lock_engine();
             let fb = eng.choose_final_bestmove(&state.position, None);
             fb.best_move.expect("legal fallback expected")
         };
@@ -1757,7 +1861,7 @@ mod tests {
         state.stop_controller.prime_stop_info(StopInfo::default());
 
         let fallback = {
-            let eng = state.engine.lock().unwrap();
+            let eng = state.lock_engine();
             let final_best = eng.choose_final_bestmove(&state.position, None);
             final_best.best_move.expect("legal fallback expected")
         };

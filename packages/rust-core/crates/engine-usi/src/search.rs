@@ -459,7 +459,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // Use start_search() - non-blocking, Engine lock released immediately
     state.current_search_id = state.current_search_id.wrapping_add(1);
     let session = {
-        let mut engine_guard = state.engine.lock().unwrap();
+        let mut engine_guard = state.lock_engine();
         engine_guard.start_search(search_position.clone(), limits)
     }; // Engine lock released here immediately
 
@@ -540,7 +540,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                             // Phase 2: Use start_search() for re-search after ponder hit
                             state.current_search_id = state.current_search_id.wrapping_add(1);
                             let session = {
-                                let mut engine_guard = state.engine.lock().unwrap();
+                                let mut engine_guard = state.lock_engine();
                                 engine_guard.start_search(state.position.clone(), limits)
                             };
 
