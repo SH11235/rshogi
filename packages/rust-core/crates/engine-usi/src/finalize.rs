@@ -7,7 +7,7 @@ use engine_core::search::{
     types::{NodeType, StopInfo},
     SearchResult,
 };
-use engine_core::usi::{append_usi_score_and_bound, move_to_usi};
+use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
@@ -93,6 +93,8 @@ fn log_and_emit_final_selection(
     ponder: Option<String>,
     stop_meta: &StopMeta,
 ) {
+    // Optional: if only-one-legal-move at root, emit 1 info line with quick eval
+    maybe_emit_forced_eval_info(state, final_move);
     diag_info_string(format!(
         "{}_select source={} move={} soft_ms={} hard_ms={}",
         label,
@@ -110,6 +112,62 @@ fn log_and_emit_final_selection(
         source_to_str(source)
     ));
     let _ = emit_bestmove_once(state, final_move.to_string(), ponder);
+}
+
+fn maybe_emit_forced_eval_info(state: &mut EngineState, final_move_usi: &str) {
+    if !state.opts.forced_move_emit_eval {
+        return;
+    }
+    if state.opts.forced_move_min_search_ms == 0 {
+        return;
+    }
+    // Count legal moves at root
+    let mg = MoveGenerator::new();
+    let Ok(list) = mg.generate_all(&state.position) else {
+        return;
+    };
+    let mut legal_count = 0usize;
+    for &m in list.as_slice() {
+        if state.position.is_legal_move(m) {
+            legal_count += 1;
+            if legal_count > 1 {
+                break;
+            }
+        }
+    }
+    if legal_count != 1 {
+        return; // not a forced move
+    }
+    // Parse final move and run a tiny search on the child for a quick score line
+    let Ok(mv) = parse_usi_move(final_move_usi) else {
+        return;
+    };
+    if !state.position.is_legal_move(mv) {
+        return;
+    }
+    let mut pos1 = state.position.clone();
+    pos1.do_move(mv);
+    // Use minimal fixed time and depth=1 for speed
+    let ms = state.opts.forced_move_min_search_ms.min(50);
+    let limits = engine_core::search::SearchLimits::builder().depth(1).fixed_time_ms(ms).build();
+    let mut eng = state.lock_engine();
+    let res = eng.search(&mut pos1, limits);
+    drop(eng);
+    // Emit a single info line with score/time/nodes and PV rooted at the final move
+    let nps = if res.stats.elapsed.as_millis() > 0 {
+        (res.stats.nodes as u128)
+            .saturating_mul(1000)
+            .saturating_div(res.stats.elapsed.as_millis())
+    } else {
+        0
+    };
+    let final_best_stub = FinalBest {
+        best_move: Some(mv),
+        pv: vec![mv],
+        source: FinalBestSource::Committed,
+    };
+    // hashfullは不明なので0を渡す（表示のみ）
+    emit_single_pv(&res, &final_best_stub, nps, 0, None, None);
 }
 
 fn finalize_sanity_check(
@@ -133,6 +191,7 @@ fn finalize_sanity_check(
         use engine_core::search::constants::MATE_SCORE;
         let sc = res.score;
         if sc.abs() >= MATE_SCORE - 100 || sc.abs() <= 10 {
+            info_string("sanity_skipped=1 reason=mate_or_draw_band");
             return None;
         }
     }
@@ -183,13 +242,17 @@ fn finalize_sanity_check(
             if m.is_promote() {
                 key += 1000;
             }
-            // 近似：移動先でのSEE（正）を少しだけ持ち上げる（静的でも0が多い可能性はあるが安全）
-            key += state.position.see(*m).max(0);
+            // 近似：PV1適用後局面でのSEE（正）を少しだけ持ち上げる
+            key += pos1.see(*m).max(0);
             -key
         });
         for &mvq in quiets.iter().take(beam_k) {
             let mut posq = pos1.clone();
             posq.do_move(mvq);
+            // quietで王手になっている場合は Threat2 対象外（null moveの意味論と揃える）
+            if posq.is_in_check() {
+                continue;
+            }
             // give move back to opponent by a null move, then evaluate opponent captures
             let undo_null = posq.do_null_move();
             if let Ok(listc) = mg2.generate_all(&posq) {
@@ -350,7 +413,7 @@ fn finalize_sanity_check(
     // Mini search (depth 1-2) for pv1 vs alt
     let mini_depth = state.opts.finalize_sanity_mini_depth.max(1); // 下限ガード（options側でもclamp済だが安全側）
     let switch_margin = state.opts.finalize_sanity_switch_margin_cp;
-    let (s1_temp, s2, pv1_check_flag, alt_check_flag) = {
+    let (s1_temp, s2_raw, pv1_check_flag, alt_check_flag) = {
         let (mv1, mv2) = (pv1, alt);
         if let Some((mut eng, spent_ms, _)) =
             try_lock_engine_with_budget(&state.engine, total_budget)
@@ -364,6 +427,10 @@ fn finalize_sanity_check(
                 ));
             }
             if remain_budget == 0 {
+                info_string(format!(
+                    "sanity_skipped=1 reason=lock_spent_budget total_ms={} spent_ms={}",
+                    total_budget, spent_ms
+                ));
                 return None;
             }
             // 2回合計がremain_budgetを超えないよう逐次分配
@@ -429,7 +496,40 @@ fn finalize_sanity_check(
     // ダブルカウント抑止: ペナルティは opp_cap のみに適用（t2 はゲート/判定用）
     let opp_penalty = opp_penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     let s1_adj = s1.saturating_sub(opp_penalty);
-    let switched = s2 > s1_adj + switch_margin;
+    // --- King-alt guard (non-check): 非チェック時に玉の手への切替を原則禁止 ---
+    let alt_is_king = is_king_move(&state.position, &alt);
+    let mut s2_eff = s2_raw;
+    if alt_is_king && !in_check_now {
+        let kap = state.opts.finalize_sanity_king_alt_penalty_cp.max(0);
+        if kap > 0 {
+            s2_eff = s2_eff.saturating_sub(kap);
+        }
+        let min_gain = state.opts.finalize_sanity_king_alt_min_gain_cp.max(0);
+        let gain = s2_eff.saturating_sub(s1_adj);
+        if gain < min_gain {
+            info_string(format!(
+                "sanity_king_alt_blocked=1 alt={} s1_adj={} s2={} s2_eff={} gain={} min_gain={}",
+                move_to_usi(&alt),
+                s1_adj,
+                s2_raw,
+                s2_eff,
+                gain,
+                min_gain
+            ));
+            return None;
+        } else {
+            info_string(format!(
+                "sanity_king_alt_allowed=1 alt={} s1_adj={} s2={} s2_eff={} gain={} min_gain={}",
+                move_to_usi(&alt),
+                s1_adj,
+                s2_raw,
+                s2_eff,
+                gain,
+                min_gain
+            ));
+        }
+    }
+    let switched = s2_eff > s1_adj + switch_margin;
     if switched {
         info_string(format!(
             "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={}",
@@ -437,7 +537,7 @@ fn finalize_sanity_check(
             move_to_usi(&alt),
             s1,
             s1_adj,
-            s2,
+            s2_eff,
             switch_margin,
             if alt_from_pv2 { "pv2" } else if pv2_illegal { "pv2_illegal->see_best" } else { "see_best" },
             total_budget,
@@ -455,7 +555,7 @@ fn finalize_sanity_check(
             move_to_usi(&alt),
             s1,
             s1_adj,
-            s2,
+            s2_eff,
             switch_margin,
             OPP_SEE_PENALTY_NUM,
             OPP_SEE_PENALTY_DEN,
@@ -1405,11 +1505,12 @@ pub fn finalize_and_send_fast(
                     pr.depth, pr.nodes, pr.elapsed_ms, sid_match, position_match
                 ));
                 // Emit finalize_event for consistent logging
+                let stop_meta = gather_stop_meta(None, None, Some(FinalizeReason::PonderToMove));
                 emit_finalize_event(
                     state,
                     label,
                     "cached",
-                    &gather_stop_meta(None, None, Some(FinalizeReason::PonderToMove)),
+                    &stop_meta,
                     &FinalizeEventParams {
                         reported_depth: pr.depth,
                         stable_depth: Some(pr.depth),
@@ -1418,8 +1519,42 @@ pub fn finalize_and_send_fast(
                         snapshot_version: None,
                     },
                 );
-                let ponder_hint = pr.pv_second;
-                let _ = emit_bestmove_once(state, best, ponder_hint);
+                let prev_usi = best.clone();
+                let mut final_usi = best.clone();
+                let mut ponder_mv: Option<String> = pr.pv_second;
+                // Run FinalizeSanity (MinMs) before emitting; if switched, compute ponder from TT
+                if let Ok(mv) = parse_usi_move(&prev_usi) {
+                    let fb = FinalBest {
+                        best_move: Some(mv),
+                        pv: Vec::new(),
+                        source: FinalBestSource::Committed,
+                    };
+                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None) {
+                        let new_usi = move_to_usi(&alt);
+                        info_string("final_select_tags tags=sanity");
+                        info_string("sanity_switch=1");
+                        info_string(format!(
+                            "final_select move={} switched_from={} reason=sanity",
+                            new_usi, prev_usi
+                        ));
+                        final_usi = new_usi;
+                        if state.opts.ponder {
+                            let eng = state.lock_engine();
+                            ponder_mv = eng
+                                .get_ponder_from_tt(&state.position, alt)
+                                .map(|m| move_to_usi(&m));
+                            drop(eng);
+                        }
+                    }
+                }
+                log_and_emit_final_selection(
+                    state,
+                    label,
+                    FinalBestSource::Committed,
+                    &final_usi,
+                    ponder_mv,
+                    &stop_meta,
+                );
                 // Clear buffer after successful emission
                 state.pending_ponder_result = None;
                 return;
@@ -1526,43 +1661,49 @@ pub fn finalize_and_send_fast(
                 }
 
                 if shallow || blocked_by_mate_gate {
-                    let snapshot_emit: Option<(String, Option<String>, FinalBestSource, u64, u64)> =
-                        if let Some((eng_guard, spent_ms, spent_us)) =
-                            try_lock_engine_with_budget(&state.engine, budget_ms)
-                        {
-                            let (final_usi, ponder_mv, final_source) = {
-                                let final_best =
-                                    eng_guard.choose_final_bestmove(&state.position, None);
-                                let used_snapshot_move = final_best.best_move.is_none();
-                                let final_usi = final_best
-                                    .best_move
-                                    .map(|m| move_to_usi(&m))
-                                    .unwrap_or_else(|| move_to_usi(&best));
-                                let ponder_mv = if state.opts.ponder {
-                                    final_best
-                                        .pv
-                                        .get(1)
-                                        .map(move_to_usi)
-                                        .or_else(|| snap.pv.get(1).map(move_to_usi))
-                                } else {
-                                    None
-                                };
-                                let final_source = if used_snapshot_move {
-                                    FinalBestSource::Committed
-                                } else {
-                                    final_best.source
-                                };
-                                (final_usi, ponder_mv, final_source)
-                            };
-                            drop(eng_guard);
-                            Some((final_usi, ponder_mv, final_source, spent_ms, spent_us))
-                        } else {
-                            None
-                        };
-
-                    if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us)) =
-                        snapshot_emit
+                    let mut tt_choice: Option<(
+                        FinalBest,
+                        String,
+                        Option<String>,
+                        FinalBestSource,
+                        u64,
+                        u64,
+                    )> = None;
+                    if let Some((eng_guard, spent_ms, spent_us)) =
+                        try_lock_engine_with_budget(&state.engine, budget_ms)
                     {
+                        let (final_usi, ponder_mv, final_source, final_best) = {
+                            let final_best = eng_guard.choose_final_bestmove(&state.position, None);
+                            let used_snapshot_move = final_best.best_move.is_none();
+                            let final_usi = final_best
+                                .best_move
+                                .map(|m| move_to_usi(&m))
+                                .unwrap_or_else(|| move_to_usi(&best));
+                            let ponder_mv = if state.opts.ponder {
+                                final_best
+                                    .pv
+                                    .get(1)
+                                    .map(move_to_usi)
+                                    .or_else(|| snap.pv.get(1).map(move_to_usi))
+                            } else {
+                                None
+                            };
+                            let final_source = if used_snapshot_move {
+                                FinalBestSource::Committed
+                            } else {
+                                final_best.source
+                            };
+                            (final_usi, ponder_mv, final_source, final_best)
+                        };
+                        drop(eng_guard);
+                        tt_choice = Some((
+                            final_best,
+                            final_usi,
+                            ponder_mv,
+                            final_source,
+                            spent_ms,
+                            spent_us,
+                        ));
                         diag_info_string(format!(
                     "{}_fast_snapshot sid={} root_key={} depth={} nodes={} elapsed={} pv_len={} source={:?} snapshot_version={} tt_probe=1 tt_probe_src=snapshot tt_probe_budget_ms={} tt_probe_spent_ms={}",
                     label,
@@ -1592,11 +1733,42 @@ pub fn finalize_and_send_fast(
                             }
                             test_probe_record(FinalizeOutcome {
                                 mode: "fast",
-                                chosen_source: source_to_str(final_source),
+                                chosen_source: source_to_str(FinalBestSource::Committed),
                                 reason_tags: tags,
                                 mate_gate_blocked: blocked_by_mate_gate,
                                 postverify_reject: false,
                             });
+                        }
+                    }
+                    if let Some((
+                        final_best,
+                        mut final_usi,
+                        mut ponder_mv,
+                        mut final_source,
+                        _spent_ms,
+                        _spent_us,
+                    )) = tt_choice
+                    {
+                        // fastでもFinalizeSanity（StopInfoが無い場合でもMinMsで実施）。切替時はCommitted扱い。
+                        if let Some(alt) =
+                            finalize_sanity_check(state, &stop_meta, &final_best, None)
+                        {
+                            let prev_usi = final_usi.clone();
+                            final_usi = move_to_usi(&alt);
+                            if state.opts.ponder {
+                                let eng2 = state.lock_engine();
+                                ponder_mv = eng2
+                                    .get_ponder_from_tt(&state.position, alt)
+                                    .map(|m| move_to_usi(&m));
+                                drop(eng2);
+                            }
+                            final_source = FinalBestSource::Committed;
+                            info_string("final_select_tags tags=sanity");
+                            info_string("sanity_switch=1");
+                            info_string(format!(
+                                "final_select move={} switched_from={} reason=sanity",
+                                final_usi, prev_usi
+                            ));
                         }
                         log_and_emit_final_selection(
                             state,
@@ -1717,6 +1889,43 @@ pub fn finalize_and_send_fast(
                         postverify_reject: false,
                     });
                 }
+                // スナップショットのみの場合でもFinalizeSanity（MinMs）を実施
+                if state.opts.finalize_sanity_enabled {
+                    let fb = FinalBest {
+                        best_move: Some(best),
+                        pv: Vec::new(),
+                        source: FinalBestSource::Committed,
+                    };
+                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None) {
+                        let prev_usi = final_usi.clone();
+                        let alt_usi = move_to_usi(&alt);
+                        let alt_ponder = if state.opts.ponder {
+                            let eng2 = state.lock_engine();
+                            let p = eng2
+                                .get_ponder_from_tt(&state.position, alt)
+                                .map(|m| move_to_usi(&m));
+                            drop(eng2);
+                            p
+                        } else {
+                            None
+                        };
+                        info_string("final_select_tags tags=sanity");
+                        info_string("sanity_switch=1");
+                        info_string(format!(
+                            "final_select move={} switched_from={} reason=sanity",
+                            alt_usi, prev_usi
+                        ));
+                        log_and_emit_final_selection(
+                            state,
+                            label,
+                            FinalBestSource::Committed,
+                            &alt_usi,
+                            alt_ponder,
+                            &stop_meta,
+                        );
+                        return;
+                    }
+                }
                 log_and_emit_final_selection(
                     state,
                     label,
@@ -1731,27 +1940,34 @@ pub fn finalize_and_send_fast(
     }
 
     let fallback_budget_ms = compute_tt_probe_budget_ms(stop_meta.info.as_ref(), 0);
-    let fallback_emit = if let Some((eng_guard, spent_ms, spent_us)) =
+    // まずTTでの最終手を取り出し（stateの不変借用スコープ内）
+    let mut tt_final_best: Option<FinalBest> = None;
+    let mut tt_final_usi: Option<String> = None;
+    let mut tt_ponder: Option<String> = None;
+    let mut tt_source: Option<FinalBestSource> = None;
+    if let Some((eng_guard, spent_ms, spent_us)) =
         try_lock_engine_with_budget(&state.engine, fallback_budget_ms)
     {
         let dbg = eng_guard.tt_debug_info();
-        let (final_usi, ponder_mv, final_source) = {
-            let final_best = eng_guard.choose_final_bestmove(&state.position, None);
-            let final_usi = final_best
-                .best_move
-                .map(|m| move_to_usi(&m))
-                .unwrap_or_else(|| "resign".to_string());
-            let ponder_mv = if state.opts.ponder {
-                final_best.pv.get(1).map(move_to_usi).or_else(|| {
-                    final_best.best_move.and_then(|bm| {
-                        eng_guard.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
-                    })
+        let final_best = eng_guard.choose_final_bestmove(&state.position, None);
+        let final_usi = final_best
+            .best_move
+            .map(|m| move_to_usi(&m))
+            .unwrap_or_else(|| "resign".to_string());
+        let ponder_mv = if state.opts.ponder {
+            final_best.pv.get(1).map(move_to_usi).or_else(|| {
+                final_best.best_move.and_then(|bm| {
+                    eng_guard.get_ponder_from_tt(&state.position, bm).map(|m| move_to_usi(&m))
                 })
-            } else {
-                None
-            };
-            (final_usi, ponder_mv, final_best.source)
+            })
+        } else {
+            None
         };
+        let fb_src = final_best.source;
+        tt_final_best = Some(final_best);
+        tt_final_usi = Some(final_usi);
+        tt_ponder = ponder_mv;
+        tt_source = Some(fb_src);
         drop(eng_guard);
         diag_info_string(format!(
             "{}_fast_tt_debug sid={} root_key={} addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={} tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
@@ -1767,21 +1983,6 @@ pub fn finalize_and_send_fast(
             spent_ms,
             spent_us
         ));
-        Some((final_usi, ponder_mv, final_source, spent_ms, spent_us, dbg))
-    } else {
-        None
-    };
-
-    if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us, dbg)) = fallback_emit {
-        diag_info_string(format!(
-            "{}_fast_tt_probe sid={} root_key={} tt_probe=1 tt_probe_src=tt tt_probe_budget_ms={} tt_probe_spent_ms={} tt_probe_spent_us={}",
-            label,
-            state.current_session_core_id.unwrap_or(0),
-            root_key_hex,
-            fallback_budget_ms,
-            spent_ms,
-            spent_us
-        ));
         diag_info_string(format!(
             "{}_fast_tt_meta sid={} root_key={} addr={:#x} size_mb={} hf_permille={} hf_phys_permille={} store_attempts={}",
             label,
@@ -1793,6 +1994,26 @@ pub fn finalize_and_send_fast(
             dbg.hf_physical_permille,
             dbg.store_attempts
         ));
+    }
+    if let (Some(final_best), Some(mut final_usi)) = (tt_final_best, tt_final_usi) {
+        let mut ponder_mv = tt_ponder;
+        let mut final_source = tt_source.unwrap_or(FinalBestSource::Committed);
+        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None) {
+            let prev_usi = final_usi.clone();
+            final_usi = move_to_usi(&alt);
+            if state.opts.ponder {
+                let eng2 = state.lock_engine();
+                ponder_mv = eng2.get_ponder_from_tt(&state.position, alt).map(|m| move_to_usi(&m));
+                drop(eng2);
+            }
+            final_source = FinalBestSource::Committed;
+            info_string("final_select_tags tags=sanity");
+            info_string("sanity_switch=1");
+            info_string(format!(
+                "final_select move={} switched_from={} reason=sanity",
+                final_usi, prev_usi
+            ));
+        }
         #[cfg(test)]
         {
             test_probe_record(FinalizeOutcome {

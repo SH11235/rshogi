@@ -79,6 +79,10 @@ pub struct UsiOptions {
     pub finalize_threat2_beam_k: u8,
     /// 代替手で SEE<0 の手を許容するか（falseで禁止）
     pub finalize_allow_see_lt0_alt: bool,
+    /// 非チェック時に玉の手へ切替を許可するために必要な最小利得（cp）。満たさなければ拒否。
+    pub finalize_sanity_king_alt_min_gain_cp: i32,
+    /// 非チェック時に代替が玉の手なら s2 に加える小ペナルティ（cp）。
+    pub finalize_sanity_king_alt_penalty_cp: i32,
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
@@ -110,6 +114,9 @@ pub struct UsiOptions {
     pub warmup_prev_moves: u32,
     // Profile selector for auto defaults (GUI override)
     pub profile_mode: ProfileMode,
+    // Forced move info emit (only-one-legal-move)
+    pub forced_move_emit_eval: bool,
+    pub forced_move_min_search_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +170,8 @@ impl Default for UsiOptions {
             finalize_threat2_min_cp: 100,
             finalize_threat2_beam_k: 8,
             finalize_allow_see_lt0_alt: true,
+            finalize_sanity_king_alt_min_gain_cp: 300,
+            finalize_sanity_king_alt_penalty_cp: 0,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             // より安全側に倒す（PV全体を確認）
@@ -188,6 +197,8 @@ impl Default for UsiOptions {
             warmup_ms: 500,
             warmup_prev_moves: 0,
             profile_mode: ProfileMode::Auto,
+            forced_move_emit_eval: true,
+            forced_move_min_search_ms: 1,
         }
     }
 }
