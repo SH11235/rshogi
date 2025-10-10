@@ -988,11 +988,30 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                         cleared += 1;
                     }
                 }
+                // Apply and reflect
                 maybe_apply_thread_based_defaults(state);
                 apply_options_to_engine(state);
+                let mode_str = match state.opts.profile_mode {
+                    ProfileMode::Auto => "Auto",
+                    ProfileMode::T1 => "T1",
+                    ProfileMode::T8 => "T8",
+                    ProfileMode::Off => "Off",
+                };
+                let resolved = match state.opts.profile_mode {
+                    ProfileMode::T1 => "T1",
+                    ProfileMode::T8 => "T8",
+                    ProfileMode::Auto => {
+                        if state.opts.threads >= 4 {
+                            "T8"
+                        } else {
+                            "T1"
+                        }
+                    }
+                    ProfileMode::Off => "-",
+                };
                 info_string(format!(
-                    "profile_applied=1 mode={:?} cleared_overrides={}",
-                    state.opts.profile_mode, cleared
+                    "profile_applied=1 mode={} resolved={} cleared_overrides={}",
+                    mode_str, resolved, cleared
                 ));
             }
         }
