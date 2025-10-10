@@ -306,7 +306,7 @@ pub fn poll_instant_mate(state: &mut EngineState) {
                     let in_check = pos1.is_in_check();
                     let mg = MoveGenerator::new();
                     let no_legal_moves = match mg.generate_all(&pos1) {
-                        Ok(list) => list.as_slice().iter().all(|&m| !pos1.is_legal_move(m)),
+                        Ok(list) => list.as_slice().is_empty(),
                         Err(_) => false,
                     };
                     if !(in_check && no_legal_moves) {
@@ -329,7 +329,7 @@ pub fn poll_instant_mate(state: &mut EngineState) {
                     let in_check = pos1.is_in_check();
                     let mg = MoveGenerator::new();
                     let no_legal_moves = match mg.generate_all(&pos1) {
-                        Ok(list) => list.as_slice().iter().all(|&m| !pos1.is_legal_move(m)),
+                        Ok(list) => list.as_slice().is_empty(),
                         Err(_) => false,
                     };
                     if !(in_check && no_legal_moves) {

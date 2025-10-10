@@ -86,12 +86,12 @@ fn force_cleanup_after_go_failure(state: &mut EngineState) {
     }
 
     if let Some(session) = state.search_session.take() {
+        // Proactively request backend stop
+        session.request_stop();
         // Try to request stop via StopController if available
         let stop_ctrl = {
-            match state.engine.lock() {
-                Ok(eng) => Some(eng.stop_controller_handle()),
-                Err(poison) => Some(poison.into_inner().stop_controller_handle()),
-            }
+            let eng = state.lock_engine();
+            Some(eng.stop_controller_handle())
         };
 
         if let Some(sc) = stop_ctrl {
@@ -116,7 +116,8 @@ fn force_cleanup_after_go_failure(state: &mut EngineState) {
     state.searching = false;
     state.stop_flag = None;
     state.ponder_hit_flag = None;
-    state.active_time_manager = None;
+    // Flush TimeManager metrics if any
+    state.finalize_time_manager();
     state.current_is_ponder = false;
     state.current_is_stochastic_ponder = false;
     state.deadline_hard = None;
@@ -190,7 +191,7 @@ fn main() -> Result<()> {
 
                     if let Some(session) = state.search_session.take() {
                         let stop_ctrl = {
-                            let engine = state.engine.lock().unwrap();
+                            let engine = state.lock_engine();
                             engine.stop_controller_handle()
                         };
 
@@ -273,7 +274,7 @@ fn main() -> Result<()> {
                 // Ensure any ongoing search completes before quit
                 if let Some(session) = state.search_session.take() {
                     let stop_ctrl = {
-                        let engine = state.engine.lock().unwrap();
+                        let engine = state.lock_engine();
                         engine.stop_controller_handle()
                     };
 

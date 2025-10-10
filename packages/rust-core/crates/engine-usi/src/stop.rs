@@ -303,7 +303,7 @@ pub fn handle_stop(state: &mut EngineState) {
         if !state.bestmove_emitted {
             // As a last resort fall back to legal move selection directly.
             let fallback = {
-                let eng = state.engine.lock().unwrap();
+                let eng = state.lock_engine();
                 eng.choose_final_bestmove(&state.position, None)
             };
             let final_usi = fallback

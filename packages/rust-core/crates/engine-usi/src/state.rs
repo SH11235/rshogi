@@ -256,6 +256,20 @@ pub struct EngineState {
 }
 
 impl EngineState {
+    /// エンジンMutexのPoisonを透過してロックを取得する共通ヘルパ。
+    ///
+    /// - 通常は `Mutex::lock()` の Guard を返す
+    /// - Poison発生後は `PoisonError::into_inner()` で復帰し、ログを1行出す
+    #[inline]
+    pub fn lock_engine(&self) -> std::sync::MutexGuard<'_, Engine> {
+        match self.engine.lock() {
+            Ok(g) => g,
+            Err(p) => {
+                crate::io::info_string("engine_mutex_poison_recover=1");
+                p.into_inner()
+            }
+        }
+    }
     pub fn new() -> Self {
         // Initialize engine-core static tables once
         engine_core::init::init_all_tables_once();

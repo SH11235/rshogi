@@ -5,9 +5,9 @@ mod basic;
 #[cfg(test)]
 mod check_evasion;
 #[cfg(test)]
-mod checks;
-#[cfg(test)]
 mod checkers_orientation;
+#[cfg(test)]
+mod checks;
 #[cfg(test)]
 mod drops;
 #[cfg(test)]
