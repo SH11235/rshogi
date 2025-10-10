@@ -385,7 +385,19 @@ MIT
 出力例（検索開始時）:
 
 ```
-info string effective_profile profile=T8 threads=8 multipv=1 root_see_gate=1 xsee=100 post_verify=1 ydrop=250 finalize_switch=30 finalize_oppsee=100 finalize_budget=8 overrides=-
+info string effective_profile mode=Auto resolved=T8 threads=8 multipv=1 \
+  root_see_gate=1 xsee=100 post_verify=1 ydrop=250 \
+  finalize_enabled=1 finalize_switch=30 finalize_oppsee=100 finalize_budget=8 \
+  overrides=- threads_overridden=0
+```
+
+Offモードの例（自動既定を無効化）:
+
+```
+info string effective_profile mode=Off resolved=- threads=8 multipv=1 \
+  root_see_gate=0 xsee=100 post_verify=0 ydrop=300 \
+  finalize_enabled=1 finalize_switch=30 finalize_oppsee=300 finalize_budget=2 \
+  overrides=RootSeeGate,PostVerify threads_overridden=1
 ```
 
 備考:
@@ -393,3 +405,5 @@ info string effective_profile profile=T8 threads=8 multipv=1 root_see_gate=1 xse
   - `Profile.Mode`（Auto/T1/T8/Off）: 自動既定の適用モードを選択
   - `Profile.ApplyAutoDefaults`（Button）: 主要キーの「ユーザー上書き」印をクリアし、選択中のプロファイルで自動既定を即時適用
 - 超短秒（≤2秒）の局面ではcpの悪化が出やすい既知の限界があります。今後、Root Post‑Verifyのqsearch化や、finalize時のscore整合、qsearchへの「条件付き・非捕獲成り」導入で改善予定です。
+
+秒読みの前倒しについて: `ByoyomiOverheadMs` は基礎オーバーヘッド（ネット/GUI遅延の見積り）、`ByoyomiDeadlineLeadMs` はその上に加えるリード（締切前倒し）として用いられます。純秒読み（`btime=wtime=0` かつ `byoyomi>0`）では両者の和を使って締切を計算し、`deadline_lead_applied=1` をログ出力します。
