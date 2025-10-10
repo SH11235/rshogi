@@ -416,7 +416,7 @@ fn run_compare_iid(args: &Args) {
         let mut lines = s.lines();
         // skip leading empties
         let mut header_opt = None;
-        while let Some(l) = lines.next() {
+        for l in lines.by_ref() {
             if !l.trim().is_empty() {
                 header_opt = Some(l.to_string());
                 break;
