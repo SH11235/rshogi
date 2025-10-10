@@ -62,6 +62,8 @@ pub struct UsiOptions {
     // Finalize sanity (PV1の軽いチェックでタダ損抑止)
     pub finalize_sanity_enabled: bool,
     pub finalize_sanity_budget_ms: u64,
+    /// Ponder等でStopInfoの時間情報が無い場合でも最低限回すための下限（ms）
+    pub finalize_sanity_min_ms: u64,
     pub finalize_sanity_mini_depth: u8,
     pub finalize_sanity_see_min_cp: i32,
     pub finalize_sanity_switch_margin_cp: i32,
@@ -71,6 +73,10 @@ pub struct UsiOptions {
     pub finalize_sanity_opp_see_penalty_cap_cp: i32,
     // Check move micro penalty for finalize sanity symmetric bias suppression
     pub finalize_sanity_check_penalty_cp: i32,
+    /// 二手脅威(quiet→capture)を軽量に見るゲートの閾値（cp相当）
+    pub finalize_threat2_min_cp: i32,
+    /// 二手脅威のquietビーム幅（上位K件だけ見る）
+    pub finalize_threat2_beam_k: u8,
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
@@ -145,12 +151,15 @@ impl Default for UsiOptions {
             nnue_simd: None,
             finalize_sanity_enabled: true,
             finalize_sanity_budget_ms: 8,
+            finalize_sanity_min_ms: 2,
             finalize_sanity_mini_depth: 2,
             finalize_sanity_see_min_cp: -90,
             finalize_sanity_switch_margin_cp: 30,
             finalize_sanity_opp_see_min_cp: 100,
             finalize_sanity_opp_see_penalty_cap_cp: 200,
             finalize_sanity_check_penalty_cp: 15,
+            finalize_threat2_min_cp: 100,
+            finalize_threat2_beam_k: 8,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             // より安全側に倒す（PV全体を確認）
