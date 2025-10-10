@@ -186,6 +186,15 @@ pub fn send_id_and_options(opts: &UsiOptions) {
             "false"
         }
     ));
+    // King-alt guard options
+    usi_println(&format!(
+        "option name FinalizeSanity.KingAltMinGainCp type spin default {} min 0 max 1000",
+        opts.finalize_sanity_king_alt_min_gain_cp
+    ));
+    usi_println(&format!(
+        "option name FinalizeSanity.KingAltPenaltyCp type spin default {} min 0 max 300",
+        opts.finalize_sanity_king_alt_penalty_cp
+    ));
 
     // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
     usi_println(&format!(
@@ -234,6 +243,19 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         profile_mode_default
     ));
     usi_println("option name Profile.ApplyAutoDefaults type button");
+    // Forced move info emit
+    usi_println(&format!(
+        "option name ForcedMove.EmitEval type check default {}",
+        if opts.forced_move_emit_eval {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    usi_println(&format!(
+        "option name ForcedMove.MinSearchMs type spin default {} min 0 max 50",
+        opts.forced_move_min_search_ms
+    ));
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -1018,10 +1040,37 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "FinalizeSanity.KingAltMinGainCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_sanity_king_alt_min_gain_cp = x.clamp(0, 1000);
+                }
+            }
+        }
+        "FinalizeSanity.KingAltPenaltyCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_sanity_king_alt_penalty_cp = x.clamp(0, 300);
+                }
+            }
+        }
         "PVStabilityBase" => {
             if let Some(v) = value_ref {
                 if let Ok(ms) = v.parse::<u64>() {
                     state.opts.pv_stability_base = ms.clamp(10, 200);
+                }
+            }
+        }
+        "ForcedMove.EmitEval" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.forced_move_emit_eval = on;
+            }
+        }
+        "ForcedMove.MinSearchMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.forced_move_min_search_ms = ms.min(50);
                 }
             }
         }
@@ -1283,6 +1332,9 @@ pub fn log_effective_profile(state: &EngineState) {
         "FinalizeSanity.MinMs",
         "FinalizeSanity.Threat2_MinCp",
         "FinalizeSanity.Threat2_BeamK",
+        "FinalizeSanity.AllowSEElt0Alt",
+        "FinalizeSanity.KingAltMinGainCp",
+        "FinalizeSanity.KingAltPenaltyCp",
         "MultiPV",
     ] {
         if state.user_overrides.contains(k) {
@@ -1290,7 +1342,7 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_beam_k={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
@@ -1303,7 +1355,11 @@ pub fn log_effective_profile(state: &EngineState) {
         state.opts.finalize_sanity_switch_margin_cp,
         state.opts.finalize_sanity_opp_see_min_cp,
         state.opts.finalize_sanity_budget_ms,
+        state.opts.finalize_threat2_min_cp,
         state.opts.finalize_threat2_beam_k,
+        state.opts.finalize_allow_see_lt0_alt as u8,
+        state.opts.finalize_sanity_king_alt_min_gain_cp,
+        state.opts.finalize_sanity_king_alt_penalty_cp,
         state.opts.mate_gate_min_stable_depth,
         state.opts.mate_gate_fast_ok_min_depth,
         state.opts.mate_gate_fast_ok_min_elapsed_ms,
