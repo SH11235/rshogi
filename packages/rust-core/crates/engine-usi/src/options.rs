@@ -754,6 +754,52 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 state.opts.instant_mate_check_all_pv = matches!(v.as_str(), "true" | "1" | "on");
             }
         }
+        "InstantMateMove.RequiredSnapshot" => {
+            if let Some(v) = value_ref {
+                let v = v.to_ascii_lowercase();
+                // Stable / Any
+                state.opts.instant_mate_require_stable = !matches!(v.as_str(), "any");
+            }
+        }
+        "InstantMateMove.MinDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(d) = v.parse::<u32>() {
+                    state.opts.instant_mate_min_depth = d.min(64) as u8;
+                }
+            }
+        }
+        "InstantMateMove.VerifyMode" => {
+            if let Some(v) = value_ref {
+                use crate::state::InstantMateVerifyMode as M;
+                let m = match v.to_ascii_lowercase().as_str() {
+                    "off" => M::Off,
+                    "qsearch" => M::QSearch,
+                    _ => M::CheckOnly,
+                };
+                state.opts.instant_mate_verify_mode = m;
+            }
+        }
+        "InstantMateMove.VerifyNodes" => {
+            if let Some(v) = value_ref {
+                if let Ok(n) = v.parse::<u32>() {
+                    state.opts.instant_mate_verify_nodes = n;
+                }
+            }
+        }
+        "InstantMateMove.RespectMinThinkMs" => {
+            if let Some(v) = value_ref {
+                let v = v.to_lowercase();
+                state.opts.instant_mate_respect_min_think_ms =
+                    matches!(v.as_str(), "true" | "1" | "on");
+            }
+        }
+        "InstantMateMove.MinRespectMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.instant_mate_min_respect_ms = ms.min(1000);
+                }
+            }
+        }
         // --- Root guard rails & warmup knobs
         "RootSeeGate" => {
             if let Some(v) = value_ref {
@@ -1290,5 +1336,51 @@ fn print_time_policy_options(opts: &UsiOptions) {
         }
     ));
     // Instant-mate detection policy (USI-led)
-    usi_println("option name InstantMateMove.CheckAllPV type check default false");
+    usi_println(&format!(
+        "option name InstantMateMove.CheckAllPV type check default {}",
+        if opts.instant_mate_check_all_pv {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    // Snapshot gating
+    usi_println(&format!(
+        "option name InstantMateMove.RequiredSnapshot type combo default {} var Stable var Any",
+        if opts.instant_mate_require_stable {
+            "Stable"
+        } else {
+            "Any"
+        }
+    ));
+    usi_println(&format!(
+        "option name InstantMateMove.MinDepth type spin default {} min 0 max 64",
+        opts.instant_mate_min_depth
+    ));
+    // Verification
+    let verify_mode = match opts.instant_mate_verify_mode {
+        crate::state::InstantMateVerifyMode::Off => "Off",
+        crate::state::InstantMateVerifyMode::CheckOnly => "CheckOnly",
+        crate::state::InstantMateVerifyMode::QSearch => "QSearch",
+    };
+    usi_println(&format!(
+        "option name InstantMateMove.VerifyMode type combo default {} var Off var CheckOnly var QSearch",
+        verify_mode
+    ));
+    usi_println(&format!(
+        "option name InstantMateMove.VerifyNodes type spin default {} min 0 max 100000",
+        opts.instant_mate_verify_nodes
+    ));
+    usi_println(&format!(
+        "option name InstantMateMove.RespectMinThinkMs type check default {}",
+        if opts.instant_mate_respect_min_think_ms {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    usi_println(&format!(
+        "option name InstantMateMove.MinRespectMs type spin default {} min 0 max 1000",
+        opts.instant_mate_min_respect_ms
+    ));
 }

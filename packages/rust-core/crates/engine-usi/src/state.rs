@@ -75,6 +75,13 @@ pub struct UsiOptions {
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
     pub instant_mate_check_all_pv: bool,
+    // Instant mate gating & verification
+    pub instant_mate_require_stable: bool,
+    pub instant_mate_min_depth: u8,
+    pub instant_mate_respect_min_think_ms: bool,
+    pub instant_mate_min_respect_ms: u64,
+    pub instant_mate_verify_mode: InstantMateVerifyMode,
+    pub instant_mate_verify_nodes: u32,
 
     // Root guard rails and experiment flags (DIAG/flags; default OFF)
     // Root SEE gate: if enabled and SEE(best) < -X, hold commit (re-search/try 2nd best)
@@ -91,6 +98,13 @@ pub struct UsiOptions {
     pub warmup_prev_moves: u32,
     // Profile selector for auto defaults (GUI override)
     pub profile_mode: ProfileMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstantMateVerifyMode {
+    Off,
+    CheckOnly,
+    QSearch,
 }
 
 impl Default for UsiOptions {
@@ -135,7 +149,15 @@ impl Default for UsiOptions {
             finalize_sanity_check_penalty_cp: 15,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
-            instant_mate_check_all_pv: false,
+            // より安全側に倒す（PV全体を確認）
+            instant_mate_check_all_pv: true,
+            // 既定は Stable 限定・深さゲートなし・最小思考時間を軽く尊重
+            instant_mate_require_stable: true,
+            instant_mate_min_depth: 0,
+            instant_mate_respect_min_think_ms: true,
+            instant_mate_min_respect_ms: 8,
+            instant_mate_verify_mode: InstantMateVerifyMode::CheckOnly,
+            instant_mate_verify_nodes: 0,
             // Guard rails (default OFF) and parameters (defaults per spec)
             root_see_gate: true,
             x_see_cp: 100,
