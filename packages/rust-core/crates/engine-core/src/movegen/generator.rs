@@ -1910,7 +1910,9 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
     checkers |= enemy_knights & knight_attacks;
 
     // Gold checks (including promoted pieces that move like gold)
-    let gold_attacks = gold_attacks(king_sq, them);
+    // NOTE: 攻撃元マスを得るため、king_sq を起点に「自分(us)の利き」を逆向きに用いる。
+    // これにより「敵(them)のGoldが king_sq を攻撃し得る“元位置”集合」と一致する。
+    let gold_attacks = gold_attacks(king_sq, us);
     let enemy_golds = pos.board.piece_bb[them as usize][PieceType::Gold as usize];
     checkers |= enemy_golds & gold_attacks;
 
@@ -1929,7 +1931,8 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
     // Silver checks
     let enemy_silvers =
         pos.board.piece_bb[them as usize][PieceType::Silver as usize] & !pos.board.promoted_bb;
-    let silver_attacks = silver_attacks(king_sq, them);
+    // Silver も Gold 同様に、逆向き（us）で攻撃元を得るのが正しい。
+    let silver_attacks = silver_attacks(king_sq, us);
     checkers |= enemy_silvers & silver_attacks;
 
     // Check sliding pieces for checks and pins
