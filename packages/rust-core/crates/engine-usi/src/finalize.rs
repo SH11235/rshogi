@@ -39,6 +39,38 @@ pub fn take_last_emitted_bestmove() -> Option<String> {
     LAST_EMITTED_BESTMOVE.get_or_init(|| Mutex::new(None)).lock().unwrap().take()
 }
 
+// ---------- Test probe for structured finalize outcomes (cfg(test) only)
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct FinalizeOutcome {
+    pub mode: &'static str,             // "joined" | "fast"
+    pub chosen_source: &'static str,    // see source_to_str
+    pub reason_tags: Vec<&'static str>, // ["sanity", "mate_gate", "postverify"] etc.
+    pub mate_gate_blocked: bool,
+    pub postverify_reject: bool,
+    // reserved for future checks (removed to keep tests minimal)
+}
+
+#[cfg(test)]
+static TEST_FINALIZE_OUTCOME: OnceLock<Mutex<Option<FinalizeOutcome>>> = OnceLock::new();
+
+#[cfg(test)]
+fn test_probe_record(outcome: FinalizeOutcome) {
+    let slot = TEST_FINALIZE_OUTCOME.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap() = Some(outcome);
+}
+
+#[cfg(test)]
+pub fn test_probe_reset() {
+    let slot = TEST_FINALIZE_OUTCOME.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap() = None;
+}
+
+#[cfg(test)]
+pub fn test_probe_take() -> Option<FinalizeOutcome> {
+    TEST_FINALIZE_OUTCOME.get_or_init(|| Mutex::new(None)).lock().unwrap().take()
+}
+
 #[inline]
 pub fn fmt_hash(h: u64) -> String {
     format!("{h:016x}")
@@ -574,7 +606,8 @@ fn try_lock_engine_with_budget<'a>(
     if let Ok(guard) = engine.try_lock() {
         let elapsed = start.elapsed();
         // ログ: スピン0で取得（静かなケース）
-        diag_info_string(format!("tt_lock_spins=0 budget_ms={}", budget_ms));
+        // Backward compatibility + clearer term
+        diag_info_string(format!("engine_lock_spins=0 tt_lock_spins=0 budget_ms={}", budget_ms));
         return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
     }
     if budget_ms == 0 {
@@ -587,7 +620,10 @@ fn try_lock_engine_with_budget<'a>(
             let elapsed = start.elapsed();
             // しきい値を超えるスピン/イールドが発生した場合のみ可視化
             if spins > 0 {
-                info_string(format!("tt_lock_spins={} budget_ms={}", spins, budget_ms));
+                info_string(format!(
+                    "engine_lock_spins={} tt_lock_spins={} budget_ms={}",
+                    spins, spins, budget_ms
+                ));
             }
             return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
         }
@@ -735,11 +771,17 @@ pub fn finalize_and_send(
     let mut mate_post_reject = false;
     if let Some(res) = result.as_ref() {
         if is_mate_score(res.score) {
+            let cfg = MateGateCfg {
+                min_stable_depth: state.opts.mate_gate_min_stable_depth,
+                fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
+                fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
+            };
             let block = mate_gate_should_block(
                 res.node_type,
                 res.stats.stable_depth,
                 res.stats.depth,
                 res.stats.elapsed.as_millis() as u64,
+                &cfg,
             );
             if block {
                 let dist = md(res.score).unwrap_or(0);
@@ -1142,6 +1184,7 @@ pub fn finalize_and_send(
         if let Some(alt) = forced_alt {
             info_string(format!("mate_switch=1 alt={}", move_to_usi(&alt)));
             maybe_switch = Some(alt);
+            // no-op for test probe: PV2優先の有無は現状検査対象外
         }
     }
     let (chosen_mv, chosen_src) = if let Some(m) = maybe_switch {
@@ -1171,6 +1214,7 @@ pub fn finalize_and_send(
         None
     };
     if maybe_switch.is_some() {
+        // legacy reason (kept for compatibility)
         let reason = if mate_gate_blocked && mate_post_reject {
             "mate_gate+postverify"
         } else if mate_gate_blocked {
@@ -1180,12 +1224,31 @@ pub fn finalize_and_send(
         } else {
             "sanity"
         };
+        // extensible tags for future coexistence (sanity + mate_gate/postverify)
+        let mut tags: Vec<&str> = vec!["sanity"]; // switching implies sanity layer involved
+        if mate_gate_blocked {
+            tags.push("mate_gate");
+        }
+        if mate_post_reject {
+            tags.push("postverify");
+        }
+        info_string(format!("final_select_tags tags={}", tags.join("+")));
         let prev = final_best.best_move.map(|m| move_to_usi(&m)).unwrap_or_else(|| "-".to_string());
         info_string("sanity_switch=1");
         info_string(format!(
             "final_select move={} switched_from={} reason={}",
             final_usi, prev, reason
         ));
+        #[cfg(test)]
+        {
+            test_probe_record(FinalizeOutcome {
+                mode: "joined",
+                chosen_source: source_to_str(chosen_src),
+                reason_tags: tags.to_vec(),
+                mate_gate_blocked,
+                postverify_reject: mate_post_reject,
+            });
+        }
     }
     log_and_emit_final_selection(state, label, chosen_src, &final_usi, ponder_mv, &stop_meta);
     // Clear pending_ponder_result to prevent stale buffer usage
@@ -1364,14 +1427,22 @@ pub fn finalize_and_send_fast(
                 // Mate fast gating: ignore shallow/inexact mate lines
                 let mut blocked_by_mate_gate = false;
                 if let Some(line0) = snap.lines.first() {
-                    if engine_core::search::common::is_mate_score(line0.score_internal)
-                        && mate_gate_should_block(
+                    if engine_core::search::common::is_mate_score(line0.score_internal) && {
+                        let cfg = MateGateCfg {
+                            min_stable_depth: state.opts.mate_gate_min_stable_depth,
+                            fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
+                            fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
+                        };
+                        let stable_opt =
+                            (snap.source == SnapshotSource::Stable).then_some(snap.depth);
+                        mate_gate_should_block(
                             line0.bound,
-                            Some(snap.depth),
+                            stable_opt,
                             snap.depth,
                             snap.elapsed_ms,
+                            &cfg,
                         )
-                    {
+                    } {
                         let dist = md(line0.score_internal).unwrap_or(0);
                         info_string(format!(
                             "mate_fast_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
@@ -1445,6 +1516,20 @@ pub fn finalize_and_send_fast(
                             fmt_hash(snap.root_key),
                             spent_us
                         ));
+                        #[cfg(test)]
+                        {
+                            let mut tags: Vec<&'static str> = Vec::new();
+                            if blocked_by_mate_gate {
+                                tags.push("mate_gate");
+                            }
+                            test_probe_record(FinalizeOutcome {
+                                mode: "fast",
+                                chosen_source: source_to_str(final_source),
+                                reason_tags: tags,
+                                mate_gate_blocked: blocked_by_mate_gate,
+                                postverify_reject: false,
+                            });
+                        }
                         log_and_emit_final_selection(
                             state,
                             label,
@@ -1457,13 +1542,99 @@ pub fn finalize_and_send_fast(
                     }
                     // ロック獲得に失敗：mateゲートでブロックされているなら snapshot を使わず合法フォールバックへ
                     if blocked_by_mate_gate {
-                        let fallback = {
-                            let eng = state.lock_engine();
-                            let fb = eng.choose_final_bestmove(&state.position, None);
+                        // A案: もう一度だけ極小予算でtry-lock → 失敗なら手計算SEEフォールバック
+                        let fallback = if let Some((eng_guard, _ms, _us)) =
+                            try_lock_engine_with_budget(&state.engine, 1)
+                        {
+                            let fb = eng_guard.choose_final_bestmove(&state.position, None);
+                            drop(eng_guard);
                             fb.best_move
                                 .map(|m| move_to_usi(&m))
                                 .unwrap_or_else(|| "resign".to_string())
+                        } else {
+                            // 手計算: SEE>=0の戦術手→SEE>=0任意→従来ヒューリスティック
+                            let mg = MoveGenerator::new();
+                            if let Ok(list) = mg.generate_all(&state.position) {
+                                let pos = &state.position;
+                                let is_king_move = |m: &engine_core::shogi::Move| {
+                                    m.piece_type()
+                                        .or_else(|| {
+                                            m.from().and_then(|sq| {
+                                                pos.board.piece_on(sq).map(|p| p.piece_type)
+                                            })
+                                        })
+                                        .map(|pt| matches!(pt, PieceType::King))
+                                        .unwrap_or(false)
+                                };
+                                let is_tactical = |m: &engine_core::shogi::Move| {
+                                    m.is_drop() || m.is_capture_hint() || m.is_promote()
+                                };
+                                let legal: Vec<_> = list
+                                    .as_slice()
+                                    .iter()
+                                    .copied()
+                                    .filter(|&m| pos.is_legal_move(m))
+                                    .collect();
+                                if legal.is_empty() {
+                                    "resign".to_string()
+                                } else {
+                                    let mut best_ge0_tac: Option<(engine_core::shogi::Move, i32)> =
+                                        None;
+                                    for &m in &legal {
+                                        if is_king_move(&m) || !is_tactical(&m) {
+                                            continue;
+                                        }
+                                        let s = pos.see(m);
+                                        if s >= 0 {
+                                            best_ge0_tac = match best_ge0_tac {
+                                                Some((mm, ss)) if ss >= s => Some((mm, ss)),
+                                                _ => Some((m, s)),
+                                            };
+                                        }
+                                    }
+                                    let mut best_ge0_any: Option<(engine_core::shogi::Move, i32)> =
+                                        None;
+                                    if best_ge0_tac.is_none() {
+                                        for &m in &legal {
+                                            if is_king_move(&m) {
+                                                continue;
+                                            }
+                                            let s = pos.see(m);
+                                            if s >= 0 {
+                                                best_ge0_any = match best_ge0_any {
+                                                    Some((mm, ss)) if ss >= s => Some((mm, ss)),
+                                                    _ => Some((m, s)),
+                                                };
+                                            }
+                                        }
+                                    }
+                                    let pick = best_ge0_tac
+                                        .map(|(m, _)| m)
+                                        .or(best_ge0_any.map(|(m, _)| m))
+                                        .or(legal
+                                            .iter()
+                                            .find(|m| is_tactical(m) && !is_king_move(m))
+                                            .copied())
+                                        .or(legal.iter().find(|m| !is_king_move(m)).copied())
+                                        .or_else(|| legal.first().copied());
+                                    pick.map(|mv| move_to_usi(&mv))
+                                        .unwrap_or_else(|| "resign".to_string())
+                                }
+                            } else {
+                                "resign".to_string()
+                            }
                         };
+                        #[cfg(test)]
+                        {
+                            let tags: Vec<&'static str> = vec!["mate_gate"];
+                            test_probe_record(FinalizeOutcome {
+                                mode: "fast",
+                                chosen_source: source_to_str(FinalBestSource::LegalFallback),
+                                reason_tags: tags,
+                                mate_gate_blocked: true,
+                                postverify_reject: false,
+                            });
+                        }
                         log_and_emit_final_selection(
                             state,
                             label,
@@ -1501,6 +1672,16 @@ pub fn finalize_and_send_fast(
                     budget_ms,
                     note
                 ));
+                #[cfg(test)]
+                {
+                    test_probe_record(FinalizeOutcome {
+                        mode: "fast",
+                        chosen_source: source_to_str(FinalBestSource::Committed),
+                        reason_tags: Vec::new(),
+                        mate_gate_blocked: false,
+                        postverify_reject: false,
+                    });
+                }
                 log_and_emit_final_selection(
                     state,
                     label,
@@ -1577,6 +1758,16 @@ pub fn finalize_and_send_fast(
             dbg.hf_physical_permille,
             dbg.store_attempts
         ));
+        #[cfg(test)]
+        {
+            test_probe_record(FinalizeOutcome {
+                mode: "fast",
+                chosen_source: source_to_str(final_source),
+                reason_tags: Vec::new(),
+                mate_gate_blocked: false,
+                postverify_reject: false,
+            });
+        }
         log_and_emit_final_selection(state, label, final_source, &final_usi, ponder_mv, &stop_meta);
         return;
     }
@@ -1629,18 +1820,60 @@ pub fn finalize_and_send_fast(
                     None
                 } else if in_check {
                     legal_moves.first().copied()
-                } else if let Some(mv) =
-                    legal_moves.iter().find(|m| is_tactical(m) && !is_king_move(m)).copied()
-                {
-                    Some(mv)
-                } else if let Some(mv) = legal_moves.iter().find(|m| !is_king_move(m)).copied() {
-                    Some(mv)
                 } else {
-                    legal_moves.first().copied()
+                    // SEE>=0（戦術）→ SEE>=0（任意）→ 従来ヒューリスティック
+                    let mut best_ge0_tac: Option<(engine_core::shogi::Move, i32)> = None;
+                    for &m in &legal_moves {
+                        if is_king_move(&m) || !is_tactical(&m) {
+                            continue;
+                        }
+                        let s = pos.see(m);
+                        if s >= 0 {
+                            best_ge0_tac = match best_ge0_tac {
+                                Some((mm, ss)) if ss >= s => Some((mm, ss)),
+                                _ => Some((m, s)),
+                            };
+                        }
+                    }
+                    let mut best_ge0_any: Option<(engine_core::shogi::Move, i32)> = None;
+                    if best_ge0_tac.is_none() {
+                        for &m in &legal_moves {
+                            if is_king_move(&m) {
+                                continue;
+                            }
+                            let s = pos.see(m);
+                            if s >= 0 {
+                                best_ge0_any = match best_ge0_any {
+                                    Some((mm, ss)) if ss >= s => Some((mm, ss)),
+                                    _ => Some((m, s)),
+                                };
+                            }
+                        }
+                    }
+                    let pick = best_ge0_tac
+                        .map(|(m, _)| m)
+                        .or(best_ge0_any.map(|(m, _)| m))
+                        .or(legal_moves
+                            .iter()
+                            .find(|m| is_tactical(m) && !is_king_move(m))
+                            .copied())
+                        .or(legal_moves.iter().find(|m| !is_king_move(m)).copied())
+                        .or_else(|| legal_moves.first().copied());
+                    pick
                 };
 
                 if let Some(chosen) = chosen {
                     let final_usi = move_to_usi(&chosen);
+                    #[cfg(test)]
+                    {
+                        test_probe_record(FinalizeOutcome {
+                            mode: "fast",
+                            chosen_source: source_to_str(FinalBestSource::LegalFallback),
+                            reason_tags: Vec::new(),
+                            mate_gate_blocked: false,
+                            postverify_reject: false,
+                        });
+                    }
                     log_and_emit_final_selection(
                         state,
                         label,
@@ -1686,16 +1919,22 @@ pub fn finalize_and_send_fast(
         }
     }
 }
-#[inline]
+struct MateGateCfg {
+    min_stable_depth: u8,
+    fast_ok_min_depth: u8,
+    fast_ok_min_elapsed_ms: u64,
+}
+
 fn mate_gate_should_block(
     bound: NodeType,
     stable_depth: Option<u8>,
     depth: u8,
     elapsed_ms: u64,
+    cfg: &MateGateCfg,
 ) -> bool {
     let exact = matches!(bound, NodeType::Exact);
-    let stable_ok = stable_depth.map(|d| d >= 5).unwrap_or(false);
-    let fast_ok = depth >= 5 || elapsed_ms >= 30;
+    let stable_ok = stable_depth.map(|d| d >= cfg.min_stable_depth).unwrap_or(false);
+    let fast_ok = depth >= cfg.fast_ok_min_depth || elapsed_ms >= cfg.fast_ok_min_elapsed_ms;
     !exact || !(stable_ok || fast_ok)
 }
 
@@ -1865,6 +2104,132 @@ mod tests {
             .expect("captured bestmove output")
             .replace("bestmove ", "");
         assert_eq!(emitted, move_to_usi(&expected));
+    }
+
+    #[test]
+    fn probe_fast_partial_snapshot_mate_gate_blocked() {
+        use engine_core::search::constants::MATE_SCORE;
+        super::test_probe_reset();
+
+        let mut state = EngineState::new();
+        let session_id = 7;
+        state.current_session_core_id = Some(session_id);
+        state.stop_controller.publish_session(None, session_id);
+        state.stop_controller.prime_stop_info(StopInfo::default());
+
+        // Construct a mate LB line at shallow depth to trigger fast gate block
+        let root_mv = parse_usi_move("7g7f").unwrap();
+        let mut pv: SmallVec<[engine_core::shogi::Move; 32]> = SmallVec::new();
+        pv.push(root_mv);
+        let line = RootLine {
+            multipv_index: 1,
+            root_move: root_mv,
+            score_internal: MATE_SCORE - 3,
+            score_cp: 30_000, // display-only; internal matters
+            bound: NodeType::LowerBound,
+            depth: 3, // shallow
+            seldepth: Some(3),
+            pv,
+            nodes: Some(100),
+            time_ms: Some(5),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: Some(3),
+        };
+        // Publish partial snapshot
+        state
+            .stop_controller
+            .publish_root_line(session_id, state.position.zobrist_hash(), &line);
+
+        finalize_and_send_fast(&mut state, "probe_fast_mate_gate", Some(FinalizeReason::Hard));
+
+        let out = super::test_probe_take().expect("finalize outcome recorded");
+        assert_eq!(out.mode, "fast");
+        assert!(out.mate_gate_blocked, "mate gate should be blocked");
+        assert!(out.reason_tags.contains(&"mate_gate"));
+    }
+
+    #[test]
+    fn probe_joined_postverify_reject() {
+        use engine_core::search::constants::MATE_SCORE;
+        use engine_core::search::SearchStats;
+        use std::time::Duration;
+        super::test_probe_reset();
+
+        let mut state = EngineState::new();
+        // Fabricate a SearchResult with a mate score that passes gate but fails CheckOnly verify
+        let stats = SearchStats {
+            elapsed: Duration::from_millis(100),
+            depth: 10,
+            seldepth: Some(10),
+            ..Default::default()
+        };
+        // PV head can be any legal move; leave empty to fall back to best_move
+        let res = SearchResult::with_node_type(
+            state.lock_engine().choose_final_bestmove(&state.position, None).best_move,
+            MATE_SCORE - 3,
+            stats,
+            NodeType::Exact,
+        );
+
+        finalize_and_send(&mut state, "probe_joined_postverify", Some(&res), false, None);
+        let out = super::test_probe_take().expect("finalize outcome recorded");
+        assert_eq!(out.mode, "joined");
+        assert!(out.postverify_reject, "postverify should reject non-mate-in-1");
+        assert!(out.reason_tags.contains(&"postverify"));
+        assert!(!out.chosen_source.is_empty());
+    }
+
+    #[test]
+    fn probe_fast_trylock_fail_see_fallback() {
+        use engine_core::search::constants::MATE_SCORE;
+        super::test_probe_reset();
+
+        let mut state = EngineState::new();
+        let session_id = 8;
+        state.current_session_core_id = Some(session_id);
+        state.stop_controller.publish_session(None, session_id);
+        state.stop_controller.prime_stop_info(StopInfo::default());
+
+        // Publish a shallow mate LB snapshot to trigger the blocked path and then force lock failure
+        let mv = parse_usi_move("2g2f").unwrap();
+        let mut pv: SmallVec<[engine_core::shogi::Move; 32]> = SmallVec::new();
+        pv.push(mv);
+        let line = RootLine {
+            multipv_index: 1,
+            root_move: mv,
+            score_internal: MATE_SCORE - 3,
+            score_cp: 30_000,
+            bound: NodeType::LowerBound,
+            depth: 3,
+            seldepth: Some(3),
+            pv,
+            nodes: Some(100),
+            time_ms: Some(5),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: Some(3),
+        };
+        state
+            .stop_controller
+            .publish_root_line(session_id, state.position.zobrist_hash(), &line);
+
+        // Hold engine lock from another thread to make try_lock_engine_with_budget fail without borrow conflicts
+        let eng_arc = state.engine.clone();
+        let locker = std::thread::spawn(move || {
+            let _g = eng_arc.lock().unwrap();
+            // Keep the lock long enough to overlap with try_lock budget comfortably
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        // Ensure the locking thread acquires the mutex before finalize
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        finalize_and_send_fast(&mut state, "probe_fast_trylock_fail", Some(FinalizeReason::Hard));
+        let _ = locker.join();
+
+        let out = super::test_probe_take().expect("finalize outcome recorded");
+        assert_eq!(out.mode, "fast");
     }
 
     #[test]

@@ -82,6 +82,10 @@ pub struct UsiOptions {
     pub instant_mate_min_respect_ms: u64,
     pub instant_mate_verify_mode: InstantMateVerifyMode,
     pub instant_mate_verify_nodes: u32,
+    // MateGate configuration (YO流ゲートの閾値)
+    pub mate_gate_min_stable_depth: u8,
+    pub mate_gate_fast_ok_min_depth: u8,
+    pub mate_gate_fast_ok_min_elapsed_ms: u64,
 
     // Root guard rails and experiment flags (DIAG/flags; default OFF)
     // Root SEE gate: if enabled and SEE(best) < -X, hold commit (re-search/try 2nd best)
@@ -158,6 +162,10 @@ impl Default for UsiOptions {
             instant_mate_min_respect_ms: 8,
             instant_mate_verify_mode: InstantMateVerifyMode::CheckOnly,
             instant_mate_verify_nodes: 0,
+            // MateGate defaults
+            mate_gate_min_stable_depth: 5,
+            mate_gate_fast_ok_min_depth: 5,
+            mate_gate_fast_ok_min_elapsed_ms: 30,
             // Guard rails (default OFF) and parameters (defaults per spec)
             root_see_gate: true,
             x_see_cp: 100,

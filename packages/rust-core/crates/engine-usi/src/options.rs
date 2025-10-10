@@ -141,6 +141,19 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     // Instant mate move options
     usi_println("option name InstantMateMove.Enabled type check default true");
     usi_println("option name InstantMateMove.MaxDistance type spin default 1 min 1 max 5");
+    // MateGate thresholds (YO流ゲートの閾値を調整可能に)
+    usi_println(&format!(
+        "option name MateGate.MinStableDepth type spin default {} min 0 max 64",
+        opts.mate_gate_min_stable_depth
+    ));
+    usi_println(&format!(
+        "option name MateGate.FastOkMinDepth type spin default {} min 0 max 64",
+        opts.mate_gate_fast_ok_min_depth
+    ));
+    usi_println(&format!(
+        "option name MateGate.FastOkMinElapsedMs type spin default {} min 0 max 5000",
+        opts.mate_gate_fast_ok_min_elapsed_ms
+    ));
     // Opponent SEE gate for finalize sanity
     usi_println(&format!(
         "option name FinalizeSanity.OppSEE_MinCp type spin default {} min 0 max 5000",
@@ -764,6 +777,39 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "MateGate.MinStableDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u8>() {
+                    state.opts.mate_gate_min_stable_depth = x.clamp(0, 64);
+                    info_string(format!(
+                        "mate_gate_min_stable_depth={}",
+                        state.opts.mate_gate_min_stable_depth
+                    ));
+                }
+            }
+        }
+        "MateGate.FastOkMinDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u8>() {
+                    state.opts.mate_gate_fast_ok_min_depth = x.clamp(0, 64);
+                    info_string(format!(
+                        "mate_gate_fast_ok_min_depth={}",
+                        state.opts.mate_gate_fast_ok_min_depth
+                    ));
+                }
+            }
+        }
+        "MateGate.FastOkMinElapsedMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u64>() {
+                    state.opts.mate_gate_fast_ok_min_elapsed_ms = x.min(5000);
+                    info_string(format!(
+                        "mate_gate_fast_ok_min_elapsed_ms={}",
+                        state.opts.mate_gate_fast_ok_min_elapsed_ms
+                    ));
+                }
+            }
+        }
         "InstantMateMove.CheckAllPV" => {
             if let Some(v) = value_ref {
                 let v = v.to_lowercase();
@@ -1191,7 +1237,7 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
@@ -1204,6 +1250,9 @@ pub fn log_effective_profile(state: &EngineState) {
         state.opts.finalize_sanity_switch_margin_cp,
         state.opts.finalize_sanity_opp_see_min_cp,
         state.opts.finalize_sanity_budget_ms,
+        state.opts.mate_gate_min_stable_depth,
+        state.opts.mate_gate_fast_ok_min_depth,
+        state.opts.mate_gate_fast_ok_min_elapsed_ms,
         if overrides.is_empty() { "-".to_string() } else { overrides.join(",") },
         if state.user_overrides.contains("Threads") { 1 } else { 0 }
     ));
