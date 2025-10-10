@@ -442,6 +442,10 @@ mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
     use crate::search::{SearchLimitsBuilder, TranspositionTable};
+    use crate::time_management::{
+        detect_game_phase_for_time, TimeControl as TMTimeControl, TimeLimits, TimeManager,
+    };
+    use crate::Color;
     use std::sync::mpsc;
 
     /// Verify that ThreadPool's shared queue correctly processes jobs exceeding worker count.
@@ -461,7 +465,14 @@ mod tests {
         let mut jobs: Vec<SearchJob> = Vec::new();
         for _ in 0..5 {
             let pos = crate::shogi::Position::startpos();
-            let limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+            // TimeManager を同伴して FixedNodes を厳密適用
+            let tl = TimeLimits {
+                time_control: TMTimeControl::FixedNodes { nodes: 64 },
+                ..Default::default()
+            };
+            let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+            let mut limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+            limits.time_manager = Some(Arc::new(tm));
             jobs.push(SearchJob {
                 position: pos,
                 limits,
@@ -537,8 +548,21 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         let pos = crate::shogi::Position::startpos();
-        let limits1 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
-        let limits2 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+        // それぞれに TimeManager を同伴
+        let tl1 = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 64 },
+            ..Default::default()
+        };
+        let tm1 = TimeManager::new(&tl1, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits1 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+        limits1.time_manager = Some(Arc::new(tm1));
+        let tl2 = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 64 },
+            ..Default::default()
+        };
+        let tm2 = TimeManager::new(&tl2, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits2 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+        limits2.time_manager = Some(Arc::new(tm2));
 
         let job1 = SearchJob {
             position: pos.clone(),
@@ -576,18 +600,38 @@ mod tests {
 
         // Dispatch normal-priority jobs with heavier workload first
         let normal_jobs: Vec<_> = (0..4)
-            .map(|_| SearchJob {
-                position: pos.clone(),
-                limits: SearchLimitsBuilder::default().fixed_nodes(2048).depth(3).build(),
+            .map(|_| {
+                let tl = TimeLimits {
+                    time_control: TMTimeControl::FixedNodes { nodes: 2048 },
+                    ..Default::default()
+                };
+                let tm =
+                    TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+                let mut limits = SearchLimitsBuilder::default().fixed_nodes(2048).depth(3).build();
+                limits.time_manager = Some(Arc::new(tm));
+                SearchJob {
+                    position: pos.clone(),
+                    limits,
+                }
             })
             .collect();
         pool.dispatch(normal_jobs, &tx);
 
         // Then dispatch high-priority jobs with lighter workload
         let high_jobs: Vec<_> = (0..4)
-            .map(|_| SearchJob {
-                position: pos.clone(),
-                limits: SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build(),
+            .map(|_| {
+                let tl = TimeLimits {
+                    time_control: TMTimeControl::FixedNodes { nodes: 64 },
+                    ..Default::default()
+                };
+                let tm =
+                    TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+                let mut limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+                limits.time_manager = Some(Arc::new(tm));
+                SearchJob {
+                    position: pos.clone(),
+                    limits,
+                }
             })
             .collect();
         pool.dispatch_high_priority(high_jobs, &tx);
@@ -626,7 +670,13 @@ mod tests {
         let pool = ThreadPool::new(backend, 1);
 
         let pos = crate::shogi::Position::startpos();
-        let limits = SearchLimitsBuilder::default().fixed_nodes(128).depth(2).build();
+        let tl = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 128 },
+            ..Default::default()
+        };
+        let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits = SearchLimitsBuilder::default().fixed_nodes(128).depth(2).build();
+        limits.time_manager = Some(Arc::new(tm));
         let job = SearchJob {
             position: pos,
             limits,
