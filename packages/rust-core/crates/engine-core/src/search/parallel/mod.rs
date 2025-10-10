@@ -882,6 +882,10 @@ mod tests {
     use crate::evaluation::evaluate::MaterialEvaluator;
     use crate::search::{SearchLimitsBuilder, SearchResult, TranspositionTable};
     use crate::shogi::Position;
+    use crate::time_management::{
+        detect_game_phase_for_time, TimeControl as TMTimeControl, TimeLimits, TimeManager,
+    };
+    use crate::Color;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -903,7 +907,19 @@ mod tests {
         );
 
         let mut pos_single = Position::startpos();
-        let limits_single = SearchLimitsBuilder::default().fixed_nodes(256).depth(3).build();
+        // FixedNodes を厳密適用するため TimeManager を同伴
+        let tm_single_limits = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 256 },
+            ..Default::default()
+        };
+        let tm_single = TimeManager::new(
+            &tm_single_limits,
+            Color::Black,
+            0,
+            detect_game_phase_for_time(&pos_single, 0),
+        );
+        let mut limits_single = SearchLimitsBuilder::default().fixed_nodes(256).depth(3).build();
+        limits_single.time_manager = Some(Arc::new(tm_single));
         let single_result = single.search(&mut pos_single, limits_single);
         assert!(helper_share(&single_result) <= f64::EPSILON);
 
@@ -916,7 +932,18 @@ mod tests {
             Arc::clone(&stop_multi),
         );
         let mut pos_multi = Position::startpos();
-        let limits_multi = SearchLimitsBuilder::default().fixed_nodes(1024).depth(4).build();
+        let tm_multi_limits = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 1024 },
+            ..Default::default()
+        };
+        let tm_multi = TimeManager::new(
+            &tm_multi_limits,
+            Color::Black,
+            0,
+            detect_game_phase_for_time(&pos_multi, 0),
+        );
+        let mut limits_multi = SearchLimitsBuilder::default().fixed_nodes(1024).depth(4).build();
+        limits_multi.time_manager = Some(Arc::new(tm_multi));
         let multi_result = multi.search(&mut pos_multi, limits_multi);
         let share = helper_share(&multi_result);
         assert!(share > 0.0, "multi-thread helper share should be positive");
@@ -936,11 +963,18 @@ mod tests {
         );
         let mut pos = Position::startpos();
         let external_flag = Arc::new(AtomicBool::new(true));
-        let limits = SearchLimitsBuilder::default()
+        // TimeManager を同伴（FixedNodes 厳密化）
+        let tm_limits = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 256 },
+            ..Default::default()
+        };
+        let tm = TimeManager::new(&tm_limits, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits = SearchLimitsBuilder::default()
             .fixed_nodes(256)
             .depth(2)
             .stop_flag(Arc::clone(&external_flag))
             .build();
+        limits.time_manager = Some(Arc::new(tm));
 
         let _ = searcher.search(&mut pos, limits);
         assert!(external_flag.load(Ordering::Acquire));
@@ -986,11 +1020,18 @@ mod tests {
 
         let mut pos = Position::startpos();
         let session_id = 42u64;
-        let limits = SearchLimitsBuilder::default()
+        // TimeManager を同伴（FixedNodes 厳密化）
+        let tm_limits = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 512 },
+            ..Default::default()
+        };
+        let tm = TimeManager::new(&tm_limits, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits = SearchLimitsBuilder::default()
             .fixed_nodes(512)
             .depth(4)
             .session_id(session_id)
             .build();
+        limits.time_manager = Some(Arc::new(tm));
 
         let _ = searcher.search(&mut pos, limits);
 
