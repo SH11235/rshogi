@@ -115,6 +115,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name FinalizeSanity.BudgetMs type spin default {} min 0 max 10",
         opts.finalize_sanity_budget_ms
     ));
+    usi_println(&format!(
+        "option name FinalizeSanity.MinMs type spin default {} min 0 max 10",
+        opts.finalize_sanity_min_ms
+    ));
     usi_println("option name FinalizeSanity.MiniDepth type spin default 2 min 1 max 3");
     usi_println("option name FinalizeSanity.SEE_MinCp type spin default -90 min -1000 max 1000");
     usi_println("option name FinalizeSanity.SwitchMarginCp type spin default 30 min 0 max 500");
@@ -165,6 +169,15 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     );
     // Symmetric check-move penalty for finalize sanity
     usi_println("option name FinalizeSanity.CheckPenaltyCp type spin default 15 min 0 max 100");
+    // Threat2 gate (opponent quiet -> capture) for finalize sanity
+    usi_println(&format!(
+        "option name FinalizeSanity.Threat2_MinCp type spin default {} min 0 max 5000",
+        opts.finalize_threat2_min_cp
+    ));
+    usi_println(&format!(
+        "option name FinalizeSanity.Threat2_BeamK type spin default {} min 0 max 64",
+        opts.finalize_threat2_beam_k
+    ));
 
     // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
     usi_println(&format!(
@@ -627,6 +640,14 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             }
             mark_override(state, "FinalizeSanity.BudgetMs");
         }
+        "FinalizeSanity.MinMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u64>() {
+                    state.opts.finalize_sanity_min_ms = x.min(10);
+                }
+            }
+            mark_override(state, "FinalizeSanity.MinMs");
+        }
         "FinalizeSanity.MiniDepth" => {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<u8>() {
@@ -668,6 +689,21 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     state.opts.finalize_sanity_check_penalty_cp = x.clamp(0, 100);
+                }
+            }
+        }
+        "FinalizeSanity.Threat2_MinCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_threat2_min_cp = x.clamp(0, 5000);
+                }
+            }
+            mark_override(state, "FinalizeSanity.Threat2_MinCp");
+        }
+        "FinalizeSanity.Threat2_BeamK" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u8>() {
+                    state.opts.finalize_threat2_beam_k = x.min(64);
                 }
             }
         }
@@ -1230,6 +1266,8 @@ pub fn log_effective_profile(state: &EngineState) {
         "FinalizeSanity.SwitchMarginCp",
         "FinalizeSanity.OppSEE_MinCp",
         "FinalizeSanity.BudgetMs",
+        "FinalizeSanity.MinMs",
+        "FinalizeSanity.Threat2_MinCp",
         "MultiPV",
     ] {
         if state.user_overrides.contains(k) {

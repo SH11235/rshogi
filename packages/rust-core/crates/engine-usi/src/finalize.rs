@@ -118,7 +118,8 @@ fn finalize_sanity_check(
     final_best: &FinalBest,
     result: Option<&SearchResult>,
 ) -> Option<engine_core::shogi::Move> {
-    if !state.opts.finalize_sanity_enabled || state.current_is_ponder {
+    if !state.opts.finalize_sanity_enabled {
+        info_string("sanity_skipped=1 reason=disabled");
         return None;
     }
     // 方針A: 王手中でもミニ検証を行う（過大評価抑制）。ログのみ付与。
@@ -146,40 +147,62 @@ fn finalize_sanity_check(
     // against immediate opponent tactical shots after PV1.
     // Compute max opponent capture SEE in child position and trigger
     // mini verification if it exceeds configured threshold.
+    // After PV1: check immediate capture threat and approximate 2-ply threat (quiet->capture)
     let mut opp_cap_see_max = 0;
-    if !need_verify {
-        let mut pos1 = state.position.clone();
-        pos1.do_move(pv1);
-        let mg2 = MoveGenerator::new();
-        if let Ok(list2) = mg2.generate_all(&pos1) {
-            let mut best = 0;
-            let opp_gate = state.opts.finalize_sanity_opp_see_min_cp.max(0);
-            for &mv in list2.as_slice() {
-                // 相手手番。捕獲ヒントかつ合法手に限定して SEE を評価
-                if mv.is_capture_hint() && pos1.is_legal_move(mv) {
-                    let g = pos1.see(mv); // opponent perspective (gain if positive)
-                    if g > best {
-                        best = g;
-                        // 閾値到達で早期打ち切り
-                        if best >= opp_gate {
-                            break;
+    let mut opp_threat2_max = 0;
+    let opp_gate = state.opts.finalize_sanity_opp_see_min_cp.max(0);
+    let threat2_gate = state.opts.finalize_threat2_min_cp.max(0);
+    let mut pos1 = state.position.clone();
+    pos1.do_move(pv1);
+    let mg2 = MoveGenerator::new();
+    if let Ok(list2) = mg2.generate_all(&pos1) {
+        // immediate captures
+        for &mv in list2.as_slice() {
+            if mv.is_capture_hint() && pos1.is_legal_move(mv) {
+                let g = pos1.see(mv);
+                if g > opp_cap_see_max {
+                    opp_cap_see_max = g;
+                }
+            }
+        }
+        // approximate two-ply threat: opponent quiet (beam-limited) then capture
+        let mut checked = 0usize;
+        let beam_k = state.opts.finalize_threat2_beam_k.max(1) as usize;
+        for &mvq in list2.as_slice() {
+            if checked >= beam_k {
+                break;
+            }
+            if mvq.is_capture_hint() {
+                continue;
+            }
+            if !pos1.is_legal_move(mvq) {
+                continue;
+            }
+            let mut posq = pos1.clone();
+            posq.do_move(mvq);
+            if let Ok(listc) = mg2.generate_all(&posq) {
+                for &mvc in listc.as_slice() {
+                    if mvc.is_capture_hint() && posq.is_legal_move(mvc) {
+                        let g2 = posq.see(mvc);
+                        if g2 > opp_threat2_max {
+                            opp_threat2_max = g2;
                         }
                     }
                 }
             }
-            opp_cap_see_max = best;
-            if best >= opp_gate {
-                need_verify = true;
-            }
+            checked += 1;
         }
+    }
+    if opp_cap_see_max >= opp_gate || opp_threat2_max >= threat2_gate {
+        need_verify = true;
     }
 
     let see_min_dbg = state.opts.finalize_sanity_see_min_cp;
     let opp_gate_dbg = state.opts.finalize_sanity_opp_see_min_cp.max(0);
     let chk_penalty_dbg = state.opts.finalize_sanity_check_penalty_cp;
     let diag_base = format!(
-        "sanity_checked=1 see={} see_min={} opp_cap_see_max={} opp_gate={} check_penalty_cp={}",
-        see, see_min_dbg, opp_cap_see_max, opp_gate_dbg, chk_penalty_dbg
+        "sanity_checked=1 see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
+        see, see_min_dbg, opp_cap_see_max, opp_gate_dbg, opp_threat2_max, threat2_gate, chk_penalty_dbg
     );
     if !need_verify {
         info_string(format!("{} switched=0 reason=see_ok", diag_base));
@@ -285,8 +308,22 @@ fn finalize_sanity_check(
     } else {
         0
     };
-    let total_budget = dynamic_budget.min(budget_max);
+    // Ensure minimum budget even when StopInfo has no deadlines (e.g., ponder finalize)
+    let fallback_min = state.opts.finalize_sanity_min_ms;
+    let desired = if dynamic_budget == 0 {
+        fallback_min
+    } else {
+        dynamic_budget
+    };
+    let mut total_budget = desired.max(fallback_min);
+    if budget_max > 0 {
+        total_budget = total_budget.min(budget_max);
+    }
     if total_budget == 0 {
+        info_string(format!(
+            "sanity_skipped=1 reason=no_budget opp_cap_see_max={} opp_threat2_max={}",
+            opp_cap_see_max, opp_threat2_max
+        ));
         return None;
     }
     // Mini search (depth 1-2) for pv1 vs alt
@@ -356,6 +393,7 @@ fn finalize_sanity_check(
             }
             (s1_local, s2_local, pv1_check, alt_check)
         } else {
+            info_string("sanity_skipped=1 reason=lock_failed");
             return None;
         }
     };
@@ -367,12 +405,16 @@ fn finalize_sanity_check(
     let capped = opp_cap_see_max.min(penalty_cap).max(0) as i64;
     let opp_penalty_i64 =
         capped.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
+    let capped_t2 = opp_threat2_max.min(penalty_cap).max(0) as i64;
+    let t2_penalty_i64 =
+        capped_t2.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
     let opp_penalty = opp_penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    let s1_adj = s1.saturating_sub(opp_penalty);
+    let t2_penalty = t2_penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    let s1_adj = s1.saturating_sub(opp_penalty).saturating_sub(t2_penalty);
     let switched = s2 > s1_adj + switch_margin;
     if switched {
         info_string(format!(
-            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{} pv1_check={} alt_check={}",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={}",
             diag_base,
             move_to_usi(&alt),
             s1,
@@ -385,10 +427,12 @@ fn finalize_sanity_check(
             OPP_SEE_PENALTY_DEN,
             pv1_check_flag as i32,
             alt_check_flag as i32,
+            opp_cap_see_max,
+            opp_threat2_max,
         ));
     } else {
         info_string(format!(
-            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{} pv1_check={} alt_check={}",
+            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={}",
             diag_base,
             move_to_usi(&alt),
             s1,
@@ -399,6 +443,8 @@ fn finalize_sanity_check(
             OPP_SEE_PENALTY_DEN,
             pv1_check_flag as i32,
             alt_check_flag as i32,
+            opp_cap_see_max,
+            opp_threat2_max,
         ));
     }
     if switched {
