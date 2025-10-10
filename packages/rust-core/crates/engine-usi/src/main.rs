@@ -17,12 +17,32 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use crate::finalize::emit_bestmove_once;
+use engine_core::usi::move_to_usi;
 use io::{info_string, usi_println};
 use oob::{enforce_deadline, poll_instant_mate, poll_oob_finalize};
 use options::{apply_options_to_engine, handle_setoption, send_id_and_options};
 use search::{handle_go, parse_position, poll_search_completion, tick_time_watchdog};
 use state::EngineState;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use stop::{handle_gameover, handle_ponderhit, handle_stop};
+
+fn emit_fallback_bestmove(state: &mut EngineState, note: &str) {
+    // 既に送信済みなら何もしない
+    if state.bestmove_emitted {
+        info_string(format!("fallback_skip already_emitted=1 note={note}"));
+        return;
+    }
+    // エンジンから安全な最終手を取得（TT/合法手）
+    let best = {
+        let eng = state.engine.lock().unwrap();
+        let fb = eng.choose_final_bestmove(&state.position, None);
+        fb.best_move.map(|mv| move_to_usi(&mv)).unwrap_or_else(|| "resign".to_string())
+    };
+    info_string(format!("fallback_bestmove_emit=1 reason={note} move={}", best));
+    let _ = emit_bestmove_once(state, best, None);
+    state.notify_idle();
+}
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -185,7 +205,21 @@ fn main() -> Result<()> {
             }
 
             if cmd.starts_with("go") {
-                handle_go(cmd, &mut state)?;
+                // go 実行の安全ラッパー。パニック/エラー伝播でプロセスが落ちないようにする。
+                info_string("go_dispatch_enter");
+                match catch_unwind(AssertUnwindSafe(|| handle_go(cmd, &mut state))) {
+                    Ok(Ok(())) => {
+                        // 正常終了
+                    }
+                    Ok(Err(e)) => {
+                        info_string(format!("go_error err={}", e));
+                        emit_fallback_bestmove(&mut state, "go_error");
+                    }
+                    Err(_) => {
+                        info_string("go_panic_caught=1");
+                        emit_fallback_bestmove(&mut state, "go_panic");
+                    }
+                }
                 continue;
             }
 
