@@ -121,6 +121,8 @@ fn main() -> Result<()> {
                     state.current_time_control = None;
                 }
 
+                // Threads連動の自動既定（ユーザー上書きが無い項目のみ）を適用し、エンジンへ反映
+                options::maybe_apply_thread_based_defaults(&mut state);
                 // Notify idle after state is consistent
                 state.notify_idle();
                 apply_options_to_engine(&mut state);
