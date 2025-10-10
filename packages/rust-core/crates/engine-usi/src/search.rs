@@ -133,10 +133,10 @@ fn handle_go_mate(_cmd: &str, state: &mut EngineState, _gp: &GoParams) -> Result
         legal.len()
     ));
     if in_check && legal.is_empty() {
-        println!("checkmate");
+        crate::io::usi_println("checkmate");
     } else {
         // 将来: gp.mate_limit_ms を用いた打ち切り応答や探索結果に応じて切替
-        println!("checkmate nomate");
+        crate::io::usi_println("checkmate nomate");
     }
     // 検討経路でもアイドル通知は出す（stop連携用の内部状態を早めに戻す）
     state.notify_idle();
@@ -635,7 +635,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
             }
             TryResult::Disconnected => {
                 // Search thread disconnected without sending result (panic or early exit)
-                // Clean up state and emit fallback bestmove
+                // Clean up state and emit fallback bestmove（PoisonErrorも救済）
                 use engine_core::usi::move_to_usi;
                 use log::error;
 
@@ -671,11 +671,25 @@ pub fn poll_search_completion(state: &mut EngineState) {
                 state.current_root_hash = None;
 
                 // Fallback: try to get a safe bestmove from Engine (TT or legal moves)
-                let bestmove = {
-                    let engine = state.engine.lock().unwrap();
-                    let final_best = engine.choose_final_bestmove(&state.position, None);
-                    final_best.best_move.map(|m| move_to_usi(&m))
-                };
+                let bestmove = match state.engine.lock() {
+                    Ok(engine) => {
+                        let final_best = engine.choose_final_bestmove(&state.position, None);
+                        final_best.best_move.map(|m| move_to_usi(&m))
+                    }
+                    Err(poison) => {
+                        let engine = poison.into_inner();
+                        let final_best = engine.choose_final_bestmove(&state.position, None);
+                        final_best.best_move.map(|m| move_to_usi(&m))
+                    }
+                }
+                .or_else(|| {
+                    let mg = engine_core::movegen::MoveGenerator::new();
+                    if let Ok(list) = mg.generate_all(&state.position) {
+                        list.as_slice().first().map(move_to_usi)
+                    } else {
+                        None
+                    }
+                });
 
                 match bestmove {
                     Some(mv) => {
