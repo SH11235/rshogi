@@ -126,26 +126,27 @@ impl Default for UsiOptions {
             simd_max_level: None,
             nnue_simd: None,
             finalize_sanity_enabled: true,
-            finalize_sanity_budget_ms: 2,
+            finalize_sanity_budget_ms: 8,
             finalize_sanity_mini_depth: 2,
             finalize_sanity_see_min_cp: -90,
             finalize_sanity_switch_margin_cp: 30,
-            finalize_sanity_opp_see_min_cp: 300,
+            finalize_sanity_opp_see_min_cp: 100,
             finalize_sanity_opp_see_penalty_cap_cp: 200,
             finalize_sanity_check_penalty_cp: 15,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             instant_mate_check_all_pv: false,
             // Guard rails (default OFF) and parameters (defaults per spec)
-            root_see_gate: false,
+            root_see_gate: true,
             x_see_cp: 100,
-            post_verify: false,
-            y_drop_cp: 300,
+            post_verify: true,
+            y_drop_cp: 250,
             promote_verify: false,
             promote_bias_cp: 20,
             warmup_ms: 500,
             warmup_prev_moves: 0,
-            profile_mode: ProfileMode::Auto,
+            // 自動プロファイルを無効化し、静的なT8相当の既定値を適用する
+            profile_mode: ProfileMode::Off,
         }
     }
 }
