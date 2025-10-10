@@ -165,21 +165,33 @@ fn finalize_sanity_check(
                 }
             }
         }
-        // approximate two-ply threat: opponent quiet (beam-limited) then capture
-        let mut checked = 0usize;
+        // approximate two-ply threat: opponent quiet (beam-limited) then opponent capture (after our null)
         let beam_k = state.opts.finalize_threat2_beam_k.max(1) as usize;
-        for &mvq in list2.as_slice() {
-            if checked >= beam_k {
-                break;
+        // Quiet候補だけを集め、簡易優先度で上位Kを選抜
+        let mut quiets: Vec<_> = list2
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|m| !m.is_capture_hint() && pos1.is_legal_move(*m))
+            .collect();
+        // 簡易優先度: 王手>成り>その他（軽量）
+        quiets.sort_by_key(|m| {
+            let mut key = 0i32;
+            if pos1.gives_check(*m) {
+                key += 2000;
             }
-            if mvq.is_capture_hint() {
-                continue;
+            if m.is_promote() {
+                key += 1000;
             }
-            if !pos1.is_legal_move(mvq) {
-                continue;
-            }
+            // 近似：移動先でのSEE（正）を少しだけ持ち上げる（静的でも0が多い可能性はあるが安全）
+            key += state.position.see(*m).max(0);
+            -key
+        });
+        for &mvq in quiets.iter().take(beam_k) {
             let mut posq = pos1.clone();
             posq.do_move(mvq);
+            // give move back to opponent by a null move, then evaluate opponent captures
+            let undo_null = posq.do_null_move();
             if let Ok(listc) = mg2.generate_all(&posq) {
                 for &mvc in listc.as_slice() {
                     if mvc.is_capture_hint() && posq.is_legal_move(mvc) {
@@ -190,7 +202,7 @@ fn finalize_sanity_check(
                     }
                 }
             }
-            checked += 1;
+            posq.undo_null_move(undo_null);
         }
     }
     if opp_cap_see_max >= opp_gate || opp_threat2_max >= threat2_gate {
@@ -242,7 +254,11 @@ fn finalize_sanity_check(
         } else if let (Some(res), Some(mv0)) = (result, best_alt) {
             if let Some(lines) = &res.lines {
                 if let Some(l2) = lines.iter().find(|l| l.multipv_index == 2) {
-                    if l2.pv.first().is_some_and(|m| m.equals_without_piece_type(&mv0)) {
+                    // USI表現一致も併用して防振
+                    let usi0 = move_to_usi(&mv0);
+                    if l2.pv.first().is_some_and(|m| {
+                        m.equals_without_piece_type(&mv0) || move_to_usi(m) == usi0
+                    }) {
                         alt_from_pv2 = true;
                     }
                 }
@@ -281,7 +297,12 @@ fn finalize_sanity_check(
         }
     }
     if best_alt.is_none() {
-        best_alt = best_ge0.map(|(m, _)| m).or(best_any.map(|(m, _)| m));
+        // SEE>=0 を優先。許可フラグが false の場合は負値代替を禁止。
+        if let Some((m, _)) = best_ge0 {
+            best_alt = Some(m);
+        } else if state.opts.finalize_allow_see_lt0_alt {
+            best_alt = best_any.map(|(m, _)| m);
+        }
     }
     let Some(alt) = best_alt else {
         info_string(format!("{} switched=0 reason=no_alt", diag_base));
@@ -405,12 +426,9 @@ fn finalize_sanity_check(
     let capped = opp_cap_see_max.min(penalty_cap).max(0) as i64;
     let opp_penalty_i64 =
         capped.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
-    let capped_t2 = opp_threat2_max.min(penalty_cap).max(0) as i64;
-    let t2_penalty_i64 =
-        capped_t2.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
+    // ダブルカウント抑止: ペナルティは opp_cap のみに適用（t2 はゲート/判定用）
     let opp_penalty = opp_penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    let t2_penalty = t2_penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    let s1_adj = s1.saturating_sub(opp_penalty).saturating_sub(t2_penalty);
+    let s1_adj = s1.saturating_sub(opp_penalty);
     let switched = s2 > s1_adj + switch_margin;
     if switched {
         info_string(format!(

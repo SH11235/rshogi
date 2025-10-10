@@ -77,6 +77,8 @@ pub struct UsiOptions {
     pub finalize_threat2_min_cp: i32,
     /// 二手脅威のquietビーム幅（上位K件だけ見る）
     pub finalize_threat2_beam_k: u8,
+    /// 代替手で SEE<0 の手を許容するか（falseで禁止）
+    pub finalize_allow_see_lt0_alt: bool,
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
@@ -160,6 +162,7 @@ impl Default for UsiOptions {
             finalize_sanity_check_penalty_cp: 15,
             finalize_threat2_min_cp: 100,
             finalize_threat2_beam_k: 8,
+            finalize_allow_see_lt0_alt: true,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             // より安全側に倒す（PV全体を確認）

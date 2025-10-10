@@ -178,6 +178,14 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name FinalizeSanity.Threat2_BeamK type spin default {} min 0 max 64",
         opts.finalize_threat2_beam_k
     ));
+    usi_println(&format!(
+        "option name FinalizeSanity.AllowSEElt0Alt type check default {}",
+        if opts.finalize_allow_see_lt0_alt {
+            "true"
+        } else {
+            "false"
+        }
+    ));
 
     // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
     usi_println(&format!(
@@ -705,6 +713,12 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 if let Ok(x) = v.parse::<u8>() {
                     state.opts.finalize_threat2_beam_k = x.min(64);
                 }
+            }
+        }
+        "FinalizeSanity.AllowSEElt0Alt" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                state.opts.finalize_allow_see_lt0_alt = on;
             }
         }
         "SearchParams.SafePruning" => {
@@ -1268,6 +1282,7 @@ pub fn log_effective_profile(state: &EngineState) {
         "FinalizeSanity.BudgetMs",
         "FinalizeSanity.MinMs",
         "FinalizeSanity.Threat2_MinCp",
+        "FinalizeSanity.Threat2_BeamK",
         "MultiPV",
     ] {
         if state.user_overrides.contains(k) {
@@ -1275,7 +1290,7 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_beam_k={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
@@ -1288,6 +1303,7 @@ pub fn log_effective_profile(state: &EngineState) {
         state.opts.finalize_sanity_switch_margin_cp,
         state.opts.finalize_sanity_opp_see_min_cp,
         state.opts.finalize_sanity_budget_ms,
+        state.opts.finalize_threat2_beam_k,
         state.opts.mate_gate_min_stable_depth,
         state.opts.mate_gate_fast_ok_min_depth,
         state.opts.mate_gate_fast_ok_min_elapsed_ms,
