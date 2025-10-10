@@ -7,6 +7,7 @@ use crate::io::diag_info_string;
 use crate::io::info_string;
 use crate::state::EngineState;
 use crate::stop::{compute_wait_budget_from_state, wait_for_result_with_budget};
+use engine_core::movegen::MoveGenerator;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::types::Bound;
 use engine_core::usi::move_to_usi;
@@ -233,87 +234,106 @@ pub fn poll_instant_mate(state: &mut EngineState) {
 
     // Check the latest snapshot for a mate score on PV(s)
     if let Some(snapshot) = state.stop_controller.try_read_snapshot() {
+        // Gate 1: Snapshot source (Stable required if configured)
+        if state.opts.instant_mate_require_stable && snapshot.source != SnapshotSource::Stable {
+            return;
+        }
+        // Gate 2: Minimum reported depth
+        if state.opts.instant_mate_min_depth > 0
+            && snapshot.depth < state.opts.instant_mate_min_depth
+        {
+            return;
+        }
+        // Gate 3: Respect small minimum think time for fast finalize
+        if state.opts.instant_mate_respect_min_think_ms
+            && snapshot.elapsed_ms < state.opts.instant_mate_min_respect_ms
+        {
+            return;
+        }
+
+        let mut try_lines: smallvec::SmallVec<[&engine_core::search::types::RootLine; 4]> =
+            smallvec::SmallVec::new();
         if state.opts.instant_mate_check_all_pv {
-            for line in &snapshot.lines {
-                use engine_core::search::constants::mate_distance as md;
-                let dist_opt = line.mate_distance.or_else(|| {
-                    (matches!(line.bound, Bound::Exact)).then(|| md(line.score_internal)).flatten()
-                });
-                let bound_ok = matches!(line.bound, Bound::Exact)
-                    || (snapshot.source == SnapshotSource::Stable && line.mate_distance.is_some());
-                if bound_ok {
-                    if let Some(dist) = dist_opt {
-                        if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
-                            let was_ponder = state.current_is_ponder;
-                            info_string(format!(
-                                "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?} sid={} root={}",
-                                dist,
-                                was_ponder as u8,
-                                snapshot.depth,
-                                snapshot.elapsed_ms,
-                                line.bound,
-                                snapshot.source,
-                                snapshot.search_id,
-                                fmt_hash(snapshot.root_key)
-                            ));
-                            state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
-                                distance: dist,
-                                was_ponder,
-                            });
-                            if !was_ponder {
-                                fast_finalize_no_detach(
-                                    state,
-                                    "instant_mate_finalize",
-                                    Some(FinalizeReason::PlannedMate {
-                                        distance: dist,
-                                        was_ponder: false,
-                                    }),
-                                );
-                            }
-                            break;
-                        }
-                    }
-                }
+            for l in &snapshot.lines {
+                try_lines.push(l);
             }
-        } else if let Some(line) = snapshot.lines.first() {
+        } else if let Some(first) = snapshot.lines.first() {
+            try_lines.push(first);
+        }
+
+        for line in try_lines {
             use engine_core::search::constants::mate_distance as md;
-            let dist_opt = line.mate_distance.or_else(|| {
-                (matches!(line.bound, Bound::Exact)).then(|| md(line.score_internal)).flatten()
-            });
-            let bound_ok = matches!(line.bound, Bound::Exact)
-                || (snapshot.source == SnapshotSource::Stable && line.mate_distance.is_some());
-            if bound_ok {
-                if let Some(dist) = dist_opt {
-                    if dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32 {
-                        let was_ponder = state.current_is_ponder;
-                        info_string(format!(
-                            "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?} sid={} root={}",
-                            dist,
-                            was_ponder as u8,
-                            snapshot.depth,
-                            snapshot.elapsed_ms,
-                            line.bound,
-                            snapshot.source,
-                            snapshot.search_id,
-                            fmt_hash(snapshot.root_key)
-                        ));
-                        state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
-                            distance: dist,
-                            was_ponder,
-                        });
-                        if !was_ponder {
-                            fast_finalize_no_detach(
-                                state,
-                                "instant_mate_finalize",
-                                Some(FinalizeReason::PlannedMate {
-                                    distance: dist,
-                                    was_ponder: false,
-                                }),
-                            );
-                        }
+            // Gate 4: bound must be Exact（fail-high/lowは不発）
+            if !matches!(line.bound, Bound::Exact) {
+                continue;
+            }
+            let dist = line.mate_distance.or_else(|| md(line.score_internal)).unwrap_or(0);
+            if !(dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32) {
+                continue;
+            }
+            // Candidate move (prefer PV[0], fallback to root_move / snapshot.best)
+            let cand = line.pv.first().copied().or(Some(line.root_move)).or(snapshot.best);
+            let Some(best_mv) = cand else { continue };
+            // Position must match snapshot root
+            let pos_hash = state.position.zobrist_hash();
+            if pos_hash != snapshot.root_key {
+                // stale snapshot; wait next tick
+                continue;
+            }
+            // Lightweight verification
+            let verify_passed = match state.opts.instant_mate_verify_mode {
+                crate::state::InstantMateVerifyMode::Off => true,
+                crate::state::InstantMateVerifyMode::CheckOnly => {
+                    let mut pos1 = state.position.clone();
+                    let _ = pos1.do_move(best_mv);
+                    let mg = MoveGenerator::new();
+                    match mg.generate_all(&pos1) {
+                        Ok(list) => list.as_slice().iter().all(|&m| !pos1.is_legal_move(m)),
+                        Err(_) => false,
                     }
                 }
+                crate::state::InstantMateVerifyMode::QSearch => {
+                    // TODO: implement tiny qsearch verification (node-limited). For now fallback to CheckOnly.
+                    let mut pos1 = state.position.clone();
+                    let _ = pos1.do_move(best_mv);
+                    let mg = MoveGenerator::new();
+                    match mg.generate_all(&pos1) {
+                        Ok(list) => list.as_slice().iter().all(|&m| !pos1.is_legal_move(m)),
+                        Err(_) => false,
+                    }
+                }
+            };
+            if !verify_passed {
+                continue;
             }
+
+            let was_ponder = state.current_is_ponder;
+            info_string(format!(
+                "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?} sid={} root={} verify_passed=1",
+                dist,
+                was_ponder as u8,
+                snapshot.depth,
+                snapshot.elapsed_ms,
+                line.bound,
+                snapshot.source,
+                snapshot.search_id,
+                fmt_hash(snapshot.root_key)
+            ));
+            state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
+                distance: dist,
+                was_ponder,
+            });
+            if !was_ponder {
+                fast_finalize_no_detach(
+                    state,
+                    "instant_mate_finalize",
+                    Some(FinalizeReason::PlannedMate {
+                        distance: dist,
+                        was_ponder: false,
+                    }),
+                );
+            }
+            break;
         }
     }
 }
