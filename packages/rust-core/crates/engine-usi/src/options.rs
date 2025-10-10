@@ -843,9 +843,12 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
-        "ByoyomiPeriods" => {
+        "ByoyomiPeriods" | "USI_ByoyomiPeriods" => {
             if let Some(v) = value_ref {
-                if let Ok(p) = v.parse::<u32>() {
+                let v_l = v.to_ascii_lowercase();
+                if v_l == "default" {
+                    state.opts.byoyomi_periods = UsiOptions::default().byoyomi_periods;
+                } else if let Ok(p) = v.parse::<u32>() {
                     state.opts.byoyomi_periods = p.clamp(1, 10);
                 }
             }
@@ -966,22 +969,32 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             }
         }
         "Profile.ApplyAutoDefaults" => {
-            // Clear overrides and (re)apply thread/profile-based defaults immediately
-            for k in [
-                "RootSeeGate",
-                "RootSeeGate.XSEE",
-                "PostVerify",
-                "PostVerify.YDrop",
-                "FinalizeSanity.SwitchMarginCp",
-                "FinalizeSanity.OppSEE_MinCp",
-                "FinalizeSanity.BudgetMs",
-                "MultiPV",
-            ] {
-                state.user_overrides.remove(k);
+            if state.searching {
+                info_string("profile_applied=0 reason=busy");
+            } else {
+                let keys = [
+                    "RootSeeGate",
+                    "RootSeeGate.XSEE",
+                    "PostVerify",
+                    "PostVerify.YDrop",
+                    "FinalizeSanity.SwitchMarginCp",
+                    "FinalizeSanity.OppSEE_MinCp",
+                    "FinalizeSanity.BudgetMs",
+                    "MultiPV",
+                ];
+                let mut cleared = 0usize;
+                for k in keys {
+                    if state.user_overrides.remove(k) {
+                        cleared += 1;
+                    }
+                }
+                maybe_apply_thread_based_defaults(state);
+                apply_options_to_engine(state);
+                info_string(format!(
+                    "profile_applied=1 mode={:?} cleared_overrides={}",
+                    state.opts.profile_mode, cleared
+                ));
             }
-            maybe_apply_thread_based_defaults(state);
-            apply_options_to_engine(state);
-            info_string("profile_applied=1");
         }
         _ => {}
     }
@@ -1069,16 +1082,17 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
 
 /// Emit a one-line info string with the effective profile and key parameters.
 pub fn log_effective_profile(state: &EngineState) {
-    let profile = match state.opts.profile_mode {
+    let mode_str = match state.opts.profile_mode {
+        ProfileMode::Auto => "Auto",
         ProfileMode::T1 => "T1",
         ProfileMode::T8 => "T8",
-        ProfileMode::Off | ProfileMode::Auto => {
-            if state.opts.threads >= 4 {
-                "T8"
-            } else {
-                "T1"
-            }
-        }
+        ProfileMode::Off => "Off",
+    };
+    let resolved = match state.opts.profile_mode {
+        ProfileMode::T1 => Some("T1"),
+        ProfileMode::T8 => Some("T8"),
+        ProfileMode::Auto => Some(if state.opts.threads >= 4 { "T8" } else { "T1" }),
+        ProfileMode::Off => None,
     };
     let mut overrides: Vec<&str> = Vec::new();
     for k in [
@@ -1096,18 +1110,21 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile profile={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_switch={} finalize_oppsee={} finalize_budget={} overrides={}",
-        profile,
+        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} overrides={} threads_overridden={}",
+        mode_str,
+        resolved.unwrap_or("-"),
         state.opts.threads,
         state.opts.multipv,
         state.opts.root_see_gate as u8,
         state.opts.x_see_cp,
         state.opts.post_verify as u8,
         state.opts.y_drop_cp,
+        state.opts.finalize_sanity_enabled as u8,
         state.opts.finalize_sanity_switch_margin_cp,
         state.opts.finalize_sanity_opp_see_min_cp,
         state.opts.finalize_sanity_budget_ms,
-        if overrides.is_empty() { "-".to_string() } else { overrides.join(",") }
+        if overrides.is_empty() { "-".to_string() } else { overrides.join(",") },
+        if state.user_overrides.contains("Threads") { 1 } else { 0 }
     ));
 }
 
@@ -1194,6 +1211,11 @@ fn print_time_policy_options(opts: &UsiOptions) {
     ));
     usi_println(&format!(
         "option name ByoyomiPeriods type spin default {} min 1 max 10",
+        opts.byoyomi_periods
+    ));
+    // Alias for GUI compatibility
+    usi_println(&format!(
+        "option name USI_ByoyomiPeriods type spin default {} min 1 max 10",
         opts.byoyomi_periods
     ));
     usi_println(&format!(

@@ -47,7 +47,7 @@ pub struct UsiOptions {
     pub watchdog_poll_ms: u64,
     // 純秒読みでGUIの厳格締切より少し手前で確実に返すための追加リード（ms）
     // network_delay2_ms に加算して最終化を前倒しする。手番側 main=0 でも適用。
-    // 既定: 300ms
+    // 既定: 150ms
     pub byoyomi_deadline_lead_ms: u64,
     // MultiPV lines
     pub multipv: u8,

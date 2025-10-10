@@ -123,7 +123,7 @@ cargo run -p engine-usi --release --features fast-fma
 
 | Option | Type | Default | Range | Description |
 |--------|------|---------|-------|-------------|
-| USI_Hash | Spin | 16 | 1-1024 | Hash table size in MB |
+| USI_Hash | Spin | 1024 | 1-1024 | Hash table size in MB |
 | Threads | Spin | 1 | 1-256 | Number of search threads |
 | USI_Ponder | Check | true | true/false | Enable pondering (thinking on opponent's time) |
 | EngineType | Combo | Material | Material/Nnue/Enhanced/EnhancedNnue | Engine evaluation and search type |
@@ -131,21 +131,23 @@ cargo run -p engine-usi --release --features fast-fma
 
 > Note: `ByoyomiPeriods` accepts the literal `default` to reset to the initial value (the engine handles this as a special case).
 
-#### ByoyomiPeriods Option
+#### ByoyomiPeriods オプション
 
-Controls the number of byoyomi periods when using byoyomi time control:
+秒読みの回数（period数）を制御します。`USI_ByoyomiPeriods` はエイリアスとして同じ意味で利用できます。`value default` を指定すると初期値（1）に戻ります。
+
+例:
 
 ```bash
-# Set default number of periods (used when not specified in go command)
+# デフォルト回数（goでperiods未指定のときに使われる）
 setoption name ByoyomiPeriods value 3
-# or using the alias
+# エイリアス（同等）
 setoption name USI_ByoyomiPeriods value 3
 
-# Reset to default (1 period)
+# 既定（1）に戻す
 setoption name ByoyomiPeriods value default
 
-# Override in go command
-go byoyomi 30000 periods 5  # 5 periods of 30 seconds each
+# goコマンド側で上書き
+go byoyomi 30000 periods 5  # 30秒×5回
 ```
 
 ## Building
