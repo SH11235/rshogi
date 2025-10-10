@@ -19,7 +19,7 @@ fn horse_adjacent_check_allows_king_escape_6i5i() {
     let moves = gen.generate_all(&pos).expect("move generation must succeed");
 
     // Collect USI strings for readability on failure
-    let usi_moves: Vec<String> = moves.as_slice().iter().map(|m| move_to_usi(m)).collect();
+    let usi_moves: Vec<String> = moves.as_slice().iter().map(move_to_usi).collect();
 
     assert!(
         usi_moves.iter().any(|m| m == "6i5i"),
@@ -53,7 +53,7 @@ fn bishop_sliding_check_blocks_away_diagonal_escape() {
 
     let gen = MoveGenerator::new();
     let moves = gen.generate_all(&pos).expect("movegen ok");
-    let usi_moves: Vec<String> = moves.as_slice().iter().map(|m| move_to_usi(m)).collect();
+    let usi_moves: Vec<String> = moves.as_slice().iter().map(move_to_usi).collect();
 
     assert!(
         !usi_moves.iter().any(|m| m == "5e6f"),
@@ -85,7 +85,7 @@ fn rook_sliding_check_blocks_away_linear_escape() {
 
     let gen = MoveGenerator::new();
     let moves = gen.generate_all(&pos).expect("movegen ok");
-    let usi_moves: Vec<String> = moves.as_slice().iter().map(|m| move_to_usi(m)).collect();
+    let usi_moves: Vec<String> = moves.as_slice().iter().map(move_to_usi).collect();
 
     assert!(
         !usi_moves.iter().any(|m| m == "5e5f"),
@@ -116,7 +116,7 @@ fn lance_sliding_check_blocks_away_linear_escape() {
 
     let gen = MoveGenerator::new();
     let moves = gen.generate_all(&pos).expect("movegen ok");
-    let usi_moves: Vec<String> = moves.as_slice().iter().map(|m| move_to_usi(m)).collect();
+    let usi_moves: Vec<String> = moves.as_slice().iter().map(move_to_usi).collect();
 
     assert!(
         !usi_moves.iter().any(|m| m == "5e5f"),
@@ -150,7 +150,7 @@ fn promoted_lance_adjacent_check_allows_side_escape() {
 
     let gen = MoveGenerator::new();
     let moves = gen.generate_all(&pos).expect("movegen ok");
-    let usi_moves: Vec<String> = moves.as_slice().iter().map(|m| move_to_usi(m)).collect();
+    let usi_moves: Vec<String> = moves.as_slice().iter().map(move_to_usi).collect();
 
     // Extension must not apply in +L adjacent check. 5e5f（直線に遠ざかる）や斜め逃げが許されうる。
     // 接近王手（+L=金相当）ではレイ延長は行われない。ここでは 5e5f が許可される形。
@@ -238,7 +238,7 @@ fn dragon_adjacent_diagonal_check_allows_side_escape() {
 
     let gen = MoveGenerator::new();
     let moves = gen.generate_all(&pos).expect("movegen ok");
-    let usi_moves: Vec<String> = moves.as_slice().iter().map(|m| move_to_usi(m)).collect();
+    let usi_moves: Vec<String> = moves.as_slice().iter().map(move_to_usi).collect();
 
     assert!(
         usi_moves.iter().any(|m| m == "5i4i"),
