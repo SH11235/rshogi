@@ -9,6 +9,7 @@ use engine_core::search::parallel::{FinalizerMsg, StopController};
 use engine_core::shogi::Position;
 use engine_core::time_management::{TimeControl, TimeManager, TimeState};
 use engine_core::Color;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
@@ -88,6 +89,8 @@ pub struct UsiOptions {
     // Reproduction: warmup search before cut (ms) and previous K moves replay
     pub warmup_ms: u64,
     pub warmup_prev_moves: u32,
+    // Profile selector for auto defaults (GUI override)
+    pub profile_mode: ProfileMode,
 }
 
 impl Default for UsiOptions {
@@ -142,6 +145,7 @@ impl Default for UsiOptions {
             promote_bias_cp: 20,
             warmup_ms: 500,
             warmup_prev_moves: 0,
+            profile_mode: ProfileMode::Auto,
         }
     }
 }
@@ -224,6 +228,9 @@ pub struct EngineState {
     pub active_time_manager: Option<Arc<TimeManager>>,
     /// Ponder search result buffered for instant finalize on ponderhit
     pub pending_ponder_result: Option<PonderResult>,
+    /// Names of USI options explicitly overridden by the user via `setoption`.
+    /// Auto defaults (Threads連動) はここに含まれないキーに対してのみ適用される。
+    pub user_overrides: HashSet<String>,
 }
 
 impl EngineState {
@@ -270,6 +277,7 @@ impl EngineState {
             deadline_near_notified: false,
             active_time_manager: None,
             pending_ponder_result: None,
+            user_overrides: HashSet::new(),
         }
     }
 
@@ -316,6 +324,15 @@ impl EngineState {
     pub fn notify_idle(&self) {
         self.idle_sync.notify_all();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ProfileMode {
+    #[default]
+    Auto,
+    T1,
+    T8,
+    Off,
 }
 
 #[derive(Default)]
