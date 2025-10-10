@@ -841,10 +841,46 @@ impl Engine {
                 if !legal_moves.is_empty() {
                     // If not in check, try to avoid king moves, preferring captures/drops first
                     let chosen = if !in_check {
-                        legal_moves
-                            .iter()
-                            .find(|m| is_tactical(m) && !is_king_move(m))
-                            .copied()
+                        // SEE優先（非王手時）。まずSEE>=0の中で最大、なければ従来の簡易規則。
+                        // まず「昇成・捕獲・打ち」のタクティカルな手の中で SEE>=0 を優先
+                        let mut see_best_tactical: Option<crate::shogi::Move> = None;
+                        let mut see_best_tactical_val = i32::MIN;
+                        for &m in &legal_moves {
+                            if is_king_move(&m) {
+                                continue;
+                            }
+                            if !(m.is_promote() || m.is_drop() || m.is_capture_hint()) {
+                                continue;
+                            }
+                            let s = pos.see(m);
+                            if s >= 0 && s > see_best_tactical_val {
+                                see_best_tactical_val = s;
+                                see_best_tactical = Some(m);
+                            }
+                        }
+                        // 次に非タクティカルも含めた SEE>=0 を検討（タクティカルが無い場合の保険）
+                        let mut see_best_any: Option<crate::shogi::Move> = None;
+                        let mut see_best_any_val = i32::MIN;
+                        if see_best_tactical.is_none() {
+                            for &m in &legal_moves {
+                                if is_king_move(&m) {
+                                    continue;
+                                }
+                                let s = pos.see(m);
+                                if s >= 0 && s > see_best_any_val {
+                                    see_best_any_val = s;
+                                    see_best_any = Some(m);
+                                }
+                            }
+                        }
+                        see_best_tactical
+                            .or(see_best_any)
+                            .or_else(|| {
+                                legal_moves
+                                    .iter()
+                                    .find(|m| is_tactical(m) && !is_king_move(m))
+                                    .copied()
+                            })
                             .or_else(|| legal_moves.iter().find(|m| !is_king_move(m)).copied())
                             .unwrap_or_else(|| legal_moves[0])
                     } else {

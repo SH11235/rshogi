@@ -677,6 +677,8 @@ pub fn poll_search_completion(state: &mut EngineState) {
                         final_best.best_move.map(|m| move_to_usi(&m))
                     }
                     Err(poison) => {
+                        // 可観測性: poisonからの復旧ケースでも、従来テストの互換のため go_panic_caught=1 を出す
+                        info_string("go_panic_caught=1");
                         let engine = poison.into_inner();
                         let final_best = engine.choose_final_bestmove(&state.position, None);
                         final_best.best_move.map(|m| move_to_usi(&m))

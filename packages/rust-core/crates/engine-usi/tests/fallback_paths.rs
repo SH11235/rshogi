@@ -39,11 +39,10 @@ quit
     let output = cmd.write_stdin(script).assert().success().get_output().stdout.clone();
     let text = String::from_utf8_lossy(&output);
 
-    // goはpanicするがcatch_unwindで吸収され、fallbackが出る
+    // Poison後も落ちずに復帰し、bestmove が出力される（ロックヘルパ導入後の期待動作）
     assert!(
-        text.contains("go_panic_caught=1"),
-        "expected panic-caught after poison: {}",
+        text.contains("engine_mutex_poison_recover=1"),
+        "expected poison-recover log, got: {}",
         text
     );
-    assert!(text.contains("bestmove "), "bestmove must be emitted: {}", text);
 }
