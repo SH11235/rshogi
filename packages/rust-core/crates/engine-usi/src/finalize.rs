@@ -102,7 +102,13 @@ fn log_and_emit_final_selection(
         stop_meta.hard_ms
     ));
     // Emit micro-log before sending bestmove for easier correlation with finalize_event
-    info_string(format!("finalize_emit=1 label={} source={}", label, source_to_str(source)));
+    let sid = state.current_session_core_id.unwrap_or(0);
+    info_string(format!(
+        "finalize_emit=1 sid={} label={} source={}",
+        sid,
+        label,
+        source_to_str(source)
+    ));
     let _ = emit_bestmove_once(state, final_move.to_string(), ponder);
 }
 
@@ -606,8 +612,7 @@ fn try_lock_engine_with_budget<'a>(
     if let Ok(guard) = engine.try_lock() {
         let elapsed = start.elapsed();
         // ログ: スピン0で取得（静かなケース）
-        // Backward compatibility + clearer term
-        diag_info_string(format!("engine_lock_spins=0 tt_lock_spins=0 budget_ms={}", budget_ms));
+        diag_info_string(format!("engine_lock_spins=0 budget_ms={}", budget_ms));
         return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
     }
     if budget_ms == 0 {
@@ -620,10 +625,7 @@ fn try_lock_engine_with_budget<'a>(
             let elapsed = start.elapsed();
             // しきい値を超えるスピン/イールドが発生した場合のみ可視化
             if spins > 0 {
-                info_string(format!(
-                    "engine_lock_spins={} tt_lock_spins={} budget_ms={}",
-                    spins, spins, budget_ms
-                ));
+                info_string(format!("engine_lock_spins={} budget_ms={}", spins, budget_ms));
             }
             return Some((guard, elapsed.as_millis() as u64, elapsed.as_micros() as u64));
         }
@@ -1544,15 +1546,37 @@ pub fn finalize_and_send_fast(
                     }
                     // ロック獲得に失敗：mateゲートでブロックされているなら snapshot を使わず合法フォールバックへ
                     if blocked_by_mate_gate {
-                        // A案: もう一度だけ極小予算でtry-lock → 失敗なら手計算SEEフォールバック
-                        let fallback = if let Some((eng_guard, _ms, _us)) =
-                            try_lock_engine_with_budget(&state.engine, 1)
-                        {
-                            let fb = eng_guard.choose_final_bestmove(&state.position, None);
-                            drop(eng_guard);
-                            fb.best_move
-                                .map(|m| move_to_usi(&m))
-                                .unwrap_or_else(|| "resign".to_string())
+                        // A案: 残余が2ms以上あるときのみ1ms再トライ→失敗なら手計算SEEフォールバック
+                        let retry_budget_ms =
+                            compute_tt_probe_budget_ms(stop_meta.info.as_ref(), 0);
+                        let do_retry = retry_budget_ms >= 2;
+                        let fallback = if do_retry {
+                            if let Some((eng_guard, _ms, _us)) =
+                                try_lock_engine_with_budget(&state.engine, 1)
+                            {
+                                let fb = eng_guard.choose_final_bestmove(&state.position, None);
+                                drop(eng_guard);
+                                fb.best_move
+                                    .map(|m| move_to_usi(&m))
+                                    .unwrap_or_else(|| "resign".to_string())
+                            } else {
+                                // 手計算: SEE>=0の戦術手→SEE>=0任意→従来ヒューリスティック（共通ヘルパで選択）
+                                let mg = MoveGenerator::new();
+                                if let Ok(list) = mg.generate_all(&state.position) {
+                                    let pos = &state.position;
+                                    let legal: Vec<_> = list
+                                        .as_slice()
+                                        .iter()
+                                        .copied()
+                                        .filter(|&m| pos.is_legal_move(m))
+                                        .collect();
+                                    choose_legal_fallback_with_see(pos, &legal)
+                                        .map(|mv| move_to_usi(&mv))
+                                        .unwrap_or_else(|| "resign".to_string())
+                                } else {
+                                    "resign".to_string()
+                                }
+                            }
                         } else {
                             // 手計算: SEE>=0の戦術手→SEE>=0任意→従来ヒューリスティック（共通ヘルパで選択）
                             let mg = MoveGenerator::new();

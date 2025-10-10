@@ -166,7 +166,7 @@ impl Default for UsiOptions {
             mate_gate_min_stable_depth: 5,
             mate_gate_fast_ok_min_depth: 5,
             mate_gate_fast_ok_min_elapsed_ms: 30,
-            // Guard rails (default OFF) and parameters (defaults per spec)
+            // Guard rails（既定 ON）
             root_see_gate: true,
             x_see_cp: 100,
             post_verify: true,
