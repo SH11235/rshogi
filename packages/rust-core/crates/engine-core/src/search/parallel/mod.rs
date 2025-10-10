@@ -122,7 +122,9 @@ where
             // helpers は MultiPV=1 固定
             worker_limits.multipv = 1;
             let jitter_on = limits.jitter_override.unwrap_or_else(jitter_enabled);
-            if jitter_on {
+            // BenchAllRun（テスト/ベンチ専用）では helper の jitter を抑止して測定の安定性を優先
+            let bench_allrun = crate::search::policy::bench_allrun_enabled();
+            if jitter_on && !bench_allrun {
                 worker_limits.root_jitter_seed =
                     Some(compute_jitter_seed(session_id, worker_index + 1, root_key));
             } else {
