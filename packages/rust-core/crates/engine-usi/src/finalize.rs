@@ -731,23 +731,30 @@ pub fn finalize_and_send(
 
     // Mate gating (YO流): Lower/Upper の mate距離では確定扱いしない。安定条件不足も抑止。
     let mut mate_rejected = false;
+    let mut mate_gate_blocked = false;
+    let mut mate_post_reject = false;
     if let Some(res) = result.as_ref() {
         if is_mate_score(res.score) {
-            let exact = matches!(res.node_type, engine_core::search::types::NodeType::Exact);
-            let stable_ok = res.stats.stable_depth.map(|d| d >= 5).unwrap_or(false);
-            if !exact || !stable_ok {
+            let block = mate_gate_should_block(
+                res.node_type,
+                res.stats.stable_depth,
+                res.stats.depth,
+                res.stats.elapsed.as_millis() as u64,
+            );
+            if block {
                 let dist = md(res.score).unwrap_or(0);
                 info_string(format!(
-                    "mate_gate_blocked=1 bound={} stable_ok={} depth={} mate_dist={}",
+                    "mate_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
                     match res.node_type {
                         engine_core::search::types::NodeType::LowerBound => "lb",
                         engine_core::search::types::NodeType::UpperBound => "ub",
                         _ => "pv",
                     },
-                    stable_ok as u8,
                     res.stats.depth,
+                    res.stats.elapsed.as_millis(),
                     dist
                 ));
+                mate_gate_blocked = true;
                 mate_rejected = true;
             }
         }
@@ -839,6 +846,7 @@ pub fn finalize_and_send(
                             in_check as u8,
                             dist
                         ));
+                        mate_post_reject = true;
                         mate_rejected = true;
                     }
                 }
@@ -1163,8 +1171,12 @@ pub fn finalize_and_send(
         None
     };
     if maybe_switch.is_some() {
-        let reason = if mate_rejected {
-            "mate_gate|postverify"
+        let reason = if mate_gate_blocked && mate_post_reject {
+            "mate_gate+postverify"
+        } else if mate_gate_blocked {
+            "mate_gate"
+        } else if mate_post_reject {
+            "postverify"
         } else {
             "sanity"
         };
@@ -1439,6 +1451,25 @@ pub fn finalize_and_send_fast(
                             final_source,
                             &final_usi,
                             ponder_mv,
+                            &stop_meta,
+                        );
+                        return;
+                    }
+                    // ロック獲得に失敗：mateゲートでブロックされているなら snapshot を使わず合法フォールバックへ
+                    if blocked_by_mate_gate {
+                        let fallback = {
+                            let eng = state.lock_engine();
+                            let fb = eng.choose_final_bestmove(&state.position, None);
+                            fb.best_move
+                                .map(|m| move_to_usi(&m))
+                                .unwrap_or_else(|| "resign".to_string())
+                        };
+                        log_and_emit_final_selection(
+                            state,
+                            label,
+                            FinalBestSource::LegalFallback,
+                            &fallback,
+                            None,
                             &stop_meta,
                         );
                         return;

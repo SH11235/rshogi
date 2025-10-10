@@ -310,8 +310,7 @@ fn main() -> Result<()> {
                 // go 実行の安全ラッパー。パニック/エラー伝播でプロセスが落ちないようにする。
                 info_string("go_dispatch_enter");
                 match catch_unwind(AssertUnwindSafe(|| {
-                    // テスト用: デバッグビルド時のみ、環境変数でpanicを強制
-                    #[cfg(debug_assertions)]
+                    // テスト用: 環境変数でpanicを強制（リリースでも有効にしてフォールバック経路を検証可能にする）
                     if std::env::var("USI_TEST_GO_PANIC").ok().as_deref() == Some("1") {
                         panic!("testhook: forced panic before handle_go");
                     }
@@ -334,8 +333,7 @@ fn main() -> Result<()> {
                 continue;
             }
 
-            // テスト用: エンジンMutexをPoisonさせる隠しコマンド（デバッグビルド限定）
-            #[cfg(debug_assertions)]
+            // テスト用: エンジンMutexをPoisonさせる隠しコマンド（リリースでも実行可にして回帰テストを容易に）
             if cmd == "debug_poison_engine" {
                 let engine = state.engine.clone();
                 std::thread::spawn(move || {
@@ -344,6 +342,9 @@ fn main() -> Result<()> {
                 })
                 .join()
                 .ok();
+                // 直後にロックを取りにいき、Poison復帰ログを確実に出す
+                // 非保持で即時ドロップ（ログ目的のみ）
+                drop(state.lock_engine());
                 info_string("debug_poison_engine_done=1");
                 continue;
             }
