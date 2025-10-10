@@ -274,6 +274,8 @@ impl EngineState {
             Ok(g) => g,
             Err(p) => {
                 // 互換ログ（テスト/運用の可観測性向上）
+                // 備考: go開始前後のpanic捕捉ログと区別しづらいため、将来的に
+                // `go_panic_caught_source=poison_recover` 等のタグ追加を検討。
                 crate::io::info_string("engine_mutex_poison_recover=1");
                 crate::io::info_string("go_panic_caught=1");
                 p.into_inner()

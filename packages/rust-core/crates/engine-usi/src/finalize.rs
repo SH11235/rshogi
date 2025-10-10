@@ -15,28 +15,26 @@ use crate::io::{diag_info_string, info_string, usi_println};
 use crate::state::EngineState;
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
-#[cfg(test)]
-use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-static LAST_EMITTED_BESTMOVE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+thread_local! {
+    static LAST_EMITTED_BESTMOVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 fn test_record_bestmove(final_usi: &str, ponder: Option<&str>) {
-    let entry = LAST_EMITTED_BESTMOVE.get_or_init(|| Mutex::new(None));
-    let mut guard = entry.lock().unwrap();
     let mut payload = format!("bestmove {}", final_usi);
     if let Some(p) = ponder {
         payload.push_str(&format!(" ponder {}", p));
     }
-    *guard = Some(payload);
+    LAST_EMITTED_BESTMOVE.with(|slot| *slot.borrow_mut() = Some(payload));
 }
 
 #[cfg(test)]
 pub fn take_last_emitted_bestmove() -> Option<String> {
-    LAST_EMITTED_BESTMOVE.get_or_init(|| Mutex::new(None)).lock().unwrap().take()
+    LAST_EMITTED_BESTMOVE.with(|slot| slot.borrow_mut().take())
 }
 
 // ---------- Test probe for structured finalize outcomes (cfg(test) only)
@@ -52,23 +50,23 @@ pub struct FinalizeOutcome {
 }
 
 #[cfg(test)]
-static TEST_FINALIZE_OUTCOME: OnceLock<Mutex<Option<FinalizeOutcome>>> = OnceLock::new();
+thread_local! {
+    static TEST_FINALIZE_OUTCOME: std::cell::RefCell<Option<FinalizeOutcome>> = const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 fn test_probe_record(outcome: FinalizeOutcome) {
-    let slot = TEST_FINALIZE_OUTCOME.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap() = Some(outcome);
+    TEST_FINALIZE_OUTCOME.with(|s| *s.borrow_mut() = Some(outcome));
 }
 
 #[cfg(test)]
 pub fn test_probe_reset() {
-    let slot = TEST_FINALIZE_OUTCOME.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap() = None;
+    TEST_FINALIZE_OUTCOME.with(|s| *s.borrow_mut() = None);
 }
 
 #[cfg(test)]
 pub fn test_probe_take() -> Option<FinalizeOutcome> {
-    TEST_FINALIZE_OUTCOME.get_or_init(|| Mutex::new(None)).lock().unwrap().take()
+    TEST_FINALIZE_OUTCOME.with(|s| s.borrow_mut().take())
 }
 
 #[inline]
@@ -103,6 +101,8 @@ fn log_and_emit_final_selection(
         stop_meta.soft_ms,
         stop_meta.hard_ms
     ));
+    // Emit micro-log before sending bestmove for easier correlation with finalize_event
+    info_string(format!("finalize_emit=1 label={} source={}", label, source_to_str(source)));
     let _ = emit_bestmove_once(state, final_move.to_string(), ponder);
 }
 
@@ -638,10 +638,10 @@ fn try_lock_engine_with_budget<'a>(
                 break;
             }
             let remaining = deadline - now;
-            if remaining >= Duration::from_millis(1) {
+            // 予算を保護: 2ms以上残る場合のみ sleep(1ms)。それ未満では yield に留める。
+            if remaining >= Duration::from_millis(2) {
                 std::thread::sleep(Duration::from_millis(1));
             } else {
-                // Windows では 1ms 未満の sleep が丸め込まれるため、残り予算が細い場合は yield で粘る。
                 std::thread::yield_now();
             }
         }
@@ -1460,37 +1460,39 @@ pub fn finalize_and_send_fast(
                 }
 
                 if shallow || blocked_by_mate_gate {
-                    let snapshot_emit = if let Some((eng_guard, spent_ms, spent_us)) =
-                        try_lock_engine_with_budget(&state.engine, budget_ms)
-                    {
-                        let (final_usi, ponder_mv, final_source) = {
-                            let final_best = eng_guard.choose_final_bestmove(&state.position, None);
-                            let used_snapshot_move = final_best.best_move.is_none();
-                            let final_usi = final_best
-                                .best_move
-                                .map(|m| move_to_usi(&m))
-                                .unwrap_or_else(|| move_to_usi(&best));
-                            let ponder_mv = if state.opts.ponder {
-                                final_best
-                                    .pv
-                                    .get(1)
-                                    .map(move_to_usi)
-                                    .or_else(|| snap.pv.get(1).map(move_to_usi))
-                            } else {
-                                None
+                    let snapshot_emit: Option<(String, Option<String>, FinalBestSource, u64, u64)> =
+                        if let Some((eng_guard, spent_ms, spent_us)) =
+                            try_lock_engine_with_budget(&state.engine, budget_ms)
+                        {
+                            let (final_usi, ponder_mv, final_source) = {
+                                let final_best =
+                                    eng_guard.choose_final_bestmove(&state.position, None);
+                                let used_snapshot_move = final_best.best_move.is_none();
+                                let final_usi = final_best
+                                    .best_move
+                                    .map(|m| move_to_usi(&m))
+                                    .unwrap_or_else(|| move_to_usi(&best));
+                                let ponder_mv = if state.opts.ponder {
+                                    final_best
+                                        .pv
+                                        .get(1)
+                                        .map(move_to_usi)
+                                        .or_else(|| snap.pv.get(1).map(move_to_usi))
+                                } else {
+                                    None
+                                };
+                                let final_source = if used_snapshot_move {
+                                    FinalBestSource::Committed
+                                } else {
+                                    final_best.source
+                                };
+                                (final_usi, ponder_mv, final_source)
                             };
-                            let final_source = if used_snapshot_move {
-                                FinalBestSource::Committed
-                            } else {
-                                final_best.source
-                            };
-                            (final_usi, ponder_mv, final_source)
+                            drop(eng_guard);
+                            Some((final_usi, ponder_mv, final_source, spent_ms, spent_us))
+                        } else {
+                            None
                         };
-                        drop(eng_guard);
-                        Some((final_usi, ponder_mv, final_source, spent_ms, spent_us))
-                    } else {
-                        None
-                    };
 
                     if let Some((final_usi, ponder_mv, final_source, spent_ms, spent_us)) =
                         snapshot_emit
@@ -1552,74 +1554,19 @@ pub fn finalize_and_send_fast(
                                 .map(|m| move_to_usi(&m))
                                 .unwrap_or_else(|| "resign".to_string())
                         } else {
-                            // 手計算: SEE>=0の戦術手→SEE>=0任意→従来ヒューリスティック
+                            // 手計算: SEE>=0の戦術手→SEE>=0任意→従来ヒューリスティック（共通ヘルパで選択）
                             let mg = MoveGenerator::new();
                             if let Ok(list) = mg.generate_all(&state.position) {
                                 let pos = &state.position;
-                                let is_king_move = |m: &engine_core::shogi::Move| {
-                                    m.piece_type()
-                                        .or_else(|| {
-                                            m.from().and_then(|sq| {
-                                                pos.board.piece_on(sq).map(|p| p.piece_type)
-                                            })
-                                        })
-                                        .map(|pt| matches!(pt, PieceType::King))
-                                        .unwrap_or(false)
-                                };
-                                let is_tactical = |m: &engine_core::shogi::Move| {
-                                    m.is_drop() || m.is_capture_hint() || m.is_promote()
-                                };
                                 let legal: Vec<_> = list
                                     .as_slice()
                                     .iter()
                                     .copied()
                                     .filter(|&m| pos.is_legal_move(m))
                                     .collect();
-                                if legal.is_empty() {
-                                    "resign".to_string()
-                                } else {
-                                    let mut best_ge0_tac: Option<(engine_core::shogi::Move, i32)> =
-                                        None;
-                                    for &m in &legal {
-                                        if is_king_move(&m) || !is_tactical(&m) {
-                                            continue;
-                                        }
-                                        let s = pos.see(m);
-                                        if s >= 0 {
-                                            best_ge0_tac = match best_ge0_tac {
-                                                Some((mm, ss)) if ss >= s => Some((mm, ss)),
-                                                _ => Some((m, s)),
-                                            };
-                                        }
-                                    }
-                                    let mut best_ge0_any: Option<(engine_core::shogi::Move, i32)> =
-                                        None;
-                                    if best_ge0_tac.is_none() {
-                                        for &m in &legal {
-                                            if is_king_move(&m) {
-                                                continue;
-                                            }
-                                            let s = pos.see(m);
-                                            if s >= 0 {
-                                                best_ge0_any = match best_ge0_any {
-                                                    Some((mm, ss)) if ss >= s => Some((mm, ss)),
-                                                    _ => Some((m, s)),
-                                                };
-                                            }
-                                        }
-                                    }
-                                    let pick = best_ge0_tac
-                                        .map(|(m, _)| m)
-                                        .or(best_ge0_any.map(|(m, _)| m))
-                                        .or(legal
-                                            .iter()
-                                            .find(|m| is_tactical(m) && !is_king_move(m))
-                                            .copied())
-                                        .or(legal.iter().find(|m| !is_king_move(m)).copied())
-                                        .or_else(|| legal.first().copied());
-                                    pick.map(|mv| move_to_usi(&mv))
-                                        .unwrap_or_else(|| "resign".to_string())
-                                }
+                                choose_legal_fallback_with_see(pos, &legal)
+                                    .map(|mv| move_to_usi(&mv))
+                                    .unwrap_or_else(|| "resign".to_string())
                             } else {
                                 "resign".to_string()
                             }
@@ -1801,18 +1748,6 @@ pub fn finalize_and_send_fast(
             } else {
                 let pos = &state.position;
                 let in_check = pos.is_in_check();
-                let is_king_move = |m: &engine_core::shogi::Move| {
-                    m.piece_type()
-                        .or_else(|| {
-                            m.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type))
-                        })
-                        .map(|pt| matches!(pt, PieceType::King))
-                        .unwrap_or(false)
-                };
-                let is_tactical = |m: &engine_core::shogi::Move| {
-                    m.is_drop() || m.is_capture_hint() || m.is_promote()
-                };
-
                 let legal_moves: Vec<_> =
                     slice.iter().copied().filter(|&m| pos.is_legal_move(m)).collect();
 
@@ -1821,45 +1756,7 @@ pub fn finalize_and_send_fast(
                 } else if in_check {
                     legal_moves.first().copied()
                 } else {
-                    // SEE>=0（戦術）→ SEE>=0（任意）→ 従来ヒューリスティック
-                    let mut best_ge0_tac: Option<(engine_core::shogi::Move, i32)> = None;
-                    for &m in &legal_moves {
-                        if is_king_move(&m) || !is_tactical(&m) {
-                            continue;
-                        }
-                        let s = pos.see(m);
-                        if s >= 0 {
-                            best_ge0_tac = match best_ge0_tac {
-                                Some((mm, ss)) if ss >= s => Some((mm, ss)),
-                                _ => Some((m, s)),
-                            };
-                        }
-                    }
-                    let mut best_ge0_any: Option<(engine_core::shogi::Move, i32)> = None;
-                    if best_ge0_tac.is_none() {
-                        for &m in &legal_moves {
-                            if is_king_move(&m) {
-                                continue;
-                            }
-                            let s = pos.see(m);
-                            if s >= 0 {
-                                best_ge0_any = match best_ge0_any {
-                                    Some((mm, ss)) if ss >= s => Some((mm, ss)),
-                                    _ => Some((m, s)),
-                                };
-                            }
-                        }
-                    }
-                    let pick = best_ge0_tac
-                        .map(|(m, _)| m)
-                        .or(best_ge0_any.map(|(m, _)| m))
-                        .or(legal_moves
-                            .iter()
-                            .find(|m| is_tactical(m) && !is_king_move(m))
-                            .copied())
-                        .or(legal_moves.iter().find(|m| !is_king_move(m)).copied())
-                        .or_else(|| legal_moves.first().copied());
-                    pick
+                    choose_legal_fallback_with_see(pos, &legal_moves)
                 };
 
                 if let Some(chosen) = chosen {
@@ -1925,6 +1822,10 @@ struct MateGateCfg {
     fast_ok_min_elapsed_ms: u64,
 }
 
+/// YO流のmateゲート判定。
+/// 非Exactは常にブロック。Exactでも (stable_ok || fast_ok) を満たさなければブロック。
+/// - stable_ok: stable_depth >= cfg.min_stable_depth（Stableスナップショット時のみ評価）
+/// - fast_ok  : depth >= cfg.fast_ok_min_depth || elapsed_ms >= cfg.fast_ok_min_elapsed_ms
 fn mate_gate_should_block(
     bound: NodeType,
     stable_depth: Option<u8>,
@@ -1936,6 +1837,71 @@ fn mate_gate_should_block(
     let stable_ok = stable_depth.map(|d| d >= cfg.min_stable_depth).unwrap_or(false);
     let fast_ok = depth >= cfg.fast_ok_min_depth || elapsed_ms >= cfg.fast_ok_min_elapsed_ms;
     !exact || !(stable_ok || fast_ok)
+}
+
+#[inline]
+fn is_king_move(pos: &engine_core::shogi::Position, m: &engine_core::shogi::Move) -> bool {
+    // Drop手（打）は from() が None。piece_type() が Some(King) なら王手。
+    m.piece_type()
+        .or_else(|| m.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type)))
+        .map(|pt| matches!(pt, PieceType::King))
+        .unwrap_or(false)
+}
+
+#[inline]
+fn is_tactical(m: &engine_core::shogi::Move) -> bool {
+    m.is_drop() || m.is_capture_hint() || m.is_promote()
+}
+
+/// SEEを用いた最終フォールバック選択（戦術>=0→任意>=0→非王手の戦術→非王手→先頭）
+fn choose_legal_fallback_with_see(
+    pos: &engine_core::shogi::Position,
+    legal_moves: &[engine_core::shogi::Move],
+) -> Option<engine_core::shogi::Move> {
+    if legal_moves.is_empty() {
+        return None;
+    }
+    // SEE>=0（戦術）
+    let mut best_ge0_tac: Option<(engine_core::shogi::Move, i32)> = None;
+    for &m in legal_moves.iter() {
+        if is_king_move(pos, &m) || !is_tactical(&m) {
+            continue;
+        }
+        let s = pos.see(m);
+        if s >= 0 {
+            best_ge0_tac = match best_ge0_tac {
+                Some((mm, ss)) if ss >= s => Some((mm, ss)),
+                _ => Some((m, s)),
+            };
+        }
+    }
+    if let Some((m, _)) = best_ge0_tac {
+        return Some(m);
+    }
+    // SEE>=0（任意）
+    let mut best_ge0_any: Option<(engine_core::shogi::Move, i32)> = None;
+    for &m in legal_moves.iter() {
+        if is_king_move(pos, &m) {
+            continue;
+        }
+        let s = pos.see(m);
+        if s >= 0 {
+            best_ge0_any = match best_ge0_any {
+                Some((mm, ss)) if ss >= s => Some((mm, ss)),
+                _ => Some((m, s)),
+            };
+        }
+    }
+    if let Some((m, _)) = best_ge0_any {
+        return Some(m);
+    }
+    // 非王手の戦術 → 非王手 → 先頭
+    legal_moves
+        .iter()
+        .find(|m| is_tactical(m) && !is_king_move(pos, m))
+        .copied()
+        .or_else(|| legal_moves.iter().find(|m| !is_king_move(pos, m)).copied())
+        .or_else(|| legal_moves.first().copied())
 }
 
 #[cfg(test)]
