@@ -233,11 +233,19 @@ fn finalize_sanity_check(
         return None;
     }
     // 時間ゲート: ハード締切までの残りで判断する（ソフト超過でも、ハードに十分余裕があれば最小検証を実施）
+    // StopInfo の有無と「期限が未知か」を先に判定
+    let limits_unknown = stop_meta
+        .info
+        .as_ref()
+        .map(|si| si.hard_limit_ms == 0 && si.soft_limit_ms == 0)
+        .unwrap_or(true);
     if let Some(si) = stop_meta.info.as_ref() {
-        let remain_hard = si.hard_limit_ms.saturating_sub(si.elapsed_ms);
-        if si.hard_timeout || remain_hard <= state.opts.finalize_sanity_min_ms {
-            info_string("sanity_skipped=1 reason=tm_hard");
-            return None;
+        if !limits_unknown {
+            let remain_hard = si.hard_limit_ms.saturating_sub(si.elapsed_ms);
+            if si.hard_timeout || remain_hard <= state.opts.finalize_sanity_min_ms {
+                info_string("sanity_skipped=1 reason=tm_hard");
+                return None;
+            }
         }
     }
     // 方針A: 王手中でもミニ検証を行う（過大評価抑制）。ログのみ付与。
@@ -324,11 +332,22 @@ fn finalize_sanity_check(
     if need_verify_from_risks(opp_cap_see_max, opp_threat2_max, opp_gate, threat2_gate) {
         need_verify = true;
     }
+    // 極端なThreat2は例外的にSanityを起動（OR）
+    if opp_threat2_max >= state.opts.finalize_threat2_extreme_min_cp.max(0) {
+        need_verify = true;
+    }
 
     // near-draw は現状ログ可視化のみ（±NEAR_DRAW_CP 近傍を簡易判定）。
     let near_draw = score_hint.map(|s| s.abs() <= NEAR_DRAW_CP).unwrap_or(false);
     // 既存のコメントどおり、将来的に alt/King 判定へ活用する場合はここで扱う。
     let pv1_is_king = is_king_move(&state.position, &pv1);
+
+    // stop_finalize 等で期限が不明(unknown)のときは、低リスクならミニ検証を省略する。
+    // 高リスクの定義: need_verify=1（SEE/Threat2）、または PV1 が王手、または PV1 が玉手。
+    if limits_unknown && !(need_verify || state.position.gives_check(pv1) || pv1_is_king) {
+        info_string(format!("sanity_skipped=1 path={} reason=tm_unknown_low_risk", path_label));
+        return None;
+    }
 
     let see_min_dbg = state.opts.finalize_sanity_see_min_cp;
     let opp_gate_dbg = state.opts.finalize_sanity_opp_see_min_cp.max(0);
@@ -367,6 +386,28 @@ fn finalize_sanity_check(
     } else {
         None
     };
+    // Special-case: PV1が「歩の非成り」かつ同一手の成りが合法なら、まず成り手を代替候補にする
+    let mut promote_alt: Option<engine_core::shogi::Move> = None;
+    if let Some(from_sq) = pv1.from() {
+        if let Some(piece) = state.position.board.piece_on(from_sq) {
+            if piece.piece_type == engine_core::shogi::PieceType::Pawn
+                && !pv1.is_promote()
+                && !pv1.is_drop()
+            {
+                // USI文字列に'+'を付けた成り手を構築し、合法なら候補に
+                let mut usi = move_to_usi(&pv1);
+                usi.push('+');
+                if let Ok(mv_p) = parse_usi_move(&usi) {
+                    if state.position.is_legal_move(mv_p) {
+                        promote_alt = Some(mv_p);
+                    }
+                }
+            }
+        }
+    }
+    if best_alt.is_none() {
+        best_alt = promote_alt;
+    }
     let mut alt_from_pv2 = false;
     // PV2 候補の合法性確認（擬似合法の可能性を排除）
     // Validate PV2 candidate legality to prevent pseudo-legal moves from being selected
@@ -590,7 +631,56 @@ fn finalize_sanity_check(
         }
         opp_penalty = p;
     }
-    let s1_adj = s1.saturating_sub(opp_penalty);
+    let mut s1_adj = s1.saturating_sub(opp_penalty);
+    // PV1が歩の非成りで、同一手の成りが合法な場合は軽いペナルティを与え、成り手を選びやすくする
+    const NONPROMOTE_PAWN_PENALTY_CP: i32 = 200;
+    if let Some(from_sq) = pv1.from() {
+        if let Some(piece) = state.position.board.piece_on(from_sq) {
+            if piece.piece_type == engine_core::shogi::PieceType::Pawn
+                && !pv1.is_promote()
+                && !pv1.is_drop()
+            {
+                let mut usi = move_to_usi(&pv1);
+                usi.push('+');
+                if let Ok(mv_p) = parse_usi_move(&usi) {
+                    if state.position.is_legal_move(mv_p) {
+                        s1_adj = s1_adj.saturating_sub(NONPROMOTE_PAWN_PENALTY_CP);
+                    }
+                }
+            }
+        }
+    }
+    // 余裕時にだけ相手番の軽いMateProbe（短手）を実行（任意の保険）。
+    // 条件: 設定ON かつ s1_adj >= +200 かつ 残ハード >= time_ms
+    if state.opts.finalize_mate_probe_enabled && s1_adj >= 200 {
+        let remain_hard = stop_meta
+            .info
+            .as_ref()
+            .map(|si| si.hard_limit_ms.saturating_sub(si.elapsed_ms))
+            .unwrap_or(0);
+        let probe_ms = state.opts.finalize_mate_probe_time_ms.min(20);
+        if remain_hard >= probe_ms && probe_ms > 0 {
+            if let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, probe_ms) {
+                let mut pos_probe = state.position.clone();
+                pos_probe.do_move(pv1);
+                let limits = engine_core::search::SearchLimits::builder()
+                    .depth(state.opts.finalize_mate_probe_depth.max(1))
+                    .fixed_time_ms(probe_ms)
+                    .build();
+                let resp = eng.search(&mut pos_probe, limits);
+                drop(eng);
+                let found = is_mate_score(resp.score) && resp.score < 0; // 相手番の有利な詰み傾向
+                info_string(format!(
+                    "mate_probe=1 depth={} time_ms={} found={} score={}",
+                    state.opts.finalize_mate_probe_depth, probe_ms, found as u8, resp.score
+                ));
+                if found {
+                    // 軽い減点でaltに傾ける（SwitchMarginの中で判定）
+                    s1_adj = s1_adj.saturating_sub(300);
+                }
+            }
+        }
+    }
     // --- King-alt guard (non-check): 非チェック時に玉の手への切替を原則禁止 ---
     let alt_is_king = is_king_move(&state.position, &alt);
     let mut s2_eff = s2_raw;

@@ -77,6 +77,8 @@ pub struct UsiOptions {
     pub finalize_threat2_min_cp: i32,
     /// 二手脅威のquietビーム幅（上位K件だけ見る）
     pub finalize_threat2_beam_k: u8,
+    /// 二手脅威(quiet→capture)が極端に大きい場合に例外的にSanityを起動するゲート（cp相当）
+    pub finalize_threat2_extreme_min_cp: i32,
     /// 代替手で SEE<0 の手を許容するか（falseで禁止）
     pub finalize_allow_see_lt0_alt: bool,
     /// 非チェック時に玉の手へ切替を許可するために必要な最小利得（cp）。満たさなければ拒否。
@@ -94,6 +96,10 @@ pub struct UsiOptions {
     pub instant_mate_min_respect_ms: u64,
     pub instant_mate_verify_mode: InstantMateVerifyMode,
     pub instant_mate_verify_nodes: u32,
+    // Finalize: 余裕時の軽MateProbe（相手番・短手限定）
+    pub finalize_mate_probe_enabled: bool,
+    pub finalize_mate_probe_depth: u8,
+    pub finalize_mate_probe_time_ms: u64,
     // MateGate configuration (YO流ゲートの閾値)
     pub mate_gate_min_stable_depth: u8,
     pub mate_gate_fast_ok_min_depth: u8,
@@ -175,6 +181,7 @@ impl Default for UsiOptions {
             finalize_sanity_check_penalty_cp: 10,
             finalize_threat2_min_cp: 200,
             finalize_threat2_beam_k: 4,
+            finalize_threat2_extreme_min_cp: 700,
             finalize_allow_see_lt0_alt: false,
             finalize_sanity_king_alt_min_gain_cp: 150,
             finalize_sanity_king_alt_penalty_cp: 0,
@@ -189,6 +196,9 @@ impl Default for UsiOptions {
             instant_mate_min_respect_ms: 8,
             instant_mate_verify_mode: InstantMateVerifyMode::CheckOnly,
             instant_mate_verify_nodes: 0,
+            finalize_mate_probe_enabled: false,
+            finalize_mate_probe_depth: 5,
+            finalize_mate_probe_time_ms: 5,
             // MateGate defaults
             mate_gate_min_stable_depth: 5,
             mate_gate_fast_ok_min_depth: 5,
