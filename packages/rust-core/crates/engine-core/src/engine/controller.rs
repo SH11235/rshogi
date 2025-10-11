@@ -20,7 +20,7 @@ use log::{debug, info, warn};
 use parking_lot::RwLock;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 use std::time::Instant;
 
@@ -31,6 +31,22 @@ fn search_profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
         EngineType::Nnue => SearchProfile::basic_nnue(),
         EngineType::Material => SearchProfile::basic_material(),
     }
+}
+
+/// Whether to emit `currmove/currmovenumber` info strings.
+///
+/// Default: suppressed (false). Enable by setting `SHOGI_INFO_CURRMOVE` to
+/// "1", "true" or "on" (case-insensitive).
+#[inline]
+fn info_currmove_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("SHOGI_INFO_CURRMOVE") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "on"
+        }
+        Err(_) => false,
+    })
 }
 
 /// The source used for final bestmove decision
@@ -475,12 +491,14 @@ impl Engine {
                         }
                     }
                     InfoEvent::CurrMove { mv, number } => {
-                        if let Some(s) = &cb_str {
-                            s(&format!(
-                                "currmove {} currmovenumber {}",
-                                crate::usi::move_to_usi(&mv),
-                                number
-                            ));
+                        if info_currmove_enabled() {
+                            if let Some(s) = &cb_str {
+                                s(&format!(
+                                    "currmove {} currmovenumber {}",
+                                    crate::usi::move_to_usi(&mv),
+                                    number
+                                ));
+                            }
                         }
                     }
                     InfoEvent::Hashfull(h) => {
