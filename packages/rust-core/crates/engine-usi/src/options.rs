@@ -1340,7 +1340,7 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
     };
     if is_t8 {
         set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
-        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 100);
+        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
         set_if_absent("PostVerify.RequirePass", &mut || state.opts.post_verify_require_pass = true);
@@ -1369,7 +1369,7 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
     } else {
         // T1 profile
         set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
-        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 100);
+        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
         set_if_absent("PostVerify.RequirePass", &mut || state.opts.post_verify_require_pass = true);

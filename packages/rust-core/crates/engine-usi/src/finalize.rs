@@ -490,8 +490,13 @@ fn finalize_sanity_check(
         ));
         return None;
     }
-    // Mini search (depth 1-2) for pv1 vs alt
-    let mini_depth = state.opts.finalize_sanity_mini_depth.max(1); // 下限ガード（options側でもclamp済だが安全側）
+    // Mini search: PV1=玉・非チェック時のみ局所的に深さを強める（MiniDepth>=3）
+    let base_mini = state.opts.finalize_sanity_mini_depth.max(1);
+    let mini_depth = if pv1_is_king && !in_check_now {
+        base_mini.max(3)
+    } else {
+        base_mini
+    };
     let switch_margin = state.opts.finalize_sanity_switch_margin_cp;
     let (s1_temp, s2_raw, pv1_check_flag, alt_check_flag) = {
         let (mv1, mv2) = (pv1, alt);
@@ -699,9 +704,25 @@ fn finalize_sanity_check(
                         .filter(|&m| !m.equals_without_piece_type(&pv1))
                         .collect();
                     let allow_neg = state.opts.finalize_allow_see_lt0_alt;
-                    if let Some(alt2) =
-                        choose_legal_fallback_with_see_filtered(pos, &legal_nonking, allow_neg)
-                    {
+                    // まずは小幅のSEE負（>= -120cp）まで暫定許容して非玉代替を探す
+                    const SEE_NEG_FLOOR: i32 = -120;
+                    let mut best_any: Option<(engine_core::shogi::Move, i32)> = None;
+                    for &m in &legal_nonking {
+                        let s = pos.see(m);
+                        if s >= SEE_NEG_FLOOR {
+                            best_any = match best_any {
+                                Some((bm, bs)) if bs >= s => Some((bm, bs)),
+                                _ => Some((m, s)),
+                            };
+                        }
+                    }
+                    let mut alt2 = best_any.map(|(m, _)| m);
+                    // 閾値内になければ従来ポリシー（SEE>=0のみ or 設定ONで負も可）
+                    if alt2.is_none() {
+                        alt2 =
+                            choose_legal_fallback_with_see_filtered(pos, &legal_nonking, allow_neg);
+                    }
+                    if let Some(alt2) = alt2 {
                         info_string(format!(
                             "sanity_pv1_king_alt_reselect_nonking=1 new_alt={}",
                             move_to_usi(&alt2)

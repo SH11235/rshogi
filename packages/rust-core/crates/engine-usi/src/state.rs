@@ -195,7 +195,7 @@ impl Default for UsiOptions {
             mate_gate_fast_ok_min_elapsed_ms: 30,
             // Guard rails（既定 ON）
             root_see_gate: true,
-            x_see_cp: 100,
+            x_see_cp: 0,
             post_verify: true,
             post_verify_require_pass: true,
             post_verify_extend_ms: 300,
