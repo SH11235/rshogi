@@ -943,6 +943,27 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        // Finalize: optional mini mate-probe knobs
+        "FinalizeSanity.MateProbe.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.finalize_mate_probe_enabled = on;
+            }
+        }
+        "FinalizeSanity.MateProbe.Depth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u8>() {
+                    state.opts.finalize_mate_probe_depth = x.clamp(1, 8);
+                }
+            }
+        }
+        "FinalizeSanity.MateProbe.TimeMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<u64>() {
+                    state.opts.finalize_mate_probe_time_ms = x.min(20);
+                }
+            }
+        }
         "InstantMateMove.CheckAllPV" => {
             if let Some(v) = value_ref {
                 let v = v.to_lowercase();
