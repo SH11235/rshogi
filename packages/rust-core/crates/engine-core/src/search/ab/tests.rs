@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -26,6 +27,12 @@ use super::driver::ClassicBackend;
 use super::pruning::NullMovePruneParams;
 use super::pvs::SearchContext;
 use super::SearchProfile;
+
+// NOTE: 検索パラメータはグローバル(Atomic)で共有されるため、
+// テスト間の並列実行で `set_nmp_enabled(false)` などの一時変更が
+// 他テストに干渉しうる。CIでの不安定要因になっていたため、
+// グローバル・ロックで該当テストを直列化する。
+static TEST_SEARCH_PARAMS_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn position_after_moves(moves: &[&str]) -> Position {
     let mut pos = Position::startpos();
@@ -816,6 +823,8 @@ impl Evaluator for RecordingEvaluator {
 
 #[test]
 fn evaluator_hooks_balance_for_classic_backend() {
+    // NMPの有効/無効を他テストが変更中でないことを保証
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap();
     let evaluator = Arc::new(RecordingEvaluator::default());
     let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
 
@@ -1246,6 +1255,8 @@ fn fixed_time_limit_lead_window_notifies_finalize_once() {
 
 #[test]
 fn null_move_respects_runtime_toggle() {
+    // ランタイムトグルを変更するため、他テストと排他にする
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap();
     let evaluator = Arc::new(MaterialEvaluator);
     let backend =
         ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
