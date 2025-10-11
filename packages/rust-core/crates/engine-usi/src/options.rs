@@ -998,6 +998,8 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
                 state.opts.post_verify_require_pass = on;
             }
+            // 明示上書きの印を付ける（Threads連動の自動既定で巻き戻さない／ログに可視化）
+            mark_override(state, "PostVerify.RequirePass");
         }
         "PostVerify.ExtendMs" => {
             if let Some(v) = value_ref {
@@ -1005,6 +1007,8 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.post_verify_extend_ms = ms.min(5000);
                 }
             }
+            // 明示上書きの印を付ける（Threads連動の自動既定で巻き戻さない／ログに可視化）
+            mark_override(state, "PostVerify.ExtendMs");
         }
         "PostVerify.DisadvantageCp" => {
             if let Some(v) = value_ref {
@@ -1343,6 +1347,7 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
             state.opts.finalize_sanity_opp_see_min_cp = 100
         });
         set_if_absent("FinalizeSanity.BudgetMs", &mut || state.opts.finalize_sanity_budget_ms = 8);
+        set_if_absent("FinalizeSanity.MinMs", &mut || state.opts.finalize_sanity_min_ms = 2);
         // Adopt Perf profile for T8: KingAltMinGainCp=300
         set_if_absent("FinalizeSanity.KingAltMinGainCp", &mut || {
             state.opts.finalize_sanity_king_alt_min_gain_cp = 300
@@ -1361,6 +1366,7 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
             state.opts.finalize_sanity_opp_see_min_cp = 120
         });
         set_if_absent("FinalizeSanity.BudgetMs", &mut || state.opts.finalize_sanity_budget_ms = 4);
+        set_if_absent("FinalizeSanity.MinMs", &mut || state.opts.finalize_sanity_min_ms = 2);
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
     }
 }

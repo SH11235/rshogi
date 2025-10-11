@@ -322,15 +322,26 @@ fn finalize_sanity_check(
         need_verify = true;
     }
 
-    // near-draw は alt 決定後に判定する（alt=玉手の例外を拾うため）
+    // near-draw は現状ログ可視化のみ（±10cp 近傍を簡易判定）。
+    let near_draw = score_hint.map(|s| s.abs() <= 10).unwrap_or(false);
+    // 既存のコメントどおり、将来的に alt/King 判定へ活用する場合はここで扱う。
     let pv1_is_king = is_king_move(&state.position, &pv1);
 
     let see_min_dbg = state.opts.finalize_sanity_see_min_cp;
     let opp_gate_dbg = state.opts.finalize_sanity_opp_see_min_cp.max(0);
     let chk_penalty_dbg = state.opts.finalize_sanity_check_penalty_cp;
     let diag_base = format!(
-        "sanity_checked=1 path={} see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
-        path_label, see, see_min_dbg, opp_cap_see_max, opp_gate_dbg, opp_threat2_max, threat2_gate, chk_penalty_dbg
+        "sanity_checked=1 path={} see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={} need_verify={} near_draw={}",
+        path_label,
+        see,
+        see_min_dbg,
+        opp_cap_see_max,
+        opp_gate_dbg,
+        opp_threat2_max,
+        threat2_gate,
+        chk_penalty_dbg,
+        need_verify as u8,
+        near_draw as u8
     );
     // SEE/T2安全でも near-draw/alt 例外のためにこの段階では早期 return しない
     // Candidate: prefer PV2 if available and legal; fallback to best SEE>=0 (または最高SEE)
@@ -359,7 +370,7 @@ fn finalize_sanity_check(
     let mut pv2_illegal = false;
     if let Some(mv0) = best_alt {
         if !state.position.is_legal_move(mv0) {
-            info_string("sanity_pv2_illegal=1 fallback=see_best");
+            info_string(format!("sanity_pv2_illegal=1 path={} fallback=see_best", path_label));
             best_alt = None; // Fallback to SEE-best candidate
             pv2_illegal = true;
         } else if mv0.equals_without_piece_type(&pv1) {
@@ -452,6 +463,16 @@ fn finalize_sanity_check(
     let mut total_budget = desired.max(fallback_min);
     if budget_max > 0 {
         total_budget = total_budget.min(budget_max);
+    }
+    // 低リスク・ゲート: fast経路で、危険なし(need_verify=0) かつ PV1が玉手でない場合、
+    // StopInfoが無くMinMsのみの実行(dynamic_budget=0)に限ってミニ検証を省略する。
+    if path_label == "fast" && dynamic_budget == 0 && !need_verify && !pv1_is_king {
+        info_string(format!(
+            "{} alt={} switched=0 reason=no_need_verify",
+            diag_base,
+            move_to_usi(&alt)
+        ));
+        return None;
     }
     if total_budget == 0 {
         info_string(format!(
@@ -563,7 +584,8 @@ fn finalize_sanity_check(
         if gain < min_gain {
             // near-draw 例外: ここに来た場合は near-draw でも King-alt の判断を実施している。
             info_string(format!(
-                "sanity_checked=1 path=joined see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
+                "sanity_checked=1 path={} see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
+                path_label,
                 see,
                 see_min_dbg,
                 opp_cap_see_max,
@@ -612,7 +634,8 @@ fn finalize_sanity_check(
                         choose_safe_nonking_fallback(pos, &legal_nonking, allow_neg)
                     {
                         info_string(format!(
-                            "no_publish=1 reason=sanity_risk_no_alt alt_class=safe_nonking new_alt={}",
+                            "no_publish=1 path={} reason=sanity_risk_no_alt alt_class=safe_nonking new_alt={}",
+                            path_label,
                             move_to_usi(&safe_alt)
                         ));
                         return Some(safe_alt);
@@ -673,7 +696,8 @@ fn finalize_sanity_check(
                             choose_safe_nonking_fallback(pos, &legal_nonking, allow_neg)
                         {
                             info_string(format!(
-                                "no_publish=1 reason=sanity_pv1_king_risk_no_alt alt_class=safe_nonking new_alt={}",
+                                "no_publish=1 path={} reason=sanity_pv1_king_risk_no_alt alt_class=safe_nonking new_alt={}",
+                                path_label,
                                 move_to_usi(&safe_alt)
                             ));
                             return Some(safe_alt);
@@ -1548,7 +1572,8 @@ pub fn finalize_and_send(
     }
 
     // Optional finalize sanity check (may switch PV1)
-    let mut maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result, None, "joined");
+    let mut maybe_switch =
+        finalize_sanity_check(state, &stop_meta, &final_best, result, None, "joined");
 
     // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
     if mate_rejected {
@@ -1764,7 +1789,8 @@ pub fn finalize_and_send_fast(
                         source: FinalBestSource::Committed,
                     };
                     // ponderhitのcached経路でも near-draw 判定の一貫化のため score_hint=0 を与える
-                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None, Some(0), "fast")
+                    if let Some(alt) =
+                        finalize_sanity_check(state, &stop_meta, &fb, None, Some(0), "fast")
                     {
                         let new_usi = move_to_usi(&alt);
                         info_string("final_select_tags tags=sanity");
@@ -1987,9 +2013,14 @@ pub fn finalize_and_send_fast(
                     {
                         // fastでもFinalizeSanity（StopInfoが無い場合でもMinMsで実施）。切替時はCommitted扱い。
                         let score_hint = snap.lines.first().map(|l| l.score_internal);
-                        if let Some(alt) =
-                            finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint, "fast")
-                        {
+                        if let Some(alt) = finalize_sanity_check(
+                            state,
+                            &stop_meta,
+                            &final_best,
+                            None,
+                            score_hint,
+                            "fast",
+                        ) {
                             let prev_usi = final_usi.clone();
                             final_usi = move_to_usi(&alt);
                             if state.opts.ponder {
@@ -2241,7 +2272,9 @@ pub fn finalize_and_send_fast(
         let mut final_source = tt_source.unwrap_or(FinalBestSource::Committed);
         // TTのみのfast経路では cheap な score_hint を与える（±10 判定用）。
         let score_hint = Some(0);
-        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint, "fast") {
+        if let Some(alt) =
+            finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint, "fast")
+        {
             let prev_usi = final_usi.clone();
             final_usi = move_to_usi(&alt);
             if state.opts.ponder {
