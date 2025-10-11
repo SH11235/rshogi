@@ -157,6 +157,7 @@
 | `SHOGI_WORKER_STACK_MB` | ワーカースタックサイズ（MB） | OS依存（2-8MB） |
 | `SHOGI_THREADPOOL_METRICS` | メトリクス収集有効化 | 0（無効） |
 | `SHOGI_CURRMOVE_THROTTLE_MS` | CurrMoveイベント発火間隔（ms） | 100 |
+| `SHOGI_INFO_CURRMOVE` | `currmove/currmovenumber` のUSI出力を有効化（`1/true/on`） | 0（抑制） |
 | `SHOGI_TEST_FORCE_JITTER` | ジッター機能強制ON/OFF | 1（有効） |
 
 詳細は `docs/parallel-search-implementation.md` を参照してください。

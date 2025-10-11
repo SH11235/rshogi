@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# moved: scripts/smoke/smoke_multipv.sh
 
 # Smoke: MultiPV behavior
 # - MultiPV=3, go movetime 1000

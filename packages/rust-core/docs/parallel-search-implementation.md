@@ -283,6 +283,15 @@ export SHOGI_CURRMOVE_THROTTLE_MS=off   # スロットル無効化
 - デフォルト: 100ms（並列環境の応答性考慮）
 - 用途: USI出力頻度調整（GUI応答性 vs ログ量）
 
+### SHOGI_INFO_CURRMOVE
+```bash
+export SHOGI_INFO_CURRMOVE=on   # `currmove/currmovenumber` 出力を有効化
+```
+- `controller` 層で `InfoEvent::CurrMove` を `info string currmove ...` に変換して出力するかを制御
+- デフォルト: 抑制（未設定/空なら出さない）
+- 受理値（大文字小文字無視）: `1` / `true` / `on` で有効化
+- 用途: デバッグ時のみ詳細な進捗を見たい場合に明示的にON
+
 ### SHOGI_TEST_FORCE_JITTER
 ```bash
 export SHOGI_TEST_FORCE_JITTER=0  # ジッター無効化（決定的探索）

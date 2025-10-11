@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# moved: scripts/smoke/smoke_normal_join.sh
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
