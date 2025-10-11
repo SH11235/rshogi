@@ -8,6 +8,7 @@ use engine_core::search::{
     SearchResult,
 };
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
+use std::cmp::Reverse;
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
 
@@ -151,7 +152,12 @@ fn maybe_emit_forced_eval_info(state: &mut EngineState, final_move_usi: &str) {
     let ms = state.opts.forced_move_min_search_ms.min(50);
     let limits = engine_core::search::SearchLimits::builder().depth(1).fixed_time_ms(ms).build();
     let start = Instant::now();
-    let mut eng = state.lock_engine();
+    // 極小予算で try-lock。失敗時は info を諦める（bestmove を遅らせない）。
+    let Some((mut eng, _spent_ms, _spent_us)) = try_lock_engine_with_budget(&state.engine, 3)
+    else {
+        diag_info_string("forced_eval_skip=1 reason=lock_unavailable");
+        return;
+    };
     let res = eng.search(&mut pos1, limits);
     drop(eng);
     let forced_eval_ms = start.elapsed().as_millis() as u64;
@@ -163,16 +169,17 @@ fn maybe_emit_forced_eval_info(state: &mut EngineState, final_move_usi: &str) {
     } else {
         0
     };
-    // ルート視点に符号を正規化
-    let score_for_root = normalize_for_root(state.position.side_to_move, &pos1, res.score);
+    // ルート視点にスコア/バウンドを正規化
+    let (score_for_root, bound_for_root) =
+        normalize_for_root_with_bound(state.position.side_to_move, &pos1, res.score, res.node_type);
 
     let final_best_stub = FinalBest {
         best_move: Some(mv),
         pv: vec![mv],
         source: FinalBestSource::Committed,
     };
-    // hashfullは不明なので0を渡す（表示のみ）。scoreはroot視点で上書き。
-    emit_single_pv(&res, &final_best_stub, nps, 0, Some(score_for_root), None);
+    // hashfullは不明なので0を渡す（表示のみ）。score/bound をroot視点で上書き。
+    emit_single_pv(&res, &final_best_stub, nps, 0, Some(score_for_root), Some(bound_for_root));
     diag_info_string(format!("forced_eval_ms={} depth=1 nps={}", forced_eval_ms, nps));
 }
 
@@ -190,11 +197,32 @@ fn normalize_for_root(
     }
 }
 
+#[inline]
+fn normalize_for_root_with_bound(
+    root_side: engine_core::Color,
+    pos_after: &engine_core::shogi::Position,
+    score: i32,
+    bound: engine_core::search::types::NodeType,
+) -> (i32, engine_core::search::types::NodeType) {
+    use engine_core::search::types::NodeType::{Exact, LowerBound, UpperBound};
+    if pos_after.side_to_move != root_side {
+        let flipped = match bound {
+            LowerBound => UpperBound,
+            UpperBound => LowerBound,
+            Exact => Exact,
+        };
+        (score.saturating_neg(), flipped)
+    } else {
+        (score, bound)
+    }
+}
+
 fn finalize_sanity_check(
     state: &mut EngineState,
     stop_meta: &StopMeta,
     final_best: &FinalBest,
     result: Option<&SearchResult>,
+    score_hint: Option<i32>,
 ) -> Option<engine_core::shogi::Move> {
     if !state.opts.finalize_sanity_enabled {
         info_string("sanity_skipped=1 reason=disabled");
@@ -255,7 +283,7 @@ fn finalize_sanity_check(
             }
             // 近似：PV1適用後局面でのSEE（正）を強めに持ち上げる
             key += 5 * pos1.see(*m).max(0);
-            -key
+            Reverse(key)
         });
         for &mvq in quiets.iter().take(beam_k) {
             let mut posq = pos1.clone();
@@ -287,6 +315,15 @@ fn finalize_sanity_check(
     if let Some(res) = result {
         use engine_core::search::constants::MATE_SCORE;
         let sc = res.score;
+        let near_mate = sc.abs() >= MATE_SCORE - 100;
+        let near_draw = sc.abs() <= 10;
+        if near_mate || (near_draw && !need_verify) {
+            info_string("sanity_skipped=1 reason=mate_or_draw_band");
+            return None;
+        }
+    } else if let Some(sh) = score_hint {
+        use engine_core::search::constants::MATE_SCORE;
+        let sc = sh;
         let near_mate = sc.abs() >= MATE_SCORE - 100;
         let near_draw = sc.abs() <= 10;
         if near_mate || (near_draw && !need_verify) {
@@ -543,6 +580,26 @@ fn finalize_sanity_check(
                 gain,
                 min_gain
             ));
+            // 非玉の代替を再探索（SEE>=0優先→任意）。見つかれば差し替え。
+            let mg = MoveGenerator::new();
+            if let Ok(list) = mg.generate_all(&state.position) {
+                let pos = &state.position;
+                let legal_nonking: Vec<_> = list
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .filter(|&m| pos.is_legal_move(m))
+                    .filter(|&m| !is_king_move(pos, &m))
+                    .filter(|&m| !m.equals_without_piece_type(&pv1))
+                    .collect();
+                if let Some(alt2) = choose_legal_fallback_with_see(pos, &legal_nonking) {
+                    info_string(format!(
+                        "sanity_alt_reselect_nonking=1 new_alt={}",
+                        move_to_usi(&alt2)
+                    ));
+                    return Some(alt2);
+                }
+            }
             return None;
         } else {
             info_string(format!(
@@ -785,6 +842,7 @@ fn compute_tt_probe_budget_ms(stop_info: Option<&StopInfo>, snapshot_elapsed_ms:
 
     let remain = limit - elapsed;
     if remain <= 3 {
+        diag_info_string("computed_tt_budget_ms=0 reason=remain_le_3");
         return 0;
     }
 
@@ -1341,7 +1399,7 @@ pub fn finalize_and_send(
     }
 
     // Optional finalize sanity check (may switch PV1)
-    let mut maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result);
+    let mut maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result, None);
 
     // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
     if mate_rejected {
@@ -1556,7 +1614,7 @@ pub fn finalize_and_send_fast(
                         pv: Vec::new(),
                         source: FinalBestSource::Committed,
                     };
-                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None) {
+                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None, None) {
                         let new_usi = move_to_usi(&alt);
                         info_string("final_select_tags tags=sanity");
                         info_string("sanity_switch=1");
@@ -1777,8 +1835,9 @@ pub fn finalize_and_send_fast(
                     )) = tt_choice
                     {
                         // fastでもFinalizeSanity（StopInfoが無い場合でもMinMsで実施）。切替時はCommitted扱い。
+                        let score_hint = snap.lines.first().map(|l| l.score_internal);
                         if let Some(alt) =
-                            finalize_sanity_check(state, &stop_meta, &final_best, None)
+                            finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint)
                         {
                             let prev_usi = final_usi.clone();
                             final_usi = move_to_usi(&alt);
@@ -1923,7 +1982,11 @@ pub fn finalize_and_send_fast(
                         pv: Vec::new(),
                         source: FinalBestSource::Committed,
                     };
-                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None) {
+                    // score_hint: snapshot先頭のscore_internalを使用
+                    let score_hint = snap.lines.first().map(|l| l.score_internal);
+                    if let Some(alt) =
+                        finalize_sanity_check(state, &stop_meta, &fb, None, score_hint)
+                    {
                         let prev_usi = final_usi.clone();
                         let alt_usi = move_to_usi(&alt);
                         let alt_ponder = if state.opts.ponder {
@@ -2025,7 +2088,7 @@ pub fn finalize_and_send_fast(
     if let (Some(final_best), Some(mut final_usi)) = (tt_final_best, tt_final_usi) {
         let mut ponder_mv = tt_ponder;
         let mut final_source = tt_source.unwrap_or(FinalBestSource::Committed);
-        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None) {
+        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None, None) {
             let prev_usi = final_usi.clone();
             final_usi = move_to_usi(&alt);
             if state.opts.ponder {
