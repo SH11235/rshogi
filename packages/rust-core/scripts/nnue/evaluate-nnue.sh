@@ -1,5 +1,6 @@
 #!/bin/bash
 # NNUE評価用ローカルスクリプト
+# moved: scripts/nnue/evaluate-nnue.sh
 
 set -euo pipefail
 
