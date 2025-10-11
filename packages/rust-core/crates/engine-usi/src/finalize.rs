@@ -19,6 +19,9 @@ use crate::util::{emit_bestmove, score_view_with_clamp};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+// near-draw の判定しきい値（cp換算）。README にも注記あり。
+const NEAR_DRAW_CP: i32 = 10;
+
 #[cfg(test)]
 thread_local! {
     static LAST_EMITTED_BESTMOVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -317,13 +320,13 @@ fn finalize_sanity_check(
             posq.undo_null_move(undo_null);
         }
     }
-    let risk_max = opp_cap_see_max.max(opp_threat2_max);
-    if risk_max >= opp_gate.max(threat2_gate) {
+    // いずれかの門を超えれば検証が必要（OR 判定）
+    if need_verify_from_risks(opp_cap_see_max, opp_threat2_max, opp_gate, threat2_gate) {
         need_verify = true;
     }
 
-    // near-draw は現状ログ可視化のみ（±10cp 近傍を簡易判定）。
-    let near_draw = score_hint.map(|s| s.abs() <= 10).unwrap_or(false);
+    // near-draw は現状ログ可視化のみ（±NEAR_DRAW_CP 近傍を簡易判定）。
+    let near_draw = score_hint.map(|s| s.abs() <= NEAR_DRAW_CP).unwrap_or(false);
     // 既存のコメントどおり、将来的に alt/King 判定へ活用する場合はここで扱う。
     let pv1_is_king = is_king_move(&state.position, &pv1);
 
@@ -1572,8 +1575,10 @@ pub fn finalize_and_send(
     }
 
     // Optional finalize sanity check (may switch PV1)
+    // joined 経路でも near_draw 可視化を揃えるため、score_hint を渡す
+    let score_hint_joined = result.map(|r| r.score);
     let mut maybe_switch =
-        finalize_sanity_check(state, &stop_meta, &final_best, result, None, "joined");
+        finalize_sanity_check(state, &stop_meta, &final_best, result, score_hint_joined, "joined");
 
     // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
     if mate_rejected {
@@ -2568,6 +2573,16 @@ fn choose_safe_nonking_fallback(
     None
 }
 
+#[inline]
+fn need_verify_from_risks(
+    opp_cap_see_max: i32,
+    opp_threat2_max: i32,
+    opp_gate: i32,
+    threat2_gate: i32,
+) -> bool {
+    opp_cap_see_max >= opp_gate || opp_threat2_max >= threat2_gate
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2604,6 +2619,15 @@ mod tests {
             exhaust_reason: None,
             mate_distance: None,
         }
+    }
+
+    #[test]
+    fn need_verify_from_risks_or_logic() {
+        // 片側のみゲート超過でも true
+        assert!(need_verify_from_risks(100, 0, 100, 300));
+        assert!(need_verify_from_risks(0, 300, 100, 300));
+        // いずれも未達なら false
+        assert!(!need_verify_from_risks(99, 299, 100, 300));
     }
 
     #[test]

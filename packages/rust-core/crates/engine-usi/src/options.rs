@@ -1238,8 +1238,6 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     "RootSeeGate.XSEE",
                     "PostVerify",
                     "PostVerify.YDrop",
-                    "PostVerify.RequirePass",
-                    "PostVerify.ExtendMs",
                     "FinalizeSanity.SwitchMarginCp",
                     "FinalizeSanity.OppSEE_MinCp",
                     "FinalizeSanity.BudgetMs",
@@ -1627,4 +1625,38 @@ fn print_time_policy_options(opts: &UsiOptions) {
         "option name InstantMateMove.MinRespectMs type spin default {} min 0 max 1000",
         opts.instant_mate_min_respect_ms
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_setoption;
+    use crate::state::EngineState;
+
+    #[test]
+    fn apply_auto_defaults_keeps_user_overrides_for_postverify() {
+        let mut state = EngineState::new();
+
+        // 明示 override（RequirePass=false, ExtendMs=1234）
+        handle_setoption("setoption name PostVerify.RequirePass value false", &mut state)
+            .expect("setoption RequirePass false");
+        assert!(state.user_overrides.contains("PostVerify.RequirePass"));
+        assert!(!state.opts.post_verify_require_pass);
+
+        handle_setoption("setoption name PostVerify.ExtendMs value 1234", &mut state)
+            .expect("setoption ExtendMs 1234");
+        assert!(state.user_overrides.contains("PostVerify.ExtendMs"));
+        assert_eq!(state.opts.post_verify_extend_ms, 1234);
+
+        // T8 プロファイルを明示してから既定適用
+        handle_setoption("setoption name Profile.Mode value T8", &mut state)
+            .expect("set profile mode");
+        handle_setoption("setoption name Profile.ApplyAutoDefaults", &mut state)
+            .expect("apply auto defaults");
+
+        // 期待: ユーザー上書きは保持され、既定による上書きはされない
+        assert!(state.user_overrides.contains("PostVerify.RequirePass"));
+        assert!(state.user_overrides.contains("PostVerify.ExtendMs"));
+        assert!(!state.opts.post_verify_require_pass);
+        assert_eq!(state.opts.post_verify_extend_ms, 1234);
+    }
 }
