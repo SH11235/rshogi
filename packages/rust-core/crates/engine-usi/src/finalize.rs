@@ -223,10 +223,19 @@ fn finalize_sanity_check(
     final_best: &FinalBest,
     result: Option<&SearchResult>,
     score_hint: Option<i32>,
+    path_label: &str,
 ) -> Option<engine_core::shogi::Move> {
     if !state.opts.finalize_sanity_enabled {
         info_string("sanity_skipped=1 reason=disabled");
         return None;
+    }
+    // fast経路などで tm=hard / 残余<=MinMs の場合は Sanity を打たずに返す
+    if let Some(si) = stop_meta.info.as_ref() {
+        let remain_soft = si.soft_limit_ms.saturating_sub(si.elapsed_ms);
+        if si.hard_timeout || remain_soft <= state.opts.finalize_sanity_min_ms {
+            info_string("sanity_skipped=1 reason=tm_hard");
+            return None;
+        }
     }
     // 方針A: 王手中でもミニ検証を行う（過大評価抑制）。ログのみ付与。
     let in_check_now = state.position.is_in_check();
@@ -308,44 +317,22 @@ fn finalize_sanity_check(
             posq.undo_null_move(undo_null);
         }
     }
-    if opp_cap_see_max >= opp_gate || opp_threat2_max >= threat2_gate {
+    let risk_max = opp_cap_see_max.max(opp_threat2_max);
+    if risk_max >= opp_gate.max(threat2_gate) {
         need_verify = true;
     }
 
-    // Mate/draw guard（条件付）: ほぼドロー帯は SEE/T2 が不要ならスキップ、mate帯は常にスキップ
-    // ただし「玉手の軽ガード」は near-draw でも常時適用する（PV1=玉手の素通し抑止）。
+    // near-draw は alt 決定後に判定する（alt=玉手の例外を拾うため）
     let pv1_is_king = is_king_move(&state.position, &pv1);
-    if let Some(res) = result {
-        use engine_core::search::constants::MATE_SCORE;
-        let sc = res.score;
-        let near_mate = sc.abs() >= MATE_SCORE - 100;
-        let near_draw = sc.abs() <= 10;
-        if near_mate || (near_draw && !need_verify && (!pv1_is_king || in_check_now)) {
-            info_string("sanity_skipped=1 reason=mate_or_draw_band");
-            return None;
-        }
-    } else if let Some(sh) = score_hint {
-        use engine_core::search::constants::MATE_SCORE;
-        let sc = sh;
-        let near_mate = sc.abs() >= MATE_SCORE - 100;
-        let near_draw = sc.abs() <= 10;
-        if near_mate || (near_draw && !need_verify && (!pv1_is_king || in_check_now)) {
-            info_string("sanity_skipped=1 reason=mate_or_draw_band");
-            return None;
-        }
-    }
 
     let see_min_dbg = state.opts.finalize_sanity_see_min_cp;
     let opp_gate_dbg = state.opts.finalize_sanity_opp_see_min_cp.max(0);
     let chk_penalty_dbg = state.opts.finalize_sanity_check_penalty_cp;
     let diag_base = format!(
-        "sanity_checked=1 see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
-        see, see_min_dbg, opp_cap_see_max, opp_gate_dbg, opp_threat2_max, threat2_gate, chk_penalty_dbg
+        "sanity_checked=1 path={} see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
+        path_label, see, see_min_dbg, opp_cap_see_max, opp_gate_dbg, opp_threat2_max, threat2_gate, chk_penalty_dbg
     );
-    if !need_verify {
-        info_string(format!("{} switched=0 reason=see_ok", diag_base));
-        return None;
-    }
+    // SEE/T2安全でも near-draw/alt 例外のためにこの段階では早期 return しない
     // Candidate: prefer PV2 if available and legal; fallback to best SEE>=0 (または最高SEE)
     let mg = MoveGenerator::new();
     let Ok(list) = mg.generate_all(&state.position) else {
@@ -586,7 +573,8 @@ fn finalize_sanity_check(
                 chk_penalty_dbg
             ));
             info_string(format!(
-                "sanity_king_alt_blocked=1 alt={} s1_adj={} s2={} s2_eff={} gain={} min_gain={}",
+                "sanity_king_alt_blocked=1 path={} alt={} s1_adj={} s2={} s2_eff={} gain={} min_gain={}",
+                path_label,
                 move_to_usi(&alt),
                 s1_adj,
                 s2_raw,
@@ -612,7 +600,8 @@ fn finalize_sanity_check(
                     choose_legal_fallback_with_see_filtered(pos, &legal_nonking, allow_neg)
                 {
                     info_string(format!(
-                        "sanity_alt_reselect_nonking=1 new_alt={}",
+                        "sanity_alt_reselect_nonking=1 path={} new_alt={}",
+                        path_label,
                         move_to_usi(&alt2)
                     ));
                     return Some(alt2);
@@ -633,7 +622,8 @@ fn finalize_sanity_check(
             return None;
         } else {
             info_string(format!(
-                "sanity_king_alt_allowed=1 alt={} s1_adj={} s2={} s2_eff={} gain={} min_gain={}",
+                "sanity_king_alt_allowed=1 path={} alt={} s1_adj={} s2={} s2_eff={} gain={} min_gain={}",
+                path_label,
                 move_to_usi(&alt),
                 s1_adj,
                 s2_raw,
@@ -1558,7 +1548,7 @@ pub fn finalize_and_send(
     }
 
     // Optional finalize sanity check (may switch PV1)
-    let mut maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result, None);
+    let mut maybe_switch = finalize_sanity_check(state, &stop_meta, &final_best, result, None, "joined");
 
     // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
     if mate_rejected {
@@ -1774,7 +1764,7 @@ pub fn finalize_and_send_fast(
                         source: FinalBestSource::Committed,
                     };
                     // ponderhitのcached経路でも near-draw 判定の一貫化のため score_hint=0 を与える
-                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None, Some(0))
+                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None, Some(0), "fast")
                     {
                         let new_usi = move_to_usi(&alt);
                         info_string("final_select_tags tags=sanity");
@@ -1998,7 +1988,7 @@ pub fn finalize_and_send_fast(
                         // fastでもFinalizeSanity（StopInfoが無い場合でもMinMsで実施）。切替時はCommitted扱い。
                         let score_hint = snap.lines.first().map(|l| l.score_internal);
                         if let Some(alt) =
-                            finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint)
+                            finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint, "fast")
                         {
                             let prev_usi = final_usi.clone();
                             final_usi = move_to_usi(&alt);
@@ -2146,7 +2136,7 @@ pub fn finalize_and_send_fast(
                     // score_hint: snapshot先頭のscore_internalを使用
                     let score_hint = snap.lines.first().map(|l| l.score_internal);
                     if let Some(alt) =
-                        finalize_sanity_check(state, &stop_meta, &fb, None, score_hint)
+                        finalize_sanity_check(state, &stop_meta, &fb, None, score_hint, "fast")
                     {
                         let prev_usi = final_usi.clone();
                         let alt_usi = move_to_usi(&alt);
@@ -2251,7 +2241,7 @@ pub fn finalize_and_send_fast(
         let mut final_source = tt_source.unwrap_or(FinalBestSource::Committed);
         // TTのみのfast経路では cheap な score_hint を与える（±10 判定用）。
         let score_hint = Some(0);
-        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint) {
+        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint, "fast") {
             let prev_usi = final_usi.clone();
             final_usi = move_to_usi(&alt);
             if state.opts.ponder {

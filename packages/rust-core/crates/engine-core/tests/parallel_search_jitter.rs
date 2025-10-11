@@ -15,8 +15,14 @@ use std::sync::Arc;
 
 #[test]
 fn helper_share_positive_and_stable_with_or_without_jitter() {
-    let share_off = run_helper_share_with(3, false);
-    let share_on = run_helper_share_with(3, true);
+    // 小さな探索量だと OS スケジューリングの揺らぎで helper_share の分散が増えるため、
+    // 少し探索量を増やしつつ、複数回走らせた中央値で比較して安定化させる。
+    const TRIALS: usize = 3; // 実行時間と安定性のバランス（~1s 未満想定）
+    let off_samples: Vec<f64> = (0..TRIALS).map(|_| run_helper_share_with(3, false)).collect();
+    let on_samples: Vec<f64> = (0..TRIALS).map(|_| run_helper_share_with(3, true)).collect();
+
+    let share_off = median(&off_samples);
+    let share_on = median(&on_samples);
 
     // 純粋 LazySMP では Queue を使わず、jitter は多様化のための軽い擾乱に留まる。
     // helper_share は主にスレッド数/探索量で決まり、jitter の有無で大きくは変わらない想定。
@@ -27,7 +33,7 @@ fn helper_share_positive_and_stable_with_or_without_jitter() {
     let diff = (share_on - share_off).abs();
     assert!(
         diff <= 25.0,
-        "helper_share should be broadly stable; diff={diff:.2} on={share_on:.2} off={share_off:.2}"
+        "helper_share should be broadly stable; diff={diff:.2} on={share_on:.2} off={share_off:.2} (on_samples={on_samples:?} off_samples={off_samples:?})"
     );
 }
 
@@ -47,15 +53,16 @@ fn run_helper_share_with(threads: usize, jitter: bool) -> f64 {
     let mut position = Position::startpos();
     // FixedNodes を厳密に効かせるため、TimeManager を明示的に付与する。
     // 注意: LazySMP では TimeManager が無い場合、FixedNodes は停止条件として扱われない。
+    // 探索量をやや増やして統計的なばらつきを抑える
     let tm_limits = TimeLimits {
-        time_control: TMTimeControl::FixedNodes { nodes: 8_192 },
+        time_control: TMTimeControl::FixedNodes { nodes: 32_768 },
         ..Default::default()
     };
     let tm =
         TimeManager::new(&tm_limits, Color::Black, 0, detect_game_phase_for_time(&position, 0));
 
     let mut limits = SearchLimitsBuilder::default()
-        .fixed_nodes(8_192)
+        .fixed_nodes(32_768)
         .depth(4)
         .jitter_override(jitter)
         .build();
@@ -65,4 +72,11 @@ fn run_helper_share_with(threads: usize, jitter: bool) -> f64 {
     // グローバルを元に戻す（他テストへの影響を避ける）
     search_policy::set_bench_allrun(false);
     result.stats.helper_share_pct.unwrap_or(0.0)
+}
+
+fn median(values: &[f64]) -> f64 {
+    debug_assert!(!values.is_empty());
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v[v.len() / 2]
 }
