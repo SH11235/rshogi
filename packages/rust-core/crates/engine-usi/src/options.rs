@@ -1046,6 +1046,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.finalize_sanity_king_alt_min_gain_cp = x.clamp(0, 1000);
                 }
             }
+            mark_override(state, "FinalizeSanity.KingAltMinGainCp");
         }
         "FinalizeSanity.KingAltPenaltyCp" => {
             if let Some(v) = value_ref {
@@ -1053,6 +1054,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.finalize_sanity_king_alt_penalty_cp = x.clamp(0, 300);
                 }
             }
+            mark_override(state, "FinalizeSanity.KingAltPenaltyCp");
         }
         "PVStabilityBase" => {
             if let Some(v) = value_ref {
@@ -1066,6 +1068,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
                 state.opts.forced_move_emit_eval = on;
             }
+            mark_override(state, "ForcedMove.EmitEval");
         }
         "ForcedMove.MinSearchMs" => {
             if let Some(v) = value_ref {
@@ -1073,6 +1076,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.forced_move_min_search_ms = ms.min(50);
                 }
             }
+            mark_override(state, "ForcedMove.MinSearchMs");
         }
         "PVStabilitySlope" => {
             if let Some(v) = value_ref {
@@ -1335,6 +1339,8 @@ pub fn log_effective_profile(state: &EngineState) {
         "FinalizeSanity.AllowSEElt0Alt",
         "FinalizeSanity.KingAltMinGainCp",
         "FinalizeSanity.KingAltPenaltyCp",
+        "ForcedMove.EmitEval",
+        "ForcedMove.MinSearchMs",
         "MultiPV",
     ] {
         if state.user_overrides.contains(k) {
