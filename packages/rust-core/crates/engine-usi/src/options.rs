@@ -207,6 +207,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         opts.finalize_threat2_extreme_min_cp
     ));
     usi_println(&format!(
+        "option name FinalizeSanity.Threat2_ExtremeWinDisableCp type spin default {} min 0 max 5000",
+        opts.finalize_threat2_extreme_win_disable_cp
+    ));
+    usi_println(&format!(
         "option name FinalizeSanity.AllowSEElt0Alt type check default {}",
         if opts.finalize_allow_see_lt0_alt {
             "true"
@@ -219,6 +223,11 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name FinalizeSanity.DefenseSEE_NegFloorCp type spin default {} min -500 max 0",
         opts.finalize_defense_see_neg_floor_cp
     ));
+    // Minimum risk reduction to allow switching
+    usi_println(&format!(
+        "option name FinalizeSanity.RiskMinDeltaCp type spin default {} min 0 max 600",
+        opts.finalize_risk_min_delta_cp
+    ));
     // King-alt guard options
     usi_println(&format!(
         "option name FinalizeSanity.KingAltMinGainCp type spin default {} min 0 max 1000",
@@ -227,6 +236,11 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name FinalizeSanity.KingAltPenaltyCp type spin default {} min 0 max 300",
         opts.finalize_sanity_king_alt_penalty_cp
+    ));
+    // Non-promote penalty for major pieces (R/B)
+    usi_println(&format!(
+        "option name FinalizeSanity.NonPromoteMajorPenaltyCp type spin default {} min 0 max 300",
+        opts.finalize_non_promote_major_penalty_cp
     ));
 
     // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
@@ -803,6 +817,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "FinalizeSanity.Threat2_ExtremeWinDisableCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_threat2_extreme_win_disable_cp = x.clamp(0, 5000);
+                }
+            }
+        }
         "FinalizeSanity.AllowSEElt0Alt" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
@@ -816,6 +837,14 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
             mark_override(state, "FinalizeSanity.DefenseSEE_NegFloorCp");
+        }
+        "FinalizeSanity.RiskMinDeltaCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_risk_min_delta_cp = x.clamp(0, 600);
+                }
+            }
+            mark_override(state, "FinalizeSanity.RiskMinDeltaCp");
         }
         "SearchParams.SafePruning" => {
             if let Some(v) = value_ref {
@@ -1175,6 +1204,14 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             }
             mark_override(state, "FinalizeSanity.KingAltPenaltyCp");
         }
+        "FinalizeSanity.NonPromoteMajorPenaltyCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_non_promote_major_penalty_cp = x.clamp(0, 300);
+                }
+            }
+            mark_override(state, "FinalizeSanity.NonPromoteMajorPenaltyCp");
+        }
         "PVStabilityBase" => {
             if let Some(v) = value_ref {
                 if let Ok(ms) = v.parse::<u64>() {
@@ -1490,8 +1527,10 @@ pub fn log_effective_profile(state: &EngineState) {
         "FinalizeSanity.Threat2_BeamK",
         "FinalizeSanity.AllowSEElt0Alt",
         "FinalizeSanity.DefenseSEE_NegFloorCp",
+        "FinalizeSanity.RiskMinDeltaCp",
         "FinalizeSanity.KingAltMinGainCp",
         "FinalizeSanity.KingAltPenaltyCp",
+        "FinalizeSanity.NonPromoteMajorPenaltyCp",
         "ForcedMove.EmitEval",
         "ForcedMove.MinSearchMs",
         "MultiPV",
