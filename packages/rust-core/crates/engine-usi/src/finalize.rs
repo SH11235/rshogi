@@ -434,6 +434,7 @@ fn finalize_sanity_check(
     // SEE>=0 を最優先、それが無ければ最大SEEを採用
     let mut best_ge0: Option<(engine_core::shogi::Move, i32)> = None;
     let mut best_any: Option<(engine_core::shogi::Move, i32)> = None;
+    let mut best_any_nonking_floor: Option<(engine_core::shogi::Move, i32)> = None;
     for &mv in list.as_slice() {
         if Some(mv) == final_best.best_move {
             continue;
@@ -460,14 +461,31 @@ fn finalize_sanity_check(
                 Some((m, v)) if v >= s => Some((m, v)),
                 _ => Some((mv, s)),
             };
+            // 非玉かつ“防御用の小幅負値”を許容するためのフロア（need_verify時のみ）
+            if need_verify && s >= state.opts.finalize_defense_see_neg_floor_cp
+                && !is_king_move(&state.position, &mv) {
+                    best_any_nonking_floor = match best_any_nonking_floor {
+                        Some((m, v)) if v >= s => Some((m, v)),
+                        _ => Some((mv, s)),
+                    };
+                }
         }
     }
     if best_alt.is_none() {
         // SEE>=0 を優先。許可フラグが false の場合は負値代替を禁止。
         if let Some((m, _)) = best_ge0 {
             best_alt = Some(m);
-        } else if state.opts.finalize_allow_see_lt0_alt {
-            best_alt = best_any.map(|(m, _)| m);
+        } else if need_verify {
+            // 高リスク時は“受け”の小幅負値（フロア基準）を非玉優先で許容
+            if let Some((m, _)) = best_any_nonking_floor {
+                info_string(format!(
+                    "sanity_defense_negfloor_used=1 floor={}",
+                    state.opts.finalize_defense_see_neg_floor_cp
+                ));
+                best_alt = Some(m);
+            } else if state.opts.finalize_allow_see_lt0_alt {
+                best_alt = best_any.map(|(m, _)| m);
+            }
         }
     }
     let Some(alt) = best_alt else {

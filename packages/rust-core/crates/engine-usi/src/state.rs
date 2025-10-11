@@ -81,6 +81,9 @@ pub struct UsiOptions {
     pub finalize_threat2_extreme_min_cp: i32,
     /// 代替手で SEE<0 の手を許容するか（falseで禁止）
     pub finalize_allow_see_lt0_alt: bool,
+    /// 高リスク時の“受け”候補として許容する SEE マイナス閾値（cp）。
+    /// need_verify=1 のときのみ適用。例: -120 なら小さな損の受けを拾う。
+    pub finalize_defense_see_neg_floor_cp: i32,
     /// 非チェック時に玉の手へ切替を許可するために必要な最小利得（cp）。満たさなければ拒否。
     pub finalize_sanity_king_alt_min_gain_cp: i32,
     /// 非チェック時に代替が玉の手なら s2 に加える小ペナルティ（cp）。
@@ -183,6 +186,7 @@ impl Default for UsiOptions {
             finalize_threat2_beam_k: 4,
             finalize_threat2_extreme_min_cp: 700,
             finalize_allow_see_lt0_alt: false,
+            finalize_defense_see_neg_floor_cp: -120,
             finalize_sanity_king_alt_min_gain_cp: 150,
             finalize_sanity_king_alt_penalty_cp: 0,
             instant_mate_move_enabled: true,
