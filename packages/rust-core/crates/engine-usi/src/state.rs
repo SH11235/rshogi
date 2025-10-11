@@ -179,7 +179,7 @@ impl Default for UsiOptions {
             fail_safe_guard: false,
             simd_max_level: None,
             nnue_simd: None,
-            finalize_sanity_enabled: true,
+            finalize_sanity_enabled: false,
             finalize_sanity_budget_ms: 8,
             finalize_sanity_min_ms: 2,
             finalize_sanity_mini_depth: 2,
