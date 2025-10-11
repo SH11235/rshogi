@@ -150,9 +150,11 @@ fn maybe_emit_forced_eval_info(state: &mut EngineState, final_move_usi: &str) {
     // Use minimal fixed time and depth=1 for speed
     let ms = state.opts.forced_move_min_search_ms.min(50);
     let limits = engine_core::search::SearchLimits::builder().depth(1).fixed_time_ms(ms).build();
+    let start = Instant::now();
     let mut eng = state.lock_engine();
     let res = eng.search(&mut pos1, limits);
     drop(eng);
+    let forced_eval_ms = start.elapsed().as_millis() as u64;
     // Emit a single info line with score/time/nodes and PV rooted at the final move
     let nps = if res.stats.elapsed.as_millis() > 0 {
         (res.stats.nodes as u128)
@@ -161,13 +163,31 @@ fn maybe_emit_forced_eval_info(state: &mut EngineState, final_move_usi: &str) {
     } else {
         0
     };
+    // ルート視点に符号を正規化
+    let score_for_root = normalize_for_root(state.position.side_to_move, &pos1, res.score);
+
     let final_best_stub = FinalBest {
         best_move: Some(mv),
         pv: vec![mv],
         source: FinalBestSource::Committed,
     };
-    // hashfullは不明なので0を渡す（表示のみ）
-    emit_single_pv(&res, &final_best_stub, nps, 0, None, None);
+    // hashfullは不明なので0を渡す（表示のみ）。scoreはroot視点で上書き。
+    emit_single_pv(&res, &final_best_stub, nps, 0, Some(score_for_root), None);
+    diag_info_string(format!("forced_eval_ms={} depth=1 nps={}", forced_eval_ms, nps));
+}
+
+#[inline]
+fn normalize_for_root(
+    root_side: engine_core::Color,
+    pos_after: &engine_core::shogi::Position,
+    score: i32,
+) -> i32 {
+    if pos_after.side_to_move != root_side {
+        // 子局面の手番がルートと反転しているなら符号を反転してルート視点に合わせる
+        score.saturating_neg()
+    } else {
+        score
+    }
 }
 
 fn finalize_sanity_check(
@@ -186,15 +206,6 @@ fn finalize_sanity_check(
         diag_info_string("sanity_in_check=1");
     }
     let pv1 = final_best.best_move?;
-    // Mate/draw guard: if PV1 score is mate帯 or (近似的に)ドロー評価に近いならスイッチ禁止
-    if let Some(res) = result {
-        use engine_core::search::constants::MATE_SCORE;
-        let sc = res.score;
-        if sc.abs() >= MATE_SCORE - 100 || sc.abs() <= 10 {
-            info_string("sanity_skipped=1 reason=mate_or_draw_band");
-            return None;
-        }
-    }
     // 以前は「PV1が王手ならFinalizeSanityをスキップ」していたが、
     // 対称性のためスキップは行わず、後段で微小ペナルティを適用する。
     // SEE gate (own move) + Opponent capture SEE gate after PV1
@@ -233,7 +244,7 @@ fn finalize_sanity_check(
             .copied()
             .filter(|m| !m.is_capture_hint() && pos1.is_legal_move(*m))
             .collect();
-        // 簡易優先度: 王手>成り>その他（軽量）
+        // 簡易優先度: 王手>成り>SEE（軽量）。SEEの寄与を少し持ち上げてビームの安定性を上げる。
         quiets.sort_by_key(|m| {
             let mut key = 0i32;
             if pos1.gives_check(*m) {
@@ -242,8 +253,8 @@ fn finalize_sanity_check(
             if m.is_promote() {
                 key += 1000;
             }
-            // 近似：PV1適用後局面でのSEE（正）を少しだけ持ち上げる
-            key += pos1.see(*m).max(0);
+            // 近似：PV1適用後局面でのSEE（正）を強めに持ち上げる
+            key += 5 * pos1.see(*m).max(0);
             -key
         });
         for &mvq in quiets.iter().take(beam_k) {
@@ -270,6 +281,18 @@ fn finalize_sanity_check(
     }
     if opp_cap_see_max >= opp_gate || opp_threat2_max >= threat2_gate {
         need_verify = true;
+    }
+
+    // Mate/draw guard（条件付）: ほぼドロー帯は SEE/T2 が不要ならスキップ、mate帯は常にスキップ
+    if let Some(res) = result {
+        use engine_core::search::constants::MATE_SCORE;
+        let sc = res.score;
+        let near_mate = sc.abs() >= MATE_SCORE - 100;
+        let near_draw = sc.abs() <= 10;
+        if near_mate || (near_draw && !need_verify) {
+            info_string("sanity_skipped=1 reason=mate_or_draw_band");
+            return None;
+        }
     }
 
     let see_min_dbg = state.opts.finalize_sanity_see_min_cp;
@@ -479,7 +502,11 @@ fn finalize_sanity_check(
             if alt_check {
                 s2_local = s2_local.saturating_sub(check_penalty_cp);
             }
-            (s1_local, s2_local, pv1_check, alt_check)
+            // 子局面スコアをルート視点に正規化
+            let root_side = state.position.side_to_move;
+            let s1_root = normalize_for_root(root_side, &pos1, s1_local);
+            let s2_root = normalize_for_root(root_side, &pos2, s2_local);
+            (s1_root, s2_root, pv1_check, alt_check)
         } else {
             info_string("sanity_skipped=1 reason=lock_failed");
             return None;
@@ -757,7 +784,7 @@ fn compute_tt_probe_budget_ms(stop_info: Option<&StopInfo>, snapshot_elapsed_ms:
     }
 
     let remain = limit - elapsed;
-    if remain <= 1 {
+    if remain <= 3 {
         return 0;
     }
 
