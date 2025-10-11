@@ -161,6 +161,23 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name MateGate.FastOkMinElapsedMs type spin default {} min 0 max 5000",
         opts.mate_gate_fast_ok_min_elapsed_ms
     ));
+    // Finalize: Optional mini mate-probe (opponent turn, shallow)
+    usi_println(&format!(
+        "option name FinalizeSanity.MateProbe.Enabled type check default {}",
+        if opts.finalize_mate_probe_enabled {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    usi_println(&format!(
+        "option name FinalizeSanity.MateProbe.Depth type spin default {} min 1 max 8",
+        opts.finalize_mate_probe_depth
+    ));
+    usi_println(&format!(
+        "option name FinalizeSanity.MateProbe.TimeMs type spin default {} min 1 max 20",
+        opts.finalize_mate_probe_time_ms
+    ));
     // Opponent SEE gate for finalize sanity
     usi_println(&format!(
         "option name FinalizeSanity.OppSEE_MinCp type spin default {} min 0 max 5000",
@@ -184,6 +201,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name FinalizeSanity.Threat2_BeamK type spin default {} min 0 max 64",
         opts.finalize_threat2_beam_k
+    ));
+    usi_println(&format!(
+        "option name FinalizeSanity.Threat2_ExtremeMinCp type spin default {} min 0 max 5000",
+        opts.finalize_threat2_extreme_min_cp
     ));
     usi_println(&format!(
         "option name FinalizeSanity.AllowSEElt0Alt type check default {}",
@@ -767,6 +788,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<u8>() {
                     state.opts.finalize_threat2_beam_k = x.min(64);
+                }
+            }
+        }
+        "FinalizeSanity.Threat2_ExtremeMinCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_threat2_extreme_min_cp = x.clamp(0, 5000);
                 }
             }
         }
