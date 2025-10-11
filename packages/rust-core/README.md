@@ -78,6 +78,53 @@ quit
 
 ### Performance Build & Features
 
+## Threads連動の自動既定（T8/T1 プロファイル）
+
+エンジンはスレッド数に応じた安全既定（プロファイル）を起動時に自動適用します。GUI が全 `setoption` を送るタイプでも、プロファイル機能で安全既定を明示適用できます。
+
+- プロファイル切替（USIオプション）
+  - `Profile.Mode`（combo: `Auto`/`T1`/`T8`/`Off`）
+  - `Profile.ApplyAutoDefaults`（button）: 現在の `Profile.Mode` に基づく既定を適用（ユーザーが明示上書きしたキーは保持）
+- 有効値ログ（探索開始時に 1 行）
+  - `info string effective_profile mode=<Auto|T1|T8|Off> resolved=<T1|T8|-> threads=<n> multipv=<n> ... overrides=<...>`
+
+### 既定値（2025-10-11 時点）
+
+- Threads ≥ 4（T8 = Perf 採用）
+  - RootSeeGate=On, `RootSeeGate.XSEE=100`
+  - PostVerify=On, `PostVerify.YDrop=250`, `PostVerify.RequirePass=On`, `PostVerify.ExtendMs=200`
+  - FinalizeSanity: `SwitchMarginCp=30`, `OppSEE_MinCp=100`, `BudgetMs=8`, `MinMs=2`
+  - KingAlt: `FinalizeSanity.KingAltMinGainCp=300`
+  - MultiPV=1
+
+- Threads = 1（T1 = SetA）
+  - RootSeeGate=On, `RootSeeGate.XSEE=100`
+  - PostVerify=Off
+  - FinalizeSanity: `SwitchMarginCp=35`, `OppSEE_MinCp=120`, `BudgetMs=4`, `MinMs=2`
+  - MultiPV=1
+
+注: ユーザーの `setoption` があればそれを最優先し、自動既定は上書きしません。GUI が全オプションを送る場合は、`Profile.Mode=T8`（または `T1`）→ `Profile.ApplyAutoDefaults` の順で明示適用してください。
+
+### Byoyomi 周辺
+
+- `USI_ByoyomiPeriods` は `ByoyomiPeriods` のエイリアス。どちらも `value=default` で既定（1）に戻せます。
+- `ByoyomiDeadlineLeadMs` の既定は 150ms（対局GUIの締切より少し前で返す安全リード）。
+ 
+### Post‑Verify 連動（早期確定の安全化）
+
+- `PostVerify.RequirePass=On` のとき、post‑verify が不合格なら短時間（`PostVerify.ExtendMs` 既定 200ms、残soft内）だけ探索を延長して再判定します。合格時のみ早期確定します。
+- 劣勢帯では軽い追い探索でTTを温めてから最善を再取得（内部連動、既定有効）。
+
+## Finalize 層の軽ガード（要点）
+
+- near-draw 帯でも「玉手の軽ガード」は常時有効（PV1=玉手/代替=玉手）。
+- King‑alt（非チェック時の玉手抑制）/ 非玉再探索 /（高リスク時の）no_publish 安全弁を実装。
+- fast 経路（TT/ponderhit）でも `score_hint` により near‑draw 判定を統一。
+- Threat2（相手 quiet→捕獲）の優先度へ昇格寄与（+300）を小さく追加。
+
+既知の限界: 超短秒（≲2s）や大劣勢・必至近傍では finalize 層のみで形勢は改善できません。次版で Root Post‑Verify の qsearch 化／早期 finalize と Post‑Verify の連動強化を検討しています。
+
+
 - 推奨ビルド（最適化）
   - `RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release`
 - フィーチャー（engine-usi から engine-core へ伝播）
