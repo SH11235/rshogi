@@ -153,7 +153,7 @@ impl Default for UsiOptions {
             hash_mb: 1024,
             threads: 8,
             ponder: true,
-            engine_type: EngineType::Material,
+            engine_type: EngineType::Enhanced,
             eval_file: None,
             overhead_ms: 50,
             network_delay_ms: 120,
