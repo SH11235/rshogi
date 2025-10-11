@@ -731,10 +731,11 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
     let opt = tm.opt_limit_ms();
     let mut finalize_reason: Option<FinalizeReason> = None;
 
-    if hard != u64::MAX && elapsed >= hard {
-        finalize_reason = Some(FinalizeReason::Hard);
-    } else if scheduled != u64::MAX && elapsed >= scheduled {
+    // Prefer Planned finalize when a scheduled stop exists.
+    if scheduled != u64::MAX && elapsed >= scheduled {
         finalize_reason = Some(FinalizeReason::Planned);
+    } else if hard != u64::MAX && elapsed >= hard {
+        finalize_reason = Some(FinalizeReason::Hard);
     } else {
         if scheduled == u64::MAX && opt != u64::MAX && elapsed >= opt {
             tm.ensure_scheduled_stop(elapsed);

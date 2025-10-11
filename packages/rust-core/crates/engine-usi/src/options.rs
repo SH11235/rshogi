@@ -214,6 +214,11 @@ pub fn send_id_and_options(opts: &UsiOptions) {
             "false"
         }
     ));
+    // High-risk defense window: allow small negative SEE for defensive candidates
+    usi_println(&format!(
+        "option name FinalizeSanity.DefenseSEE_NegFloorCp type spin default {} min -500 max 0",
+        opts.finalize_defense_see_neg_floor_cp
+    ));
     // King-alt guard options
     usi_println(&format!(
         "option name FinalizeSanity.KingAltMinGainCp type spin default {} min 0 max 1000",
@@ -803,6 +808,14 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
                 state.opts.finalize_allow_see_lt0_alt = on;
             }
+        }
+        "FinalizeSanity.DefenseSEE_NegFloorCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.finalize_defense_see_neg_floor_cp = x.clamp(-500, 0);
+                }
+            }
+            mark_override(state, "FinalizeSanity.DefenseSEE_NegFloorCp");
         }
         "SearchParams.SafePruning" => {
             if let Some(v) = value_ref {
@@ -1476,6 +1489,7 @@ pub fn log_effective_profile(state: &EngineState) {
         "FinalizeSanity.Threat2_MinCp",
         "FinalizeSanity.Threat2_BeamK",
         "FinalizeSanity.AllowSEElt0Alt",
+        "FinalizeSanity.DefenseSEE_NegFloorCp",
         "FinalizeSanity.KingAltMinGainCp",
         "FinalizeSanity.KingAltPenaltyCp",
         "ForcedMove.EmitEval",
