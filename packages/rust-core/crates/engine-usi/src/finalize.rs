@@ -387,26 +387,24 @@ fn finalize_sanity_check(
         None
     };
     // Special-case: PV1が「歩の非成り」かつ同一手の成りが合法なら、まず成り手を代替候補にする
-    let mut promote_alt: Option<engine_core::shogi::Move> = None;
-    if let Some(from_sq) = pv1.from() {
-        if let Some(piece) = state.position.board.piece_on(from_sq) {
-            if piece.piece_type == engine_core::shogi::PieceType::Pawn
-                && !pv1.is_promote()
-                && !pv1.is_drop()
-            {
-                // USI文字列に'+'を付けた成り手を構築し、合法なら候補に
-                let mut usi = move_to_usi(&pv1);
-                usi.push('+');
-                if let Ok(mv_p) = parse_usi_move(&usi) {
-                    if state.position.is_legal_move(mv_p) {
-                        promote_alt = Some(mv_p);
+    if best_alt.is_none() {
+        if let Some(from_sq) = pv1.from() {
+            if let Some(piece) = state.position.board.piece_on(from_sq) {
+                if piece.piece_type == engine_core::shogi::PieceType::Pawn && !pv1.is_promote() {
+                    // 探索生成から“同一from/toでis_promote=true”の合法手を探す
+                    let mgp = MoveGenerator::new();
+                    if let Ok(listp) = mgp.generate_all(&state.position) {
+                        if let Some(mv_p) = listp.as_slice().iter().copied().find(|m| {
+                            m.is_promote()
+                                && m.equals_without_piece_type(&pv1)
+                                && state.position.is_legal_move(*m)
+                        }) {
+                            best_alt = Some(mv_p);
+                        }
                     }
                 }
             }
         }
-    }
-    if best_alt.is_none() {
-        best_alt = promote_alt;
     }
     let mut alt_from_pv2 = false;
     // PV2 候補の合法性確認（擬似合法の可能性を排除）
@@ -636,16 +634,15 @@ fn finalize_sanity_check(
     const NONPROMOTE_PAWN_PENALTY_CP: i32 = 200;
     if let Some(from_sq) = pv1.from() {
         if let Some(piece) = state.position.board.piece_on(from_sq) {
-            if piece.piece_type == engine_core::shogi::PieceType::Pawn
-                && !pv1.is_promote()
-                && !pv1.is_drop()
-            {
-                let mut usi = move_to_usi(&pv1);
-                usi.push('+');
-                if let Ok(mv_p) = parse_usi_move(&usi) {
-                    if state.position.is_legal_move(mv_p) {
-                        s1_adj = s1_adj.saturating_sub(NONPROMOTE_PAWN_PENALTY_CP);
-                    }
+            if piece.piece_type == engine_core::shogi::PieceType::Pawn && !pv1.is_promote() {
+                // “同一手の成り”が合法に存在する場合のみ軽ペナルティ（既存の合法手listを再利用）
+                let exists = list.as_slice().iter().copied().any(|m| {
+                    m.is_promote()
+                        && m.equals_without_piece_type(&pv1)
+                        && state.position.is_legal_move(m)
+                });
+                if exists {
+                    s1_adj = s1_adj.saturating_sub(NONPROMOTE_PAWN_PENALTY_CP);
                 }
             }
         }
