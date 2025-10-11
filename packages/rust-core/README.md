@@ -88,7 +88,7 @@ quit
 - 有効値ログ（探索開始時に 1 行）
   - `info string effective_profile mode=<Auto|T1|T8|Off> resolved=<T1|T8|-> threads=<n> multipv=<n> root_see_gate= xsee= post_verify= ydrop= finalize_switch= finalize_oppsee= finalize_budget= t2_min= t2_beam_k= see_lt0_alt= king_alt_min= ... overrides=<...>`
 
-### 既定値（2025-10-11 時点）
+### 既定値（現時点）
 
 - Threads ≥ 4（T8 = Perf 採用）
   - RootSeeGate=On, `RootSeeGate.XSEE=100`
@@ -119,7 +119,8 @@ quit
 
 - near-draw 帯でも「玉手の軽ガード」は常時有効（PV1=玉手/代替=玉手）。
 - King‑alt（非チェック時の玉手抑制）/ 非玉再探索 /（高リスク時の）no_publish 安全弁を実装。
-- fast 経路（TT/ponderhit）でも `score_hint` により near‑draw 判定を統一（現状は±10cpの近似でログ可視化のみ）。
+- fast 経路（TT/ponderhit）でも `score_hint` により near‑draw 判定を統一（現状は±10cpの近似でログ可視化のみ；定数 `NEAR_DRAW_CP=10`）。
+- fast 経路・安全時はミニ検証を省略する軽ゲートを適用（ログ: `reason=no_need_verify`）。
 - Threat2（相手 quiet→捕獲）の優先度へ昇格寄与（+300）を小さく追加。
 
 既知の限界: 超短秒（≲2s）や大劣勢・必至近傍では finalize 層のみで形勢は改善できません。次版で Root Post‑Verify の qsearch 化／早期 finalize と Post‑Verify の連動強化を検討しています。
