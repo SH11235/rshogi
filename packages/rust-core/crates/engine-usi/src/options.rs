@@ -112,7 +112,11 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     // Finalize sanity (light guard before emitting bestmove)
     usi_println(&format!(
         "option name FinalizeSanity.Enabled type check default {}",
-        if opts.finalize_sanity_enabled { "true" } else { "false" }
+        if opts.finalize_sanity_enabled {
+            "true"
+        } else {
+            "false"
+        }
     ));
     usi_println(&format!(
         "option name FinalizeSanity.BudgetMs type spin default {} min 0 max 10",
