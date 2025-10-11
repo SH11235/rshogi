@@ -88,19 +88,20 @@ quit
 - 有効値ログ（探索開始時に 1 行）
   - `info string effective_profile mode=<Auto|T1|T8|Off> resolved=<T1|T8|-> threads=<n> multipv=<n> root_see_gate= xsee= post_verify= ydrop= finalize_switch= finalize_oppsee= finalize_budget= t2_min= t2_beam_k= see_lt0_alt= king_alt_min= ... overrides=<...>`
 
-### 既定値（現時点）
+### 既定値（Safety-Lite R1）
 
-- Threads ≥ 4（T8 = Perf 採用）
-  - RootSeeGate=On, `RootSeeGate.XSEE=100`
-  - PostVerify=On, `PostVerify.YDrop=250`, `PostVerify.RequirePass=On`, `PostVerify.ExtendMs=200`
-  - FinalizeSanity: `SwitchMarginCp=30`, `OppSEE_MinCp=100`, `BudgetMs=8`, `MinMs=2`
-  - KingAlt: `FinalizeSanity.KingAltMinGainCp=300`
+- Threads ≥ 4（T8）
+  - RootSeeGate=On（XSEE=100）
+  - PostVerify=On（YDrop=225, RequirePass=On, ExtendMs=300, DisadvantageCp=-300）
+  - FinalizeSanity: SwitchMarginCp=40 / OppSEE_MinCp=100 / BudgetMs=8 / MinMs=2 / Threat2_MinCp=200 / Threat2_BeamK=4 / AllowSEElt0Alt=false / CheckPenaltyCp=10
+  - KingAltMinGainCp=150
   - MultiPV=1
 
-- Threads = 1（T1 = SetA）
-  - RootSeeGate=On, `RootSeeGate.XSEE=100`
-  - PostVerify=On, `PostVerify.YDrop=225`
-  - FinalizeSanity: `SwitchMarginCp=35`, `OppSEE_MinCp=120`, `BudgetMs=4`, `MinMs=2`
+- Threads = 1（T1）
+  - RootSeeGate=On（XSEE=100）
+  - PostVerify=On（YDrop=225, RequirePass=On, ExtendMs=300, DisadvantageCp=-300）
+  - FinalizeSanity: SwitchMarginCp=40 / OppSEE_MinCp=120 / BudgetMs=4 / MinMs=2 / Threat2_MinCp=200 / Threat2_BeamK=4 / AllowSEElt0Alt=false / CheckPenaltyCp=10
+  - KingAltMinGainCp=150
   - MultiPV=1
 
 注: ユーザーの `setoption` があればそれを最優先し、自動既定は上書きしません。GUI が全オプションを送る場合は、`Profile.Mode=T8`（または `T1`）→ `Profile.ApplyAutoDefaults` の順で明示適用してください。

@@ -320,7 +320,7 @@ fn finalize_sanity_check(
             posq.undo_null_move(undo_null);
         }
     }
-    // いずれかの門を超えれば検証が必要（OR 判定）
+    // Threat2/opp_cap の両方がゲート超時のみ検証（AND 判定）
     if need_verify_from_risks(opp_cap_see_max, opp_threat2_max, opp_gate, threat2_gate) {
         need_verify = true;
     }
@@ -565,14 +565,20 @@ fn finalize_sanity_check(
     };
     let s1 = s1_temp;
     // 相手最大捕獲SEEに応じてPV1側スコアへ軽いペナルティを付加（過大評価抑制）
-    const OPP_SEE_PENALTY_NUM: i32 = 7; // λ=0.7（分数表現）
-    const OPP_SEE_PENALTY_DEN: i32 = 10;
+    const OPP_SEE_PENALTY_NUM: i32 = 1; // λ=0.5（分数表現）
+    const OPP_SEE_PENALTY_DEN: i32 = 2;
     let penalty_cap = state.opts.finalize_sanity_opp_see_penalty_cap_cp.max(0);
-    let capped = opp_cap_see_max.min(penalty_cap).max(0) as i64;
-    let opp_penalty_i64 =
-        capped.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
-    // ダブルカウント抑止: ペナルティは opp_cap のみに適用（t2 はゲート/判定用）
-    let opp_penalty = opp_penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    let mut opp_penalty = 0i32;
+    if opp_cap_see_max >= opp_gate_dbg && penalty_cap > 0 {
+        let capped = opp_cap_see_max.min(penalty_cap).max(0) as i64;
+        let p_i64 =
+            capped.saturating_mul(OPP_SEE_PENALTY_NUM as i64) / (OPP_SEE_PENALTY_DEN as i64);
+        let mut p = p_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        if s1 >= 200 {
+            p /= 2; // 優勢帯では半減
+        }
+        opp_penalty = p;
+    }
     let s1_adj = s1.saturating_sub(opp_penalty);
     // --- King-alt guard (non-check): 非チェック時に玉の手への切替を原則禁止 ---
     let alt_is_king = is_king_move(&state.position, &alt);
@@ -584,7 +590,7 @@ fn finalize_sanity_check(
         }
         let min_gain = state.opts.finalize_sanity_king_alt_min_gain_cp.max(0);
         let gain = s2_eff.saturating_sub(s1_adj);
-        if gain < min_gain {
+        if gain < min_gain && (opp_cap_see_max >= opp_gate_dbg || opp_threat2_max >= threat2_gate) {
             // near-draw 例外: ここに来た場合は near-draw でも King-alt の判断を実施している。
             info_string(format!(
                 "sanity_checked=1 path={} see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
@@ -632,7 +638,7 @@ fn finalize_sanity_check(
                     return Some(alt2);
                 }
                 // 最終安全弁: 高リスクかつ非玉代替が見つからない場合は no_publish=1（安全手クラスへ強制）。
-                if opp_cap_see_max >= opp_gate_dbg || opp_threat2_max >= threat2_gate {
+                if opp_cap_see_max >= opp_gate_dbg && opp_threat2_max >= threat2_gate {
                     if let Some(safe_alt) =
                         choose_safe_nonking_fallback(pos, &legal_nonking, allow_neg)
                     {
@@ -664,7 +670,9 @@ fn finalize_sanity_check(
     if pv1_is_king && !in_check_now {
         let min_gain = state.opts.finalize_sanity_king_alt_min_gain_cp.max(0);
         let gain_keep = s1_adj.saturating_sub(s2_eff); // keep側の余裕（s2の方が良いなら負になる）
-        if gain_keep < min_gain {
+        if gain_keep < min_gain
+            && (opp_cap_see_max >= opp_gate_dbg || opp_threat2_max >= threat2_gate)
+        {
             info_string(format!(
                 "sanity_pv1_is_king=1 s1_adj={} s2={} keep_gain={} min_gain={}",
                 s1_adj, s2_eff, gain_keep, min_gain
@@ -694,7 +702,7 @@ fn finalize_sanity_check(
                         ));
                         return Some(alt2);
                     }
-                    if opp_cap_see_max >= opp_gate_dbg || opp_threat2_max >= threat2_gate {
+                    if opp_cap_see_max >= opp_gate_dbg && opp_threat2_max >= threat2_gate {
                         if let Some(safe_alt) =
                             choose_safe_nonking_fallback(pos, &legal_nonking, allow_neg)
                         {
@@ -729,6 +737,16 @@ fn finalize_sanity_check(
             opp_cap_see_max,
             opp_threat2_max,
         ));
+        // 差し替え確定時は軽い評価行を1本だけ出力してGUI乖離を軽減
+        let mut line = String::from("info depth 1 score ");
+        append_usi_score_and_bound(
+            &mut line,
+            engine_core::usi::ScoreView::Cp(s2_eff),
+            NodeType::Exact,
+        );
+        line.push_str(" pv ");
+        line.push_str(&move_to_usi(&alt));
+        usi_println(&line);
     } else {
         info_string(format!(
             "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={}",
@@ -2580,7 +2598,8 @@ fn need_verify_from_risks(
     opp_gate: i32,
     threat2_gate: i32,
 ) -> bool {
-    opp_cap_see_max >= opp_gate || opp_threat2_max >= threat2_gate
+    // AND 条件: 両方のゲートを超えたときのみ検証を要求
+    opp_cap_see_max >= opp_gate && opp_threat2_max >= threat2_gate
 }
 
 #[cfg(test)]
@@ -2622,10 +2641,12 @@ mod tests {
     }
 
     #[test]
-    fn need_verify_from_risks_or_logic() {
-        // 片側のみゲート超過でも true
-        assert!(need_verify_from_risks(100, 0, 100, 300));
-        assert!(need_verify_from_risks(0, 300, 100, 300));
+    fn need_verify_from_risks_and_logic() {
+        // 両側がゲート超過のときのみ true
+        assert!(need_verify_from_risks(150, 350, 100, 300));
+        // 片側のみ超過は false
+        assert!(!need_verify_from_risks(100, 0, 100, 300));
+        assert!(!need_verify_from_risks(0, 300, 100, 300));
         // いずれも未達なら false
         assert!(!need_verify_from_risks(99, 299, 100, 300));
     }
