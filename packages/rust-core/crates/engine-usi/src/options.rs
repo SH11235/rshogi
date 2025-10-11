@@ -110,7 +110,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.EnableStaticBeta type check default true");
     usi_println("option name SearchParams.ProbCut_SkipVerifyLt4 type check default false");
     // Finalize sanity (light guard before emitting bestmove)
-    usi_println("option name FinalizeSanity.Enabled type check default true");
+    usi_println(&format!(
+        "option name FinalizeSanity.Enabled type check default {}",
+        if opts.finalize_sanity_enabled { "true" } else { "false" }
+    ));
     usi_println(&format!(
         "option name FinalizeSanity.BudgetMs type spin default {} min 0 max 10",
         opts.finalize_sanity_budget_ms
@@ -1627,7 +1630,8 @@ fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {
 }
 
 fn print_engine_type_options() {
-    usi_println("option name EngineType type combo default Material var Material var Enhanced var Nnue var EnhancedNnue");
+    // Default is Enhanced (Material/Enhanced/Nnue/EnhancedNnue)
+    usi_println("option name EngineType type combo default Enhanced var Material var Enhanced var Nnue var EnhancedNnue");
 }
 
 fn print_time_policy_options(opts: &UsiOptions) {
