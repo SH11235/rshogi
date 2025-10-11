@@ -273,13 +273,14 @@ fn finalize_sanity_check(
             .filter(|m| !m.is_capture_hint() && pos1.is_legal_move(*m))
             .collect();
         // 簡易優先度: 王手>成り>SEE（軽量）。SEEの寄与を少し持ち上げてビームの安定性を上げる。
+        const THREAT2_PROMO_DELTA: i32 = 300; // 小さめの昇格寄与（T8の微補強用）
         quiets.sort_by_key(|m| {
             let mut key = 0i32;
             if pos1.gives_check(*m) {
                 key += 2000;
             }
             if m.is_promote() {
-                key += 1000;
+                key += 1000 + THREAT2_PROMO_DELTA;
             }
             // 近似：PV1適用後局面でのSEE（正）を強めに持ち上げる
             key += 5 * pos1.see(*m).max(0);
@@ -312,12 +313,14 @@ fn finalize_sanity_check(
     }
 
     // Mate/draw guard（条件付）: ほぼドロー帯は SEE/T2 が不要ならスキップ、mate帯は常にスキップ
+    // ただし「玉手の軽ガード」は near-draw でも常時適用する（PV1=玉手の素通し抑止）。
+    let pv1_is_king = is_king_move(&state.position, &pv1);
     if let Some(res) = result {
         use engine_core::search::constants::MATE_SCORE;
         let sc = res.score;
         let near_mate = sc.abs() >= MATE_SCORE - 100;
         let near_draw = sc.abs() <= 10;
-        if near_mate || (near_draw && !need_verify) {
+        if near_mate || (near_draw && !need_verify && (!pv1_is_king || in_check_now)) {
             info_string("sanity_skipped=1 reason=mate_or_draw_band");
             return None;
         }
@@ -326,7 +329,7 @@ fn finalize_sanity_check(
         let sc = sh;
         let near_mate = sc.abs() >= MATE_SCORE - 100;
         let near_draw = sc.abs() <= 10;
-        if near_mate || (near_draw && !need_verify) {
+        if near_mate || (near_draw && !need_verify && (!pv1_is_king || in_check_now)) {
             info_string("sanity_skipped=1 reason=mate_or_draw_band");
             return None;
         }
@@ -571,6 +574,17 @@ fn finalize_sanity_check(
         let min_gain = state.opts.finalize_sanity_king_alt_min_gain_cp.max(0);
         let gain = s2_eff.saturating_sub(s1_adj);
         if gain < min_gain {
+            // near-draw 例外: ここに来た場合は near-draw でも King-alt の判断を実施している。
+            info_string(format!(
+                "sanity_checked=1 path=joined see={} see_min={} opp_cap_see_max={} opp_gate={} opp_threat2_max={} threat2_gate={} check_penalty_cp={}",
+                see,
+                see_min_dbg,
+                opp_cap_see_max,
+                opp_gate_dbg,
+                opp_threat2_max,
+                threat2_gate,
+                chk_penalty_dbg
+            ));
             info_string(format!(
                 "sanity_king_alt_blocked=1 alt={} s1_adj={} s2={} s2_eff={} gain={} min_gain={}",
                 move_to_usi(&alt),
@@ -592,12 +606,28 @@ fn finalize_sanity_check(
                     .filter(|&m| !is_king_move(pos, &m))
                     .filter(|&m| !m.equals_without_piece_type(&pv1))
                     .collect();
-                if let Some(alt2) = choose_legal_fallback_with_see(pos, &legal_nonking) {
+                // AllowSEElt0Alt を遵守
+                let allow_neg = state.opts.finalize_allow_see_lt0_alt;
+                if let Some(alt2) =
+                    choose_legal_fallback_with_see_filtered(pos, &legal_nonking, allow_neg)
+                {
                     info_string(format!(
                         "sanity_alt_reselect_nonking=1 new_alt={}",
                         move_to_usi(&alt2)
                     ));
                     return Some(alt2);
+                }
+                // 最終安全弁: 高リスクかつ非玉代替が見つからない場合は no_publish=1（安全手クラスへ強制）。
+                if opp_cap_see_max >= opp_gate_dbg || opp_threat2_max >= threat2_gate {
+                    if let Some(safe_alt) =
+                        choose_safe_nonking_fallback(pos, &legal_nonking, allow_neg)
+                    {
+                        info_string(format!(
+                            "no_publish=1 reason=sanity_risk_no_alt alt_class=safe_nonking new_alt={}",
+                            move_to_usi(&safe_alt)
+                        ));
+                        return Some(safe_alt);
+                    }
                 }
             }
             return None;
@@ -611,6 +641,56 @@ fn finalize_sanity_check(
                 gain,
                 min_gain
             ));
+        }
+    }
+
+    // PV1=玉手のガード（非チェック時）: PV1が玉手で、切替メリットが小さい場合は非玉へ切替を試みる
+    if pv1_is_king && !in_check_now {
+        let min_gain = state.opts.finalize_sanity_king_alt_min_gain_cp.max(0);
+        let gain_keep = s1_adj.saturating_sub(s2_eff); // keep側の余裕（s2の方が良いなら負になる）
+        if gain_keep < min_gain {
+            info_string(format!(
+                "sanity_pv1_is_king=1 s1_adj={} s2={} keep_gain={} min_gain={}",
+                s1_adj, s2_eff, gain_keep, min_gain
+            ));
+            // 既に alt を評価済み。非玉であればこのまま切替、玉なら再選択。
+            if !alt_is_king {
+                return Some(alt);
+            } else {
+                let mg = MoveGenerator::new();
+                if let Ok(list) = mg.generate_all(&state.position) {
+                    let pos = &state.position;
+                    let legal_nonking: Vec<_> = list
+                        .as_slice()
+                        .iter()
+                        .copied()
+                        .filter(|&m| pos.is_legal_move(m))
+                        .filter(|&m| !is_king_move(pos, &m))
+                        .filter(|&m| !m.equals_without_piece_type(&pv1))
+                        .collect();
+                    let allow_neg = state.opts.finalize_allow_see_lt0_alt;
+                    if let Some(alt2) =
+                        choose_legal_fallback_with_see_filtered(pos, &legal_nonking, allow_neg)
+                    {
+                        info_string(format!(
+                            "sanity_pv1_king_alt_reselect_nonking=1 new_alt={}",
+                            move_to_usi(&alt2)
+                        ));
+                        return Some(alt2);
+                    }
+                    if opp_cap_see_max >= opp_gate_dbg || opp_threat2_max >= threat2_gate {
+                        if let Some(safe_alt) =
+                            choose_safe_nonking_fallback(pos, &legal_nonking, allow_neg)
+                        {
+                            info_string(format!(
+                                "no_publish=1 reason=sanity_pv1_king_risk_no_alt alt_class=safe_nonking new_alt={}",
+                                move_to_usi(&safe_alt)
+                            ));
+                            return Some(safe_alt);
+                        }
+                    }
+                }
+            }
         }
     }
     let switched = s2_eff > s1_adj + switch_margin;
@@ -1007,7 +1087,7 @@ pub fn finalize_and_send(
     } else {
         None
     };
-    let final_best = {
+    let mut final_best = {
         let eng = state.lock_engine();
         if let Some(ci) = snapshot_committed.as_ref() {
             eng.choose_final_bestmove(&state.position, Some(ci))
@@ -1141,6 +1221,85 @@ pub fn finalize_and_send(
                         ));
                         mate_post_reject = true;
                         mate_rejected = true;
+                    }
+                }
+            }
+        }
+
+        // 早期finalize連動: Post-VerifyがNGなら残りsoftで短時間延長→再判定し、必要なら最善再取得
+        if mate_post_reject && state.opts.post_verify_require_pass {
+            let remain_soft = stop_meta
+                .info
+                .as_ref()
+                .map(|si| si.soft_limit_ms.saturating_sub(si.elapsed_ms))
+                .unwrap_or(0);
+            let ext_ms = remain_soft.min(state.opts.post_verify_extend_ms);
+            if ext_ms >= 10 {
+                info_string(format!(
+                    "early_finalize_blocked=1 reason=postverify_reject extend_ms={} remain_soft_ms={}",
+                    ext_ms, remain_soft
+                ));
+                let mut pos = state.position.clone();
+                let limits = engine_core::search::SearchLimits::builder()
+                    .depth(1)
+                    .fixed_time_ms(ext_ms)
+                    .build();
+                if let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, 3) {
+                    let res2 = eng.search(&mut pos, limits);
+                    drop(eng);
+                    let mut reject_again = false;
+                    if is_mate_score(res2.score) {
+                        if let Some(bm2) = res2.best_move {
+                            let mut pos1 = state.position.clone();
+                            let _ = pos1.do_move(bm2);
+                            let mg = MoveGenerator::new();
+                            if let Ok(list2) = mg.generate_all(&pos1) {
+                                let in_check2 = pos1.is_in_check();
+                                let no_legal2 = list2.as_slice().is_empty();
+                                if !(in_check2 && no_legal2) {
+                                    reject_again = true;
+                                }
+                            }
+                        }
+                    }
+                    if !reject_again {
+                        info_string("early_finalize_recheck_pass=1");
+                        // TT更新後の最善を再取得
+                        let eng2 = state.lock_engine();
+                        final_best = eng2.choose_final_bestmove(&state.position, None);
+                    } else {
+                        info_string("early_finalize_recheck_fail=1");
+                    }
+                }
+            }
+        }
+
+        // 劣勢/終盤帯のVerify強化（限定ON）: スコアが一定以下なら小延長でTTを温め最善を再取得
+        if state.opts.post_verify {
+            let disadv = res.score <= state.opts.post_verify_disadvantage_cp;
+            if disadv {
+                let remain_soft = stop_meta
+                    .info
+                    .as_ref()
+                    .map(|si| si.soft_limit_ms.saturating_sub(si.elapsed_ms))
+                    .unwrap_or(0);
+                let ext_ms = (state.opts.post_verify_extend_ms / 2).max(10).min(remain_soft);
+                if ext_ms >= 10 {
+                    diag_info_string(format!(
+                        "postverify_strengthen=1 ext_ms={} remain_soft_ms={}",
+                        ext_ms, remain_soft
+                    ));
+                    let mut pos = state.position.clone();
+                    let limits = engine_core::search::SearchLimits::builder()
+                        .depth(1)
+                        .fixed_time_ms(ext_ms)
+                        .build();
+                    if let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, 3) {
+                        let _ = eng.search(&mut pos, limits);
+                        drop(eng);
+                        // TT更新後の最善を再取得
+                        let eng2 = state.lock_engine();
+                        final_best = eng2.choose_final_bestmove(&state.position, None);
                     }
                 }
             }
@@ -1614,7 +1773,9 @@ pub fn finalize_and_send_fast(
                         pv: Vec::new(),
                         source: FinalBestSource::Committed,
                     };
-                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None, None) {
+                    // ponderhitのcached経路でも near-draw 判定の一貫化のため score_hint=0 を与える
+                    if let Some(alt) = finalize_sanity_check(state, &stop_meta, &fb, None, Some(0))
+                    {
                         let new_usi = move_to_usi(&alt);
                         info_string("final_select_tags tags=sanity");
                         info_string("sanity_switch=1");
@@ -2088,7 +2249,9 @@ pub fn finalize_and_send_fast(
     if let (Some(final_best), Some(mut final_usi)) = (tt_final_best, tt_final_usi) {
         let mut ponder_mv = tt_ponder;
         let mut final_source = tt_source.unwrap_or(FinalBestSource::Committed);
-        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None, None) {
+        // TTのみのfast経路では cheap な score_hint を与える（±10 判定用）。
+        let score_hint = Some(0);
+        if let Some(alt) = finalize_sanity_check(state, &stop_meta, &final_best, None, score_hint) {
             let prev_usi = final_usi.clone();
             final_usi = move_to_usi(&alt);
             if state.opts.ponder {
@@ -2301,6 +2464,85 @@ fn choose_legal_fallback_with_see(
         .copied()
         .or_else(|| legal_moves.iter().find(|m| !is_king_move(pos, m)).copied())
         .or_else(|| legal_moves.first().copied())
+}
+
+/// SEE>=0 の制約をオプションで切り替えできる版（非玉のみ対象で使う想定）
+fn choose_legal_fallback_with_see_filtered(
+    pos: &engine_core::shogi::Position,
+    legal_moves: &[engine_core::shogi::Move],
+    allow_see_lt0: bool,
+) -> Option<engine_core::shogi::Move> {
+    if legal_moves.is_empty() {
+        return None;
+    }
+    // まずは SEE>=0 の候補（戦術優先→任意）
+    if let Some(mv) = legal_moves
+        .iter()
+        .copied()
+        .filter(|m| !is_king_move(pos, m))
+        .filter(is_tactical)
+        .map(|m| (m, pos.see(m)))
+        .filter(|&(_, s)| s >= 0)
+        .max_by_key(|&(_, s)| s)
+        .map(|(m, _)| m)
+    {
+        return Some(mv);
+    }
+    if let Some(mv) = legal_moves
+        .iter()
+        .copied()
+        .filter(|m| !is_king_move(pos, m))
+        .map(|m| (m, pos.see(m)))
+        .filter(|&(_, s)| s >= 0)
+        .max_by_key(|&(_, s)| s)
+        .map(|(m, _)| m)
+    {
+        return Some(mv);
+    }
+    if !allow_see_lt0 {
+        // SEE<0 を許容しない場合はここで打ち切り
+        return None;
+    }
+    // 以降は SEE サインを問わずに安全側を優先
+    legal_moves
+        .iter()
+        .find(|m| is_tactical(m) && !is_king_move(pos, m))
+        .copied()
+        .or_else(|| legal_moves.iter().find(|m| !is_king_move(pos, m)).copied())
+        .or_else(|| legal_moves.first().copied())
+}
+
+/// "安全手クラス"を選ぶための最終フォールバック（非玉限定）。
+/// allow_see_lt0=falseのときは SEE>=0 のみ、trueのときは負も可。
+fn choose_safe_nonking_fallback(
+    pos: &engine_core::shogi::Position,
+    legal_nonking: &[engine_core::shogi::Move],
+    allow_see_lt0: bool,
+) -> Option<engine_core::shogi::Move> {
+    // 非玉かつ SEE>=0 を優先
+    if let Some(mv) = legal_nonking
+        .iter()
+        .copied()
+        .map(|m| (m, pos.see(m)))
+        .filter(|&(_, s)| s >= 0)
+        .max_by_key(|&(_, s)| s)
+        .map(|(m, _)| m)
+    {
+        return Some(mv);
+    }
+    if allow_see_lt0 {
+        // SEE 制約を外して次点
+        if let Some(mv) = legal_nonking
+            .iter()
+            .copied()
+            .map(|m| (m, pos.see(m)))
+            .max_by_key(|&(_, s)| s)
+            .map(|(m, _)| m)
+        {
+            return Some(mv);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

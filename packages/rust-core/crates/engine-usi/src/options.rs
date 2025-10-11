@@ -214,6 +214,22 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         opts.y_drop_cp
     ));
     usi_println(&format!(
+        "option name PostVerify.RequirePass type check default {}",
+        if opts.post_verify_require_pass {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    usi_println(&format!(
+        "option name PostVerify.ExtendMs type spin default {} min 0 max 5000",
+        opts.post_verify_extend_ms
+    ));
+    usi_println(&format!(
+        "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
+        opts.post_verify_disadvantage_cp
+    ));
+    usi_println(&format!(
         "option name PromoteVerify type check default {}",
         if opts.promote_verify { "true" } else { "false" }
     ));
@@ -668,6 +684,11 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     state.opts.finalize_sanity_budget_ms = x.min(10);
                 }
             }
+            // Ensure MinMs <= BudgetMs
+            if state.opts.finalize_sanity_min_ms > state.opts.finalize_sanity_budget_ms {
+                state.opts.finalize_sanity_min_ms = state.opts.finalize_sanity_budget_ms;
+                info_string("finalize_minms_clamped=1");
+            }
             mark_override(state, "FinalizeSanity.BudgetMs");
         }
         "FinalizeSanity.MinMs" => {
@@ -675,6 +696,11 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 if let Ok(x) = v.parse::<u64>() {
                     state.opts.finalize_sanity_min_ms = x.min(10);
                 }
+            }
+            // Ensure MinMs <= BudgetMs
+            if state.opts.finalize_sanity_min_ms > state.opts.finalize_sanity_budget_ms {
+                state.opts.finalize_sanity_min_ms = state.opts.finalize_sanity_budget_ms;
+                info_string("finalize_minms_clamped=1");
             }
             mark_override(state, "FinalizeSanity.MinMs");
         }
@@ -966,6 +992,26 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
             mark_override(state, "PostVerify.YDrop");
+        }
+        "PostVerify.RequirePass" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.post_verify_require_pass = on;
+            }
+        }
+        "PostVerify.ExtendMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.post_verify_extend_ms = ms.min(5000);
+                }
+            }
+        }
+        "PostVerify.DisadvantageCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(cp) = v.parse::<i32>() {
+                    state.opts.post_verify_disadvantage_cp = cp.clamp(-10000, 0);
+                }
+            }
         }
         "PromoteVerify" => {
             if let Some(v) = value_ref {
@@ -1285,6 +1331,8 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 100);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 250);
+        set_if_absent("PostVerify.RequirePass", &mut || state.opts.post_verify_require_pass = true);
+        set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 200);
         set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
             state.opts.finalize_sanity_switch_margin_cp = 30
         });
@@ -1292,6 +1340,10 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
             state.opts.finalize_sanity_opp_see_min_cp = 100
         });
         set_if_absent("FinalizeSanity.BudgetMs", &mut || state.opts.finalize_sanity_budget_ms = 8);
+        // Adopt Perf profile for T8: KingAltMinGainCp=300
+        set_if_absent("FinalizeSanity.KingAltMinGainCp", &mut || {
+            state.opts.finalize_sanity_king_alt_min_gain_cp = 300
+        });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
     } else {
         // T1 profile

@@ -105,6 +105,12 @@ pub struct UsiOptions {
     pub x_see_cp: i32,
     // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
     pub post_verify: bool,
+    /// Early finalize linkage: require post-verify to pass; if reject, extend search briefly
+    pub post_verify_require_pass: bool,
+    /// Extend search time (ms) on post-verify reject (capped by remaining soft time)
+    pub post_verify_extend_ms: u64,
+    /// Strengthen post-verify when disadvantaged (score <= this)
+    pub post_verify_disadvantage_cp: i32,
     pub y_drop_cp: i32,
     // Promote vs. non-promote verify and small bias for promote
     pub promote_verify: bool,
@@ -130,7 +136,7 @@ impl Default for UsiOptions {
     fn default() -> Self {
         Self {
             hash_mb: 1024,
-            threads: 1,
+            threads: 8,
             ponder: true,
             engine_type: EngineType::Material,
             eval_file: None,
@@ -191,6 +197,9 @@ impl Default for UsiOptions {
             root_see_gate: true,
             x_see_cp: 100,
             post_verify: true,
+            post_verify_require_pass: true,
+            post_verify_extend_ms: 200,
+            post_verify_disadvantage_cp: -500,
             y_drop_cp: 250,
             promote_verify: false,
             promote_bias_cp: 20,
