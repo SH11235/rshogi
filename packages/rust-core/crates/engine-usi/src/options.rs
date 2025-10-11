@@ -1234,9 +1234,12 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     "RootSeeGate.XSEE",
                     "PostVerify",
                     "PostVerify.YDrop",
+                    "PostVerify.RequirePass",
+                    "PostVerify.ExtendMs",
                     "FinalizeSanity.SwitchMarginCp",
                     "FinalizeSanity.OppSEE_MinCp",
                     "FinalizeSanity.BudgetMs",
+                    "FinalizeSanity.KingAltMinGainCp",
                     "MultiPV",
                 ];
                 let mut cleared = 0usize;
@@ -1382,6 +1385,8 @@ pub fn log_effective_profile(state: &EngineState) {
         "RootSeeGate.XSEE",
         "PostVerify",
         "PostVerify.YDrop",
+        "PostVerify.RequirePass",
+        "PostVerify.ExtendMs",
         "FinalizeSanity.SwitchMarginCp",
         "FinalizeSanity.OppSEE_MinCp",
         "FinalizeSanity.BudgetMs",

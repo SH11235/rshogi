@@ -86,7 +86,7 @@ quit
   - `Profile.Mode`（combo: `Auto`/`T1`/`T8`/`Off`）
   - `Profile.ApplyAutoDefaults`（button）: 現在の `Profile.Mode` に基づく既定を適用（ユーザーが明示上書きしたキーは保持）
 - 有効値ログ（探索開始時に 1 行）
-  - `info string effective_profile mode=<Auto|T1|T8|Off> resolved=<T1|T8|-> threads=<n> multipv=<n> ... overrides=<...>`
+  - `info string effective_profile mode=<Auto|T1|T8|Off> resolved=<T1|T8|-> threads=<n> multipv=<n> root_see_gate= xsee= post_verify= ydrop= finalize_switch= finalize_oppsee= finalize_budget= t2_min= t2_beam_k= see_lt0_alt= king_alt_min= ... overrides=<...>`
 
 ### 既定値（2025-10-11 時点）
 
@@ -99,7 +99,7 @@ quit
 
 - Threads = 1（T1 = SetA）
   - RootSeeGate=On, `RootSeeGate.XSEE=100`
-  - PostVerify=Off
+  - PostVerify=On, `PostVerify.YDrop=225`
   - FinalizeSanity: `SwitchMarginCp=35`, `OppSEE_MinCp=120`, `BudgetMs=4`, `MinMs=2`
   - MultiPV=1
 
@@ -504,43 +504,3 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 
 MIT
 
-## Threads連動の自動既定（T1/T8プロファイル）
-
-探索開始時に `Threads` に応じた安全側の既定値を自動適用します。GUI/ユーザーが `setoption` で明示設定した値は最優先で、その項目には自動既定を上書きしません（干渉しません）。検索開始時には、実際に有効になっているプロファイルと主要パラメータを1行で出力します。
-
-- Threads ≥ 4（T8プロファイル）
-  - RootSeeGate=On, RootSeeGate.XSEE=100
-  - PostVerify=On, PostVerify.YDrop=250
-  - FinalizeSanity.SwitchMarginCp=30, FinalizeSanity.OppSEE_MinCp=100, FinalizeSanity.BudgetMs=8
-  - MultiPV=1
-- Threads = 1（T1プロファイル）
-  - RootSeeGate=On, RootSeeGate.XSEE=100
-  - PostVerify=On, PostVerify.YDrop=225
-  - FinalizeSanity.SwitchMarginCp=35, FinalizeSanity.OppSEE_MinCp=120, FinalizeSanity.BudgetMs=4
-  - MultiPV=1
-
-出力例（検索開始時）:
-
-```
-info string effective_profile mode=Auto resolved=T8 threads=8 multipv=1 \
-  root_see_gate=1 xsee=100 post_verify=1 ydrop=250 \
-  finalize_enabled=1 finalize_switch=30 finalize_oppsee=100 finalize_budget=8 \
-  overrides=- threads_overridden=0
-```
-
-Offモードの例（自動既定を無効化）:
-
-```
-info string effective_profile mode=Off resolved=- threads=8 multipv=1 \
-  root_see_gate=0 xsee=100 post_verify=0 ydrop=300 \
-  finalize_enabled=1 finalize_switch=30 finalize_oppsee=300 finalize_budget=2 \
-  overrides=RootSeeGate,PostVerify threads_overridden=1
-```
-
-備考:
-- すべてのオプションをGUIから明示的に`setoption`で流すタイプのGUIでは、自動既定は「そのままでは」当たりません。必要に応じて、以下のプロファイル操作を利用してください。
-  - `Profile.Mode`（Auto/T1/T8/Off）: 自動既定の適用モードを選択
-  - `Profile.ApplyAutoDefaults`（Button）: 主要キーの「ユーザー上書き」印をクリアし、選択中のプロファイルで自動既定を即時適用
-- 超短秒（≤2秒）の局面ではcpの悪化が出やすい既知の限界があります。今後、Root Post‑Verifyのqsearch化や、finalize時のscore整合、qsearchへの「条件付き・非捕獲成り」導入で改善予定です。
-
-秒読みの前倒しについて: `ByoyomiOverheadMs` は基礎オーバーヘッド（ネット/GUI遅延の見積り）、`ByoyomiDeadlineLeadMs` はその上に加えるリード（締切前倒し）として用いられます。純秒読み（`btime=wtime=0` かつ `byoyomi>0`）では両者の和を使って締切を計算し、`deadline_lead_applied=1` をログ出力します。
