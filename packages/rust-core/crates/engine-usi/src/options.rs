@@ -121,7 +121,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     ));
     usi_println("option name FinalizeSanity.MiniDepth type spin default 2 min 1 max 3");
     usi_println("option name FinalizeSanity.SEE_MinCp type spin default -90 min -1000 max 1000");
-    usi_println("option name FinalizeSanity.SwitchMarginCp type spin default 30 min 0 max 500");
+    usi_println(&format!(
+        "option name FinalizeSanity.SwitchMarginCp type spin default {} min 0 max 500",
+        opts.finalize_sanity_switch_margin_cp
+    ));
     usi_println("option name SearchParams.SafePruning type check default true");
     usi_println("option name SearchParams.QS_MarginCapture type spin default 150 min 0 max 5000");
     usi_println("option name SearchParams.QS_BadCaptureMin type spin default 450 min 0 max 5000");
@@ -164,11 +167,15 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         opts.finalize_sanity_opp_see_min_cp
     ));
     // Independent penalty cap for opponent capture SEE in finalize sanity
-    usi_println(
-        "option name FinalizeSanity.OppSEE_PenaltyCapCp type spin default 200 min 0 max 5000",
-    );
+    usi_println(&format!(
+        "option name FinalizeSanity.OppSEE_PenaltyCapCp type spin default {} min 0 max 5000",
+        opts.finalize_sanity_opp_see_penalty_cap_cp
+    ));
     // Symmetric check-move penalty for finalize sanity
-    usi_println("option name FinalizeSanity.CheckPenaltyCp type spin default 15 min 0 max 100");
+    usi_println(&format!(
+        "option name FinalizeSanity.CheckPenaltyCp type spin default {} min 0 max 100",
+        opts.finalize_sanity_check_penalty_cp
+    ));
     // Threat2 gate (opponent quiet -> capture) for finalize sanity
     usi_println(&format!(
         "option name FinalizeSanity.Threat2_MinCp type spin default {} min 0 max 5000",
@@ -1335,20 +1342,28 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
         set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 100);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
-        set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 250);
+        set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
         set_if_absent("PostVerify.RequirePass", &mut || state.opts.post_verify_require_pass = true);
-        set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 200);
+        set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 300);
         set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
-            state.opts.finalize_sanity_switch_margin_cp = 30
+            state.opts.finalize_sanity_switch_margin_cp = 40
         });
         set_if_absent("FinalizeSanity.OppSEE_MinCp", &mut || {
             state.opts.finalize_sanity_opp_see_min_cp = 100
         });
         set_if_absent("FinalizeSanity.BudgetMs", &mut || state.opts.finalize_sanity_budget_ms = 8);
         set_if_absent("FinalizeSanity.MinMs", &mut || state.opts.finalize_sanity_min_ms = 2);
-        // Adopt Perf profile for T8: KingAltMinGainCp=300
+        set_if_absent("FinalizeSanity.Threat2_MinCp", &mut || {
+            state.opts.finalize_threat2_min_cp = 200
+        });
+        set_if_absent("FinalizeSanity.Threat2_BeamK", &mut || {
+            state.opts.finalize_threat2_beam_k = 4
+        });
         set_if_absent("FinalizeSanity.KingAltMinGainCp", &mut || {
-            state.opts.finalize_sanity_king_alt_min_gain_cp = 300
+            state.opts.finalize_sanity_king_alt_min_gain_cp = 150
+        });
+        set_if_absent("FinalizeSanity.AllowSEElt0Alt", &mut || {
+            state.opts.finalize_allow_see_lt0_alt = false
         });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
     } else {
@@ -1357,14 +1372,28 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 100);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
+        set_if_absent("PostVerify.RequirePass", &mut || state.opts.post_verify_require_pass = true);
+        set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 300);
         set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
-            state.opts.finalize_sanity_switch_margin_cp = 35
+            state.opts.finalize_sanity_switch_margin_cp = 40
         });
         set_if_absent("FinalizeSanity.OppSEE_MinCp", &mut || {
             state.opts.finalize_sanity_opp_see_min_cp = 120
         });
         set_if_absent("FinalizeSanity.BudgetMs", &mut || state.opts.finalize_sanity_budget_ms = 4);
         set_if_absent("FinalizeSanity.MinMs", &mut || state.opts.finalize_sanity_min_ms = 2);
+        set_if_absent("FinalizeSanity.Threat2_MinCp", &mut || {
+            state.opts.finalize_threat2_min_cp = 200
+        });
+        set_if_absent("FinalizeSanity.Threat2_BeamK", &mut || {
+            state.opts.finalize_threat2_beam_k = 4
+        });
+        set_if_absent("FinalizeSanity.KingAltMinGainCp", &mut || {
+            state.opts.finalize_sanity_king_alt_min_gain_cp = 150
+        });
+        set_if_absent("FinalizeSanity.AllowSEElt0Alt", &mut || {
+            state.opts.finalize_allow_see_lt0_alt = false
+        });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
     }
 }
