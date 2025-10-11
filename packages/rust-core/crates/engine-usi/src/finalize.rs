@@ -232,10 +232,10 @@ fn finalize_sanity_check(
         info_string("sanity_skipped=1 reason=disabled");
         return None;
     }
-    // fast経路などで tm=hard / 残余<=MinMs の場合は Sanity を打たずに返す
+    // 時間ゲート: ハード締切までの残りで判断する（ソフト超過でも、ハードに十分余裕があれば最小検証を実施）
     if let Some(si) = stop_meta.info.as_ref() {
-        let remain_soft = si.soft_limit_ms.saturating_sub(si.elapsed_ms);
-        if si.hard_timeout || remain_soft <= state.opts.finalize_sanity_min_ms {
+        let remain_hard = si.hard_limit_ms.saturating_sub(si.elapsed_ms);
+        if si.hard_timeout || remain_hard <= state.opts.finalize_sanity_min_ms {
             info_string("sanity_skipped=1 reason=tm_hard");
             return None;
         }
@@ -469,7 +469,13 @@ fn finalize_sanity_check(
     }
     // 低リスク・ゲート: fast経路で、危険なし(need_verify=0) かつ PV1が玉手でない場合、
     // StopInfoが無くMinMsのみの実行(dynamic_budget=0)に限ってミニ検証を省略する。
-    if path_label == "fast" && dynamic_budget == 0 && !need_verify && !pv1_is_king {
+    // 追加ガード: pv1が王手になるときはスキップせず軽検証を行う（浅い王手バイアス抑制）
+    if path_label == "fast"
+        && dynamic_budget == 0
+        && !need_verify
+        && !pv1_is_king
+        && !state.position.gives_check(pv1)
+    {
         info_string(format!(
             "{} alt={} switched=0 reason=no_need_verify",
             diag_base,
@@ -1242,21 +1248,32 @@ pub fn finalize_and_send(
             if let Some(bm) = res.best_move {
                 let mut pos1 = state.position.clone();
                 let _ = pos1.do_move(bm);
+                // 合法回避手が0かを厳密に確認する
                 let mg = MoveGenerator::new();
+                let mut has_evasion = false;
                 if let Ok(list) = mg.generate_all(&pos1) {
-                    let in_check = pos1.is_in_check();
-                    let no_legal = list.as_slice().is_empty();
-                    if !(in_check && no_legal) {
-                        let dist = md(res.score).unwrap_or(0);
-                        info_string(format!(
-                            "mate_postverify_reject=1 replies={} in_check={} mate_dist={}",
-                            list.len(),
-                            in_check as u8,
-                            dist
-                        ));
-                        mate_post_reject = true;
-                        mate_rejected = true;
+                    for &mv in list.as_slice() {
+                        if !pos1.is_legal_move(mv) {
+                            continue;
+                        }
+                        let undo = pos1.do_move(mv);
+                        let still = pos1.is_in_check();
+                        pos1.undo_move(mv, undo);
+                        if !still {
+                            has_evasion = true;
+                            break;
+                        }
                     }
+                }
+                let forced_mate = pos1.is_in_check() && !has_evasion;
+                if !forced_mate {
+                    let dist = md(res.score).unwrap_or(0);
+                    info_string(format!(
+                        "mate_postverify_reject=1 evasion_exists={} mate_dist={}",
+                        has_evasion as u8, dist
+                    ));
+                    mate_post_reject = true;
+                    mate_rejected = true;
                 }
             }
         }
@@ -1287,13 +1304,25 @@ pub fn finalize_and_send(
                         if let Some(bm2) = res2.best_move {
                             let mut pos1 = state.position.clone();
                             let _ = pos1.do_move(bm2);
+                            // 合法回避が存在するか再確認
                             let mg = MoveGenerator::new();
+                            let mut has_evasion2 = false;
                             if let Ok(list2) = mg.generate_all(&pos1) {
-                                let in_check2 = pos1.is_in_check();
-                                let no_legal2 = list2.as_slice().is_empty();
-                                if !(in_check2 && no_legal2) {
-                                    reject_again = true;
+                                for &mv in list2.as_slice() {
+                                    if !pos1.is_legal_move(mv) {
+                                        continue;
+                                    }
+                                    let undo = pos1.do_move(mv);
+                                    let still = pos1.is_in_check();
+                                    pos1.undo_move(mv, undo);
+                                    if !still {
+                                        has_evasion2 = true;
+                                        break;
+                                    }
                                 }
+                            }
+                            if has_evasion2 || !pos1.is_in_check() {
+                                reject_again = true;
                             }
                         }
                     }
