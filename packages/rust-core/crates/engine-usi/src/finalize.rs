@@ -332,9 +332,13 @@ fn finalize_sanity_check(
     if need_verify_from_risks(opp_cap_see_max, opp_threat2_max, opp_gate, threat2_gate) {
         need_verify = true;
     }
-    // 極端なThreat2は例外的にSanityを起動（OR）
+    // 極端なThreat2は例外的にSanityを起動（OR）。ただし勝勢帯では無効化
     if opp_threat2_max >= state.opts.finalize_threat2_extreme_min_cp.max(0) {
-        need_verify = true;
+        let win_disable_cp = state.opts.finalize_threat2_extreme_win_disable_cp.max(0);
+        let win_hint_ok = score_hint.map(|s| s >= win_disable_cp).unwrap_or(false);
+        if !win_hint_ok {
+            need_verify = true;
+        }
     }
 
     // near-draw は現状ログ可視化のみ（±NEAR_DRAW_CP 近傍を簡易判定）。
@@ -386,11 +390,18 @@ fn finalize_sanity_check(
     } else {
         None
     };
-    // Special-case: PV1が「歩の非成り」かつ同一手の成りが合法なら、まず成り手を代替候補にする
+    // Special-case: PV1が「非成り」かつ同一手の成りが合法なら、まず成り手を代替候補にする（歩/R/B対応）
     if best_alt.is_none() {
         if let Some(from_sq) = pv1.from() {
             if let Some(piece) = state.position.board.piece_on(from_sq) {
-                if piece.piece_type == engine_core::shogi::PieceType::Pawn && !pv1.is_promote() {
+                if !pv1.is_promote()
+                    && (piece.piece_type == engine_core::shogi::PieceType::Pawn
+                        || matches!(
+                            piece.piece_type,
+                            engine_core::shogi::PieceType::Rook
+                                | engine_core::shogi::PieceType::Bishop
+                        ))
+                {
                     // 探索生成から“同一from/toでis_promote=true”の合法手を探す
                     let mgp = MoveGenerator::new();
                     if let Ok(listp) = mgp.generate_all(&state.position) {
@@ -462,13 +473,15 @@ fn finalize_sanity_check(
                 _ => Some((mv, s)),
             };
             // 非玉かつ“防御用の小幅負値”を許容するためのフロア（need_verify時のみ）
-            if need_verify && s >= state.opts.finalize_defense_see_neg_floor_cp
-                && !is_king_move(&state.position, &mv) {
-                    best_any_nonking_floor = match best_any_nonking_floor {
-                        Some((m, v)) if v >= s => Some((m, v)),
-                        _ => Some((mv, s)),
-                    };
-                }
+            if need_verify
+                && s >= state.opts.finalize_defense_see_neg_floor_cp
+                && !is_king_move(&state.position, &mv)
+            {
+                best_any_nonking_floor = match best_any_nonking_floor {
+                    Some((m, v)) if v >= s => Some((m, v)),
+                    _ => Some((mv, s)),
+                };
+            }
         }
     }
     if best_alt.is_none() {
@@ -648,19 +661,26 @@ fn finalize_sanity_check(
         opp_penalty = p;
     }
     let mut s1_adj = s1.saturating_sub(opp_penalty);
-    // PV1が歩の非成りで、同一手の成りが合法な場合は軽いペナルティを与え、成り手を選びやすくする
+    // 非成り抑制: PV1が「歩/飛/角」の非成りで、同一手の成りが合法なら軽いペナルティ
     const NONPROMOTE_PAWN_PENALTY_CP: i32 = 200;
+    let nonpromote_major_pen = state.opts.finalize_non_promote_major_penalty_cp.clamp(0, 300);
     if let Some(from_sq) = pv1.from() {
         if let Some(piece) = state.position.board.piece_on(from_sq) {
-            if piece.piece_type == engine_core::shogi::PieceType::Pawn && !pv1.is_promote() {
-                // “同一手の成り”が合法に存在する場合のみ軽ペナルティ（既存の合法手listを再利用）
+            if !pv1.is_promote() {
                 let exists = list.as_slice().iter().copied().any(|m| {
                     m.is_promote()
                         && m.equals_without_piece_type(&pv1)
                         && state.position.is_legal_move(m)
                 });
                 if exists {
-                    s1_adj = s1_adj.saturating_sub(NONPROMOTE_PAWN_PENALTY_CP);
+                    if piece.piece_type == engine_core::shogi::PieceType::Pawn {
+                        s1_adj = s1_adj.saturating_sub(NONPROMOTE_PAWN_PENALTY_CP);
+                    } else if matches!(
+                        piece.piece_type,
+                        engine_core::shogi::PieceType::Rook | engine_core::shogi::PieceType::Bishop
+                    ) {
+                        s1_adj = s1_adj.saturating_sub(nonpromote_major_pen);
+                    }
                 }
             }
         }
@@ -699,6 +719,34 @@ fn finalize_sanity_check(
     // --- King-alt guard (non-check): 非チェック時に玉の手への切替を原則禁止 ---
     let alt_is_king = is_king_move(&state.position, &alt);
     let mut s2_eff = s2_raw;
+    // alt 側が非成り（歩/飛/角）で同一成りが合法なら軽ペナルティ
+    if let Some(from_sq) = alt.from() {
+        if let Some(piece) = state.position.board.piece_on(from_sq) {
+            if !alt.is_promote() {
+                let mgp = MoveGenerator::new();
+                if let Ok(listp) = mgp.generate_all(&state.position) {
+                    let exists = listp.as_slice().iter().copied().any(|m| {
+                        m.is_promote()
+                            && m.equals_without_piece_type(&alt)
+                            && state.position.is_legal_move(m)
+                    });
+                    if exists {
+                        if piece.piece_type == engine_core::shogi::PieceType::Pawn {
+                            s2_eff = s2_eff.saturating_sub(NONPROMOTE_PAWN_PENALTY_CP);
+                        } else if matches!(
+                            piece.piece_type,
+                            engine_core::shogi::PieceType::Rook
+                                | engine_core::shogi::PieceType::Bishop
+                        ) {
+                            let pen =
+                                state.opts.finalize_non_promote_major_penalty_cp.clamp(0, 300);
+                            s2_eff = s2_eff.saturating_sub(pen);
+                        }
+                    }
+                }
+            }
+        }
+    }
     if alt_is_king && !in_check_now {
         let kap = state.opts.finalize_sanity_king_alt_penalty_cp.max(0);
         if kap > 0 {
@@ -850,36 +898,74 @@ fn finalize_sanity_check(
             }
         }
     }
-    let switched = s2_eff > s1_adj + switch_margin;
-    if switched {
-        info_string(format!(
-            "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={}",
-            diag_base,
-            move_to_usi(&alt),
-            s1,
-            s1_adj,
-            s2_eff,
-            switch_margin,
-            if alt_from_pv2 { "pv2" } else if pv2_illegal { "pv2_illegal->see_best" } else { "see_best" },
-            total_budget,
-            OPP_SEE_PENALTY_NUM,
-            OPP_SEE_PENALTY_DEN,
-            pv1_check_flag as i32,
-            alt_check_flag as i32,
-            opp_cap_see_max,
-            opp_threat2_max,
-        ));
-        // 差し替え確定時は軽い評価行を1本だけ出力してGUI乖離を軽減
-        let mut line = String::from("info depth 1 score ");
-        append_usi_score_and_bound(
-            &mut line,
-            engine_core::usi::ScoreView::Cp(s2_eff),
-            NodeType::Exact,
+    let would_switch = s2_eff > s1_adj + switch_margin;
+    // 置換前後のリスク比較（alt採用前チェック）
+    let mut switched = false;
+    if would_switch {
+        let risk_before = opp_cap_see_max.max(opp_threat2_max);
+        let (opp_cap_after, opp_t2_after) = compute_risks_after_move(
+            &state.position,
+            alt,
+            state.opts.finalize_threat2_beam_k as usize,
         );
-        line.push_str(" pv ");
-        line.push_str(&move_to_usi(&alt));
-        usi_println(&line);
-    } else {
+        let risk_after = opp_cap_after.max(opp_t2_after);
+        let delta = risk_before.saturating_sub(risk_after);
+        let gate_ok = opp_cap_after < opp_gate_dbg && opp_t2_after < threat2_gate;
+        let delta_ok = delta >= state.opts.finalize_risk_min_delta_cp.max(0);
+        switched = gate_ok || delta_ok;
+        if !switched {
+            info_string(format!(
+                "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={} risk_before={} risk_after={} risk_drop={} reason=no_risk_drop",
+                diag_base,
+                move_to_usi(&alt),
+                s1,
+                s1_adj,
+                s2_eff,
+                switch_margin,
+                OPP_SEE_PENALTY_NUM,
+                OPP_SEE_PENALTY_DEN,
+                pv1_check_flag as i32,
+                alt_check_flag as i32,
+                opp_cap_see_max,
+                opp_threat2_max,
+                risk_before,
+                risk_after,
+                delta
+            ));
+        } else {
+            info_string(format!(
+                "{} alt={} s1={} s1_adj={} s2={} margin={} switched=1 origin={} total_budget_ms={} lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={} risk_before={} risk_after={} risk_drop={}",
+                diag_base,
+                move_to_usi(&alt),
+                s1,
+                s1_adj,
+                s2_eff,
+                switch_margin,
+                if alt_from_pv2 { "pv2" } else if pv2_illegal { "pv2_illegal->see_best" } else { "see_best" },
+                total_budget,
+                OPP_SEE_PENALTY_NUM,
+                OPP_SEE_PENALTY_DEN,
+                pv1_check_flag as i32,
+                alt_check_flag as i32,
+                opp_cap_see_max,
+                opp_threat2_max,
+                risk_before,
+                risk_after,
+                delta
+            ));
+            // 差し替え確定時は軽い評価行を1本だけ出力してGUI乖離を軽減
+            let mut line = String::from("info depth 1 score ");
+            append_usi_score_and_bound(
+                &mut line,
+                engine_core::usi::ScoreView::Cp(s2_eff),
+                NodeType::Exact,
+            );
+            line.push_str(" pv ");
+            line.push_str(&move_to_usi(&alt));
+            usi_println(&line);
+        }
+    }
+    if !switched {
         info_string(format!(
             "{} alt={} s1={} s1_adj={} s2={} margin={} switched=0 lambda={}/{} pv1_check={} alt_check={} opp_cap={} opp_t2={}",
             diag_base,
@@ -903,6 +989,66 @@ fn finalize_sanity_check(
     }
 }
 
+fn compute_risks_after_move(
+    pos: &engine_core::shogi::Position,
+    mv: engine_core::shogi::Move,
+    beam_k: usize,
+) -> (i32, i32) {
+    let mut pos1 = pos.clone();
+    pos1.do_move(mv);
+    let mg = MoveGenerator::new();
+    let mut opp_cap_see_max = 0;
+    let mut opp_threat2_max = 0;
+    if let Ok(list2) = mg.generate_all(&pos1) {
+        for &m in list2.as_slice() {
+            if m.is_capture_hint() && pos1.is_legal_move(m) {
+                let g = pos1.see(m);
+                if g > opp_cap_see_max {
+                    opp_cap_see_max = g;
+                }
+            }
+        }
+        // Threat2 approximation: quiet then capture after null
+        let mut quiets: Vec<_> = list2
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|m| !m.is_capture_hint() && pos1.is_legal_move(*m))
+            .collect();
+        const THREAT2_PROMO_DELTA: i32 = 300;
+        quiets.sort_by_key(|m| {
+            let mut key = 0i32;
+            if pos1.gives_check(*m) {
+                key += 2000;
+            }
+            if m.is_promote() {
+                key += 1000 + THREAT2_PROMO_DELTA;
+            }
+            key += 5 * pos1.see(*m).max(0);
+            Reverse(key)
+        });
+        for &mq in quiets.iter().take(beam_k.max(1)) {
+            let mut pq = pos1.clone();
+            pq.do_move(mq);
+            if pq.is_in_check() {
+                continue;
+            }
+            let undo = pq.do_null_move();
+            if let Ok(listc) = mg.generate_all(&pq) {
+                for &mc in listc.as_slice() {
+                    if mc.is_capture_hint() && pq.is_legal_move(mc) {
+                        let g2 = pq.see(mc);
+                        if g2 > opp_threat2_max {
+                            opp_threat2_max = g2;
+                        }
+                    }
+                }
+            }
+            pq.undo_null_move(undo);
+        }
+    }
+    (opp_cap_see_max, opp_threat2_max)
+}
 fn prepare_stop_meta(
     _label: &str,
     controller_info: Option<StopInfo>,
@@ -1294,8 +1440,14 @@ pub fn finalize_and_send(
                     res.stats.elapsed.as_millis(),
                     dist
                 ));
-                mate_gate_blocked = true;
-                mate_rejected = true;
+                // 距離1はゲート免除（必ずCheckOnlyのpost-verifyを実施）
+                if dist <= 1 {
+                    mate_gate_blocked = false;
+                    mate_rejected = false;
+                } else {
+                    mate_gate_blocked = true;
+                    mate_rejected = true;
+                }
             }
         }
     }
@@ -2096,7 +2248,7 @@ pub fn finalize_and_send_fast(
                             snap.elapsed_ms,
                             dist
                         ));
-                        blocked_by_mate_gate = true;
+                        blocked_by_mate_gate = dist > 1; // 距離1は免除
                     }
                 }
 

@@ -79,15 +79,21 @@ pub struct UsiOptions {
     pub finalize_threat2_beam_k: u8,
     /// 二手脅威(quiet→capture)が極端に大きい場合に例外的にSanityを起動するゲート（cp相当）
     pub finalize_threat2_extreme_min_cp: i32,
+    /// 勝勢帯では「極端Threat2の例外OR」を無効化するためのしきい値（cp）。既定=+800。
+    pub finalize_threat2_extreme_win_disable_cp: i32,
     /// 代替手で SEE<0 の手を許容するか（falseで禁止）
     pub finalize_allow_see_lt0_alt: bool,
     /// 高リスク時の“受け”候補として許容する SEE マイナス閾値（cp）。
     /// need_verify=1 のときのみ適用。例: -120 なら小さな損の受けを拾う。
     pub finalize_defense_see_neg_floor_cp: i32,
+    /// 置換前後のリスク差分（risk_before − risk_after）の最小要求値（cp）。既定=100。
+    pub finalize_risk_min_delta_cp: i32,
     /// 非チェック時に玉の手へ切替を許可するために必要な最小利得（cp）。満たさなければ拒否。
     pub finalize_sanity_king_alt_min_gain_cp: i32,
     /// 非チェック時に代替が玉の手なら s2 に加える小ペナルティ（cp）。
     pub finalize_sanity_king_alt_penalty_cp: i32,
+    /// R/B 非成りに与える軽ペナルティ（cp）
+    pub finalize_non_promote_major_penalty_cp: i32,
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
@@ -185,10 +191,13 @@ impl Default for UsiOptions {
             finalize_threat2_min_cp: 200,
             finalize_threat2_beam_k: 4,
             finalize_threat2_extreme_min_cp: 700,
+            finalize_threat2_extreme_win_disable_cp: 800,
             finalize_allow_see_lt0_alt: false,
             finalize_defense_see_neg_floor_cp: -120,
+            finalize_risk_min_delta_cp: 100,
             finalize_sanity_king_alt_min_gain_cp: 150,
             finalize_sanity_king_alt_penalty_cp: 0,
+            finalize_non_promote_major_penalty_cp: 120,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             // より安全側に倒す（PV全体を確認）
