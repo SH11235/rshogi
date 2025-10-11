@@ -514,7 +514,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     "Enhanced" => EngineType::Enhanced,
                     "Nnue" => EngineType::Nnue,
                     "EnhancedNnue" => EngineType::EnhancedNnue,
-                    _ => EngineType::Material,
+                    _ => EngineType::Enhanced,
                 };
                 state.opts.engine_type = et;
             }
