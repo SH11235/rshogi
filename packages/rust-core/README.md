@@ -119,7 +119,7 @@ quit
 
 - near-draw 帯でも「玉手の軽ガード」は常時有効（PV1=玉手/代替=玉手）。
 - King‑alt（非チェック時の玉手抑制）/ 非玉再探索 /（高リスク時の）no_publish 安全弁を実装。
-- fast 経路（TT/ponderhit）でも `score_hint` により near‑draw 判定を統一。
+- fast 経路（TT/ponderhit）でも `score_hint` により near‑draw 判定を統一（現状は±10cpの近似でログ可視化のみ）。
 - Threat2（相手 quiet→捕獲）の優先度へ昇格寄与（+300）を小さく追加。
 
 既知の限界: 超短秒（≲2s）や大劣勢・必至近傍では finalize 層のみで形勢は改善できません。次版で Root Post‑Verify の qsearch 化／早期 finalize と Post‑Verify の連動強化を検討しています。
@@ -254,38 +254,7 @@ setoption name InstantMateMove.MinRespectMs value 8
 setoption name InstantMateMove.Enabled value false
 ```
 
-### Threads連動の自動既定（T8/T1 プロファイル）
-
-エンジンは `Threads` を見て、対局安全寄りの既定（プロファイル）を自動で適用します。GUI から明示の `setoption` があればそれを最優先し、自動既定は上書きしません。
-
-- 適用条件（Profile.Mode=Auto の既定）
-  - `Threads ≥ 4` → T8 プロファイル
-  - `Threads = 1` → T1 プロファイル
-
-- 既定値（要点のみ）
-  - T8（Threads≥4）
-    - RootSeeGate=On（XSEE=100）
-    - PostVerify=On（YDrop=250）
-    - Finalize: SwitchMargin=30 / OppSEE_Min=100 / BudgetMs=8
-    - MultiPV=1
-  - T1（Threads=1）
-    - RootSeeGate=On（XSEE=100）
-    - PostVerify=On（YDrop=225）
-    - Finalize: SwitchMargin=35 / OppSEE_Min=120 / BudgetMs=4
-    - MultiPV=1
-
-- ログ（探索開始時）
-
-```text
-info string effective_profile mode=Auto resolved=T8 threads=8 multipv=1 \
-  root_see_gate=1 xsee=100 post_verify=1 ydrop=250 \
-  finalize_enabled=1 finalize_switch=30 finalize_oppsee=100 finalize_budget=8 \
-  overrides=- threads_overridden=0
-```
-
-メモ:
-- `effective_profile` は「最終的に有効な設定」を1行で可視化します。GUIの `setoption` で上書きされたキーは `overrides` に列挙されます。
-- `Profile.Mode` を `T1`/`T8`/`Off` に切り替えることで、自動既定を明示固定または無効化できます。
+<!-- 重複していた Threads連動の自動既定（T8/T1 プロファイル）の下段セクションを削除。上段（本README前半）の記述を正とします。 -->
 
 ## Building
 
@@ -503,4 +472,3 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 ## License
 
 MIT
-
