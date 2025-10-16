@@ -330,13 +330,31 @@ where
                 }
             }
         }
+        // Remove any workers whose handles have been taken (dead or timing-out workers).
+        // This ensures resize() will correctly spawn replacements next time.
+        self.workers.retain(|w| w.handle.is_some());
         joined
     }
 
     /// Convenience: cancel all workers and wait for up to `timeout` for them to exit.
     pub fn cancel_all_join(&mut self, timeout: std::time::Duration) -> usize {
         self.cancel_all();
-        self.join_with_timeout(timeout)
+        let joined = self.join_with_timeout(timeout);
+        // Double-guard: in case of future changes, ensure no dead entries remain.
+        self.workers.retain(|w| w.handle.is_some());
+        // Best-effort: lightly drain both queues to avoid holding onto stale Sender clones
+        // from the canceled session. Keep bounded to avoid long blocking.
+        for _ in 0..1024 {
+            if self.task_hi_rx.try_recv().is_err() {
+                break;
+            }
+        }
+        for _ in 0..1024 {
+            if self.task_rx.try_recv().is_err() {
+                break;
+            }
+        }
+        joined
     }
 }
 
@@ -689,5 +707,52 @@ mod tests {
         // Worker should have compensated elapsed and refreshed nps.
         assert!(result.stats.elapsed.as_nanos() > 0, "elapsed should be non-zero");
         assert!(result.nps > 0, "nps should be refreshed and positive");
+    }
+
+    /// After cancel_all_join(), dead workers must be removed so that a subsequent
+    /// resize() can respawn helper threads. This test verifies that helpers
+    /// resume functioning in the next run.
+    #[test]
+    fn cancel_then_resize_recreates_workers() {
+        let backend = Arc::new(ClassicBackend::with_tt(
+            Arc::new(MaterialEvaluator),
+            Arc::new(TranspositionTable::new(2)),
+        ));
+        let mut pool = ThreadPool::new(backend, 2);
+
+        // Cancel helpers and join with a small timeout; pool should drop dead entries.
+        let _ = pool.cancel_all_join(std::time::Duration::from_millis(300));
+
+        // Now ask for 2 helpers again; this should respawn workers.
+        pool.resize(2);
+
+        // Dispatch two small jobs and ensure we receive two results.
+        let (tx, rx) = mpsc::channel();
+        let pos = crate::shogi::Position::startpos();
+
+        let mk_job = || {
+            let tl = TimeLimits {
+                time_control: TMTimeControl::FixedNodes { nodes: 128 },
+                ..Default::default()
+            };
+            let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+            let mut limits = SearchLimitsBuilder::default().fixed_nodes(128).depth(2).build();
+            limits.time_manager = Some(Arc::new(tm));
+            SearchJob {
+                position: pos.clone(),
+                limits,
+            }
+        };
+
+        pool.dispatch(vec![mk_job(), mk_job()], &tx);
+
+        let mut received = 0usize;
+        while received < 2 {
+            let (_wid, res) = rx.recv().expect("result");
+            assert!(res.stats.nodes > 0);
+            received += 1;
+        }
+
+        assert_eq!(received, 2);
     }
 }
