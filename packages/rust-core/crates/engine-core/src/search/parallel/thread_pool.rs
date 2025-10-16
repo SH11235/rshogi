@@ -187,6 +187,20 @@ where
     }
 
     pub fn resize(&mut self, desired: usize) {
+        // Normalize worker list: if any dead entries (handle.is_none()) remain for any reason,
+        // drop them so the length check below reflects actual live workers.
+        // Do a fast pre-scan to avoid retain() when not needed.
+        let mut found_dead = false;
+        for w in &self.workers {
+            if w.handle.is_none() {
+                found_dead = true;
+                break;
+            }
+        }
+        if found_dead {
+            self.workers.retain(|w| w.handle.is_some());
+        }
+
         while self.workers.len() < desired {
             let id = self.workers.len() + 1; // helper ids start at 1 (0 is main thread)
             let backend = Arc::clone(&self.backend);
