@@ -824,9 +824,14 @@ impl Evaluator for RecordingEvaluator {
 #[test]
 fn evaluator_hooks_balance_for_classic_backend() {
     // NMPの有効/無効を他テストが変更中でないことを保証
-    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap();
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    // ランタイム既定値を明示的に適用してテストを安定化
+    crate::search::params::__test_reset_runtime_values();
     let evaluator = Arc::new(RecordingEvaluator::default());
-    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let backend = ClassicBackend::with_profile_apply_defaults(
+        Arc::clone(&evaluator),
+        SearchProfile::enhanced(),
+    );
 
     // 初期局面を使用（探索枝が豊富で、NMPが確実に発動する）
     let pos = Position::startpos();
@@ -1256,7 +1261,9 @@ fn fixed_time_limit_lead_window_notifies_finalize_once() {
 #[test]
 fn null_move_respects_runtime_toggle() {
     // ランタイムトグルを変更するため、他テストと排他にする
-    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap();
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    // 念のため既定値にリセットしてからトグル操作
+    crate::search::params::__test_reset_runtime_values();
     let evaluator = Arc::new(MaterialEvaluator);
     let backend =
         ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
