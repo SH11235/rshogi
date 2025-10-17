@@ -31,6 +31,9 @@ plotters = { version = "0.3", optional = true }
 once_cell = { workspace = true }
 jsonschema = { version = "0.17", features = ["draft202012"] }
 bincode = "1.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "charset", "deflate", "gzip"] }
+url = "2.5"
+walkdir = "2.5"
 
 [features]
 default = []
