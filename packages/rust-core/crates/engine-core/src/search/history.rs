@@ -68,6 +68,32 @@ impl CounterMoveHistory {
     pub fn clear(&mut self) {
         self.table = [[[None; SHOGI_BOARD_SIZE]; COUNTER_FROM_DIM]; 2];
     }
+
+    pub(crate) fn merge_from(&mut self, other: &Self) {
+        for color in 0..2 {
+            for from in 0..COUNTER_FROM_DIM {
+                for to in 0..SHOGI_BOARD_SIZE {
+                    if self.table[color][from][to].is_none() {
+                        self.table[color][from][to] = other.table[color][from][to];
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn filled_count(&self) -> u32 {
+        let mut count = 0u32;
+        for color in 0..2 {
+            for from in 0..COUNTER_FROM_DIM {
+                for to in 0..SHOGI_BOARD_SIZE {
+                    if self.table[color][from][to].is_some() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
 }
 
 #[inline]
@@ -159,6 +185,35 @@ impl ButterflyHistory {
     /// Clear all history scores
     pub fn clear(&mut self) {
         self.scores = [[[0; SHOGI_BOARD_SIZE]; BUTTERFLY_FROM_DIM]; 2];
+    }
+
+    pub(crate) fn merge_from(&mut self, other: &Self) {
+        for color in 0..2 {
+            for from in 0..BUTTERFLY_FROM_DIM {
+                for to in 0..SHOGI_BOARD_SIZE {
+                    merge_history_value(
+                        &mut self.scores[color][from][to],
+                        other.scores[color][from][to],
+                        QUIET_HISTORY_MAX,
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn max_abs(&self) -> i16 {
+        let mut max_val = 0i16;
+        for color in 0..2 {
+            for from in 0..BUTTERFLY_FROM_DIM {
+                for to in 0..SHOGI_BOARD_SIZE {
+                    let val = self.scores[color][from][to].abs();
+                    if val > max_val {
+                        max_val = val;
+                    }
+                }
+            }
+        }
+        max_val
     }
 }
 
@@ -292,6 +347,16 @@ impl ContinuationHistory {
     pub fn clear(&mut self) {
         self.scores.fill(0);
     }
+
+    pub(crate) fn merge_from(&mut self, other: &Self) {
+        for (dst, src) in self.scores.iter_mut().zip(&other.scores) {
+            merge_history_value(dst, *src, CONT_HISTORY_MAX);
+        }
+    }
+
+    pub(crate) fn max_abs(&self) -> i16 {
+        self.scores.iter().map(|v| v.abs()).max().unwrap_or(0)
+    }
 }
 
 /// Capture history - tracks success of captures by attacker/victim/to square
@@ -372,6 +437,39 @@ impl CaptureHistory {
                 }
             }
         }
+    }
+
+    pub(crate) fn merge_from(&mut self, other: &Self) {
+        for color in 0..2 {
+            for attacker in 0..NUM_PIECE_TYPES {
+                for victim in 0..NUM_PIECE_TYPES {
+                    for to in 0..SHOGI_BOARD_SIZE {
+                        merge_history_value(
+                            &mut self.scores[color][attacker][victim][to],
+                            other.scores[color][attacker][victim][to],
+                            CAP_HISTORY_MAX,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn max_abs(&self) -> i16 {
+        let mut max_val = 0i16;
+        for color in 0..2 {
+            for attacker in 0..NUM_PIECE_TYPES {
+                for victim in 0..NUM_PIECE_TYPES {
+                    for to in 0..SHOGI_BOARD_SIZE {
+                        let val = self.scores[color][attacker][victim][to].abs();
+                        if val > max_val {
+                            max_val = val;
+                        }
+                    }
+                }
+            }
+        }
+        max_val
     }
 }
 
@@ -521,6 +619,15 @@ fn age_value(value: &mut i16, shift: u32) {
     let delta = current >> shift;
     let next = current - delta;
     *value = next as i16;
+}
+
+fn merge_history_value(target: &mut i16, other: i16, max: i16) {
+    if other == 0 {
+        return;
+    }
+    let sum = i32::from(*target) + i32::from(other);
+    let limit = i32::from(max);
+    *target = sum.clamp(-limit, limit) as i16;
 }
 
 #[cfg(test)]

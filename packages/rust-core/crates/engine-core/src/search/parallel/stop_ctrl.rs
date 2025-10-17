@@ -20,10 +20,18 @@ pub enum FinalizeReason {
     NearHard,
     /// Planned rounded stop time reached/near
     Planned,
+    /// Planned stop due to detected short mate (distance <= K)
+    ///
+    /// Carries mate distance (plies, positive when we mate the opponent) and whether
+    /// the session was in ponder mode when triggered. Treated similarly to Planned
+    /// for priority and StopInfo semantics; primarily used for diagnostics.
+    PlannedMate { distance: i32, was_ponder: bool },
     /// Generic time-manager stop (e.g., node limit or emergency)
     TimeManagerStop,
     /// User/GUI stop propagation (for consistency)
     UserStop,
+    /// Ponder to move transition (ponderhit with search already completed)
+    PonderToMove,
 }
 
 /// Messages delivered to the USI layer to coordinate exactly-once bestmove emission.
@@ -125,7 +133,10 @@ impl StopController {
         match reason {
             FinalizeReason::Hard => 5,
             FinalizeReason::NearHard => 4,
+            // Treat PlannedMate a bit higher than generic Planned to preempt lower-priority caps
+            FinalizeReason::PlannedMate { .. } => 4,
             FinalizeReason::Planned => 3,
+            FinalizeReason::PonderToMove => 3,
             FinalizeReason::TimeManagerStop => 2,
             FinalizeReason::UserStop => 1,
         }
@@ -235,9 +246,12 @@ impl StopController {
             FinalizeReason::Hard => {
                 si.reason = TerminationReason::TimeLimit;
                 si.hard_timeout = true;
+                si.stop_tag = Some("hard_deadline".to_string());
             }
             FinalizeReason::NearHard
             | FinalizeReason::Planned
+            | FinalizeReason::PlannedMate { .. }
+            | FinalizeReason::PonderToMove
             | FinalizeReason::TimeManagerStop => {
                 si.reason = TerminationReason::TimeLimit;
                 si.hard_timeout = false;
@@ -246,6 +260,10 @@ impl StopController {
                 si.reason = TerminationReason::UserStop;
                 si.hard_timeout = false;
             }
+        }
+        // Attach a diagnostic tag for PlannedMate if available
+        if let FinalizeReason::PlannedMate { distance, .. } = reason {
+            si.stop_tag = Some(format!("planned_mate K={}", distance));
         }
         *guard = Some(si);
     }
@@ -727,6 +745,58 @@ mod tests {
     }
 
     #[test]
+    fn root_snapshot_progress_is_monotonic() {
+        use crate::search::types::{Bound, RootLine};
+        use crate::shogi::Move;
+        use smallvec::SmallVec;
+
+        let ctrl = StopController::new();
+        ctrl.publish_session(None, 77);
+        ctrl.prime_stop_info(StopInfo::default());
+
+        let mut pv = SmallVec::<[Move; 32]>::new();
+        pv.push(Move::null());
+
+        let make_line = |depth: u32, nodes: u64, time_ms: u64| RootLine {
+            multipv_index: 1,
+            root_move: Move::null(),
+            score_internal: 0,
+            score_cp: 32,
+            bound: Bound::Exact,
+            depth,
+            seldepth: Some(depth as u8),
+            pv: pv.clone(),
+            nodes: Some(nodes),
+            time_ms: Some(time_ms),
+            nps: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
+        let updates = [(8, 1_000u64, 20u64), (12, 5_000, 60), (15, 12_000, 120)];
+        let mut last_depth = 0;
+        let mut last_nodes = 0;
+        let mut last_time = 0;
+
+        for (depth, nodes, elapsed) in updates {
+            ctrl.publish_root_line(77, 0xAA55_AA55, &make_line(depth, nodes, elapsed));
+            let snapshot = ctrl.try_read_snapshot().expect("snapshot present");
+            assert!(snapshot.depth >= last_depth);
+            assert!(snapshot.nodes >= last_nodes);
+            assert!(snapshot.elapsed_ms >= last_time);
+            last_depth = snapshot.depth;
+            last_nodes = snapshot.nodes;
+            last_time = snapshot.elapsed_ms;
+
+            let stop_info = ctrl.try_read_stop_info().expect("stop info present");
+            assert!(stop_info.depth_reached >= last_depth);
+            assert!(stop_info.nodes >= last_nodes);
+            assert!(stop_info.elapsed_ms >= last_time);
+        }
+    }
+
+    #[test]
     fn request_stop_flag_only_keeps_stop_info_reason() {
         let ctrl = StopController::new();
         let info = StopInfo {
@@ -856,6 +926,65 @@ mod tests {
             assert_eq!(info.nodes, 100);
             assert_eq!(info.elapsed_ms, 40);
         }
+    }
+
+    #[test]
+    fn request_finalize_planned_mate_sets_time_limit_non_hard() {
+        use crate::search::types::TerminationReason;
+        let ctrl = StopController::new();
+        let external = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&external), 2025);
+        // Prime a default StopInfo so request_finalize updates fields
+        ctrl.prime_stop_info(StopInfo::default());
+
+        ctrl.request_finalize(FinalizeReason::PlannedMate {
+            distance: 1,
+            was_ponder: false,
+        });
+
+        let info = ctrl.try_read_stop_info().expect("stop info present");
+        assert_eq!(info.reason, TerminationReason::TimeLimit);
+        assert!(!info.hard_timeout);
+        // Stop tag should record planned_mate with distance
+        assert!(
+            info.stop_tag.as_deref().unwrap_or("").contains("planned_mate"),
+            "stop_tag should contain planned_mate"
+        );
+        // External stop flag should be set
+        assert!(external.load(AtomicOrdering::Acquire));
+    }
+
+    #[test]
+    fn planned_mate_tag_is_overwritten_by_hard() {
+        use crate::search::types::TerminationReason;
+        use std::sync::mpsc;
+
+        let ctrl = StopController::new();
+        let (tx, rx) = mpsc::channel();
+        ctrl.register_finalizer(tx);
+        let external = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&external), 1);
+        // Drain SessionStart
+        let _ = rx.recv();
+        ctrl.prime_stop_info(StopInfo::default());
+
+        ctrl.request_finalize(FinalizeReason::PlannedMate {
+            distance: 1,
+            was_ponder: false,
+        });
+        let _ = rx.recv();
+        {
+            let info = ctrl.try_read_stop_info().expect("present");
+            assert_eq!(info.reason, TerminationReason::TimeLimit);
+            assert!(info.stop_tag.as_deref().unwrap_or("").contains("planned_mate"));
+        }
+
+        // Hard should overwrite tag to hard_deadline
+        ctrl.request_finalize(FinalizeReason::Hard);
+        let _ = rx.recv();
+        let info = ctrl.try_read_stop_info().expect("present");
+        assert_eq!(info.reason, TerminationReason::TimeLimit);
+        assert_eq!(info.stop_tag.as_deref(), Some("hard_deadline"));
     }
 
     #[test]

@@ -78,6 +78,55 @@ quit
 
 ### Performance Build & Features
 
+## Threads連動の自動既定（T8/T1 プロファイル）
+
+エンジンはスレッド数に応じた安全既定（プロファイル）を起動時に自動適用します。GUI が全 `setoption` を送るタイプでも、プロファイル機能で安全既定を明示適用できます。
+
+- プロファイル切替（USIオプション）
+  - `Profile.Mode`（combo: `Auto`/`T1`/`T8`/`Off`）
+  - `Profile.ApplyAutoDefaults`（button）: 現在の `Profile.Mode` に基づく既定を適用（ユーザーが明示上書きしたキーは保持）
+- 有効値ログ（探索開始時に 1 行）
+  - `info string effective_profile mode=<Auto|T1|T8|Off> resolved=<T1|T8|-> threads=<n> multipv=<n> root_see_gate= xsee= post_verify= ydrop= finalize_switch= finalize_oppsee= finalize_budget= t2_min= t2_beam_k= see_lt0_alt= king_alt_min= ... overrides=<...>`
+
+### 既定値（Safety-Lite R1）
+
+- Threads ≥ 4（T8）
+  - RootSeeGate=On（XSEE=100）
+  - PostVerify=On（YDrop=225, RequirePass=On, ExtendMs=300, DisadvantageCp=-300）
+  - FinalizeSanity: SwitchMarginCp=40 / OppSEE_MinCp=100 / BudgetMs=8 / MinMs=2 / Threat2_MinCp=200 / Threat2_BeamK=4 / AllowSEElt0Alt=false / CheckPenaltyCp=10
+  - KingAltMinGainCp=150
+  - MultiPV=1
+
+- Threads = 1（T1）
+  - RootSeeGate=On（XSEE=100）
+  - PostVerify=On（YDrop=225, RequirePass=On, ExtendMs=300, DisadvantageCp=-300）
+  - FinalizeSanity: SwitchMarginCp=40 / OppSEE_MinCp=120 / BudgetMs=4 / MinMs=2 / Threat2_MinCp=200 / Threat2_BeamK=4 / AllowSEElt0Alt=false / CheckPenaltyCp=10
+  - KingAltMinGainCp=150
+  - MultiPV=1
+
+注: ユーザーの `setoption` があればそれを最優先し、自動既定は上書きしません。GUI が全オプションを送る場合は、`Profile.Mode=T8`（または `T1`）→ `Profile.ApplyAutoDefaults` の順で明示適用してください。
+
+### Byoyomi 周辺
+
+- `USI_ByoyomiPeriods` は `ByoyomiPeriods` のエイリアス。どちらも `value=default` で既定（1）に戻せます。
+- `ByoyomiDeadlineLeadMs` の既定は 150ms（対局GUIの締切より少し前で返す安全リード）。
+ 
+### Post‑Verify 連動（早期確定の安全化）
+
+- `PostVerify.RequirePass=On` のとき、post‑verify が不合格なら短時間（`PostVerify.ExtendMs` 既定 200ms、残soft内）だけ探索を延長して再判定します。合格時のみ早期確定します。
+- 劣勢帯では軽い追い探索でTTを温めてから最善を再取得（内部連動、既定有効）。
+
+## Finalize 層の軽ガード（要点）
+
+- near-draw 帯でも「玉手の軽ガード」は常時有効（PV1=玉手/代替=玉手）。
+- King‑alt（非チェック時の玉手抑制）/ 非玉再探索 /（高リスク時の）no_publish 安全弁を実装。
+- fast 経路（TT/ponderhit）でも `score_hint` により near‑draw 判定を統一（現状は±10cpの近似でログ可視化のみ；定数 `NEAR_DRAW_CP=10`）。
+- fast 経路・安全時はミニ検証を省略する軽ゲートを適用（ログ: `reason=no_need_verify`）。
+- Threat2（相手 quiet→捕獲）の優先度へ昇格寄与（+300）を小さく追加。
+
+既知の限界: 超短秒（≲2s）や大劣勢・必至近傍では finalize 層のみで形勢は改善できません。次版で Root Post‑Verify の qsearch 化／早期 finalize と Post‑Verify の連動強化を検討しています。
+
+
 - 推奨ビルド（最適化）
   - `RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release`
 - フィーチャー（engine-usi から engine-core へ伝播）
@@ -107,6 +156,23 @@ cargo run -p engine-usi --release --features fast-fma
 
 起動時に `info string core_features=engine-core:...` を出力します（再現性・ログ用途）。
 
+### Panic ハンドリング方針（engine-usi は panic=unwind 前提）
+
+- 本エンジンの USI バイナリ（`engine-usi`）は、異常時にプロセスを落とさず復旧するため、Rust の `panic = "unwind"` を前提としています。
+  - `Cargo.toml`（workspace の `[profile.dev]` / `[profile.release]`）で `panic = "unwind"` を明示済み。
+  - これにより、`go`/`position`/`setoption` 等のハンドラ内部で発生したパニックは `catch_unwind` により捕捉され、ログ出力とフォールバック経路（必要に応じて `bestmove`）で継続します。
+- もし配布ポリシー等で `panic = "abort"` を使用する場合、この安全化は無効化されます。対局用途では `unwind` を強く推奨します。
+
+運用ログ（例）:
+
+```
+info string go_dispatch_enter
+info string go_enter cmd=go btime 0 wtime 0 byoyomi 10000
+info string go_panic_caught=1
+info string fallback_bestmove_emit=1 reason=go_panic move=... sid=... root=...
+bestmove ...
+```
+
 ### USI出力（診断強化）
 - 探索中の`info`行に`hashfull <permille>`を常時付与します。
 - 終局時（finalize/stop）に、MultiPV未使用でも`info multipv 1 ... hashfull ... pv ...`を必ず1本出力します（SinglePVの可視化）。
@@ -123,7 +189,7 @@ cargo run -p engine-usi --release --features fast-fma
 
 | Option | Type | Default | Range | Description |
 |--------|------|---------|-------|-------------|
-| USI_Hash | Spin | 16 | 1-1024 | Hash table size in MB |
+| USI_Hash | Spin | 1024 | 1-1024 | Hash table size in MB |
 | Threads | Spin | 1 | 1-256 | Number of search threads |
 | USI_Ponder | Check | true | true/false | Enable pondering (thinking on opponent's time) |
 | EngineType | Combo | Material | Material/Nnue/Enhanced/EnhancedNnue | Engine evaluation and search type |
@@ -131,22 +197,66 @@ cargo run -p engine-usi --release --features fast-fma
 
 > Note: `ByoyomiPeriods` accepts the literal `default` to reset to the initial value (the engine handles this as a special case).
 
-#### ByoyomiPeriods Option
+#### ByoyomiPeriods オプション
 
-Controls the number of byoyomi periods when using byoyomi time control:
+秒読みの回数（period数）を制御します。`USI_ByoyomiPeriods` はエイリアスとして同じ意味で利用できます。`value default` を指定すると初期値（1）に戻ります。
+
+例:
 
 ```bash
-# Set default number of periods (used when not specified in go command)
+# デフォルト回数（goでperiods未指定のときに使われる）
 setoption name ByoyomiPeriods value 3
-# or using the alias
+# エイリアス（同等）
 setoption name USI_ByoyomiPeriods value 3
 
-# Reset to default (1 period)
+# 既定（1）に戻す
 setoption name ByoyomiPeriods value default
 
-# Override in go command
-go byoyomi 30000 periods 5  # 5 periods of 30 seconds each
+# goコマンド側で上書き
+go byoyomi 30000 periods 5  # 30秒×5回
 ```
+
+### InstantMateMove（短手数詰みの即時確定）
+
+詰みが「確定」したときに、探索を待たず即座にbestmoveを返す機能です。誤発火（Partial/浅深度の暫定PVによる即指し）を防ぐため、ゲートと軽検証を追加しています。
+
+- 代表オプション（既定値）
+  - `InstantMateMove.Enabled`（true）: 機能の有効/無効。疑義のある環境では false 推奨。
+  - `InstantMateMove.MaxDistance`（1）: 「詰みまでの手数」しきい値（plies）。1=1手詰め相当のみ即確定。
+  - `InstantMateMove.CheckAllPV`（true）: MultiPV全行の詰みを確認（falseでPV1のみ）。
+  - `InstantMateMove.RequiredSnapshot`（Stable）: Stableスナップショットのみで発火（Partialは不発）。
+  - `InstantMateMove.MinDepth`（0）: 追加の深さゲート。0で無効（YaneuraOu流: 証明重視）。
+  - `InstantMateMove.VerifyMode`（CheckOnly）: 軽検証モード。
+    - Off: 検証なし
+    - CheckOnly: 候補手を仮指し→相手合法手が0なら確定
+    - QSearch: 将来の軽qsearch用フック（現状はCheckOnly相当）
+  - `InstantMateMove.VerifyNodes`（0）: 軽qsearch用の上限ノード（将来使用）。
+  - `InstantMateMove.RespectMinThinkMs`（true）: 最小思考時間の尊重を有効化。
+  - `InstantMateMove.MinRespectMs`（8）: fast finalize 前に最低限使う思考時間（ms）。
+
+- 運用の勘所
+  - まず安全に止める: `setoption name InstantMateMove.Enabled value false`
+- 代替として誤検知を減らす: `InstantMateMove.CheckAllPV value true`（既定でtrue）
+  - 既定は「Stable限定＋軽検証（CheckOnly）＋最小思考時間8ms尊重」で、Partial・浅深度での誤発火を抑止します。
+
+例: 既定強化（明示）
+
+```bash
+setoption name InstantMateMove.Enabled value true
+setoption name InstantMateMove.RequiredSnapshot value Stable
+setoption name InstantMateMove.CheckAllPV value true
+setoption name InstantMateMove.VerifyMode value CheckOnly
+setoption name InstantMateMove.RespectMinThinkMs value true
+setoption name InstantMateMove.MinRespectMs value 8
+```
+
+例: 一時的に完全無効化
+
+```bash
+setoption name InstantMateMove.Enabled value false
+```
+
+<!-- 重複していた Threads連動の自動既定（T8/T1 プロファイル）の下段セクションを削除。上段（本README前半）の記述を正とします。 -->
 
 ## Building
 
@@ -220,6 +330,25 @@ Tips for reproducible results:
 - Pin CPU cores (e.g., `taskset -c 0` on Linux)
 - Keep the system idle during runs
 - Consider disabling turbo/CPU frequency scaling during measurement
+
+## Parallel Bench Notes (LazySMP)
+
+- BenchAllRun（全スレッド全力実行）
+  - 環境: `SHOGI_PAR_BENCH_ALLRUN=1` を指定すると、Primary 完了後も Helper を最後まで待ち合わせます。
+  - ログ: `info string helpers_join_ms=... received=X/Y canceled=0|1` を1回出力します。
+    - `received` は受信できた Helper 件数（Y=Threads-1）
+    - `canceled=1` はベンチの安全装置が働き、期限超過でフォールバックしたことを示します。
+  - 期限の決定順: `SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS` > TimeManager(hard/soft) > FixedTime+1000ms > 既定3000ms
+
+- 通常対局（BenchAllRun=0）
+  - `stop_flag` による自発停止＋短時間ドレインで即応性を重視します。
+  - ドレインの総時間は `SHOGI_STOP_DRAIN_MS`（既定45ms）で制御できます（0で無効）。
+  - 旧挙動（Primary直後にHelperをキャンセル）を比較したい場合は `SHOGI_PAR_CANCEL_ON_PRIMARY=1` を設定します。
+
+- qsearch ノード上限のセンチネル
+  - `qnodes_limit(0)` を指定すると **無制限**（センチネル）として扱われます。
+  - デフォルト上限（`DEFAULT_QNODES_LIMIT=300,000`）の影響を避けたいベンチでは `0` を明示してください。
+
 
 ## Code Quality
 

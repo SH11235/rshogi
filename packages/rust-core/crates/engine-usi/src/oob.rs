@@ -4,8 +4,12 @@ use std::sync::mpsc;
 
 use crate::finalize::{emit_bestmove_once, finalize_and_send, finalize_and_send_fast, fmt_hash};
 use crate::io::diag_info_string;
+use crate::io::info_string;
 use crate::state::EngineState;
 use crate::stop::{compute_wait_budget_from_state, wait_for_result_with_budget};
+use engine_core::movegen::MoveGenerator;
+use engine_core::search::snapshot::SnapshotSource;
+use engine_core::search::types::Bound;
 use engine_core::usi::move_to_usi;
 use std::time::Instant;
 
@@ -45,6 +49,9 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                 if !state.searching || state.bestmove_emitted {
                     continue;
                 }
+                // Suppress OOB finalize during ponder (except UserStop).
+                // Note: FinalizeReason::PonderToMove is handled directly by handle_ponderhit
+                // in the USI layer, so it is suppressed here to avoid duplicate finalize.
                 if state.current_is_ponder && !matches!(reason, FinalizeReason::UserStop) {
                     let root =
                         state.current_root_hash.unwrap_or_else(|| state.position.zobrist_hash());
@@ -91,6 +98,8 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
                     FinalizeReason::Hard => "oob_hard_finalize",
                     FinalizeReason::NearHard => "oob_near_hard_finalize",
                     FinalizeReason::Planned => "oob_planned_finalize",
+                    FinalizeReason::PlannedMate { .. } => "oob_planned_mate_finalize",
+                    FinalizeReason::PonderToMove => "oob_ponder_to_move_finalize",
                     FinalizeReason::TimeManagerStop => "oob_tm_finalize",
                     FinalizeReason::UserStop => "oob_user_finalize",
                 };
@@ -210,6 +219,350 @@ pub fn poll_oob_finalize(state: &mut EngineState) {
 
     // Put receiver back
     state.finalizer_rx = Some(rx);
+}
+
+/// Poll StopController snapshot to detect short-mate (distance <= K) and
+/// trigger early finalize. This realizes USI-led instant-mate finalization (A案).
+pub fn poll_instant_mate(state: &mut EngineState) {
+    if !state.searching || !state.opts.instant_mate_move_enabled {
+        return;
+    }
+    // Do not act if a bestmove has already been emitted (session finished)
+    if state.bestmove_emitted {
+        return;
+    }
+
+    // Check the latest snapshot for a mate score on PV(s)
+    if let Some(snapshot) = state.stop_controller.try_read_snapshot() {
+        // Gate 1: Snapshot source (Stable required if configured)
+        if state.opts.instant_mate_require_stable && snapshot.source != SnapshotSource::Stable {
+            return;
+        }
+        // Gate 2: Minimum reported depth
+        if state.opts.instant_mate_min_depth > 0
+            && snapshot.depth < state.opts.instant_mate_min_depth
+        {
+            return;
+        }
+        let mut try_lines: smallvec::SmallVec<[&engine_core::search::types::RootLine; 4]> =
+            smallvec::SmallVec::new();
+        if state.opts.instant_mate_check_all_pv {
+            for l in &snapshot.lines {
+                try_lines.push(l);
+            }
+        } else if let Some(first) = snapshot.lines.first() {
+            try_lines.push(first);
+        }
+
+        for line in try_lines {
+            // Gate 3 (per-line): Respect minimum think time for fast finalize
+            if state.opts.instant_mate_respect_min_think_ms {
+                // InstantMateではMinRespectMsのみを尊重（MinThinkMsは見ない）
+                let want_ms = state.opts.instant_mate_min_respect_ms;
+                let elapsed = snapshot.elapsed_ms.max(line.time_ms.unwrap_or(0));
+                if elapsed < want_ms {
+                    continue;
+                }
+            }
+            use engine_core::search::constants::mate_distance as md;
+            // Gate 4: bound must be Exact（fail-high/lowは不発）
+            if !matches!(line.bound, Bound::Exact) {
+                continue;
+            }
+            let dist = line.mate_distance.or_else(|| md(line.score_internal)).unwrap_or(0);
+            if !(dist > 0 && dist <= state.opts.instant_mate_move_max_distance as i32) {
+                continue;
+            }
+            // Candidate move (prefer PV[0], fallback to root_move / snapshot.best), null除外
+            let non_null = |m: engine_core::shogi::Move| if m.is_null() { None } else { Some(m) };
+            let cand = line
+                .pv
+                .first()
+                .copied()
+                .and_then(non_null)
+                .or_else(|| non_null(line.root_move))
+                .or_else(|| snapshot.best.and_then(non_null));
+            let Some(best_mv) = cand else {
+                info_string("instant_mate_verify_fail=1 reason=no_candidate");
+                continue;
+            };
+            // Gate 5: candidate must be legal in current position（TT起源/古いPVの混入対策）
+            if !state.position.is_legal_move(best_mv) {
+                info_string("instant_mate_verify_fail=1 reason=illegal_best");
+                continue;
+            }
+            // Position must match snapshot root
+            let pos_hash = state.position.zobrist_hash();
+            if pos_hash != snapshot.root_key {
+                // stale snapshot; wait next tick
+                continue;
+            }
+            // Lightweight verification
+            let verify_passed = match state.opts.instant_mate_verify_mode {
+                crate::state::InstantMateVerifyMode::Off => true,
+                crate::state::InstantMateVerifyMode::CheckOnly => {
+                    let mut pos1 = state.position.clone();
+                    let _ = pos1.do_move(best_mv);
+                    let in_check = pos1.is_in_check();
+                    let mg = MoveGenerator::new();
+                    let no_legal_moves = match mg.generate_all(&pos1) {
+                        Ok(list) => list.as_slice().is_empty(),
+                        Err(_) => false,
+                    };
+                    if !(in_check && no_legal_moves) {
+                        let reason = if !in_check {
+                            "not_in_check"
+                        } else {
+                            "has_escape"
+                        };
+                        info_string(format!("instant_mate_verify_fail=1 reason={}", reason));
+                    }
+                    in_check && no_legal_moves
+                }
+                crate::state::InstantMateVerifyMode::QSearch => {
+                    // TODO(verify): implement tiny qsearch verification
+                    // - TTへの書き込みは行わない（副作用ゼロ）
+                    // - ノード上限（opts.instant_mate_verify_nodes）で早期停止
+                    // - ここでは暫定としてCheckOnly相当の in_check && no_legal_moves を用いる
+                    let mut pos1 = state.position.clone();
+                    let _ = pos1.do_move(best_mv);
+                    let in_check = pos1.is_in_check();
+                    let mg = MoveGenerator::new();
+                    let no_legal_moves = match mg.generate_all(&pos1) {
+                        Ok(list) => list.as_slice().is_empty(),
+                        Err(_) => false,
+                    };
+                    if !(in_check && no_legal_moves) {
+                        let reason = if !in_check {
+                            "not_in_check"
+                        } else {
+                            "has_escape"
+                        };
+                        info_string(format!("instant_mate_verify_fail=1 reason={}", reason));
+                    }
+                    in_check && no_legal_moves
+                }
+            };
+            if !verify_passed {
+                continue;
+            }
+
+            let was_ponder = state.current_is_ponder;
+            info_string(format!(
+                "instant_mate_triggered=1 distance={} was_ponder={} depth={} elapsed_ms={} bound={:?} source={:?} sid={} root={} verify_passed=1",
+                dist,
+                was_ponder as u8,
+                snapshot.depth,
+                snapshot.elapsed_ms,
+                line.bound,
+                snapshot.source,
+                snapshot.search_id,
+                fmt_hash(snapshot.root_key)
+            ));
+            state.stop_controller.request_finalize(FinalizeReason::PlannedMate {
+                distance: dist,
+                was_ponder,
+            });
+            if !was_ponder {
+                fast_finalize_no_detach(
+                    state,
+                    "instant_mate_finalize",
+                    Some(FinalizeReason::PlannedMate {
+                        distance: dist,
+                        was_ponder: false,
+                    }),
+                );
+            }
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_oob_finalize {
+    use super::*;
+    use crate::finalize::take_last_emitted_bestmove;
+    use engine_core::search::types::{Bound, RootLine};
+    use engine_core::shogi::Move;
+    use engine_core::usi::parse_usi_move;
+
+    fn make_mate1_line() -> RootLine {
+        use engine_core::search::constants::MATE_SCORE;
+        RootLine {
+            multipv_index: 1,
+            // 3g3f（7g7f）: 開始局面で合法な先手の一手
+            root_move: parse_usi_move("3g3f").unwrap_or_else(|_| Move::null()),
+            score_internal: MATE_SCORE - 1, // mate in 1 ply
+            score_cp: 30_000,               // clipped display (not used by detector)
+            bound: Bound::Exact,
+            depth: 10,
+            seldepth: Some(10),
+            pv: smallvec::smallvec![parse_usi_move("3g3f").unwrap_or_else(|_| Move::null())],
+            nodes: Some(1000),
+            time_ms: Some(5),
+            nps: Some(200_000),
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: Some(1),
+        }
+    }
+
+    #[test]
+    fn instant_mate_non_ponder_emits_bestmove_once() {
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = false;
+
+        // 試験では Stable ゲートを外し、VerifyもOFFにしてトリガ条件のみ検査
+        state.opts.instant_mate_require_stable = false;
+        // 最小思考時間の尊重を無効化（テストを安定化）
+        state.opts.instant_mate_respect_min_think_ms = false;
+        state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
+
+        // Publish a snapshot with mate in 1（Partial）
+        let sid = 4242u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        state.stop_controller.publish_root_line(sid, root_key, &make_mate1_line());
+
+        // Before: no bestmove
+        assert!(!state.bestmove_emitted);
+
+        // Trigger
+        poll_instant_mate(&mut state);
+
+        // After: bestmove must be emitted exactly once
+        assert!(state.bestmove_emitted, "bestmove should be emitted on instant mate");
+        let bm = take_last_emitted_bestmove();
+        assert!(bm.is_some(), "bestmove payload should be recorded in tests");
+    }
+
+    #[test]
+    fn instant_mate_in_ponder_does_not_emit_immediately() {
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = true;
+
+        // Publish a snapshot with mate in 1
+        let sid = 777u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        state.stop_controller.publish_root_line(sid, root_key, &make_mate1_line());
+
+        // Trigger
+        poll_instant_mate(&mut state);
+
+        // Ponder中は即送信しない（停止要求のみ）。bestmove未送信のまま。
+        assert!(!state.bestmove_emitted, "ponder mode must not emit bestmove immediately");
+    }
+
+    #[test]
+    fn instant_mate_helper_non_exact_does_not_trigger() {
+        use engine_core::search::constants::MATE_SCORE;
+        use engine_core::search::types::Bound;
+
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = false;
+
+        // Publish a snapshot with mate score but non-Exact bound (LowerBound)
+        let sid = 8888u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        let mut line = make_mate1_line();
+        line.bound = Bound::LowerBound;
+        // still keep internal mate score to verify guard works
+        line.score_internal = MATE_SCORE - 1;
+        state.stop_controller.publish_root_line(sid, root_key, &line);
+
+        poll_instant_mate(&mut state);
+        assert!(
+            !state.bestmove_emitted,
+            "non-Exact helper snapshot must not trigger instant-mate finalize"
+        );
+    }
+
+    #[test]
+    fn instant_mate_pv2_only_triggers_when_check_all_pv_enabled() {
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 1;
+        state.searching = true;
+        state.current_is_ponder = false;
+        // まずは PV1 のみを見る（デフォルトが true の環境に合わせる）
+        state.opts.instant_mate_check_all_pv = false;
+
+        // Publish a stable snapshot with PV1 non-mate and PV2 mate in 1
+        let sid = 20251u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        let mut pv1 = make_mate1_line();
+        pv1.bound = Bound::Exact;
+        pv1.mate_distance = None;
+        pv1.score_internal = 120; // not a mate
+
+        let mut pv2 = make_mate1_line(); // Exact mate in 1 (legal move already set)
+        pv2.multipv_index = 2; // PV2
+
+        // 検証はOFFにして MultiPVの挙動だけを見る
+        state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
+
+        // SmallVec の inline 容量を明示し型推論エラー (SmallVec<_>) を解消
+        let lines: smallvec::SmallVec<[RootLine; 2]> =
+            smallvec::smallvec![pv1.clone(), pv2.clone()];
+        state
+            .stop_controller
+            .publish_committed_snapshot(sid, root_key, &lines[..], 1000, 10);
+
+        // Default (CheckAllPV=false): should NOT trigger (PV1 is not mate)
+        poll_instant_mate(&mut state);
+        assert!(
+            !state.bestmove_emitted,
+            "should not trigger when only PV2 is mate and CheckAllPV=false"
+        );
+
+        // Enable CheckAllPV → now should trigger
+        state.opts.instant_mate_check_all_pv = true;
+        poll_instant_mate(&mut state);
+        assert!(state.bestmove_emitted, "CheckAllPV=true should trigger on PV2 mate");
+        let _ = take_last_emitted_bestmove();
+    }
+
+    #[test]
+    fn instant_mate_prefers_mate_distance_field_when_available() {
+        use engine_core::search::types::Bound;
+
+        let mut state = EngineState::new();
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 2;
+        state.searching = true;
+        state.current_is_ponder = false;
+
+        // Partialでも発火させるためStableゲートをOFF、検証もOFF
+        state.opts.instant_mate_require_stable = false;
+        // 最小思考時間の尊重を無効化（line.time_ms が小さくても通す）
+        state.opts.instant_mate_respect_min_think_ms = false;
+        state.opts.instant_mate_verify_mode = crate::state::InstantMateVerifyMode::Off;
+
+        let sid = 9999u64;
+        let root_key = state.position.zobrist_hash();
+        state.stop_controller.publish_session(None, sid);
+        let mut line = make_mate1_line();
+        line.bound = Bound::Exact;
+        // publish
+        state.stop_controller.publish_root_line(sid, root_key, &line);
+
+        poll_instant_mate(&mut state);
+        assert!(state.bestmove_emitted, "Exact helper snapshot with mate must trigger");
+        let bm = take_last_emitted_bestmove();
+        assert!(bm.is_some());
+    }
 }
 
 /// Enforce locally computed deadlines (USI層のみで完結するOOB finalize)

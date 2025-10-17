@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# moved: scripts/smoke/smoke_stop.sh
 
 # Smoke: stop/finalize behavior under pure byoyomi
 # - go btime 0 wtime 0 byoyomi 2000

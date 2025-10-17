@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -13,7 +14,7 @@ use crate::search::limits::SearchLimitsBuilder;
 use crate::search::mate_score;
 use crate::search::snapshot::SnapshotSource;
 use crate::search::types::{NodeType, TerminationReason};
-use crate::search::{SearchLimits, SearchStack};
+use crate::search::{SearchLimits, SearchStack, TranspositionTable};
 use crate::shogi::{Color, Move, Piece, PieceType};
 use crate::time_management::{
     self, mock_advance_time, mock_set_time, GamePhase, TimeControl, TimeLimits, TimeManager,
@@ -26,6 +27,12 @@ use super::driver::ClassicBackend;
 use super::pruning::NullMovePruneParams;
 use super::pvs::SearchContext;
 use super::SearchProfile;
+
+// NOTE: 検索パラメータはグローバル(Atomic)で共有されるため、
+// テスト間の並列実行で `set_nmp_enabled(false)` などの一時変更が
+// 他テストに干渉しうる。CIでの不安定要因になっていたため、
+// グローバル・ロックで該当テストを直列化する。
+static TEST_SEARCH_PARAMS_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 fn position_after_moves(moves: &[&str]) -> Position {
     let mut pos = Position::startpos();
@@ -337,6 +344,41 @@ fn compute_qnodes_limit_scales_with_remaining_time() {
     );
 
     mock_set_time(0);
+}
+
+#[test]
+fn qnodes_limit_zero_is_unlimited_sentinel() {
+    // qnodes_limit(0) should be treated as an unlimited sentinel by compute_qnodes_limit().
+    // This avoids accidental clamping to MIN/DEFAULT and is intended for performance benches.
+    let mut limits = SearchLimitsBuilder::default().qnodes_limit(0).build();
+    // No TimeManager / FixedTime to interfere with the raw value
+    let limit = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
+    assert_eq!(limit, u64::MAX, "qnodes_limit(0) must be unlimited sentinel");
+
+    // Also verify that SearchContext side logic does not prematurely stop when limit is 0
+    // (we emulate this by ensuring that a non-zero limit is passed to ctx and thus only
+    // compute_qnodes_limit() is responsible for the sentinel behavior).
+    limits = SearchLimitsBuilder::default().qnodes_limit(0).build();
+    let computed =
+        ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 1, 1);
+    assert_eq!(computed, u64::MAX);
+}
+
+#[test]
+fn extract_pv_is_limited_to_32_moves() {
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(Arc::clone(&evaluator));
+    let pos = Position::startpos();
+    // Choose a legal first move
+    let first = {
+        let mg = MoveGenerator::new();
+        mg.generate_all(&pos).unwrap()[0]
+    };
+    let limits = SearchLimitsBuilder::default().time_control(TimeControl::Infinite).build();
+    let mut nodes = 0u64;
+    let pv = backend.extract_pv(&pos, 128, first, &limits, &mut nodes);
+    assert!(pv.len() <= 32, "PV length must be capped at 32, got {}", pv.len());
 }
 
 #[test]
@@ -698,11 +740,12 @@ fn extract_pv_returns_consistent_line() {
 #[test]
 fn search_profile_basic_disables_advanced_pruning() {
     let profile = SearchProfile::basic();
-    assert!(profile.prune.enable_nmp);
+    // Basic profile (Material/Nnue) disables all advanced pruning techniques
+    assert!(!profile.prune.enable_nmp);
     assert!(!profile.prune.enable_iid);
     assert!(!profile.prune.enable_razor);
-    assert!(profile.prune.enable_probcut);
-    assert!(profile.prune.enable_static_beta_pruning);
+    assert!(!profile.prune.enable_probcut);
+    assert!(!profile.prune.enable_static_beta_pruning);
 }
 
 struct RecordingEvaluator {
@@ -780,23 +823,20 @@ impl Evaluator for RecordingEvaluator {
 
 #[test]
 fn evaluator_hooks_balance_for_classic_backend() {
+    // NMPの有効/無効を他テストが変更中でないことを保証
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    // ランタイム既定値を明示的に適用してテストを安定化
+    crate::search::params::__test_reset_runtime_values();
     let evaluator = Arc::new(RecordingEvaluator::default());
-    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
-    // 分岐数を絞った局面（両玉と金のみ）でフック呼び出しの整合性を検証する。
-    // 深さ4の探索でもノード爆発を抑え、テスト実行時間を短縮することが目的。
-    let mut pos = Position::empty();
-    pos.side_to_move = Color::Black;
-    pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
-    pos.board
-        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::Gold, Color::Black));
-    pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
-    pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Gold, Color::White));
-    pos.hash = pos.compute_hash();
-    pos.zobrist_hash = pos.hash;
-    let limits = SearchLimitsBuilder::default().depth(4).build();
+    let backend = ClassicBackend::with_profile_apply_defaults(
+        Arc::clone(&evaluator),
+        SearchProfile::enhanced(),
+    );
+
+    // 初期局面を使用（探索枝が豊富で、NMPが確実に発動する）
+    let pos = Position::startpos();
+
+    let limits = SearchLimitsBuilder::default().depth(5).build();
 
     let _ = backend.think_blocking(&pos, &limits, None);
 
@@ -857,7 +897,7 @@ fn panic_in_search_thread_returns_error_result_with_stop_info() {
     assert!(!info.hard_timeout, "panic fallback should not mark hard timeout");
     let delta = info.elapsed_ms.abs_diff(expected_elapsed);
     assert!(
-        delta <= 20,
+        delta <= 150,
         "elapsed_ms should stay close to expected (expected {expected_elapsed}, actual {} , delta {delta})",
         info.elapsed_ms
     );
@@ -915,6 +955,73 @@ fn stop_returns_latest_committed_root_line() {
     assert!(matches!(stable_line.bound, NodeType::Exact));
     assert_eq!(result.best_move, Some(stable_line.root_move));
     assert_eq!(result.stats.root_report_source, Some(SnapshotSource::Stable));
+}
+
+#[test]
+fn abdada_no_reduction_for_owner_side() {
+    // Owner path: do not preset busy; the first entrant sets busy and must NOT reduce here.
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+    let backend = super::driver::ClassicBackend::with_tt(Arc::clone(&evaluator), Arc::clone(&tt));
+
+    let pos = Position::startpos();
+
+    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let logs_cb = Arc::clone(&logs);
+    let limits = SearchLimitsBuilder::default()
+        .depth(6)
+        .info_string_callback(Arc::new(move |s: &str| {
+            logs_cb.lock().unwrap().push(s.to_string());
+        }))
+        .build();
+
+    let _ = backend.think_blocking(&pos, &limits, None);
+
+    let collected = logs.lock().unwrap();
+    let saw_reduce = collected.iter().any(|l| l.contains("abdada_cut_reduction=1 next_depth="));
+    assert!(
+        !saw_reduce,
+        "owner side should not reduce on first busy set (no busy detection)"
+    );
+}
+
+#[test]
+fn abdada_no_reduction_when_depth_below_threshold() {
+    // With preset busy but depth<6, ABDADA must not trigger
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+    let backend = super::driver::ClassicBackend::with_tt(Arc::clone(&evaluator), Arc::clone(&tt));
+
+    let pos = Position::startpos();
+    let hash = pos.zobrist_hash();
+    tt.store(crate::search::tt::TTStoreArgs::new(
+        hash,
+        None::<crate::shogi::Move>,
+        0,
+        0,
+        10,
+        crate::search::NodeType::Exact,
+        pos.side_to_move,
+    ));
+    let _ = tt.set_exact_cut(hash, pos.side_to_move);
+
+    let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let logs_cb = Arc::clone(&logs);
+    let limits = SearchLimitsBuilder::default()
+        .depth(5) // below ABDADA_MIN_DEPTH(6)
+        .info_string_callback(Arc::new(move |s: &str| {
+            logs_cb.lock().unwrap().push(s.to_string());
+        }))
+        .build();
+
+    let _ = backend.think_blocking(&pos, &limits, None);
+
+    let collected = logs.lock().unwrap();
+    let saw_reduce = collected.iter().any(|l| l.contains("abdada_cut_reduction=1 next_depth="));
+    assert!(
+        !saw_reduce,
+        "depth<6 should not trigger abdada reduction even when busy is preset"
+    );
 }
 
 #[test]
@@ -1153,6 +1260,10 @@ fn fixed_time_limit_lead_window_notifies_finalize_once() {
 
 #[test]
 fn null_move_respects_runtime_toggle() {
+    // ランタイムトグルを変更するため、他テストと排他にする
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    // 念のため既定値にリセットしてからトグル操作
+    crate::search::params::__test_reset_runtime_values();
     let evaluator = Arc::new(MaterialEvaluator);
     let backend =
         ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());

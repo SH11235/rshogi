@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# moved: scripts/nnue/collect_nnue_fp32_simd_metrics.sh
 
 OUT_DIR="docs/performance/data"
 DO_MACRO_NATIVE=false

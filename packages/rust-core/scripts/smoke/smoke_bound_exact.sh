@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# moved: scripts/smoke/smoke_bound_exact.sh
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"

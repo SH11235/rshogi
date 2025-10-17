@@ -125,6 +125,7 @@ impl LimitChecker {
                     hard_timeout: false,
                     soft_limit_ms: 0,
                     hard_limit_ms: 0,
+                    stop_tag: None,
                 });
                 return true;
             }
@@ -142,6 +143,7 @@ impl LimitChecker {
                     hard_timeout,
                     soft_limit_ms: 0,
                     hard_limit_ms: 0,
+                    stop_tag: None,
                 });
                 return true;
             }
@@ -159,6 +161,7 @@ impl LimitChecker {
                     hard_timeout: false,
                     soft_limit_ms: 0,
                     hard_limit_ms: 0,
+                    stop_tag: None,
                 });
                 return true;
             }

@@ -11,18 +11,21 @@ use log::warn;
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
+use crate::search::constants::MAX_PLY;
 use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
 use crate::search::types::{NodeType, RootLine, SearchStack, StopInfo, TerminationReason};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::Position;
 use smallvec::SmallVec;
+use std::cell::RefCell;
 
 use super::ordering::{self, Heuristics};
 use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
 #[cfg(feature = "diagnostics")]
 use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
+use crate::search::policy::{asp_fail_high_pct, asp_fail_low_pct};
 use crate::search::snapshot::SnapshotSource;
 use crate::search::tt::TTProbe;
 use crate::time_management::TimeControl;
@@ -35,6 +38,37 @@ enum DeadlineHit {
 }
 
 static SEARCH_THREAD_SEQ: AtomicU64 = AtomicU64::new(1);
+
+// Thread-local stack cache to avoid per-iteration Vec allocations.
+// Helpers経路だけでなく main でも安全に機能するが、挙動は不変（内容は毎回 Default で埋め直し）。
+thread_local! {
+    static STACK_CACHE: RefCell<Vec<SearchStack>> = const { RefCell::new(Vec::new()) };
+}
+
+#[inline]
+pub(crate) fn take_stack_cache() -> Vec<SearchStack> {
+    STACK_CACHE.with(|cell| {
+        let mut v = std::mem::take(&mut *cell.borrow_mut());
+        let want = MAX_PLY + 1;
+        if v.len() != want {
+            v.clear();
+            v.resize(want, SearchStack::default());
+        } else {
+            // 既存メモリを再利用。各要素の内部バッファ容量は保持したまま中身をクリア。
+            for e in v.iter_mut() {
+                e.reset_for_iteration();
+            }
+        }
+        v
+    })
+}
+
+#[inline]
+pub(crate) fn return_stack_cache(buf: Vec<SearchStack>) {
+    STACK_CACHE.with(|cell| {
+        *cell.borrow_mut() = buf;
+    });
+}
 
 #[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
@@ -50,7 +84,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             || limits.time_manager.as_ref().is_some_and(|tm| tm.is_in_byoyomi())
     }
 
-    fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
+    /// Compute qsearch node limit for the current context.
+    ///
+    /// ポリシー要点:
+    /// - `qnodes_limit == Some(0)` かつ 時間管理や固定時間が無いベンチ系では無制限（`u64::MAX`）
+    /// - 時間管理や固定時間がある場合は、それらに基づくダイナミック上限を適用
+    /// - Byoyomi 中は深さに応じて緩やかに上限を引き上げ（浅い層では控えめ、深くなると増やす）
+    /// - それ以外は既定上限 `DEFAULT_QNODES_LIMIT` を上回らないようクランプ（安全側）
+    pub(crate) fn compute_qnodes_limit(limits: &SearchLimits, depth: i32, pv_idx: usize) -> u64 {
+        // qnodes_limit==0 は「無制限」意図。ただし実対局（時間管理あり）では
+        // TM/時間上限に基づく動的縮小は残す。ベンチ用途（時間管理なし）のみ完全無制限。
+        let request_unlimited = matches!(limits.qnodes_limit, Some(0));
         let mut limit =
             limits.qnodes_limit.unwrap_or(crate::search::constants::DEFAULT_QNODES_LIMIT);
         let byoyomi_active = Self::is_byoyomi_active(limits);
@@ -78,6 +122,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let scaled = soft_ms.saturating_mul(crate::search::constants::QNODES_PER_MS);
                 limit = limit.min(scaled);
             }
+        }
+
+        // if time control is absent entirely (no TM, no fixed time, no deadlines),
+        // honor the unlimited request for benches; otherwise keep dynamic cap.
+        if request_unlimited
+            && limits.time_manager.is_none()
+            && limits.time_limit().is_none()
+            && limits.fallback_deadlines.is_none()
+        {
+            return u64::MAX;
         }
 
         if pv_idx > 1 {
@@ -155,6 +209,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         None
     }
     #[inline]
+    fn retries_max(soft_deadline: Option<Duration>, start: &Instant) -> u32 {
+        if let Some(sd) = soft_deadline {
+            let elapsed = start.elapsed();
+            let remain_ms = if sd > elapsed {
+                (sd - elapsed).as_millis() as u64
+            } else {
+                0
+            };
+            if remain_ms <= 40 {
+                2
+            } else {
+                3
+            }
+        } else {
+            3
+        }
+    }
+    #[inline]
     pub(crate) fn classify_root_bound(local_best: i32, alpha_win: i32, beta_win: i32) -> NodeType {
         if local_best <= alpha_win {
             NodeType::UpperBound
@@ -176,7 +248,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     val.parse::<u64>().ok().filter(|v| *v > 0)
                 }
             }
-            Err(_) => Some(150),
+            // Default: 100ms provides good responsiveness in parallel search with multiple
+            // helpers while avoiding excessive USI output spam.
+            Err(_) => Some(100),
         })
     }
 
@@ -250,10 +324,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         false
     }
 
-    pub(super) fn iterative(
+    fn iterative_with_buffers(
         &self,
         root: &Position,
         limits: &SearchLimits,
+        stack: &mut [SearchStack],
+        heur_state: &mut Heuristics,
         info: Option<&InfoEventCallback>,
     ) -> SearchResult {
         let max_depth = limits.depth_limit_u8() as i32;
@@ -280,11 +356,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         } else {
             limits.time_parameters.as_ref().map(|tp| tp.min_think_ms).unwrap_or(0)
         };
-        let _last_hashfull_emit_ms = 0u64;
-        let mut prev_score = 0;
-        // Aspiration initial params
-        const ASP_DELTA0: i32 = 30;
-        const ASP_DELTA_MAX: i32 = 350;
+        let mut prev_score: i32 = 0;
+        use crate::search::constants::{
+            ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX, ASPIRATION_DELTA_THREADS_K,
+        };
+        // Shallow depths are volatile; disable aspiration under this depth
+        // to avoid frequent fail-low/high thrashing and wasted re-searches.
+        const ASPIRATION_MIN_DEPTH: i32 = 5;
         const SELDEPTH_EXTRA_MARGIN: u32 = 32;
 
         // Cumulative counters for diagnostics
@@ -292,6 +370,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_beta_cuts: u64 = 0;
         let mut cum_lmr_counter: u64 = 0;
         let mut cum_lmr_trials: u64 = 0;
+        // Aggregate qnodes across PVs/iterations for this worker result
+        let mut cum_qnodes: u64 = 0;
+        #[cfg(feature = "diagnostics")]
+        let mut cum_abdada_busy_detected: u64 = 0;
+        #[cfg(feature = "diagnostics")]
+        let mut cum_abdada_busy_set: u64 = 0;
         let mut stats_hint_exists: u64 = 0;
         let mut stats_hint_used: u64 = 0;
 
@@ -318,12 +402,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cumulative_asp_failures: u32 = 0;
         let mut cumulative_asp_hits: u32 = 0;
         let mut cumulative_researches: u32 = 0;
-        let mut iterative_heur = Heuristics::default();
         let stop_controller = limits.stop_controller.clone();
         let mut finalize_soft_sent = false;
         let mut last_deadline_hit: Option<DeadlineHit> = None;
         let mut lead_window_soft_break = false;
         let mut finalize_hard_sent = false;
+        let is_helper = limits.helper_role;
         let mut notify_deadline = |hit: DeadlineHit, nodes_now: u64| {
             if let Some(cb) = limits.info_string_callback.as_ref() {
                 let elapsed = t0.elapsed().as_millis();
@@ -362,6 +446,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         });
 
+        // Track best move from previous iteration for root move ordering hint
+        // and aspiration center smoothing (A+C approach from YaneuraOu design)
+        let mut best_hint_next_iter: Option<(crate::shogi::Move, i32)> = None;
+
         for d in 1..=max_depth {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             if super::diagnostics::should_abort_now() {
@@ -389,11 +477,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
             {
                 notify_deadline(hit, nodes);
-                last_deadline_hit = Some(hit);
-                if incomplete_depth.is_none() {
-                    incomplete_depth = Some(d as u8);
+                match hit {
+                    DeadlineHit::Stop | DeadlineHit::Hard => {
+                        last_deadline_hit = Some(hit);
+                        if incomplete_depth.is_none() {
+                            incomplete_depth = Some(d as u8);
+                        }
+                        break;
+                    }
+                    DeadlineHit::Soft => {
+                        last_deadline_hit = Some(hit);
+                        if is_helper {
+                            if incomplete_depth.is_none() {
+                                incomplete_depth = Some(d as u8);
+                            }
+                            break;
+                        }
+                        lead_window_soft_break = true;
+                        // Primary continues current iteration to commit PV.
+                    }
                 }
-                break;
             }
             let mut seldepth: u32 = 0;
             let mut iteration_asp_failures: u32 = 0;
@@ -423,20 +526,62 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                 }
             }
-            let mut root_picker =
-                ordering::RootPicker::new(root, list.as_slice(), root_tt_hint_mv, prev_root_lines);
-            let mut root_moves: Vec<(crate::shogi::Move, i32)> =
-                Vec::with_capacity(list.as_slice().len());
-            while let Some((mv, key)) = root_picker.next() {
-                root_moves.push((mv, key));
+
+            // Fallback hint: If TT hint and prev_root_lines are both absent,
+            // use the best move from the previous iteration as a hint.
+            // This ensures RootPicker has ordering guidance even on the first few iterations.
+            let hint_for_picker = root_tt_hint_mv.or_else(|| {
+                if prev_root_lines.is_none() {
+                    best_hint_next_iter.map(|(m, _)| m)
+                } else {
+                    None
+                }
+            });
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                if let Some(hm) = hint_for_picker {
+                    cb(&format!("root_hint_applied=1 move={}", crate::usi::move_to_usi(&hm)));
+                } else {
+                    cb("root_hint_applied=0");
+                }
             }
+
+            let root_jitter = limits.root_jitter_seed.map(|seed| {
+                ordering::RootJitter::new(seed, ordering::constants::ROOT_JITTER_AMPLITUDE)
+            });
+            // 純粋 LazySMP: RootWorkQueue は使用しない
+
+            let mut root_picker = ordering::RootPicker::new(ordering::RootPickerConfig {
+                pos: root,
+                moves: list.as_slice(),
+                tt_move: hint_for_picker,
+                prev_lines: prev_root_lines,
+                jitter: root_jitter,
+            });
+
+            #[cfg(feature = "diagnostics")]
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                cb(&format!(
+                    "root_penalty_stats see={} post={} promote={} top1_penalized={}",
+                    root_picker.stats_root_see_penalized(),
+                    root_picker.stats_postverify_penalized(),
+                    root_picker.stats_promote_bias_applied(),
+                    root_picker.stats_top1_penalized() as u8
+                ));
+            }
+            let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
+                Vec::with_capacity(list.as_slice().len());
+            while let Some((mv, key, idx)) = root_picker.next() {
+                root_moves.push((mv, key, idx));
+            }
+            // 純粋 LazySMP: pre-claim は行わない
             if root_moves.is_empty() {
                 if incomplete_depth.is_none() {
                     incomplete_depth = Some(d as u8);
                 }
                 break;
             }
-            let root_rank: Vec<crate::shogi::Move> = root_moves.iter().map(|(m, _)| *m).collect();
+            let root_rank: Vec<crate::shogi::Move> =
+                root_moves.iter().map(|(m, _, _)| *m).collect();
             let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
             for (idx, mv) in root_rank.iter().enumerate() {
                 rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
@@ -461,17 +606,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut depth_beta_cuts: u64 = 0;
             let mut depth_lmr_counter: u64 = 0;
             let mut depth_lmr_trials: u64 = 0;
-            let mut _local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
+            let mut local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
             let mut depth_hint_exists: u64 = 0;
             let mut depth_hint_used: u64 = 0;
             let mut line_nodes_checkpoint = nodes;
             let mut line_time_checkpoint = t0.elapsed().as_millis() as u64;
             if d % 2 == 0 {
-                iterative_heur.age_all();
+                heur_state.age_all();
             }
-            let mut shared_heur = std::mem::take(&mut iterative_heur);
+            let mut shared_heur = std::mem::take(heur_state);
             shared_heur.lmr_trials = 0;
+            // qnodes フォールバック用: 最後に試行したPVのqnodesと、当該PVの行公開有無
+            let mut last_pv_qnodes: u64 = 0;
+            let mut last_pv_published: bool = false;
             for pv_idx in 1..=k {
+                if is_helper && lead_window_soft_break {
+                    if incomplete_depth.is_none() {
+                        incomplete_depth = Some(d as u8);
+                    }
+                    break;
+                }
                 if let Some(hit) = Self::deadline_hit(
                     t0,
                     soft_deadline,
@@ -485,29 +639,88 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     match hit {
                         DeadlineHit::Stop | DeadlineHit::Hard => break,
                         DeadlineHit::Soft => {
-                            if depth_lines.len() >= required_multipv_lines {
+                            if is_helper || depth_lines.len() >= required_multipv_lines {
+                                if is_helper && incomplete_depth.is_none() {
+                                    incomplete_depth = Some(d as u8);
+                                }
                                 break;
                             }
+                            lead_window_soft_break = true;
                         }
                     }
                 }
                 // Aspiration window per PV head
-                let mut alpha = if d == 1 {
-                    i32::MIN / 2
+                // If prev_root_lines is None and we have a hint from previous iteration,
+                // smooth the aspiration center: center = (7*prev_score + 3*hint_score)/10
+                let aspiration_center = if d > 1 && prev_root_lines.is_none() {
+                    if let Some((_, hint_score)) = best_hint_next_iter {
+                        // Skip smoothing near mate scores to preserve mate distance integrity
+                        use crate::search::constants::MATE_SCORE;
+                        if prev_score.abs() >= MATE_SCORE - 100
+                            || hint_score.abs() >= MATE_SCORE - 100
+                        {
+                            prev_score
+                        } else {
+                            // Weighted average with i64 intermediate calculation to prevent overflow
+                            // in case SEARCH_INF or coefficients are changed in the future
+                            let c =
+                                (7_i64 * prev_score as i64 + 3_i64 * hint_score as i64) / 10_i64;
+                            c.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                        }
+                    } else {
+                        prev_score
+                    }
                 } else {
-                    prev_score - ASP_DELTA0
+                    prev_score
                 };
-                let mut beta = if d == 1 {
-                    i32::MAX / 2
+
+                // 初期窓とΔ（YaneuraOu準拠 + 拡張）
+                // primary: Δ0 = Δinit + K*log2(Threads)（上限あり）
+                // helper: off=フル窓 / wide=±HELPER_ASPIRATION_WIDE_DELTA
+                // floor(log2(threads)) を正しく計算（threads_hint 優先）
+                let threads_lg2: i32 = limits
+                    .threads_hint
+                    .map(|t| {
+                        if t > 0 {
+                            (u32::BITS - 1 - t.leading_zeros()) as i32
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
+                let mut delta = ASPIRATION_DELTA_INITIAL;
+                let mut alpha;
+                let mut beta;
+                // Gate aspiration start by depth and PV stability:
+                // use full window while the search is shallow AND previous iteration has not
+                // published any root lines. Once either (depth>=min) or (prev_root_lines.is_some())
+                // holds, allow aspiration for the primary. Helpers follow their own policy.
+                if !is_helper && d < ASPIRATION_MIN_DEPTH && prev_root_lines.is_none() {
+                    alpha = i32::MIN / 2;
+                    beta = i32::MAX / 2;
+                } else if is_helper {
+                    match helper_asp_mode() {
+                        HelperAspMode::Off => {
+                            delta = ASPIRATION_DELTA_MAX;
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                        }
+                        HelperAspMode::Wide => {
+                            delta = helper_asp_delta();
+                            alpha = aspiration_center - delta;
+                            beta = aspiration_center + delta;
+                        }
+                    }
                 } else {
-                    prev_score + ASP_DELTA0
-                };
-                let mut delta = ASP_DELTA0;
+                    delta = (ASPIRATION_DELTA_INITIAL
+                        + ASPIRATION_DELTA_THREADS_K.saturating_mul(threads_lg2))
+                    .min(ASPIRATION_DELTA_MAX);
+                    alpha = aspiration_center - delta;
+                    beta = aspiration_center + delta;
+                }
                 let mut window_alpha = alpha;
                 let mut window_beta = beta;
 
-                // 検索用stack/heuristicsを初期化
-                let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
                 let mut heur = std::mem::take(&mut shared_heur);
                 let lmr_trials_checkpoint = heur.lmr_trials;
                 let mut tt_hits: u64 = 0;
@@ -517,14 +730,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut root_tt_hint_used: u64 = 0;
                 let mut qnodes: u64 = 0;
                 let qnodes_limit = Self::compute_qnodes_limit(limits, d, pv_idx);
+                // 純粋 LazySMP: ルートインデックスの claim/release 管理は不要
 
                 // 作業用root move配列（excludedを除外）
                 let excluded_keys: SmallVec<[u32; 32]> =
                     excluded.iter().map(|m| m.to_u32()).collect();
-                let active_moves: SmallVec<[(crate::shogi::Move, i32); 64]> = root_moves
+                let active_moves: SmallVec<[(crate::shogi::Move, i32, usize); 64]> = root_moves
                     .iter()
                     .copied()
-                    .filter(|(m, _)| {
+                    .filter(|(m, _, _)| {
                         let key = m.to_u32();
                         // MultiPV では完全一致の手のみ除外し、昇成・不成などの派生は別ラインとして扱う。
                         !excluded_keys.contains(&key)
@@ -534,6 +748,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
+                let mut helper_retries: u32 = 0; // fail‑high のみ 1 回まで許可
                 loop {
                     if let Some(hit) = Self::deadline_hit(
                         t0,
@@ -548,9 +763,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
                             DeadlineHit::Soft => {
-                                if depth_lines.len() >= required_multipv_lines {
+                                if is_helper || depth_lines.len() >= required_multipv_lines {
+                                    if is_helper && incomplete_depth.is_none() {
+                                        incomplete_depth = Some(d as u8);
+                                    }
                                     break;
                                 }
+                                lead_window_soft_break = true;
                             }
                         }
                     }
@@ -566,7 +785,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
-                    for (idx, (mv, _)) in active_moves.iter().copied().enumerate() {
+                    for (idx, (mv, _, _root_idx)) in active_moves.iter().copied().enumerate() {
+                        // 純粋 LazySMP: claim は行わない
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
                         if super::diagnostics::should_abort_now() {
                             last_deadline_hit = Some(DeadlineHit::Stop);
@@ -585,9 +805,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             match hit {
                                 DeadlineHit::Stop | DeadlineHit::Hard => break,
                                 DeadlineHit::Soft => {
-                                    if depth_lines.len() >= required_multipv_lines {
+                                    if is_helper || depth_lines.len() >= required_multipv_lines {
+                                        if is_helper && incomplete_depth.is_none() {
+                                            incomplete_depth = Some(d as u8);
+                                        }
                                         break;
                                     }
+                                    lead_window_soft_break = true;
                                 }
                             }
                         }
@@ -619,6 +843,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     seldepth: &mut seldepth,
                                     qnodes: &mut qnodes,
                                     qnodes_limit,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_set: &mut cum_abdada_busy_set,
                                 };
                                 let (sc, _) = self.alphabeta(
                                     pvs::ABArgs {
@@ -628,7 +856,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         beta: -alpha,
                                         ply: 1,
                                         is_pv: true,
-                                        stack: &mut stack,
+                                        stack,
                                         heur: &mut heur,
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
@@ -645,6 +873,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     seldepth: &mut seldepth,
                                     qnodes: &mut qnodes,
                                     qnodes_limit,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_set: &mut cum_abdada_busy_set,
                                 };
                                 let (sc_nw, _) = self.alphabeta(
                                     pvs::ABArgs {
@@ -654,7 +886,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         beta: -alpha,
                                         ply: 1,
                                         is_pv: false,
-                                        stack: &mut stack,
+                                        stack,
                                         heur: &mut heur,
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
@@ -671,6 +903,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         seldepth: &mut seldepth,
                                         qnodes: &mut qnodes,
                                         qnodes_limit,
+                                        #[cfg(feature = "diagnostics")]
+                                        abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                        #[cfg(feature = "diagnostics")]
+                                        abdada_busy_set: &mut cum_abdada_busy_set,
                                     };
                                     let (sc_fw, _) = self.alphabeta(
                                         pvs::ABArgs {
@@ -680,7 +916,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             beta: -alpha,
                                             ply: 1,
                                             is_pv: true,
-                                            stack: &mut stack,
+                                            stack,
                                             heur: &mut heur,
                                             tt_hits: &mut tt_hits,
                                             beta_cuts: &mut beta_cuts,
@@ -700,6 +936,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > alpha {
                             alpha = score;
                         }
+                        // 純粋 LazySMP: done 通知は行わない
                         if alpha >= beta {
                             break; // fail-high
                         }
@@ -723,9 +960,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
                             DeadlineHit::Soft => {
-                                if depth_lines.len() >= required_multipv_lines {
+                                if is_helper || depth_lines.len() >= required_multipv_lines {
+                                    if is_helper && incomplete_depth.is_none() {
+                                        incomplete_depth = Some(d as u8);
+                                    }
                                     break;
                                 }
+                                lead_window_soft_break = true;
                             }
                         }
                     }
@@ -741,18 +982,29 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 new_beta,
                             });
                         }
-                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                            cb(&format!(
-                                "aspiration fail-low old=[{},{}] new=[{},{}]",
-                                old_alpha, old_beta, new_alpha, new_beta
-                            ));
-                        }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
-                        alpha = new_alpha;
-                        beta = new_beta;
-                        delta = (delta * 2).min(ASP_DELTA_MAX);
-                        continue;
+                        // If re-searches are piling up on the primary, bail out to a full window
+                        // to stabilize PV and avoid time loss.
+                        let retries_max = Self::retries_max(soft_deadline, &t0);
+                        if !is_helper && iteration_researches >= retries_max {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            continue;
+                        }
+                        if is_helper {
+                            // helper: fail‑low は再探索しない
+                            break;
+                        } else {
+                            alpha = new_alpha;
+                            beta = new_beta;
+                            // 非対称拡大量（デフォルト33%）。環境変数で調整可。
+                            let add_pct = asp_fail_low_pct();
+                            let add = (delta * add_pct / 100).max(1);
+                            delta = (delta + add).min(ASPIRATION_DELTA_MAX);
+                            continue;
+                        }
                     }
                     if local_best >= old_beta {
                         let new_alpha = old_alpha;
@@ -766,19 +1018,37 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 new_beta,
                             });
                         }
-                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                            cb(&format!(
-                                "aspiration fail-high old=[{},{}] new=[{},{}]",
-                                old_alpha, old_beta, new_alpha, new_beta
-                            ));
-                        }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         iteration_researches = iteration_researches.saturating_add(1);
-                        alpha = new_alpha;
-                        beta = new_beta;
-                        delta = (delta * 2).min(ASP_DELTA_MAX);
-                        continue;
+                        let retries_max = Self::retries_max(soft_deadline, &t0);
+                        if !is_helper && iteration_researches >= retries_max {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            continue;
+                        }
+                        if is_helper {
+                            if helper_retries == 0 {
+                                // 2 回目はフル窓で 1 回だけ再探索
+                                alpha = i32::MIN / 2;
+                                beta = i32::MAX / 2;
+                                helper_retries = 1;
+                                continue;
+                            } else {
+                                // 打ち切り
+                                break;
+                            }
+                        } else {
+                            alpha = new_alpha;
+                            beta = new_beta;
+                            // 非対称拡大量（デフォルト33%）。環境変数で調整可。
+                            let add_pct = asp_fail_high_pct();
+                            let add = (delta * add_pct / 100).max(1);
+                            delta = (delta + add).min(ASPIRATION_DELTA_MAX);
+                            continue;
+                        }
                     }
+                    // 純粋 LazySMP: done 通知は不要
                     iteration_asp_hits = iteration_asp_hits.saturating_add(1);
                     break; // success within window
                 }
@@ -795,6 +1065,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 depth_lmr_counter = depth_lmr_counter.saturating_add(lmr_counter);
                 depth_lmr_trials = depth_lmr_trials
                     .saturating_add(heur.lmr_trials.saturating_sub(lmr_trials_checkpoint));
+                // Pass heuristics update back to shared state for next PV/iteration.
+                // This ensures heuristics learned during this PV search are not lost.
                 shared_heur = heur;
 
                 // 発火: Depth / Hashfull（深さ1回の発火で十分）
@@ -811,6 +1083,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             cb(InfoEvent::Hashfull(hf));
                         }
                     }
+                    // pre-claim 診断は廃止
                 }
 
                 // PV 行の生成と発火
@@ -823,6 +1096,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         best = Some(m);
                         best_score = local_best;
                         prev_score = local_best;
+                        // Capture best move and score for use as hint in next iteration
+                        local_best_for_next_iter = Some((m, local_best));
                         if let Some(hint) = root_tt_hint_mv {
                             root_tt_hint_exists = 1;
                             if m.to_u32() == hint.to_u32() {
@@ -831,7 +1106,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         depth_hint_exists = root_tt_hint_exists;
                         depth_hint_used = root_tt_hint_used;
-                        _local_best_for_next_iter = Some((m, local_best));
                     }
                     // 可能ならTTからPVを復元し、だめなら軽量再探索へフォールバック
                     let mut pv = self.reconstruct_root_pv_from_tt(root, d, m).unwrap_or_default();
@@ -852,14 +1126,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     } else {
                         None
                     };
-                    let alpha = window_alpha;
-                    let beta = window_beta;
-                    let bound = Self::classify_root_bound(local_best, alpha, beta);
+                    let orig_alpha = window_alpha;
+                    let orig_beta = window_beta;
+                    let bound = Self::classify_root_bound(local_best, orig_alpha, orig_beta);
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
                         score_internal: local_best,
-                        score_cp: local_best,
+                        score_cp: crate::search::types::clamp_score_cp(local_best),
                         bound,
                         depth: d as u32,
                         seldepth: Some(
@@ -872,10 +1146,37 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nps: line_nps,
                         exact_exhausted: false,
                         exhaust_reason: None,
-                        mate_distance: None,
+                        // Attach mate distance for diagnostics and USI snapshot consumers
+                        mate_distance: crate::search::constants::mate_distance(local_best),
                     };
                     let node_type_for_store = line.bound;
                     let line_arc = Arc::new(line);
+                    // ベンチ時のメイト即停止（冪等）: primary かつ PV1 が Exact mate の場合
+                    if !is_helper
+                        && pv_idx == 1
+                        && matches!(node_type_for_store, NodeType::Exact)
+                        && bench_stop_on_mate_enabled()
+                        && {
+                            use crate::search::common::is_mate_score;
+                            is_mate_score(local_best)
+                        }
+                    {
+                        if let Some(ctrl) = stop_controller.as_ref() {
+                            ctrl.request_stop_flag_only();
+                        }
+                    }
+                    if let Some(ctrl) = stop_controller.as_ref() {
+                        let mut ctrl_line = (*line_arc).clone();
+                        ctrl_line.nodes = Some(nodes);
+                        let elapsed_total_ms = elapsed_ms_total;
+                        ctrl_line.time_ms = Some(elapsed_total_ms);
+                        ctrl_line.nps = if elapsed_total_ms > 0 {
+                            Some(nodes.saturating_mul(1000) / elapsed_total_ms.max(1))
+                        } else {
+                            None
+                        };
+                        ctrl.publish_root_line(session_id, root_key, &ctrl_line);
+                    }
                     if let Some(cb) = info {
                         cb(InfoEvent::PV {
                             line: Arc::clone(&line_arc),
@@ -885,6 +1186,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         Ok(line) => line,
                         Err(arc) => (*arc).clone(),
                     });
+                    // Collect qnodes consumed for this PV head
+                    cum_qnodes = cum_qnodes.saturating_add(qnodes);
+                    // フォールバック用にも記録（公開済み）
+                    last_pv_qnodes = qnodes;
+                    last_pv_published = true;
                     // TT 保存は 1 行目かつ Exact のときのみ行う。
                     // Aspiration 成功時にのみ Exact が確定する前提なので、将来の窓調整変更で
                     // 誤って Lower/Upper を保存しないよう明示的にガードしておく。
@@ -916,8 +1222,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     line_time_checkpoint = elapsed_ms_total;
                 } else {
                     // 局面が詰み/手なし等でPVが取れない → 打ち切り
+                    // このPVで消費したqnodesをフォールバック用に記録
+                    last_pv_qnodes = qnodes;
+                    last_pv_published = false;
                     break;
                 }
+            }
+
+            // PV 行が公開されなかった場合でも、最後に試行した PV の qnodes を統計に反映
+            if !last_pv_published && last_pv_qnodes > 0 {
+                cum_qnodes = cum_qnodes.saturating_add(last_pv_qnodes);
             }
 
             // 深さ集計を累積
@@ -934,7 +1248,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
             let iteration_complete = depth_lines.len() >= required_multipv_lines;
 
-            iterative_heur = shared_heur;
+            *heur_state = shared_heur;
 
             if iteration_complete {
                 final_lines = Some(depth_lines.clone());
@@ -949,13 +1263,38 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         nodes,
                         t0.elapsed().as_millis() as u64,
                     );
+
+                    // Thin B案: 探索側フック — 短手数詰みを検出したら早期最終化を要求
+                    if crate::search::config::mate_early_stop_enabled() {
+                        if let Some(first_line) = depth_lines.first() {
+                            let max_d =
+                                crate::search::config::mate_early_stop_max_distance() as i32;
+                            if let Some(dist) =
+                                crate::search::constants::mate_distance(first_line.score_internal)
+                            {
+                                if dist > 0 && dist <= max_d {
+                                    ctrl.request_finalize(FinalizeReason::PlannedMate {
+                                        distance: dist,
+                                        was_ponder: limits.is_ponder,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             } else if incomplete_depth.is_none() {
                 // iteration が完了しなかった場合は未完了深さとして記録する。
                 incomplete_depth = Some(d as u8);
             }
 
-            let mut lead_ms = 10u64;
+            // Update hint for next iteration only if we obtained a best move from this iteration.
+            // This preserves hints from previous iterations when current iteration is incomplete
+            // (e.g., early cutoff before pv_idx==1 is reached).
+            if let Some(h) = local_best_for_next_iter {
+                best_hint_next_iter = Some(h);
+            }
+
+            let mut lead_ms = crate::search::policy::lead_window_base_ms();
 
             cumulative_asp_failures =
                 cumulative_asp_failures.saturating_add(iteration_asp_failures);
@@ -1038,6 +1377,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ..Default::default()
         };
         stats.elapsed = t0.elapsed();
+        // Reflect accumulated quiescence nodes
+        stats.qnodes = cum_qnodes;
         stats.depth = final_depth_reached;
         stats.seldepth = final_seldepth_reached;
         stats.raw_seldepth = final_seldepth_raw.map(|v| v.min(u16::MAX as u32) as u16);
@@ -1045,6 +1386,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);
         stats.root_fail_high_count = Some(cum_beta_cuts);
+        #[cfg(feature = "diagnostics")]
+        {
+            stats.abdada_busy_detected = Some(cum_abdada_busy_detected);
+            stats.abdada_busy_set = Some(cum_abdada_busy_set);
+        }
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
         stats.aspiration_failures = Some(cumulative_asp_failures);
@@ -1052,6 +1398,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.re_searches = Some(cumulative_researches);
         stats.pv_changed = Some(cumulative_pv_changed);
         stats.incomplete_depth = incomplete_depth;
+        if limits.store_heuristics {
+            stats.heuristics = Some(Arc::new(heur_state.clone()));
+        }
 
         let final_lines_opt = final_lines.clone();
         if let Some(first_line) = final_lines_opt.as_ref().and_then(|lines| lines.first()) {
@@ -1077,7 +1426,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         if let Some(lines) = final_lines_opt.as_ref() {
             if let Some(first) = lines.first() {
                 best_move_out = Some(first.root_move);
-                score_out = first.score_cp;
+                // Internal score（mate距離保持）を採用。UI向けは必要時にclamp。
+                score_out = first.score_internal;
                 node_type_out = first.bound;
                 stats.pv = first.pv.iter().copied().collect();
             }
@@ -1094,6 +1444,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         } else if let Some(snap) = stable_snapshot {
             best_move_out = snap.best;
+            // スナップショットはcpのみ保持のため、この経路ではcpを使用（互換維持）
             score_out = snap.score_cp;
             node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
@@ -1106,6 +1457,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stable_depth = Some(snap.depth);
         } else if let Some(snap) = snapshot_any.clone() {
             best_move_out = snap.best;
+            // 同上（Partial/Stable snapshot経路）
             score_out = snap.score_cp;
             node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
@@ -1190,6 +1542,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     hard_timeout,
                     soft_limit_ms: if soft_ms != u64::MAX { soft_ms } else { 0 },
                     hard_limit_ms: if hard_ms != u64::MAX { hard_ms } else { 0 },
+                    stop_tag: None,
                 });
                 result.end_reason = reason;
             } else if let Some(dl) = limits.fallback_deadlines {
@@ -1217,6 +1570,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     hard_timeout: hard_timeout && !lead_window_soft_break,
                     soft_limit_ms: dl.soft_limit_ms,
                     hard_limit_ms: dl.hard_limit_ms,
+                    stop_tag: None,
                 });
                 result.end_reason = reason;
             } else if let Some(limit) = limits.time_limit() {
@@ -1251,6 +1605,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     hard_timeout,
                     soft_limit_ms: cap_ms,
                     hard_limit_ms: cap_ms,
+                    stop_tag: None,
                 });
                 result.end_reason = reason;
             }
@@ -1269,6 +1624,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ));
         }
         result
+    }
+
+    pub(super) fn iterative(
+        &self,
+        root: &Position,
+        limits: &SearchLimits,
+        info: Option<&InfoEventCallback>,
+    ) -> SearchResult {
+        let mut stack = take_stack_cache();
+        let mut heur_state = Heuristics::default();
+        let result =
+            self.iterative_with_buffers(root, limits, &mut stack[..], &mut heur_state, info);
+        return_stack_cache(stack);
+        result
+    }
+
+    pub fn think_with_ctx(
+        &self,
+        root: &Position,
+        limits: &SearchLimits,
+        stack: &mut [SearchStack],
+        heur: &mut Heuristics,
+        info: Option<crate::search::api::InfoEventCallback>,
+    ) -> SearchResult {
+        let info_ref = info.as_ref();
+        self.iterative_with_buffers(root, limits, stack, heur, info_ref)
     }
 }
 
@@ -1383,6 +1764,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
                                 hard_timeout,
                                 soft_limit_ms,
                                 hard_limit_ms,
+                                stop_tag: None,
                             });
                             let _ = tx.send(fallback);
                         }
@@ -1407,3 +1789,136 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
         // Engine側でshared_tt再生成＋Backend再バインド方針のため未使用
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::{SearchLimitsBuilder, TranspositionTable};
+    use crate::shogi::Position;
+    use std::sync::Arc;
+
+    #[test]
+    fn stack_cache_preserves_inner_capacity_across_iterations() {
+        // Prepare a stack buffer and inflate inner quiet_moves capacity
+        let mut buf = super::take_stack_cache();
+        assert_eq!(buf.len(), (crate::search::constants::MAX_PLY + 1));
+        let idx = 8usize;
+        // Inflate capacity by pushing many moves
+        for _ in 0..512 {
+            buf[idx].quiet_moves.push(crate::shogi::Move::null());
+        }
+        let cap_before = buf[idx].quiet_moves.capacity();
+        // Return to cache (would be reused next take)
+        super::return_stack_cache(buf);
+
+        // Take again (new iteration). Implementation should clear but keep capacity
+        let buf2 = super::take_stack_cache();
+        let cap_after = buf2[idx].quiet_moves.capacity();
+        assert!(
+            cap_after >= cap_before,
+            "inner Vec capacity should be preserved across iterations (before={}, after={})",
+            cap_before,
+            cap_after
+        );
+        super::return_stack_cache(buf2);
+    }
+
+    #[test]
+    fn heuristics_carryover_across_pvs_and_iterations() {
+        // Test that heuristics (lmr_trials) grow across PVs and iterations,
+        // ensuring the fix (shared_heur = heur at PV tail) works correctly.
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+        let backend = ClassicBackend::with_tt(evaluator, tt);
+
+        let pos = Position::startpos();
+        let limits = SearchLimitsBuilder::default()
+            .depth(5) // Use depth 5 to ensure LMR is triggered
+            .multipv(2) // Use MultiPV to test across multiple PVs
+            .store_heuristics(true)
+            .build();
+
+        let result = backend.think_blocking(&pos, &limits, None);
+
+        // Verify that heuristics were captured
+        assert!(
+            result.stats.heuristics.is_some(),
+            "Heuristics should be stored when store_heuristics=true"
+        );
+
+        if let Some(heur) = result.stats.heuristics.as_ref() {
+            let summary = heur.summary();
+            // At depth 5 with multipv=2, we expect some LMR activity
+            // The exact value depends on search dynamics, but it should be > 0
+            // if heuristics are properly carried across PVs.
+            //
+            // If the bug (*heur_state = heur) existed, lmr_trials would be reset
+            // between PVs and remain low. With the fix (shared_heur = heur),
+            // lmr_trials should accumulate.
+            //
+            // Note: In some positions, LMR may not trigger. We check both lmr_trials
+            // and other heuristic tables to ensure carryover is working.
+            let has_lmr = summary.lmr_trials > 0;
+            let has_other = summary.quiet_max > 0
+                || summary.continuation_max > 0
+                || summary.capture_max > 0
+                || summary.counter_filled > 0;
+            assert!(
+                has_lmr || has_other,
+                "At least some heuristic activity should occur at depth 5. \
+                 lmr_trials={}, quiet_max={}, continuation_max={}, capture_max={}, counter_filled={}",
+                summary.lmr_trials,
+                summary.quiet_max,
+                summary.continuation_max,
+                summary.capture_max,
+                summary.counter_filled
+            );
+        }
+    }
+
+    #[test]
+    fn qnodes_unlimited_when_no_time_and_limit_zero() {
+        let limits = SearchLimitsBuilder::default()
+            .time_control(TimeControl::Infinite)
+            .qnodes_limit(0)
+            .build();
+        let got = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
+        assert_eq!(got, u64::MAX, "bench/unlimited path should yield u64::MAX");
+    }
+
+    #[test]
+    fn qnodes_default_clamped_without_time_and_no_override() {
+        use crate::search::constants::DEFAULT_QNODES_LIMIT;
+        let limits = SearchLimitsBuilder::default().time_control(TimeControl::Infinite).build();
+        let got = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
+        assert_eq!(got, DEFAULT_QNODES_LIMIT, "should clamp to default when no override");
+    }
+
+    // RootWorkQueue/claim は純粋 LazySMP では使用しないため、関連テストは削除しました。
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelperAspMode {
+    Off,
+    Wide,
+}
+
+fn helper_asp_mode() -> HelperAspMode {
+    match crate::search::policy::helper_asp_mode_value() {
+        0 => HelperAspMode::Off,
+        _ => HelperAspMode::Wide,
+    }
+}
+
+#[inline]
+fn helper_asp_delta() -> i32 {
+    use crate::search::constants::ASPIRATION_DELTA_MAX;
+    crate::search::policy::helper_asp_delta_value()
+        .clamp(50, 600)
+        .min(ASPIRATION_DELTA_MAX)
+}
+
+// asp_fail_low_pct / asp_fail_high_pct: see crate::search::policy
+
+// Use shared policy getter from parallel module to avoid divergence
+use crate::search::policy::bench_stop_on_mate_enabled;

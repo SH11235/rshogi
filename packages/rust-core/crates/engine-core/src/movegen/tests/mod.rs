@@ -5,6 +5,8 @@ mod basic;
 #[cfg(test)]
 mod check_evasion;
 #[cfg(test)]
+mod checkers_orientation;
+#[cfg(test)]
 mod checks;
 #[cfg(test)]
 mod drops;
@@ -16,6 +18,9 @@ mod pieces;
 mod promotion_from_promotion_zone;
 #[cfg(test)]
 mod underflow_test;
+
+#[cfg(test)]
+mod king_danger_squares;
 
 #[cfg(test)]
 mod lance_edge_tests {

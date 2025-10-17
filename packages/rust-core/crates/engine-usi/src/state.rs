@@ -9,6 +9,7 @@ use engine_core::search::parallel::{FinalizerMsg, StopController};
 use engine_core::shogi::Position;
 use engine_core::time_management::{TimeControl, TimeManager, TimeState};
 use engine_core::Color;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
@@ -46,7 +47,7 @@ pub struct UsiOptions {
     pub watchdog_poll_ms: u64,
     // 純秒読みでGUIの厳格締切より少し手前で確実に返すための追加リード（ms）
     // network_delay2_ms に加算して最終化を前倒しする。手番側 main=0 でも適用。
-    // 既定: 300ms
+    // 既定: 150ms
     pub byoyomi_deadline_lead_ms: u64,
     // MultiPV lines
     pub multipv: u8,
@@ -58,23 +59,109 @@ pub struct UsiOptions {
     pub simd_max_level: Option<String>,
     // NNUE SIMD clamp (runtime). None = Auto
     pub nnue_simd: Option<String>,
+    // Finalize sanity (PV1の軽いチェックでタダ損抑止)
+    pub finalize_sanity_enabled: bool,
+    pub finalize_sanity_budget_ms: u64,
+    /// Ponder等でStopInfoの時間情報が無い場合でも最低限回すための下限（ms）
+    pub finalize_sanity_min_ms: u64,
+    pub finalize_sanity_mini_depth: u8,
+    pub finalize_sanity_see_min_cp: i32,
+    pub finalize_sanity_switch_margin_cp: i32,
+    // Opponent capture SEE gate after PV1 (positive cp threshold)
+    pub finalize_sanity_opp_see_min_cp: i32,
+    // Opponent capture SEE penalty cap (independent from opp_see_min gate)
+    pub finalize_sanity_opp_see_penalty_cap_cp: i32,
+    // Check move micro penalty for finalize sanity symmetric bias suppression
+    pub finalize_sanity_check_penalty_cp: i32,
+    /// 二手脅威(quiet→capture)を軽量に見るゲートの閾値（cp相当）
+    pub finalize_threat2_min_cp: i32,
+    /// 二手脅威のquietビーム幅（上位K件だけ見る）
+    pub finalize_threat2_beam_k: u8,
+    /// 二手脅威(quiet→capture)が極端に大きい場合に例外的にSanityを起動するゲート（cp相当）
+    pub finalize_threat2_extreme_min_cp: i32,
+    /// 勝勢帯では「極端Threat2の例外OR」を無効化するためのしきい値（cp）。既定=+800。
+    pub finalize_threat2_extreme_win_disable_cp: i32,
+    /// 代替手で SEE<0 の手を許容するか（falseで禁止）
+    pub finalize_allow_see_lt0_alt: bool,
+    /// 高リスク時の“受け”候補として許容する SEE マイナス閾値（cp）。
+    /// need_verify=1 のときのみ適用。例: -120 なら小さな損の受けを拾う。
+    pub finalize_defense_see_neg_floor_cp: i32,
+    /// 置換前後のリスク差分（risk_before − risk_after）の最小要求値（cp）。既定=100。
+    pub finalize_risk_min_delta_cp: i32,
+    /// 非チェック時に玉の手へ切替を許可するために必要な最小利得（cp）。満たさなければ拒否。
+    pub finalize_sanity_king_alt_min_gain_cp: i32,
+    /// 非チェック時に代替が玉の手なら s2 に加える小ペナルティ（cp）。
+    pub finalize_sanity_king_alt_penalty_cp: i32,
+    /// R/B 非成りに与える軽ペナルティ（cp）
+    pub finalize_non_promote_major_penalty_cp: i32,
+    // Instant mate move options
+    pub instant_mate_move_enabled: bool,
+    pub instant_mate_move_max_distance: u32,
+    pub instant_mate_check_all_pv: bool,
+    // Instant mate gating & verification
+    pub instant_mate_require_stable: bool,
+    pub instant_mate_min_depth: u8,
+    pub instant_mate_respect_min_think_ms: bool,
+    pub instant_mate_min_respect_ms: u64,
+    pub instant_mate_verify_mode: InstantMateVerifyMode,
+    pub instant_mate_verify_nodes: u32,
+    // Finalize: 余裕時の軽MateProbe（相手番・短手限定）
+    pub finalize_mate_probe_enabled: bool,
+    pub finalize_mate_probe_depth: u8,
+    pub finalize_mate_probe_time_ms: u64,
+    // MateGate configuration (YO流ゲートの閾値)
+    pub mate_gate_min_stable_depth: u8,
+    pub mate_gate_fast_ok_min_depth: u8,
+    pub mate_gate_fast_ok_min_elapsed_ms: u64,
+
+    // Root guard rails and experiment flags (DIAG/flags; default OFF)
+    // Root SEE gate: if enabled and SEE(best) < -X, hold commit (re-search/try 2nd best)
+    pub root_see_gate: bool,
+    pub x_see_cp: i32,
+    // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
+    pub post_verify: bool,
+    /// Early finalize linkage: require post-verify to pass; if reject, extend search briefly
+    pub post_verify_require_pass: bool,
+    /// Extend search time (ms) on post-verify reject (capped by remaining soft time)
+    pub post_verify_extend_ms: u64,
+    /// Strengthen post-verify when disadvantaged (score <= this)
+    pub post_verify_disadvantage_cp: i32,
+    pub y_drop_cp: i32,
+    // Promote vs. non-promote verify and small bias for promote
+    pub promote_verify: bool,
+    pub promote_bias_cp: i32,
+    // Reproduction: warmup search before cut (ms) and previous K moves replay
+    pub warmup_ms: u64,
+    pub warmup_prev_moves: u32,
+    // Profile selector for auto defaults (GUI override)
+    pub profile_mode: ProfileMode,
+    // Forced move info emit (only-one-legal-move)
+    pub forced_move_emit_eval: bool,
+    pub forced_move_min_search_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstantMateVerifyMode {
+    Off,
+    CheckOnly,
+    QSearch,
 }
 
 impl Default for UsiOptions {
     fn default() -> Self {
         Self {
             hash_mb: 1024,
-            threads: 1,
+            threads: 8,
             ponder: true,
-            engine_type: EngineType::Material,
+            engine_type: EngineType::Enhanced,
             eval_file: None,
             overhead_ms: 50,
             network_delay_ms: 120,
-            network_delay2_ms: 800,
-            min_think_ms: 200,
+            network_delay2_ms: 120,
+            min_think_ms: 100,
             byoyomi_periods: 1,
             byoyomi_early_finish_ratio: 80,
-            byoyomi_safety_ms: 500,
+            byoyomi_safety_ms: 200,
             pv_stability_base: 80,
             pv_stability_slope: 5,
             slow_mover_pct: 100,
@@ -84,14 +171,66 @@ impl Default for UsiOptions {
             stochastic_ponder: false,
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
-            stop_wait_ms: 200,
+            stop_wait_ms: 50,
             watchdog_poll_ms: 2,
-            byoyomi_deadline_lead_ms: 300,
+            byoyomi_deadline_lead_ms: 150,
             multipv: 1,
             gameover_sends_bestmove: false,
             fail_safe_guard: false,
             simd_max_level: None,
             nnue_simd: None,
+            finalize_sanity_enabled: false,
+            finalize_sanity_budget_ms: 8,
+            finalize_sanity_min_ms: 2,
+            finalize_sanity_mini_depth: 2,
+            finalize_sanity_see_min_cp: -90,
+            finalize_sanity_switch_margin_cp: 40,
+            finalize_sanity_opp_see_min_cp: 100,
+            finalize_sanity_opp_see_penalty_cap_cp: 0,
+            finalize_sanity_check_penalty_cp: 10,
+            finalize_threat2_min_cp: 200,
+            finalize_threat2_beam_k: 4,
+            finalize_threat2_extreme_min_cp: 700,
+            finalize_threat2_extreme_win_disable_cp: 800,
+            finalize_allow_see_lt0_alt: false,
+            finalize_defense_see_neg_floor_cp: -120,
+            finalize_risk_min_delta_cp: 100,
+            finalize_sanity_king_alt_min_gain_cp: 150,
+            finalize_sanity_king_alt_penalty_cp: 0,
+            finalize_non_promote_major_penalty_cp: 120,
+            instant_mate_move_enabled: true,
+            instant_mate_move_max_distance: 1,
+            // より安全側に倒す（PV全体を確認）
+            instant_mate_check_all_pv: true,
+            // 既定は Stable 限定・深さゲートなし・最小思考時間を軽く尊重
+            instant_mate_require_stable: true,
+            instant_mate_min_depth: 0,
+            instant_mate_respect_min_think_ms: true,
+            instant_mate_min_respect_ms: 8,
+            instant_mate_verify_mode: InstantMateVerifyMode::CheckOnly,
+            instant_mate_verify_nodes: 0,
+            finalize_mate_probe_enabled: false,
+            finalize_mate_probe_depth: 5,
+            finalize_mate_probe_time_ms: 5,
+            // MateGate defaults
+            mate_gate_min_stable_depth: 5,
+            mate_gate_fast_ok_min_depth: 5,
+            mate_gate_fast_ok_min_elapsed_ms: 30,
+            // Guard rails（既定 ON）
+            root_see_gate: true,
+            x_see_cp: 0,
+            post_verify: true,
+            post_verify_require_pass: true,
+            post_verify_extend_ms: 300,
+            post_verify_disadvantage_cp: -300,
+            y_drop_cp: 225,
+            promote_verify: false,
+            promote_bias_cp: 20,
+            warmup_ms: 500,
+            warmup_prev_moves: 0,
+            profile_mode: ProfileMode::Auto,
+            forced_move_emit_eval: true,
+            forced_move_min_search_ms: 1,
         }
     }
 }
@@ -111,6 +250,27 @@ pub struct GoParams {
     pub periods: Option<u32>,
     pub moves_to_go: Option<u32>,
     pub rtime: Option<u64>,
+    // go mate サポート（暫定: 即時判定のみ）
+    pub mate_mode: bool,
+    /// None = infinite（停止が来るまで） / Some(ms) = タイムアウト（将来の実探索向け）
+    pub mate_limit_ms: Option<u64>,
+}
+
+/// Lightweight snapshot of ponder search result for instant finalize on ponderhit.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PonderResult {
+    pub best_move: Option<String>,
+    pub score: i32,
+    pub depth: u8,
+    pub nodes: u64,
+    pub elapsed_ms: u64,
+    /// Second move in PV (opponent's predicted response) for ponder hint
+    pub pv_second: Option<String>,
+    /// Session ID to verify this result matches the current search session
+    pub session_id: Option<u64>,
+    /// Root position hash to verify this result is for the current position
+    pub root_hash: u64,
 }
 
 pub struct EngineState {
@@ -151,9 +311,32 @@ pub struct EngineState {
     pub deadline_near: Option<Instant>,
     pub deadline_near_notified: bool,
     pub active_time_manager: Option<Arc<TimeManager>>,
+    /// Ponder search result buffered for instant finalize on ponderhit
+    pub pending_ponder_result: Option<PonderResult>,
+    /// Names of USI options explicitly overridden by the user via `setoption`.
+    /// Auto defaults (Threads連動) はここに含まれないキーに対してのみ適用される。
+    pub user_overrides: HashSet<String>,
 }
 
 impl EngineState {
+    /// エンジンMutexのPoisonを透過してロックを取得する共通ヘルパ。
+    ///
+    /// - 通常は `Mutex::lock()` の Guard を返す
+    /// - Poison発生後は `PoisonError::into_inner()` で復帰し、ログを1行出す
+    #[inline]
+    pub fn lock_engine(&self) -> std::sync::MutexGuard<'_, Engine> {
+        match self.engine.lock() {
+            Ok(g) => g,
+            Err(p) => {
+                // 互換ログ（テスト/運用の可観測性向上）
+                // 備考: go開始前後のpanic捕捉ログと区別しづらいため、将来的に
+                // `go_panic_caught_source=poison_recover` 等のタグ追加を検討。
+                crate::io::info_string("engine_mutex_poison_recover=1");
+                crate::io::info_string("go_panic_caught=1");
+                p.into_inner()
+            }
+        }
+    }
     pub fn new() -> Self {
         // Initialize engine-core static tables once
         engine_core::init::init_all_tables_once();
@@ -196,6 +379,8 @@ impl EngineState {
             deadline_near: None,
             deadline_near_notified: false,
             active_time_manager: None,
+            pending_ponder_result: None,
+            user_overrides: HashSet::new(),
         }
     }
 
@@ -242,6 +427,15 @@ impl EngineState {
     pub fn notify_idle(&self) {
         self.idle_sync.notify_all();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ProfileMode {
+    #[default]
+    Auto,
+    T1,
+    T8,
+    Off,
 }
 
 #[derive(Default)]

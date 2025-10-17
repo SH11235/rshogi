@@ -10,13 +10,13 @@ NNUEモデルの品質を確保するため、新しいモデルと既存のベ�
 
 ### 1. ローカル評価スクリプト（推奨）
 
-`scripts/evaluate-nnue.sh`を使用してローカルで詳細な評価を実行できます。
+`scripts/nnue/evaluate-nnue.sh`を使用してローカルで詳細な評価を実行できます。
 
 #### 基本的な使用方法
 
 ```bash
 cd packages/rust-core
-./scripts/evaluate-nnue.sh [baseline.nnue] [candidate.nnue] [games] [threads]
+./scripts/nnue/evaluate-nnue.sh [baseline.nnue] [candidate.nnue] [games] [threads]
 ```
 
 #### パラメータ
@@ -30,14 +30,14 @@ cd packages/rust-core
 
 ```bash
 # デフォルト設定で実行
-./scripts/evaluate-nnue.sh
+./scripts/nnue/evaluate-nnue.sh
 
 # カスタム設定で実行
-./scripts/evaluate-nnue.sh baseline.nnue new_model.nnue 2000 16
+./scripts/nnue/evaluate-nnue.sh baseline.nnue new_model.nnue 2000 16
 
 # 新しくトレーニングしたモデルを評価
 cp runs/train_nnue_*/final_weights.nnue candidate.nnue
-./scripts/evaluate-nnue.sh runs/ref.nnue candidate.nnue
+./scripts/nnue/evaluate-nnue.sh runs/ref.nnue candidate.nnue
 ```
 
 #### 評価結果
@@ -106,7 +106,7 @@ ls docs/reports/fixtures/opening/representative_100.epd
 
 hash-mbパラメータを調整：
 ```bash
-./scripts/evaluate-nnue.sh
+./scripts/nnue/evaluate-nnue.sh
 # スクリプトを編集して--hash-mbを512などに変更
 ```
 
