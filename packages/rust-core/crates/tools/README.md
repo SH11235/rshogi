@@ -7,6 +7,34 @@
 - ワークスペース全体: `cargo build --release`
 - 本クレートの特定バイナリ: `cargo build --release --bin <ツール名>`
 
+### Floodgate → CSA → SFEN 抽出ツール
+
+`floodgate-pipeline` を追加しました。Floodgateの索引(`00LIST.floodgate`)から `.csa` を取得し、SFENを抽出して横ミラー・重複除去まで行います（HTTPのみ）。
+
+基本フロー:
+
+1. 索引DL
+   ```bash
+   cargo run -p tools --bin floodgate_pipeline -- fetch-index \
+     --root http://wdoor.c.u-tokyo.ac.jp/shogi/x/ --out 00LIST.floodgate
+   ```
+2. 本体DL
+   ```bash
+   cargo run -p tools --bin floodgate_pipeline -- download \
+     --index 00LIST.floodgate --root http://wdoor.c.u-tokyo.ac.jp/shogi/x/ \
+     --out-dir logs/x --limit 100   # 動作確認用に一部だけDL
+   ```
+3. 抽出実行
+   ```bash
+   cargo run -p tools --bin floodgate_pipeline -- extract \
+     --root logs/x --out runs/floodgate.sfens.gz --mode all --mirror-dedup
+   ```
+
+補足:
+- `--mode initial|all|nth` を選択。`--mode nth --nth 24,32` のように手数指定も可能。
+- `--mirror-dedup` は4トークン正規化＋横ミラー正規化で重複除去。
+- 参照元の索引はテキスト1行1パスで `.csa` のみを抽出対象にしています。
+
 ## 推奨ワークフロー（学習データ〜学習）
 
 1) 教師データ生成（JSONL 推奨）
