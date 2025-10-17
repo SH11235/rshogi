@@ -9,7 +9,7 @@ use crate::time_management::{
 use crate::{
     engine::session::SearchSession,
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
-    evaluation::nnue::NNUEEvaluatorWrapper,
+    evaluation::nnue::{NNUEEvaluatorWrapper, NnueDiag},
     search::ab::{ClassicBackend, SearchProfile},
     search::api::{InfoEventCallback, SearcherBackend},
     search::parallel::StopController,
@@ -341,6 +341,15 @@ impl Engine {
             backend.update_threads(self.num_threads.max(1));
             backend.update_hash(self.tt_size_mb.max(1));
         }
+    }
+
+    /// Take NNUE diagnostics (dims/uid + startpos cp) if NNUE is active and loaded.
+    pub fn nnue_diag_for_logging(&self) -> Option<(NnueDiag, i32)> {
+        let g = self.nnue_evaluator.read();
+        let w = g.as_ref()?;
+        let diag = w.diag_snapshot();
+        let cp = w.eval_startpos_cp();
+        Some((diag, cp))
     }
 
     /// Issue an immediate stop request to the currently running search without acquiring locks.
