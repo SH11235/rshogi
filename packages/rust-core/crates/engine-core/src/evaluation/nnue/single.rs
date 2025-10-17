@@ -38,7 +38,9 @@ impl SingleChannelNet {
                 cp += w * a;
             }
         }
-        cp.clamp(-32000.0, 32000.0) as i32
+        // Apply output scaling to centipawns
+        let scaled = cp * self.scale;
+        scaled.clamp(-32000.0, 32000.0) as i32
     }
     #[inline]
     fn infer_with_active_indices(&self, active: &[usize], _stm: Color) -> i32 {
@@ -82,7 +84,8 @@ impl SingleChannelNet {
         }
 
         // Apply a conservative clip for stability in search
-        let cp = cp.clamp(-32000.0, 32000.0);
+        // Apply output scaling to centipawns
+        let cp = (cp * self.scale).clamp(-32000.0, 32000.0);
         cp as i32
     }
 
