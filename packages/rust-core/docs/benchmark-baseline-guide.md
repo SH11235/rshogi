@@ -157,7 +157,7 @@ git push
       "mean_nps": 410550.0,
       "std_dev": 131777.16,
       "avg_speedup": 1.0,
-      "duplication_percentage": 16.31,
+      "helper_share_pct": 16.31,
       "effective_speedup": 1.0
     }
   ]

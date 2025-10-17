@@ -55,6 +55,8 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p engine-usi --release --features di
 - `Threads`: 1–256
 - `EvalFile`: 学習済みNNUE重みファイルのパス
 - `ByoyomiPeriods`: 秒読み回数（`USI_ByoyomiPeriods` エイリアスも可）
+- `BenchAllRun`: ベンチ時、primary 完了後も全スレッドを持ち時間（Hard）まで走行（check, default=false）。ランタイム反映（setoption 即時有効）。
+- `BenchStopOnMate`: ベンチ時もメイト検出で即停止（check, default=true）。ランタイム反映（setoption 即時有効）。
 
 ## トラブルシュート
 - FMA で評価が一致しない: 期待通りです（丸め差）。`fast-fma` を外すか、FMA を含む経路同士で比較・検証してください。

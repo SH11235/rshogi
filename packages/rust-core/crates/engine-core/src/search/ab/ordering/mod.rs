@@ -3,6 +3,7 @@ mod guards;
 mod move_picker;
 mod root_picker;
 
+use std::fmt;
 use std::sync::OnceLock;
 
 use crate::search::history::{
@@ -10,13 +11,13 @@ use crate::search::history::{
 };
 use crate::search::params as dynp;
 use crate::search::types::SearchStack;
-
 pub(crate) use guards::{EvalMoveGuard, EvalNullGuard};
 #[cfg(any(test, feature = "bench-move-picker"))]
 pub use move_picker::MovePicker;
 #[cfg(not(any(test, feature = "bench-move-picker")))]
 pub(crate) use move_picker::MovePicker;
 pub(crate) use root_picker::RootPicker;
+pub use root_picker::{RootJitter, RootPickerConfig};
 
 const MOVENO_LOG_TABLE_SIZE: usize = 512;
 
@@ -63,13 +64,22 @@ fn ln_moveno(moveno: usize) -> f32 {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Heuristics {
     pub(crate) history: ButterflyHistory,
     pub(crate) counter: CounterMoveHistory,
     pub(crate) continuation: ContinuationHistory,
     pub(crate) capture: CaptureHistory,
     pub(crate) lmr_trials: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeuristicsSummary {
+    pub quiet_max: i16,
+    pub continuation_max: i16,
+    pub capture_max: i16,
+    pub counter_filled: u32,
+    pub lmr_trials: u64,
 }
 
 impl Heuristics {
@@ -86,6 +96,41 @@ impl Heuristics {
         self.continuation.clear();
         self.capture.clear();
         self.lmr_trials = 0;
+    }
+
+    pub fn merge_from(&mut self, other: &Self) {
+        self.history.merge_from(&other.history);
+        self.counter.merge_from(&other.counter);
+        self.continuation.merge_from(&other.continuation);
+        self.capture.merge_from(&other.capture);
+        self.lmr_trials = self.lmr_trials.saturating_add(other.lmr_trials);
+    }
+
+    pub fn summary(&self) -> HeuristicsSummary {
+        HeuristicsSummary {
+            quiet_max: self.history.max_abs(),
+            continuation_max: self.continuation.max_abs(),
+            capture_max: self.capture.max_abs(),
+            counter_filled: self.counter.filled_count(),
+            lmr_trials: self.lmr_trials,
+        }
+    }
+
+    pub fn lmr_trials(&self) -> u64 {
+        self.lmr_trials
+    }
+}
+
+impl fmt::Debug for Heuristics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let summary = self.summary();
+        f.debug_struct("Heuristics")
+            .field("lmr_trials", &self.lmr_trials)
+            .field("quiet_max", &summary.quiet_max)
+            .field("continuation_max", &summary.continuation_max)
+            .field("capture_max", &summary.capture_max)
+            .field("counter_filled", &summary.counter_filled)
+            .finish()
     }
 }
 

@@ -1,5 +1,6 @@
 //! Common types for search algorithms
 
+use crate::search::ab::ordering::Heuristics;
 use crate::search::snapshot::SnapshotSource;
 use crate::shogi::Move;
 use smallvec::SmallVec;
@@ -11,6 +12,13 @@ pub type IterationCallback = Arc<dyn Fn(&CommittedIteration) + Send + Sync>;
 
 /// Callback type for lightweight `info string` diagnostics.
 pub type InfoStringCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Clamp score for cp-oriented displays/logs. Internal score (mate/fail-soft) は保持しつつ、
+/// 表示上の極端値を避けたい場面で使用する簡易クリップ。
+#[inline]
+pub fn clamp_score_cp(score: i32) -> i32 {
+    score.clamp(-30_000, 30_000)
+}
 
 /// Search statistics
 #[derive(Clone, Debug, Default)]
@@ -45,8 +53,9 @@ pub struct SearchStats {
     pub re_searches: Option<u32>,
     /// Number of times PV head changed (root)
     pub pv_changed: Option<u32>,
-    /// Duplication percentage for parallel search (0-100)
-    pub duplication_percentage: Option<f64>,
+    /// Helper share percentage of total nodes in parallel search (0-100).
+    /// Defined as: 100 * (total_nodes - primary_nodes) / total_nodes
+    pub helper_share_pct: Option<f64>,
     /// Number of check extensions applied
     pub check_extensions: Option<u64>,
     /// Number of king move extensions applied
@@ -79,6 +88,16 @@ pub struct SearchStats {
     pub root_report_source: Option<SnapshotSource>,
     /// Snapshot version identifier
     pub snapshot_version: Option<u64>,
+    /// Heuristics snapshot produced during search (optional)
+    pub heuristics: Option<Arc<Heuristics>>,
+    /// MultipV merge detail (primary/helper) — diagnostics only
+    pub multipv_primary_lines: Option<u8>,
+    pub multipv_helper_lines: Option<u8>,
+    /// ABDADA diagnostics (counts)
+    #[cfg(feature = "diagnostics")]
+    pub abdada_busy_detected: Option<u64>,
+    #[cfg(feature = "diagnostics")]
+    pub abdada_busy_set: Option<u64>,
 }
 
 impl SearchStats {
@@ -240,7 +259,8 @@ impl SearchResult {
             let mv = first.pv.first().copied().or(Some(first.root_move));
             // Publish PV into stats for backward compatibility
             stats.pv = first.pv.iter().copied().collect();
-            (mv, first.score_cp, first.bound)
+            // 統一方針: SearchResult::score は内部スコア（mate距離保持）
+            (mv, first.score_internal, first.bound)
         } else {
             (None, 0, NodeType::Exact)
         };
@@ -382,6 +402,8 @@ pub struct StopInfo {
     pub soft_limit_ms: u64,
     /// Hard time limit in ms (0 if not applicable)
     pub hard_limit_ms: u64,
+    /// Optional diagnostic tag (e.g., "planned_mate K=1"). For logging/USI only.
+    pub stop_tag: Option<String>,
 }
 
 impl Default for StopInfo {
@@ -394,6 +416,7 @@ impl Default for StopInfo {
             hard_timeout: false,
             soft_limit_ms: 0,
             hard_limit_ms: 0,
+            stop_tag: None,
         }
     }
 }
@@ -454,6 +477,26 @@ impl SearchStack {
             ply,
             ..Default::default()
         }
+    }
+
+    /// 反復開始時の軽量リセット（容量は保持）
+    #[inline]
+    pub fn reset_for_iteration(&mut self) {
+        self.ply = 0;
+        self.current_move = None;
+        self.static_eval = None;
+        self.killers = [None, None];
+        self.move_count = 0;
+        self.pv = false;
+        self.null_move = false;
+        self.in_check = false;
+        self.threat_move = None;
+        self.history_score = 0;
+        self.excluded_move = None;
+        self.counter_move = None;
+        self.quiet_moves.clear(); // 容量保持
+        self.consecutive_checks = 0;
+        self.pv_line.clear(); // SmallVec の容量保持
     }
 
     /// Update killers (convenience method)

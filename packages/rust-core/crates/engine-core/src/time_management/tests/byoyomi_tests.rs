@@ -335,7 +335,9 @@ fn test_byoyomi_mixed_correct_incorrect_updates() {
     // Verify we're in byoyomi with correct state
     let (periods, period_ms, in_byoyomi) = tm.get_byoyomi_state().unwrap();
     assert!(in_byoyomi, "Should be in byoyomi after spending all main time");
-    assert_eq!(periods, 3, "All periods should be available");
+    // 現行仕様: 移行手での超過時間はその手で byoyomi に充当され、必要に応じて期を消費する。
+    // よって本ケースでは 1 期消費され、残りは 2 期となる。
+    assert_eq!(periods, 2, "One period should be consumed on transition");
     assert_eq!(
         period_ms, 1000,
         "After consuming exactly one period, current period resets to full"

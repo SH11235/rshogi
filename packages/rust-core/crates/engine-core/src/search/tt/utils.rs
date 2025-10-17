@@ -143,6 +143,12 @@ fn extract_node_type(data: u64) -> crate::search::NodeType {
     }
 }
 
+#[inline(always)]
+fn extract_pv_flag(data: u64) -> bool {
+    use super::constants::{PV_FLAG_MASK, PV_FLAG_SHIFT};
+    ((data >> PV_FLAG_SHIFT) & PV_FLAG_MASK) != 0
+}
+
 /// Generic helper to try updating an existing entry with depth filtering using CAS
 #[inline(always)]
 pub(crate) fn try_update_entry_generic(
@@ -166,6 +172,8 @@ pub(crate) fn try_update_entry_generic(
     }
 
     let old_depth = extract_depth(old_data);
+    let old_node_type = extract_node_type(old_data);
+    let old_is_pv = extract_pv_flag(old_data);
 
     // Relaxed depth filtering to improve TT hit rate in parallel search
     // Critical fix for parallel search + iterative deepening:
@@ -175,6 +183,33 @@ pub(crate) fn try_update_entry_generic(
     // - Same depth updates are allowed (may have better node type or more recent info)
     //
     // This increases hit rate from 0.3% to 20%+ in parallel search scenarios
+
+    // A/B2: PV Exact を Non-PV の bound で上書きしない（深さに関わらず保護）
+    // - 既存が PV かつ Exact、かつ新規が Non-PV かつ Bound の場合は更新拒否
+    if old_is_pv
+        && matches!(old_node_type, crate::search::NodeType::Exact)
+        && !new_entry.is_pv()
+        && !matches!(new_entry.node_type(), crate::search::NodeType::Exact)
+    {
+        // Diagnostics: block Non-PV bound from overwriting PV Exact（局面キー短縮付き）
+        #[cfg(any(debug_assertions, feature = "tt_diagnostics"))]
+        {
+            let key_short = format!("{:016x}", new_entry.key());
+            log::info!(
+                "info string tt_pv_exact_overwrite_blocked=1 key={} old_depth={} new_depth={} old_nt={:?} new_nt={:?}",
+                key_short,
+                old_depth,
+                new_entry.depth(),
+                old_node_type,
+                new_entry.node_type()
+            );
+        }
+        #[cfg(feature = "tt_metrics")]
+        if let Some(m) = metrics {
+            record_metric(m, MetricType::DepthFiltered);
+        }
+        return UpdateResult::Filtered;
+    }
 
     // Filter only if new depth is strictly less than old depth
     if new_entry.depth() < old_depth {
@@ -189,7 +224,6 @@ pub(crate) fn try_update_entry_generic(
     // This follows YaneuraOu's replacement policy
     if new_entry.depth() == old_depth {
         use crate::search::NodeType;
-        let old_node_type = extract_node_type(old_data);
         let new_node_type = new_entry.node_type();
 
         // Prioritize Exact nodes - don't replace Exact with bounds

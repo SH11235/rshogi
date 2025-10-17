@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# moved: scripts/smoke/smoke_usi.sh
 
 CARGO_BIN="cargo run --release -p engine-usi"
 TIMEOUT=15

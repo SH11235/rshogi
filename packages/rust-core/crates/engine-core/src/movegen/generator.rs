@@ -78,6 +78,16 @@ struct MoveGenImpl<'a> {
 }
 
 impl<'a> MoveGenImpl<'a> {
+    #[inline]
+    fn extend_from_king(&mut self, df: i8, dr: i8) {
+        let mut f = self.king_sq.file() as i8 + df;
+        let mut r = self.king_sq.rank() as i8 + dr;
+        while (0..BOARD_FILES as i8).contains(&f) && (0..BOARD_RANKS as i8).contains(&r) {
+            self.king_danger_squares.set(Square::new(f as u8, r as u8));
+            f += df;
+            r += dr;
+        }
+    }
     /// Create a new move generation context
     fn new(pos: &'a Position) -> Result<Self, MoveGenError> {
         let us = pos.side_to_move;
@@ -767,70 +777,67 @@ impl<'a> MoveGenImpl<'a> {
         }
     }
 
-    /// Calculate danger squares where king cannot move when in check from sliding pieces
+    /// Calculate danger squares where king cannot move when in check from sliding pieces.
+    ///
+    /// 重要: 本関数は「滑走利きで王手されている場合」にのみ、王から
+    /// チェッカーと反対方向のレイを危険マスとして塗る。
+    /// 馬/竜の接近利き（king-like 1歩）の王手や、幾何的に整列していない
+    /// ケースでは危険マス延長を行わない。
     fn calculate_king_danger_squares(&mut self) {
-        if let Some(checker_sq) = self.checkers.lsb() {
-            if let Some(checker_piece) = self.pos.board.piece_on(checker_sq) {
-                match checker_piece.piece_type {
-                    PieceType::Rook => {
-                        // For rook, only squares along the line AWAY from the checker
-                        if self.king_sq.file() == checker_sq.file() {
-                            // Same file - move away from checker direction
-                            let rank_step =
-                                (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-                            let mut r = self.king_sq.rank() as i8 + rank_step;
-                            while (0..BOARD_RANKS as i8).contains(&r) {
-                                self.king_danger_squares
-                                    .set(Square::new(self.king_sq.file(), r as u8));
-                                r += rank_step;
-                            }
-                        } else if self.king_sq.rank() == checker_sq.rank() {
-                            // Same rank - move away from checker direction
-                            let file_step =
-                                (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
-                            let mut f = self.king_sq.file() as i8 + file_step;
-                            while (0..BOARD_FILES as i8).contains(&f) {
-                                self.king_danger_squares
-                                    .set(Square::new(f as u8, self.king_sq.rank()));
-                                f += file_step;
-                            }
-                        }
-                    }
-                    PieceType::Bishop => {
-                        // For bishop, only squares along the diagonal AWAY from the checker
-                        let file_step =
-                            (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
-                        let rank_step =
-                            (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+        let Some(checker_sq) = self.checkers.lsb() else {
+            return;
+        };
 
-                        // Move one step away from checker direction
-                        let mut file = self.king_sq.file() as i8 + file_step;
-                        let mut rank = self.king_sq.rank() as i8 + rank_step;
-                        while (0..BOARD_FILES as i8).contains(&file)
-                            && (0..BOARD_RANKS as i8).contains(&rank)
-                        {
-                            self.king_danger_squares.set(Square::new(file as u8, rank as u8));
-                            file += file_step;
-                            rank += rank_step;
-                        }
+        let Some(checker_piece) = self.pos.board.piece_on(checker_sq) else {
+            return;
+        };
+        let promoted = self.pos.board.promoted_bb.test(checker_sq);
+
+        // 2点間に駒が存在しないか
+        let between_clear = || -> bool {
+            let between = between_bb(checker_sq, self.king_sq);
+            (between & self.occupied).is_empty()
+        };
+
+        match checker_piece.piece_type {
+            PieceType::Rook => {
+                // 竜(+R)でも「直線の滑走王手」のときだけ延長。
+                // 竜の「斜め1歩（King-like）」による接近王手は延長しない。
+                if self.is_aligned_rook(self.king_sq, checker_sq) && between_clear() {
+                    if self.king_sq.file() == checker_sq.file() {
+                        let dr = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                        self.extend_from_king(0, dr);
+                    } else {
+                        let df = (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                        self.extend_from_king(df, 0);
                     }
-                    PieceType::Lance => {
-                        // For lance, only squares along the file AWAY from the checker
-                        if self.king_sq.file() == checker_sq.file() {
-                            let rank_step =
-                                (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
-                            let mut r = self.king_sq.rank() as i8 + rank_step;
-                            while (0..BOARD_RANKS as i8).contains(&r) {
-                                self.king_danger_squares
-                                    .set(Square::new(self.king_sq.file(), r as u8));
-                                r += rank_step;
-                            }
-                        }
-                    }
-                    _ => {} // Other pieces don't have ray attacks
+                } else {
+                    // 接近王手（竜の斜め1歩等）や非整列・遮蔽ありのケースは延長しない。
+                    let _ = promoted;
                 }
             }
+            PieceType::Bishop => {
+                // 馬(+B)でも、斜め一直線で遮蔽なし=滑走王手のときのみ延長。
+                if self.is_aligned_bishop(self.king_sq, checker_sq) && between_clear() {
+                    let df = (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                    let dr = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                    self.extend_from_king(df, dr);
+                } else {
+                    // 接近王手（馬の縦横1歩等）や非整列・遮蔽ありのケースは延長しない。
+                    let _ = promoted;
+                }
+            }
+            PieceType::Lance => {
+                // 香は未成のみ滑走。成香（+L=金相当）での接近王手は延長しない。
+                if !promoted && self.king_sq.file() == checker_sq.file() && between_clear() {
+                    let dr = (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                    self.extend_from_king(0, dr);
+                }
+            }
+            _ => {}
         }
+
+        debug_assert!(!self.king_danger_squares.test(self.king_sq));
     }
 
     /// Calculate pin rays for all pinned pieces
@@ -1903,7 +1910,9 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
     checkers |= enemy_knights & knight_attacks;
 
     // Gold checks (including promoted pieces that move like gold)
-    let gold_attacks = gold_attacks(king_sq, them);
+    // NOTE: 攻撃元マスを得るため、king_sq を起点に「自分(us)の利き」を逆向きに用いる。
+    // これにより「敵(them)のGoldが king_sq を攻撃し得る“元位置”集合」と一致する。
+    let gold_attacks = gold_attacks(king_sq, us);
     let enemy_golds = pos.board.piece_bb[them as usize][PieceType::Gold as usize];
     checkers |= enemy_golds & gold_attacks;
 
@@ -1922,7 +1931,8 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
     // Silver checks
     let enemy_silvers =
         pos.board.piece_bb[them as usize][PieceType::Silver as usize] & !pos.board.promoted_bb;
-    let silver_attacks = silver_attacks(king_sq, them);
+    // Silver も Gold 同様に、逆向き（us）で攻撃元を得るのが正しい。
+    let silver_attacks = silver_attacks(king_sq, us);
     checkers |= enemy_silvers & silver_attacks;
 
     // Check sliding pieces for checks and pins
@@ -2136,7 +2146,8 @@ mod tests {
         let attackers = gen.attackers_to_with_occupancy(target, Color::White, pos.board.all_bb);
         assert!(gen.is_attacked_by(target, Color::White));
         assert!(!attackers.is_empty());
-        assert_eq!(attackers.is_empty(), !gen.is_attacked_by(target, Color::White));
+        let is_attacked = gen.is_attacked_by(target, Color::White);
+        assert_eq!(attackers.is_empty(), !is_attacked);
     }
 
     #[test]

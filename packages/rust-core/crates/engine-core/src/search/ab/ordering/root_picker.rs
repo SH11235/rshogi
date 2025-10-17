@@ -1,3 +1,6 @@
+use rand::{rngs::SmallRng, Rng, SeedableRng};
+
+use crate::movegen::generator::MoveGenerator;
 use crate::search::params::{
     root_multipv_bonus, root_prev_score_scale, root_tt_bonus, ROOT_BASE_KEY, ROOT_PREV_SCORE_CLAMP,
 };
@@ -10,24 +13,83 @@ struct RootScoredMove {
     mv: Move,
     key: i32,
     order: usize,
+    #[cfg(feature = "diagnostics")]
+    penal_see: bool,
+    #[cfg(feature = "diagnostics")]
+    penal_post: bool,
 }
 
 pub struct RootPicker {
     scored: Vec<RootScoredMove>,
-    cursor: usize,
+    // Reserved for future YBWC/PV-first integration. Currently we only use fallback (scored order).
+    primary: Vec<usize>,
+    fallback: Vec<usize>,
+    primary_cursor: usize,
+    fallback_cursor: usize,
+    #[cfg(feature = "diagnostics")]
+    root_see_penalized: u32,
+    #[cfg(feature = "diagnostics")]
+    postverify_penalized: u32,
+    #[cfg(feature = "diagnostics")]
+    promote_bias_applied: u32,
+    #[cfg(feature = "diagnostics")]
+    top1_penalized: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct RootJitter {
+    pub seed: u64,
+    pub amplitude: i32,
+}
+
+impl RootJitter {
+    pub const fn new(seed: u64, amplitude: i32) -> Self {
+        Self { seed, amplitude }
+    }
+}
+
+pub struct RootPickerConfig<'a> {
+    pub pos: &'a Position,
+    pub moves: &'a [Move],
+    pub tt_move: Option<Move>,
+    pub prev_lines: Option<&'a [RootLine]>,
+    pub jitter: Option<RootJitter>,
 }
 
 impl RootPicker {
-    pub fn new(
-        pos: &Position,
-        moves: &[Move],
-        tt_move: Option<Move>,
-        prev_lines: Option<&[RootLine]>,
-    ) -> Self {
+    pub fn new(config: RootPickerConfig) -> Self {
+        // NOTE:
+        // - We keep ordering lightweight; all scoring happens on a single pass with a cached
+        //   MoveGenerator for Post‑Verify to avoid repeated allocations.
+        // - Both `primary` and `fallback` store indices into `scored` so that `entry_at()` is O(1).
+        //   This layout is future‑proof for PV‑first/YBWC: primary can later be populated
+        //   without changing access semantics or complexity.
+        let RootPickerConfig {
+            pos,
+            moves,
+            tt_move,
+            prev_lines,
+            jitter,
+        } = config;
+        let (mut rng_opt, jitter_amplitude) = match jitter {
+            Some(cfg) if cfg.amplitude != 0 => {
+                (Some(SmallRng::seed_from_u64(cfg.seed)), cfg.amplitude.abs())
+            }
+            _ => (None, 0),
+        };
+        // Cache MoveGenerator outside the loop for Post-Verify optimization
+        let mg = MoveGenerator::new();
         let mut scored = Vec::with_capacity(moves.len());
+        let in_check = pos.is_in_check();
+        #[cfg(feature = "diagnostics")]
+        let mut root_see_penalized = 0u32;
+        #[cfg(feature = "diagnostics")]
+        let mut postverify_penalized = 0u32;
+        #[cfg(feature = "diagnostics")]
+        let mut promote_bias_applied = 0u32;
         for (idx, &mv) in moves.iter().enumerate() {
             let is_check = pos.gives_check(mv) as i32;
-            let see = if mv.is_capture_hint() { pos.see(mv) } else { 0 };
+            let see = pos.see(mv);
             let is_promo = mv.is_promote() as i32;
             let good_capture = mv.is_capture_hint() && see >= 0;
 
@@ -35,6 +97,72 @@ impl RootPicker {
             // チェック/成りは “基礎 + 追加” の二段加点で強調している（既存順位との互換性保持）。
             key += is_check * 2_000 + see * 10 + is_promo;
             key += 500 * is_check + 300 * is_promo + 200 * (good_capture as i32);
+
+            // Root SEE Gate (flagged・root限定・王手回避中は除外)
+            #[cfg(feature = "diagnostics")]
+            let mut penal_see = false;
+            if crate::search::config::root_see_gate_enabled() && !in_check {
+                let x_th = crate::search::config::root_see_x_cp();
+                if see < -x_th {
+                    let base = 50;
+                    let over = (-see - x_th).max(0);
+                    let mut penalty = base + over;
+                    if is_check != 0 {
+                        penalty /= 2;
+                    }
+                    key = key.saturating_sub(penalty);
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        penal_see = true;
+                    }
+                }
+            }
+
+            // Post‑Verify（近似）: root限定・王手回避中は除外（!in_check のときのみ適用）
+            #[cfg(feature = "diagnostics")]
+            let mut penal_post = false;
+            if crate::search::config::post_verify_enabled() && !good_capture && !in_check {
+                // Build child and find opponent best capture by SEE
+                let mut child = pos.clone();
+                let _ = child.do_move(mv);
+                let mut opp_best_see = i32::MIN / 2;
+                if let Ok(moves2) = mg.generate_all(&child) {
+                    for m2 in moves2 {
+                        if m2.is_capture_hint() {
+                            let v = child.see(m2);
+                            if v > opp_best_see {
+                                opp_best_see = v;
+                            }
+                        }
+                    }
+                }
+                let y_th = crate::search::config::post_verify_ydrop_cp();
+                if opp_best_see > y_th {
+                    let base_i64: i64 = 50;
+                    let over_i64: i64 = (opp_best_see - y_th).max(0) as i64;
+                    let mut penalty_i64 = base_i64 + over_i64;
+                    if is_check != 0 {
+                        penalty_i64 /= 2;
+                    }
+                    let penalty = penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    key = key.saturating_sub(penalty);
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        penal_post = true;
+                    }
+                }
+            }
+
+            // Promote bias (flag): small positive bias to promotion moves
+            #[cfg(feature = "diagnostics")]
+            let mut promote_bias = false;
+            if crate::search::config::promote_verify_enabled() && mv.is_promote() {
+                key = key.saturating_add(crate::search::config::promote_bias_cp());
+                #[cfg(feature = "diagnostics")]
+                {
+                    promote_bias = true;
+                }
+            }
 
             if let Some(ttm) = tt_move {
                 if mv.equals_without_piece_type(&ttm) {
@@ -50,26 +178,102 @@ impl RootPicker {
                 key += root_multipv_bonus(prev.multipv_index);
             }
 
+            if let Some(rng) = rng_opt.as_mut() {
+                if jitter_amplitude > 0 && !mv.is_capture_hint() && is_check == 0 {
+                    let jitter = rng.random_range(-jitter_amplitude..=jitter_amplitude);
+                    key = key.saturating_add(jitter);
+                }
+            }
+
+            #[cfg(feature = "diagnostics")]
+            if penal_see {
+                root_see_penalized += 1;
+            }
+            #[cfg(feature = "diagnostics")]
+            if penal_post {
+                postverify_penalized += 1;
+            }
+            #[cfg(feature = "diagnostics")]
+            if promote_bias {
+                promote_bias_applied += 1;
+            }
             let scored_move = RootScoredMove {
                 mv,
                 key,
                 order: idx,
+                #[cfg(feature = "diagnostics")]
+                penal_see,
+                #[cfg(feature = "diagnostics")]
+                penal_post,
             };
             scored.push(scored_move);
         }
 
         scored.sort_unstable_by(|a, b| b.key.cmp(&a.key).then_with(|| a.order.cmp(&b.order)));
 
-        Self { scored, cursor: 0 }
+        let len = scored.len();
+        let primary = Vec::new();
+        let mut fallback = Vec::with_capacity(len);
+        for i in 0..len {
+            fallback.push(i);
+        }
+
+        #[cfg(feature = "diagnostics")]
+        let top1_penalized = scored
+            .first()
+            .map(|e| (e.penal_see || e.penal_post) && !in_check)
+            .unwrap_or(false);
+
+        Self {
+            scored,
+            primary,
+            fallback,
+            primary_cursor: 0,
+            fallback_cursor: 0,
+            #[cfg(feature = "diagnostics")]
+            root_see_penalized,
+            #[cfg(feature = "diagnostics")]
+            postverify_penalized,
+            #[cfg(feature = "diagnostics")]
+            promote_bias_applied,
+            #[cfg(feature = "diagnostics")]
+            top1_penalized,
+        }
     }
 
-    pub fn next(&mut self) -> Option<(Move, i32)> {
-        if self.cursor >= self.scored.len() {
-            return None;
+    pub fn next(&mut self) -> Option<(Move, i32, usize)> {
+        if self.primary_cursor < self.primary.len() {
+            let idx = self.primary[self.primary_cursor];
+            self.primary_cursor += 1;
+            return self.entry_at(idx);
         }
-        let entry = self.scored[self.cursor];
-        self.cursor += 1;
-        Some((entry.mv, entry.key))
+        if self.fallback_cursor < self.fallback.len() {
+            let idx = self.fallback[self.fallback_cursor];
+            self.fallback_cursor += 1;
+            return self.entry_at(idx);
+        }
+        None
+    }
+
+    fn entry_at(&self, idx: usize) -> Option<(Move, i32, usize)> {
+        self.scored.get(idx).map(|e| (e.mv, e.key, e.order))
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_root_see_penalized(&self) -> u32 {
+        self.root_see_penalized
+    }
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_postverify_penalized(&self) -> u32 {
+        self.postverify_penalized
+    }
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_promote_bias_applied(&self) -> u32 {
+        self.promote_bias_applied
+    }
+    #[cfg(feature = "diagnostics")]
+    pub fn stats_top1_penalized(&self) -> bool {
+        self.top1_penalized
     }
 }
 
@@ -108,9 +312,15 @@ mod tests {
             parse_usi_move("2g2f").unwrap(),
         ];
         let tt_move = parse_usi_move("2g2f").expect("valid tt move");
-        let mut picker = RootPicker::new(&pos, &moves, Some(tt_move), None);
-        let first = picker.next().unwrap();
-        assert!(first.0.equals_without_piece_type(&tt_move));
+        let mut picker = RootPicker::new(RootPickerConfig {
+            pos: &pos,
+            moves: &moves,
+            tt_move: Some(tt_move),
+            prev_lines: None,
+            jitter: None,
+        });
+        let (mv, _, _) = picker.next().unwrap();
+        assert!(mv.equals_without_piece_type(&tt_move));
     }
 
     #[test]
@@ -120,9 +330,15 @@ mod tests {
         let mv_b = parse_usi_move("2g2f").unwrap();
         let moves = [mv_a, mv_b];
         let prev_lines = [make_root_line(1, mv_b, 150), make_root_line(2, mv_a, -50)];
-        let mut picker = RootPicker::new(&pos, &moves, None, Some(&prev_lines));
-        let first = picker.next().unwrap();
-        assert!(first.0.equals_without_piece_type(&mv_b));
+        let mut picker = RootPicker::new(RootPickerConfig {
+            pos: &pos,
+            moves: &moves,
+            tt_move: None,
+            prev_lines: Some(&prev_lines),
+            jitter: None,
+        });
+        let (mv, _, _) = picker.next().unwrap();
+        assert!(mv.equals_without_piece_type(&mv_b));
     }
 
     #[test]
@@ -132,8 +348,14 @@ mod tests {
         let mv_b = parse_usi_move("2g2f").unwrap();
         let moves = [mv_a, mv_b];
         let prev_lines = [make_root_line(2, mv_a, 0), make_root_line(1, mv_b, 0)];
-        let mut picker = RootPicker::new(&pos, &moves, None, Some(&prev_lines));
-        let first = picker.next().unwrap();
-        assert!(first.0.equals_without_piece_type(&mv_b));
+        let mut picker = RootPicker::new(RootPickerConfig {
+            pos: &pos,
+            moves: &moves,
+            tt_move: None,
+            prev_lines: Some(&prev_lines),
+            jitter: None,
+        });
+        let (mv, _, _) = picker.next().unwrap();
+        assert!(mv.equals_without_piece_type(&mv_b));
     }
 }

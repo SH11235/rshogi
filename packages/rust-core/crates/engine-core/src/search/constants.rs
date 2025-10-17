@@ -31,31 +31,27 @@ pub const MAX_QPLY: u8 = 32;
 /// This is now a secondary safeguard, increased from 32 to allow deeper main searches
 pub const MAX_QUIESCE_DEPTH: u16 = 96;
 
-/// Aspiration window constants
+/// Aspiration window constants used in iterative deepening
 ///
 /// These values control the alpha-beta window narrowing optimization:
-/// - Initial window: 25 centipawns provides a good balance between search reduction
-///   and re-search frequency. Narrower windows (10-20) cause more re-searches,
-///   wider windows (50+) reduce the optimization benefit.
-/// - Delta: Minimum expansion of 25 ensures progress even with small score changes
-/// - Expansion factor: 1.5x provides geometric growth that adapts to score volatility
-/// - Retry limit: 3 attempts prevents excessive re-searching in volatile positions
+/// - Initial delta: 45 centipawns provides a better balance for SMP (>=4 threads),
+///   reducing fail-low/high frequency without overly widening the window
+/// - Maximum delta: 400 centipawns caps the window expansion to prevent
+///   excessively wide windows in volatile positions while allowing faster recovery
 ///
-/// These values are derived from:
-/// 1. Empirical testing showing 20-30 cp windows work well for Shogi
-/// 2. Common practice in strong engines (Stockfish, Komodo use similar ranges)
-/// 3. The principle that window size should scale with position complexity
-pub const ASPIRATION_WINDOW_INITIAL: i32 = 25; // 25 centipawns (0.25 pawn)
-pub const ASPIRATION_WINDOW_DELTA: i32 = 25; // Minimum expansion step
-pub const ASPIRATION_WINDOW_EXPANSION: f32 = 1.5; // Geometric growth rate
-pub const ASPIRATION_RETRY_LIMIT: u32 = 3; // Max retries before full window
+/// The window starts narrow and expands geometrically on fail-high/fail-low,
+/// providing good performance across diverse position types.
+///
+/// These values are empirically tuned for the ClassicBackend implementation.
+pub const ASPIRATION_DELTA_INITIAL: i32 = 45; // Initial window half-width (centipawns)
+pub const ASPIRATION_DELTA_MAX: i32 = 400; // Maximum window expansion limit
 
-/// Maximum window adjustment based on volatility (prevents extreme windows)
-pub const ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT: i32 = 100; // 1 pawn max adjustment
+/// Helper 用の広窓デフォルト（centipawns）
+pub const HELPER_ASPIRATION_WIDE_DELTA: i32 = 350;
 
-/// Maximum aspiration window size (4x initial window)
-/// Prevents excessively wide windows that negate the optimization benefit
-pub const ASPIRATION_WINDOW_MAX: i32 = 100;
+/// primary の初期Δ拡大係数（Δ += K * log2(Threads)）
+/// 8→12へ。8スレッド時 +36cp 程度の上乗せでSMP時の失敗率を抑制。
+pub const ASPIRATION_DELTA_THREADS_K: i32 = 12;
 
 /// Time pressure threshold for search decisions
 /// When remaining time < elapsed time * threshold, enter time pressure mode
@@ -68,7 +64,7 @@ pub const TIME_CHECK_MASK_NORMAL: u64 = 0x1FFF; // 8192 nodes - for normal time 
 pub const TIME_CHECK_MASK_BYOYOMI: u64 = 0x7FF; // 2048 nodes - more frequent for byoyomi
 pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
 
-/// Default quiescence search node limit (1 million nodes)
+/// Default quiescence search node limit (300,000 nodes)
 /// This prevents explosion in complex positions with many captures.
 /// Can be overridden with SearchLimits::builder().qnodes_limit()
 pub const DEFAULT_QNODES_LIMIT: u64 = 300_000;
@@ -94,6 +90,50 @@ pub const MAIN_NEAR_DEADLINE_WINDOW_MS: u64 = 500;
 /// the current best move and exit without waiting for GUI stop.
 pub const NEAR_HARD_FINALIZE_MS: u64 = 500;
 
+/// Extract mate distance from a score, returning None if not a mate score.
+///
+/// Mate scores are encoded as `MATE_SCORE - distance` where distance is in plies.
+/// **Note**: 1 ply = one side's move (half-move in chess/shogi terminology).
+/// This follows YaneuraOu/Stockfish convention of 1-ply increments.
+///
+/// # Returns
+/// - `Some(distance)` if score represents mate (positive: we mate opponent, negative: we get mated)
+/// - `None` if score is not in mate range
+/// - Distance 0 is theoretically possible (immediate mate position) but rare in practice;
+///   InstantMateMove feature requires distance > 0
+///
+/// # Examples
+/// ```
+/// use engine_core::search::constants::{mate_distance, MATE_SCORE};
+///
+/// // Mate in 3 plies (score = MATE_SCORE - 3)
+/// assert_eq!(mate_distance(MATE_SCORE - 3), Some(3));
+///
+/// // Getting mated in 5 plies (score = -(MATE_SCORE - 5))
+/// assert_eq!(mate_distance(-(MATE_SCORE - 5)), Some(-5));
+///
+/// // Not a mate score
+/// assert_eq!(mate_distance(100), None);
+/// ```
+pub fn mate_distance(score: i32) -> Option<i32> {
+    let abs_score = score.abs();
+    // Mate scores are encoded as MATE_SCORE - ply (1 ply = 1 increment)
+    // The furthest mate is MAX_PLY plies away
+    let lower_bound = MATE_SCORE - MAX_PLY as i32;
+    if abs_score >= lower_bound && abs_score <= MATE_SCORE {
+        let distance = MATE_SCORE - abs_score;
+        Some(if score > 0 { distance } else { -distance })
+    } else {
+        None
+    }
+}
+
+/// Minimum depth for helper thread snapshot publication.
+/// Helper snapshots shallower than this are suppressed to reduce USI noise
+/// and avoid reporting low-quality partial results.
+/// This constant is shared between engine-core (parallel search) and engine-usi (finalize).
+pub const HELPER_SNAPSHOT_MIN_DEPTH: u32 = 3;
+
 /// Validate that constants maintain proper relationships
 #[cfg(test)]
 mod tests {
@@ -115,12 +155,9 @@ mod tests {
         // Ensure draw score is neutral
         assert_eq!(DRAW_SCORE, 0);
 
-        // Ensure aspiration window constants are reasonable
-        assert!(ASPIRATION_WINDOW_INITIAL > 0);
-        assert!(ASPIRATION_WINDOW_DELTA > 0);
-        assert!(ASPIRATION_WINDOW_MAX >= ASPIRATION_WINDOW_INITIAL);
-        assert!(ASPIRATION_WINDOW_EXPANSION > 1.0);
-        assert!(ASPIRATION_RETRY_LIMIT > 0);
+        // Ensure aspiration delta constants are reasonable
+        assert!(ASPIRATION_DELTA_INITIAL > 0);
+        assert!(ASPIRATION_DELTA_MAX >= ASPIRATION_DELTA_INITIAL);
     }
 
     #[test]

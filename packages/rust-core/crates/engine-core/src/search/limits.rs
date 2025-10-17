@@ -2,8 +2,9 @@
 
 use crate::search::parallel::StopController;
 use crate::time_management::{TimeControl, TimeManager, TimeParameters};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+// OnceLock unused after RootWorkQueue removal
 use std::time::{Duration, Instant};
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
@@ -25,6 +26,7 @@ pub struct SearchLimits {
     /// Wall-clock instant when search started (used for diagnostics / elapsed derivations)
     pub start_time: Instant,
     /// Optional panic time scale for extending soft deadlines after aspiration failures etc.
+    /// TODO: Currently unused in pure LazySMP pipeline; retained for future policy experiments.
     pub panic_time_scale: Option<f64>,
     /// Optional contempt value in centipawns (positive favors side to move)
     pub contempt: Option<i32>,
@@ -40,10 +42,17 @@ pub struct SearchLimits {
     pub iteration_callback: Option<IterationCallback>,
     /// Ponder hit flag for converting ponder search to normal search
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
-    /// Internal: Shared qnodes counter for parallel search
-    /// This is set by ParallelSearcher and not exposed in the builder
-    #[doc(hidden)]
-    pub qnodes_counter: Option<Arc<AtomicU64>>,
+    /// Optional jitter seed for helper threads (parallel search)
+    pub root_jitter_seed: Option<u64>,
+    /// Test/bench/diagnostics: override helper jitter on/off (None = follow env/default)
+    /// 本番経路では通常 None のまま。互換性と単純化のため常時フィールドを保持する。
+    pub jitter_override: Option<bool>,
+    // RootSplit: removed (pure LazySMP)
+    // RootWorkQueue: removed (pure LazySMP)
+    /// Whether this search instance runs as helper worker in LazySMP
+    pub helper_role: bool,
+    /// Whether heuristics snapshots should be retained for diagnostics
+    pub store_heuristics: bool,
     /// Skip quiescence search at depth 0 and return immediate evaluation
     /// This is useful for extremely time-constrained situations
     pub immediate_eval_at_depth_zero: bool,
@@ -58,6 +67,8 @@ pub struct SearchLimits {
     pub time_manager: Option<Arc<TimeManager>>,
     /// Stop controller used for OOB finalize coordination
     pub stop_controller: Option<Arc<StopController>>,
+    /// Hint for threads used in this search (to avoid global env dependency)
+    pub threads_hint: Option<u32>,
 }
 
 impl Default for SearchLimits {
@@ -80,13 +91,18 @@ impl Default for SearchLimits {
             info_string_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
-            qnodes_counter: None,
+            root_jitter_seed: None,
+            jitter_override: None,
+
+            helper_role: false,
+            store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
             time_manager: None,
             stop_controller: None,
+            threads_hint: None,
         }
     }
 }
@@ -163,6 +179,11 @@ pub struct SearchLimitsBuilder {
     multipv: u8,
     enable_fail_safe: bool,
     fallback_deadlines: Option<FallbackDeadlines>,
+    root_jitter_seed: Option<u64>,
+    jitter_override: Option<bool>,
+
+    helper_role: bool,
+    store_heuristics: bool,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -189,6 +210,11 @@ impl Default for SearchLimitsBuilder {
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
+            root_jitter_seed: None,
+            jitter_override: None,
+
+            helper_role: false,
+            store_heuristics: false,
         }
     }
 }
@@ -320,6 +346,22 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Test/bench-only: override helper jitter on/off.
+    /// None (default) means follow environment/default behavior.
+    pub fn jitter_override(mut self, enable: bool) -> Self {
+        self.jitter_override = Some(enable);
+        self
+    }
+
+    // root_split: removed (pure LazySMP)
+
+    /// Attach a shared root work queue for helper work-stealing
+    /// Mark this search limits as helper role
+    pub fn helper_role(mut self, helper: bool) -> Self {
+        self.helper_role = helper;
+        self
+    }
+
     /// Set stop flag
     pub fn stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.stop_flag = Some(flag);
@@ -393,6 +435,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Enable or disable heuristics snapshot storage (diagnostic use only)
+    pub fn store_heuristics(mut self, enable: bool) -> Self {
+        self.store_heuristics = enable;
+        self
+    }
+
     /// Set session ID for OOB finalize coordination
     ///
     /// This is typically set by Engine::start_search() and must match the session ID
@@ -441,13 +489,17 @@ impl SearchLimitsBuilder {
             info_string_callback: self.info_string_callback,
             iteration_callback: self.iteration_callback,
             ponder_hit_flag: self.ponder_hit_flag,
-            qnodes_counter: None,
+            root_jitter_seed: self.root_jitter_seed,
+            jitter_override: self.jitter_override,
+            helper_role: self.helper_role,
+            store_heuristics: self.store_heuristics,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
             multipv: self.multipv,
             enable_fail_safe: self.enable_fail_safe,
             fallback_deadlines: self.fallback_deadlines,
             time_manager: None,
             stop_controller: None,
+            threads_hint: None,
         }
     }
 }
@@ -482,13 +534,18 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             info_string_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
-            qnodes_counter: None,
+            root_jitter_seed: None,
+            jitter_override: None,
+
+            helper_role: false,
+            store_heuristics: false,
             immediate_eval_at_depth_zero: false,
             multipv: 1,
             enable_fail_safe: false,
             fallback_deadlines: None,
             time_manager: None,
             stop_controller: None,
+            threads_hint: None,
         }
     }
 }
@@ -544,13 +601,16 @@ impl std::fmt::Debug for SearchLimits {
             .field("info_string_callback", &self.info_string_callback.is_some())
             .field("iteration_callback", &self.iteration_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
-            .field("qnodes_counter", &self.qnodes_counter.is_some())
+            .field("root_jitter_seed", &self.root_jitter_seed)
+            .field("jitter_override", &self.jitter_override)
+            .field("helper_role", &self.helper_role)
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .field("multipv", &self.multipv)
             .field("enable_fail_safe", &self.enable_fail_safe)
             .field("fallback_deadlines", &self.fallback_deadlines.is_some())
             .field("time_manager", &self.time_manager.is_some())
             .field("stop_controller", &self.stop_controller.is_some())
+            .field("threads_hint", &self.threads_hint)
             .finish()
     }
 }
