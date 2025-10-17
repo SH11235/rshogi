@@ -53,6 +53,32 @@ use std::error::Error;
 use std::sync::Arc;
 use weights::{load_single_weights, load_weights};
 
+/// Lightweight diagnostics for NNUE weights (for logging via USI)
+#[derive(Debug, Clone)]
+pub struct NnueDiag {
+    /// backend kind: "classic" or "single"
+    pub backend: &'static str,
+    /// Present when backend == single
+    pub single: Option<NnueDiagSingle>,
+    /// Present when backend == classic
+    pub classic: Option<NnueDiagClassic>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NnueDiagSingle {
+    pub input_dim: usize,
+    pub acc_dim: usize,
+    pub uid: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NnueDiagClassic {
+    pub acc_dim: usize,
+    pub input_dim: usize,
+    pub h1_dim: usize,
+    pub h2_dim: usize,
+}
+
 /// エンジン側の有効feature一覧（ベンチレポート用）
 #[inline]
 pub fn enabled_features_str() -> String {
@@ -336,6 +362,40 @@ impl NNUEEvaluatorWrapper {
             Backend::Classic { .. } => "classic",
             Backend::Single { .. } => "single",
         }
+    }
+
+    /// Take a lightweight diagnostic snapshot of the loaded weights (dims/uid)
+    pub fn diag_snapshot(&self) -> NnueDiag {
+        match &self.backend {
+            Backend::Classic { evaluator, .. } => NnueDiag {
+                backend: "classic",
+                single: None,
+                classic: Some(NnueDiagClassic {
+                    acc_dim: evaluator.feature_transformer.acc_dim(),
+                    input_dim: evaluator.network.input_dim,
+                    h1_dim: evaluator.network.h1_dim,
+                    h2_dim: evaluator.network.h2_dim,
+                }),
+            },
+            Backend::Single { net, .. } => NnueDiag {
+                backend: "single",
+                single: Some(NnueDiagSingle {
+                    input_dim: net.n_feat,
+                    acc_dim: net.acc_dim,
+                    uid: net.uid,
+                }),
+                classic: None,
+            },
+        }
+    }
+
+    /// Evaluate startpos once for diagnostics (cp)
+    pub fn eval_startpos_cp(&self) -> i32 {
+        // Use a stateless fork to avoid mutating any external state
+        let mut w = self.fork_stateless();
+        let pos = Position::startpos();
+        w.set_position(&pos);
+        w.evaluate(&pos)
     }
     /// Create new wrapper from weights file (typed error)
     pub fn new_typed(weights_path: &str) -> NNUEResult<Self> {

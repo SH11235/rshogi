@@ -1411,6 +1411,27 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
                     if let Some(kind) = eng.nnue_backend_kind() {
                         info_string(format!("nnue_backend={}", kind));
                     }
+                    // Emit detailed NNUE diagnostics for easier field troubleshooting
+                    if let Some((diag, start_cp)) = eng.nnue_diag_for_logging() {
+                        match (diag.backend, diag.single.as_ref(), diag.classic.as_ref()) {
+                            ("single", Some(s), _) => {
+                                info_string(format!(
+                                    "nnue_single dims input_dim={} acc_dim={} uid=0x{:016x}",
+                                    s.input_dim, s.acc_dim, s.uid
+                                ));
+                            }
+                            ("classic", _, Some(c)) => {
+                                info_string(format!(
+                                    "nnue_classic dims acc_dim={} input_dim={} h1_dim={} h2_dim={}",
+                                    c.acc_dim, c.input_dim, c.h1_dim, c.h2_dim
+                                ));
+                            }
+                            (other, _, _) => {
+                                info_string(format!("nnue_diag backend={} (no dims)", other));
+                            }
+                        }
+                        info_string(format!("nnue_startpos_cp={}", start_cp));
+                    }
                 }
             }
         }
