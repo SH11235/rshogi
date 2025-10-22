@@ -61,6 +61,7 @@ cat runs/gauntlet_local/report.md
 
 # Gate判定
 GATE=$(jq -r '.summary.gate' runs/gauntlet_local/result.json)
+PV_SAMPLES=$(jq -r '.summary.pv_spread_samples' runs/gauntlet_local/result.json 2>/dev/null || echo 0)
 echo ""
 echo "Gate Decision: $GATE"
 
@@ -70,4 +71,20 @@ elif [ "$GATE" = "provisional" ]; then
   echo "⚠️  Candidate NNUE is comparable but not clearly better"
 else
   echo "❌ Candidate NNUE failed to meet criteria"
+fi
+
+# 自動PV補完: pv_spread_samples==0 の場合は pv_probe を実行して補助統計を採取
+if [ "${PV_SAMPLES:-0}" = "0" ]; then
+  echo "\n[auto] pv_spread_samples=0 → pv_probe(depth=8, samples=200) を実行します"
+  cargo build -p tools --release --bin pv_probe >/dev/null 2>&1 || true
+  target/release/pv_probe \
+    --cand "$CANDIDATE" \
+    --book "$BOOK_PATH" \
+    --depth 8 --threads 1 --hash-mb 512 \
+    --samples 200 --seed 42 \
+    --json runs/gauntlet_local/pv_probe_auto_d8_s200.json || true
+  if [ -f runs/gauntlet_local/pv_probe_auto_d8_s200.json ]; then
+    echo "[auto] pv_probe stats:";
+    jq -r '.stats' runs/gauntlet_local/pv_probe_auto_d8_s200.json || true;
+  fi
 fi
