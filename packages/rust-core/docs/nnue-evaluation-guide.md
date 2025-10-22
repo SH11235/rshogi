@@ -96,7 +96,32 @@ cargo run -p tools --release --bin verify_classic_roundtrip -- \
 - FP32が強く、INTが弱い → 量子化校正の見直し（校正サンプル増量、`--quant-search` 継続、`relu_clip`/per-channel指定の見直しなど）。
 - FP32自体が弱い → データ/学習の再強化（TIME_MS↑、ユニーク↑、追加エポック、再蒸留）。
 
-### 4. PV spread の取得（`pv_probe` 推奨）
+### 4. シャード実行（推奨・次ラウンドからの既定）
+
+長い評価（短TC2000/長TC800〜2000）の壁時計時間短縮のため、threads=1を守ったままプロセス並列（シャーディング）で gauntlet を実行します。
+
+- スクリプト: `scripts/nnue/gauntlet-sharded.sh`（分割起動）/ `scripts/nnue/merge-gauntlet-json.sh`（集計）
+- 不変条件（各 shard 共通で固定）
+  - `--threads 1`、同一の `--time` / `--hash-mb` / `--book`
+  - seed は shard ごとに異なる（既定は `12345+i`）
+- 使い方（短TC2000を16分割の例）
+```bash
+scripts/nnue/gauntlet-sharded.sh \
+  runs/ref.nnue runs/cand.nnue \
+  2000 16 "0/10+0.1" \
+  runs/gauntlet_sharded/$(date +%Y%m%d_%H%M) \
+  runs/fixed/20251011/openings_ply1_20_v1.sfen
+
+scripts/nnue/merge-gauntlet-json.sh runs/gauntlet_sharded/<ts>
+# 出力: runs/gauntlet_sharded/<ts>/merged.result.json
+```
+- 並列度の目安
+  - `shards ≈ (有効コア数-予約コア)`（他ジョブとコア分離する場合は `taskset` を使用）
+  - I/O衝突を避けるため、必要に応じ `nice`/`ionice` を併用
+- 採否判定
+  - 単体実行時と同一の基準（短TC: 勝率≥55%/2000局、長TC: 勝率≥55%/800→2000）を、`merged.result.json` に対して適用
+
+### 5. PV spread の取得（`pv_probe` 推奨）
 
 gauntlet の内部計測は条件により `pv_spread_samples=0` となることがあるため、PV spread は `pv_probe` を用いて別途採取します。
 
@@ -111,7 +136,7 @@ target/release/pv_probe \
 ```
 ```
 
-### 5. CI/CDでの軽量チェック
+### 6. CI/CDでの軽量チェック
 
 `.github/workflows/gauntlet-regression-check.yml`により、コード変更時に自動的に軽量なリグレッションチェックが実行されます。これは重大な性能劣化の検出のみを目的としています。
 
