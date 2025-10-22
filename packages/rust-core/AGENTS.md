@@ -62,3 +62,48 @@
 
 ## Language Preference
 Please respond in Japanese (日本語) when interacting with this codebase.
+
+---
+
+## NNUE Training Ops — Quick SOP for Agents (必読)
+
+このリポジトリで NNUE 学習・評価を扱うエージェント向けの実務ルール。毎回ここを参照して行動してください。
+
+### 1) 評価（Gauntlet）の原則（Spec 013）
+- `--threads 1` 固定、固定オープニング（既定: `runs/fixed/20251011/openings_ply1_20_v1.sfen`）。
+- Gate 判定は「勝率/NPS」が主。PVは補助（pv_probe）。
+- スクリプト: `scripts/nnue/evaluate-nnue.sh`（pv_spread_samples==0 の場合、自動で `pv_probe --depth 8 --samples 200` を実行し、補助統計を併記）。
+
+### 2) シャード実行（次ラウンド以降の既定）
+- 長時間の評価（短TC2000 / 長TC800〜2000）はプロセス並列で短縮。
+- 起動: `scripts/nnue/gauntlet-sharded.sh BASE CAND TOTAL_GAMES SHARDS TIME OUT_DIR [BOOK]`
+- 集計: `scripts/nnue/merge-gauntlet-json.sh OUT_DIR` → `merged.result.json` に対して採否基準を適用。
+- ルール: 各 shard は `--threads 1`、`--time/hash/book` 共通、seed は shard 番号でずらす。
+
+### 3) Champion/Teacher の管理（symlink + manifest）
+- Single（長TC用途）: `runs/ref.nnue` を Champion Single に張替え。`runs/baselines/current/{single.fp32.bin, champion.manifest.json}` を併置。
+- Classic（短TC用途）: `runs/baselines/current/classic.nnue` を Champion Classic に。`champion_classic.manifest.json` とハッシュを保存。
+- 採用処理はスクリプトで自動化可（例: `runs/auto_adopt_classic_from_exp3.sh`）。
+
+### 4) cp表示の校正ポリシー
+- 原則「注釈側で揃える」。`calibrate_teacher_scale` で得た mu/scale を注釈の `--wdl-scale`（および蒸留の `--teacher-scale-fit linear`）に反映。
+- ランタイム補正（USIオプション）は“例外時のみ”実装・適用。既定は触れない。
+
+### 5) ログとドキュメント
+- 計画: `docs/nnue-training-plan.md`（計画のみ）。
+- 実施ログ: `docs/reports/nnue-training-log.md`（日付・コマンド・指標）。
+- 評価ガイド: `docs/nnue-evaluation-guide.md`（シャード実行・pv補完の運用を明記）。
+
+### 6) 並行実行の作法（衝突回避）
+- ガントレットは1コア相当。学習・注釈は `taskset` で別コアに、`nice`/`ionice` で低優先度に。
+- 例: `taskset -c 1-31 nice -n 10 ionice -c2 -n7 <cmd>`
+
+### 7) 採否基準（据え置き）
+- 短TC（0/10+0.1, 2000局, threads=1）: 勝率≥55%、|ΔNPS|≤3%（±5%は要追試）。
+- 長TC（0/40+0.4, 800→2000局）: 勝率≥55%。|ΔNPS|は参考（-3%まで許容、超過は要追試）。
+- 量子化: FP32と比較し短TC非劣化、長TCで±1%以内が理想（±3%運用可）。
+
+### 8) よく使うスクリプト
+- 学習パイプ: `scripts/nnue/phase1_batch.sh`（環境変数で O/M/E, TIME_MS, MULTIPV, KD_* を指定）。
+- Gauntlet単体: `scripts/nnue/evaluate-nnue.sh`（pv自動補完あり）。
+- シャード実行/集計: `scripts/nnue/gauntlet-sharded.sh` / `scripts/nnue/merge-gauntlet-json.sh`。
