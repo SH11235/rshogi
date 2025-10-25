@@ -19,6 +19,7 @@ chrono = { workspace = true }
 criterion = { version = "0.6", features = ["html_reports"] }
 rand = { workspace = true }
 rand_xoshiro = { workspace = true }
+rand_chacha = "0.3"
 rayon = "1.10"
 zstd = { version = "0.13", optional = true }
 bytemuck = "1.15"
