@@ -88,6 +88,7 @@ Please respond in Japanese (日本語) when interacting with this codebase.
 ### 4) cp表示の校正ポリシー
 - 原則「注釈側で揃える」。`calibrate_teacher_scale` で得た mu/scale を注釈の `--wdl-scale`（および蒸留の `--teacher-scale-fit linear`）に反映。
 - ランタイム補正（USIオプション）は“例外時のみ”実装・適用。既定は触れない。
+- 実装済み: Classic v1 エクスポートに `--final-cp-gain` を追加。量子化済最終層（output）の i8/i32 を倍率 `G` でスケーリングして Q16→cp 表示レンジを整える（丸め・飽和あり）。
 
 ### 5) ログとドキュメント
 - 計画: `docs/nnue-training-plan.md`（計画のみ）。

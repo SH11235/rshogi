@@ -551,6 +551,38 @@ impl ClassicIntNetworkBundle {
         self.network
             .propagate_from_acc_scratch(&views.acc_us, &views.acc_them, &mut views.mid)
     }
+
+    /// Apply a final CP gain to the last linear layer (weights/bias) in integer domain.
+    /// This is a post-quantization scalar to expand the effective cp dynamic range at runtime
+    /// (engine converts Q16>>16 to cp). It multiplies `output_weights (i8)` and `output_bias (i32)`
+    /// by `gain`, rounding away from zero and saturating to valid ranges.
+    /// Returns (saturated_weights, saturated_biases[0 or 1]).
+    pub fn apply_final_cp_gain(&mut self, gain: f32) -> (u32, u32) {
+        if !gain.is_finite() || !(gain > 0.0) {
+            return (0, 0);
+        }
+        let mut sat_w = 0u32;
+        for w in &mut self.network.output_weights {
+            let scaled = round_away_from_zero((*w as f32) * gain);
+            let clipped = clip_sym(scaled, I8_QMAX) as i8;
+            if clipped as i32 != scaled {
+                sat_w += 1;
+            }
+            *w = clipped;
+        }
+        let old = self.network.output_bias;
+        let scaled_b = round_away_from_zero((old as f32) * gain);
+        // i32 is large; still guard against overflow in extreme cases by clamping.
+        let new_b = if scaled_b == i32::MIN || scaled_b == i32::MAX {
+            scaled_b
+        } else {
+            // No explicit network-specific cap; keep full i32 range.
+            scaled_b
+        };
+        let sat_b = if new_b != scaled_b { 1 } else { 0 };
+        self.network.output_bias = new_b;
+        (sat_w, sat_b)
+    }
 }
 
 /// 中間層再利用用スクラッチ

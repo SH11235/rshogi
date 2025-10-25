@@ -227,6 +227,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("final-cp-gain")
+                .long("final-cp-gain")
+                .help("Classic v1 export only: multiply final output layer (weights/bias) by this gain to align Q16->cp display range (default: 1.0)")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("1.0"),
+        )
+        .arg(
             Arg::new("distill-from-single")
                 .long("distill-from-single")
                 .help("Path to teacher Single FP32 weights for knowledge distillation")
@@ -597,6 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quant_out,
         emit_fp32_also: app.get_flag("emit-fp32-also"),
     };
+    let final_cp_gain: f32 = *app.get_one::<f32>("final-cp-gain").unwrap_or(&1.0);
     // Teacher domain (cp or wdl-logit)。教師種別に応じて既定値を選ぶ。
     let default_teacher_domain = default_teacher_domain(distill_teacher_kind);
     let teacher_domain = app
@@ -786,6 +794,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             export_options.quant_h2,
             export_options.quant_out
         );
+        if export_options.arch == ArchKind::Classic
+            && matches!(export_options.format, ExportFormat::ClassicV1)
+        {
+            eprintln!("  FinalCPGain: {:.3}", final_cp_gain);
+        }
     } else {
         println!(
             "  Export: arch={:?}, format={:?}, q_ft={:?}, q_h1={:?}, q_h2={:?}, q_out={:?}",
@@ -796,6 +809,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             export_options.quant_h2,
             export_options.quant_out
         );
+        if export_options.arch == ArchKind::Classic
+            && matches!(export_options.format, ExportFormat::ClassicV1)
+        {
+            println!("  FinalCPGain: {:.3}", final_cp_gain);
+        }
     }
     if human_to_stderr {
         match &distill_options.teacher_path {
@@ -1223,8 +1241,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
 
+        // Apply final cp gain (post-quant) if requested
+        let mut bundle_mut = bundle_int;
+        if export_options.arch == ArchKind::Classic
+            && matches!(export_options.format, ExportFormat::ClassicV1)
+            && final_cp_gain != 1.0
+        {
+            let (sw, sb) = bundle_mut.apply_final_cp_gain(final_cp_gain);
+            if human_to_stderr {
+                eprintln!(
+                    "Applied final-cp-gain={:.3} to Classic INT (sat_w={}, sat_b={})",
+                    final_cp_gain, sw, sb
+                );
+            } else {
+                println!(
+                    "Applied final-cp-gain={:.3} to Classic INT (sat_w={}, sat_b={})",
+                    final_cp_gain, sw, sb
+                );
+            }
+        }
         classic_scales = Some(scales);
-        classic_bundle = Some(bundle_int);
+        classic_bundle = Some(bundle_mut);
 
         let relu_clip = match &network {
             Network::Classic(existing) => existing.relu_clip,
@@ -1383,12 +1420,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     quant_metrics = Some(qm);
                                 }
 
+                                // Apply final cp gain before saving bundle
+                                let mut bundle_m = bundle_int;
+                                if export_options.arch == ArchKind::Classic
+                                    && matches!(export_options.format, ExportFormat::ClassicV1)
+                                    && final_cp_gain != 1.0
+                                {
+                                    let (sw, sb) = bundle_m.apply_final_cp_gain(final_cp_gain);
+                                    if let Some(lg) = ctx.structured.as_ref() {
+                                        let rec = serde_json::json!({
+                                            "ts": chrono::Utc::now().to_rfc3339(),
+                                            "component": "export",
+                                            "phase": "final_cp_gain",
+                                            "gain": final_cp_gain,
+                                            "sat_w": sw,
+                                            "sat_b": sb,
+                                        });
+                                        lg.write_json(&rec);
+                                    } else if human_to_stderr {
+                                        eprintln!(
+                                            "Applied final-cp-gain={:.3} to Classic INT (sat_w={}, sat_b={})",
+                                            final_cp_gain, sw, sb
+                                        );
+                                    } else {
+                                        println!(
+                                            "Applied final-cp-gain={:.3} to Classic INT (sat_w={}, sat_b={})",
+                                            final_cp_gain, sw, sb
+                                        );
+                                    }
+                                }
                                 classic_scales = Some(scales.clone());
                                 export_options.quant_ft = scales.scheme.ft;
                                 export_options.quant_h1 = scales.scheme.h1;
                                 export_options.quant_h2 = scales.scheme.h2;
                                 export_options.quant_out = scales.scheme.out;
-                                *ctx.classic_bundle = Some(bundle_int);
+                                *ctx.classic_bundle = Some(bundle_m);
                             }
                             Err(e) => {
                                 if human_to_stderr {
