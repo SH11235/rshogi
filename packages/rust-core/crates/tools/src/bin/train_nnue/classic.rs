@@ -558,7 +558,9 @@ impl ClassicIntNetworkBundle {
     /// by `gain`, rounding away from zero and saturating to valid ranges.
     /// Returns (saturated_weights, saturated_biases[0 or 1]).
     pub fn apply_final_cp_gain(&mut self, gain: f32) -> (u32, u32) {
-        if !gain.is_finite() || !(gain > 0.0) {
+        // NOTE: f32 の比較は部分順序だが、NaN/Inf は is_finite() で先に弾き、
+        // 正のスカラーのみ許可するため <= で明示する。
+        if !gain.is_finite() || gain <= 0.0 {
             return (0, 0);
         }
         let mut sat_w = 0u32;
