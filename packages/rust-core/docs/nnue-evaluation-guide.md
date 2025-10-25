@@ -96,7 +96,7 @@ cargo run -p tools --release --bin verify_classic_roundtrip -- \
 - FP32が強く、INTが弱い → 量子化校正の見直し（校正サンプル増量、`--quant-search` 継続、`relu_clip`/per-channel指定の見直しなど）。
 - FP32自体が弱い → データ/学習の再強化（TIME_MS↑、ユニーク↑、追加エポック、再蒸留）。
 
-### 4. シャード実行（推奨・次ラウンドからの既定）
+### 4. シャード実行（推奨・既定運用）
 
 長い評価（短TC2000/長TC800〜2000）の壁時計時間短縮のため、threads=1を守ったままプロセス並列（シャーディング）で gauntlet を実行します。
 
@@ -106,6 +106,7 @@ cargo run -p tools --release --bin verify_classic_roundtrip -- \
   - seed は shard ごとに異なる（既定は `12345+i`）
 - 使い方（短TC2000を16分割の例）
 ```bash
+# 実行権限が無い場合は `chmod +x scripts/nnue/*.sh` を先に実行
 scripts/nnue/gauntlet-sharded.sh \
   runs/ref.nnue runs/cand.nnue \
   2000 16 "0/10+0.1" \
@@ -115,11 +116,40 @@ scripts/nnue/gauntlet-sharded.sh \
 scripts/nnue/merge-gauntlet-json.sh runs/gauntlet_sharded/<ts>
 # 出力: runs/gauntlet_sharded/<ts>/merged.result.json
 ```
+
+注意: シャード起動直後は `merge-gauntlet-json.sh` が `no inputs` を返すことがあります。各 `shard_*/result.json` が出揃ってから再度マージを実行してください（もしくは `quant_and_sharded_eval.sh` に待機処理を追加）。
 - 並列度の目安
   - `shards ≈ (有効コア数-予約コア)`（他ジョブとコア分離する場合は `taskset` を使用）
   - I/O衝突を避けるため、必要に応じ `nice`/`ionice` を併用
 - 採否判定
   - 単体実行時と同一の基準（短TC: 勝率≥55%/2000局、長TC: 勝率≥55%/800→2000）を、`merged.result.json` に対して適用
+
+備考: gauntlet はフェアペアリングの都合で「各プロセスのゲーム数が偶数」である必要があります。`gauntlet-sharded.sh` は各 shard に偶数ゲーム数を自動割当するよう修正済みです（例: 2000games/16shards → {126×8,124×8}）。
+
+### 5. Classic cp表示レンジの調整（final-cp-gain）
+
+- Classic v1 INT のエクスポート時に `--final-cp-gain <G>` を指定すると、最終層（output）の i8/i32 を `G` 倍（丸め・飽和付き）でスケーリングします。
+- 目的: ランタイムの Q16→cp 右シフト後のレンジが小さすぎる場合（cp≒0 問題）の見え方/感度を改善。
+- 例（既存ディレクトリに別名出力）
+```
+cargo run -p tools --release --bin train_nnue -- \
+  --input runs/.../train.cache --arch classic \
+  --distill-from-classic runs/.../classic_v1/nn_best.fp32.bin --distill-only \
+  --export-format classic-v1 \
+  --quant-calibration runs/fixed/20251011/val.cache runs/.../train.cache \
+  --quant-calibration-limit 120000 \
+  --quant-ft per-tensor --quant-h1 per-channel --quant-h2 per-channel --quant-out per-tensor \
+  --final-cp-gain 64 \
+  --out runs/.../classic_v1_q_pc_120k_cpfit64
+
+# 確認（cpが0縛りでないことを目視）
+target/release/nnue_smoke runs/.../classic_v1_q_pc_120k_cpfit64/nn.classic.nnue
+```
+
+補足: スクリプトに実行権限が無いとシャード起動に失敗します（"許可がありません"）。その場合は次を実行してから再実行してください。
+```bash
+chmod +x scripts/nnue/gauntlet-sharded.sh scripts/nnue/merge-gauntlet-json.sh scripts/nnue/evaluate-nnue.sh
+```
 
 ### 5. PV spread の取得（`pv_probe` 推奨）
 
