@@ -166,6 +166,39 @@ target/release/pv_probe \
 ```
 ```
 
+補足（v2: 厳密合成＋並列）
+
+`pv_probe` は v2 形式のJSONにヒストグラムを埋め込み、シャーディングやプロセス内workersで並列収集した結果を厳密にマージできます（Nearest‑Rank定義でp50/p90を再計算）。Spec 013の原則に合わせ、各ワーカーは `threads=1` を維持します。
+
+- 並列収集（8 workers, TT off, target 200 サンプル）
+```bash
+target/release/pv_probe run \
+  --cand runs/baselines/current/classic.nnue \
+  --book runs/fixed/20251011/openings_ply1_20_v1.sfen \
+  --ms 1500 --threads 1 --workers 8 --hash-mb-per-worker 256 \
+  --tt off --target-samples 200 \
+  --json runs/tmp/pv_probe_v2_w8.json
+```
+
+- シャード（8分割）→ 厳密マージ
+```bash
+for i in $(seq 0 7); do
+  target/release/pv_probe run \
+    --cand runs/baselines/current/classic.nnue \
+    --book runs/fixed/20251011/openings_ply1_20_v1.sfen \
+    --ms 1500 --threads 1 --tt off \
+    --shards 8 --shard-index $i --seed 42 \
+    --target-samples 150 \
+    --json runs/tmp/pv_probe_shard_$i.json &
+done
+wait
+target/release/pv_probe merge runs/tmp/pv_probe_shard_*.json --out runs/tmp/pv_probe_merged.json
+```
+
+注意:
+- 厳密合成（exact）は、`tt=off|isolate`、`bucket_size_cp=1`、`book_sha256`/`ms|depth`の一致が前提です。不一致は既定エラー（`--warn`で警告継続）。
+- メモリは `workers × hash_mb_per_worker` で消費されます。OOMに注意してください。
+
 ### 6. CI/CDでの軽量チェック
 
 `.github/workflows/gauntlet-regression-check.yml`により、コード変更時に自動的に軽量なリグレッションチェックが実行されます。これは重大な性能劣化の検出のみを目的としています。
