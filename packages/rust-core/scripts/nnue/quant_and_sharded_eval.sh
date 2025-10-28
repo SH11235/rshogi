@@ -57,7 +57,7 @@ for LIM in "${CAL_LIMITS[@]}"; do
   # 5) PV probe (補助)
   cargo build -p tools --release --bin pv_probe >/dev/null
   target/release/pv_probe --cand "$CAND_INT" --book "$BOOK" \
-    --depth 8 --threads 1 --hash-mb 512 --samples 200 --seed 42 \
+    --depth 8 --threads 1 --hash-mb-per-worker 512 --target-samples 200 --seed 42 \
     --json "$OUT_Q/pv_probe_d8_s200.json" || true
 done
 

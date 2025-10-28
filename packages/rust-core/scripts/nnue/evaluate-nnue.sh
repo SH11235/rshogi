@@ -75,13 +75,13 @@ fi
 
 # 自動PV補完: pv_spread_samples==0 の場合は pv_probe を実行して補助統計を採取
 if [ "${PV_SAMPLES:-0}" = "0" ]; then
-  echo "\n[auto] pv_spread_samples=0 → pv_probe(depth=8, samples=200) を実行します"
+  echo "\n[auto] pv_spread_samples=0 → pv_probe(depth=8, target-samples=200) を実行します"
   cargo build -p tools --release --bin pv_probe >/dev/null 2>&1 || true
   target/release/pv_probe \
     --cand "$CANDIDATE" \
     --book "$BOOK_PATH" \
-    --depth 8 --threads 1 --hash-mb 512 \
-    --samples 200 --seed 42 \
+    --depth 8 --threads 1 --hash-mb-per-worker 512 \
+    --target-samples 200 --seed 42 \
     --json runs/gauntlet_local/pv_probe_auto_d8_s200.json || true
   if [ -f runs/gauntlet_local/pv_probe_auto_d8_s200.json ]; then
     echo "[auto] pv_probe stats:";
