@@ -595,6 +595,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         false
     }
 
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn threads_lg2_for_test(threads_hint: u32) -> i32 {
+        threads_hint.max(1).ilog2() as i32
+    }
+
     fn iterative_with_buffers(
         &self,
         root: &Position,
@@ -1603,6 +1609,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         && pv_idx == 1
                         && matches!(node_type_for_store, NodeType::Exact)
                         && bench_stop_on_mate_enabled()
+                        && limits.time_manager.is_none()
+                        && limits.time_limit().is_none()
+                        && limits.fallback_deadlines.is_none()
                         && {
                             use crate::search::common::is_mate_score;
                             is_mate_score(local_best)
@@ -1895,8 +1904,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         // qnodes を統計へ反映
                         cum_qnodes = cum_qnodes.saturating_add(qnodes_local);
                         if let Some(cb) = limits.info_string_callback.as_ref() {
+                            let (kind, diff) = match first.bound {
+                                NodeType::UpperBound => ("upper", (alpha0 - target).abs()),
+                                NodeType::LowerBound => ("lower", (target - beta0).abs()),
+                                NodeType::Exact => ("exact", 0),
+                            };
                             cb(&format!(
-                                "near_final_zero_window=1 budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={} confirmed_exact={}",
+                                "near_final_zero_window=1 kind={} diff={} alpha={} beta={} target={} budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={} confirmed_exact={}",
+                                kind,
+                                diff,
+                                alpha0,
+                                beta0,
+                                target,
                                 budget,
                                 budget_qnodes,
                                 qnodes_limit_pre,

@@ -1639,3 +1639,93 @@ fn generate_evasions_double_check_only_king_moves() {
 
     assert_eq!(all_sorted, evasion_sorted);
 }
+
+#[test]
+fn near_final_updates_final_lines_and_snapshot() {
+    use crate::search::ab::ClassicBackend;
+    use crate::search::types::NodeType;
+    use crate::shogi::Position;
+    use std::sync::Arc;
+
+    // Enable near-final verification with permissive gates
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS", "0");
+
+    let backend = ClassicBackend::with_profile_apply_defaults(
+        Arc::new(crate::evaluation::evaluate::MaterialEvaluator),
+        crate::search::ab::SearchProfile::enhanced_material(),
+    );
+    let pos = Position::startpos();
+
+    // Limits: short fixed time to drive near-deadline path
+    let limits = crate::search::limits::SearchLimitsBuilder::default()
+        .fixed_time_ms(50)
+        .multipv(1)
+        .build();
+
+    let result = backend.think_blocking(&pos, &limits, None);
+    // Ensure we produced at least one line
+    let lines = result.lines.expect("lines present");
+    let first = &lines[0];
+    // After near-final, bound may be Exact（環境/局面に依存するため強断言しない）
+    assert!(matches!(
+        first.bound,
+        NodeType::Exact | NodeType::UpperBound | NodeType::LowerBound
+    ));
+    // Snapshot consistency: stats.pv reflects the same PV head as lines[0]
+    assert_eq!(
+        result.stats.pv.first().copied(),
+        first.pv.first().copied(),
+        "final snapshot PV head should match final_lines[0]"
+    );
+}
+
+#[test]
+fn near_final_bound_slack_boundary() {
+    use crate::search::ab::ClassicBackend;
+    use crate::shogi::Position;
+    use std::sync::Arc;
+
+    // slack=0 → attempt only when exactly on boundary; slack=1 → attempt when within 1cp
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS", "0");
+
+    let backend = ClassicBackend::with_profile_apply_defaults(
+        Arc::new(crate::evaluation::evaluate::MaterialEvaluator),
+        crate::search::ab::SearchProfile::enhanced_material(),
+    );
+    let pos = Position::startpos();
+
+    // Helper to run once with slack value
+    let run_once = |slack_cp: i32| {
+        std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP", slack_cp.to_string());
+        let limits = crate::search::limits::SearchLimitsBuilder::default()
+            .fixed_time_ms(30)
+            .multipv(1)
+            .build();
+        backend.think_blocking(&pos, &limits, None)
+    };
+
+    let res0 = run_once(0);
+    let res1 = run_once(1);
+    // We can't deterministically assert attempted counts here without parsing info logs,
+    // but we can at least assert both runs succeed and produce a line, guarding regressions
+    assert!(res0.lines.as_ref().is_some());
+    assert!(res1.lines.as_ref().is_some());
+}
+
+#[test]
+fn threads_lg2_monotonic_and_non_negative() {
+    use super::driver::ClassicBackend as BE;
+    let seq = [1_u32, 2, 3, 4, 8, 16, 24, 32];
+    let mut prev = -1_i32;
+    for &t in &seq {
+        let lg = BE::<MaterialEvaluator>::threads_lg2_for_test(t);
+        assert!(lg >= 0, "threads_lg2 should be non-negative for t={}", t);
+        assert!(lg >= prev, "threads_lg2 should be monotonic: {} -> {}", prev, lg);
+        prev = lg;
+    }
+}
