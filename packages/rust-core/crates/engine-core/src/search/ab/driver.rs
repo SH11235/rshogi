@@ -227,13 +227,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
     }
     #[inline]
-    fn derive_main_near_deadline_window_ms(hard_ms: u64) -> u64 {
+    pub(crate) fn derive_main_near_deadline_window_ms(hard_ms: u64) -> u64 {
         // 80..600ms の範囲で hard の 1/5
         let base = hard_ms / 5;
         base.clamp(80, 600)
     }
     #[inline]
-    fn derive_near_hard_finalize_ms(hard_ms: u64) -> u64 {
+    pub(crate) fn derive_near_hard_finalize_ms(hard_ms: u64) -> u64 {
         // 60..400ms の範囲で hard の 1/6
         let base = hard_ms / 6;
         base.clamp(60, 400)
@@ -462,6 +462,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // and aspiration center smoothing (A+C approach from YaneuraOu design)
         let mut best_hint_next_iter: Option<(crate::shogi::Move, i32)> = None;
 
+        // NearHard finalize は多重発火させない
+        let mut finalize_nearhard_sent = false;
+
+        // 観測用フラグ（SearchStatsに反映）
+        let mut stats_near_deadline_skip_new_iter: u64 = 0;
+        let mut stats_multipv_shrunk: u64 = 0;
+
         for d in 1..=max_depth {
             // Near-deadline gate: do not start a new iteration if we are too close to hard deadline.
             if let Some(tm) = limits.time_manager.as_ref() {
@@ -472,11 +479,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         let t_rem = hard_ms.saturating_sub(elapsed_ms);
                         let main_win = Self::derive_main_near_deadline_window_ms(hard_ms);
                         let near_final_win = Self::derive_near_hard_finalize_ms(hard_ms);
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "near_deadline_params hard_ms={} t_rem={} main_win_ms={} finalize_win_ms={}",
+                                hard_ms, t_rem, main_win, near_final_win
+                            ));
+                        }
                         if t_rem <= near_final_win {
                             if let Some(ctrl) = limits.stop_controller.as_ref() {
-                                ctrl.request_finalize(
-                                    crate::search::parallel::stop_ctrl::FinalizeReason::NearHard,
-                                );
+                                if !finalize_nearhard_sent {
+                                    ctrl.request_finalize(FinalizeReason::NearHard);
+                                    finalize_nearhard_sent = true;
+                                }
                             }
                         }
                         // Skip starting a new iteration if not the very first one
@@ -484,8 +498,36 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                 cb("near_deadline_skip_new_iter=1");
                             }
+                            stats_near_deadline_skip_new_iter = 1;
                             break;
                         }
+                    }
+                }
+            }
+            // Fixed time limit（time_limit）が設定されている場合も同様の近〆切ゲートを適用
+            if let Some(limit) = limits.time_limit() {
+                let cap_ms = limit.as_millis() as u64;
+                let elapsed_ms = t0.elapsed().as_millis() as u64;
+                if elapsed_ms < cap_ms {
+                    let t_rem = cap_ms.saturating_sub(elapsed_ms);
+                    let main_win = Self::derive_main_near_deadline_window_ms(cap_ms);
+                    let near_final_win = Self::derive_near_hard_finalize_ms(cap_ms);
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        cb(&format!(
+                            "near_deadline_params hard_ms={} t_rem={} main_win_ms={} finalize_win_ms={}",
+                            cap_ms, t_rem, main_win, near_final_win
+                        ));
+                    }
+                    if t_rem <= near_final_win {
+                        // FixedTime: Planned finalize を一度だけ（通知兼ログは共通ヘルパで）
+                        notify_deadline(DeadlineHit::Soft, nodes);
+                    }
+                    if t_rem <= main_win && d > 1 {
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb("near_deadline_skip_new_iter=1");
+                        }
+                        stats_near_deadline_skip_new_iter = 1;
+                        break;
                     }
                 }
             }
@@ -643,7 +685,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                 cb("near_deadline_multipv_shrink=1");
                             }
+                            stats_multipv_shrunk = 1;
                         }
+                    }
+                }
+            }
+            // Fixed time でも MultiPV 縮退を適用
+            if let Some(limit) = limits.time_limit() {
+                let cap_ms = limit.as_millis() as u64;
+                let elapsed_ms = t0.elapsed().as_millis() as u64;
+                if elapsed_ms < cap_ms {
+                    let t_rem = cap_ms.saturating_sub(elapsed_ms);
+                    let main_win = Self::derive_main_near_deadline_window_ms(cap_ms);
+                    if t_rem <= main_win {
+                        k = 1;
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb("near_deadline_multipv_shrink=1");
+                        }
+                        stats_multipv_shrunk = 1;
                     }
                 }
             }
@@ -1042,6 +1101,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
+                            // フル窓へ落とした直後にカウンタをリセット
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
                             continue;
                         }
                         iteration_researches = iteration_researches.saturating_add(1);
@@ -1052,6 +1114,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
                             continue;
                         }
                         if is_helper {
@@ -1084,6 +1148,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
                             continue;
                         }
                         iteration_researches = iteration_researches.saturating_add(1);
@@ -1092,6 +1158,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
                             continue;
                         }
                         if is_helper {
@@ -1465,6 +1533,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.re_searches = Some(cumulative_researches);
         stats.pv_changed = Some(cumulative_pv_changed);
         stats.incomplete_depth = incomplete_depth;
+        // 近〆切観測フラグ
+        if stats_near_deadline_skip_new_iter != 0 {
+            stats.near_deadline_skip_new_iter = Some(stats_near_deadline_skip_new_iter);
+        }
+        if stats_multipv_shrunk != 0 {
+            stats.multipv_shrunk = Some(stats_multipv_shrunk);
+        }
         if limits.store_heuristics {
             stats.heuristics = Some(Arc::new(heur_state.clone()));
         }
@@ -1651,17 +1726,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if lead_window_soft_break {
                     hard_timeout = false;
                 }
-                let reason = if hard_timeout
-                    || matches!(last_deadline_hit, Some(DeadlineHit::Soft))
-                    || lead_window_soft_break
-                {
-                    TerminationReason::TimeLimit
-                } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
+                // FixedTime: 終了理由は常に TimeLimit（UserStop を除く）に寄せる
+                let reason = if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
                     || Self::should_stop(limits)
                 {
                     TerminationReason::UserStop
                 } else {
-                    TerminationReason::Completed
+                    TerminationReason::TimeLimit
                 };
 
                 result.stop_info = Some(StopInfo {

@@ -231,6 +231,24 @@ fn tt_bound_follows_used_window() {
 }
 
 #[test]
+fn near_deadline_windows_scale_and_clamp() {
+    use super::driver::ClassicBackend as BE;
+    // hard very small => clamped to lower bounds
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(100), 80);
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(100), 60);
+    // typical fast TC
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(300), 80); // 60 -> clamp to 80
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(300), 60); // 50 -> clamp to 60
+                                                                                // mid TC
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(1000), 200);
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(1000), 166);
+    // long TC (upper clamp)
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(4000), 600); // 800 -> clamp 600
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(4000), 400);
+    // 666 -> clamp 400
+}
+
+#[test]
 fn qsearch_skips_quiet_checks_when_disabled() {
     let pos = Position::startpos();
     let heur = Heuristics::default();
