@@ -70,6 +70,16 @@ pub(crate) fn return_stack_cache(buf: Vec<SearchStack>) {
     });
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NearDeadlineDecision {
+    skip_new_iter: bool,
+    shrink_multipv: bool,
+    fire_nearhard: bool,
+    main_win_ms: u64,
+    finalize_win_ms: u64,
+    t_rem_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     pub(super) evaluator: Arc<E>,
@@ -249,6 +259,33 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let base = hard_ms / 6;
         base.clamp(60, 400)
     }
+
+    #[inline]
+    fn decide_near_deadline_policy(
+        hard_cap_ms: u64,
+        elapsed_ms: u64,
+        depth: i32,
+        _multipv: u8,
+    ) -> Option<NearDeadlineDecision> {
+        if hard_cap_ms == u64::MAX || elapsed_ms >= hard_cap_ms {
+            return None;
+        }
+        let t_rem = hard_cap_ms.saturating_sub(elapsed_ms);
+        let main_win = Self::derive_main_near_deadline_window_ms(hard_cap_ms);
+        let finalize_win = Self::derive_near_hard_finalize_ms(hard_cap_ms);
+        let fire_nearhard = t_rem <= finalize_win;
+        // 新イテ抑止は2手目以降のみ（d>1）
+        let skip_new_iter = t_rem <= main_win && depth > 1;
+        let shrink_multipv = t_rem <= main_win;
+        Some(NearDeadlineDecision {
+            skip_new_iter,
+            shrink_multipv,
+            fire_nearhard,
+            main_win_ms: main_win,
+            finalize_win_ms: finalize_win,
+            t_rem_ms: t_rem,
+        })
+    }
     #[inline]
     pub(crate) fn classify_root_bound(local_best: i32, alpha_win: i32, beta_win: i32) -> NodeType {
         if local_best <= alpha_win {
@@ -274,6 +311,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // Default: 100ms provides good responsiveness in parallel search with multiple
             // helpers while avoiding excessive USI output spam.
             Err(_) => Some(100),
+        })
+    }
+
+    #[inline]
+    fn near_final_zero_window_enabled() -> bool {
+        static FLAG: OnceLock<bool> = OnceLock::new();
+        *FLAG.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "on"
+            }
+            Err(_) => false,
+        })
+    }
+
+    #[inline]
+    fn near_final_zero_window_budget_ms() -> u64 {
+        static VAL: OnceLock<u64> = OnceLock::new();
+        *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
+            Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
+            Err(_) => 80,
         })
     }
 
@@ -433,6 +491,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut lead_window_soft_break = false;
         let mut finalize_hard_sent = false;
         let is_helper = limits.helper_role;
+        let mut zero_window_done = false;
         let mut notify_deadline = |hit: DeadlineHit, nodes_now: u64| {
             if let Some(cb) = limits.info_string_callback.as_ref() {
                 let elapsed = t0.elapsed().as_millis();
@@ -440,6 +499,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     "deadline_hit kind={:?} elapsed_ms={} nodes={}",
                     hit, elapsed, nodes_now
                 ));
+            }
+            // finalize送出は primary のみ（helper はログのみ）
+            if is_helper {
+                return;
             }
             if let Some(ctrl) = stop_controller.as_ref() {
                 match hit {
@@ -487,27 +550,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let hard_ms = tm.hard_limit_ms();
                 if hard_ms != u64::MAX {
                     let elapsed_ms = tm.elapsed_ms();
-                    if elapsed_ms < hard_ms {
-                        let t_rem = hard_ms.saturating_sub(elapsed_ms);
-                        let main_win = Self::derive_main_near_deadline_window_ms(hard_ms);
-                        let near_final_win = Self::derive_near_hard_finalize_ms(hard_ms);
+                    if let Some(dec) =
+                        Self::decide_near_deadline_policy(hard_ms, elapsed_ms, d, limits.multipv)
+                    {
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb(&format!(
                                 "near_deadline_params hard_ms={} t_rem={} main_win_ms={} finalize_win_ms={}",
-                                hard_ms, t_rem, main_win, near_final_win
+                                hard_ms, dec.t_rem_ms, dec.main_win_ms, dec.finalize_win_ms
                             ));
                         }
-                        if !Self::p1_disabled() && t_rem <= near_final_win {
+                        if !Self::p1_disabled() && dec.fire_nearhard {
                             if let Some(ctrl) = limits.stop_controller.as_ref() {
-                                if !finalize_nearhard_sent {
+                                if !finalize_nearhard_sent && !is_helper {
                                     ctrl.request_finalize(FinalizeReason::NearHard);
                                     finalize_nearhard_sent = true;
-                                    // Planned は notify_deadline 側で nearhard 送出済みかを見て抑止する
                                 }
                             }
                         }
-                        // Skip starting a new iteration if not the very first one
-                        if !Self::p1_disabled() && t_rem <= main_win && d > 1 {
+                        if !Self::p1_disabled() && dec.skip_new_iter {
                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                 cb("near_deadline_skip_new_iter=1");
                             }
@@ -521,27 +581,25 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if let Some(limit) = limits.time_limit() {
                 let cap_ms = limit.as_millis() as u64;
                 let elapsed_ms = t0.elapsed().as_millis() as u64;
-                if elapsed_ms < cap_ms {
-                    let t_rem = cap_ms.saturating_sub(elapsed_ms);
-                    let main_win = Self::derive_main_near_deadline_window_ms(cap_ms);
-                    let near_final_win = Self::derive_near_hard_finalize_ms(cap_ms);
+                if let Some(dec) =
+                    Self::decide_near_deadline_policy(cap_ms, elapsed_ms, d, limits.multipv)
+                {
                     if let Some(cb) = limits.info_string_callback.as_ref() {
                         cb(&format!(
                             "near_deadline_params hard_ms={} t_rem={} main_win_ms={} finalize_win_ms={}",
-                            cap_ms, t_rem, main_win, near_final_win
+                            cap_ms, dec.t_rem_ms, dec.main_win_ms, dec.finalize_win_ms
                         ));
                     }
-                    if !Self::p1_disabled() && t_rem <= near_final_win {
+                    if !Self::p1_disabled() && dec.fire_nearhard {
                         // FixedTime でも NearHard finalize を 1 回だけ送る（P1仕様）。
                         if let Some(ctrl) = limits.stop_controller.as_ref() {
-                            if !finalize_nearhard_sent {
+                            if !finalize_nearhard_sent && !is_helper {
                                 ctrl.request_finalize(FinalizeReason::NearHard);
                                 finalize_nearhard_sent = true;
-                                // Planned は notify_deadline 側で nearhard 送出済みかを見て抑止する
                             }
                         }
                     }
-                    if !Self::p1_disabled() && t_rem <= main_win && d > 1 {
+                    if !Self::p1_disabled() && dec.skip_new_iter {
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb("near_deadline_skip_new_iter=1");
                         }
@@ -1421,6 +1479,91 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 final_depth_reached = d as u8;
                 final_seldepth_reached = Some(capped_seldepth);
                 final_seldepth_raw = Some(seldepth);
+
+                // P1.5: 近締切で 0-window 最終確認を1回だけ試みる（任意、環境フラグで有効化）
+                if !Self::p1_disabled()
+                    && finalize_nearhard_sent
+                    && !zero_window_done
+                    && Self::near_final_zero_window_enabled()
+                    && d > 1
+                    && !depth_lines.is_empty()
+                {
+                    // 予算的な安全: t_rem が極小ならスキップ
+                    let mut t_rem: u64 = 0;
+                    if let Some(tm) = limits.time_manager.as_ref() {
+                        let hard = tm.hard_limit_ms();
+                        let el = tm.elapsed_ms();
+                        if hard != u64::MAX && el < hard {
+                            t_rem = hard.saturating_sub(el);
+                        }
+                    } else if let Some(limit) = limits.time_limit() {
+                        let cap = limit.as_millis() as u64;
+                        let el = t0.elapsed().as_millis() as u64;
+                        if el < cap {
+                            t_rem = cap.saturating_sub(el);
+                        }
+                    }
+                    let budget = Self::near_final_zero_window_budget_ms();
+                    if t_rem == 0 || t_rem >= 5 {
+                        if let Some(first) = depth_lines.first_mut() {
+                            let mv0 = first.root_move;
+                            let target = first.score_internal;
+                            // 0-window: [s-1, s]
+                            let alpha0 = target.saturating_sub(1);
+                            let beta0 = target;
+                            let mut child = root.clone();
+                            child.do_move(mv0);
+                            // 局所カウンタ（本確認は軽量・単発）
+                            let mut qnodes_local: u64 = 0;
+                            let qnodes_limit_local = Self::compute_qnodes_limit(limits, d, 1);
+                            let mut tt_hits_local: u64 = 0;
+                            let mut beta_cuts_local: u64 = 0;
+                            let mut lmr_counter_local: u64 = 0;
+                            let mut heur_local = Heuristics::default();
+                            let mut search_ctx_nw = SearchContext {
+                                limits,
+                                start_time: &t0,
+                                nodes: &mut nodes,
+                                seldepth: &mut seldepth,
+                                qnodes: &mut qnodes_local,
+                                qnodes_limit: qnodes_limit_local,
+                                #[cfg(feature = "diagnostics")]
+                                abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                #[cfg(feature = "diagnostics")]
+                                abdada_busy_set: &mut cum_abdada_busy_set,
+                            };
+                            let (sc_nw, _) = self.alphabeta(
+                                pvs::ABArgs {
+                                    pos: &child,
+                                    depth: d - 1,
+                                    alpha: -(beta0),
+                                    beta: -alpha0,
+                                    ply: 1,
+                                    is_pv: false,
+                                    stack,
+                                    heur: &mut heur_local,
+                                    tt_hits: &mut tt_hits_local,
+                                    beta_cuts: &mut beta_cuts_local,
+                                    lmr_counter: &mut lmr_counter_local,
+                                },
+                                &mut search_ctx_nw,
+                            );
+                            let s_back = -sc_nw;
+                            if s_back > alpha0 && s_back < beta0 {
+                                first.bound = NodeType::Exact;
+                            }
+                            zero_window_done = true;
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb(&format!(
+                                    "near_final_zero_window=1 budget_ms={} t_rem={} confirmed_exact={}",
+                                    budget,
+                                    t_rem,
+                                    (s_back > alpha0 && s_back < beta0) as u8
+                                ));
+                            }
+                        }
+                    }
+                }
                 if let Some(ctrl) = stop_controller.as_ref() {
                     ctrl.publish_committed_snapshot(
                         session_id,
