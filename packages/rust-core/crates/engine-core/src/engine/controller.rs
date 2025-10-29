@@ -2,7 +2,7 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
-use crate::search::types::StopInfo;
+use crate::search::types::{NodeType, RootLine, StopInfo};
 use crate::time_management::{
     detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeState,
 };
@@ -16,6 +16,10 @@ use crate::{
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
 };
+use crate::search::types::clamp_score_cp;
+use crate::search::common::get_mate_distance;
+use crate::search::tt::reconstruct_pv_generic;
+use smallvec::SmallVec;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
 use std::sync::{
@@ -563,9 +567,13 @@ impl Engine {
 
         // Wait for result synchronously (for backward compatibility)
         // In the future, callers should use start_search() directly for true async behavior
-        let result = session
+        let mut result = session
             .recv_result()
             .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()));
+
+        // P0: Ensure we return at least one PV by fallback to TT if lines are empty
+        // - Do not change result.node_type; only synthesize lines[0]
+        self.finalize_pv_from_tt(pos, &mut result);
 
         if let Some(tm) = session.time_manager() {
             let elapsed_ms = result.stats.elapsed.as_millis() as u64;
@@ -574,6 +582,126 @@ impl Engine {
         }
 
         result
+    }
+
+    /// Fallback: if result.lines is empty, try to reconstruct PV from TT (Exact only) and
+    /// synthesize lines[0] accordingly. Does not modify result.node_type.
+    fn finalize_pv_from_tt(&self, pos: &Position, result: &mut SearchResult) {
+        // Already has at least one line
+        if result
+            .lines
+            .as_ref()
+            .map(|ls| !ls.is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        // Try reconstructing PV from TT
+        let mut p = pos.clone();
+        let pv = reconstruct_pv_generic(&*self.shared_tt, &mut p, 32);
+        let mut adopted_tt = false;
+        if let Some(&head) = pv.first() {
+            // Head legality guard（TT汚染時の保険）
+            if pos.is_pseudo_legal(head) && pos.is_legal_move(head) {
+                adopted_tt = true;
+            }
+        }
+
+        if adopted_tt {
+            // Probe root entry to attach node_type/score if Exact
+            let root_hash = pos.zobrist_hash();
+            let mut bound = result.node_type;
+            let mut score_internal = result.score;
+            if let Some(entry) = self.shared_tt.probe_entry(root_hash, pos.side_to_move) {
+                if entry.matches(root_hash) && entry.node_type() == NodeType::Exact {
+                    bound = NodeType::Exact;
+                    // entry.score() は TT 格納時に root 相対へ正規化済み。
+                    // ルートでの取得のため ply=0 で一致し、追加正規化は不要。
+                    score_internal = entry.score() as i32;
+                }
+            }
+
+            let root_move = pv.first().copied().unwrap_or_else(crate::shogi::Move::null);
+            // Fallback seldepth: prefer stats.seldepth, else derive from result
+            let seldepth = result
+                .stats
+                .seldepth
+                .or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+            let line = RootLine {
+                multipv_index: 1,
+                root_move,
+                score_internal,
+                score_cp: clamp_score_cp(score_internal),
+                bound,
+                depth: result.depth,
+                seldepth,
+                pv: {
+                    let mut v: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+                    v.extend(pv.iter().copied());
+                    v
+                },
+                nodes: Some(result.nodes),
+                time_ms: Some(result
+                    .stats
+                    .elapsed
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64),
+                nps: Some(result.nps),
+                exact_exhausted: false,
+                exhaust_reason: None,
+                mate_distance: get_mate_distance(score_internal),
+            };
+            let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+            out.push(line);
+            result.lines = Some(out);
+            result.refresh_summary();
+            return;
+        }
+
+        // 最終フォールバック（任意）：すべて空でTTも採用不可なら 1 手PVを作る
+        if result
+            .lines
+            .as_ref()
+            .map(|ls| ls.is_empty())
+            .unwrap_or(true)
+        {
+            let fb = self.choose_final_bestmove(pos, None);
+            if let Some(best) = fb.best_move {
+                // 合成（1手 PV）。score/bound は現行 result のものを使用
+                let seldepth = result
+                    .stats
+                    .seldepth
+                    .or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+                let mut pv_one: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+                pv_one.push(best);
+                let score_internal = result.score;
+                let line = RootLine {
+                    multipv_index: 1,
+                    root_move: best,
+                    score_internal,
+                    score_cp: clamp_score_cp(score_internal),
+                    bound: result.node_type,
+                    depth: result.depth,
+                    seldepth,
+                    pv: pv_one,
+                    nodes: Some(result.nodes),
+                    time_ms: Some(result
+                        .stats
+                        .elapsed
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64),
+                    nps: Some(result.nps),
+                    exact_exhausted: false,
+                    exhaust_reason: None,
+                    mate_distance: get_mate_distance(score_internal),
+                };
+                let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+                out.push(line);
+                result.lines = Some(out);
+                result.refresh_summary();
+            }
+        }
     }
 
     /// Try to get a ponder move directly from TT for the child position after `best_move`.
