@@ -1262,14 +1262,15 @@ fn fixed_time_limit_lead_window_notifies_finalize_once() {
 
     let finalize_msg = finalizer_rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("StopController should receive Planned finalize");
+        .expect("StopController should receive NearHard finalize");
     match finalize_msg {
         FinalizerMsg::Finalize {
             session_id: sid,
             reason,
         } => {
             assert_eq!(sid, session_id);
-            assert_eq!(reason, FinalizeReason::Planned);
+            // FixedTime near-final 窓では NearHard finalize を一度だけ送る（P1仕様）
+            assert_eq!(reason, FinalizeReason::NearHard);
         }
         other => panic!("unexpected finalize message: {other:?}"),
     }

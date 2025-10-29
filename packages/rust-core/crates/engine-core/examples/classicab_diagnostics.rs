@@ -273,11 +273,11 @@ fn main() {
             if args.format == "text" {
                 if depth == args.depth_min {
                     println!(
-                        "  columns: depth nodes nps hashfull helper_share(%) score tt_hits lmr lmr_trials beta_cuts aspFH aspFL root_hint_exist root_hint_used tt_root_match tt_root_depth heur_quiet_max heur_cont_max heur_capture_max heur_counter"
+                        "  columns: depth nodes nps hashfull helper_share(%) score tt_hits lmr lmr_trials beta_cuts aspFH aspFL root_tt_hint_exists root_tt_hint_used tt_root_match tt_root_depth heur_quiet_max heur_cont_max heur_capture_max heur_counter"
                     );
                 }
                 println!(
-                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  helper_share(%) {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
+                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  helper_share(%) {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_tt_hint_exists {:>1}  root_tt_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
                     depth,
                     res.stats.nodes,
                     nps,
@@ -501,7 +501,7 @@ fn run_compare_iid(args: &Args) {
         );
     }
     // サマリ出力（CSV）
-    println!("name,depth,tt_hits_on,tt_hits_off,delta_hits,beta_on,beta_off,delta_beta,nodes_on,nodes_off,nodes_ratio,root_hint_used_on,root_hint_used_off");
+    println!("name,depth,tt_hits_on,tt_hits_off,delta_hits,beta_on,beta_off,delta_beta,nodes_on,nodes_off,nodes_ratio,root_tt_hint_used_on,root_tt_hint_used_off");
     let mut sum_hits_on: u64 = 0;
     let mut sum_hits_off: u64 = 0;
     let mut sum_beta_on: u64 = 0;
@@ -525,8 +525,8 @@ fn run_compare_iid(args: &Args) {
             let b_off = g(offr, "beta_cuts");
             let n_on = g(&r, "nodes");
             let n_off = g(offr, "nodes");
-            let used_on = g(&r, "root_hint_used");
-            let used_off = g(offr, "root_hint_used");
+            let used_on = g(&r, "root_tt_hint_used");
+            let used_off = g(offr, "root_tt_hint_used");
             let ratio = if n_off > 0 {
                 (n_on as f64) / (n_off as f64)
             } else {

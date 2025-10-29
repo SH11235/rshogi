@@ -73,6 +73,11 @@ fn synthesize_primary_line_from_result(result: &mut SearchResult) {
 }
 
 fn jitter_enabled() -> bool {
+    // ベンチ安定化（bench_allrun）中は helper の RootJitter を常に無効化して
+    // 測定の再現性を確保する（テストもこの前提）。
+    if crate::search::policy::bench_allrun_enabled() {
+        return false;
+    }
     match std::env::var("SHOGI_TEST_FORCE_JITTER") {
         Ok(val) => val != "0",
         Err(_) => true,
