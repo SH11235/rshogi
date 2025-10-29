@@ -6,7 +6,7 @@ use self::thread_pool::{SearchJob, ThreadPool};
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
-use crate::search::common::is_mate_score;
+use crate::search::common::{get_mate_distance, is_mate_score};
 use crate::search::constants::HELPER_SNAPSHOT_MIN_DEPTH;
 use crate::search::types::NodeType;
 // RootSplit は純粋 LazySMP では使用しないが、clone_limits_for_worker の定義上 import は残る
@@ -22,6 +22,69 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Ensure result has at least one root line by synthesizing it from stats/best_move
+///
+/// 優先順:
+/// 1) 既存の lines[0]
+/// 2) stats.pv
+/// 3) best_move の1手PV
+///
+/// score/bound の整合性:
+/// - 既存 lines を使う場合はその値を尊重
+/// - 合成時は score_internal=result.score, bound=result.node_type
+fn synthesize_primary_line_from_result(result: &mut SearchResult) {
+    // already has a non-empty lines
+    if result
+        .lines
+        .as_ref()
+        .map(|ls| !ls.is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    // Decide PV source
+    let mut pv: SmallVec<[Move; 32]> = SmallVec::new();
+    if !result.stats.pv.is_empty() {
+        pv.extend(result.stats.pv.iter().copied());
+    } else if let Some(mv) = result.best_move {
+        pv.push(mv);
+    } else {
+        // nothing to synthesize from
+        return;
+    }
+
+    // Fallback seldepth: prefer stats.seldepth, else derive from result.seldepth
+    let seldepth = result
+        .stats
+        .seldepth
+        .or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+
+    let line = RootLine {
+        multipv_index: 1,
+        root_move: pv.first().copied().unwrap_or_else(Move::null),
+        score_internal: result.score,
+        score_cp: clamp_score_cp(result.score),
+        bound: result.node_type,
+        depth: result.depth,
+        seldepth,
+        pv,
+        nodes: Some(result.nodes),
+        time_ms: Some(result
+            .stats
+            .elapsed
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64),
+        nps: Some(result.nps),
+        exact_exhausted: false,
+        exhaust_reason: None,
+        mate_distance: get_mate_distance(result.score),
+    };
+    let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+    out.push(line);
+    result.lines = Some(out);
+}
 
 fn jitter_enabled() -> bool {
     match std::env::var("SHOGI_TEST_FORCE_JITTER") {
@@ -398,6 +461,9 @@ where
 fn finish_single_result(tt: &TranspositionTable, result: &mut SearchResult, start: Instant) {
     result.stats.elapsed = start.elapsed();
     result.hashfull = tt.hashfull_permille() as u32;
+    // Ensure at least one PV line exists for downstream consumers (generatorなど)
+    synthesize_primary_line_from_result(result);
+    // Refresh once at the end
     result.refresh_summary();
 }
 
@@ -460,7 +526,6 @@ fn combine_results(
         info.depth_reached = max_depth.min(u32::from(u8::MAX)) as u8;
     }
     final_result.hashfull = tt.hashfull_permille() as u32;
-    final_result.refresh_summary();
 
     let primary_heuristics = results
         .iter()
@@ -619,10 +684,13 @@ fn combine_results(
             final_result.stats.multipv_primary_lines = Some(multipv_primary_added);
             final_result.stats.multipv_helper_lines = Some(multipv_helper_added);
             // MultiPV 統合後に派生フィールド（depth/seldepth/nps/ponder 等）を再集計
-            final_result.refresh_summary();
+            // Derive fields will be refreshed at the end
         }
     }
 
+    // After merging, ensure at least one synthesized line exists, then refresh once
+    synthesize_primary_line_from_result(&mut final_result);
+    final_result.refresh_summary();
     final_result
 }
 
@@ -649,6 +717,16 @@ fn prefers(candidate: &(usize, SearchResult), current: &(usize, SearchResult)) -
         Ordering::Greater => return true,
         Ordering::Less => return false,
         Ordering::Equal => {}
+    }
+
+    // Prefer Exact node type if all above are equal (stability/tie-break)
+    match (
+        candidate.1.node_type == NodeType::Exact,
+        current.1.node_type == NodeType::Exact,
+    ) {
+        (true, false) => return true,
+        (false, true) => return false,
+        _ => {}
     }
 
     // Fully equal: prefer smaller worker id (primary=0 wins).
