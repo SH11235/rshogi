@@ -364,10 +364,10 @@ fn main() {
     if args.format == "csv" || args.format == "json" {
         if args.format == "csv" {
             let mut out = String::new();
-            out.push_str("name,sfen,depth,nodes,nps,hashfull,helper_share_pct,score,lines_len,top1_exact,tt_hits,lmr,lmr_trials,beta_cuts,aspiration_failures,re_searches,pv_changed,aspFH,aspFL,root_tt_hint_exists,root_tt_hint_used,tt_root_match,tt_root_depth,multipv_primary_lines,multipv_helper_lines,near_deadline_skip_new_iter,multipv_shrunk,incomplete_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n");
+            out.push_str(CSV_HEADER);
             for r in &rows {
                 out.push_str(&format!(
-                    "{name},{sfen},{depth},{nodes},{nps},{hashfull},{helper_share_pct:.2},{score},{lines_len},{top1_exact},{tt_hits},{lmr},{lmr_trials},{beta_cuts},{aspiration_failures},{re_searches},{pv_changed},{asp_fail_high},{asp_fail_low},{root_tt_hint_exists},{root_tt_hint_used},{tt_root_match},{tt_root_depth},{multipv_primary_lines},{multipv_helper_lines},{near_deadline_skip_new_iter},{multipv_shrunk},{incomplete_depth},{heur_quiet_max},{heur_cont_max},{heur_capture_max},{heur_counter_filled}\n",
+                    "{name},{sfen},{depth},{nodes},{nps},{hashfull},{helper_share_pct:.2},{score},{lines_len},{top1_exact},{tt_hits},{lmr},{lmr_trials},{beta_cuts},{aspiration_failures},{re_searches},{pv_changed},{asp_fail_high},{asp_fail_low},{root_tt_hint_exists},{root_tt_hint_used},{tt_root_match},{tt_root_depth},{multipv_primary_lines},{multipv_helper_lines},{near_deadline_skip_new_iter},{multipv_shrunk},{near_final_attempted},{near_final_confirmed},{incomplete_depth},{heur_quiet_max},{heur_cont_max},{heur_capture_max},{heur_counter_filled}\n",
                     name = r.name,
                     sfen = r.sfen,
                     depth = r.depth,
@@ -395,6 +395,8 @@ fn main() {
                     multipv_helper_lines = r.multipv_helper_lines,
                     near_deadline_skip_new_iter = r.near_deadline_skip_new_iter,
                     multipv_shrunk = r.multipv_shrunk,
+                    near_final_attempted = r.near_final_attempted,
+                    near_final_confirmed = r.near_final_confirmed,
                     incomplete_depth = r.incomplete_depth,
                     heur_quiet_max = r.heur_quiet_max,
                     heur_cont_max = r.heur_cont_max,
@@ -415,6 +417,19 @@ fn main() {
                 println!("{}", s);
             }
         }
+    }
+}
+
+// Keep CSV header as a single constant to avoid format drift (used by tests as well)
+const CSV_HEADER: &str = "name,sfen,depth,nodes,nps,hashfull,helper_share_pct,score,lines_len,top1_exact,tt_hits,lmr,lmr_trials,beta_cuts,aspiration_failures,re_searches,pv_changed,aspFH,aspFL,root_tt_hint_exists,root_tt_hint_used,tt_root_match,tt_root_depth,multipv_primary_lines,multipv_helper_lines,near_deadline_skip_new_iter,multipv_shrunk,near_final_attempted,near_final_confirmed,incomplete_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n";
+
+#[cfg(test)]
+mod tests {
+    use super::CSV_HEADER;
+    #[test]
+    fn csv_header_contains_near_final_columns() {
+        assert!(CSV_HEADER.contains("near_final_attempted"));
+        assert!(CSV_HEADER.contains("near_final_confirmed"));
     }
 }
 

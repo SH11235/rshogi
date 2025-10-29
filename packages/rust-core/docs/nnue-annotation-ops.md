@@ -32,6 +32,7 @@
 ## P1.5（Near‑final 狭窓検証：既定OFF）
 - 内容: 近ハード帯で PV1先頭手を狭窓（[s−Δ, s+Δ]、既定Δ=1cp）で1回だけ検証。窓内ヒットで `lines[0].bound=Exact`、`score_internal←検証値`。既にExactならスキップ。
 - 予算: `BUDGET_MS` を qnodes に換算し上限にクランプ。`MIN_DEPTH` と `MIN_TREM_MS` で実行ガード。
+- qnodes計上: 検証探索で消費した `qnodes_local` は累積統計 `cum_qnodes` に加算します（NPSがわずかに動くのは仕様）。
 - 代表トグル（環境変数）
   - `SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE`（0/1, 既定0）
   - `SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP`（既定1, 1..32）
