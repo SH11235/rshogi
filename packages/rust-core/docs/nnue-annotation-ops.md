@@ -38,6 +38,9 @@
   - `SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS`（既定80, 10..200）
   - `SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH`（既定4, 1..64）
   - `SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS`（既定60, 5..500）
+  - `SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV`（既定0）
+  - `SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE`（既定0）
+  - `SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP`（既定0, 0..32）
 - 推奨: 既定OFF。End-heavy×高MPVでスポットON（目安: 800ms/MPV7→Δ=2、1200ms/MPV10→Δ=3）。
 
 ## 計測KPI（generator/探索 共通）
@@ -66,4 +69,6 @@
 - A/B当日レポート: `docs/reports/nnue-ab-20251029.md`
 - generator FAQ: `docs/nnue-generator-faq.md`
 - ランタイムトグル一覧/解説: `docs/tuning-guide.md`
-
+- 近締切ログ（例）
+  - 実行: `near_final_zero_window=1 budget_ms=.. budget_qnodes=.. qnodes_limit_pre=.. qnodes_limit_post=.. t_rem=.. qnodes_used=.. confirmed_exact=0|1`
+  - スキップ: `near_final_zero_window_skip=1 reason=already_exact|min_depth|trem_short|min_multipv|mate_near`

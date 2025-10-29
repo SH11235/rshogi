@@ -367,7 +367,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ..
         } = params;
-        if !toggles.enable_probcut || !dynp::probcut_enabled() || pos.is_in_check() || params.is_pv
+        if !toggles.enable_probcut
+            || !dynp::probcut_enabled()
+            || !dynp::probcut_allowed(depth)
+            || pos.is_in_check()
+            || params.is_pv
         {
             return None;
         }
