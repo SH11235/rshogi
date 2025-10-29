@@ -113,6 +113,8 @@ fn main() {
         hashfull: u16,
         helper_share_pct: f64,
         score: i32,
+        lines_len: usize,
+        top1_exact: u8,
         tt_hits: u64,
         lmr: u64,
         lmr_trials: u64,
@@ -290,6 +292,13 @@ fn main() {
                     heur_summary.counter_filled
                 );
             } else {
+                let lines_len = res.lines.as_ref().map(|ls| ls.len()).unwrap_or(0);
+                let top1_exact: u8 = res
+                    .lines
+                    .as_ref()
+                    .and_then(|ls| ls.first())
+                    .map(|l| matches!(l.bound, engine_core::search::types::NodeType::Exact) as u8)
+                    .unwrap_or(0);
                 rows.push(Row {
                     name,
                     sfen,
@@ -299,6 +308,8 @@ fn main() {
                     hashfull: hf,
                     helper_share_pct: helper_share,
                     score: res.score,
+                    lines_len,
+                    top1_exact,
                     tt_hits,
                     lmr,
                     lmr_trials,
@@ -322,10 +333,10 @@ fn main() {
     if args.format == "csv" || args.format == "json" {
         if args.format == "csv" {
             let mut out = String::new();
-            out.push_str("name,sfen,depth,nodes,nps,hashfull,helper_share_pct,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n");
+            out.push_str("name,sfen,depth,nodes,nps,hashfull,helper_share_pct,score,lines_len,top1_exact,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n");
             for r in &rows {
                 out.push_str(&format!(
-                    "{name},{sfen},{depth},{nodes},{nps},{hashfull},{helper_share_pct:.2},{score},{tt_hits},{lmr},{lmr_trials},{beta_cuts},{asp_fail_high},{asp_fail_low},{root_tt_hint_exists},{root_tt_hint_used},{tt_root_match},{tt_root_depth},{heur_quiet_max},{heur_cont_max},{heur_capture_max},{heur_counter_filled}\n",
+                    "{name},{sfen},{depth},{nodes},{nps},{hashfull},{helper_share_pct:.2},{score},{lines_len},{top1_exact},{tt_hits},{lmr},{lmr_trials},{beta_cuts},{asp_fail_high},{asp_fail_low},{root_tt_hint_exists},{root_tt_hint_used},{tt_root_match},{tt_root_depth},{heur_quiet_max},{heur_cont_max},{heur_capture_max},{heur_counter_filled}\n",
                     name = r.name,
                     sfen = r.sfen,
                     depth = r.depth,
@@ -334,6 +345,8 @@ fn main() {
                     hashfull = r.hashfull,
                     helper_share_pct = r.helper_share_pct,
                     score = r.score,
+                    lines_len = r.lines_len,
+                    top1_exact = r.top1_exact,
                     tt_hits = r.tt_hits,
                     lmr = r.lmr,
                     lmr_trials = r.lmr_trials,

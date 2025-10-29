@@ -8,10 +8,8 @@ use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
 use crate::search::common::{get_mate_distance, is_mate_score};
 use crate::search::constants::HELPER_SNAPSHOT_MIN_DEPTH;
-use crate::search::types::NodeType;
-// RootSplit は純粋 LazySMP では使用しないが、clone_limits_for_worker の定義上 import は残る
-// RootSplit は純粋 LazySMP では使用しない
 use crate::search::types::{clamp_score_cp, RootLine};
+use crate::search::types::{InfoStringCallback, NodeType};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Move;
 use crate::Position;
@@ -35,12 +33,7 @@ use std::time::Instant;
 /// - 合成時は score_internal=result.score, bound=result.node_type
 fn synthesize_primary_line_from_result(result: &mut SearchResult) {
     // already has a non-empty lines
-    if result
-        .lines
-        .as_ref()
-        .map(|ls| !ls.is_empty())
-        .unwrap_or(false)
-    {
+    if result.lines.as_ref().map(|ls| !ls.is_empty()).unwrap_or(false) {
         return;
     }
 
@@ -56,10 +49,7 @@ fn synthesize_primary_line_from_result(result: &mut SearchResult) {
     }
 
     // Fallback seldepth: prefer stats.seldepth, else derive from result.seldepth
-    let seldepth = result
-        .stats
-        .seldepth
-        .or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+    let seldepth = result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
 
     let line = RootLine {
         multipv_index: 1,
@@ -71,11 +61,7 @@ fn synthesize_primary_line_from_result(result: &mut SearchResult) {
         seldepth,
         pv,
         nodes: Some(result.nodes),
-        time_ms: Some(result
-            .stats
-            .elapsed
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64),
+        time_ms: Some(result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
         nps: Some(result.nps),
         exact_exhausted: false,
         exhaust_reason: None,
@@ -720,10 +706,7 @@ fn prefers(candidate: &(usize, SearchResult), current: &(usize, SearchResult)) -
     }
 
     // Prefer Exact node type if all above are equal (stability/tie-break)
-    match (
-        candidate.1.node_type == NodeType::Exact,
-        current.1.node_type == NodeType::Exact,
-    ) {
+    match (candidate.1.node_type == NodeType::Exact, current.1.node_type == NodeType::Exact) {
         (true, false) => return true,
         (false, true) => return false,
         _ => {}
@@ -802,7 +785,7 @@ fn publish_helper_snapshot(
     root_key: u64,
     worker_id: usize,
     result: &SearchResult,
-    info_cb: Option<&crate::search::types::InfoStringCallback>,
+    info_cb: Option<&InfoStringCallback>,
 ) {
     if worker_id == 0 {
         return;
