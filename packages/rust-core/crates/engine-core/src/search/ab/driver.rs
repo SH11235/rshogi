@@ -227,6 +227,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
     }
     #[inline]
+    fn derive_main_near_deadline_window_ms(hard_ms: u64) -> u64 {
+        // 80..600ms の範囲で hard の 1/5
+        let base = hard_ms / 5;
+        base.clamp(80, 600)
+    }
+    #[inline]
+    fn derive_near_hard_finalize_ms(hard_ms: u64) -> u64 {
+        // 60..400ms の範囲で hard の 1/6
+        let base = hard_ms / 6;
+        base.clamp(60, 400)
+    }
+    #[inline]
     pub(crate) fn classify_root_bound(local_best: i32, alpha_win: i32, beta_win: i32) -> NodeType {
         if local_best <= alpha_win {
             NodeType::UpperBound
@@ -451,6 +463,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut best_hint_next_iter: Option<(crate::shogi::Move, i32)> = None;
 
         for d in 1..=max_depth {
+            // Near-deadline gate: do not start a new iteration if we are too close to hard deadline.
+            if let Some(tm) = limits.time_manager.as_ref() {
+                let hard_ms = tm.hard_limit_ms();
+                if hard_ms != u64::MAX {
+                    let elapsed_ms = tm.elapsed_ms();
+                    if elapsed_ms < hard_ms {
+                        let t_rem = hard_ms.saturating_sub(elapsed_ms);
+                        let main_win = Self::derive_main_near_deadline_window_ms(hard_ms);
+                        let near_final_win = Self::derive_near_hard_finalize_ms(hard_ms);
+                        if t_rem <= near_final_win {
+                            if let Some(ctrl) = limits.stop_controller.as_ref() {
+                                ctrl.request_finalize(
+                                    crate::search::parallel::stop_ctrl::FinalizeReason::NearHard,
+                                );
+                            }
+                        }
+                        // Skip starting a new iteration if not the very first one
+                        if t_rem <= main_win && d > 1 {
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb("near_deadline_skip_new_iter=1");
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             if super::diagnostics::should_abort_now() {
                 last_deadline_hit = Some(DeadlineHit::Stop);
@@ -591,8 +629,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let root_static_eval_i16 =
                 root_static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
-            // MultiPV（逐次選抜）
-            let k = limits.multipv.max(1) as usize;
+            // MultiPV（逐次選抜）— near‑deadline では PV1 仕上げを優先（縮退）
+            let mut k = limits.multipv.max(1) as usize;
+            if let Some(tm) = limits.time_manager.as_ref() {
+                let hard_ms = tm.hard_limit_ms();
+                if hard_ms != u64::MAX {
+                    let elapsed_ms = tm.elapsed_ms();
+                    if elapsed_ms < hard_ms {
+                        let t_rem = hard_ms.saturating_sub(elapsed_ms);
+                        let main_win = Self::derive_main_near_deadline_window_ms(hard_ms);
+                        if t_rem <= main_win {
+                            k = 1;
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb("near_deadline_multipv_shrink=1");
+                            }
+                        }
+                    }
+                }
+            }
             let mut excluded: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
             let mut depth_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
             let required_multipv_lines = if k > 1 {
@@ -983,6 +1037,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             });
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
+                        // P1: Aggressive bailout — two failures in the same iteration => full window
+                        if !is_helper && iteration_asp_failures >= 2 {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            continue;
+                        }
                         iteration_researches = iteration_researches.saturating_add(1);
                         // If re-searches are piling up on the primary, bail out to a full window
                         // to stabilize PV and avoid time loss.
@@ -1019,6 +1080,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             });
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
+                        if !is_helper && iteration_asp_failures >= 2 {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            continue;
+                        }
                         iteration_researches = iteration_researches.saturating_add(1);
                         let retries_max = Self::retries_max(soft_deadline, &t0);
                         if !is_helper && iteration_researches >= retries_max {

@@ -2,6 +2,9 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
+use crate::search::common::get_mate_distance;
+use crate::search::tt::reconstruct_pv_generic;
+use crate::search::types::clamp_score_cp;
 use crate::search::types::{NodeType, RootLine, StopInfo};
 use crate::time_management::{
     detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeState,
@@ -16,12 +19,9 @@ use crate::{
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
 };
-use crate::search::types::clamp_score_cp;
-use crate::search::common::get_mate_distance;
-use crate::search::tt::reconstruct_pv_generic;
-use smallvec::SmallVec;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, OnceLock,
@@ -588,12 +588,7 @@ impl Engine {
     /// synthesize lines[0] accordingly. Does not modify result.node_type.
     fn finalize_pv_from_tt(&self, pos: &Position, result: &mut SearchResult) {
         // Already has at least one line
-        if result
-            .lines
-            .as_ref()
-            .map(|ls| !ls.is_empty())
-            .unwrap_or(false)
-        {
+        if result.lines.as_ref().map(|ls| !ls.is_empty()).unwrap_or(false) {
             return;
         }
 
@@ -624,10 +619,8 @@ impl Engine {
 
             let root_move = pv.first().copied().unwrap_or_else(crate::shogi::Move::null);
             // Fallback seldepth: prefer stats.seldepth, else derive from result
-            let seldepth = result
-                .stats
-                .seldepth
-                .or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+            let seldepth =
+                result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
             let line = RootLine {
                 multipv_index: 1,
                 root_move,
@@ -642,11 +635,7 @@ impl Engine {
                     v
                 },
                 nodes: Some(result.nodes),
-                time_ms: Some(result
-                    .stats
-                    .elapsed
-                    .as_millis()
-                    .min(u128::from(u64::MAX)) as u64),
+                time_ms: Some(result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
                 nps: Some(result.nps),
                 exact_exhausted: false,
                 exhaust_reason: None,
@@ -660,19 +649,12 @@ impl Engine {
         }
 
         // 最終フォールバック（任意）：すべて空でTTも採用不可なら 1 手PVを作る
-        if result
-            .lines
-            .as_ref()
-            .map(|ls| ls.is_empty())
-            .unwrap_or(true)
-        {
+        if result.lines.as_ref().map(|ls| ls.is_empty()).unwrap_or(true) {
             let fb = self.choose_final_bestmove(pos, None);
             if let Some(best) = fb.best_move {
                 // 合成（1手 PV）。score/bound は現行 result のものを使用
-                let seldepth = result
-                    .stats
-                    .seldepth
-                    .or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+                let seldepth =
+                    result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
                 let mut pv_one: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
                 pv_one.push(best);
                 let score_internal = result.score;
@@ -686,11 +668,7 @@ impl Engine {
                     seldepth,
                     pv: pv_one,
                     nodes: Some(result.nodes),
-                    time_ms: Some(result
-                        .stats
-                        .elapsed
-                        .as_millis()
-                        .min(u128::from(u64::MAX)) as u64),
+                    time_ms: Some(result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
                     nps: Some(result.nps),
                     exact_exhausted: false,
                     exhaust_reason: None,
@@ -725,7 +703,7 @@ impl Engine {
         }
         // YaneuraOu 同様、確信度の低い境界ノードは避ける（成り／駒種差などで
         // PV 順が揺れても決定手を誤誘導しないよう Exact のみ採用）。
-        if entry.node_type() != crate::search::NodeType::Exact {
+        if entry.node_type() != NodeType::Exact {
             return None;
         }
         if let Some(mv) = entry.get_move() {
