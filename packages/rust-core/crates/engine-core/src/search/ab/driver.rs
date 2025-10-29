@@ -79,6 +79,19 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     #[inline]
+    fn p1_disabled() -> bool {
+        static FLAG: OnceLock<bool> = OnceLock::new();
+        *FLAG.get_or_init(|| {
+            match std::env::var("SHOGI_DISABLE_P1") {
+                Ok(v) => {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "1" || v == "true" || v == "on"
+                }
+                Err(_) => false,
+            }
+        })
+    }
+    #[inline]
     fn is_byoyomi_active(limits: &SearchLimits) -> bool {
         matches!(limits.time_control, TimeControl::Byoyomi { .. })
             || limits.time_manager.as_ref().is_some_and(|tm| tm.is_in_byoyomi())
@@ -485,7 +498,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 hard_ms, t_rem, main_win, near_final_win
                             ));
                         }
-                        if t_rem <= near_final_win {
+                        if !Self::p1_disabled() && t_rem <= near_final_win {
                             if let Some(ctrl) = limits.stop_controller.as_ref() {
                                 if !finalize_nearhard_sent {
                                     ctrl.request_finalize(FinalizeReason::NearHard);
@@ -494,7 +507,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             }
                         }
                         // Skip starting a new iteration if not the very first one
-                        if t_rem <= main_win && d > 1 {
+                        if !Self::p1_disabled() && t_rem <= main_win && d > 1 {
                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                 cb("near_deadline_skip_new_iter=1");
                             }
@@ -518,11 +531,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             cap_ms, t_rem, main_win, near_final_win
                         ));
                     }
-                    if t_rem <= near_final_win {
-                        // FixedTime: Planned finalize を一度だけ（通知兼ログは共通ヘルパで）
-                        notify_deadline(DeadlineHit::Soft, nodes);
+                    if !Self::p1_disabled() && t_rem <= near_final_win {
+                        // FixedTime でも NearHard finalize を 1 回だけ送る（P1仕様）。
+                        if let Some(ctrl) = limits.stop_controller.as_ref() {
+                            if !finalize_nearhard_sent {
+                                ctrl.request_finalize(FinalizeReason::NearHard);
+                                finalize_nearhard_sent = true;
+                            }
+                        }
                     }
-                    if t_rem <= main_win && d > 1 {
+                    if !Self::p1_disabled() && t_rem <= main_win && d > 1 {
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb("near_deadline_skip_new_iter=1");
                         }
@@ -680,7 +698,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if elapsed_ms < hard_ms {
                         let t_rem = hard_ms.saturating_sub(elapsed_ms);
                         let main_win = Self::derive_main_near_deadline_window_ms(hard_ms);
-                        if t_rem <= main_win {
+                        if !Self::p1_disabled() && t_rem <= main_win {
                             k = 1;
                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                 cb("near_deadline_multipv_shrink=1");
@@ -697,7 +715,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if elapsed_ms < cap_ms {
                     let t_rem = cap_ms.saturating_sub(elapsed_ms);
                     let main_win = Self::derive_main_near_deadline_window_ms(cap_ms);
-                    if t_rem <= main_win {
+                    if !Self::p1_disabled() && t_rem <= main_win {
                         k = 1;
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb("near_deadline_multipv_shrink=1");
@@ -1097,7 +1115,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         // P1: Aggressive bailout — two failures in the same iteration => full window
-                        if !is_helper && iteration_asp_failures >= 2 {
+                        if !Self::p1_disabled() && !is_helper && iteration_asp_failures >= 2 {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1110,7 +1128,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         // If re-searches are piling up on the primary, bail out to a full window
                         // to stabilize PV and avoid time loss.
                         let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !is_helper && iteration_researches >= retries_max {
+                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1144,7 +1162,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             });
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
-                        if !is_helper && iteration_asp_failures >= 2 {
+                        if !Self::p1_disabled() && !is_helper && iteration_asp_failures >= 2 {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1154,7 +1172,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_researches = iteration_researches.saturating_add(1);
                         let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !is_helper && iteration_researches >= retries_max {
+                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
