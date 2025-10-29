@@ -12,6 +12,10 @@ NNUEモデルの品質を確保するため、新しいモデルと既存のベ�
 
 `scripts/nnue/evaluate-nnue.sh`を使用してローカルで詳細な評価を実行できます。Spec 013 により評価時の `--threads` は 1 で固定です（スクリプト側で強制）。Opening book は既定で `runs/fixed/20251011/openings_ply1_20_v1.sfen` を使用します（環境変数 `EVAL_BOOK` で差し替え可能）。PV spread は `--pv-ms` により探索時間を延ばせますが、内部条件によりサンプル 0 となる場合があるため、補助指標は `pv_probe` を用いて別途採取します。
 
+ベースライン（BASE）の選び方
+- Classic 候補を評価するときは、ベースラインも Classic（現Champion）を用いると ΔNPS を適正比較できます。
+- 既定BASEは `runs/baselines/current/classic.nnue`（環境変数 `BASE` で上書き可能）。
+
 #### 基本的な使用方法
 
 ```bash
