@@ -132,6 +132,8 @@ fn main() {
         multipv_helper_lines: u8,
         near_deadline_skip_new_iter: u64,
         multipv_shrunk: u64,
+        near_final_attempted: u64,
+        near_final_confirmed: u64,
         incomplete_depth: u8,
         heur_quiet_max: i16,
         heur_cont_max: i16,
@@ -315,6 +317,8 @@ fn main() {
                 let near_deadline_skip_new_iter =
                     res.stats.near_deadline_skip_new_iter.unwrap_or(0);
                 let multipv_shrunk = res.stats.multipv_shrunk.unwrap_or(0);
+                let near_final_attempted = res.stats.near_final_attempted.unwrap_or(0);
+                let near_final_confirmed = res.stats.near_final_confirmed.unwrap_or(0);
                 let incomplete_depth = res.stats.incomplete_depth.unwrap_or(0);
                 rows.push(Row {
                     name,
@@ -344,6 +348,8 @@ fn main() {
                     multipv_helper_lines,
                     near_deadline_skip_new_iter,
                     multipv_shrunk,
+                    near_final_attempted,
+                    near_final_confirmed,
                     incomplete_depth,
                     heur_quiet_max: heur_summary.quiet_max,
                     heur_cont_max: heur_summary.continuation_max,

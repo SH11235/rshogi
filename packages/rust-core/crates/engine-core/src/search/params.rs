@@ -433,14 +433,27 @@ pub fn set_probcut_skip_verify_lt4(on: bool) {
 // Shallow gating (d<=D) — optional runtime policy
 #[inline]
 pub fn shallow_gate_enabled() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("SEARCH_SHALLOW_GATE") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "on"
-        }
-        Err(_) => false,
-    })
+    #[cfg(test)]
+    {
+        return match std::env::var("SEARCH_SHALLOW_GATE") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "on" | "yes")
+            }
+            Err(_) => false,
+        };
+    }
+    #[cfg(not(test))]
+    {
+        static FLAG: OnceLock<bool> = OnceLock::new();
+        *FLAG.get_or_init(|| match std::env::var("SEARCH_SHALLOW_GATE") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "on" | "yes")
+            }
+            Err(_) => false,
+        })
+    }
 }
 
 #[inline]
