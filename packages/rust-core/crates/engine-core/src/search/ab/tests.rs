@@ -1278,6 +1278,57 @@ fn fixed_time_limit_lead_window_notifies_finalize_once() {
 }
 
 #[test]
+fn multipv_shrinks_near_deadline_fixed_time() {
+    // 80ms 固定時間だと main_win は clamp により 80ms。開始直後から対象帯域に入り、縮退が有効になる。
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(8),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let limits = SearchLimitsBuilder::default().multipv(3).depth(3).fixed_time_ms(80).build();
+    let res = backend.think_blocking(&pos, &limits, None);
+    assert_eq!(
+        res.stats.multipv_shrunk.unwrap_or(0),
+        1,
+        "near-deadline should shrink MultiPV to 1 under fixed-time"
+    );
+}
+
+#[test]
+fn multipv_shrinks_near_deadline_with_time_manager() {
+    use crate::time_management::{
+        detect_game_phase_for_time, TimeControl as TMTC, TimeLimits as TMLimits, TimeManager,
+    };
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(8),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+
+    // TimeManager 経路で 80ms を設定
+    let tm_limits = TMLimits {
+        time_control: TMTC::FixedTime { ms_per_move: 80 },
+        ..Default::default()
+    };
+    let tm = TimeManager::new(
+        &tm_limits,
+        pos.side_to_move,
+        pos.ply as u32,
+        detect_game_phase_for_time(&pos, pos.ply as u32),
+    );
+
+    let mut limits = SearchLimitsBuilder::default().multipv(3).depth(3).build();
+    limits.time_manager = Some(Arc::new(tm));
+
+    let res = backend.think_blocking(&pos, &limits, None);
+    assert_eq!(
+        res.stats.multipv_shrunk.unwrap_or(0),
+        1,
+        "near-deadline should shrink MultiPV to 1 under TimeManager"
+    );
+}
+
+#[test]
 fn null_move_respects_runtime_toggle() {
     // ランタイムトグルを変更するため、他テストと排他にする
     let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
