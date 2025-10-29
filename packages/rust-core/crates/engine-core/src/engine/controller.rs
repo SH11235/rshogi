@@ -606,7 +606,8 @@ impl Engine {
         if adopted_tt {
             // Probe root entry to attach node_type/score if Exact
             let root_hash = pos.zobrist_hash();
-            let mut bound = result.node_type;
+            // 安全側の既定: UpperBound。TT Exact 採用時のみ Exact に上書きする。
+            let mut bound = NodeType::UpperBound;
             let mut score_internal = result.score;
             if let Some(entry) = self.shared_tt.probe_entry(root_hash, pos.side_to_move) {
                 if entry.matches(root_hash) && entry.node_type() == NodeType::Exact {

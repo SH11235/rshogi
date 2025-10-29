@@ -93,6 +93,10 @@ pub struct SearchStats {
     /// MultipV merge detail (primary/helper) — diagnostics only
     pub multipv_primary_lines: Option<u8>,
     pub multipv_helper_lines: Option<u8>,
+    /// Near-deadline: whether we skipped starting a new iteration (0/1)
+    pub near_deadline_skip_new_iter: Option<u64>,
+    /// Near-deadline: whether MultiPV was shrunk to 1 (0/1)
+    pub multipv_shrunk: Option<u64>,
     /// ABDADA diagnostics (counts)
     #[cfg(feature = "diagnostics")]
     pub abdada_busy_detected: Option<u64>,
