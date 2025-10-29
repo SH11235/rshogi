@@ -316,41 +316,103 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
     #[inline]
     fn near_final_zero_window_enabled() -> bool {
-        static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE") {
-            Ok(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                v == "1" || v == "true" || v == "on"
-            }
-            Err(_) => false,
-        })
+        #[cfg(test)]
+        {
+            return match env::var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE") {
+                Ok(v) => {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "1" || v == "true" || v == "on"
+                }
+                Err(_) => false,
+            };
+        }
+        #[cfg(not(test))]
+        {
+            static FLAG: OnceLock<bool> = OnceLock::new();
+            *FLAG.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE") {
+                Ok(v) => {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "1" || v == "true" || v == "on"
+                }
+                Err(_) => false,
+            })
+        }
     }
 
     #[inline]
     fn near_final_zero_window_budget_ms() -> u64 {
-        static VAL: OnceLock<u64> = OnceLock::new();
-        *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
-            Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
-            Err(_) => 80,
-        })
+        #[cfg(test)]
+        {
+            return match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
+                Err(_) => 80,
+            };
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
+                Err(_) => 80,
+            })
+        }
     }
 
     #[inline]
     fn near_final_zero_window_min_depth() -> i32 {
-        static VAL: OnceLock<i32> = OnceLock::new();
-        *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
-            Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
-            Err(_) => 4,
-        })
+        #[cfg(test)]
+        {
+            return match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
+                Err(_) => 4,
+            };
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<i32> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
+                Err(_) => 4,
+            })
+        }
     }
 
     #[inline]
     fn near_final_zero_window_min_trem_ms() -> u64 {
-        static VAL: OnceLock<u64> = OnceLock::new();
-        *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
-            Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
-            Err(_) => 60,
-        })
+        #[cfg(test)]
+        {
+            return match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
+                Err(_) => 60,
+            };
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
+                Err(_) => 60,
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_verify_delta_cp() -> i32 {
+        #[cfg(test)]
+        {
+            return match env::var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            };
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<i32> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            })
+        }
     }
 
     pub fn new(evaluator: Arc<E>) -> Self {
@@ -1535,6 +1597,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     && Self::near_final_zero_window_enabled()
                     && d >= Self::near_final_zero_window_min_depth()
                     && !depth_lines.is_empty()
+                    && !matches!(depth_lines.first().map(|l| l.bound), Some(NodeType::Exact))
                 {
                     // 予算的な安全: t_rem が極小ならスキップ
                     let mut t_rem: u64 = 0;
@@ -1557,9 +1620,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if let Some(first) = depth_lines.first_mut() {
                             let mv0 = first.root_move;
                             let target = first.score_internal;
-                            // 0-window: [s-1, s]
-                            let alpha0 = target.saturating_sub(1);
-                            let beta0 = target;
+                            // 狭いフル窓: [s-Δ, s+Δ] で Exact を確認（整数スコアで成立する最小窓）
+                            let verify_delta = Self::near_final_verify_delta_cp();
+                            let alpha0 = target.saturating_sub(verify_delta);
+                            let beta0 = target.saturating_add(verify_delta);
                             let mut child = root.clone();
                             child.do_move(mv0);
                             // 局所カウンタ（本確認は軽量・単発）
@@ -1586,14 +1650,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 #[cfg(feature = "diagnostics")]
                                 abdada_busy_set: &mut cum_abdada_busy_set,
                             };
-                            let (sc_nw, _) = self.alphabeta(
+                            let (sc_vf, _) = self.alphabeta(
                                 pvs::ABArgs {
                                     pos: &child,
                                     depth: d - 1,
                                     alpha: -(beta0),
                                     beta: -alpha0,
                                     ply: 1,
-                                    is_pv: false,
+                                    is_pv: true,
                                     stack,
                                     heur: &mut heur_local,
                                     tt_hits: &mut tt_hits_local,
@@ -1602,9 +1666,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 },
                                 &mut search_ctx_nw,
                             );
-                            let s_back = -sc_nw;
-                            if s_back > alpha0 && s_back < beta0 {
+                            let s_back = -sc_vf;
+                            let confirmed = s_back > alpha0 && s_back < beta0;
+                            if confirmed {
                                 first.bound = NodeType::Exact;
+                                // 検証値に寄せる（±Δ内の誤差を吸収）
+                                first.score_internal = s_back;
                             }
                             zero_window_done = true;
                             if let Some(cb) = limits.info_string_callback.as_ref() {
@@ -1614,7 +1681,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     budget_qnodes,
                                     t_rem,
                                     qnodes_local,
-                                    (s_back > alpha0 && s_back < beta0) as u8
+                                    confirmed as u8
                                 ));
                             }
                         }
