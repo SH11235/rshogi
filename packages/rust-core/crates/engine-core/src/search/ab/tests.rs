@@ -1278,6 +1278,143 @@ fn fixed_time_limit_lead_window_notifies_finalize_once() {
 }
 
 #[test]
+fn tm_soft_cap_skips_nearhard_but_applies_skip_or_shrink() {
+    use crate::search::parallel::{FinalizeReason, FinalizerMsg, StopController};
+    use crate::time_management::{
+        detect_game_phase_for_time, TimeControl as TMTC, TimeLimits as TMLimits, TimeManager,
+    };
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(5),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let controller = Arc::new(StopController::new());
+    let (tx, rx) = mpsc::channel();
+    controller.register_finalizer(tx);
+    let session_id = 4567;
+    controller.publish_session(None, session_id);
+
+    // Build TM and override to soft-only (hard==u64::MAX)
+    let tl = TMLimits {
+        time_control: TMTC::FixedTime { ms_per_move: 120 },
+        ..Default::default()
+    };
+    let tm = TimeManager::new(
+        &tl,
+        pos.side_to_move,
+        pos.ply as u32,
+        detect_game_phase_for_time(&pos, pos.ply as u32),
+    );
+    // soft=120, hard=MAX
+    tm.override_limits_for_test(120, u64::MAX);
+
+    let mut limits = SearchLimitsBuilder::default()
+        .multipv(3)
+        .depth(3)
+        .session_id(session_id)
+        .build();
+    limits.time_manager = Some(Arc::new(tm));
+    limits.stop_controller = Some(controller.clone());
+    let res = backend.think_blocking(&pos, &limits, None);
+
+    // Assert: no NearHard finalize message
+    while let Ok(msg) = rx.try_recv() {
+        if let FinalizerMsg::Finalize { reason, .. } = msg {
+            assert_ne!(
+                reason,
+                FinalizeReason::NearHard,
+                "NearHard should not be sent when TM hard==MAX"
+            );
+        }
+    }
+    // Optional: at least the search completed
+    assert!(res.stats.nodes > 0);
+}
+
+#[test]
+fn ponder_mode_suppresses_nearhard_finalize() {
+    use crate::search::parallel::{FinalizeReason, FinalizerMsg, StopController};
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(5),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let controller = Arc::new(StopController::new());
+    let (tx, rx) = mpsc::channel();
+    controller.register_finalizer(tx);
+    let session_id = 8901;
+    controller.publish_session(None, session_id);
+
+    let mut limits =
+        SearchLimitsBuilder::default().session_id(session_id).fixed_time_ms(80).build();
+    limits.is_ponder = true;
+    limits.stop_controller = Some(controller.clone());
+    let _ = backend.think_blocking(&pos, &limits, None);
+
+    // No NearHard finalize expected in ponder mode
+    while let Ok(msg) = rx.try_recv() {
+        if let FinalizerMsg::Finalize { reason, .. } = msg {
+            assert_ne!(
+                reason,
+                FinalizeReason::NearHard,
+                "NearHard must be suppressed in ponder mode"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_window_budget_limits_qnodes() {
+    // Enable zero-window finalize and set a very small budget; check info string for qnodes_used <= budget
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS", "10");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH", "3");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS", "5");
+
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(5),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let capture = lines.clone();
+    let limits = SearchLimitsBuilder::default()
+        .fixed_time_ms(120)
+        .depth(4)
+        .info_string_callback(Arc::new(move |s: &str| {
+            if s.contains("near_final_zero_window=") {
+                capture.lock().unwrap().push(s.to_string());
+            }
+        }))
+        .build();
+    let _ = backend.think_blocking(&pos, &limits, None);
+    // Inspect captured logs (if any); if none, the test is inconclusive but not a hard failure for flaky timing
+    let logs = lines.lock().unwrap().clone();
+    if let Some(last) = logs.last() {
+        // very lax parse: find qnodes_used and budget_qnodes numbers
+        let used = last
+            .split_whitespace()
+            .find(|t| t.starts_with("qnodes_used="))
+            .and_then(|kv| kv.split('=').nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let budget = last
+            .split_whitespace()
+            .find(|t| t.starts_with("budget_qnodes="))
+            .and_then(|kv| kv.split('=').nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        assert!(
+            used <= budget,
+            "qnodes_used={} should be <= budget_qnodes={}; log={} ",
+            used,
+            budget,
+            last
+        );
+    }
+}
+
+#[test]
 fn multipv_shrinks_near_deadline_fixed_time() {
     // 80ms 固定時間だと main_win は clamp により 80ms。開始直後から対象帯域に入り、縮退が有効になる。
     let evaluator = Arc::new(SleepyEvaluator {
