@@ -182,23 +182,34 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
     #[inline]
     fn multipv_scheduler_enabled() -> bool {
-        static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| match std::env::var("SHOGI_MULTIPV_SCHEDULER") {
-            Ok(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                v == "1" || v == "true" || v == "on"
-            }
-            Err(_) => false,
-        })
+        #[cfg(test)]
+        {
+            return Self::parse_bool_env("SHOGI_MULTIPV_SCHEDULER", false);
+        }
+        #[cfg(not(test))]
+        {
+            static FLAG: OnceLock<bool> = OnceLock::new();
+            *FLAG.get_or_init(|| Self::parse_bool_env("SHOGI_MULTIPV_SCHEDULER", false))
+        }
     }
 
     #[inline]
     fn multipv_scheduler_bias() -> u64 {
-        static VAL: OnceLock<u64> = OnceLock::new();
-        *VAL.get_or_init(|| match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
-            Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
-            Err(_) => 4,
-        })
+        #[cfg(test)]
+        {
+            return match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
+                Err(_) => 4,
+            };
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
+                Err(_) => 4,
+            })
+        }
     }
 
     #[cfg(test)]
@@ -341,27 +352,28 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         })
     }
 
+    // Parse common boolean env values (1/true/on/yes) with default
     #[inline]
+    fn parse_bool_env(var: &str, default: bool) -> bool {
+        match env::var(var) {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "on" | "yes")
+            }
+            Err(_) => default,
+        }
+    }
+
     fn near_final_zero_window_enabled() -> bool {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE") {
-                Ok(v) => {
-                    let v = v.trim().to_ascii_lowercase();
-                    v == "1" || v == "true" || v == "on"
-                }
-                Err(_) => false,
-            }
+            Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", false)
         }
         #[cfg(not(test))]
         {
             static FLAG: OnceLock<bool> = OnceLock::new();
-            *FLAG.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE") {
-                Ok(v) => {
-                    let v = v.trim().to_ascii_lowercase();
-                    v == "1" || v == "true" || v == "on"
-                }
-                Err(_) => false,
+            *FLAG.get_or_init(|| {
+                Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", false)
             })
         }
     }
@@ -465,24 +477,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_zero_window_skip_mate() -> bool {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE") {
-                Ok(v) => {
-                    let v = v.trim().to_ascii_lowercase();
-                    v == "1" || v == "true" || v == "on"
-                }
-                Err(_) => false,
-            }
+            Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE", false)
         }
         #[cfg(not(test))]
         {
             static FLAG: OnceLock<bool> = OnceLock::new();
-            *FLAG.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE") {
-                Ok(v) => {
-                    let v = v.trim().to_ascii_lowercase();
-                    v == "1" || v == "true" || v == "on"
-                }
-                Err(_) => false,
-            })
+            *FLAG
+                .get_or_init(|| Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE", false))
         }
     }
 
@@ -648,6 +649,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_abdada_busy_set: u64 = 0;
         let mut stats_hint_exists: u64 = 0;
         let mut stats_hint_used: u64 = 0;
+        // Near-final verification counters (attempted/confirmed)
+        let mut near_final_attempted: u64 = 0;
+        let mut near_final_confirmed: u64 = 0;
 
         self.evaluator.on_set_position(root);
 
@@ -1089,16 +1093,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // primary: Δ0 = Δinit + K*log2(Threads)（上限あり）
                 // helper: off=フル窓 / wide=±HELPER_ASPIRATION_WIDE_DELTA
                 // floor(log2(threads)) を正しく計算（threads_hint 優先）
-                let threads_lg2: i32 = limits
-                    .threads_hint
-                    .map(|t| {
-                        if t > 0 {
-                            (u32::BITS - 1 - t.leading_zeros()) as i32
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0);
+                // u32::ilog2 を用いることでビット幅依存のバグを回避
+                let threads_lg2: i32 =
+                    limits.threads_hint.map(|t| t.max(1).ilog2() as i32).unwrap_or(0);
                 let mut delta = ASPIRATION_DELTA_INITIAL;
                 let mut alpha;
                 let mut beta;
@@ -1701,12 +1698,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             *heur_state = shared_heur;
 
             if iteration_complete {
-                final_lines = Some(depth_lines.clone());
                 final_depth_reached = d as u8;
                 final_seldepth_reached = Some(capped_seldepth);
                 final_seldepth_raw = Some(seldepth);
 
-                // 近締切帯での最終確認（任意、環境フラグで有効化）
+                // 近締切帯での最終確認（任意、環境フラグで有効化）。
+                // まず、条件を満たすが既にExactな場合のスキップ理由をログ。
+                if !Self::p1_disabled()
+                    && finalize_nearhard_sent
+                    && Self::near_final_zero_window_enabled()
+                    && d >= Self::near_final_zero_window_min_depth()
+                    && !depth_lines.is_empty()
+                    && matches!(depth_lines.first().map(|l| l.bound), Some(NodeType::Exact))
+                {
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        cb("near_final_zero_window_skip=1 reason=already_exact");
+                    }
+                }
+
                 if !Self::p1_disabled()
                     && finalize_nearhard_sent
                     && !zero_window_done
@@ -1756,19 +1765,28 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             let near = match first.bound {
                                 NodeType::UpperBound => {
                                     // fail-low: target <= alpha
-                                    (verify_window_alpha.saturating_sub(target)).abs() <= slack
+                                    (verify_window_alpha - target).abs() <= slack
                                 }
                                 NodeType::LowerBound => {
                                     // fail-high: target >= beta
-                                    (target.saturating_sub(verify_window_beta)).abs() <= slack
+                                    (target - verify_window_beta).abs() <= slack
                                 }
                                 NodeType::Exact => false,
                             };
                             if !near {
                                 if let Some(cb) = limits.info_string_callback.as_ref() {
+                                    let (kind, diff) = match first.bound {
+                                        NodeType::UpperBound => {
+                                            ("upper", (verify_window_alpha - target).abs())
+                                        }
+                                        NodeType::LowerBound => {
+                                            ("lower", (target - verify_window_beta).abs())
+                                        }
+                                        NodeType::Exact => ("exact", 0),
+                                    };
                                     cb(&format!(
-                                        "near_final_zero_window_skip=1 reason=bound_far slack={} alpha={} beta={} score={}",
-                                        slack, verify_window_alpha, verify_window_beta, target
+                                        "near_final_zero_window_skip=1 reason=bound_far kind={} diff={} slack={} alpha={} beta={} score={}",
+                                        kind, diff, slack, verify_window_alpha, verify_window_beta, target
                                     ));
                                 }
                                 zero_window_done = true;
@@ -1820,6 +1838,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             #[cfg(feature = "diagnostics")]
                             abdada_busy_set: &mut cum_abdada_busy_set,
                         };
+                        // Attempt once per iteration under gating conditions
+                        near_final_attempted = near_final_attempted.saturating_add(1);
                         let (sc_vf, _) = self.alphabeta(
                             pvs::ABArgs {
                                 pos: &child,
@@ -1840,16 +1860,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         let confirmed =
                             Self::classify_root_bound(s_back, alpha0, beta0) == NodeType::Exact;
                         if confirmed {
+                            near_final_confirmed = near_final_confirmed.saturating_add(1);
                             first.bound = NodeType::Exact;
                             // 検証値に寄せる（±Δ内の誤差を吸収）
                             first.score_internal = s_back;
                             first.score_cp = crate::search::types::clamp_score_cp(s_back);
-                            first.mate_distance =
-                                crate::search::constants::mate_distance(s_back);
+                            first.mate_distance = crate::search::constants::mate_distance(s_back);
                             // 可能ならPV更新（TTから復元）
-                            let pv = self
-                                .reconstruct_root_pv_from_tt(root, d, mv0)
-                                .unwrap_or_default();
+                            let pv =
+                                self.reconstruct_root_pv_from_tt(root, d, mv0).unwrap_or_default();
                             if !pv.is_empty() {
                                 first.pv = SmallVec::from_vec(pv.to_vec());
                             }
@@ -1889,6 +1908,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                 }
+
+                // near-final 検証による depth_lines の更新を反映した後に final_lines を固定
+                final_lines = Some(depth_lines.clone());
                 if let Some(ctrl) = stop_controller.as_ref() {
                     ctrl.publish_committed_snapshot(
                         session_id,
@@ -2027,6 +2049,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
+        if near_final_attempted != 0 {
+            stats.near_final_attempted = Some(near_final_attempted);
+        }
+        if near_final_confirmed != 0 {
+            stats.near_final_confirmed = Some(near_final_confirmed);
+        }
         stats.aspiration_failures = Some(cumulative_asp_failures);
         stats.aspiration_hits = Some(cumulative_asp_hits);
         stats.re_searches = Some(cumulative_researches);

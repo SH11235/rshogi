@@ -45,6 +45,20 @@
     - 実行: `near_final_zero_window=1 budget_ms=.. budget_qnodes=.. qnodes_limit_pre=.. qnodes_limit_post=.. t_rem=.. qnodes_used=.. confirmed_exact=0|1`
     - スキップ: `near_final_zero_window_skip=1 reason=already_exact|min_depth|trem_short|min_multipv|mate_near ...`
 
+- MultiPV スケジューラ（最小）
+  - `SHOGI_MULTIPV_SCHEDULER`（既定: 0/Off）
+    - 有効化すると PV1 を優先し、PV2 以降の qsearch 上限を強めに絞る（`compute_qnodes_limit` 内）。
+  - `SHOGI_MULTIPV_SCHEDULER_PV2_DIV`（既定: 4、範囲: 2..32）
+    - PV2 の分配倍率。PVn は概ね `div * n` 相当で強く制限される。高MPV×長TCの注釈で PV1 の確定性を上げる用途。
+
+- 浅層ゲート（任意の安定化）
+  - `SEARCH_SHALLOW_GATE`（既定: 0/Off）
+    - ルート浅層（例: d≤3）で ProbCut/NMP を抑制し、LMR を弱める。PV が立たない源流を軽減する運用向け。
+  - `SEARCH_SHALLOW_GATE_DEPTH`（既定: 3）
+    - 浅層ゲートを適用する深さ上限。
+  - `SEARCH_SHALLOW_LMR_FACTOR_X100`（既定: 120）
+    - 浅層での LMR 係数（%）。値を大きくすると減深が弱まる（=安定寄り）。
+
 
 - 探索パラメータ（runtime）
   - `SearchParams.LMR_K_x100`（既定170）: LMR の強さ係数（低いほど強めに減深）。

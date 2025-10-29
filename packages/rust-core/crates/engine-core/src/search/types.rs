@@ -97,6 +97,10 @@ pub struct SearchStats {
     pub near_deadline_skip_new_iter: Option<u64>,
     /// Near-deadline: whether MultiPV was shrunk to 1 (0/1)
     pub multipv_shrunk: Option<u64>,
+    /// Near-final verify attempts (number of times narrow-window verification was executed)
+    pub near_final_attempted: Option<u64>,
+    /// Near-final verify confirmations (number of times Exact was confirmed)
+    pub near_final_confirmed: Option<u64>,
     /// ABDADA diagnostics (counts)
     #[cfg(feature = "diagnostics")]
     pub abdada_busy_detected: Option<u64>,
