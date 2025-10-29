@@ -108,6 +108,15 @@ pub fn lmr_k_coeff() -> f32 {
 }
 
 #[inline]
+pub fn lmr_k_coeff_for_depth(depth: i32) -> f32 {
+    let base = lmr_k_coeff();
+    if shallow_gate_enabled() && depth <= shallow_gate_depth() {
+        return base * shallow_lmr_factor();
+    }
+    base
+}
+
+#[inline]
 pub fn lmp_limit_for_depth(depth: i32) -> usize {
     match depth {
         d if d <= 1 => RUNTIME_LMP_D1.load(Ordering::Relaxed),
@@ -419,6 +428,63 @@ pub fn set_pruning_safe_mode(on: bool) {
 
 pub fn set_probcut_skip_verify_lt4(on: bool) {
     RUNTIME_PROBCUT_SKIP_VERIFY_LT4.store(on, Ordering::Relaxed);
+}
+
+// Shallow gating (d<=D) — optional runtime policy
+#[inline]
+pub fn shallow_gate_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("SEARCH_SHALLOW_GATE") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "on"
+        }
+        Err(_) => false,
+    })
+}
+
+#[inline]
+pub fn shallow_gate_depth() -> i32 {
+    static VAL: OnceLock<i32> = OnceLock::new();
+    *VAL.get_or_init(|| match std::env::var("SEARCH_SHALLOW_GATE_DEPTH") {
+        Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 8)).unwrap_or(3),
+        Err(_) => 3,
+    })
+}
+
+#[inline]
+fn shallow_lmr_factor() -> f32 {
+    static VAL: OnceLock<f32> = OnceLock::new();
+    *VAL.get_or_init(|| match std::env::var("SEARCH_SHALLOW_LMR_FACTOR_X100") {
+        Ok(v) => v
+            .parse::<u32>()
+            .ok()
+            .map(|x| (x.max(50).min(400) as f32) / 100.0)
+            .unwrap_or(1.2),
+        Err(_) => 1.2,
+    })
+}
+
+#[inline]
+pub fn probcut_allowed(depth: i32) -> bool {
+    if !probcut_enabled() {
+        return false;
+    }
+    if shallow_gate_enabled() && depth <= shallow_gate_depth() {
+        return false;
+    }
+    true
+}
+
+#[inline]
+pub fn nmp_allowed(depth: i32) -> bool {
+    if !nmp_enabled() {
+        return false;
+    }
+    if shallow_gate_enabled() && depth <= shallow_gate_depth() {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]

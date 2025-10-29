@@ -35,8 +35,15 @@
       - 実施する最小反復深さ。浅い反復では実行しない。
     - SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS（既定 60, 範囲 5..500）
       - 残時間がこの値未満なら実行しない（極小時間での回し直し抑止）。
+    - SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV（既定 0）
+      - MultiPV がこの値未満なら検証を行わない（高MPV時のみONにする運用向け）。
+    - SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE（既定 0）
+      - mate帯スコア近傍では検証をスキップ（距離ゆらぎ対策）。
+    - SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP（既定 0, 0..32）
+      - mate帯では Δ をこの値だけ追加で広げる（skipよりもExact化優先したい場合）。
   - ログ例（info string）
-    - `near_final_zero_window=1 budget_ms=.. budget_qnodes=.. t_rem=.. qnodes_used=.. confirmed_exact=0|1`
+    - 実行: `near_final_zero_window=1 budget_ms=.. budget_qnodes=.. qnodes_limit_pre=.. qnodes_limit_post=.. t_rem=.. qnodes_used=.. confirmed_exact=0|1`
+    - スキップ: `near_final_zero_window_skip=1 reason=already_exact|min_depth|trem_short|min_multipv|mate_near ...`
 
 
 - 探索パラメータ（runtime）
