@@ -8,15 +8,15 @@ NNUEモデルの品質を確保するため、新しいモデルと既存のベ�
 
 ## 評価方法
 
-### 1. ローカル評価スクリプト（推奨）
+### 1. ローカル評価スクリプト（推奨 / Spec 013 準拠）
 
-`scripts/nnue/evaluate-nnue.sh`を使用してローカルで詳細な評価を実行できます。
+`scripts/nnue/evaluate-nnue.sh`を使用してローカルで詳細な評価を実行できます。Spec 013 により評価時の `--threads` は 1 で固定です（スクリプト側で強制）。Opening book は既定で `runs/fixed/20251011/openings_ply1_20_v1.sfen` を使用します（環境変数 `EVAL_BOOK` で差し替え可能）。PV spread は `--pv-ms` により探索時間を延ばせますが、内部条件によりサンプル 0 となる場合があるため、補助指標は `pv_probe` を用いて別途採取します。
 
 #### 基本的な使用方法
 
 ```bash
 cd packages/rust-core
-./scripts/nnue/evaluate-nnue.sh [baseline.nnue] [candidate.nnue] [games] [threads]
+./scripts/nnue/evaluate-nnue.sh [baseline.nnue] [candidate.nnue] [games] [threads=1] [pv_ms=500]
 ```
 
 #### パラメータ
@@ -24,7 +24,8 @@ cd packages/rust-core
 - `baseline.nnue`: 比較基準となる既存のNNUEファイル（デフォルト: `runs/nnue_local/baseline.nnue`）
 - `candidate.nnue`: 評価対象の新しいNNUEファイル（デフォルト: `runs/nnue_local/candidate.nnue`）
 - `games`: 対戦ゲーム数（デフォルト: 1000）
-- `threads`: 並列実行スレッド数（デフォルト: 8）
+- `threads`: 評価スレッド数。Spec 013 により 1 固定（引数で与えても内部で 1 に強制）
+- `pv_ms`: PV 計測時間（ミリ秒）。既定 500ms、必要に応じて 1000〜3000ms に増やすとサンプルが得やすい
 
 #### 実行例
 
@@ -32,8 +33,9 @@ cd packages/rust-core
 # デフォルト設定で実行
 ./scripts/nnue/evaluate-nnue.sh
 
-# カスタム設定で実行
-./scripts/nnue/evaluate-nnue.sh baseline.nnue new_model.nnue 2000 16
+# カスタム設定で実行（threads は 1 を指定。内部でも 1 に強制）
+EVAL_BOOK=runs/fixed/20251011/openings_ply1_20_v1.sfen \
+  ./scripts/nnue/evaluate-nnue.sh baseline.nnue new_model.nnue 2000 1 1000
 
 # 新しくトレーニングしたモデルを評価
 cp runs/train_nnue_*/final_weights.nnue candidate.nnue
@@ -46,10 +48,11 @@ cp runs/train_nnue_*/final_weights.nnue candidate.nnue
 
 - **勝率**: candidateがbaselineに対してどれだけ勝ったか
 - **NPS (Nodes Per Second)**: 探索速度の比較
-- **Gate判定**: 
-  - **Pass**: 55%以上の勝率かつNPS差が±3%以内（採用推奨）
-  - **Provisional**: 統計的に有意だが、Pass条件は未達
-  - **Reject**: 明確に劣っている（採用非推奨）
+- **Gate判定**（本プロジェクト運用）: 
+  - **Pass**: 勝率≥55% または Elo +6（95%CI下限>0）かつ |ΔNPS|≤3%（強化幅が大きい場合は+5%まで許容）
+  - **Provisional**: 統計的に有意だが、Pass条件は未達（追試推奨）
+  - **Reject**: 95%CIの下限≤0 もしくは明確に劣る
+  - 備考: gauntlet 内部の PV 計測はサンプル 0 となる場合があり、採否は勝率/Elo/NPS で決定。PV spread は `pv_probe` 結果を補助として保存。
 
 ### 2. gauntletツールの直接使用
 
@@ -59,20 +62,144 @@ cp runs/train_nnue_*/final_weights.nnue candidate.nnue
 # ビルド
 cargo build -p tools --release --bin gauntlet --features nnue_telemetry
 
-# 実行
+# 実行（threads=1 固定）
 target/release/gauntlet \
   --base baseline.nnue \
   --cand candidate.nnue \
   --time "0/10+0.1" \
   --games 1000 \
-  --threads 8 \
+  --threads 1 \
   --hash-mb 1024 \
-  --book docs/reports/fixtures/opening/representative_100.epd \
+  --book runs/fixed/20251011/openings_ply1_20_v1.sfen \
   --json result.json \
   --report report.md
+
+### 3. 量子化の影響切り分け（Classic）
+
+Classic の量子化後モデル（INT）が長TCで伸びない場合、まず FP32 で長TCを回し、次に FP32 と INT の出力差を測定して切り分けます。
+
+1) 非量子化 Classic（FP32）の強度確認（注意）
+  - 多くのエンジンは Classic のランタイムで INT8 を前提にしており、FP32 Classic を直接対局で評価できない場合があります。本リポジトリの `gauntlet` も INT8 Classic と Single に対応しています。
+  - そのため、FP32 Classic の強度確認は対局ではなく 2) のラウンドトリップ誤差（FP32 対 INT）の測定で代替します。
+
+2) FP32 vs INT のラウンドトリップ誤差（verify_classic_roundtrip）
+```bash
+head -n 5000 runs/fixed/20251011/openings_ply1_20_v1.sfen > runs/tmp/rt_suite_5k.sfen
+cargo run -p tools --release --bin verify_classic_roundtrip -- \
+  --fp32 runs/phase1_.../classic_v1/nn_best.fp32.bin \
+  --int  runs/phase1_.../classic_v1_q/nn.classic.nnue \
+  --positions runs/tmp/rt_suite_5k.sfen \
+  --out rt_diff_5k.json --worst-jsonl rt_worst_5k.jsonl --worst-count 50
 ```
 
-### 3. CI/CDでの軽量チェック
+3) 対応の指針
+- FP32が強く、INTが弱い → 量子化校正の見直し（校正サンプル増量、`--quant-search` 継続、`relu_clip`/per-channel指定の見直しなど）。
+- FP32自体が弱い → データ/学習の再強化（TIME_MS↑、ユニーク↑、追加エポック、再蒸留）。
+
+### 4. シャード実行（推奨・既定運用）
+
+長い評価（短TC2000/長TC800〜2000）の壁時計時間短縮のため、threads=1を守ったままプロセス並列（シャーディング）で gauntlet を実行します。
+
+- スクリプト: `scripts/nnue/gauntlet-sharded.sh`（分割起動）/ `scripts/nnue/merge-gauntlet-json.sh`（集計）
+- 不変条件（各 shard 共通で固定）
+  - `--threads 1`、同一の `--time` / `--hash-mb` / `--book`
+  - seed は shard ごとに異なる（既定は `12345+i`）
+- 使い方（短TC2000を16分割の例）
+```bash
+# 実行権限が無い場合は `chmod +x scripts/nnue/*.sh` を先に実行
+scripts/nnue/gauntlet-sharded.sh \
+  runs/ref.nnue runs/cand.nnue \
+  2000 16 "0/10+0.1" \
+  runs/gauntlet_sharded/$(date +%Y%m%d_%H%M) \
+  runs/fixed/20251011/openings_ply1_20_v1.sfen
+
+scripts/nnue/merge-gauntlet-json.sh runs/gauntlet_sharded/<ts>
+# 出力: runs/gauntlet_sharded/<ts>/merged.result.json
+```
+
+注意: シャード起動直後は `merge-gauntlet-json.sh` が `no inputs` を返すことがあります。各 `shard_*/result.json` が出揃ってから再度マージを実行してください（もしくは `quant_and_sharded_eval.sh` に待機処理を追加）。
+- 並列度の目安
+  - `shards ≈ (有効コア数-予約コア)`（他ジョブとコア分離する場合は `taskset` を使用）
+  - I/O衝突を避けるため、必要に応じ `nice`/`ionice` を併用
+- 採否判定
+  - 単体実行時と同一の基準（短TC: 勝率≥55%/2000局、長TC: 勝率≥55%/800→2000）を、`merged.result.json` に対して適用
+
+備考: gauntlet はフェアペアリングの都合で「各プロセスのゲーム数が偶数」である必要があります。`gauntlet-sharded.sh` は各 shard に偶数ゲーム数を自動割当するよう修正済みです（例: 2000games/16shards → {126×8,124×8}）。
+
+### 5. Classic cp表示レンジの調整（final-cp-gain）
+
+- Classic v1 INT のエクスポート時に `--final-cp-gain <G>` を指定すると、最終層（output）の i8/i32 を `G` 倍（丸め・飽和付き）でスケーリングします。
+- 目的: ランタイムの Q16→cp 右シフト後のレンジが小さすぎる場合（cp≒0 問題）の見え方/感度を改善。
+- 例（既存ディレクトリに別名出力）
+```
+cargo run -p tools --release --bin train_nnue -- \
+  --input runs/.../train.cache --arch classic \
+  --distill-from-classic runs/.../classic_v1/nn_best.fp32.bin --distill-only \
+  --export-format classic-v1 \
+  --quant-calibration runs/fixed/20251011/val.cache runs/.../train.cache \
+  --quant-calibration-limit 120000 \
+  --quant-ft per-tensor --quant-h1 per-channel --quant-h2 per-channel --quant-out per-tensor \
+  --final-cp-gain 64 \
+  --out runs/.../classic_v1_q_pc_120k_cpfit64
+
+# 確認（cpが0縛りでないことを目視）
+target/release/nnue_smoke runs/.../classic_v1_q_pc_120k_cpfit64/nn.classic.nnue
+```
+
+補足: スクリプトに実行権限が無いとシャード起動に失敗します（"許可がありません"）。その場合は次を実行してから再実行してください。
+```bash
+chmod +x scripts/nnue/gauntlet-sharded.sh scripts/nnue/merge-gauntlet-json.sh scripts/nnue/evaluate-nnue.sh
+```
+
+### 5. PV spread の取得（`pv_probe` 推奨）
+
+gauntlet の内部計測は条件により `pv_spread_samples=0` となることがあるため、PV spread は `pv_probe` を用いて別途採取します。
+
+```bash
+cargo build -p tools --release --bin pv_probe
+target/release/pv_probe \
+  --cand candidate.nnue \
+  --book runs/fixed/20251011/openings_ply1_20_v1.sfen \
+  --depth 6 --threads 1 --hash-mb 512 \
+  --samples 100 --seed 42 \
+  --json pv_probe_d6_s100.json
+```
+```
+
+補足（v2: 厳密合成＋並列）
+
+`pv_probe` は v2 形式のJSONにヒストグラムを埋め込み、シャーディングやプロセス内workersで並列収集した結果を厳密にマージできます（Nearest‑Rank定義でp50/p90を再計算）。Spec 013の原則に合わせ、各ワーカーは `threads=1` を維持します。
+
+- 並列収集（8 workers, TT off, target 200 サンプル）
+```bash
+target/release/pv_probe run \
+  --cand runs/baselines/current/classic.nnue \
+  --book runs/fixed/20251011/openings_ply1_20_v1.sfen \
+  --ms 1500 --threads 1 --workers 8 --hash-mb-per-worker 256 \
+  --tt off --target-samples 200 \
+  --json runs/tmp/pv_probe_v2_w8.json
+```
+
+- シャード（8分割）→ 厳密マージ
+```bash
+for i in $(seq 0 7); do
+  target/release/pv_probe run \
+    --cand runs/baselines/current/classic.nnue \
+    --book runs/fixed/20251011/openings_ply1_20_v1.sfen \
+    --ms 1500 --threads 1 --tt off \
+    --shards 8 --shard-index $i --seed 42 \
+    --target-samples 150 \
+    --json runs/tmp/pv_probe_shard_$i.json &
+done
+wait
+target/release/pv_probe merge runs/tmp/pv_probe_shard_*.json --out runs/tmp/pv_probe_merged.json
+```
+
+注意:
+- 厳密合成（exact）は、`tt=off|isolate`、`bucket_size_cp=1`、`book_sha256`/`ms|depth`の一致が前提です。不一致は既定エラー（`--warn`で警告継続）。
+- メモリは `workers × hash_mb_per_worker` で消費されます。OOMに注意してください。
+
+### 6. CI/CDでの軽量チェック
 
 `.github/workflows/gauntlet-regression-check.yml`により、コード変更時に自動的に軽量なリグレッションチェックが実行されます。これは重大な性能劣化の検出のみを目的としています。
 
@@ -80,8 +207,8 @@ target/release/gauntlet \
 
 1. **新しいNNUEモデルの評価**
    - 最低1000ゲーム以上で評価
-   - 複数スレッドで並列実行して時間短縮
-   - 異なる開局から開始して偏りを防ぐ
+   - threads=1 固定（Spec 013）。所要時間短縮はゲーム数/TCを調整
+   - 異なる開局から開始して偏りを防ぐ（固定スイートを使用）
 
 2. **評価環境**
    - CPUリソースが豊富なローカル環境を推奨
