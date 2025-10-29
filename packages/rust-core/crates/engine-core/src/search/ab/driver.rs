@@ -81,14 +81,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     #[inline]
     fn p1_disabled() -> bool {
         static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| {
-            match std::env::var("SHOGI_DISABLE_P1") {
-                Ok(v) => {
-                    let v = v.trim().to_ascii_lowercase();
-                    v == "1" || v == "true" || v == "on"
-                }
-                Err(_) => false,
+        *FLAG.get_or_init(|| match std::env::var("SHOGI_DISABLE_P1") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "on"
             }
+            Err(_) => false,
         })
     }
     #[inline]
@@ -428,7 +426,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cumulative_asp_hits: u32 = 0;
         let mut cumulative_researches: u32 = 0;
         let stop_controller = limits.stop_controller.clone();
+        // Finalize 一回化ガード
         let mut finalize_soft_sent = false;
+        let mut finalize_nearhard_sent = false;
         let mut last_deadline_hit: Option<DeadlineHit> = None;
         let mut lead_window_soft_break = false;
         let mut finalize_hard_sent = false;
@@ -475,8 +475,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // and aspiration center smoothing (A+C approach from YaneuraOu design)
         let mut best_hint_next_iter: Option<(crate::shogi::Move, i32)> = None;
 
-        // NearHard finalize は多重発火させない
-        let mut finalize_nearhard_sent = false;
+        // finalize_nearhard_sent は上で宣言（notify_deadline からも参照）
 
         // 観測用フラグ（SearchStatsに反映）
         let mut stats_near_deadline_skip_new_iter: u64 = 0;
@@ -503,6 +502,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 if !finalize_nearhard_sent {
                                     ctrl.request_finalize(FinalizeReason::NearHard);
                                     finalize_nearhard_sent = true;
+                                    // Planned は notify_deadline 側で nearhard 送出済みかを見て抑止する
                                 }
                             }
                         }
@@ -537,6 +537,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if !finalize_nearhard_sent {
                                 ctrl.request_finalize(FinalizeReason::NearHard);
                                 finalize_nearhard_sent = true;
+                                // Planned は notify_deadline 側で nearhard 送出済みかを見て抑止する
                             }
                         }
                     }
@@ -574,7 +575,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if let Some(hit) =
                 Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
             {
-                notify_deadline(hit, nodes);
+                if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
+                    notify_deadline(hit, nodes);
+                }
                 match hit {
                     DeadlineHit::Stop | DeadlineHit::Hard => {
                         last_deadline_hit = Some(hit);
@@ -765,7 +768,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     min_think_ms,
                     nodes,
                 ) {
-                    notify_deadline(hit, nodes);
+                    if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
+                        notify_deadline(hit, nodes);
+                    }
                     last_deadline_hit = Some(hit);
                     match hit {
                         DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -889,7 +894,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         min_think_ms,
                         nodes,
                     ) {
-                        notify_deadline(hit, nodes);
+                        if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
+                            notify_deadline(hit, nodes);
+                        }
                         last_deadline_hit = Some(hit);
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -931,7 +938,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             min_think_ms,
                             nodes,
                         ) {
-                            notify_deadline(hit, nodes);
+                            if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
+                                notify_deadline(hit, nodes);
+                            }
                             last_deadline_hit = Some(hit);
                             match hit {
                                 DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -1086,7 +1095,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         min_think_ms,
                         nodes,
                     ) {
-                        notify_deadline(hit, nodes);
+                        if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
+                            notify_deadline(hit, nodes);
+                        }
                         last_deadline_hit = Some(hit);
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -1128,7 +1139,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         // If re-searches are piling up on the primary, bail out to a full window
                         // to stabilize PV and avoid time loss.
                         let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max {
+                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max
+                        {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1172,7 +1184,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_researches = iteration_researches.saturating_add(1);
                         let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max {
+                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max
+                        {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1488,7 +1501,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             reason, d, elapsed, nodes, lead_ms_current
                         ));
                         }
-                        if lead_window_finalize {
+                        if lead_window_finalize && !finalize_nearhard_sent {
                             notify_deadline(DeadlineHit::Soft, nodes);
                         }
                         if !matches!(last_deadline_hit, Some(DeadlineHit::Hard)) {
