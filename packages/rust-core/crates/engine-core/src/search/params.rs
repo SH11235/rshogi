@@ -456,11 +456,7 @@ pub fn shallow_gate_depth() -> i32 {
 fn shallow_lmr_factor() -> f32 {
     static VAL: OnceLock<f32> = OnceLock::new();
     *VAL.get_or_init(|| match std::env::var("SEARCH_SHALLOW_LMR_FACTOR_X100") {
-        Ok(v) => v
-            .parse::<u32>()
-            .ok()
-            .map(|x| (x.max(50).min(400) as f32) / 100.0)
-            .unwrap_or(1.2),
+        Ok(v) => v.parse::<u32>().ok().map(|x| (x.clamp(50, 400) as f32) / 100.0).unwrap_or(1.2),
         Err(_) => 1.2,
     })
 }
