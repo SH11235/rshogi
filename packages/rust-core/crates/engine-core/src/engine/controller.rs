@@ -634,8 +634,11 @@ impl Engine {
                 let root_move =
                     legal_prefix.first().copied().unwrap_or_else(crate::shogi::Move::null);
                 // Fallback seldepth: prefer stats.seldepth, else derive from result
-                let seldepth =
-                    result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+                let seldepth = result.stats.seldepth.or_else(|| {
+                    let hint =
+                        result.seldepth.max(legal_prefix.len() as u32).min(u32::from(u8::MAX));
+                    Some(hint as u8)
+                });
                 let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
                 let nodes_total = result.stats.nodes;
                 let nps = if elapsed_ms == 0 {
@@ -665,14 +668,9 @@ impl Engine {
                 };
                 let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
                 out.push(line);
-                // 同期更新：lines とトップレベルを一貫化
-                let first = out[0].clone();
                 result.lines = Some(out);
-                result.best_move = Some(first.root_move);
-                result.score = first.score_internal;
-                result.node_type = first.bound;
-                result.stats.pv = first.pv.iter().copied().collect();
-                result.refresh_summary();
+                result.sync_from_primary_line();
+                debug!("pv_synth_source=tt");
                 return;
             }
         }
@@ -682,10 +680,12 @@ impl Engine {
             let fb = self.choose_final_bestmove(pos, None);
             if let Some(best) = fb.best_move {
                 // 合成（1手 PV）。score/bound は現行 result のものを使用
-                let seldepth =
-                    result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
                 let mut pv_one: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
                 pv_one.push(best);
+                let seldepth = result.stats.seldepth.or_else(|| {
+                    let hint = result.seldepth.max(pv_one.len() as u32).min(u32::from(u8::MAX));
+                    Some(hint as u8)
+                });
                 let score_internal = result.score;
                 let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
                 let nodes_total = result.stats.nodes;
@@ -712,16 +712,9 @@ impl Engine {
                 };
                 let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
                 out.push(line);
-                // 同期更新：lines とトップレベルを一貫化
-                let first = out[0].clone();
                 result.lines = Some(out);
-                result.best_move = Some(first.root_move);
-                // 1手合成は既存の score/node_type をそのまま first に写しているため、
-                // 念のためトップレベルにも明示反映する。
-                result.score = first.score_internal;
-                result.node_type = first.bound;
-                result.stats.pv = first.pv.iter().copied().collect();
-                result.refresh_summary();
+                result.sync_from_primary_line();
+                debug!("pv_synth_source=legal_fallback");
             }
         }
     }
@@ -982,11 +975,22 @@ impl Engine {
         let tt_pv = self.reconstruct_root_pv_from_tt(pos, 24);
         if let Some(&head) = tt_pv.first() {
             if pos.is_pseudo_legal(head) && pos.is_legal_move(head) {
-                return FinalBest {
-                    best_move: Some(head),
-                    pv: tt_pv,
-                    source: FinalBestSource::TT,
-                };
+                let mut cursor = pos.clone();
+                let mut trimmed: Vec<crate::shogi::Move> = Vec::with_capacity(tt_pv.len());
+                for mv in tt_pv {
+                    if !cursor.is_pseudo_legal(mv) || !cursor.is_legal_move(mv) {
+                        break;
+                    }
+                    trimmed.push(mv);
+                    let _ = cursor.do_move(mv);
+                }
+                if !trimmed.is_empty() {
+                    return FinalBest {
+                        best_move: Some(head),
+                        pv: trimmed,
+                        source: FinalBestSource::TT,
+                    };
+                }
             }
         }
 

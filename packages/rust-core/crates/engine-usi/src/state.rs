@@ -113,6 +113,10 @@ pub struct UsiOptions {
     pub mate_gate_min_stable_depth: u8,
     pub mate_gate_fast_ok_min_depth: u8,
     pub mate_gate_fast_ok_min_elapsed_ms: u64,
+    // Mate post-verify tuning
+    pub mate_postverify_skip_max_dist: u32,
+    pub mate_postverify_exact_min_depth: u8,
+    pub mate_postverify_exact_min_elapsed_ms: u64,
 
     // Root guard rails and experiment flags (DIAG/flags; default OFF)
     // Root SEE gate: if enabled and SEE(best) < -X, hold commit (re-search/try 2nd best)
@@ -216,11 +220,14 @@ impl Default for UsiOptions {
             mate_gate_min_stable_depth: 5,
             mate_gate_fast_ok_min_depth: 5,
             mate_gate_fast_ok_min_elapsed_ms: 30,
+            mate_postverify_skip_max_dist: 3,
+            mate_postverify_exact_min_depth: 8,
+            mate_postverify_exact_min_elapsed_ms: 400,
             // Guard rails（既定 ON）
             root_see_gate: true,
             x_see_cp: 0,
             post_verify: true,
-            post_verify_require_pass: true,
+            post_verify_require_pass: false,
             post_verify_extend_ms: 300,
             post_verify_disadvantage_cp: -300,
             y_drop_cp: 225,

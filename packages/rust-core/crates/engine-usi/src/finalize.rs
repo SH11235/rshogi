@@ -1521,37 +1521,59 @@ pub fn finalize_and_send(
             snap_version
         ));
 
-        // PostVerify for mate距離: bestを1手進めて“相手が詰み回避できない=応手0”かを軽確認。
+        // PostVerify for mate距離: bestを1手進めて即詰であるかを確認。距離が短くExactな場合はスキップ。
         if state.opts.post_verify && is_mate_score(res.score) {
-            if let Some(bm) = res.best_move {
-                let mut pos1 = state.position.clone();
-                let _ = pos1.do_move(bm);
-                // 合法回避手が0かを厳密に確認する
-                let mg = MoveGenerator::new();
-                let mut has_evasion = false;
-                if let Ok(list) = mg.generate_all(&pos1) {
-                    for &mv in list.as_slice() {
-                        if !pos1.is_legal_move(mv) {
-                            continue;
-                        }
-                        let undo = pos1.do_move(mv);
-                        let still = pos1.is_in_check();
-                        pos1.undo_move(mv, undo);
-                        if !still {
-                            has_evasion = true;
-                            break;
+            let dist = md(res.score).unwrap_or(0);
+            let mut skip_immediate_check = false;
+            if dist > 1
+                && (dist as u32) <= state.opts.mate_postverify_skip_max_dist
+                && res.node_type == NodeType::Exact
+            {
+                let stable_depth = res.stats.stable_depth.unwrap_or(0);
+                let elapsed_ms = res.stats.elapsed.as_millis() as u64;
+                if stable_depth >= state.opts.mate_postverify_exact_min_depth
+                    || elapsed_ms >= state.opts.mate_postverify_exact_min_elapsed_ms
+                {
+                    info_string(format!(
+                        "mate_postverify_skip=1 reason=exact_small_dist dist={} stable_depth={} elapsed_ms={}",
+                        dist,
+                        stable_depth,
+                        elapsed_ms
+                    ));
+                    skip_immediate_check = true;
+                }
+            }
+
+            if !skip_immediate_check {
+                if let Some(bm) = res.best_move {
+                    let mut pos1 = state.position.clone();
+                    let _ = pos1.do_move(bm);
+                    // 合法回避手が0かを厳密に確認する
+                    let mg = MoveGenerator::new();
+                    let mut has_evasion = false;
+                    if let Ok(list) = mg.generate_all(&pos1) {
+                        for &mv in list.as_slice() {
+                            if !pos1.is_legal_move(mv) {
+                                continue;
+                            }
+                            let undo = pos1.do_move(mv);
+                            let still = pos1.is_in_check();
+                            pos1.undo_move(mv, undo);
+                            if !still {
+                                has_evasion = true;
+                                break;
+                            }
                         }
                     }
-                }
-                let forced_mate = pos1.is_in_check() && !has_evasion;
-                if !forced_mate {
-                    let dist = md(res.score).unwrap_or(0);
-                    info_string(format!(
-                        "mate_postverify_reject=1 evasion_exists={} mate_dist={}",
-                        has_evasion as u8, dist
-                    ));
-                    mate_post_reject = true;
-                    mate_rejected = true;
+                    let forced_mate = pos1.is_in_check() && !has_evasion;
+                    if !forced_mate {
+                        info_string(format!(
+                            "mate_postverify_reject=1 evasion_exists={} mate_dist={}",
+                            has_evasion as u8, dist
+                        ));
+                        mate_post_reject = true;
+                        mate_rejected = true;
+                    }
                 }
             }
         }
