@@ -606,8 +606,8 @@ impl Engine {
         if adopted_tt {
             // Probe root entry to attach node_type/score if Exact
             let root_hash = pos.zobrist_hash();
-            // 安全側の既定: UpperBound。TT Exact 採用時のみ Exact に上書きする。
-            let mut bound = NodeType::UpperBound;
+            // 既存の result.node_type / result.score を起点にし、TT Exact の場合のみ上書きする。
+            let mut bound = result.node_type;
             let mut score_internal = result.score;
             if let Some(entry) = self.shared_tt.probe_entry(root_hash, pos.side_to_move) {
                 if entry.matches(root_hash) && entry.node_type() == NodeType::Exact {
@@ -1123,8 +1123,12 @@ impl Evaluator for NNUEEvaluatorProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::types::NodeType as Bound;
+    use crate::search::types::SearchResult;
+    use crate::search::types::SearchStats;
     use crate::shogi::Position;
-    use crate::usi::move_to_usi;
+    use crate::usi::{move_to_usi, parse_usi_move};
+    use std::time::Duration;
 
     #[test]
     fn legal_fallback_prefers_promotion_as_tactical() {
@@ -1139,5 +1143,127 @@ mod tests {
             move_to_usi(&mv)
         );
         assert_eq!(best.source, FinalBestSource::LegalFallback);
+    }
+
+    /// 合成PV（TT不採用→最終1手PV）で `result.node_type` が保持されることを検証。
+    #[test]
+    fn finalize_pv_preserves_bound_on_fallback() {
+        let engine = Engine::new(EngineType::Material);
+        let pos = Position::startpos();
+
+        // lines なし・LowerBound 結果を用意（スコアは任意）
+        let mut result = SearchResult::with_node_type(
+            None,
+            50,
+            SearchStats {
+                elapsed: Duration::from_millis(1),
+                depth: 6,
+                seldepth: Some(4),
+                ..Default::default()
+            },
+            Bound::LowerBound,
+        );
+
+        // TT は空のまま → finalize_pv_from_tt は最終フォールバック（1手PV合成）を通る
+        super::Engine::finalize_pv_from_tt(&engine, &pos, &mut result);
+
+        let lines = result.lines.as_ref().expect("lines must be synthesized");
+        let first = &lines[0];
+        assert_eq!(first.bound, Bound::LowerBound, "fallback must preserve result.node_type");
+        assert_eq!(first.score_internal, 50, "fallback must keep result.score");
+        assert!(first.pv.len() >= 1, "fallback must synthesize at least 1 move PV");
+    }
+
+    /// ルートTTが非Exactの場合はTT由来PVを採用せず、境界を保持することを検証。
+    #[test]
+    fn finalize_pv_preserves_bound_when_tt_non_exact() {
+        let engine = Engine::new(EngineType::Material);
+        let pos = Position::startpos();
+
+        // ルートに合法手を持つ LowerBound エントリを保存（PV 再構成は Exact 連鎖のみなので採用不可）
+        let mv = parse_usi_move("7g7f").unwrap();
+        let root_hash = pos.zobrist_hash();
+        let side = pos.side_to_move;
+        engine.shared_tt.store(crate::search::tt::TTStoreArgs::new(
+            root_hash,
+            Some(mv),
+            10,
+            0,
+            8,
+            Bound::LowerBound,
+            side,
+        ));
+
+        let mut result = SearchResult::with_node_type(
+            None,
+            -25,
+            SearchStats {
+                elapsed: Duration::from_millis(1),
+                depth: 8,
+                seldepth: Some(6),
+                ..Default::default()
+            },
+            Bound::UpperBound,
+        );
+
+        super::Engine::finalize_pv_from_tt(&engine, &pos, &mut result);
+
+        let lines = result.lines.as_ref().expect("lines must be synthesized");
+        let first = &lines[0];
+        assert_eq!(first.bound, Bound::UpperBound, "non-Exact TT must not flip bound");
+        assert_eq!(
+            first.score_internal, -25,
+            "score must remain result.score when TT is non-Exact"
+        );
+    }
+
+    /// ルートTTが Exact の場合にのみ `Exact` へ昇格し、TT スコアが反映されることを検証。
+    #[test]
+    fn finalize_pv_upgrades_to_exact_when_tt_exact() {
+        let engine = Engine::new(EngineType::Material);
+        let pos = Position::startpos();
+
+        // ルートに Exact エントリを保存（合法手 + 十分な深さ）。
+        let mv = parse_usi_move("7g7f").unwrap();
+        let root_hash = pos.zobrist_hash();
+        let side = pos.side_to_move;
+        let tt_score: i16 = 321; // TT に保存する内部スコア（i16）
+        engine.shared_tt.store(crate::search::tt::TTStoreArgs::new(
+            root_hash,
+            Some(mv),
+            tt_score,
+            0,
+            8,
+            Bound::Exact,
+            side,
+        ));
+
+        // 入力結果は LowerBound/別スコアだが、TT Exact により Exact/TT スコアへ上書きされる想定
+        let mut result = SearchResult::with_node_type(
+            None,
+            -999,
+            SearchStats {
+                elapsed: Duration::from_millis(1),
+                depth: 10,
+                seldepth: Some(9),
+                ..Default::default()
+            },
+            Bound::LowerBound,
+        );
+
+        super::Engine::finalize_pv_from_tt(&engine, &pos, &mut result);
+
+        let lines = result.lines.as_ref().expect("lines must be synthesized from TT");
+        let first = &lines[0];
+        assert_eq!(first.bound, Bound::Exact, "TT Exact must upgrade bound to Exact");
+        assert_eq!(
+            first.score_internal, tt_score as i32,
+            "score must be taken from Exact TT entry"
+        );
+        let head = first.pv.first().copied().unwrap();
+        assert!(
+            head.equals_without_piece_type(&mv),
+            "PV head must match TT move (ignoring piece type)"
+        );
     }
 }
