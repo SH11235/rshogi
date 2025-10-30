@@ -571,8 +571,9 @@ impl Engine {
             .recv_result()
             .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()));
 
-        // P0: Ensure we return at least one PV by fallback to TT if lines are empty
-        // - Do not change result.node_type; only synthesize lines[0]
+        // - 合成PV（TT/合法フォールバック）を採用した場合は、
+        //   SearchResult のトップレベル（best_move/score/node_type、stats.pv）も
+        //   lines[0] に合わせて同期する（下流のUSI側バッファと不整合を起こさないため）。
         self.finalize_pv_from_tt(pos, &mut result);
 
         if let Some(tm) = session.time_manager() {
@@ -585,7 +586,8 @@ impl Engine {
     }
 
     /// Fallback: if result.lines is empty, try to reconstruct PV from TT (Exact only) and
-    /// synthesize lines[0] accordingly. Does not modify result.node_type.
+    /// synthesize lines[0] accordingly. 合成した場合は best_move/score/node_type と
+    /// stats.pv も同期して SearchResult を一貫化する。
     fn finalize_pv_from_tt(&self, pos: &Position, result: &mut SearchResult) {
         // Already has at least one line
         if result.lines.as_ref().map(|ls| !ls.is_empty()).unwrap_or(false) {
@@ -644,7 +646,13 @@ impl Engine {
             };
             let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
             out.push(line);
+            // 同期更新：lines とトップレベルを一貫化
+            let first = out[0].clone();
             result.lines = Some(out);
+            result.best_move = Some(first.root_move);
+            result.score = first.score_internal;
+            result.node_type = first.bound;
+            result.stats.pv = first.pv.iter().copied().collect();
             result.refresh_summary();
             return;
         }
@@ -677,7 +685,15 @@ impl Engine {
                 };
                 let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
                 out.push(line);
+                // 同期更新：lines とトップレベルを一貫化
+                let first = out[0].clone();
                 result.lines = Some(out);
+                result.best_move = Some(first.root_move);
+                // 1手合成は既存の score/node_type をそのまま first に写しているため、
+                // 念のためトップレベルにも明示反映する。
+                result.score = first.score_internal;
+                result.node_type = first.bound;
+                result.stats.pv = first.pv.iter().copied().collect();
                 result.refresh_summary();
             }
         }
