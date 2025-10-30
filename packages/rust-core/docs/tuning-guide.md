@@ -25,6 +25,12 @@
 - SHOGI_LEAD_WINDOW_FINALIZE（既定: 1）
   - リードウィンドウ（Soft）での穏やかな停止を有効にする。
 
+- SHOGI_DISABLE_STABILIZATION（既定: 0）
+  - 安定化ゲート群（近締切ゲート/アスピ安定化/狭窓検証の枠）を一括で無効化（旧名 `SHOGI_DISABLE_P1` も受理）。
+
+- SHOGI_QNODES_LIMIT_RELAX_MULT（既定: 1, 範囲: 1..32）
+  - `compute_qnodes_limit` の最終上限（DEFAULT）を倍率で緩和。長TC/分析モードで SelDepth を伸ばす A/B に使用。
+
 - SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE（既定: 0）
   - Near‑hard 〆切帯で PV1 に対する「狭窓検証」（[s−Δ, s+Δ]、既定 Δ=1cp）を 1 回だけ実施し、Exact を確認。
   - 併用パラメータ（任意）
@@ -58,6 +64,19 @@
     - 浅層ゲートを適用する深さ上限。
   - `SEARCH_SHALLOW_LMR_FACTOR_X100`（既定: 120）
     - 浅層での LMR 係数（%）。値を大きくすると減深が弱まる（=安定寄り）。
+
+## Diagnostics 指標（CSV/JSON 対応）
+- classicab_diagnostics（format=csv|json）における主な列
+  - 収率/境界: `lines_len`, `top1_exact`
+  - 近締切: `near_deadline_skip_new_iter`, `multipv_shrunk`
+  - 狭窓検証: `near_final_attempted`, `near_final_confirmed`
+  - パフォーマンス: `nodes`, `nps`, `tt_hits`, `lmr`, `lmr_trials`, `beta_cuts`
+
+## A/B Tips（運用例）
+- P0+P1の評価（短TC/浅深）
+  - 例: TIME=300ms, MPV=2, HASH=512, JOBS=16。`SEARCH_SHALLOW_GATE=1`（d≤3）, `SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP=1` を併用し、空PV≈0%、Top1Exact の伸び/NPS 変動（±2%以内）を確認。
+- 高MPV 束のみ MultiPV スケジューラON
+  - 例: MPV≥7, TIME≥800ms。`SHOGI_MULTIPV_SCHEDULER=1`, `SHOGI_MULTIPV_SCHEDULER_PV2_DIV=4` から開始。PV1 確定性↑と PV2+ 遅延のトレードオフを比較。
 
 
 - 探索パラメータ（runtime）
