@@ -1410,7 +1410,6 @@ pub fn finalize_and_send(
     };
 
     // Mate gating (YO流): Lower/Upper の mate距離では確定扱いしない。安定条件不足も抑止。
-    let mut mate_rejected = false;
     let mut mate_gate_blocked = false;
     let mut mate_post_reject = false;
     if let Some(res) = result.as_ref() {
@@ -1441,13 +1440,7 @@ pub fn finalize_and_send(
                     dist
                 ));
                 // 距離1はゲート免除（必ずCheckOnlyのpost-verifyを実施）
-                if dist <= 1 {
-                    mate_gate_blocked = false;
-                    mate_rejected = false;
-                } else {
-                    mate_gate_blocked = true;
-                    mate_rejected = true;
-                }
+                mate_gate_blocked = dist > 1;
             }
         }
     }
@@ -1572,7 +1565,6 @@ pub fn finalize_and_send(
                             has_evasion as u8, dist
                         ));
                         mate_post_reject = true;
-                        mate_rejected = true;
                     }
                 }
             }
@@ -1928,7 +1920,7 @@ pub fn finalize_and_send(
         finalize_sanity_check(state, &stop_meta, &final_best, result, score_hint_joined, "joined");
 
     // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
-    if mate_rejected {
+    if mate_gate_blocked || (mate_post_reject && state.opts.post_verify_require_pass) {
         let pv1 = final_best.best_move;
         let mut forced_alt: Option<engine_core::shogi::Move> = None;
         if let Some(snap) = snapshot_valid.as_ref() {

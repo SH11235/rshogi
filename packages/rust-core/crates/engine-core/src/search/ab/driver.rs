@@ -1886,6 +1886,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         let budget_qnodes = eff_budget_ms
                             .saturating_mul(crate::search::constants::QNODES_PER_MS)
                             .max(crate::search::constants::MIN_QNODES_LIMIT);
+                        if eff_budget_ms == 0 {
+                            zero_window_done = true;
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb("near_final_zero_window_skip=1 reason=no_budget");
+                            }
+                            continue;
+                        }
                         qnodes_limit_local = qnodes_limit_local.min(budget_qnodes);
                         let qnodes_limit_post = qnodes_limit_local;
                         let mut search_ctx_nw = SearchContext {
