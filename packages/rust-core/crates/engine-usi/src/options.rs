@@ -7,6 +7,7 @@ use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
 use crate::state::{EngineState, ProfileMode, UsiOptions};
+use std::sync::OnceLock;
 fn mark_override(state: &mut EngineState, key: &str) {
     state.user_overrides.insert(key.to_string());
 }
@@ -1568,6 +1569,12 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         && !state.user_overrides.contains("PostVerify.RequirePass")
     {
         state.opts.post_verify_require_pass = false;
+        static REQUIRE_PASS_NOTICE: OnceLock<()> = OnceLock::new();
+        if REQUIRE_PASS_NOTICE.set(()).is_ok() {
+            crate::io::info_string(
+                "post_verify_require_pass_default=0 (post_verify_require_pass disabled by default)",
+            );
+        }
     }
 }
 

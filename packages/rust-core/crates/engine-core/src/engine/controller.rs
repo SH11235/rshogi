@@ -669,6 +669,8 @@ impl Engine {
                 let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
                 out.push(line);
                 result.lines = Some(out);
+                // sync_from_primary_line() keeps best_move/score/node_type/stats.pv aligned with lines[0].
+                // 以降はこれらのフィールドを個別に書き換えないこと。
                 result.sync_from_primary_line();
                 debug!("pv_synth_source=tt");
                 return;
@@ -713,6 +715,8 @@ impl Engine {
                 let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
                 out.push(line);
                 result.lines = Some(out);
+                // sync_from_primary_line() keeps best_move/score/node_type/stats.pv aligned with lines[0].
+                // 以降はこれらのフィールドを個別に書き換えないこと。
                 result.sync_from_primary_line();
                 debug!("pv_synth_source=legal_fallback");
             }
