@@ -22,6 +22,71 @@ use std::time::{Duration, Instant};
 // near-draw の判定しきい値（cp換算）。README にも注記あり。
 const NEAR_DRAW_CP: i32 = 10;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MateSkipInfo {
+    dist: i32,
+    stable_depth: Option<u8>,
+    elapsed_ms: u64,
+}
+
+fn postverify_skip_info(
+    res: &SearchResult,
+    opts: &crate::state::UsiOptions,
+) -> Option<MateSkipInfo> {
+    if !is_mate_score(res.score) {
+        return None;
+    }
+    let dist = md(res.score).unwrap_or(0);
+    if dist <= 1 {
+        return None;
+    }
+    if (dist as u32) > opts.mate_postverify_skip_max_dist {
+        return None;
+    }
+    if res.node_type != NodeType::Exact {
+        return None;
+    }
+    let stable_depth = res.stats.stable_depth;
+    let elapsed_ms = res.stats.elapsed.as_millis() as u64;
+    let depth_ok = stable_depth.map(|d| d >= opts.mate_postverify_exact_min_depth).unwrap_or(false);
+    let elapsed_ok = elapsed_ms >= opts.mate_postverify_exact_min_elapsed_ms;
+    if depth_ok || elapsed_ok {
+        Some(MateSkipInfo {
+            dist,
+            stable_depth,
+            elapsed_ms,
+        })
+    } else {
+        None
+    }
+}
+
+fn has_immediate_mate_after(
+    pos: &engine_core::shogi::Position,
+    mv: engine_core::shogi::Move,
+) -> bool {
+    let mut next = pos.clone();
+    let _ = next.do_move(mv);
+    if !next.is_in_check() {
+        return false;
+    }
+    let mg = MoveGenerator::new();
+    if let Ok(list) = mg.generate_all(&next) {
+        for &evade in list.as_slice() {
+            if !next.is_legal_move(evade) {
+                continue;
+            }
+            let undo = next.do_move(evade);
+            let still = next.is_in_check();
+            next.undo_move(evade, undo);
+            if !still {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 thread_local! {
     static LAST_EMITTED_BESTMOVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -1516,56 +1581,23 @@ pub fn finalize_and_send(
 
         // PostVerify for mate距離: bestを1手進めて即詰であるかを確認。距離が短くExactな場合はスキップ。
         if state.opts.post_verify && is_mate_score(res.score) {
-            let dist = md(res.score).unwrap_or(0);
-            let mut skip_immediate_check = false;
-            if dist > 1
-                && (dist as u32) <= state.opts.mate_postverify_skip_max_dist
-                && res.node_type == NodeType::Exact
-            {
-                let stable_depth = res.stats.stable_depth.unwrap_or(0);
-                let elapsed_ms = res.stats.elapsed.as_millis() as u64;
-                if stable_depth >= state.opts.mate_postverify_exact_min_depth
-                    || elapsed_ms >= state.opts.mate_postverify_exact_min_elapsed_ms
-                {
+            if let Some(skip) = postverify_skip_info(res, &state.opts) {
+                info_string(format!(
+                    "mate_postverify_skip=1 reason=exact_small_dist dist={} stable_depth={} elapsed_ms={}",
+                    skip.dist,
+                    skip.stable_depth
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    skip.elapsed_ms
+                ));
+            } else if let Some(bm) = res.best_move {
+                if !has_immediate_mate_after(&state.position, bm) {
+                    let dist = md(res.score).unwrap_or(0);
                     info_string(format!(
-                        "mate_postverify_skip=1 reason=exact_small_dist dist={} stable_depth={} elapsed_ms={}",
-                        dist,
-                        stable_depth,
-                        elapsed_ms
+                        "mate_postverify_reject=1 evasion_exists=1 mate_dist={}",
+                        dist
                     ));
-                    skip_immediate_check = true;
-                }
-            }
-
-            if !skip_immediate_check {
-                if let Some(bm) = res.best_move {
-                    let mut pos1 = state.position.clone();
-                    let _ = pos1.do_move(bm);
-                    // 合法回避手が0かを厳密に確認する
-                    let mg = MoveGenerator::new();
-                    let mut has_evasion = false;
-                    if let Ok(list) = mg.generate_all(&pos1) {
-                        for &mv in list.as_slice() {
-                            if !pos1.is_legal_move(mv) {
-                                continue;
-                            }
-                            let undo = pos1.do_move(mv);
-                            let still = pos1.is_in_check();
-                            pos1.undo_move(mv, undo);
-                            if !still {
-                                has_evasion = true;
-                                break;
-                            }
-                        }
-                    }
-                    let forced_mate = pos1.is_in_check() && !has_evasion;
-                    if !forced_mate {
-                        info_string(format!(
-                            "mate_postverify_reject=1 evasion_exists={} mate_dist={}",
-                            has_evasion as u8, dist
-                        ));
-                        mate_post_reject = true;
-                    }
+                    mate_post_reject = true;
                 }
             }
         }
@@ -2926,13 +2958,54 @@ fn need_verify_from_risks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::EngineState;
+    use crate::state::{EngineState, UsiOptions};
     use engine_core::engine::controller::{Engine, EngineType};
     use engine_core::movegen::MoveGenerator;
+    use engine_core::search::common::mate_score;
     use engine_core::search::parallel::FinalizeReason;
-    use engine_core::search::types::{NodeType, RootLine};
+    use engine_core::search::types::{NodeType, RootLine, SearchResult, SearchStats};
     use engine_core::usi::parse_usi_move;
     use smallvec::SmallVec;
+    use std::time::Duration;
+
+    fn mk_result_with(
+        score: i32,
+        node_type: NodeType,
+        stable_depth: Option<u8>,
+        elapsed_ms: u64,
+    ) -> SearchResult {
+        let stats = SearchStats {
+            nodes: 0,
+            elapsed: Duration::from_millis(elapsed_ms),
+            depth: stable_depth.unwrap_or(0) as u8,
+            stable_depth,
+            ..Default::default()
+        };
+        let mut res = SearchResult::new(Some(engine_core::shogi::Move::null()), score, stats);
+        res.node_type = node_type;
+        res
+    }
+
+    #[test]
+    fn postverify_skip_info_exact_small_distance() {
+        let mut opts = UsiOptions::default();
+        opts.mate_postverify_skip_max_dist = 3;
+        opts.mate_postverify_exact_min_depth = 8;
+        opts.mate_postverify_exact_min_elapsed_ms = 400;
+
+        let res = mk_result_with(mate_score(3, true), NodeType::Exact, Some(8), 200);
+        let info = postverify_skip_info(&res, &opts);
+        assert!(info.is_some(), "expected skip info when stable depth meets threshold");
+
+        let res_low_depth = mk_result_with(mate_score(3, true), NodeType::Exact, Some(2), 100);
+        assert!(postverify_skip_info(&res_low_depth, &opts).is_none());
+
+        let res_long_dist = mk_result_with(mate_score(5, true), NodeType::Exact, Some(9), 600);
+        assert!(postverify_skip_info(&res_long_dist, &opts).is_none());
+
+        let res_non_exact = mk_result_with(mate_score(2, true), NodeType::LowerBound, Some(9), 600);
+        assert!(postverify_skip_info(&res_non_exact, &opts).is_none());
+    }
 
     fn build_root_line(
         root_move: engine_core::shogi::Move,
@@ -3154,6 +3227,7 @@ mod tests {
         super::test_probe_reset();
 
         let mut state = EngineState::new();
+        state.opts.post_verify_require_pass = true;
         // Fabricate a SearchResult with a mate score that passes gate but fails CheckOnly verify
         let stats = SearchStats {
             elapsed: Duration::from_millis(100),

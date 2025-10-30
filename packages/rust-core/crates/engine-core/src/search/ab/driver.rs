@@ -1889,7 +1889,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if eff_budget_ms == 0 {
                             zero_window_done = true;
                             if let Some(cb) = limits.info_string_callback.as_ref() {
-                                cb("near_final_zero_window_skip=1 reason=no_budget");
+                                cb(&format!(
+                                    "near_final_zero_window_skip=1 reason=no_budget t_rem={} eff_budget_ms={}",
+                                    t_rem,
+                                    eff_budget_ms
+                                ));
                             }
                             continue;
                         }
@@ -2282,6 +2286,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         );
 
         if result.lines.is_some() {
+            // sync_from_primary_line() keeps legacy fields aligned with lines[0];
+            // call-site以降で best_move/score/node_type/stats.pv を個別に変更しないこと。
             result.sync_from_primary_line();
         }
 
