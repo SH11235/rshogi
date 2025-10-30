@@ -1875,7 +1875,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         let mut lmr_counter_local: u64 = 0;
                         let mut heur_local = Heuristics::default();
                         // 予算ms → qnodesへ換算し、上限を予算にクランプ
-                        let budget_qnodes = budget
+                        let safety_ms: u64 = 20;
+                        let eff_budget_ms = if t_rem == 0 {
+                            budget
+                        } else if t_rem > safety_ms {
+                            budget.min(t_rem.saturating_sub(safety_ms))
+                        } else {
+                            0
+                        };
+                        let budget_qnodes = eff_budget_ms
                             .saturating_mul(crate::search::constants::QNODES_PER_MS)
                             .max(crate::search::constants::MIN_QNODES_LIMIT);
                         qnodes_limit_local = qnodes_limit_local.min(budget_qnodes);
@@ -1962,7 +1970,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 alpha0,
                                 beta0,
                                 target,
-                                budget,
+                                eff_budget_ms,
                                 budget_qnodes,
                                 qnodes_limit_pre,
                                 qnodes_limit_post,
@@ -2170,10 +2178,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         if let Some(lines) = final_lines_opt.as_ref() {
             if let Some(first) = lines.first() {
-                best_move_out = Some(first.root_move);
-                // Internal score（mate距離保持）を採用。UI向けは必要時にclamp。
-                score_out = first.score_internal;
-                node_type_out = first.bound;
+                // Internal score（mate距離保持）
                 stats.pv = first.pv.iter().copied().collect();
             }
             let mut published_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
@@ -2231,13 +2236,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
 
-        if let Some(lines) = result_lines.as_ref().and_then(|ls| ls.first()) {
-            best_move_out = Some(lines.root_move);
-            score_out = lines.score_internal;
-            node_type_out = lines.bound;
-            stats.pv = lines.pv.iter().copied().collect();
-        }
-
         if best_move_out.is_none() {
             if let Some(first) = stats.pv.first() {
                 best_move_out = Some(*first);
@@ -2275,6 +2273,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             None,
             result_lines.clone(),
         );
+
+        if result.lines.is_some() {
+            result.sync_from_primary_line();
+        }
 
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;

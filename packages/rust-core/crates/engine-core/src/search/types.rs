@@ -317,6 +317,19 @@ impl SearchResult {
             self.end_reason = info.reason;
         }
     }
+
+    /// Ensure legacy fields mirror the primary line when present.
+    pub fn sync_from_primary_line(&mut self) {
+        if let Some(lines) = self.lines.as_ref() {
+            if let Some(first) = lines.first() {
+                self.best_move = Some(first.root_move);
+                self.score = first.score_internal;
+                self.node_type = first.bound;
+                self.stats.pv = first.pv.iter().copied().collect();
+            }
+        }
+        self.refresh_summary();
+    }
 }
 
 fn compute_nps(nodes: u64, elapsed: Duration) -> u64 {
