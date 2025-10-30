@@ -606,55 +606,75 @@ impl Engine {
         }
 
         if adopted_tt {
-            // Probe root entry to attach node_type/score if Exact
-            let root_hash = pos.zobrist_hash();
-            // 既存の result.node_type / result.score を起点にし、TT Exact の場合のみ上書きする。
-            let mut bound = result.node_type;
-            let mut score_internal = result.score;
-            if let Some(entry) = self.shared_tt.probe_entry(root_hash, pos.side_to_move) {
-                if entry.matches(root_hash) && entry.node_type() == NodeType::Exact {
-                    bound = NodeType::Exact;
-                    // entry.score() は TT 格納時に root 相対へ正規化済み。
-                    // ルートでの取得のため ply=0 で一致し、追加正規化は不要。
-                    score_internal = entry.score() as i32;
+            let mut legal_prefix: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+            let mut cursor = pos.clone();
+            for mv in pv.iter().copied() {
+                if !cursor.is_pseudo_legal(mv) || !cursor.is_legal_move(mv) {
+                    break;
                 }
+                legal_prefix.push(mv);
+                let _ = cursor.do_move(mv);
             }
 
-            let root_move = pv.first().copied().unwrap_or_else(crate::shogi::Move::null);
-            // Fallback seldepth: prefer stats.seldepth, else derive from result
-            let seldepth =
-                result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
-            let line = RootLine {
-                multipv_index: 1,
-                root_move,
-                score_internal,
-                score_cp: clamp_score_cp(score_internal),
-                bound,
-                depth: result.depth,
-                seldepth,
-                pv: {
-                    let mut v: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
-                    v.extend(pv.iter().copied());
-                    v
-                },
-                nodes: Some(result.nodes),
-                time_ms: Some(result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
-                nps: Some(result.nps),
-                exact_exhausted: false,
-                exhaust_reason: None,
-                mate_distance: get_mate_distance(score_internal),
-            };
-            let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
-            out.push(line);
-            // 同期更新：lines とトップレベルを一貫化
-            let first = out[0].clone();
-            result.lines = Some(out);
-            result.best_move = Some(first.root_move);
-            result.score = first.score_internal;
-            result.node_type = first.bound;
-            result.stats.pv = first.pv.iter().copied().collect();
-            result.refresh_summary();
-            return;
+            if !legal_prefix.is_empty() {
+                // Probe root entry to attach node_type/score if Exact
+                let root_hash = pos.zobrist_hash();
+                // 既存の result.node_type / result.score を起点にし、TT Exact の場合のみ上書きする。
+                let mut bound = result.node_type;
+                let mut score_internal = result.score;
+                if let Some(entry) = self.shared_tt.probe_entry(root_hash, pos.side_to_move) {
+                    if entry.matches(root_hash) && entry.node_type() == NodeType::Exact {
+                        bound = NodeType::Exact;
+                        // entry.score() は TT 格納時に root 相対へ正規化済み。
+                        // ルートでの取得のため ply=0 で一致し、追加正規化は不要。
+                        score_internal = entry.score() as i32;
+                    }
+                }
+
+                let root_move =
+                    legal_prefix.first().copied().unwrap_or_else(crate::shogi::Move::null);
+                // Fallback seldepth: prefer stats.seldepth, else derive from result
+                let seldepth =
+                    result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
+                let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+                let nodes_total = result.stats.nodes;
+                let nps = if elapsed_ms == 0 {
+                    0
+                } else {
+                    nodes_total.saturating_mul(1000).saturating_div(elapsed_ms.max(1))
+                };
+                let line = RootLine {
+                    multipv_index: 1,
+                    root_move,
+                    score_internal,
+                    score_cp: clamp_score_cp(score_internal),
+                    bound,
+                    depth: result.depth,
+                    seldepth,
+                    pv: {
+                        let mut v: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+                        v.extend(legal_prefix.iter().copied());
+                        v
+                    },
+                    nodes: Some(nodes_total),
+                    time_ms: Some(elapsed_ms),
+                    nps: Some(nps),
+                    exact_exhausted: false,
+                    exhaust_reason: None,
+                    mate_distance: get_mate_distance(score_internal),
+                };
+                let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+                out.push(line);
+                // 同期更新：lines とトップレベルを一貫化
+                let first = out[0].clone();
+                result.lines = Some(out);
+                result.best_move = Some(first.root_move);
+                result.score = first.score_internal;
+                result.node_type = first.bound;
+                result.stats.pv = first.pv.iter().copied().collect();
+                result.refresh_summary();
+                return;
+            }
         }
 
         // 最終フォールバック（任意）：すべて空でTTも採用不可なら 1 手PVを作る
@@ -667,6 +687,13 @@ impl Engine {
                 let mut pv_one: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
                 pv_one.push(best);
                 let score_internal = result.score;
+                let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+                let nodes_total = result.stats.nodes;
+                let nps = if elapsed_ms == 0 {
+                    0
+                } else {
+                    nodes_total.saturating_mul(1000).saturating_div(elapsed_ms.max(1))
+                };
                 let line = RootLine {
                     multipv_index: 1,
                     root_move: best,
@@ -676,9 +703,9 @@ impl Engine {
                     depth: result.depth,
                     seldepth,
                     pv: pv_one,
-                    nodes: Some(result.nodes),
-                    time_ms: Some(result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64),
-                    nps: Some(result.nps),
+                    nodes: Some(nodes_total),
+                    time_ms: Some(elapsed_ms),
+                    nps: Some(nps),
                     exact_exhausted: false,
                     exhaust_reason: None,
                     mate_distance: get_mate_distance(score_internal),
