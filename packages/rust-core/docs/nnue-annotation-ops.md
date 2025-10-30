@@ -29,6 +29,10 @@
   - TMでhardがない場合は soft をcapにして「新イテ抑止/縮退」のみ適用（NearHardは送らない）。
 - MultiPV縮退: 近締切帯では 1 へ縮退（PV1優先）。
 
+補足（キルスイッチ）
+- ランタイムで一括無効化する場合は `SHOGI_DISABLE_STABILIZATION=1` を使用（旧名 `SHOGI_DISABLE_P1` も後方互換で受理）。
+  - 対象: 近締切ゲート（新イテ抑止/縮退/NearHard）、アスピ安定化（2回失敗→フル窓、リトライ上限→フル窓）、P1.5（狭窓検証）の枠組み。
+
 ## P1.5（Near‑final 狭窓検証：既定OFF）
 - 内容: 近ハード帯で PV1先頭手を狭窓（[s−Δ, s+Δ]、既定Δ=1cp）で1回だけ検証。窓内ヒットで `lines[0].bound=Exact`、`score_internal←検証値`。既にExactならスキップ。
 - 予算: `BUDGET_MS` を qnodes に換算し上限にクランプ。`MIN_DEPTH` と `MIN_TREM_MS` で実行ガード。
@@ -43,12 +47,19 @@
   - `SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE`（既定0）
   - `SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP`（既定0, 0..32）
 - 推奨: 既定OFF。End-heavy×高MPVでスポットON（目安: 800ms/MPV7→Δ=2、1200ms/MPV10→Δ=3）。
+ - ログ拡張（解析補助）
+   - 実行時: `near_final_zero_window=1 kind=upper|lower diff=Δ alpha=.. beta=.. target=.. budget_ms=.. qnodes_used=.. confirmed_exact=0|1`
+   - スキップ: `near_final_zero_window_skip=1 reason=already_exact|min_depth|trem_short|min_multipv|mate_near|bound_far ...`
+     - 近締切で MultiPV が縮退（k→1）して `min_multipv` に満たない場合は `... reason=min_multipv ... shrunk=1` を付与。
 
 ## 計測KPI（generator/探索 共通）
 - 収率: `empty_pv_rate`（≈0%を目標）、`top1_exact_rate`、成功率（success/attempted）。
 - 安定性: `aspiration_failures/re_searches（p99≤2）`, `root_fail_high_count`。
 - 近締切: `near_deadline_params（origin, main/fin windows, t_rem）`、`multipv_shrunk`、`skip_new_iter`。
 - パフォーマンス: `NPS`, `seldepth`, `tt_hit_rate`。
+
+注記（qnodes計上）
+- 近締切 狭窓検証で消費した `qnodes_local` は累積統計 `cum_qnodes` に加算します（NPSがわずかに動くのは仕様）。
 
 ## A/Bの代表結果（2025-10-29）
 - 短TC/浅深（300ms/MPV3）: P1.5の恩恵は小（Top1Exact/成功率 微減〜±0、NPS −1〜−2%）。

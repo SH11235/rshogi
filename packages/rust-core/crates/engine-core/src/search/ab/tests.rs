@@ -1729,3 +1729,35 @@ fn threads_lg2_monotonic_and_non_negative() {
         prev = lg;
     }
 }
+#[test]
+fn classify_root_bound_boundaries() {
+    use super::driver::ClassicBackend as BE;
+    // alpha < beta invariant
+    let (alpha, beta) = (-10, 10);
+    // Exactly at alpha → UpperBound
+    assert!(matches!(
+        BE::<MaterialEvaluator>::classify_root_bound(alpha, alpha, beta),
+        NodeType::UpperBound
+    ));
+    // Exactly at beta → LowerBound
+    assert!(matches!(
+        BE::<MaterialEvaluator>::classify_root_bound(beta, alpha, beta),
+        NodeType::LowerBound
+    ));
+    // Strictly inside → Exact
+    assert!(matches!(
+        BE::<MaterialEvaluator>::classify_root_bound(0, alpha, beta),
+        NodeType::Exact
+    ));
+}
+
+#[test]
+fn byoyomi_qnodes_limit_scales_with_depth() {
+    use super::driver::ClassicBackend as BE;
+    use crate::search::limits::SearchLimitsBuilder as B;
+    // Byoyomi time control without TimeManager → driver detects byoyomi_active
+    let limits = B::default().byoyomi(20_000, 1_000, 1).build();
+    let d1 = BE::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 1, 1);
+    let d4 = BE::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 4, 1);
+    assert!(d4 > d1, "byoyomi qnodes limit should increase with depth ({} -> {})", d1, d4);
+}
