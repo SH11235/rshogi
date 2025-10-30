@@ -1747,10 +1747,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             *heur_state = shared_heur;
 
             if iteration_complete {
-                final_depth_reached = d as u8;
-                final_seldepth_reached = Some(capped_seldepth);
-                final_seldepth_raw = Some(seldepth);
-
                 // 近締切帯での最終確認（任意、環境フラグで有効化）。
                 // まず、条件を満たすが既にExactな場合のスキップ理由をログ。
                 if !Self::stabilization_disabled()
@@ -1971,34 +1967,46 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                 }
 
-                // near-final 検証による depth_lines の更新を反映した後に final_lines を固定
-                final_lines = Some(depth_lines.clone());
-                if let Some(ctrl) = stop_controller.as_ref() {
-                    ctrl.publish_committed_snapshot(
-                        session_id,
-                        root_key,
-                        depth_lines.as_slice(),
-                        nodes,
-                        t0.elapsed().as_millis() as u64,
-                    );
+                let fully_resolved =
+                    matches!(depth_lines.first().map(|l| l.bound), Some(NodeType::Exact));
 
-                    // Thin B案: 探索側フック — 短手数詰みを検出したら早期最終化を要求
-                    if crate::search::config::mate_early_stop_enabled() {
-                        if let Some(first_line) = depth_lines.first() {
-                            let max_d =
-                                crate::search::config::mate_early_stop_max_distance() as i32;
-                            if let Some(dist) =
-                                crate::search::constants::mate_distance(first_line.score_internal)
-                            {
-                                if dist > 0 && dist <= max_d {
-                                    ctrl.request_finalize(FinalizeReason::PlannedMate {
-                                        distance: dist,
-                                        was_ponder: limits.is_ponder,
-                                    });
+                if fully_resolved {
+                    final_depth_reached = d as u8;
+                    final_seldepth_reached = Some(capped_seldepth);
+                    final_seldepth_raw = Some(seldepth);
+
+                    // near-final 検証による depth_lines の更新を反映した後に final_lines を固定
+                    final_lines = Some(depth_lines.clone());
+                    if let Some(ctrl) = stop_controller.as_ref() {
+                        ctrl.publish_committed_snapshot(
+                            session_id,
+                            root_key,
+                            depth_lines.as_slice(),
+                            nodes,
+                            t0.elapsed().as_millis() as u64,
+                        );
+
+                        // Thin B案: 探索側フック — 短手数詰みを検出したら早期最終化を要求
+                        if crate::search::config::mate_early_stop_enabled() {
+                            if let Some(first_line) = depth_lines.first() {
+                                let max_d =
+                                    crate::search::config::mate_early_stop_max_distance() as i32;
+                                if let Some(dist) = crate::search::constants::mate_distance(
+                                    first_line.score_internal,
+                                ) {
+                                    if dist > 0 && dist <= max_d {
+                                        ctrl.request_finalize(FinalizeReason::PlannedMate {
+                                            distance: dist,
+                                            was_ponder: limits.is_ponder,
+                                        });
+                                    }
                                 }
                             }
                         }
                     }
+                } else if incomplete_depth.is_none() {
+                    // fail-high/low 等でExactが得られなかった → 未完イテレーションとして扱う
+                    incomplete_depth = Some(d as u8);
                 }
             } else if incomplete_depth.is_none() {
                 // iteration が完了しなかった場合は未完了深さとして記録する。
