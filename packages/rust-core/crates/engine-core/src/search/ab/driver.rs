@@ -89,15 +89,26 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     #[inline]
-    fn p1_disabled() -> bool {
-        static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| match std::env::var("SHOGI_DISABLE_P1") {
-            Ok(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                v == "1" || v == "true" || v == "on"
+    /// Global kill-switch for stabilization gates (near-deadline policy, aspiration safeguards, near-final verify).
+    /// New name: SHOGI_DISABLE_STABILIZATION（旧: SHOGI_DISABLE_P1 を後方互換で受理）。
+    fn stabilization_disabled() -> bool {
+        #[cfg(test)]
+        {
+            if Self::parse_bool_env("SHOGI_DISABLE_STABILIZATION", false) {
+                return true;
             }
-            Err(_) => false,
-        })
+            return Self::parse_bool_env("SHOGI_DISABLE_P1", false);
+        }
+        #[cfg(not(test))]
+        {
+            static FLAG: OnceLock<bool> = OnceLock::new();
+            *FLAG.get_or_init(|| {
+                if Self::parse_bool_env("SHOGI_DISABLE_STABILIZATION", false) {
+                    return true;
+                }
+                Self::parse_bool_env("SHOGI_DISABLE_P1", false)
+            })
+        }
     }
     #[inline]
     fn is_byoyomi_active(limits: &SearchLimits) -> bool {
@@ -174,10 +185,29 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             limit = base.saturating_mul(depth_scale).saturating_add(99) / 100;
         }
 
-        limit.clamp(
-            crate::search::constants::MIN_QNODES_LIMIT,
-            crate::search::constants::DEFAULT_QNODES_LIMIT,
-        )
+        let relax_mult = Self::qnodes_limit_relax_mult();
+        let max_cap =
+            crate::search::constants::DEFAULT_QNODES_LIMIT.saturating_mul(relax_mult.max(1));
+        limit.clamp(crate::search::constants::MIN_QNODES_LIMIT, max_cap)
+    }
+
+    #[inline]
+    fn qnodes_limit_relax_mult() -> u64 {
+        #[cfg(test)]
+        {
+            return match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            };
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            })
+        }
     }
 
     #[inline]
@@ -767,7 +797,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             ));
                         }
                         // NearHard finalize は hard が存在する場合のみ、ponder 中は送らない
-                        if !Self::p1_disabled()
+                        if !Self::stabilization_disabled()
                             && hard_ms != u64::MAX
                             && !limits.is_ponder
                             && dec.fire_nearhard
@@ -779,7 +809,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 }
                             }
                         }
-                        if !Self::p1_disabled() && dec.skip_new_iter {
+                        if !Self::stabilization_disabled() && dec.skip_new_iter {
                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                 cb("near_deadline_skip_new_iter=1");
                             }
@@ -802,7 +832,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             cap_ms, dec.t_rem_ms, dec.main_win_ms, dec.finalize_win_ms
                         ));
                     }
-                    if !Self::p1_disabled() && !limits.is_ponder && dec.fire_nearhard {
+                    if !Self::stabilization_disabled() && !limits.is_ponder && dec.fire_nearhard {
                         // FixedTime でも NearHard finalize を 1 回だけ送る（P1仕様）。
                         if let Some(ctrl) = limits.stop_controller.as_ref() {
                             if !finalize_nearhard_sent && !is_helper {
@@ -811,7 +841,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             }
                         }
                     }
-                    if !Self::p1_disabled() && dec.skip_new_iter {
+                    if !Self::stabilization_disabled() && dec.skip_new_iter {
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb("near_deadline_skip_new_iter=1");
                         }
@@ -981,7 +1011,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if let Some(dec) =
                         Self::decide_near_deadline_policy(cap_ms, elapsed_ms, d, limits.multipv)
                     {
-                        if !Self::p1_disabled() && dec.shrink_multipv {
+                        if !Self::stabilization_disabled() && dec.shrink_multipv {
                             k = 1;
                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                 cb("near_deadline_multipv_shrink=1");
@@ -998,7 +1028,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if let Some(dec) =
                     Self::decide_near_deadline_policy(cap_ms, elapsed_ms, d, limits.multipv)
                 {
-                    if !Self::p1_disabled() && dec.shrink_multipv {
+                    if !Self::stabilization_disabled() && dec.shrink_multipv {
                         k = 1;
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb("near_deadline_multipv_shrink=1");
@@ -1409,7 +1439,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
                         // P1: Aggressive bailout — two failures in the same iteration => full window
-                        if !Self::p1_disabled() && !is_helper && iteration_asp_failures >= 2 {
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_asp_failures >= 2
+                        {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1422,7 +1455,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         // If re-searches are piling up on the primary, bail out to a full window
                         // to stabilize PV and avoid time loss.
                         let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_researches >= retries_max
                         {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
@@ -1457,7 +1492,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             });
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
-                        if !Self::p1_disabled() && !is_helper && iteration_asp_failures >= 2 {
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_asp_failures >= 2
+                        {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
@@ -1467,7 +1505,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         iteration_researches = iteration_researches.saturating_add(1);
                         let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !Self::p1_disabled() && !is_helper && iteration_researches >= retries_max
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_researches >= retries_max
                         {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
@@ -1713,7 +1753,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
                 // 近締切帯での最終確認（任意、環境フラグで有効化）。
                 // まず、条件を満たすが既にExactな場合のスキップ理由をログ。
-                if !Self::p1_disabled()
+                if !Self::stabilization_disabled()
                     && finalize_nearhard_sent
                     && Self::near_final_zero_window_enabled()
                     && d >= Self::near_final_zero_window_min_depth()
@@ -1725,7 +1765,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                 }
 
-                if !Self::p1_disabled()
+                if !Self::stabilization_disabled()
                     && finalize_nearhard_sent
                     && !zero_window_done
                     && Self::near_final_zero_window_enabled()
@@ -1754,8 +1794,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if limits.multipv < min_mpv {
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb(&format!(
-                                "near_final_zero_window_skip=1 reason=min_multipv mpv={} min_mpv={} t_rem={}",
-                                limits.multipv, min_mpv, t_rem
+                                "near_final_zero_window_skip=1 reason=min_multipv mpv={} min_mpv={} t_rem={} shrunk={}",
+                                limits.multipv,
+                                min_mpv,
+                                t_rem,
+                                (stats_multipv_shrunk != 0) as u8
                             ));
                         }
                     } else if t_rem < min_trem {
