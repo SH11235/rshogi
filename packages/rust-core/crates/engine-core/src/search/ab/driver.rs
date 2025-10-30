@@ -1809,6 +1809,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         let target = first.score_internal;
                         // 近傍判定: 境界からの距離が slack 以下なら検証対象
                         let slack = Self::near_final_zero_window_bound_slack_cp();
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "near_final_zero_window_start=1 depth={} score={} bound={:?}",
+                                d, target, first.bound
+                            ));
+                        }
                         if slack > 0 {
                             let near = match first.bound {
                                 NodeType::UpperBound => {
@@ -1949,7 +1955,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 NodeType::Exact => ("exact", 0),
                             };
                             cb(&format!(
-                                "near_final_zero_window=1 kind={} diff={} alpha={} beta={} target={} budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={} confirmed_exact={}",
+                                "near_final_zero_window_result=1 status={} kind={} diff={} alpha={} beta={} target={} budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={}",
+                                if confirmed { "confirmed" } else { "inexact" },
                                 kind,
                                 diff,
                                 alpha0,
@@ -1960,8 +1967,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 qnodes_limit_pre,
                                 qnodes_limit_post,
                                 t_rem,
-                                qnodes_local,
-                                confirmed as u8
+                                qnodes_local
                             ));
                         }
                     }
@@ -2172,7 +2178,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             let mut published_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
             if incomplete_depth.is_some() && !lines.is_empty() {
+                // 未完イテレーションでは MultiPV=1 のみ公開し、USI 側もその前提で扱う。
                 published_lines.push(lines[0].clone());
+                if let Some(cb) = limits.info_string_callback.as_ref() {
+                    cb("finalize_lines_shrunk=1 reason=incomplete_iteration");
+                }
             } else {
                 published_lines.extend(lines.iter().cloned());
             }
@@ -2182,10 +2192,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 stable_depth = Some(final_depth_reached);
             }
         } else if let Some(snap) = stable_snapshot {
-            best_move_out = snap.best;
-            // スナップショットはcpのみ保持のため、この経路ではcpを使用（互換維持）
-            score_out = snap.score_cp;
-            node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
             stats.depth = snap.depth;
             stats.seldepth = snap.seldepth;
@@ -2194,11 +2200,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             report_source = Some(SnapshotSource::Stable);
             snapshot_version = Some(snap.version);
             stable_depth = Some(snap.depth);
+            if let Some(first) = result_lines.as_ref().and_then(|ls| ls.first()) {
+                best_move_out = Some(first.root_move);
+                score_out = first.score_internal;
+                node_type_out = first.bound;
+            } else {
+                best_move_out = snap.best;
+                score_out = snap.score_cp;
+                node_type_out = snap.node_type;
+            }
         } else if let Some(snap) = snapshot_any.clone() {
-            best_move_out = snap.best;
-            // 同上（Partial/Stable snapshot経路）
-            score_out = snap.score_cp;
-            node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
             stats.depth = snap.depth;
             stats.seldepth = snap.seldepth;
@@ -2209,6 +2220,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if snap.source == SnapshotSource::Stable {
                 stable_depth = Some(snap.depth);
             }
+            if let Some(first) = result_lines.as_ref().and_then(|ls| ls.first()) {
+                best_move_out = Some(first.root_move);
+                score_out = first.score_internal;
+                node_type_out = first.bound;
+            } else {
+                best_move_out = snap.best;
+                score_out = snap.score_cp;
+                node_type_out = snap.node_type;
+            }
+        }
+
+        if let Some(lines) = result_lines.as_ref().and_then(|ls| ls.first()) {
+            best_move_out = Some(lines.root_move);
+            score_out = lines.score_internal;
+            node_type_out = lines.bound;
+            stats.pv = lines.pv.iter().copied().collect();
         }
 
         if best_move_out.is_none() {
