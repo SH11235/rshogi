@@ -1222,7 +1222,7 @@ mod tests {
         let first = &lines[0];
         assert_eq!(first.bound, Bound::LowerBound, "fallback must preserve result.node_type");
         assert_eq!(first.score_internal, 50, "fallback must keep result.score");
-        assert!(first.pv.len() >= 1, "fallback must synthesize at least 1 move PV");
+        assert!(!first.pv.is_empty(), "fallback must synthesize at least 1 move PV");
     }
 
     /// ルートTTが非Exactの場合はTT由来PVを採用せず、境界を保持することを検証。

@@ -2977,7 +2977,7 @@ mod tests {
         let stats = SearchStats {
             nodes: 0,
             elapsed: Duration::from_millis(elapsed_ms),
-            depth: stable_depth.unwrap_or(0) as u8,
+            depth: stable_depth.unwrap_or(0),
             stable_depth,
             ..Default::default()
         };
@@ -2988,10 +2988,12 @@ mod tests {
 
     #[test]
     fn postverify_skip_info_exact_small_distance() {
-        let mut opts = UsiOptions::default();
-        opts.mate_postverify_skip_max_dist = 3;
-        opts.mate_postverify_exact_min_depth = 8;
-        opts.mate_postverify_exact_min_elapsed_ms = 400;
+        let opts = UsiOptions {
+            mate_postverify_skip_max_dist: 3,
+            mate_postverify_exact_min_depth: 8,
+            mate_postverify_exact_min_elapsed_ms: 400,
+            ..Default::default()
+        };
 
         let res = mk_result_with(mate_score(3, true), NodeType::Exact, Some(8), 200);
         let info = postverify_skip_info(&res, &opts);

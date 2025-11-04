@@ -97,7 +97,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if Self::parse_bool_env("SHOGI_DISABLE_STABILIZATION", false) {
                 return true;
             }
-            return Self::parse_bool_env("SHOGI_DISABLE_P1", false);
+            Self::parse_bool_env("SHOGI_DISABLE_P1", false)
         }
         #[cfg(not(test))]
         {
@@ -195,10 +195,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn qnodes_limit_relax_mult() -> u64 {
         #[cfg(test)]
         {
-            return match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
+            match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
                 Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
                 Err(_) => 1,
-            };
+            }
         }
         #[cfg(not(test))]
         {
@@ -214,7 +214,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn multipv_scheduler_enabled() -> bool {
         #[cfg(test)]
         {
-            return Self::parse_bool_env("SHOGI_MULTIPV_SCHEDULER", false);
+            Self::parse_bool_env("SHOGI_MULTIPV_SCHEDULER", false)
         }
         #[cfg(not(test))]
         {
@@ -227,10 +227,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn multipv_scheduler_bias() -> u64 {
         #[cfg(test)]
         {
-            return match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
+            match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
                 Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
                 Err(_) => 4,
-            };
+            }
         }
         #[cfg(not(test))]
         {
@@ -1389,7 +1389,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             beta_cuts: &mut beta_cuts,
                                             lmr_counter: &mut lmr_counter,
                                             lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
-                                            lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                            lmr_blocked_recapture: Some(
+                                                &depth_lmr_blocked_recapture,
+                                            ),
                                             evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                         },
                                         &mut search_ctx_fw,

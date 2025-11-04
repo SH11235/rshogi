@@ -9,11 +9,11 @@ use smallvec::SmallVec;
 
 use super::driver::ClassicBackend;
 use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, MovePicker};
-use crate::movegen::MoveGenerator;
-use std::sync::OnceLock;
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
+use crate::movegen::MoveGenerator;
 use crate::search::policy::{abdada_enabled, tt_suppress_below_depth};
 use crate::search::types::NodeType;
+use std::sync::OnceLock;
 
 #[cfg(feature = "diagnostics")]
 use super::qsearch::record_qnodes_peak;

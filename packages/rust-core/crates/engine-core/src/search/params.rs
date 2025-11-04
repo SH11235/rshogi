@@ -435,13 +435,13 @@ pub fn set_probcut_skip_verify_lt4(on: bool) {
 pub fn shallow_gate_enabled() -> bool {
     #[cfg(test)]
     {
-        return match std::env::var("SEARCH_SHALLOW_GATE") {
+        match std::env::var("SEARCH_SHALLOW_GATE") {
             Ok(v) => {
                 let v = v.trim().to_ascii_lowercase();
                 matches!(v.as_str(), "1" | "true" | "on" | "yes")
             }
             Err(_) => false,
-        };
+        }
     }
     #[cfg(not(test))]
     {

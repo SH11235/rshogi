@@ -907,13 +907,11 @@ mod watchdog_tests {
                     panic!("expected immediate Planned finalize after scheduling, got {:?}", other)
                 }
             }
-        } else {
-            if let Some(rx) = state.finalizer_rx.as_ref() {
-                assert!(
-                    rx.try_recv().is_err(),
-                    "no finalize should be emitted when only scheduling"
-                );
-            }
+        } else if let Some(rx) = state.finalizer_rx.as_ref() {
+            assert!(
+                rx.try_recv().is_err(),
+                "no finalize should be emitted when only scheduling"
+            );
         }
     }
 
