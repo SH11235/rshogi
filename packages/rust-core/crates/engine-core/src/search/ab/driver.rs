@@ -18,7 +18,7 @@ use crate::search::types::{NodeType, RootLine, SearchStack, StopInfo, Terminatio
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::Position;
 use smallvec::SmallVec;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use super::ordering::{self, Heuristics};
 use super::profile::{PruneToggles, SearchProfile};
@@ -677,6 +677,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_beta_cuts: u64 = 0;
         let mut cum_lmr_counter: u64 = 0;
         let mut cum_lmr_trials: u64 = 0;
+        // Instrumentation (cumulative across the whole search)
+        let mut cum_lmr_blocked_in_check: u64 = 0;
+        let mut cum_lmr_blocked_recapture: u64 = 0;
+        let mut cum_evasion_sparsity_ext: u64 = 0;
         // Aggregate qnodes across PVs/iterations for this worker result
         let mut cum_qnodes: u64 = 0;
         #[cfg(feature = "diagnostics")]
@@ -1050,6 +1054,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut depth_beta_cuts: u64 = 0;
             let mut depth_lmr_counter: u64 = 0;
             let mut depth_lmr_trials: u64 = 0;
+            // instrumentation (depth‑local Cells)
+            let depth_lmr_blocked_in_check = Cell::new(0u64);
+            let depth_lmr_blocked_recapture = Cell::new(0u64);
+            let depth_evasion_sparsity_ext = Cell::new(0u64);
             let mut local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
             let mut depth_hint_exists: u64 = 0;
             let mut depth_hint_used: u64 = 0;
@@ -1314,6 +1322,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
                                         lmr_counter: &mut lmr_counter,
+                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                     },
                                     &mut search_ctx,
                                 );
@@ -1344,6 +1355,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
                                         lmr_counter: &mut lmr_counter,
+                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                     },
                                     &mut search_ctx_nw,
                                 );
@@ -1374,6 +1388,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             tt_hits: &mut tt_hits,
                                             beta_cuts: &mut beta_cuts,
                                             lmr_counter: &mut lmr_counter,
+                                            lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                            lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                            evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                         },
                                         &mut search_ctx_fw,
                                     );
@@ -1735,6 +1752,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             cum_beta_cuts = cum_beta_cuts.saturating_add(depth_beta_cuts);
             cum_lmr_counter = cum_lmr_counter.saturating_add(depth_lmr_counter);
             cum_lmr_trials = cum_lmr_trials.saturating_add(depth_lmr_trials);
+            // Instrumentation aggregation
+            cum_lmr_blocked_in_check =
+                cum_lmr_blocked_in_check.saturating_add(depth_lmr_blocked_in_check.get());
+            cum_lmr_blocked_recapture =
+                cum_lmr_blocked_recapture.saturating_add(depth_lmr_blocked_recapture.get());
+            cum_evasion_sparsity_ext =
+                cum_evasion_sparsity_ext.saturating_add(depth_evasion_sparsity_ext.get());
 
             // 反復ごとのrootヒント統計（最終反復で掲載）
             stats_hint_exists = depth_hint_exists;
@@ -1926,6 +1950,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 tt_hits: &mut tt_hits_local,
                                 beta_cuts: &mut beta_cuts_local,
                                 lmr_counter: &mut lmr_counter_local,
+                                lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                             },
                             &mut search_ctx_nw,
                         );
@@ -2136,6 +2163,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.tt_hits = Some(cum_tt_hits);
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);
+        // Publish instrumentation
+        stats.lmr_blocked_in_check = Some(cum_lmr_blocked_in_check);
+        stats.lmr_blocked_recapture = Some(cum_lmr_blocked_recapture);
+        stats.evasion_sparsity_extensions = Some(cum_evasion_sparsity_ext);
         stats.root_fail_high_count = Some(cum_beta_cuts);
         #[cfg(feature = "diagnostics")]
         {
