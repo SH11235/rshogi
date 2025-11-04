@@ -209,6 +209,10 @@ fn tt_bound_follows_used_window() {
             tt_hits: &mut tt_hits,
             beta_cuts: &mut beta_cuts,
             lmr_counter: &mut lmr_counter,
+            // These counters are optional in tests; not tracking per-depth stats here.
+            lmr_blocked_in_check: None,
+            lmr_blocked_recapture: None,
+            evasion_sparsity_ext: None,
         },
         &mut ctx,
     );
