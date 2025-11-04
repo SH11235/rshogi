@@ -101,6 +101,12 @@ pub struct SearchStats {
     pub near_final_attempted: Option<u64>,
     /// Near-final verify confirmations (number of times Exact was confirmed)
     pub near_final_confirmed: Option<u64>,
+    /// LMR gating: times LMR was disabled/blocked due to in_check/evasion at current node
+    pub lmr_blocked_in_check: Option<u64>,
+    /// LMR gating: times LMR was disabled/blocked due to recapture heuristic
+    pub lmr_blocked_recapture: Option<u64>,
+    /// Extensions: times we applied +1 ply due to evasion sparsity (few legal evasions)
+    pub evasion_sparsity_extensions: Option<u64>,
     /// ABDADA diagnostics (counts)
     #[cfg(feature = "diagnostics")]
     pub abdada_busy_detected: Option<u64>,

@@ -267,6 +267,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     tt_hits,
                     beta_cuts,
                     lmr_counter,
+                    lmr_blocked_in_check: None,
+                    lmr_blocked_recapture: None,
+                    evasion_sparsity_ext: None,
                 },
                 ctx,
             );
@@ -332,6 +335,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 tt_hits,
                 beta_cuts,
                 lmr_counter,
+                lmr_blocked_in_check: None,
+                lmr_blocked_recapture: None,
+                evasion_sparsity_ext: None,
             },
             ctx,
         );
@@ -479,6 +485,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             tt_hits,
                             beta_cuts,
                             lmr_counter,
+                            lmr_blocked_in_check: None,
+                            lmr_blocked_recapture: None,
+                            evasion_sparsity_ext: None,
                         },
                         ctx,
                     );
@@ -549,6 +558,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         tt_hits,
                         beta_cuts,
                         lmr_counter,
+                        lmr_blocked_in_check: None,
+                        lmr_blocked_recapture: None,
+                        evasion_sparsity_ext: None,
                     },
                     ctx,
                 );

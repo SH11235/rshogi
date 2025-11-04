@@ -153,6 +153,9 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
                         tt_hits: &mut _tt_hits,
                         beta_cuts: &mut _beta_cuts,
                         lmr_counter: &mut _lmr_counter,
+                        lmr_blocked_in_check: None,
+                        lmr_blocked_recapture: None,
+                        evasion_sparsity_ext: None,
                     },
                     &mut ctx,
                 );
