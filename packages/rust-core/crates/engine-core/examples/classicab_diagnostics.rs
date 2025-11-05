@@ -113,16 +113,28 @@ fn main() {
         hashfull: u16,
         helper_share_pct: f64,
         score: i32,
+        lines_len: usize,
+        top1_exact: u8,
         tt_hits: u64,
         lmr: u64,
         lmr_trials: u64,
         beta_cuts: u64,
+        aspiration_failures: u32,
+        re_searches: u32,
+        pv_changed: u32,
         asp_fail_high: u32,
         asp_fail_low: u32,
         tt_root_match: u8,
         tt_root_depth: u8,
         root_tt_hint_exists: u64,
         root_tt_hint_used: u64,
+        multipv_primary_lines: u8,
+        multipv_helper_lines: u8,
+        near_deadline_skip_new_iter: u64,
+        multipv_shrunk: u64,
+        near_final_attempted: u64,
+        near_final_confirmed: u64,
+        incomplete_depth: u8,
         heur_quiet_max: i16,
         heur_cont_max: i16,
         heur_capture_max: i16,
@@ -263,11 +275,11 @@ fn main() {
             if args.format == "text" {
                 if depth == args.depth_min {
                     println!(
-                        "  columns: depth nodes nps hashfull helper_share(%) score tt_hits lmr lmr_trials beta_cuts aspFH aspFL root_hint_exist root_hint_used tt_root_match tt_root_depth heur_quiet_max heur_cont_max heur_capture_max heur_counter"
+                        "  columns: depth nodes nps hashfull helper_share(%) score tt_hits lmr lmr_trials beta_cuts aspFH aspFL root_tt_hint_exists root_tt_hint_used tt_root_match tt_root_depth heur_quiet_max heur_cont_max heur_capture_max heur_counter"
                     );
                 }
                 println!(
-                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  helper_share(%) {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_hint_exist {:>1}  root_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
+                    "  depth {:>2}  nodes {:>10}  nps {:>9}  hashfull {:>4}  helper_share(%) {:>6.1}  score {:>6}  tt_hits {:>8}  lmr {:>8}  lmr_trials {:>8}  beta_cuts {:>8}  aspFH {:>3}  aspFL {:>3}  root_tt_hint_exists {:>1}  root_tt_hint_used {:>1}  tt_root_match {:>1}  tt_root_depth {:>2}  heur_quiet_max {:>5}  heur_cont_max {:>5}  heur_capture_max {:>5}  heur_counter {:>6}",
                     depth,
                     res.stats.nodes,
                     nps,
@@ -290,6 +302,24 @@ fn main() {
                     heur_summary.counter_filled
                 );
             } else {
+                let lines_len = res.lines.as_ref().map(|ls| ls.len()).unwrap_or(0);
+                let top1_exact: u8 = res
+                    .lines
+                    .as_ref()
+                    .and_then(|ls| ls.first())
+                    .map(|l| matches!(l.bound, engine_core::search::types::NodeType::Exact) as u8)
+                    .unwrap_or(0);
+                let aspiration_failures = res.stats.aspiration_failures.unwrap_or(0);
+                let re_searches = res.stats.re_searches.unwrap_or(0);
+                let pv_changed = res.stats.pv_changed.unwrap_or(0);
+                let multipv_primary_lines = res.stats.multipv_primary_lines.unwrap_or(0);
+                let multipv_helper_lines = res.stats.multipv_helper_lines.unwrap_or(0);
+                let near_deadline_skip_new_iter =
+                    res.stats.near_deadline_skip_new_iter.unwrap_or(0);
+                let multipv_shrunk = res.stats.multipv_shrunk.unwrap_or(0);
+                let near_final_attempted = res.stats.near_final_attempted.unwrap_or(0);
+                let near_final_confirmed = res.stats.near_final_confirmed.unwrap_or(0);
+                let incomplete_depth = res.stats.incomplete_depth.unwrap_or(0);
                 rows.push(Row {
                     name,
                     sfen,
@@ -299,16 +329,28 @@ fn main() {
                     hashfull: hf,
                     helper_share_pct: helper_share,
                     score: res.score,
+                    lines_len,
+                    top1_exact,
                     tt_hits,
                     lmr,
                     lmr_trials,
                     beta_cuts: beta,
+                    aspiration_failures,
+                    re_searches,
+                    pv_changed,
                     asp_fail_high,
                     asp_fail_low,
                     tt_root_match,
                     tt_root_depth,
                     root_tt_hint_exists: res.stats.root_tt_hint_exists.unwrap_or(0),
                     root_tt_hint_used: res.stats.root_tt_hint_used.unwrap_or(0),
+                    multipv_primary_lines,
+                    multipv_helper_lines,
+                    near_deadline_skip_new_iter,
+                    multipv_shrunk,
+                    near_final_attempted,
+                    near_final_confirmed,
+                    incomplete_depth,
                     heur_quiet_max: heur_summary.quiet_max,
                     heur_cont_max: heur_summary.continuation_max,
                     heur_capture_max: heur_summary.capture_max,
@@ -322,10 +364,10 @@ fn main() {
     if args.format == "csv" || args.format == "json" {
         if args.format == "csv" {
             let mut out = String::new();
-            out.push_str("name,sfen,depth,nodes,nps,hashfull,helper_share_pct,score,tt_hits,lmr,lmr_trials,beta_cuts,aspFH,aspFL,root_hint_exist,root_hint_used,tt_root_match,tt_root_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n");
+            out.push_str(CSV_HEADER);
             for r in &rows {
                 out.push_str(&format!(
-                    "{name},{sfen},{depth},{nodes},{nps},{hashfull},{helper_share_pct:.2},{score},{tt_hits},{lmr},{lmr_trials},{beta_cuts},{asp_fail_high},{asp_fail_low},{root_tt_hint_exists},{root_tt_hint_used},{tt_root_match},{tt_root_depth},{heur_quiet_max},{heur_cont_max},{heur_capture_max},{heur_counter_filled}\n",
+                    "{name},{sfen},{depth},{nodes},{nps},{hashfull},{helper_share_pct:.2},{score},{lines_len},{top1_exact},{tt_hits},{lmr},{lmr_trials},{beta_cuts},{aspiration_failures},{re_searches},{pv_changed},{asp_fail_high},{asp_fail_low},{root_tt_hint_exists},{root_tt_hint_used},{tt_root_match},{tt_root_depth},{multipv_primary_lines},{multipv_helper_lines},{near_deadline_skip_new_iter},{multipv_shrunk},{near_final_attempted},{near_final_confirmed},{incomplete_depth},{heur_quiet_max},{heur_cont_max},{heur_capture_max},{heur_counter_filled}\n",
                     name = r.name,
                     sfen = r.sfen,
                     depth = r.depth,
@@ -334,16 +376,28 @@ fn main() {
                     hashfull = r.hashfull,
                     helper_share_pct = r.helper_share_pct,
                     score = r.score,
+                    lines_len = r.lines_len,
+                    top1_exact = r.top1_exact,
                     tt_hits = r.tt_hits,
                     lmr = r.lmr,
                     lmr_trials = r.lmr_trials,
                     beta_cuts = r.beta_cuts,
+                    aspiration_failures = r.aspiration_failures,
+                    re_searches = r.re_searches,
+                    pv_changed = r.pv_changed,
                     asp_fail_high = r.asp_fail_high,
                     asp_fail_low = r.asp_fail_low,
                     root_tt_hint_exists = r.root_tt_hint_exists,
                     root_tt_hint_used = r.root_tt_hint_used,
                     tt_root_match = r.tt_root_match,
                     tt_root_depth = r.tt_root_depth,
+                    multipv_primary_lines = r.multipv_primary_lines,
+                    multipv_helper_lines = r.multipv_helper_lines,
+                    near_deadline_skip_new_iter = r.near_deadline_skip_new_iter,
+                    multipv_shrunk = r.multipv_shrunk,
+                    near_final_attempted = r.near_final_attempted,
+                    near_final_confirmed = r.near_final_confirmed,
+                    incomplete_depth = r.incomplete_depth,
                     heur_quiet_max = r.heur_quiet_max,
                     heur_cont_max = r.heur_cont_max,
                     heur_capture_max = r.heur_capture_max,
@@ -363,6 +417,19 @@ fn main() {
                 println!("{}", s);
             }
         }
+    }
+}
+
+// Keep CSV header as a single constant to avoid format drift (used by tests as well)
+const CSV_HEADER: &str = "name,sfen,depth,nodes,nps,hashfull,helper_share_pct,score,lines_len,top1_exact,tt_hits,lmr,lmr_trials,beta_cuts,aspiration_failures,re_searches,pv_changed,aspFH,aspFL,root_tt_hint_exists,root_tt_hint_used,tt_root_match,tt_root_depth,multipv_primary_lines,multipv_helper_lines,near_deadline_skip_new_iter,multipv_shrunk,near_final_attempted,near_final_confirmed,incomplete_depth,heur_quiet_max,heur_cont_max,heur_capture_max,heur_counter_filled\n";
+
+#[cfg(test)]
+mod tests {
+    use super::CSV_HEADER;
+    #[test]
+    fn csv_header_contains_near_final_columns() {
+        assert!(CSV_HEADER.contains("near_final_attempted"));
+        assert!(CSV_HEADER.contains("near_final_confirmed"));
     }
 }
 
@@ -455,7 +522,7 @@ fn run_compare_iid(args: &Args) {
         );
     }
     // サマリ出力（CSV）
-    println!("name,depth,tt_hits_on,tt_hits_off,delta_hits,beta_on,beta_off,delta_beta,nodes_on,nodes_off,nodes_ratio,root_hint_used_on,root_hint_used_off");
+    println!("name,depth,tt_hits_on,tt_hits_off,delta_hits,beta_on,beta_off,delta_beta,nodes_on,nodes_off,nodes_ratio,root_tt_hint_used_on,root_tt_hint_used_off");
     let mut sum_hits_on: u64 = 0;
     let mut sum_hits_off: u64 = 0;
     let mut sum_beta_on: u64 = 0;
@@ -479,8 +546,8 @@ fn run_compare_iid(args: &Args) {
             let b_off = g(offr, "beta_cuts");
             let n_on = g(&r, "nodes");
             let n_off = g(offr, "nodes");
-            let used_on = g(&r, "root_hint_used");
-            let used_off = g(offr, "root_hint_used");
+            let used_on = g(&r, "root_tt_hint_used");
+            let used_off = g(offr, "root_tt_hint_used");
             let ratio = if n_off > 0 {
                 (n_on as f64) / (n_off as f64)
             } else {

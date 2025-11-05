@@ -2,7 +2,10 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
-use crate::search::types::StopInfo;
+use crate::search::common::get_mate_distance;
+use crate::search::tt::reconstruct_pv_generic;
+use crate::search::types::clamp_score_cp;
+use crate::search::types::{NodeType, RootLine, StopInfo};
 use crate::time_management::{
     detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager, TimeState,
 };
@@ -18,6 +21,7 @@ use crate::{
 };
 use log::{debug, info, warn};
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, OnceLock,
@@ -563,9 +567,14 @@ impl Engine {
 
         // Wait for result synchronously (for backward compatibility)
         // In the future, callers should use start_search() directly for true async behavior
-        let result = session
+        let mut result = session
             .recv_result()
             .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()));
+
+        // - 合成PV（TT/合法フォールバック）を採用した場合は、
+        //   SearchResult のトップレベル（best_move/score/node_type、stats.pv）も
+        //   lines[0] に合わせて同期する（下流のUSI側バッファと不整合を起こさないため）。
+        self.finalize_pv_from_tt(pos, &mut result);
 
         if let Some(tm) = session.time_manager() {
             let elapsed_ms = result.stats.elapsed.as_millis() as u64;
@@ -574,6 +583,144 @@ impl Engine {
         }
 
         result
+    }
+
+    /// Fallback: if result.lines is empty, try to reconstruct PV from TT (Exact only) and
+    /// synthesize lines[0] accordingly. 合成した場合は best_move/score/node_type と
+    /// stats.pv も同期して SearchResult を一貫化する。
+    fn finalize_pv_from_tt(&self, pos: &Position, result: &mut SearchResult) {
+        // Already has at least one line
+        if result.lines.as_ref().map(|ls| !ls.is_empty()).unwrap_or(false) {
+            return;
+        }
+
+        // Try reconstructing PV from TT
+        let mut p = pos.clone();
+        let pv = reconstruct_pv_generic(&*self.shared_tt, &mut p, 32);
+        let mut adopted_tt = false;
+        if let Some(&head) = pv.first() {
+            // Head legality guard（TT汚染時の保険）
+            if pos.is_pseudo_legal(head) && pos.is_legal_move(head) {
+                adopted_tt = true;
+            }
+        }
+
+        if adopted_tt {
+            let mut legal_prefix: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+            let mut cursor = pos.clone();
+            for mv in pv.iter().copied() {
+                if !cursor.is_pseudo_legal(mv) || !cursor.is_legal_move(mv) {
+                    break;
+                }
+                legal_prefix.push(mv);
+                let _ = cursor.do_move(mv);
+            }
+
+            if !legal_prefix.is_empty() {
+                // Probe root entry to attach node_type/score if Exact
+                let root_hash = pos.zobrist_hash();
+                // 既存の result.node_type / result.score を起点にし、TT Exact の場合のみ上書きする。
+                let mut bound = result.node_type;
+                let mut score_internal = result.score;
+                if let Some(entry) = self.shared_tt.probe_entry(root_hash, pos.side_to_move) {
+                    if entry.matches(root_hash) && entry.node_type() == NodeType::Exact {
+                        bound = NodeType::Exact;
+                        // entry.score() は TT 格納時に root 相対へ正規化済み。
+                        // ルートでの取得のため ply=0 で一致し、追加正規化は不要。
+                        score_internal = entry.score() as i32;
+                    }
+                }
+
+                let root_move =
+                    legal_prefix.first().copied().unwrap_or_else(crate::shogi::Move::null);
+                // Fallback seldepth: prefer stats.seldepth, else derive from result
+                let seldepth = result.stats.seldepth.or_else(|| {
+                    let hint =
+                        result.seldepth.max(legal_prefix.len() as u32).min(u32::from(u8::MAX));
+                    Some(hint as u8)
+                });
+                let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+                let nodes_total = result.stats.nodes;
+                let nps = if elapsed_ms == 0 {
+                    0
+                } else {
+                    nodes_total.saturating_mul(1000).saturating_div(elapsed_ms.max(1))
+                };
+                let line = RootLine {
+                    multipv_index: 1,
+                    root_move,
+                    score_internal,
+                    score_cp: clamp_score_cp(score_internal),
+                    bound,
+                    depth: result.depth,
+                    seldepth,
+                    pv: {
+                        let mut v: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+                        v.extend(legal_prefix.iter().copied());
+                        v
+                    },
+                    nodes: Some(nodes_total),
+                    time_ms: Some(elapsed_ms),
+                    nps: Some(nps),
+                    exact_exhausted: false,
+                    exhaust_reason: None,
+                    mate_distance: get_mate_distance(score_internal),
+                };
+                let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+                out.push(line);
+                result.lines = Some(out);
+                // sync_from_primary_line() keeps best_move/score/node_type/stats.pv aligned with lines[0].
+                // 以降はこれらのフィールドを個別に書き換えないこと。
+                result.sync_from_primary_line();
+                debug!("pv_synth_source=tt");
+                return;
+            }
+        }
+
+        // 最終フォールバック（任意）：すべて空でTTも採用不可なら 1 手PVを作る
+        if result.lines.as_ref().map(|ls| ls.is_empty()).unwrap_or(true) {
+            let fb = self.choose_final_bestmove(pos, None);
+            if let Some(best) = fb.best_move {
+                // 合成（1手 PV）。score/bound は現行 result のものを使用
+                let mut pv_one: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
+                pv_one.push(best);
+                let seldepth = result.stats.seldepth.or_else(|| {
+                    let hint = result.seldepth.max(pv_one.len() as u32).min(u32::from(u8::MAX));
+                    Some(hint as u8)
+                });
+                let score_internal = result.score;
+                let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+                let nodes_total = result.stats.nodes;
+                let nps = if elapsed_ms == 0 {
+                    0
+                } else {
+                    nodes_total.saturating_mul(1000).saturating_div(elapsed_ms.max(1))
+                };
+                let line = RootLine {
+                    multipv_index: 1,
+                    root_move: best,
+                    score_internal,
+                    score_cp: clamp_score_cp(score_internal),
+                    bound: result.node_type,
+                    depth: result.depth,
+                    seldepth,
+                    pv: pv_one,
+                    nodes: Some(nodes_total),
+                    time_ms: Some(elapsed_ms),
+                    nps: Some(nps),
+                    exact_exhausted: false,
+                    exhaust_reason: None,
+                    mate_distance: get_mate_distance(score_internal),
+                };
+                let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+                out.push(line);
+                result.lines = Some(out);
+                // sync_from_primary_line() keeps best_move/score/node_type/stats.pv aligned with lines[0].
+                // 以降はこれらのフィールドを個別に書き換えないこと。
+                result.sync_from_primary_line();
+                debug!("pv_synth_source=legal_fallback");
+            }
+        }
     }
 
     /// Try to get a ponder move directly from TT for the child position after `best_move`.
@@ -597,7 +744,7 @@ impl Engine {
         }
         // YaneuraOu 同様、確信度の低い境界ノードは避ける（成り／駒種差などで
         // PV 順が揺れても決定手を誤誘導しないよう Exact のみ採用）。
-        if entry.node_type() != crate::search::NodeType::Exact {
+        if entry.node_type() != NodeType::Exact {
             return None;
         }
         if let Some(mv) = entry.get_move() {
@@ -832,11 +979,22 @@ impl Engine {
         let tt_pv = self.reconstruct_root_pv_from_tt(pos, 24);
         if let Some(&head) = tt_pv.first() {
             if pos.is_pseudo_legal(head) && pos.is_legal_move(head) {
-                return FinalBest {
-                    best_move: Some(head),
-                    pv: tt_pv,
-                    source: FinalBestSource::TT,
-                };
+                let mut cursor = pos.clone();
+                let mut trimmed: Vec<crate::shogi::Move> = Vec::with_capacity(tt_pv.len());
+                for mv in tt_pv {
+                    if !cursor.is_pseudo_legal(mv) || !cursor.is_legal_move(mv) {
+                        break;
+                    }
+                    trimmed.push(mv);
+                    let _ = cursor.do_move(mv);
+                }
+                if !trimmed.is_empty() {
+                    return FinalBest {
+                        best_move: Some(head),
+                        pv: trimmed,
+                        source: FinalBestSource::TT,
+                    };
+                }
             }
         }
 
@@ -1016,8 +1174,12 @@ impl Evaluator for NNUEEvaluatorProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::types::NodeType as Bound;
+    use crate::search::types::SearchResult;
+    use crate::search::types::SearchStats;
     use crate::shogi::Position;
-    use crate::usi::move_to_usi;
+    use crate::usi::{move_to_usi, parse_usi_move};
+    use std::time::Duration;
 
     #[test]
     fn legal_fallback_prefers_promotion_as_tactical() {
@@ -1032,5 +1194,127 @@ mod tests {
             move_to_usi(&mv)
         );
         assert_eq!(best.source, FinalBestSource::LegalFallback);
+    }
+
+    /// 合成PV（TT不採用→最終1手PV）で `result.node_type` が保持されることを検証。
+    #[test]
+    fn finalize_pv_preserves_bound_on_fallback() {
+        let engine = Engine::new(EngineType::Material);
+        let pos = Position::startpos();
+
+        // lines なし・LowerBound 結果を用意（スコアは任意）
+        let mut result = SearchResult::with_node_type(
+            None,
+            50,
+            SearchStats {
+                elapsed: Duration::from_millis(1),
+                depth: 6,
+                seldepth: Some(4),
+                ..Default::default()
+            },
+            Bound::LowerBound,
+        );
+
+        // TT は空のまま → finalize_pv_from_tt は最終フォールバック（1手PV合成）を通る
+        super::Engine::finalize_pv_from_tt(&engine, &pos, &mut result);
+
+        let lines = result.lines.as_ref().expect("lines must be synthesized");
+        let first = &lines[0];
+        assert_eq!(first.bound, Bound::LowerBound, "fallback must preserve result.node_type");
+        assert_eq!(first.score_internal, 50, "fallback must keep result.score");
+        assert!(!first.pv.is_empty(), "fallback must synthesize at least 1 move PV");
+    }
+
+    /// ルートTTが非Exactの場合はTT由来PVを採用せず、境界を保持することを検証。
+    #[test]
+    fn finalize_pv_preserves_bound_when_tt_non_exact() {
+        let engine = Engine::new(EngineType::Material);
+        let pos = Position::startpos();
+
+        // ルートに合法手を持つ LowerBound エントリを保存（PV 再構成は Exact 連鎖のみなので採用不可）
+        let mv = parse_usi_move("7g7f").unwrap();
+        let root_hash = pos.zobrist_hash();
+        let side = pos.side_to_move;
+        engine.shared_tt.store(crate::search::tt::TTStoreArgs::new(
+            root_hash,
+            Some(mv),
+            10,
+            0,
+            8,
+            Bound::LowerBound,
+            side,
+        ));
+
+        let mut result = SearchResult::with_node_type(
+            None,
+            -25,
+            SearchStats {
+                elapsed: Duration::from_millis(1),
+                depth: 8,
+                seldepth: Some(6),
+                ..Default::default()
+            },
+            Bound::UpperBound,
+        );
+
+        super::Engine::finalize_pv_from_tt(&engine, &pos, &mut result);
+
+        let lines = result.lines.as_ref().expect("lines must be synthesized");
+        let first = &lines[0];
+        assert_eq!(first.bound, Bound::UpperBound, "non-Exact TT must not flip bound");
+        assert_eq!(
+            first.score_internal, -25,
+            "score must remain result.score when TT is non-Exact"
+        );
+    }
+
+    /// ルートTTが Exact の場合にのみ `Exact` へ昇格し、TT スコアが反映されることを検証。
+    #[test]
+    fn finalize_pv_upgrades_to_exact_when_tt_exact() {
+        let engine = Engine::new(EngineType::Material);
+        let pos = Position::startpos();
+
+        // ルートに Exact エントリを保存（合法手 + 十分な深さ）。
+        let mv = parse_usi_move("7g7f").unwrap();
+        let root_hash = pos.zobrist_hash();
+        let side = pos.side_to_move;
+        let tt_score: i16 = 321; // TT に保存する内部スコア（i16）
+        engine.shared_tt.store(crate::search::tt::TTStoreArgs::new(
+            root_hash,
+            Some(mv),
+            tt_score,
+            0,
+            8,
+            Bound::Exact,
+            side,
+        ));
+
+        // 入力結果は LowerBound/別スコアだが、TT Exact により Exact/TT スコアへ上書きされる想定
+        let mut result = SearchResult::with_node_type(
+            None,
+            -999,
+            SearchStats {
+                elapsed: Duration::from_millis(1),
+                depth: 10,
+                seldepth: Some(9),
+                ..Default::default()
+            },
+            Bound::LowerBound,
+        );
+
+        super::Engine::finalize_pv_from_tt(&engine, &pos, &mut result);
+
+        let lines = result.lines.as_ref().expect("lines must be synthesized from TT");
+        let first = &lines[0];
+        assert_eq!(first.bound, Bound::Exact, "TT Exact must upgrade bound to Exact");
+        assert_eq!(
+            first.score_internal, tt_score as i32,
+            "score must be taken from Exact TT entry"
+        );
+        let head = first.pv.first().copied().unwrap();
+        assert!(
+            head.equals_without_piece_type(&mv),
+            "PV head must match TT move (ignoring piece type)"
+        );
     }
 }

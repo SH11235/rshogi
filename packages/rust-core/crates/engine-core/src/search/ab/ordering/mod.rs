@@ -154,7 +154,8 @@ pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_>) -> i32 {
     *params.lmr_trials = params.lmr_trials.saturating_add(1);
     let depth_ln = ln_depth(params.depth);
     let moveno_ln = ln_moveno(params.moveno);
-    let rd = ((depth_ln * moveno_ln) / dynp::lmr_k_coeff()).floor() as i32;
+    // 深さ依存の係数（浅層では LMR を弱める）
+    let rd = ((depth_ln * moveno_ln) / dynp::lmr_k_coeff_for_depth(params.depth)).floor() as i32;
     let mut r = rd.max(1);
     if params.is_pv {
         r -= 1;

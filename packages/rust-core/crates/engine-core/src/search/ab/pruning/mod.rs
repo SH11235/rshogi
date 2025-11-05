@@ -267,6 +267,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     tt_hits,
                     beta_cuts,
                     lmr_counter,
+                    lmr_blocked_in_check: None,
+                    lmr_blocked_recapture: None,
+                    evasion_sparsity_ext: None,
                 },
                 ctx,
             );
@@ -332,6 +335,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 tt_hits,
                 beta_cuts,
                 lmr_counter,
+                lmr_blocked_in_check: None,
+                lmr_blocked_recapture: None,
+                evasion_sparsity_ext: None,
             },
             ctx,
         );
@@ -367,7 +373,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ..
         } = params;
-        if !toggles.enable_probcut || !dynp::probcut_enabled() || pos.is_in_check() || params.is_pv
+        if !toggles.enable_probcut
+            || !dynp::probcut_enabled()
+            || !dynp::probcut_allowed(depth)
+            || pos.is_in_check()
+            || params.is_pv
         {
             return None;
         }
@@ -475,6 +485,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             tt_hits,
                             beta_cuts,
                             lmr_counter,
+                            lmr_blocked_in_check: None,
+                            lmr_blocked_recapture: None,
+                            evasion_sparsity_ext: None,
                         },
                         ctx,
                     );
@@ -545,6 +558,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         tt_hits,
                         beta_cuts,
                         lmr_counter,
+                        lmr_blocked_in_check: None,
+                        lmr_blocked_recapture: None,
+                        evasion_sparsity_ext: None,
                     },
                     ctx,
                 );

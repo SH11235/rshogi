@@ -18,7 +18,7 @@ use crate::search::types::{NodeType, RootLine, SearchStack, StopInfo, Terminatio
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::Position;
 use smallvec::SmallVec;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use super::ordering::{self, Heuristics};
 use super::profile::{PruneToggles, SearchProfile};
@@ -70,6 +70,16 @@ pub(crate) fn return_stack_cache(buf: Vec<SearchStack>) {
     });
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NearDeadlineDecision {
+    skip_new_iter: bool,
+    shrink_multipv: bool,
+    fire_nearhard: bool,
+    main_win_ms: u64,
+    finalize_win_ms: u64,
+    t_rem_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     pub(super) evaluator: Arc<E>,
@@ -78,6 +88,28 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    #[inline]
+    /// Global kill-switch for stabilization gates (near-deadline policy, aspiration safeguards, near-final verify).
+    /// New name: SHOGI_DISABLE_STABILIZATION（旧: SHOGI_DISABLE_P1 を後方互換で受理）。
+    fn stabilization_disabled() -> bool {
+        #[cfg(test)]
+        {
+            if Self::parse_bool_env("SHOGI_DISABLE_STABILIZATION", false) {
+                return true;
+            }
+            Self::parse_bool_env("SHOGI_DISABLE_P1", false)
+        }
+        #[cfg(not(test))]
+        {
+            static FLAG: OnceLock<bool> = OnceLock::new();
+            *FLAG.get_or_init(|| {
+                if Self::parse_bool_env("SHOGI_DISABLE_STABILIZATION", false) {
+                    return true;
+                }
+                Self::parse_bool_env("SHOGI_DISABLE_P1", false)
+            })
+        }
+    }
     #[inline]
     fn is_byoyomi_active(limits: &SearchLimits) -> bool {
         matches!(limits.time_control, TimeControl::Byoyomi { .. })
@@ -134,9 +166,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return u64::MAX;
         }
 
+        // MultiPVスケジューラ（最小版）: PV1を優先するため、PV2以降の上限を強く絞る
         if pv_idx > 1 {
-            let divisor = (pv_idx as u64).saturating_add(1);
-            limit /= divisor;
+            let divisor = if Self::multipv_scheduler_enabled() {
+                let bias = Self::multipv_scheduler_bias();
+                bias.saturating_mul(pv_idx as u64).max(2)
+            } else {
+                (pv_idx as u64).saturating_add(1)
+            };
+            limit = limit.saturating_div(divisor);
         }
 
         if byoyomi_active {
@@ -147,10 +185,61 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             limit = base.saturating_mul(depth_scale).saturating_add(99) / 100;
         }
 
-        limit.clamp(
-            crate::search::constants::MIN_QNODES_LIMIT,
-            crate::search::constants::DEFAULT_QNODES_LIMIT,
-        )
+        let relax_mult = Self::qnodes_limit_relax_mult();
+        let max_cap =
+            crate::search::constants::DEFAULT_QNODES_LIMIT.saturating_mul(relax_mult.max(1));
+        limit.clamp(crate::search::constants::MIN_QNODES_LIMIT, max_cap)
+    }
+
+    #[inline]
+    fn qnodes_limit_relax_mult() -> u64 {
+        #[cfg(test)]
+        {
+            match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            })
+        }
+    }
+
+    #[inline]
+    fn multipv_scheduler_enabled() -> bool {
+        #[cfg(test)]
+        {
+            Self::parse_bool_env("SHOGI_MULTIPV_SCHEDULER", false)
+        }
+        #[cfg(not(test))]
+        {
+            static FLAG: OnceLock<bool> = OnceLock::new();
+            *FLAG.get_or_init(|| Self::parse_bool_env("SHOGI_MULTIPV_SCHEDULER", false))
+        }
+    }
+
+    #[inline]
+    fn multipv_scheduler_bias() -> u64 {
+        #[cfg(test)]
+        {
+            match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
+                Err(_) => 4,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
+                Err(_) => 4,
+            })
+        }
     }
 
     #[cfg(test)]
@@ -227,6 +316,45 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
     }
     #[inline]
+    pub(crate) fn derive_main_near_deadline_window_ms(hard_ms: u64) -> u64 {
+        // 80..600ms の範囲で hard の 1/5
+        let base = hard_ms / 5;
+        base.clamp(80, 600)
+    }
+    #[inline]
+    pub(crate) fn derive_near_hard_finalize_ms(hard_ms: u64) -> u64 {
+        // 60..400ms の範囲で hard の 1/6
+        let base = hard_ms / 6;
+        base.clamp(60, 400)
+    }
+
+    #[inline]
+    fn decide_near_deadline_policy(
+        hard_cap_ms: u64,
+        elapsed_ms: u64,
+        depth: i32,
+        _multipv: u8,
+    ) -> Option<NearDeadlineDecision> {
+        if hard_cap_ms == u64::MAX || elapsed_ms >= hard_cap_ms {
+            return None;
+        }
+        let t_rem = hard_cap_ms.saturating_sub(elapsed_ms);
+        let main_win = Self::derive_main_near_deadline_window_ms(hard_cap_ms);
+        let finalize_win = Self::derive_near_hard_finalize_ms(hard_cap_ms);
+        let fire_nearhard = t_rem <= finalize_win;
+        // 新イテ抑止は2手目以降のみ（d>1）
+        let skip_new_iter = t_rem <= main_win && depth > 1;
+        let shrink_multipv = t_rem <= main_win;
+        Some(NearDeadlineDecision {
+            skip_new_iter,
+            shrink_multipv,
+            fire_nearhard,
+            main_win_ms: main_win,
+            finalize_win_ms: finalize_win,
+            t_rem_ms: t_rem,
+        })
+    }
+    #[inline]
     pub(crate) fn classify_root_bound(local_best: i32, alpha_win: i32, beta_win: i32) -> NodeType {
         if local_best <= alpha_win {
             NodeType::UpperBound
@@ -252,6 +380,179 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // helpers while avoiding excessive USI output spam.
             Err(_) => Some(100),
         })
+    }
+
+    // Parse common boolean env values (1/true/on/yes) with default
+    #[inline]
+    fn parse_bool_env(var: &str, default: bool) -> bool {
+        match env::var(var) {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "on" | "yes")
+            }
+            Err(_) => default,
+        }
+    }
+
+    fn near_final_zero_window_enabled() -> bool {
+        #[cfg(test)]
+        {
+            Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", false)
+        }
+        #[cfg(not(test))]
+        {
+            static FLAG: OnceLock<bool> = OnceLock::new();
+            *FLAG.get_or_init(|| {
+                Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", false)
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_zero_window_budget_ms() -> u64 {
+        #[cfg(test)]
+        {
+            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
+                Err(_) => 80,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
+                Err(_) => 80,
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_zero_window_min_depth() -> i32 {
+        #[cfg(test)]
+        {
+            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
+                Err(_) => 4,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<i32> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
+                Err(_) => 4,
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_zero_window_min_trem_ms() -> u64 {
+        #[cfg(test)]
+        {
+            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
+                Err(_) => 60,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u64> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
+                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
+                Err(_) => 60,
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_zero_window_min_multipv() -> u8 {
+        #[cfg(test)]
+        {
+            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV") {
+                Ok(v) => v.parse::<u8>().ok().unwrap_or(0),
+                Err(_) => 0,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<u8> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV") {
+                Ok(v) => v.parse::<u8>().ok().unwrap_or(0),
+                Err(_) => 0,
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_verify_delta_cp() -> i32 {
+        #[cfg(test)]
+        {
+            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<i32> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                Err(_) => 1,
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_zero_window_skip_mate() -> bool {
+        #[cfg(test)]
+        {
+            Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE", false)
+        }
+        #[cfg(not(test))]
+        {
+            static FLAG: OnceLock<bool> = OnceLock::new();
+            *FLAG
+                .get_or_init(|| Self::parse_bool_env("SHOGI_ZERO_WINDOW_FINALIZE_SKIP_MATE", false))
+        }
+    }
+
+    #[inline]
+    fn near_final_zero_window_mate_delta_cp() -> i32 {
+        #[cfg(test)]
+        {
+            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 32)).unwrap_or(0),
+                Err(_) => 0,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<i32> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 32)).unwrap_or(0),
+                Err(_) => 0,
+            })
+        }
+    }
+
+    #[inline]
+    fn near_final_zero_window_bound_slack_cp() -> i32 {
+        #[cfg(test)]
+        {
+            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 64)).unwrap_or(0),
+                Err(_) => 0,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            static VAL: OnceLock<i32> = OnceLock::new();
+            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP") {
+                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 64)).unwrap_or(0),
+                Err(_) => 0,
+            })
+        }
     }
 
     pub fn new(evaluator: Arc<E>) -> Self {
@@ -324,6 +625,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         false
     }
 
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn threads_lg2_for_test(threads_hint: u32) -> i32 {
+        threads_hint.max(1).ilog2() as i32
+    }
+
     fn iterative_with_buffers(
         &self,
         root: &Position,
@@ -370,6 +677,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_beta_cuts: u64 = 0;
         let mut cum_lmr_counter: u64 = 0;
         let mut cum_lmr_trials: u64 = 0;
+        // Instrumentation (cumulative across the whole search)
+        let mut cum_lmr_blocked_in_check: u64 = 0;
+        let mut cum_lmr_blocked_recapture: u64 = 0;
+        let mut cum_evasion_sparsity_ext: u64 = 0;
         // Aggregate qnodes across PVs/iterations for this worker result
         let mut cum_qnodes: u64 = 0;
         #[cfg(feature = "diagnostics")]
@@ -378,6 +689,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cum_abdada_busy_set: u64 = 0;
         let mut stats_hint_exists: u64 = 0;
         let mut stats_hint_used: u64 = 0;
+        // Near-final verification counters (attempted/confirmed)
+        let mut near_final_attempted: u64 = 0;
+        let mut near_final_confirmed: u64 = 0;
 
         self.evaluator.on_set_position(root);
 
@@ -403,11 +717,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut cumulative_asp_hits: u32 = 0;
         let mut cumulative_researches: u32 = 0;
         let stop_controller = limits.stop_controller.clone();
+        // Finalize 一回化ガード
         let mut finalize_soft_sent = false;
+        let mut finalize_nearhard_sent = false;
         let mut last_deadline_hit: Option<DeadlineHit> = None;
         let mut lead_window_soft_break = false;
         let mut finalize_hard_sent = false;
         let is_helper = limits.helper_role;
+        let mut zero_window_done = false;
         let mut notify_deadline = |hit: DeadlineHit, nodes_now: u64| {
             if let Some(cb) = limits.info_string_callback.as_ref() {
                 let elapsed = t0.elapsed().as_millis();
@@ -415,6 +732,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     "deadline_hit kind={:?} elapsed_ms={} nodes={}",
                     hit, elapsed, nodes_now
                 ));
+            }
+            // finalize送出は primary のみ（helper はログのみ）
+            if is_helper {
+                return;
             }
             if let Some(ctrl) = stop_controller.as_ref() {
                 match hit {
@@ -450,7 +771,89 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // and aspiration center smoothing (A+C approach from YaneuraOu design)
         let mut best_hint_next_iter: Option<(crate::shogi::Move, i32)> = None;
 
+        // finalize_nearhard_sent は上で宣言（notify_deadline からも参照）
+
+        // 観測用フラグ（SearchStatsに反映）
+        let mut stats_near_deadline_skip_new_iter: u64 = 0;
+        let mut stats_multipv_shrunk: u64 = 0;
+
         for d in 1..=max_depth {
+            // Near-deadline gate: do not start a new iteration if we are too close to hard deadline.
+            if let Some(tm) = limits.time_manager.as_ref() {
+                let hard_ms = tm.hard_limit_ms();
+                let soft_ms = tm.soft_limit_ms();
+                let cap = if hard_ms != u64::MAX {
+                    Some((hard_ms, "tm-hard"))
+                } else if soft_ms != u64::MAX {
+                    Some((soft_ms, "tm-soft"))
+                } else {
+                    None
+                };
+                if let Some((cap_ms, origin)) = cap {
+                    let elapsed_ms = tm.elapsed_ms();
+                    if let Some(dec) =
+                        Self::decide_near_deadline_policy(cap_ms, elapsed_ms, d, limits.multipv)
+                    {
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "near_deadline_params origin={} hard_ms={} t_rem={} main_win_ms={} finalize_win_ms={}",
+                                origin, cap_ms, dec.t_rem_ms, dec.main_win_ms, dec.finalize_win_ms
+                            ));
+                        }
+                        // NearHard finalize は hard が存在する場合のみ、ponder 中は送らない
+                        if !Self::stabilization_disabled()
+                            && hard_ms != u64::MAX
+                            && !limits.is_ponder
+                            && dec.fire_nearhard
+                        {
+                            if let Some(ctrl) = limits.stop_controller.as_ref() {
+                                if !finalize_nearhard_sent && !is_helper {
+                                    ctrl.request_finalize(FinalizeReason::NearHard);
+                                    finalize_nearhard_sent = true;
+                                }
+                            }
+                        }
+                        if !Self::stabilization_disabled() && dec.skip_new_iter {
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb("near_deadline_skip_new_iter=1");
+                            }
+                            stats_near_deadline_skip_new_iter = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Fixed time limit（time_limit）が設定されている場合も同様の近〆切ゲートを適用
+            else if let Some(limit) = limits.time_limit() {
+                let cap_ms = limit.as_millis() as u64;
+                let elapsed_ms = t0.elapsed().as_millis() as u64;
+                if let Some(dec) =
+                    Self::decide_near_deadline_policy(cap_ms, elapsed_ms, d, limits.multipv)
+                {
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        cb(&format!(
+                            "near_deadline_params origin=fixed hard_ms={} t_rem={} main_win_ms={} finalize_win_ms={}",
+                            cap_ms, dec.t_rem_ms, dec.main_win_ms, dec.finalize_win_ms
+                        ));
+                    }
+                    if !Self::stabilization_disabled() && !limits.is_ponder && dec.fire_nearhard {
+                        // FixedTime でも NearHard finalize を 1 回だけ送る（P1仕様）。
+                        if let Some(ctrl) = limits.stop_controller.as_ref() {
+                            if !finalize_nearhard_sent && !is_helper {
+                                ctrl.request_finalize(FinalizeReason::NearHard);
+                                finalize_nearhard_sent = true;
+                            }
+                        }
+                    }
+                    if !Self::stabilization_disabled() && dec.skip_new_iter {
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb("near_deadline_skip_new_iter=1");
+                        }
+                        stats_near_deadline_skip_new_iter = 1;
+                        break;
+                    }
+                }
+            }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             if super::diagnostics::should_abort_now() {
                 last_deadline_hit = Some(DeadlineHit::Stop);
@@ -476,25 +879,29 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if let Some(hit) =
                 Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
             {
-                notify_deadline(hit, nodes);
-                match hit {
-                    DeadlineHit::Stop | DeadlineHit::Hard => {
-                        last_deadline_hit = Some(hit);
-                        if incomplete_depth.is_none() {
-                            incomplete_depth = Some(d as u8);
-                        }
-                        break;
-                    }
-                    DeadlineHit::Soft => {
-                        last_deadline_hit = Some(hit);
-                        if is_helper {
+                if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
+                    // ignore Soft after NearHard
+                } else {
+                    notify_deadline(hit, nodes);
+                    match hit {
+                        DeadlineHit::Stop | DeadlineHit::Hard => {
+                            last_deadline_hit = Some(hit);
                             if incomplete_depth.is_none() {
                                 incomplete_depth = Some(d as u8);
                             }
                             break;
                         }
-                        lead_window_soft_break = true;
-                        // Primary continues current iteration to commit PV.
+                        DeadlineHit::Soft => {
+                            last_deadline_hit = Some(hit);
+                            if is_helper {
+                                if incomplete_depth.is_none() {
+                                    incomplete_depth = Some(d as u8);
+                                }
+                                break;
+                            }
+                            lead_window_soft_break = true;
+                            // Primary continues current iteration to commit PV.
+                        }
                     }
                 }
             }
@@ -591,8 +998,49 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let root_static_eval_i16 =
                 root_static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
-            // MultiPV（逐次選抜）
-            let k = limits.multipv.max(1) as usize;
+            // MultiPV（逐次選抜）— near‑deadline では PV1 仕上げを優先（縮退）
+            let mut k = limits.multipv.max(1) as usize;
+            if let Some(tm) = limits.time_manager.as_ref() {
+                let hard_ms = tm.hard_limit_ms();
+                let soft_ms = tm.soft_limit_ms();
+                let cap = if hard_ms != u64::MAX {
+                    Some(hard_ms)
+                } else if soft_ms != u64::MAX {
+                    Some(soft_ms)
+                } else {
+                    None
+                };
+                if let Some(cap_ms) = cap {
+                    let elapsed_ms = tm.elapsed_ms();
+                    if let Some(dec) =
+                        Self::decide_near_deadline_policy(cap_ms, elapsed_ms, d, limits.multipv)
+                    {
+                        if !Self::stabilization_disabled() && dec.shrink_multipv {
+                            k = 1;
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb("near_deadline_multipv_shrink=1");
+                            }
+                            stats_multipv_shrunk = 1;
+                        }
+                    }
+                }
+            }
+            // Fixed time でも MultiPV 縮退を適用（decide の shrink を使用）
+            if let Some(limit) = limits.time_limit() {
+                let cap_ms = limit.as_millis() as u64;
+                let elapsed_ms = t0.elapsed().as_millis() as u64;
+                if let Some(dec) =
+                    Self::decide_near_deadline_policy(cap_ms, elapsed_ms, d, limits.multipv)
+                {
+                    if !Self::stabilization_disabled() && dec.shrink_multipv {
+                        k = 1;
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb("near_deadline_multipv_shrink=1");
+                        }
+                        stats_multipv_shrunk = 1;
+                    }
+                }
+            }
             let mut excluded: SmallVec<[crate::shogi::Move; 32]> = SmallVec::new();
             let mut depth_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
             let required_multipv_lines = if k > 1 {
@@ -606,6 +1054,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let mut depth_beta_cuts: u64 = 0;
             let mut depth_lmr_counter: u64 = 0;
             let mut depth_lmr_trials: u64 = 0;
+            // instrumentation (depth‑local Cells)
+            let depth_lmr_blocked_in_check = Cell::new(0u64);
+            let depth_lmr_blocked_recapture = Cell::new(0u64);
+            let depth_evasion_sparsity_ext = Cell::new(0u64);
             let mut local_best_for_next_iter: Option<(crate::shogi::Move, i32)> = None;
             let mut depth_hint_exists: u64 = 0;
             let mut depth_hint_used: u64 = 0;
@@ -616,6 +1068,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             let mut shared_heur = std::mem::take(heur_state);
             shared_heur.lmr_trials = 0;
+            // Verify-bound slack 用: 採用した PV1 の root 窓（alpha/beta）を保持
+            let mut verify_window_alpha: i32 = 0;
+            let mut verify_window_beta: i32 = 0;
             // qnodes フォールバック用: 最後に試行したPVのqnodesと、当該PVの行公開有無
             let mut last_pv_qnodes: u64 = 0;
             let mut last_pv_published: bool = false;
@@ -634,18 +1089,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     min_think_ms,
                     nodes,
                 ) {
-                    notify_deadline(hit, nodes);
-                    last_deadline_hit = Some(hit);
-                    match hit {
-                        DeadlineHit::Stop | DeadlineHit::Hard => break,
-                        DeadlineHit::Soft => {
-                            if is_helper || depth_lines.len() >= required_multipv_lines {
-                                if is_helper && incomplete_depth.is_none() {
-                                    incomplete_depth = Some(d as u8);
+                    if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
+                        // ignore Soft after NearHard
+                    } else {
+                        notify_deadline(hit, nodes);
+                        last_deadline_hit = Some(hit);
+                        match hit {
+                            DeadlineHit::Stop | DeadlineHit::Hard => break,
+                            DeadlineHit::Soft => {
+                                if is_helper || depth_lines.len() >= required_multipv_lines {
+                                    if is_helper && incomplete_depth.is_none() {
+                                        incomplete_depth = Some(d as u8);
+                                    }
+                                    break;
                                 }
-                                break;
+                                lead_window_soft_break = true;
                             }
-                            lead_window_soft_break = true;
                         }
                     }
                 }
@@ -678,16 +1137,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // primary: Δ0 = Δinit + K*log2(Threads)（上限あり）
                 // helper: off=フル窓 / wide=±HELPER_ASPIRATION_WIDE_DELTA
                 // floor(log2(threads)) を正しく計算（threads_hint 優先）
-                let threads_lg2: i32 = limits
-                    .threads_hint
-                    .map(|t| {
-                        if t > 0 {
-                            (u32::BITS - 1 - t.leading_zeros()) as i32
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0);
+                // u32::ilog2 を用いることでビット幅依存のバグを回避
+                let threads_lg2: i32 =
+                    limits.threads_hint.map(|t| t.max(1).ilog2() as i32).unwrap_or(0);
                 let mut delta = ASPIRATION_DELTA_INITIAL;
                 let mut alpha;
                 let mut beta;
@@ -758,18 +1210,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         min_think_ms,
                         nodes,
                     ) {
-                        notify_deadline(hit, nodes);
-                        last_deadline_hit = Some(hit);
-                        match hit {
-                            DeadlineHit::Stop | DeadlineHit::Hard => break,
-                            DeadlineHit::Soft => {
-                                if is_helper || depth_lines.len() >= required_multipv_lines {
-                                    if is_helper && incomplete_depth.is_none() {
-                                        incomplete_depth = Some(d as u8);
+                        if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
+                            // ignore Soft after NearHard
+                        } else {
+                            notify_deadline(hit, nodes);
+                            last_deadline_hit = Some(hit);
+                            match hit {
+                                DeadlineHit::Stop | DeadlineHit::Hard => break,
+                                DeadlineHit::Soft => {
+                                    if is_helper || depth_lines.len() >= required_multipv_lines {
+                                        if is_helper && incomplete_depth.is_none() {
+                                            incomplete_depth = Some(d as u8);
+                                        }
+                                        break;
                                     }
-                                    break;
+                                    lead_window_soft_break = true;
                                 }
-                                lead_window_soft_break = true;
                             }
                         }
                     }
@@ -800,18 +1256,23 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             min_think_ms,
                             nodes,
                         ) {
-                            notify_deadline(hit, nodes);
-                            last_deadline_hit = Some(hit);
-                            match hit {
-                                DeadlineHit::Stop | DeadlineHit::Hard => break,
-                                DeadlineHit::Soft => {
-                                    if is_helper || depth_lines.len() >= required_multipv_lines {
-                                        if is_helper && incomplete_depth.is_none() {
-                                            incomplete_depth = Some(d as u8);
+                            if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
+                                // ignore Soft after NearHard
+                            } else {
+                                notify_deadline(hit, nodes);
+                                last_deadline_hit = Some(hit);
+                                match hit {
+                                    DeadlineHit::Stop | DeadlineHit::Hard => break,
+                                    DeadlineHit::Soft => {
+                                        if is_helper || depth_lines.len() >= required_multipv_lines
+                                        {
+                                            if is_helper && incomplete_depth.is_none() {
+                                                incomplete_depth = Some(d as u8);
+                                            }
+                                            break;
                                         }
-                                        break;
+                                        lead_window_soft_break = true;
                                     }
-                                    lead_window_soft_break = true;
                                 }
                             }
                         }
@@ -861,6 +1322,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
                                         lmr_counter: &mut lmr_counter,
+                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                     },
                                     &mut search_ctx,
                                 );
@@ -891,6 +1355,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         tt_hits: &mut tt_hits,
                                         beta_cuts: &mut beta_cuts,
                                         lmr_counter: &mut lmr_counter,
+                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                     },
                                     &mut search_ctx_nw,
                                 );
@@ -921,6 +1388,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             tt_hits: &mut tt_hits,
                                             beta_cuts: &mut beta_cuts,
                                             lmr_counter: &mut lmr_counter,
+                                            lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                            lmr_blocked_recapture: Some(
+                                                &depth_lmr_blocked_recapture,
+                                            ),
+                                            evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                         },
                                         &mut search_ctx_fw,
                                     );
@@ -955,7 +1427,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         min_think_ms,
                         nodes,
                     ) {
-                        notify_deadline(hit, nodes);
+                        if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
+                            notify_deadline(hit, nodes);
+                        }
                         last_deadline_hit = Some(hit);
                         match hit {
                             DeadlineHit::Stop | DeadlineHit::Hard => break,
@@ -983,14 +1457,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             });
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
+                        // P1: Aggressive bailout — two failures in the same iteration => full window
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_asp_failures >= 2
+                        {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            // フル窓へ落とした直後にカウンタをリセット
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
+                            continue;
+                        }
                         iteration_researches = iteration_researches.saturating_add(1);
                         // If re-searches are piling up on the primary, bail out to a full window
                         // to stabilize PV and avoid time loss.
                         let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !is_helper && iteration_researches >= retries_max {
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_researches >= retries_max
+                        {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
                             continue;
                         }
                         if is_helper {
@@ -1019,12 +1511,28 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             });
                         }
                         iteration_asp_failures = iteration_asp_failures.saturating_add(1);
-                        iteration_researches = iteration_researches.saturating_add(1);
-                        let retries_max = Self::retries_max(soft_deadline, &t0);
-                        if !is_helper && iteration_researches >= retries_max {
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_asp_failures >= 2
+                        {
                             alpha = i32::MIN / 2;
                             beta = i32::MAX / 2;
                             delta = ASPIRATION_DELTA_MAX;
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
+                            continue;
+                        }
+                        iteration_researches = iteration_researches.saturating_add(1);
+                        let retries_max = Self::retries_max(soft_deadline, &t0);
+                        if !Self::stabilization_disabled()
+                            && !is_helper
+                            && iteration_researches >= retries_max
+                        {
+                            alpha = i32::MIN / 2;
+                            beta = i32::MAX / 2;
+                            delta = ASPIRATION_DELTA_MAX;
+                            iteration_asp_failures = 0;
+                            iteration_researches = 0;
                             continue;
                         }
                         if is_helper {
@@ -1129,6 +1637,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     let orig_alpha = window_alpha;
                     let orig_beta = window_beta;
                     let bound = Self::classify_root_bound(local_best, orig_alpha, orig_beta);
+                    if pv_idx == 1 {
+                        verify_window_alpha = orig_alpha;
+                        verify_window_beta = orig_beta;
+                    }
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
                         root_move: m,
@@ -1156,6 +1668,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         && pv_idx == 1
                         && matches!(node_type_for_store, NodeType::Exact)
                         && bench_stop_on_mate_enabled()
+                        && limits.time_manager.is_none()
+                        && limits.time_limit().is_none()
+                        && limits.fallback_deadlines.is_none()
                         && {
                             use crate::search::common::is_mate_score;
                             is_mate_score(local_best)
@@ -1239,6 +1754,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             cum_beta_cuts = cum_beta_cuts.saturating_add(depth_beta_cuts);
             cum_lmr_counter = cum_lmr_counter.saturating_add(depth_lmr_counter);
             cum_lmr_trials = cum_lmr_trials.saturating_add(depth_lmr_trials);
+            // Instrumentation aggregation
+            cum_lmr_blocked_in_check =
+                cum_lmr_blocked_in_check.saturating_add(depth_lmr_blocked_in_check.get());
+            cum_lmr_blocked_recapture =
+                cum_lmr_blocked_recapture.saturating_add(depth_lmr_blocked_recapture.get());
+            cum_evasion_sparsity_ext =
+                cum_evasion_sparsity_ext.saturating_add(depth_evasion_sparsity_ext.get());
 
             // 反復ごとのrootヒント統計（最終反復で掲載）
             stats_hint_exists = depth_hint_exists;
@@ -1251,36 +1773,294 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             *heur_state = shared_heur;
 
             if iteration_complete {
-                final_lines = Some(depth_lines.clone());
-                final_depth_reached = d as u8;
-                final_seldepth_reached = Some(capped_seldepth);
-                final_seldepth_raw = Some(seldepth);
-                if let Some(ctrl) = stop_controller.as_ref() {
-                    ctrl.publish_committed_snapshot(
-                        session_id,
-                        root_key,
-                        depth_lines.as_slice(),
-                        nodes,
-                        t0.elapsed().as_millis() as u64,
-                    );
+                // 近締切帯での最終確認（任意、環境フラグで有効化）。
+                // まず、条件を満たすが既にExactな場合のスキップ理由をログ。
+                if !Self::stabilization_disabled()
+                    && finalize_nearhard_sent
+                    && Self::near_final_zero_window_enabled()
+                    && d >= Self::near_final_zero_window_min_depth()
+                    && !depth_lines.is_empty()
+                    && matches!(depth_lines.first().map(|l| l.bound), Some(NodeType::Exact))
+                {
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        cb("near_final_zero_window_skip=1 reason=already_exact");
+                    }
+                }
 
-                    // Thin B案: 探索側フック — 短手数詰みを検出したら早期最終化を要求
-                    if crate::search::config::mate_early_stop_enabled() {
-                        if let Some(first_line) = depth_lines.first() {
-                            let max_d =
-                                crate::search::config::mate_early_stop_max_distance() as i32;
-                            if let Some(dist) =
-                                crate::search::constants::mate_distance(first_line.score_internal)
-                            {
-                                if dist > 0 && dist <= max_d {
-                                    ctrl.request_finalize(FinalizeReason::PlannedMate {
-                                        distance: dist,
-                                        was_ponder: limits.is_ponder,
-                                    });
+                if !Self::stabilization_disabled()
+                    && finalize_nearhard_sent
+                    && !zero_window_done
+                    && Self::near_final_zero_window_enabled()
+                    && d >= Self::near_final_zero_window_min_depth()
+                    && !depth_lines.is_empty()
+                    && !matches!(depth_lines.first().map(|l| l.bound), Some(NodeType::Exact))
+                {
+                    // 予算的な安全: t_rem が極小ならスキップ
+                    let mut t_rem: u64 = 0;
+                    if let Some(tm) = limits.time_manager.as_ref() {
+                        let hard = tm.hard_limit_ms();
+                        let el = tm.elapsed_ms();
+                        if hard != u64::MAX && el < hard {
+                            t_rem = hard.saturating_sub(el);
+                        }
+                    } else if let Some(limit) = limits.time_limit() {
+                        let cap = limit.as_millis() as u64;
+                        let el = t0.elapsed().as_millis() as u64;
+                        if el < cap {
+                            t_rem = cap.saturating_sub(el);
+                        }
+                    }
+                    let budget = Self::near_final_zero_window_budget_ms();
+                    let min_trem = Self::near_final_zero_window_min_trem_ms();
+                    let min_mpv = Self::near_final_zero_window_min_multipv();
+                    if limits.multipv < min_mpv {
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "near_final_zero_window_skip=1 reason=min_multipv mpv={} min_mpv={} t_rem={} shrunk={}",
+                                limits.multipv,
+                                min_mpv,
+                                t_rem,
+                                (stats_multipv_shrunk != 0) as u8
+                            ));
+                        }
+                    } else if t_rem < min_trem {
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "near_final_zero_window_skip=1 reason=trem_short t_rem={} min_trem={}",
+                                t_rem, min_trem
+                            ));
+                        }
+                    } else if let Some(first) = depth_lines.first_mut() {
+                        let mv0 = first.root_move;
+                        let target = first.score_internal;
+                        // 近傍判定: 境界からの距離が slack 以下なら検証対象
+                        let slack = Self::near_final_zero_window_bound_slack_cp();
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "near_final_zero_window_start=1 depth={} score={} bound={:?}",
+                                d, target, first.bound
+                            ));
+                        }
+                        if slack > 0 {
+                            let near = match first.bound {
+                                NodeType::UpperBound => {
+                                    // fail-low: target <= alpha
+                                    (verify_window_alpha - target).abs() <= slack
+                                }
+                                NodeType::LowerBound => {
+                                    // fail-high: target >= beta
+                                    (target - verify_window_beta).abs() <= slack
+                                }
+                                NodeType::Exact => false,
+                            };
+                            if !near {
+                                if let Some(cb) = limits.info_string_callback.as_ref() {
+                                    let (kind, diff) = match first.bound {
+                                        NodeType::UpperBound => {
+                                            ("upper", (verify_window_alpha - target).abs())
+                                        }
+                                        NodeType::LowerBound => {
+                                            ("lower", (target - verify_window_beta).abs())
+                                        }
+                                        NodeType::Exact => ("exact", 0),
+                                    };
+                                    cb(&format!(
+                                        "near_final_zero_window_skip=1 reason=bound_far kind={} diff={} slack={} alpha={} beta={} score={}",
+                                        kind, diff, slack, verify_window_alpha, verify_window_beta, target
+                                    ));
+                                }
+                                zero_window_done = true;
+                                continue;
+                            }
+                        }
+                        // mate近傍の扱い
+                        if Self::near_final_zero_window_skip_mate()
+                            && crate::search::common::is_mate_score(target)
+                        {
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb("near_final_zero_window_skip=1 reason=mate_near");
+                            }
+                            zero_window_done = true;
+                            continue;
+                        }
+                        let mut verify_delta = Self::near_final_verify_delta_cp();
+                        if crate::search::common::is_mate_score(target) {
+                            verify_delta += Self::near_final_zero_window_mate_delta_cp().max(0);
+                        }
+                        // 狭いフル窓: [s-Δ, s+Δ] で Exact を確認（整数スコアで成立する最小窓）
+                        let alpha0 = target.saturating_sub(verify_delta);
+                        let beta0 = target.saturating_add(verify_delta);
+                        let mut child = root.clone();
+                        child.do_move(mv0);
+                        // 局所カウンタ（本確認は軽量・単発）
+                        let mut qnodes_local: u64 = 0;
+                        let mut qnodes_limit_local = Self::compute_qnodes_limit(limits, d, 1);
+                        let qnodes_limit_pre = qnodes_limit_local;
+                        let mut tt_hits_local: u64 = 0;
+                        let mut beta_cuts_local: u64 = 0;
+                        let mut lmr_counter_local: u64 = 0;
+                        let mut heur_local = Heuristics::default();
+                        // 予算ms → qnodesへ換算し、上限を予算にクランプ
+                        let safety_ms: u64 = 20;
+                        let eff_budget_ms = if t_rem == 0 {
+                            budget
+                        } else if t_rem > safety_ms {
+                            budget.min(t_rem.saturating_sub(safety_ms))
+                        } else {
+                            0
+                        };
+                        let budget_qnodes = eff_budget_ms
+                            .saturating_mul(crate::search::constants::QNODES_PER_MS)
+                            .max(crate::search::constants::MIN_QNODES_LIMIT);
+                        if eff_budget_ms == 0 {
+                            zero_window_done = true;
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb(&format!(
+                                    "near_final_zero_window_skip=1 reason=no_budget t_rem={} eff_budget_ms={}",
+                                    t_rem,
+                                    eff_budget_ms
+                                ));
+                            }
+                            continue;
+                        }
+                        qnodes_limit_local = qnodes_limit_local.min(budget_qnodes);
+                        let qnodes_limit_post = qnodes_limit_local;
+                        let mut search_ctx_nw = SearchContext {
+                            limits,
+                            start_time: &t0,
+                            nodes: &mut nodes,
+                            seldepth: &mut seldepth,
+                            qnodes: &mut qnodes_local,
+                            qnodes_limit: qnodes_limit_local,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_detected: &mut cum_abdada_busy_detected,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_set: &mut cum_abdada_busy_set,
+                        };
+                        // Attempt once per iteration under gating conditions
+                        near_final_attempted = near_final_attempted.saturating_add(1);
+                        let (sc_vf, _) = self.alphabeta(
+                            pvs::ABArgs {
+                                pos: &child,
+                                depth: d - 1,
+                                alpha: -(beta0),
+                                beta: -alpha0,
+                                ply: 1,
+                                is_pv: true,
+                                stack,
+                                heur: &mut heur_local,
+                                tt_hits: &mut tt_hits_local,
+                                beta_cuts: &mut beta_cuts_local,
+                                lmr_counter: &mut lmr_counter_local,
+                                lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
+                            },
+                            &mut search_ctx_nw,
+                        );
+                        let s_back = -sc_vf;
+                        let confirmed =
+                            Self::classify_root_bound(s_back, alpha0, beta0) == NodeType::Exact;
+                        if confirmed {
+                            near_final_confirmed = near_final_confirmed.saturating_add(1);
+                            first.bound = NodeType::Exact;
+                            // 検証値に寄せる（±Δ内の誤差を吸収）
+                            first.score_internal = s_back;
+                            first.score_cp = crate::search::types::clamp_score_cp(s_back);
+                            first.mate_distance = crate::search::constants::mate_distance(s_back);
+                            // 可能ならPV更新（TTから復元）
+                            let pv =
+                                self.reconstruct_root_pv_from_tt(root, d, mv0).unwrap_or_default();
+                            if !pv.is_empty() {
+                                first.pv = SmallVec::from_vec(pv.to_vec());
+                            }
+                            // TTへ保存（PV1相当のrootラインとしてExactを保持）
+                            if let Some(tt) = &self.tt {
+                                let store_score =
+                                    crate::search::common::adjust_mate_score_for_tt(s_back, 0)
+                                        .clamp(i16::MIN as i32, i16::MAX as i32)
+                                        as i16;
+                                let mut args = crate::search::tt::TTStoreArgs::new(
+                                    root_key,
+                                    Some(mv0),
+                                    store_score,
+                                    root_static_eval_i16,
+                                    d as u8,
+                                    NodeType::Exact,
+                                    root.side_to_move,
+                                );
+                                args.is_pv = true;
+                                tt.store(args);
+                            }
+                        }
+                        zero_window_done = true;
+                        // qnodes を統計へ反映
+                        cum_qnodes = cum_qnodes.saturating_add(qnodes_local);
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            let (kind, diff) = match first.bound {
+                                NodeType::UpperBound => ("upper", (alpha0 - target).abs()),
+                                NodeType::LowerBound => ("lower", (target - beta0).abs()),
+                                NodeType::Exact => ("exact", 0),
+                            };
+                            cb(&format!(
+                                "near_final_zero_window_result=1 status={} kind={} diff={} alpha={} beta={} target={} budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={}",
+                                if confirmed { "confirmed" } else { "inexact" },
+                                kind,
+                                diff,
+                                alpha0,
+                                beta0,
+                                target,
+                                eff_budget_ms,
+                                budget_qnodes,
+                                qnodes_limit_pre,
+                                qnodes_limit_post,
+                                t_rem,
+                                qnodes_local
+                            ));
+                        }
+                    }
+                }
+
+                let fully_resolved =
+                    matches!(depth_lines.first().map(|l| l.bound), Some(NodeType::Exact));
+
+                if fully_resolved {
+                    final_depth_reached = d as u8;
+                    final_seldepth_reached = Some(capped_seldepth);
+                    final_seldepth_raw = Some(seldepth);
+
+                    // near-final 検証による depth_lines の更新を反映した後に final_lines を固定
+                    final_lines = Some(depth_lines.clone());
+                    if let Some(ctrl) = stop_controller.as_ref() {
+                        ctrl.publish_committed_snapshot(
+                            session_id,
+                            root_key,
+                            depth_lines.as_slice(),
+                            nodes,
+                            t0.elapsed().as_millis() as u64,
+                        );
+
+                        // Thin B案: 探索側フック — 短手数詰みを検出したら早期最終化を要求
+                        if crate::search::config::mate_early_stop_enabled() {
+                            if let Some(first_line) = depth_lines.first() {
+                                let max_d =
+                                    crate::search::config::mate_early_stop_max_distance() as i32;
+                                if let Some(dist) = crate::search::constants::mate_distance(
+                                    first_line.score_internal,
+                                ) {
+                                    if dist > 0 && dist <= max_d {
+                                        ctrl.request_finalize(FinalizeReason::PlannedMate {
+                                            distance: dist,
+                                            was_ponder: limits.is_ponder,
+                                        });
+                                    }
                                 }
                             }
                         }
                     }
+                } else if incomplete_depth.is_none() {
+                    // fail-high/low 等でExactが得られなかった → 未完イテレーションとして扱う
+                    incomplete_depth = Some(d as u8);
                 }
             } else if incomplete_depth.is_none() {
                 // iteration が完了しなかった場合は未完了深さとして記録する。
@@ -1335,7 +2115,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             reason, d, elapsed, nodes, lead_ms_current
                         ));
                         }
-                        if lead_window_finalize {
+                        if lead_window_finalize && !finalize_nearhard_sent {
                             notify_deadline(DeadlineHit::Soft, nodes);
                         }
                         if !matches!(last_deadline_hit, Some(DeadlineHit::Hard)) {
@@ -1385,6 +2165,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         stats.tt_hits = Some(cum_tt_hits);
         stats.lmr_count = Some(cum_lmr_counter);
         stats.lmr_trials = Some(cum_lmr_trials);
+        // Publish instrumentation
+        stats.lmr_blocked_in_check = Some(cum_lmr_blocked_in_check);
+        stats.lmr_blocked_recapture = Some(cum_lmr_blocked_recapture);
+        stats.evasion_sparsity_extensions = Some(cum_evasion_sparsity_ext);
         stats.root_fail_high_count = Some(cum_beta_cuts);
         #[cfg(feature = "diagnostics")]
         {
@@ -1393,11 +2177,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         stats.root_tt_hint_exists = Some(stats_hint_exists);
         stats.root_tt_hint_used = Some(stats_hint_used);
+        if near_final_attempted != 0 {
+            stats.near_final_attempted = Some(near_final_attempted);
+        }
+        if near_final_confirmed != 0 {
+            stats.near_final_confirmed = Some(near_final_confirmed);
+        }
         stats.aspiration_failures = Some(cumulative_asp_failures);
         stats.aspiration_hits = Some(cumulative_asp_hits);
         stats.re_searches = Some(cumulative_researches);
         stats.pv_changed = Some(cumulative_pv_changed);
         stats.incomplete_depth = incomplete_depth;
+        // 近〆切観測フラグ
+        if stats_near_deadline_skip_new_iter != 0 {
+            stats.near_deadline_skip_new_iter = Some(stats_near_deadline_skip_new_iter);
+        }
+        if stats_multipv_shrunk != 0 {
+            stats.multipv_shrunk = Some(stats_multipv_shrunk);
+        }
         if limits.store_heuristics {
             stats.heuristics = Some(Arc::new(heur_state.clone()));
         }
@@ -1425,15 +2222,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         if let Some(lines) = final_lines_opt.as_ref() {
             if let Some(first) = lines.first() {
-                best_move_out = Some(first.root_move);
-                // Internal score（mate距離保持）を採用。UI向けは必要時にclamp。
-                score_out = first.score_internal;
-                node_type_out = first.bound;
+                // Internal score（mate距離保持）
                 stats.pv = first.pv.iter().copied().collect();
             }
             let mut published_lines: SmallVec<[RootLine; 4]> = SmallVec::new();
             if incomplete_depth.is_some() && !lines.is_empty() {
+                // 未完イテレーションでは MultiPV=1 のみ公開し、USI 側もその前提で扱う。
                 published_lines.push(lines[0].clone());
+                if let Some(cb) = limits.info_string_callback.as_ref() {
+                    cb("finalize_lines_shrunk=1 reason=incomplete_iteration");
+                }
             } else {
                 published_lines.extend(lines.iter().cloned());
             }
@@ -1443,10 +2241,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 stable_depth = Some(final_depth_reached);
             }
         } else if let Some(snap) = stable_snapshot {
-            best_move_out = snap.best;
-            // スナップショットはcpのみ保持のため、この経路ではcpを使用（互換維持）
-            score_out = snap.score_cp;
-            node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
             stats.depth = snap.depth;
             stats.seldepth = snap.seldepth;
@@ -1455,11 +2249,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             report_source = Some(SnapshotSource::Stable);
             snapshot_version = Some(snap.version);
             stable_depth = Some(snap.depth);
+            if let Some(first) = result_lines.as_ref().and_then(|ls| ls.first()) {
+                best_move_out = Some(first.root_move);
+                score_out = first.score_internal;
+                node_type_out = first.bound;
+            } else {
+                best_move_out = snap.best;
+                score_out = snap.score_cp;
+                node_type_out = snap.node_type;
+            }
         } else if let Some(snap) = snapshot_any.clone() {
-            best_move_out = snap.best;
-            // 同上（Partial/Stable snapshot経路）
-            score_out = snap.score_cp;
-            node_type_out = snap.node_type;
             result_lines = Some(snap.lines.clone());
             stats.depth = snap.depth;
             stats.seldepth = snap.seldepth;
@@ -1469,6 +2268,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             snapshot_version = Some(snap.version);
             if snap.source == SnapshotSource::Stable {
                 stable_depth = Some(snap.depth);
+            }
+            if let Some(first) = result_lines.as_ref().and_then(|ls| ls.first()) {
+                best_move_out = Some(first.root_move);
+                score_out = first.score_internal;
+                node_type_out = first.bound;
+            } else {
+                best_move_out = snap.best;
+                score_out = snap.score_cp;
+                node_type_out = snap.node_type;
             }
         }
 
@@ -1509,6 +2317,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             None,
             result_lines.clone(),
         );
+
+        if result.lines.is_some() {
+            // sync_from_primary_line() keeps legacy fields aligned with lines[0];
+            // call-site以降で best_move/score/node_type/stats.pv を個別に変更しないこと。
+            result.sync_from_primary_line();
+        }
 
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;
@@ -1584,17 +2398,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if lead_window_soft_break {
                     hard_timeout = false;
                 }
-                let reason = if hard_timeout
-                    || matches!(last_deadline_hit, Some(DeadlineHit::Soft))
-                    || lead_window_soft_break
-                {
-                    TerminationReason::TimeLimit
-                } else if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
+                // FixedTime: 終了理由は常に TimeLimit（UserStop を除く）に寄せる
+                let reason = if matches!(last_deadline_hit, Some(DeadlineHit::Stop))
                     || Self::should_stop(limits)
                 {
                     TerminationReason::UserStop
                 } else {
-                    TerminationReason::Completed
+                    TerminationReason::TimeLimit
                 };
 
                 result.stop_info = Some(StopInfo {

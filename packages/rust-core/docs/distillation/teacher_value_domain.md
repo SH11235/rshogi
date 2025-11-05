@@ -1,6 +1,15 @@
 # Teacher Value Domain と Classic Distillation 指針
 
-本ドキュメントでは `train_nnue` ツールにおける **教師値 (teacher value)** の「ドメイン」概念と、Classic NNUE への知識蒸留 (Knowledge Distillation) 仕様・利用法を整理します。
+本ドキュメントでは `train_nnue` ツールにおける **教師値 (teacher value)** の「ドメイン」概念と、Classic NNUE への知識蒸留 (Knowledge Distillation) 仕様・利用法を整理します。併せて、`--label wdl` と `--wdl-scale` の意味を冒頭で要約します。
+
+---
+
+## 概要（要約）
+- ラベル `wdl` は「勝率」を学習するモードです。ネットワーク出力は勝率のロジット `z`（シグモイド前の実数）で、`p = σ(z) = 1/(1+e^{-z})` から勝率 `p` を得ます。
+- `--wdl-scale S` は cp（センチポーン）とロジット `z` の変換係数です。
+  - cp → ロジット: `z = cp / S`
+  - ロジット → cp: `cp ≈ z * S`
+- 既定では `S = 600` を使用し、cp と勝率ロジットのスケールを安定化させます。蒸留（教師が cp か wdl-logit か）に応じて、この係数で相互変換して混合損失のスケールを整えます。
 
 ## 背景
 
