@@ -225,9 +225,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         alpha = used_alpha;
         let beta = used_beta;
 
-        // Track whether best move at this node has been verified (no pruning/reduction path)
-        // PVノードはフル窓探索を通るため既定で verified とみなす（降格誤判定を避ける）
-        let mut best_verified: bool = is_pv;
         if self.should_static_beta_prune(super::pruning::StaticBetaPruneParams {
             toggles: &self.profile.prune,
             depth,
@@ -731,8 +728,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if score > best {
                 best = score;
                 best_mv = Some(mv);
-                // ベスト更新時に verified フラグを反映
-                best_verified = best_verified || pv_move;
             }
             if score > alpha {
                 alpha = score;
@@ -799,18 +794,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             (qs, None)
         } else {
             if let Some(tt) = &self.tt {
-                let mut node_type = if best <= used_alpha {
+                let node_type = if best <= used_alpha {
                     NodeType::UpperBound
                 } else if best >= used_beta {
                     NodeType::LowerBound
                 } else {
                     NodeType::Exact
                 };
-                // If this node would be Exact but the best line is not verified,
-                // degrade to a bound entry to avoid misleading TT guidance.
-                if matches!(node_type, NodeType::Exact) && !best_verified {
-                    node_type = NodeType::UpperBound;
-                }
                 let store_score = crate::search::common::adjust_mate_score_for_tt(best, ply as u8)
                     .clamp(i16::MIN as i32, i16::MAX as i32);
                 let static_eval_i16 = static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;

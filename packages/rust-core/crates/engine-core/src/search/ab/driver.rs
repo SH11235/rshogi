@@ -1231,7 +1231,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
-                let mut local_best_verified = false;
                 let mut local_best = i32::MIN / 2;
                 let mut helper_retries: u32 = 0; // fail‑high のみ 1 回まで許可
                 loop {
@@ -1441,13 +1440,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > local_best {
                             local_best = score;
                             local_best_mv = Some(mv);
-                            // Update verified status: captures, checks, or PV head within 20cp margin
-                            let head_considered_verified =
-                                idx == 0 && (local_best - prev_score).abs() <= 20;
-                            let cand_verified = mv.is_capture_hint()
-                                || root.gives_check(mv)
-                                || head_considered_verified;
-                            local_best_verified = cand_verified;
                         }
                         if score > alpha {
                             alpha = score;
@@ -1654,14 +1646,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         #[cfg(feature = "diagnostics")]
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb(&format!(
-                                "sticky_check verified={} changed={} near_deadline={} m={}",
-                                local_best_verified as u8,
+                                "sticky_check changed={} near_deadline={} m={}",
                                 changed as u8,
                                 near_deadline as u8,
                                 crate::usi::move_to_usi(&m)
                             ));
                         }
-                        if changed && near_deadline && !local_best_verified {
+                        if changed && near_deadline {
                             if let Some(prev_mv) = prev_best_move_for_iteration {
                                 adopt_mv = prev_mv;
                                 // keep previous score as hint center
