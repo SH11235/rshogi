@@ -1324,13 +1324,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             }
                         }
                         let mut child = root.clone();
-                        {
+                        let score = {
                             let _guard =
                                 ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
                             child.do_move(mv);
-                        }
-
-                        let score = {
                             if idx == 0 {
                                 let mut search_ctx = SearchContext {
                                     limits,
