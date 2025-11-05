@@ -15,7 +15,7 @@ use crate::{
     evaluation::nnue::{NNUEEvaluatorWrapper, NnueDiag},
     search::ab::{ClassicBackend, SearchProfile},
     search::api::{InfoEventCallback, SearcherBackend},
-    search::parallel::StopController,
+    search::parallel::{ParallelSearcher, ParallelSearcherBackend, StopController},
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
 };
@@ -314,6 +314,45 @@ impl Engine {
     }
 
     fn build_backend(&mut self) -> Option<Arc<dyn SearcherBackend + Send + Sync>> {
+        // Legacy escape hatch for emergency rollback
+        if std::env::var("SHOGI_FORCE_CLASSIC_BACKEND").is_ok() {
+            warn!("Using legacy ClassicBackend (SHOGI_FORCE_CLASSIC_BACKEND is set)");
+            return self.build_legacy_backend();
+        }
+
+        let profile = search_profile_for_engine_type(self.engine_type);
+
+        match self.engine_type {
+            EngineType::Material | EngineType::Enhanced => {
+                let searcher: ParallelSearcher<MaterialEvaluator> = ParallelSearcher::with_profile(
+                    Arc::clone(&self.material_evaluator),
+                    Arc::clone(&self.shared_tt),
+                    self.num_threads.max(1),
+                    Arc::clone(&self.stop_controller),
+                    profile,
+                );
+                Some(Arc::new(ParallelSearcherBackend::new(searcher)))
+            }
+            EngineType::Nnue | EngineType::EnhancedNnue => {
+                self.ensure_nnue_evaluator_initialized();
+                let proxy = Arc::new(NNUEEvaluatorProxy {
+                    evaluator: self.nnue_evaluator.clone(),
+                    locals: thread_local::ThreadLocal::new(),
+                });
+                let searcher: ParallelSearcher<NNUEEvaluatorProxy> = ParallelSearcher::with_profile(
+                    proxy,
+                    Arc::clone(&self.shared_tt),
+                    self.num_threads.max(1),
+                    Arc::clone(&self.stop_controller),
+                    profile,
+                );
+                Some(Arc::new(ParallelSearcherBackend::new(searcher)))
+            }
+        }
+    }
+
+    /// Legacy backend builder (for emergency rollback only)
+    fn build_legacy_backend(&mut self) -> Option<Arc<dyn SearcherBackend + Send + Sync>> {
         match self.engine_type {
             EngineType::Material | EngineType::Enhanced => {
                 let profile = search_profile_for_engine_type(self.engine_type);
