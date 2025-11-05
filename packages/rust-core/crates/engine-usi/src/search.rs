@@ -732,6 +732,8 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
     let mut finalize_reason: Option<FinalizeReason> = None;
 
     // Prefer Planned finalize when a scheduled stop exists.
+    // 小さな丸め誤差で即時確定しないよう、スケジュール確立直後の再評価には数msのグレースを入れる。
+    const SCHEDULE_GRACE_MS: u64 = 3;
     if scheduled != u64::MAX && elapsed >= scheduled {
         finalize_reason = Some(FinalizeReason::Planned);
     } else if hard != u64::MAX && elapsed >= hard {
@@ -746,8 +748,11 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
                     "tm_watchdog_schedule elapsed_ms={} opt_ms={} scheduled_ms={}",
                     elapsed, opt, new_deadline
                 ));
-                // 同一 tick 内で再評価: すでに elapsed>=scheduled なら即 Planned を確定
-                if elapsed >= new_deadline {
+                // 同一 tick 内の再評価は、new_deadline が elapsed より未来にあり、
+                // かつグレース込みで到達している場合にのみ確定させる。
+                if new_deadline > elapsed
+                    && elapsed.saturating_add(SCHEDULE_GRACE_MS) >= new_deadline
+                {
                     finalize_reason = Some(FinalizeReason::Planned);
                 }
             }
