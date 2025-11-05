@@ -35,6 +35,7 @@ pub(super) struct NullMovePruneParams<'a, 'ctx> {
     pub beta_cuts: &'a mut u64,
     pub lmr_counter: &'a mut u64,
     pub ctx: &'a mut SearchContext<'ctx>,
+    pub is_pv: bool,
 }
 
 pub(super) struct MaybeIidParams<'a, 'ctx> {
@@ -237,9 +238,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             beta_cuts,
             lmr_counter,
             ctx,
+            is_pv,
         } = params;
-        // Verification/risk: disable NMP when verification flag or prev_risky is set at this node
-        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning || st.prev_risky) {
+        // Verification/risk/PV: disable NMP when verification flag or prev_risky or PV node
+        if is_pv || stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning || st.prev_risky)
+        {
             return None;
         }
         if !toggles.enable_nmp || !dynp::nmp_enabled() {

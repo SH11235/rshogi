@@ -228,7 +228,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // Skip SBP when verification is requested at this node
         let verify_here = stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning);
         // Track whether best move at this node has been verified (no pruning/reduction path)
-        let mut best_verified: bool = verify_here;
+        // PVノードはフル窓探索を通るため既定で verified とみなす（降格誤判定を避ける）
+        let mut best_verified: bool = verify_here || is_pv;
         if !verify_here
             && self.should_static_beta_prune(super::pruning::StaticBetaPruneParams {
                 toggles: &self.profile.prune,
@@ -277,6 +278,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 beta_cuts: &mut *beta_cuts,
                 lmr_counter: &mut *lmr_counter,
                 ctx,
+                is_pv,
             }) {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
                 diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
@@ -844,6 +846,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if score > best {
                 best = score;
                 best_mv = Some(mv);
+                // ベスト更新時に verified フラグを反映
+                best_verified = best_verified || pv_move || this_move_verified;
             }
             if score > alpha {
                 alpha = score;
