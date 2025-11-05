@@ -31,6 +31,9 @@ use crate::search::snapshot::SnapshotSource;
 use crate::search::tt::TTProbe;
 use crate::time_management::TimeControl;
 
+/// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
+const STICKY_PV_WINDOW_MS: u64 = 400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
     Stop,
@@ -82,7 +85,7 @@ struct NearDeadlineDecision {
 }
 
 /// Computes remaining time in milliseconds for sticky-PV logic.
-/// Supports both TimeManager (hard/soft limits) and fixed time_limit modes.
+/// Supports TimeManager (hard/soft limits), fixed time_limit, and fallback_deadlines.
 #[inline]
 fn time_remaining_ms_for_sticky(t0: Instant, limits: &SearchLimits) -> Option<u64> {
     if let Some(tm) = limits.time_manager.as_ref() {
@@ -97,6 +100,9 @@ fn time_remaining_ms_for_sticky(t0: Instant, limits: &SearchLimits) -> Option<u6
             return Some(soft.saturating_sub(elapsed));
         }
         None
+    } else if let Some(dl) = limits.fallback_deadlines {
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+        Some(dl.hard_limit_ms.saturating_sub(elapsed_ms))
     } else if let Some(limit) = limits.time_limit() {
         let cap = limit.as_millis() as u64;
         let el = t0.elapsed().as_millis() as u64;
@@ -1228,10 +1234,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_verified = false;
                 let mut local_best = i32::MIN / 2;
                 let mut helper_retries: u32 = 0; // fail‑high のみ 1 回まで許可
-                                                 // Root PV 一手検証: 反復内の予算と重複管理を aspiration ループの外側で保持
-                let mut pv_verify_attempts: u32 = 0;
-                let mut pv_verify_seen: SmallVec<[u32; 16]> = SmallVec::new();
-                let mut pv_verify_passed: SmallVec<[u32; 16]> = SmallVec::new();
                 loop {
                     if let Some(hit) = Self::deadline_hit(
                         t0,
@@ -1272,7 +1274,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
-                    // pv_verify_attempts/seen は反復内で共有（aspiration再試行でリセットしない）
                     for (idx, (mv, _, _root_idx)) in active_moves.iter().copied().enumerate() {
                         // 純粋 LazySMP: claim は行わない
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
@@ -1328,149 +1329,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             let _guard =
                                 ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
                             child.do_move(mv);
-                        }
-
-                        // Optional: root PV one-move verification for risky quiet/drop moves
-                        // Applied to both idx==0 and idx!=0 to ensure proper verification
-                        if pv_idx == 1
-                            && d as u8 >= crate::search::config::pv_verify_min_depth()
-                            && crate::search::config::pv_verify_enabled()
-                        {
-                            // Per-iteration throttle and de-dup for verification
-                            let skip_budget = pv_verify_attempts
-                                >= crate::search::config::pv_verify_max_per_iter() as u32;
-                            let already_seen = pv_verify_seen.iter().any(|&id| id == mv.to_u32());
-                            let allowed = !(skip_budget || already_seen);
-                            let is_capture = mv.is_capture_hint();
-                            let gives_check = root.gives_check(mv);
-                            let is_quiet = !is_capture && !gives_check;
-                            let is_drop = mv.is_drop();
-                            let mut need_verify = false;
-                            let mut _opp_best_see_log = None;
-                            if is_quiet || is_drop {
-                                // Compute opponent best capture SEE after this move
-                                let mg2 = crate::movegen::MoveGenerator::new();
-                                let mut child2 = root.clone();
-                                {
-                                    let _guard = ordering::EvalMoveGuard::new(
-                                        self.evaluator.as_ref(),
-                                        root,
-                                        mv,
-                                    );
-                                    child2.do_move(mv);
-                                }
-                                let mut opp_best_see = i32::MIN / 2;
-                                if let Ok(list2) = mg2.generate_all(&child2) {
-                                    for mv2 in list2 {
-                                        if mv2.is_capture_hint() {
-                                            let v = child2.see(mv2);
-                                            if v > opp_best_see {
-                                                opp_best_see = v;
-                                            }
-                                        }
-                                    }
-                                }
-                                let th = if is_drop {
-                                    crate::search::config::pv_verify_reply_xsee_drop()
-                                } else {
-                                    crate::search::config::pv_verify_reply_xsee_quiet()
-                                };
-                                if opp_best_see > th {
-                                    need_verify = true;
-                                }
-                                _opp_best_see_log = Some(opp_best_see);
-                            }
-                            if need_verify && allowed {
-                                #[cfg(feature = "diagnostics")]
-                                if let Some(cb) = limits.info_string_callback.as_ref() {
-                                    cb(&format!(
-                                        "pv_verify start depth={} mv={} idx={}",
-                                        d,
-                                        crate::usi::move_to_usi(&mv),
-                                        idx
-                                    ));
-                                }
-                                // account attempt and remember this move for this iteration
-                                pv_verify_attempts = pv_verify_attempts.saturating_add(1);
-                                pv_verify_seen.push(mv.to_u32());
-                                // mark verification flag for child ply only
-                                let child_ply = 1usize;
-                                let saved_flag = stack[child_ply].verify_no_pruning;
-                                stack[child_ply].verify_no_pruning = true;
-                                // zero-window verify around alpha (+optional margin)
-                                let alpha_margin =
-                                    crate::search::config::pv_verify_alpha_margin_cp();
-                                let alpha_p = alpha.saturating_add(alpha_margin);
-                                let alpha_c = -alpha_p;
-                                let beta_c = alpha_c + 1;
-                                let mut v_nodes = 0u64;
-                                let mut v_seldepth = 0u32;
-                                let mut v_qnodes = 0u64;
-                                let v_q_limit = Self::compute_qnodes_limit(limits, d - 1, 1);
-                                #[cfg(feature = "diagnostics")]
-                                let mut v_abdada_detected = 0u64;
-                                #[cfg(feature = "diagnostics")]
-                                let mut v_abdada_set = 0u64;
-                                let mut v_ctx = SearchContext {
-                                    limits,
-                                    start_time: &t0,
-                                    nodes: &mut v_nodes,
-                                    seldepth: &mut v_seldepth,
-                                    qnodes: &mut v_qnodes,
-                                    qnodes_limit: v_q_limit,
-                                    #[cfg(feature = "diagnostics")]
-                                    abdada_busy_detected: &mut v_abdada_detected,
-                                    #[cfg(feature = "diagnostics")]
-                                    abdada_busy_set: &mut v_abdada_set,
-                                };
-                                let (v_sc_c, _) = self.alphabeta(
-                                    pvs::ABArgs {
-                                        pos: &child,
-                                        depth: d - 1,
-                                        alpha: alpha_c,
-                                        beta: beta_c,
-                                        ply: 1,
-                                        is_pv: false,
-                                        stack,
-                                        heur: &mut heur,
-                                        tt_hits: &mut tt_hits,
-                                        beta_cuts: &mut beta_cuts,
-                                        lmr_counter: &mut lmr_counter,
-                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
-                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
-                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
-                                    },
-                                    &mut v_ctx,
-                                );
-                                stack[child_ply].verify_no_pruning = saved_flag;
-                                let parent_sc = -v_sc_c;
-                                let verify_fail = parent_sc <= alpha_p;
-                                if verify_fail {
-                                    #[cfg(feature = "diagnostics")]
-                                    if let Some(cb) = limits.info_string_callback.as_ref() {
-                                        let opp = _opp_best_see_log.unwrap_or(0);
-                                        cb(&format!(
-                                            "pv_verify result=fail idx={} parent_sc={} alpha={} opp_reply_see={}",
-                                            idx,
-                                            parent_sc,
-                                            alpha_p,
-                                            opp
-                                        ));
-                                    }
-                                    // Skip this root move (demote) and continue to next
-                                    continue;
-                                }
-                                // verification passed for this root move - record in passed set
-                                pv_verify_passed.push(mv.to_u32());
-                                #[cfg(feature = "diagnostics")]
-                                if let Some(cb) = limits.info_string_callback.as_ref() {
-                                    cb(&format!(
-                                        "pv_verify result=pass idx={} move={}",
-                                        idx,
-                                        crate::usi::move_to_usi(&mv)
-                                    ));
-                                }
-                            }
                         }
 
                         let score = {
@@ -1583,10 +1441,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > local_best {
                             local_best = score;
                             local_best_mv = Some(mv);
-                            let cand_verified = pv_verify_passed.iter().any(|&k| k == mv.to_u32())
-                                || mv.is_capture_hint()
+                            // Update verified status: captures, checks, or PV head within 20cp margin
+                            let head_considered_verified =
+                                idx == 0 && (local_best - prev_score).abs() <= 20;
+                            let cand_verified = mv.is_capture_hint()
                                 || root.gives_check(mv)
-                                || idx == 0;
+                                || head_considered_verified;
                             local_best_verified = cand_verified;
                         }
                         if score > alpha {
@@ -1789,9 +1649,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                         // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先
                         let mut adopt_mv = m;
-                        let sticky_ms: u64 = 400;
                         let near_deadline = time_remaining_ms_for_sticky(t0, limits)
-                            .is_some_and(|t_rem| t_rem <= sticky_ms);
+                            .is_some_and(|t_rem| t_rem <= STICKY_PV_WINDOW_MS);
                         #[cfg(feature = "diagnostics")]
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb(&format!(

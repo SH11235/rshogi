@@ -105,8 +105,6 @@ pub struct UsiOptions {
     pub instant_mate_min_respect_ms: u64,
     pub instant_mate_verify_mode: InstantMateVerifyMode,
     pub instant_mate_verify_nodes: u32,
-    // PV verification (pre-search to detect dangerous quiet/drop moves)
-    pub pv_verify_enabled: bool,
     // Finalize: 余裕時の軽MateProbe（相手番・短手限定）
     pub finalize_mate_probe_enabled: bool,
     pub finalize_mate_probe_depth: u8,
@@ -215,7 +213,6 @@ impl Default for UsiOptions {
             instant_mate_min_respect_ms: 8,
             instant_mate_verify_mode: InstantMateVerifyMode::CheckOnly,
             instant_mate_verify_nodes: 0,
-            pv_verify_enabled: true,
             finalize_mate_probe_enabled: false,
             finalize_mate_probe_depth: 5,
             finalize_mate_probe_time_ms: 5,

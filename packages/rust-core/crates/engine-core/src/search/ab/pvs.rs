@@ -225,65 +225,57 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         alpha = used_alpha;
         let beta = used_beta;
 
-        // Skip SBP when verification is requested at this node
-        let verify_here = stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning);
         // Track whether best move at this node has been verified (no pruning/reduction path)
         // PVノードはフル窓探索を通るため既定で verified とみなす（降格誤判定を避ける）
-        let mut best_verified: bool = verify_here || is_pv;
-        if !verify_here
-            && self.should_static_beta_prune(super::pruning::StaticBetaPruneParams {
-                toggles: &self.profile.prune,
-                depth,
-                pos,
-                beta,
-                static_eval,
-                is_pv,
-                ply,
-                stack: &*stack,
-            })
-        {
+        let mut best_verified: bool = is_pv;
+        if self.should_static_beta_prune(super::pruning::StaticBetaPruneParams {
+            toggles: &self.profile.prune,
+            depth,
+            pos,
+            beta,
+            static_eval,
+            is_pv,
+            ply,
+            stack: &*stack,
+        }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (static_eval, None);
         }
 
-        if !verify_here {
-            if let Some(r) = self.razor_prune(super::pruning::RazorPruneParams {
-                toggles: &self.profile.prune,
-                depth,
-                pos,
-                alpha,
-                static_eval,
-                ctx,
-                ply,
-                is_pv,
-            }) {
-                #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-                return (r, None);
-            }
+        if let Some(r) = self.razor_prune(super::pruning::RazorPruneParams {
+            toggles: &self.profile.prune,
+            depth,
+            pos,
+            alpha,
+            static_eval,
+            ctx,
+            ply,
+            is_pv,
+        }) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+            return (r, None);
         }
 
-        if !verify_here {
-            if let Some(score) = self.null_move_prune(NullMovePruneParams {
-                toggles: &self.profile.prune,
-                depth,
-                pos,
-                beta,
-                static_eval,
-                ply,
-                stack: &mut *stack,
-                heur: &mut *heur,
-                tt_hits: &mut *tt_hits,
-                beta_cuts: &mut *beta_cuts,
-                lmr_counter: &mut *lmr_counter,
-                ctx,
-                is_pv,
-            }) {
-                #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-                return (score, None);
-            }
+        if let Some(score) = self.null_move_prune(NullMovePruneParams {
+            toggles: &self.profile.prune,
+            depth,
+            pos,
+            beta,
+            static_eval,
+            ply,
+            stack: &mut *stack,
+            heur: &mut *heur,
+            tt_hits: &mut *tt_hits,
+            beta_cuts: &mut *beta_cuts,
+            lmr_counter: &mut *lmr_counter,
+            ctx,
+            is_pv,
+        }) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+            return (score, None);
         }
 
         let mut tt_hint: Option<crate::shogi::Move> = None;
@@ -398,26 +390,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             tt_depth_ok,
         });
 
-        if !verify_here {
-            if let Some((score, mv)) = self.probcut(ProbcutParams {
-                toggles: &self.profile.prune,
-                depth,
-                pos,
-                beta,
-                static_eval,
-                ply,
-                is_pv,
-                stack: &mut *stack,
-                heur: &mut *heur,
-                tt_hits: &mut *tt_hits,
-                beta_cuts: &mut *beta_cuts,
-                lmr_counter: &mut *lmr_counter,
-                ctx,
-            }) {
-                #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-                return (score, Some(mv));
-            }
+        if let Some((score, mv)) = self.probcut(ProbcutParams {
+            toggles: &self.profile.prune,
+            depth,
+            pos,
+            beta,
+            static_eval,
+            ply,
+            is_pv,
+            stack: &mut *stack,
+            heur: &mut *heur,
+            tt_hits: &mut *tt_hits,
+            beta_cuts: &mut *beta_cuts,
+            lmr_counter: &mut *lmr_counter,
+            ctx,
+        }) {
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+            return (score, Some(mv));
         }
 
         let prev_move = if ply > 0 {
@@ -461,7 +451,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
 
-            if !verify_here && depth < 14 && is_quiet {
+            if depth < 14 && is_quiet {
                 let mut h = heur.history.get(pos.side_to_move, mv);
                 // 明示的に i16 範囲へクランプ（将来の係数変更でも安全）
                 h = h.clamp(i16::MIN as i32, i16::MAX as i32);
@@ -491,15 +481,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if !verify_here && depth <= 3 && is_quiet && !stack[ply as usize].prev_risky {
+            if depth <= 3 && is_quiet && !stack[ply as usize].prev_risky {
                 let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
                 }
             }
             // Futility（alpha側）: 静止のみ・チェック静止/良捕獲/昇は除外、depth<=8
-            if !verify_here
-                && dynp::pruning_safe_mode()
+            if dynp::pruning_safe_mode()
                 && dynp::fut_dynamic_enabled()
                 && depth <= 8
                 && is_quiet
@@ -544,22 +533,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             let mut next_depth = depth - 1;
-            let mut reduction = if verify_here {
-                0
-            } else {
-                ordering::late_move_reduction(LateMoveReductionParams {
-                    lmr_trials: &mut heur.lmr_trials,
-                    depth,
-                    moveno,
-                    is_quiet,
-                    is_good_capture,
-                    is_pv,
-                    gives_check,
-                    static_eval,
-                    ply,
-                    stack: &*stack,
-                })
-            };
+            let mut reduction = ordering::late_move_reduction(LateMoveReductionParams {
+                lmr_trials: &mut heur.lmr_trials,
+                depth,
+                moveno,
+                is_quiet,
+                is_good_capture,
+                is_pv,
+                gives_check,
+                static_eval,
+                ply,
+                stack: &*stack,
+            });
             // LMR gating: disable reductions in tactical/sensitive contexts
             if reduction > 0 && Self::gating_enabled() {
                 // 1) Current node is in check (evasion node)
@@ -650,93 +635,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             });
             let pv_move = !first_move_done;
             let mut did_fullwin_research = false;
-            // Per-move verification flag
-            let mut this_move_verified = false;
-            // Optional: pre-pass verification for risky PV move (zero window, no pruning)
-            if pv_move
-                && crate::search::config::pv_verify_enabled()
-                && depth >= crate::search::config::pv_verify_min_depth() as i32
-            {
-                // Drop or risky quiet (SEE<0) は事前確認の対象
-                let risky_quiet = is_quiet && pos.see(mv) < 0;
-                let mut need_verify = mv.is_drop() || risky_quiet;
-                if !need_verify {
-                    // reply_xSEE ゲート
-                    let mut child_tmp = pos.clone();
-                    child_tmp.do_move(mv);
-                    let mut opp_best_see = i32::MIN / 2;
-                    if let Ok(list2) = MoveGenerator::new().generate_all(&child_tmp) {
-                        for mv2 in list2 {
-                            if mv2.is_capture_hint() {
-                                let v = child_tmp.see(mv2);
-                                if v > opp_best_see {
-                                    opp_best_see = v;
-                                }
-                            }
-                        }
-                    }
-                    let th = if mv.is_drop() {
-                        crate::search::config::pv_verify_reply_xsee_drop()
-                    } else {
-                        crate::search::config::pv_verify_reply_xsee_quiet()
-                    };
-                    if opp_best_see > th {
-                        need_verify = true;
-                    }
-                }
-                if need_verify {
-                    let mut child_v = pos.clone();
-                    child_v.do_move(mv);
-                    // αに対して margin を持ったゼロ窓で即時確認
-                    let margin = crate::search::config::pv_verify_alpha_margin_cp();
-                    let v_alpha = alpha + margin;
-                    // 子ノードで“無減衰/無枝刈り”を要求
-                    if let Some(st) = stack.get_mut((ply + 1) as usize) {
-                        st.verify_no_pruning = true;
-                    }
-                    let (sc_v, _) = self.alphabeta(
-                        ABArgs {
-                            pos: &child_v,
-                            depth: next_depth,
-                            alpha: -(v_alpha + 1),
-                            beta: -v_alpha,
-                            ply: ply + 1,
-                            is_pv: false,
-                            stack,
-                            heur,
-                            tt_hits,
-                            beta_cuts,
-                            lmr_counter,
-                            lmr_blocked_in_check,
-                            lmr_blocked_recapture,
-                            evasion_sparsity_ext,
-                        },
-                        ctx,
-                    );
-                    // 明示クリア（子側で clear されるが、次のループに影響しないよう安全策）
-                    if let Some(st) = stack.get_mut((ply + 1) as usize) {
-                        st.verify_no_pruning = false;
-                    }
-                    let verify_score = -sc_v;
-                    if verify_score <= v_alpha {
-                        // 検証fail: この手はPV候補から降格（通常探索を省略）
-                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                        super::diagnostics::record_tag(
-                            pos,
-                            "pv_verify_prepass_fail",
-                            Some(format!(
-                                "ply={} depth={} alpha={} margin={} score={}",
-                                ply, depth, alpha, margin, verify_score
-                            )),
-                        );
-                        // 次の手へ
-                        continue;
-                    } else {
-                        // Zero-window prepass succeeded → mark this move as verified
-                        this_move_verified = true;
-                    }
-                }
-            }
             let score = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                 let mut child = pos.clone();
@@ -793,17 +691,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         // 再探索条件:
                         //  - β未到達の上振れ (s < beta)
                         //  - 減深が入っており、かつ s >= α+δ（δ=80cp）
-                        // 無減衰確認: 減深由来の上振れは verify_no_pruning を付けて検証する
                         const REDELTA_CP: i32 = 80;
                         let need_re = (s < beta) || (reduction > 0 && s >= alpha + REDELTA_CP);
                         if need_re && !std::mem::replace(&mut did_fullwin_research, true) {
                             #[cfg(any(debug_assertions, feature = "diagnostics"))]
                             super::diagnostics::record_tag(pos, "lmr_fullwin_re", None);
-                            if reduction > 0 {
-                                if let Some(st) = stack.get_mut((ply + 1) as usize) {
-                                    st.verify_no_pruning = true;
-                                }
-                            }
                             let (sc_fw, _) = self.alphabeta(
                                 ABArgs {
                                     pos: &child,
@@ -823,14 +715,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 },
                                 ctx,
                             );
-                            if reduction > 0 {
-                                if let Some(st) = stack.get_mut((ply + 1) as usize) {
-                                    st.verify_no_pruning = false;
-                                }
-                            }
                             s = -sc_fw;
-                            // Full-window re-search without pruning confirms score path
-                            this_move_verified = true;
                         }
                     }
                     s
@@ -847,7 +732,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 best = score;
                 best_mv = Some(mv);
                 // ベスト更新時に verified フラグを反映
-                best_verified = best_verified || pv_move || this_move_verified;
+                best_verified = best_verified || pv_move;
             }
             if score > alpha {
                 alpha = score;
@@ -897,13 +782,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if is_quiet {
                 stack[ply as usize].quiet_moves.push(mv);
             }
-            // Update best_verified when best move is updated
-            if best_mv.map(|b| b.to_u32()) != Some(mv.to_u32()) {
-                // not best: nothing
-            } else {
-                // Maintain verified flag for current best
-                best_verified = best_verified || this_move_verified;
-            }
         }
         if aborted {
             // 中断時は現時点のベスト値（非PV手は探索済み）か静的評価をそのまま返す。
@@ -930,7 +808,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 };
                 // If this node would be Exact but the best line is not verified,
                 // degrade to a bound entry to avoid misleading TT guidance.
-                if matches!(node_type, NodeType::Exact) && !best_verified && !verify_here {
+                if matches!(node_type, NodeType::Exact) && !best_verified {
                     node_type = NodeType::UpperBound;
                 }
                 let store_score = crate::search::common::adjust_mate_score_for_tt(best, ply as u8)
