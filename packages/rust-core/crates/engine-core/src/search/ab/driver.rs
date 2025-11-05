@@ -1206,6 +1206,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                                  // Root PV 一手検証: 反復内の予算と重複管理を aspiration ループの外側で保持
                 let mut pv_verify_attempts: u32 = 0;
                 let mut pv_verify_seen: SmallVec<[u32; 16]> = SmallVec::new();
+                let mut pv_verify_passed: SmallVec<[u32; 16]> = SmallVec::new();
                 loop {
                     if let Some(hit) = Self::deadline_hit(
                         t0,
@@ -1311,8 +1312,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             && crate::search::config::pv_verify_enabled()
                         {
                             // Per-iteration throttle and de-dup for verification
-                            let skip_budget = (pv_verify_attempts as u8)
-                                >= crate::search::config::pv_verify_max_per_iter();
+                            let skip_budget = pv_verify_attempts
+                                >= crate::search::config::pv_verify_max_per_iter() as u32;
                             let already_seen = pv_verify_seen.iter().any(|&id| id == mv.to_u32());
                             let allowed = !(skip_budget || already_seen);
                             let is_capture = mv.is_capture_hint();
@@ -1434,11 +1435,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     // Skip this root move (demote) and continue to next
                                     continue;
                                 }
-                                // verification passed for this root move
-                                local_best_verified = true;
+                                // verification passed for this root move - record in passed set
+                                pv_verify_passed.push(mv.to_u32());
                                 #[cfg(feature = "diagnostics")]
                                 if let Some(cb) = limits.info_string_callback.as_ref() {
-                                    cb(&format!("pv_verify result=pass idx={} verified=true", idx));
+                                    cb(&format!(
+                                        "pv_verify result=pass idx={} move={}",
+                                        idx,
+                                        crate::usi::move_to_usi(&mv)
+                                    ));
                                 }
                             }
                         }
@@ -1553,6 +1558,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > local_best {
                             local_best = score;
                             local_best_mv = Some(mv);
+                            // Update verified status based on this move being best
+                            let cand_verified = pv_verify_passed.iter().any(|&k| k == mv.to_u32())
+                                || mv.is_capture_hint()
+                                || root.gives_check(mv)
+                                || idx == 0;
+                            local_best_verified = cand_verified;
                         }
                         if score > alpha {
                             alpha = score;
@@ -1770,6 +1781,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             }
                             None => false,
                         };
+                        #[cfg(feature = "diagnostics")]
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "sticky_check verified={} changed={} near_deadline={} m={}",
+                                local_best_verified as u8,
+                                changed as u8,
+                                near_deadline as u8,
+                                crate::usi::move_to_usi(&m)
+                            ));
+                        }
                         if changed && near_deadline && !local_best_verified {
                             if let Some(prev_mv) = prev_best_move_for_iteration {
                                 adopt_mv = prev_mv;
