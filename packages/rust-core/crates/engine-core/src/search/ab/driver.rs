@@ -1583,16 +1583,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if score > local_best {
                             local_best = score;
                             local_best_mv = Some(mv);
-                            // Update verified status based on this move being best
-                            let was_verified_in_this_iter =
-                                pv_verify_passed.iter().any(|&k| k == mv.to_u32());
-                            let head_considered_verified = idx == 0
-                                && ((local_best - prev_score).abs() <= 20
-                                    || was_verified_in_this_iter);
-                            let cand_verified = was_verified_in_this_iter
+                            let cand_verified = pv_verify_passed.iter().any(|&k| k == mv.to_u32())
                                 || mv.is_capture_hint()
                                 || root.gives_check(mv)
-                                || head_considered_verified;
+                                || idx == 0;
                             local_best_verified = cand_verified;
                         }
                         if score > alpha {
