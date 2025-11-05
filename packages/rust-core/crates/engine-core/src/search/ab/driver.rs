@@ -1242,6 +1242,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
+                    // Throttle PV one-move verification per iteration
+                    let mut pv_verify_attempts: u32 = 0;
+                    let mut pv_verify_seen: SmallVec<[u32; 16]> = SmallVec::new();
                     for (idx, (mv, _, _root_idx)) in active_moves.iter().copied().enumerate() {
                         // 純粋 LazySMP: claim は行わない
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
@@ -1336,6 +1339,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     && d as u8 >= crate::search::config::pv_verify_min_depth()
                                     && crate::search::config::pv_verify_enabled()
                                 {
+                                    // Per-iteration throttle and de-dup for verification
+                                    let skip_budget = (pv_verify_attempts as u8)
+                                        >= crate::search::config::pv_verify_max_per_iter();
+                                    let already_seen =
+                                        pv_verify_seen.iter().any(|&id| id == mv.to_u32());
+                                    let allowed = !(skip_budget || already_seen);
                                     let is_capture = mv.is_capture_hint();
                                     let gives_check = root.gives_check(mv);
                                     let is_quiet = !is_capture && !gives_check;
@@ -1375,14 +1384,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         }
                                         opp_best_see_log = Some(opp_best_see);
                                     }
-                                    if need_verify {
-                                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                                            cb(&format!(
-                                                "pv_verify_start depth={} mv={}",
-                                                d,
-                                                crate::usi::move_to_usi(&mv)
-                                            ));
-                                        }
+                                    if need_verify && allowed {
+                                        // account attempt and remember this move for this iteration
+                                        pv_verify_attempts = pv_verify_attempts.saturating_add(1);
+                                        pv_verify_seen.push(mv.to_u32());
                                         // mark verification flag for child ply only
                                         let child_ply = 1usize;
                                         let saved_flag = stack[child_ply].verify_no_pruning;
@@ -1442,17 +1447,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         stack[child_ply].verify_no_pruning = saved_flag;
                                         let parent_sc = -v_sc_c;
                                         let verify_fail = parent_sc <= alpha_p;
-                                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                                            let opp = opp_best_see_log.unwrap_or(0);
-                                            cb(&format!(
-                                                "pv_verify_end result={} parent_sc={} alpha={} opp_reply_see={}"
-                                                , if verify_fail {1} else {0}
-                                                , parent_sc
-                                                , alpha_p
-                                                , opp
-                                            ));
-                                        }
                                         if verify_fail {
+                                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                                let opp = opp_best_see_log.unwrap_or(0);
+                                                cb(&format!(
+                                                    "pv_verify result=fail parent_sc={} alpha={} opp_reply_see={}",
+                                                    parent_sc,
+                                                    alpha_p,
+                                                    opp
+                                                ));
+                                            }
                                             // Skip this root move (demote) and continue to next
                                             continue;
                                         }
