@@ -304,6 +304,8 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
         opts.promote_bias_cp
     ));
+    // PVVerify runtime toggle (default follows EngineType; see apply_options_to_engine)
+    usi_println("option name PVVerify.Enabled type check default true");
     // Reproduction helpers
     usi_println(&format!(
         "option name Warmup.Ms type spin default {} min 0 max 60000",
@@ -1171,6 +1173,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 if let Ok(b) = v.parse::<i32>() {
                     state.opts.promote_bias_cp = b.clamp(-1000, 1000);
                 }
+            }
+        }
+        "PVVerify.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                engine_core::search::config::set_pv_verify_enabled(on);
+                info_string(format!("pv_verify={}", on as u8));
             }
         }
         "Warmup.Ms" => {
