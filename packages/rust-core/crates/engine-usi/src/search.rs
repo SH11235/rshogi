@@ -738,6 +738,7 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
         finalize_reason = Some(FinalizeReason::Hard);
     } else {
         if scheduled == u64::MAX && opt != u64::MAX && elapsed >= opt {
+            // スケジュールを確立（丸め/安全マージンにより「過去の時刻」になることがある）
             tm.ensure_scheduled_stop(elapsed);
             let new_deadline = tm.scheduled_end_ms();
             if new_deadline != u64::MAX {
@@ -745,10 +746,15 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
                     "tm_watchdog_schedule elapsed_ms={} opt_ms={} scheduled_ms={}",
                     elapsed, opt, new_deadline
                 ));
+                // 同一 tick 内で再評価: すでに elapsed>=scheduled なら即 Planned を確定
+                if elapsed >= new_deadline {
+                    finalize_reason = Some(FinalizeReason::Planned);
+                }
             }
         }
 
-        if tm.is_time_critical() {
+        // Planned/Hard が未決なら、TimeManagerStop を最後に評価
+        if finalize_reason.is_none() && tm.is_time_critical() {
             finalize_reason = Some(FinalizeReason::TimeManagerStop);
         }
     }
@@ -885,10 +891,27 @@ mod watchdog_tests {
             u64::MAX,
             "watchdog should schedule a planned stop before hitting hard deadline"
         );
-        assert!(!stop_flag.load(AtomicOrdering::Acquire));
 
-        if let Some(rx) = state.finalizer_rx.as_ref() {
-            assert!(rx.try_recv().is_err(), "no finalize should be emitted when only scheduling");
+        // 仕様変更: scheduled が過去時刻に丸められる場合、同一 tick 内で Planned が確定し得る。
+        // そのため、ここでは「直ちに finalize していない」ことだけでなく、
+        // 「即時 Planned finalize が届くケース」も許容する。
+        let stopped = stop_flag.load(AtomicOrdering::Acquire);
+        if stopped {
+            // Finalize が Planned で届いていることを確認
+            let rx = state.finalizer_rx.as_ref().expect("finalizer receiver available");
+            match rx.try_recv() {
+                Ok(FinalizerMsg::Finalize { reason, .. }) => {
+                    assert_eq!(reason, FinalizeReason::Planned)
+                }
+                other => {
+                    panic!("expected immediate Planned finalize after scheduling, got {:?}", other)
+                }
+            }
+        } else if let Some(rx) = state.finalizer_rx.as_ref() {
+            assert!(
+                rx.try_recv().is_err(),
+                "no finalize should be emitted when only scheduling"
+            );
         }
     }
 

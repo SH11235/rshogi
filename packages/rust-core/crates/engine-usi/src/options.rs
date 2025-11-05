@@ -7,6 +7,7 @@ use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
 use crate::state::{EngineState, ProfileMode, UsiOptions};
+use std::sync::OnceLock;
 fn mark_override(state: &mut EngineState, key: &str) {
     state.user_overrides.insert(key.to_string());
 }
@@ -282,6 +283,18 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
         opts.post_verify_disadvantage_cp
+    ));
+    usi_println(&format!(
+        "option name PostVerify.SkipMateDistance type spin default {} min 1 max 32",
+        opts.mate_postverify_skip_max_dist
+    ));
+    usi_println(&format!(
+        "option name PostVerify.ExactMinDepth type spin default {} min 0 max 64",
+        opts.mate_postverify_exact_min_depth
+    ));
+    usi_println(&format!(
+        "option name PostVerify.ExactMinElapsedMs type spin default {} min 0 max 10000",
+        opts.mate_postverify_exact_min_elapsed_ms
     ));
     usi_println(&format!(
         "option name PromoteVerify type check default {}",
@@ -1122,6 +1135,30 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "PostVerify.SkipMateDistance" => {
+            if let Some(v) = value_ref {
+                if let Ok(d) = v.parse::<u32>() {
+                    state.opts.mate_postverify_skip_max_dist = d.clamp(1, 32);
+                }
+            }
+            mark_override(state, "PostVerify.SkipMateDistance");
+        }
+        "PostVerify.ExactMinDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(d) = v.parse::<u32>() {
+                    state.opts.mate_postverify_exact_min_depth = d.min(64) as u8;
+                }
+            }
+            mark_override(state, "PostVerify.ExactMinDepth");
+        }
+        "PostVerify.ExactMinElapsedMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.mate_postverify_exact_min_elapsed_ms = ms.min(10_000);
+                }
+            }
+            mark_override(state, "PostVerify.ExactMinElapsedMs");
+        }
         "PromoteVerify" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
@@ -1470,7 +1507,9 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
-        set_if_absent("PostVerify.RequirePass", &mut || state.opts.post_verify_require_pass = true);
+        set_if_absent("PostVerify.RequirePass", &mut || {
+            state.opts.post_verify_require_pass = false
+        });
         set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 300);
         set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
             state.opts.finalize_sanity_switch_margin_cp = 40
@@ -1499,7 +1538,9 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
-        set_if_absent("PostVerify.RequirePass", &mut || state.opts.post_verify_require_pass = true);
+        set_if_absent("PostVerify.RequirePass", &mut || {
+            state.opts.post_verify_require_pass = false
+        });
         set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 300);
         set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
             state.opts.finalize_sanity_switch_margin_cp = 40
@@ -1522,6 +1563,18 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
             state.opts.finalize_allow_see_lt0_alt = false
         });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
+    }
+
+    if !state.opts.finalize_sanity_enabled
+        && !state.user_overrides.contains("PostVerify.RequirePass")
+    {
+        state.opts.post_verify_require_pass = false;
+        static REQUIRE_PASS_NOTICE: OnceLock<()> = OnceLock::new();
+        if REQUIRE_PASS_NOTICE.set(()).is_ok() {
+            crate::io::info_string(
+                "post_verify_require_pass_default=0 (post_verify_require_pass disabled by default)",
+            );
+        }
     }
 }
 
@@ -1547,6 +1600,9 @@ pub fn log_effective_profile(state: &EngineState) {
         "PostVerify.YDrop",
         "PostVerify.RequirePass",
         "PostVerify.ExtendMs",
+        "PostVerify.SkipMateDistance",
+        "PostVerify.ExactMinDepth",
+        "PostVerify.ExactMinElapsedMs",
         "FinalizeSanity.SwitchMarginCp",
         "FinalizeSanity.OppSEE_MinCp",
         "FinalizeSanity.BudgetMs",

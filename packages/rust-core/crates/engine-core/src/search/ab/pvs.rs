@@ -10,8 +10,10 @@ use smallvec::SmallVec;
 use super::driver::ClassicBackend;
 use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, MovePicker};
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
+use crate::movegen::MoveGenerator;
 use crate::search::policy::{abdada_enabled, tt_suppress_below_depth};
 use crate::search::types::NodeType;
+use std::sync::OnceLock;
 
 #[cfg(feature = "diagnostics")]
 use super::qsearch::record_qnodes_peak;
@@ -140,9 +142,24 @@ pub(crate) struct ABArgs<'a> {
     pub(crate) tt_hits: &'a mut u64,
     pub(crate) beta_cuts: &'a mut u64,
     pub(crate) lmr_counter: &'a mut u64,
+    // instrumentation (optional): LMR gating + evasion extension counters
+    pub(crate) lmr_blocked_in_check: Option<&'a std::cell::Cell<u64>>,
+    pub(crate) lmr_blocked_recapture: Option<&'a std::cell::Cell<u64>>,
+    pub(crate) evasion_sparsity_ext: Option<&'a std::cell::Cell<u64>>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    #[inline]
+    fn gating_enabled() -> bool {
+        static FLAG: OnceLock<bool> = OnceLock::new();
+        *FLAG.get_or_init(|| match std::env::var("SEARCH_GATING_ENABLE") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                !(v == "0" || v == "false" || v == "off")
+            }
+            Err(_) => true,
+        })
+    }
     pub(crate) fn alphabeta(
         &self,
         args: ABArgs,
@@ -160,6 +177,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             tt_hits,
             beta_cuts,
             lmr_counter,
+            lmr_blocked_in_check,
+            lmr_blocked_recapture,
+            evasion_sparsity_ext,
         } = args;
         #[cfg(any(debug_assertions, feature = "diagnostics"))]
         diagnostics::record_ab_enter(pos, depth, alpha, beta, is_pv, "ab_enter");
@@ -407,6 +427,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut first_move_done = false;
         let mut tried_captures: SmallVec<[crate::shogi::Move; 16]> = SmallVec::new();
         let mut aborted = false;
+        // Pre-compute evasion count once per node (only when in_check)
+        let mut evasion_count: Option<usize> = None;
+        if Self::gating_enabled() && stack[ply as usize].in_check {
+            let mg = MoveGenerator::new();
+            if let Ok(list) = mg.generate_evasions(pos) {
+                evasion_count = Some(list.len());
+            }
+        }
         while let Some(mv) = picker.next(&*heur) {
             if ctx.time_up() || Self::should_stop(ctx.limits) {
                 aborted = true;
@@ -512,6 +540,37 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 ply,
                 stack: &*stack,
             });
+            // LMR gating: disable reductions in tactical/sensitive contexts
+            if reduction > 0 && Self::gating_enabled() {
+                // 1) Current node is in check (evasion node)
+                if stack[ply as usize].in_check {
+                    if let Some(cell) = lmr_blocked_in_check {
+                        cell.set(cell.get().saturating_add(1));
+                    }
+                    reduction = 0;
+                } else {
+                    // 2) Recapture: previous move was a capture and we capture back on the same square
+                    let recap = if is_capture {
+                        if ply > 0 {
+                            if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
+                                prev_mv.is_capture_hint() && prev_mv.to() == mv.to()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if recap {
+                        if let Some(cell) = lmr_blocked_recapture {
+                            cell.set(cell.get().saturating_add(1));
+                        }
+                        reduction = 0;
+                    }
+                }
+            }
             // 特例ガード: 直前が回避直後の静止 or TT強ヒント → 減深を1段弱める
             if reduction > 0 && is_quiet {
                 let prev_in_check = if ply > 0 {
@@ -527,6 +586,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if reduction > 0 {
                 next_depth -= reduction;
                 *lmr_counter += 1;
+            }
+            // Lightweight extension: evasion sparsity (+1) when few legal evasions
+            if Self::gating_enabled() && stack[ply as usize].in_check {
+                if let Some(k) = evasion_count {
+                    if k <= 2 {
+                        // Cap to original depth
+                        next_depth = (next_depth + 1).min(depth);
+                        if let Some(cell) = evasion_sparsity_ext {
+                            cell.set(cell.get().saturating_add(1));
+                        }
+                    }
+                }
             }
             // 後着（busy検知）時のみ、静止手に限って追加で −1ply 合流
             if use_abdada && abdada_reduce && is_quiet && next_depth > 0 {
@@ -573,6 +644,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             tt_hits,
                             beta_cuts,
                             lmr_counter,
+                            lmr_blocked_in_check,
+                            lmr_blocked_recapture,
+                            evasion_sparsity_ext,
                         },
                         ctx,
                     );
@@ -591,6 +665,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             tt_hits,
                             beta_cuts,
                             lmr_counter,
+                            lmr_blocked_in_check,
+                            lmr_blocked_recapture,
+                            evasion_sparsity_ext,
                         },
                         ctx,
                     );
@@ -617,6 +694,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     tt_hits,
                                     beta_cuts,
                                     lmr_counter,
+                                    lmr_blocked_in_check,
+                                    lmr_blocked_recapture,
+                                    evasion_sparsity_ext,
                                 },
                                 ctx,
                             );

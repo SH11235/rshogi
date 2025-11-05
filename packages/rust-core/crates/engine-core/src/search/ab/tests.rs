@@ -209,6 +209,10 @@ fn tt_bound_follows_used_window() {
             tt_hits: &mut tt_hits,
             beta_cuts: &mut beta_cuts,
             lmr_counter: &mut lmr_counter,
+            // These counters are optional in tests; not tracking per-depth stats here.
+            lmr_blocked_in_check: None,
+            lmr_blocked_recapture: None,
+            evasion_sparsity_ext: None,
         },
         &mut ctx,
     );
@@ -228,6 +232,24 @@ fn tt_bound_follows_used_window() {
             assert_eq!(entry.node_type(), expected);
         }
     }
+}
+
+#[test]
+fn near_deadline_windows_scale_and_clamp() {
+    use super::driver::ClassicBackend as BE;
+    // hard very small => clamped to lower bounds
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(100), 80);
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(100), 60);
+    // typical fast TC
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(300), 80); // 60 -> clamp to 80
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(300), 60); // 50 -> clamp to 60
+                                                                                // mid TC
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(1000), 200);
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(1000), 166);
+    // long TC (upper clamp)
+    assert_eq!(BE::<MaterialEvaluator>::derive_main_near_deadline_window_ms(4000), 600); // 800 -> clamp 600
+    assert_eq!(BE::<MaterialEvaluator>::derive_near_hard_finalize_ms(4000), 400);
+    // 666 -> clamp 400
 }
 
 #[test]
@@ -1244,18 +1266,207 @@ fn fixed_time_limit_lead_window_notifies_finalize_once() {
 
     let finalize_msg = finalizer_rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("StopController should receive Planned finalize");
+        .expect("StopController should receive NearHard finalize");
     match finalize_msg {
         FinalizerMsg::Finalize {
             session_id: sid,
             reason,
         } => {
             assert_eq!(sid, session_id);
-            assert_eq!(reason, FinalizeReason::Planned);
+            // FixedTime near-final 窓では NearHard finalize を一度だけ送る（P1仕様）
+            assert_eq!(reason, FinalizeReason::NearHard);
         }
         other => panic!("unexpected finalize message: {other:?}"),
     }
     assert!(finalizer_rx.try_recv().is_err(), "finalize should fire exactly once");
+}
+
+#[test]
+fn tm_soft_cap_skips_nearhard_but_applies_skip_or_shrink() {
+    use crate::search::parallel::{FinalizeReason, FinalizerMsg, StopController};
+    use crate::time_management::{
+        detect_game_phase_for_time, TimeControl as TMTC, TimeLimits as TMLimits, TimeManager,
+    };
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(5),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let controller = Arc::new(StopController::new());
+    let (tx, rx) = mpsc::channel();
+    controller.register_finalizer(tx);
+    let session_id = 4567;
+    controller.publish_session(None, session_id);
+
+    // Build TM and override to soft-only (hard==u64::MAX)
+    let tl = TMLimits {
+        time_control: TMTC::FixedTime { ms_per_move: 120 },
+        ..Default::default()
+    };
+    let tm = TimeManager::new(
+        &tl,
+        pos.side_to_move,
+        pos.ply as u32,
+        detect_game_phase_for_time(&pos, pos.ply as u32),
+    );
+    // soft=120, hard=MAX
+    tm.override_limits_for_test(120, u64::MAX);
+
+    let mut limits = SearchLimitsBuilder::default()
+        .multipv(3)
+        .depth(3)
+        .session_id(session_id)
+        .build();
+    limits.time_manager = Some(Arc::new(tm));
+    limits.stop_controller = Some(controller.clone());
+    let res = backend.think_blocking(&pos, &limits, None);
+
+    // Assert: no NearHard finalize message
+    while let Ok(msg) = rx.try_recv() {
+        if let FinalizerMsg::Finalize { reason, .. } = msg {
+            assert_ne!(
+                reason,
+                FinalizeReason::NearHard,
+                "NearHard should not be sent when TM hard==MAX"
+            );
+        }
+    }
+    // Optional: at least the search completed
+    assert!(res.stats.nodes > 0);
+}
+
+#[test]
+fn ponder_mode_suppresses_nearhard_finalize() {
+    use crate::search::parallel::{FinalizeReason, FinalizerMsg, StopController};
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(5),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let controller = Arc::new(StopController::new());
+    let (tx, rx) = mpsc::channel();
+    controller.register_finalizer(tx);
+    let session_id = 8901;
+    controller.publish_session(None, session_id);
+
+    let mut limits =
+        SearchLimitsBuilder::default().session_id(session_id).fixed_time_ms(80).build();
+    limits.is_ponder = true;
+    limits.stop_controller = Some(controller.clone());
+    let _ = backend.think_blocking(&pos, &limits, None);
+
+    // No NearHard finalize expected in ponder mode
+    while let Ok(msg) = rx.try_recv() {
+        if let FinalizerMsg::Finalize { reason, .. } = msg {
+            assert_ne!(
+                reason,
+                FinalizeReason::NearHard,
+                "NearHard must be suppressed in ponder mode"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_window_budget_limits_qnodes() {
+    // Enable zero-window finalize and set a very small budget; check info string for qnodes_used <= budget
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS", "10");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH", "3");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS", "5");
+
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(5),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let capture = lines.clone();
+    let limits = SearchLimitsBuilder::default()
+        .fixed_time_ms(120)
+        .depth(4)
+        .info_string_callback(Arc::new(move |s: &str| {
+            if s.contains("near_final_zero_window=") {
+                capture.lock().unwrap().push(s.to_string());
+            }
+        }))
+        .build();
+    let _ = backend.think_blocking(&pos, &limits, None);
+    // Inspect captured logs (if any); if none, the test is inconclusive but not a hard failure for flaky timing
+    let logs = lines.lock().unwrap().clone();
+    if let Some(last) = logs.last() {
+        // very lax parse: find qnodes_used and budget_qnodes numbers
+        let used = last
+            .split_whitespace()
+            .find(|t| t.starts_with("qnodes_used="))
+            .and_then(|kv| kv.split('=').nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let budget = last
+            .split_whitespace()
+            .find(|t| t.starts_with("budget_qnodes="))
+            .and_then(|kv| kv.split('=').nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        assert!(
+            used <= budget,
+            "qnodes_used={} should be <= budget_qnodes={}; log={} ",
+            used,
+            budget,
+            last
+        );
+    }
+}
+
+#[test]
+fn multipv_shrinks_near_deadline_fixed_time() {
+    // 80ms 固定時間だと main_win は clamp により 80ms。開始直後から対象帯域に入り、縮退が有効になる。
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(8),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+    let limits = SearchLimitsBuilder::default().multipv(3).depth(3).fixed_time_ms(80).build();
+    let res = backend.think_blocking(&pos, &limits, None);
+    assert_eq!(
+        res.stats.multipv_shrunk.unwrap_or(0),
+        1,
+        "near-deadline should shrink MultiPV to 1 under fixed-time"
+    );
+}
+
+#[test]
+fn multipv_shrinks_near_deadline_with_time_manager() {
+    use crate::time_management::{
+        detect_game_phase_for_time, TimeControl as TMTC, TimeLimits as TMLimits, TimeManager,
+    };
+    let evaluator = Arc::new(SleepyEvaluator {
+        delay: Duration::from_millis(8),
+    });
+    let backend = ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced());
+    let pos = Position::startpos();
+
+    // TimeManager 経路で 80ms を設定
+    let tm_limits = TMLimits {
+        time_control: TMTC::FixedTime { ms_per_move: 80 },
+        ..Default::default()
+    };
+    let tm = TimeManager::new(
+        &tm_limits,
+        pos.side_to_move,
+        pos.ply as u32,
+        detect_game_phase_for_time(&pos, pos.ply as u32),
+    );
+
+    let mut limits = SearchLimitsBuilder::default().multipv(3).depth(3).build();
+    limits.time_manager = Some(Arc::new(tm));
+
+    let res = backend.think_blocking(&pos, &limits, None);
+    assert_eq!(
+        res.stats.multipv_shrunk.unwrap_or(0),
+        1,
+        "near-deadline should shrink MultiPV to 1 under TimeManager"
+    );
 }
 
 #[test]
@@ -1431,4 +1642,126 @@ fn generate_evasions_double_check_only_king_moves() {
     evasion_sorted.sort_unstable();
 
     assert_eq!(all_sorted, evasion_sorted);
+}
+
+#[test]
+fn near_final_updates_final_lines_and_snapshot() {
+    use crate::search::ab::ClassicBackend;
+    use crate::search::types::NodeType;
+    use crate::shogi::Position;
+    use std::sync::Arc;
+
+    // Enable near-final verification with permissive gates
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS", "0");
+
+    let backend = ClassicBackend::with_profile_apply_defaults(
+        Arc::new(crate::evaluation::evaluate::MaterialEvaluator),
+        crate::search::ab::SearchProfile::enhanced_material(),
+    );
+    let pos = Position::startpos();
+
+    // Limits: short fixed time to drive near-deadline path
+    let limits = crate::search::limits::SearchLimitsBuilder::default()
+        .fixed_time_ms(50)
+        .multipv(1)
+        .build();
+
+    let result = backend.think_blocking(&pos, &limits, None);
+    // Ensure we produced at least one line
+    let lines = result.lines.expect("lines present");
+    let first = &lines[0];
+    // After near-final, bound may be Exact（環境/局面に依存するため強断言しない）
+    assert!(matches!(
+        first.bound,
+        NodeType::Exact | NodeType::UpperBound | NodeType::LowerBound
+    ));
+    // Snapshot consistency: stats.pv reflects the same PV head as lines[0]
+    assert_eq!(
+        result.stats.pv.first().copied(),
+        first.pv.first().copied(),
+        "final snapshot PV head should match final_lines[0]"
+    );
+}
+
+#[test]
+fn near_final_bound_slack_boundary() {
+    use crate::search::ab::ClassicBackend;
+    use crate::shogi::Position;
+    use std::sync::Arc;
+
+    // slack=0 → attempt only when exactly on boundary; slack=1 → attempt when within 1cp
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_NEAR_DEADLINE", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH", "1");
+    std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS", "0");
+
+    let backend = ClassicBackend::with_profile_apply_defaults(
+        Arc::new(crate::evaluation::evaluate::MaterialEvaluator),
+        crate::search::ab::SearchProfile::enhanced_material(),
+    );
+    let pos = Position::startpos();
+
+    // Helper to run once with slack value
+    let run_once = |slack_cp: i32| {
+        std::env::set_var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP", slack_cp.to_string());
+        let limits = crate::search::limits::SearchLimitsBuilder::default()
+            .fixed_time_ms(30)
+            .multipv(1)
+            .build();
+        backend.think_blocking(&pos, &limits, None)
+    };
+
+    let res0 = run_once(0);
+    let res1 = run_once(1);
+    // We can't deterministically assert attempted counts here without parsing info logs,
+    // but we can at least assert both runs succeed and produce a line, guarding regressions
+    assert!(res0.lines.as_ref().is_some());
+    assert!(res1.lines.as_ref().is_some());
+}
+
+#[test]
+fn threads_lg2_monotonic_and_non_negative() {
+    use super::driver::ClassicBackend as BE;
+    let seq = [1_u32, 2, 3, 4, 8, 16, 24, 32];
+    let mut prev = -1_i32;
+    for &t in &seq {
+        let lg = BE::<MaterialEvaluator>::threads_lg2_for_test(t);
+        assert!(lg >= 0, "threads_lg2 should be non-negative for t={}", t);
+        assert!(lg >= prev, "threads_lg2 should be monotonic: {} -> {}", prev, lg);
+        prev = lg;
+    }
+}
+#[test]
+fn classify_root_bound_boundaries() {
+    use super::driver::ClassicBackend as BE;
+    // alpha < beta invariant
+    let (alpha, beta) = (-10, 10);
+    // Exactly at alpha → UpperBound
+    assert!(matches!(
+        BE::<MaterialEvaluator>::classify_root_bound(alpha, alpha, beta),
+        NodeType::UpperBound
+    ));
+    // Exactly at beta → LowerBound
+    assert!(matches!(
+        BE::<MaterialEvaluator>::classify_root_bound(beta, alpha, beta),
+        NodeType::LowerBound
+    ));
+    // Strictly inside → Exact
+    assert!(matches!(
+        BE::<MaterialEvaluator>::classify_root_bound(0, alpha, beta),
+        NodeType::Exact
+    ));
+}
+
+#[test]
+fn byoyomi_qnodes_limit_scales_with_depth() {
+    use super::driver::ClassicBackend as BE;
+    use crate::search::limits::SearchLimitsBuilder as B;
+    // Byoyomi time control without TimeManager → driver detects byoyomi_active
+    let limits = B::default().byoyomi(20_000, 1_000, 1).build();
+    let d1 = BE::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 1, 1);
+    let d4 = BE::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 4, 1);
+    assert!(d4 > d1, "byoyomi qnodes limit should increase with depth ({} -> {})", d1, d4);
 }

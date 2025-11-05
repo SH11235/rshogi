@@ -93,6 +93,20 @@ pub struct SearchStats {
     /// MultipV merge detail (primary/helper) — diagnostics only
     pub multipv_primary_lines: Option<u8>,
     pub multipv_helper_lines: Option<u8>,
+    /// Near-deadline: whether we skipped starting a new iteration (0/1)
+    pub near_deadline_skip_new_iter: Option<u64>,
+    /// Near-deadline: whether MultiPV was shrunk to 1 (0/1)
+    pub multipv_shrunk: Option<u64>,
+    /// Near-final verify attempts (number of times narrow-window verification was executed)
+    pub near_final_attempted: Option<u64>,
+    /// Near-final verify confirmations (number of times Exact was confirmed)
+    pub near_final_confirmed: Option<u64>,
+    /// LMR gating: times LMR was disabled/blocked due to in_check/evasion at current node
+    pub lmr_blocked_in_check: Option<u64>,
+    /// LMR gating: times LMR was disabled/blocked due to recapture heuristic
+    pub lmr_blocked_recapture: Option<u64>,
+    /// Extensions: times we applied +1 ply due to evasion sparsity (few legal evasions)
+    pub evasion_sparsity_extensions: Option<u64>,
     /// ABDADA diagnostics (counts)
     #[cfg(feature = "diagnostics")]
     pub abdada_busy_detected: Option<u64>,
@@ -307,6 +321,33 @@ impl SearchResult {
         self.nps = compute_nps(self.stats.nodes, self.stats.elapsed);
         if let Some(ref info) = self.stop_info {
             self.end_reason = info.reason;
+        }
+    }
+
+    /// Ensure legacy fields mirror the primary line when present.
+    pub fn sync_from_primary_line(&mut self) {
+        if let Some(lines) = self.lines.as_ref() {
+            if let Some(first) = lines.first() {
+                self.best_move = Some(first.root_move);
+                self.score = first.score_internal;
+                self.node_type = first.bound;
+                self.stats.pv = first.pv.iter().copied().collect();
+                if self.stats.pv.is_empty() {
+                    self.stats.pv.push(first.root_move);
+                }
+            }
+        }
+        self.refresh_summary();
+        #[cfg(debug_assertions)]
+        {
+            if let Some(lines) = self.lines.as_ref() {
+                if let Some(first) = lines.first() {
+                    debug_assert_eq!(self.best_move, Some(first.root_move));
+                    debug_assert_eq!(self.score, first.score_internal);
+                    debug_assert_eq!(self.node_type, first.bound);
+                    debug_assert_eq!(self.stats.pv.first().copied(), Some(first.root_move));
+                }
+            }
         }
     }
 }
@@ -618,5 +659,53 @@ mod tests {
         assert_eq!(TerminationReason::Mate.to_string(), "mate");
         assert_eq!(TerminationReason::Completed.to_string(), "completed");
         assert_eq!(TerminationReason::Error.to_string(), "error");
+    }
+
+    #[test]
+    fn test_sync_from_primary_line_updates_top_level() {
+        use crate::usi::parse_usi_move;
+        use smallvec::smallvec;
+
+        let root_move = parse_usi_move("7g7f").unwrap();
+        let reply_move = parse_usi_move("3c3d").unwrap();
+        let pv = smallvec![root_move, reply_move];
+
+        let line = RootLine {
+            multipv_index: 1,
+            root_move,
+            score_internal: 345,
+            score_cp: clamp_score_cp(345),
+            bound: NodeType::Exact,
+            depth: 12,
+            seldepth: Some(18),
+            pv,
+            nodes: Some(42_000),
+            time_ms: Some(750),
+            nps: Some(56_000),
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        };
+
+        let stats = SearchStats {
+            nodes: 42_000,
+            elapsed: Duration::from_millis(750),
+            depth: 8,
+            seldepth: Some(16),
+            ..Default::default()
+        };
+
+        let mut result = SearchResult::new(None, 0, stats);
+        let mut lines = SmallVec::<[RootLine; 4]>::new();
+        lines.push(line);
+        result.lines = Some(lines);
+
+        result.sync_from_primary_line();
+
+        assert_eq!(result.best_move, Some(root_move));
+        assert_eq!(result.score, 345);
+        assert_eq!(result.node_type, NodeType::Exact);
+        assert_eq!(result.stats.pv.first().copied(), Some(root_move));
+        assert_eq!(result.ponder, Some(reply_move));
     }
 }
