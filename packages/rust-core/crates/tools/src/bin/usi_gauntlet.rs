@@ -79,6 +79,11 @@ struct USIProc {
     stdin: ChildStdin,
     rx: Receiver<String>,
     last_eval: Option<LastEval>,
+    // lightweight diagnostics counters parsed from stdout
+    cnt_pv_verify_fail: usize,
+    cnt_oob_verify_fail: usize,
+    cnt_oob_switch: usize,
+    cnt_finalize_event: usize,
 }
 
 impl Drop for USIProc {
@@ -131,6 +136,10 @@ impl USIProc {
             stdin,
             rx,
             last_eval: None,
+            cnt_pv_verify_fail: 0,
+            cnt_oob_verify_fail: 0,
+            cnt_oob_switch: 0,
+            cnt_finalize_event: 0,
         })
     }
 
@@ -159,6 +168,19 @@ impl USIProc {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms + 3000);
         while Instant::now() < deadline {
             if let Ok(line) = self.rx.recv_timeout(Duration::from_millis(20)) {
+                // count simple diagnostics tags (engine stdout)
+                if line.contains("pv_verify result=fail") {
+                    self.cnt_pv_verify_fail += 1;
+                }
+                if line.contains("oob_pv_verify_fail") {
+                    self.cnt_oob_verify_fail += 1;
+                }
+                if line.contains("oob_pv_switch") {
+                    self.cnt_oob_switch += 1;
+                }
+                if line.contains("finalize_event") {
+                    self.cnt_finalize_event += 1;
+                }
                 if let Some(idx) = line.find("score cp ") {
                     // parse integer after "score cp "
                     let s = &line[idx + 9..];
@@ -195,6 +217,20 @@ impl USIProc {
             }
         }
         Ok(("resign".to_string(), self.last_eval.take()))
+    }
+
+    fn take_counters(&mut self) -> (usize, usize, usize, usize) {
+        let snap = (
+            self.cnt_pv_verify_fail,
+            self.cnt_oob_verify_fail,
+            self.cnt_oob_switch,
+            self.cnt_finalize_event,
+        );
+        self.cnt_pv_verify_fail = 0;
+        self.cnt_oob_verify_fail = 0;
+        self.cnt_oob_switch = 0;
+        self.cnt_finalize_event = 0;
+        snap
     }
 }
 
@@ -255,6 +291,11 @@ fn main() -> Result<()> {
     let base_wins = Arc::new(AtomicUsize::new(0));
     let draws = Arc::new(AtomicUsize::new(0));
     let games_done = Arc::new(AtomicUsize::new(0));
+    // global counters for stdout-diagnostics
+    let g_pv_verify_fail = Arc::new(AtomicUsize::new(0));
+    let g_oob_verify_fail = Arc::new(AtomicUsize::new(0));
+    let g_oob_switch = Arc::new(AtomicUsize::new(0));
+    let g_finalize_event = Arc::new(AtomicUsize::new(0));
 
     let chunks = {
         let c = cli.concurrency.max(1);
@@ -302,6 +343,11 @@ fn main() -> Result<()> {
         let eval_file = eval_file.clone();
         let base_env = base_env.clone();
         let cand_env = cand_env.clone();
+        // clone global diagnostics counters into this worker
+        let w_pv = g_pv_verify_fail.clone();
+        let w_ov = g_oob_verify_fail.clone();
+        let w_sw = g_oob_switch.clone();
+        let w_fn = g_finalize_event.clone();
         let progress_path = out_dir.join(format!("run_worker_{}.log", wid));
         let handle = thread::spawn(move || -> Result<()> {
             let mut progress =
@@ -374,6 +420,12 @@ fn main() -> Result<()> {
                     };
                     to_move.send(format!("go byoyomi {}", byoyomi))?;
                     let (bm, eval) = to_move.recv_bestmove(byoyomi + 200)?;
+                    // accumulate lightweight counters from the side that just searched
+                    let (pvf, ovf, swc, fin) = to_move.take_counters();
+                    w_pv.fetch_add(pvf, Ordering::Relaxed);
+                    w_ov.fetch_add(ovf, Ordering::Relaxed);
+                    w_sw.fetch_add(swc, Ordering::Relaxed);
+                    w_fn.fetch_add(fin, Ordering::Relaxed);
                     if adj_enable {
                         match eval {
                             Some(LastEval::Mate(m)) if adj_mate_enable => {
@@ -477,10 +529,17 @@ fn main() -> Result<()> {
     } else {
         0.5
     };
-    fs::write(cli.out.join("summary.txt"), format!(
-        "USI Gauntlet (byoyomi={}ms, games={})\n- Candidate wins: {}\n- Baseline wins:  {}\n- Draws:          {}\n- Score rate:     {:.3}\n",
-        cli.byoyomi_ms, games, cw, bw, dr, score_rate
-    ))?;
+    let pvf = g_pv_verify_fail.load(Ordering::Relaxed);
+    let ovf = g_oob_verify_fail.load(Ordering::Relaxed);
+    let swc = g_oob_switch.load(Ordering::Relaxed);
+    let fin = g_finalize_event.load(Ordering::Relaxed);
+    fs::write(
+        cli.out.join("summary.txt"),
+        format!(
+            "USI Gauntlet (byoyomi={}ms, games={})\n- Candidate wins: {}\n- Baseline wins:  {}\n- Draws:          {}\n- Score rate:     {:.3}\n- pv_verify_fail: {}\n- oob_verify_fail: {}\n- oob_switch:     {}\n- finalize_event: {}\n",
+            cli.byoyomi_ms, games, cw, bw, dr, score_rate, pvf, ovf, swc, fin
+        ),
+    )?;
     fs::write(
         cli.out.join("result.json"),
         serde_json::to_string_pretty(&Summary {
