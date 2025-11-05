@@ -81,6 +81,31 @@ struct NearDeadlineDecision {
     t_rem_ms: u64,
 }
 
+/// Computes remaining time in milliseconds for sticky-PV logic.
+/// Supports both TimeManager (hard/soft limits) and fixed time_limit modes.
+#[inline]
+fn time_remaining_ms_for_sticky(t0: Instant, limits: &SearchLimits) -> Option<u64> {
+    if let Some(tm) = limits.time_manager.as_ref() {
+        let hard = tm.hard_limit_ms();
+        if hard != u64::MAX {
+            let elapsed = tm.elapsed_ms();
+            return Some(hard.saturating_sub(elapsed));
+        }
+        let soft = tm.soft_limit_ms();
+        if soft != u64::MAX {
+            let elapsed = tm.elapsed_ms();
+            return Some(soft.saturating_sub(elapsed));
+        }
+        None
+    } else if let Some(limit) = limits.time_limit() {
+        let cap = limit.as_millis() as u64;
+        let el = t0.elapsed().as_millis() as u64;
+        Some(cap.saturating_sub(el))
+    } else {
+        None
+    }
+}
+
 #[derive(Clone)]
 pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     pub(super) evaluator: Arc<E>,
@@ -1559,10 +1584,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             local_best = score;
                             local_best_mv = Some(mv);
                             // Update verified status based on this move being best
-                            let cand_verified = pv_verify_passed.iter().any(|&k| k == mv.to_u32())
+                            let was_verified_in_this_iter =
+                                pv_verify_passed.iter().any(|&k| k == mv.to_u32());
+                            let head_considered_verified = idx == 0
+                                && ((local_best - prev_score).abs() <= 20
+                                    || was_verified_in_this_iter);
+                            let cand_verified = was_verified_in_this_iter
                                 || mv.is_capture_hint()
                                 || root.gives_check(mv)
-                                || idx == 0;
+                                || head_considered_verified;
                             local_best_verified = cand_verified;
                         }
                         if score > alpha {
@@ -1764,23 +1794,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             cumulative_pv_changed = cumulative_pv_changed.saturating_add(1);
                         }
                         // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先
-                        use std::time::Duration;
-                        let now = Instant::now();
                         let mut adopt_mv = m;
                         let sticky_ms: u64 = 400;
-                        let near_deadline = match hard_deadline {
-                            Some(hd) => {
-                                // hd: Duration until hard deadline from start t0
-                                let elapsed = now.saturating_duration_since(t0);
-                                let rem = if hd > elapsed {
-                                    hd - elapsed
-                                } else {
-                                    Duration::ZERO
-                                };
-                                rem.as_millis() as u64 <= sticky_ms
-                            }
-                            None => false,
-                        };
+                        let near_deadline = time_remaining_ms_for_sticky(t0, limits)
+                            .is_some_and(|t_rem| t_rem <= sticky_ms);
                         #[cfg(feature = "diagnostics")]
                         if let Some(cb) = limits.info_string_callback.as_ref() {
                             cb(&format!(
