@@ -1499,9 +1499,9 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     // PV直下ワンムーブ検証はEnhancedで有効化
     engine_core::search::config::set_pv_verify_enabled(retry_on);
     if retry_on {
-        // 実戦向け: 深さ≥8で動作、αに+40cpの余裕
+        // 実戦向け: 深さ≥8で動作、ゼロ窓（±1cp相当）に近い狭幅
         engine_core::search::config::set_pv_verify_min_depth(8);
-        engine_core::search::config::set_pv_verify_alpha_margin_cp(40);
+        engine_core::search::config::set_pv_verify_alpha_margin_cp(1);
     }
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);

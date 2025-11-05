@@ -1203,6 +1203,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut local_best_verified = false;
                 let mut local_best = i32::MIN / 2;
                 let mut helper_retries: u32 = 0; // fail‑high のみ 1 回まで許可
+                                                 // Root PV 一手検証: 反復内の予算と重複管理を aspiration ループの外側で保持
+                let mut pv_verify_attempts: u32 = 0;
+                let mut pv_verify_seen: SmallVec<[u32; 16]> = SmallVec::new();
                 loop {
                     if let Some(hit) = Self::deadline_hit(
                         t0,
@@ -1243,9 +1246,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
-                    // Throttle PV one-move verification per iteration
-                    let mut pv_verify_attempts: u32 = 0;
-                    let mut pv_verify_seen: SmallVec<[u32; 16]> = SmallVec::new();
+                    // pv_verify_attempts/seen は反復内で共有（aspiration再試行でリセットしない）
                     for (idx, (mv, _, _root_idx)) in active_moves.iter().copied().enumerate() {
                         // 純粋 LazySMP: claim は行わない
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]

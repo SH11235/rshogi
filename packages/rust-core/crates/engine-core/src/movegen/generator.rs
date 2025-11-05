@@ -2,7 +2,6 @@ use crate::shogi::attacks::{
     between_bb, gold_attacks, king_attacks, knight_attacks, lance_attacks, pawn_attacks,
     silver_attacks, sliding_attacks, HAND_ORDER,
 };
-use crate::shogi::board::NUM_PIECE_TYPES;
 use crate::shogi::board_constants::{
     FILE_MASKS, RANK_1_2_MASK, RANK_1_MASK, RANK_8_9_MASK, RANK_9_MASK, SHOGI_BOARD_SIZE,
 };
@@ -128,6 +127,8 @@ impl<'a> MoveGenImpl<'a> {
         {
             let mut combined_from_piece_bb = Bitboard::EMPTY;
             for &color in &[Color::Black, Color::White] {
+                use crate::shogi::board::NUM_PIECE_TYPES;
+
                 let mut union = Bitboard::EMPTY;
                 for piece_idx in 0..NUM_PIECE_TYPES {
                     union |= pos.board.piece_bb[color as usize][piece_idx];
