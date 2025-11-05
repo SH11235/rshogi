@@ -25,6 +25,7 @@ static PV_VERIFY_MIN_DEPTH: AtomicU8 = AtomicU8::new(8);
 static PV_VERIFY_REPLY_XSEE_QUIET: AtomicI32 = AtomicI32::new(200);
 static PV_VERIFY_REPLY_XSEE_DROP: AtomicI32 = AtomicI32::new(250);
 static PV_VERIFY_ALPHA_MARGIN_CP: AtomicI32 = AtomicI32::new(0);
+static PV_VERIFY_MAX_PER_ITER: AtomicU8 = AtomicU8::new(6);
 
 /// Enable or disable mate early stop globally
 pub fn set_mate_early_stop_enabled(enabled: bool) {
@@ -142,4 +143,12 @@ pub fn set_pv_verify_alpha_margin_cp(cp: i32) {
 #[inline]
 pub fn pv_verify_alpha_margin_cp() -> i32 {
     PV_VERIFY_ALPHA_MARGIN_CP.load(Ordering::Acquire)
+}
+
+pub fn set_pv_verify_max_per_iter(n: u8) {
+    PV_VERIFY_MAX_PER_ITER.store(n.max(1), Ordering::Release);
+}
+#[inline]
+pub fn pv_verify_max_per_iter() -> u8 {
+    PV_VERIFY_MAX_PER_ITER.load(Ordering::Acquire)
 }
