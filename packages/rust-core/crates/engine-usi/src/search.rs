@@ -908,10 +908,7 @@ mod watchdog_tests {
                 }
             }
         } else if let Some(rx) = state.finalizer_rx.as_ref() {
-            assert!(
-                rx.try_recv().is_err(),
-                "no finalize should be emitted when only scheduling"
-            );
+            assert!(rx.try_recv().is_err(), "no finalize should be emitted when only scheduling");
         }
     }
 
