@@ -104,6 +104,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ply,
             stack,
         } = params;
+        // Verification: disable SBP entirely when verification flag is set at this node
+        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning) {
+            return false;
+        }
+        // Safety gate (Level C-lite): SBP を浅層では無効化（safe時 depth<=5）。
+        // 即時の取り返しを誤って刈るのを回避。
+        if crate::search::params::pruning_safe_mode() && depth <= 5 {
+            return false;
+        }
         if !(toggles.enable_static_beta_pruning && dynp::static_beta_enabled()) {
             return false;
         }
@@ -168,6 +177,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ply,
             is_pv,
         } = params;
+        // Verification: disable Razor when verification flag is set
+        if ctx.limits.info_string_callback.as_ref().is_some() {
+            // no-op; the flag lives on SearchStack, consult via ctx not possible here
+        }
+        // Access SearchStack via ctx is not available here; guard in caller (pvs.rs)
+        // Safety gate (Level C-lite): Razor を浅層では無効化（safe時 depth<=5）。
+        if crate::search::params::pruning_safe_mode() && depth <= 5 {
+            return None;
+        }
         if !(toggles.enable_razor && dynp::razor_enabled()) {
             return None;
         }
@@ -220,6 +238,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter,
             ctx,
         } = params;
+        // Verification: disable NMP when verification flag is set at this node
+        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning) {
+            return None;
+        }
         if !toggles.enable_nmp || !dynp::nmp_enabled() {
             return None;
         }
@@ -373,6 +395,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ..
         } = params;
+        // Verification: disable ProbCut when verification flag is set at this node
+        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning) {
+            return None;
+        }
         if !toggles.enable_probcut
             || !dynp::probcut_enabled()
             || !dynp::probcut_allowed(depth)
@@ -384,8 +410,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         // Safeモード: YO寄りの厳しめガード + 事前qsearch + 検証探索(depth-5)
         if dynp::pruning_safe_mode() {
-            // Guard: too shallow near root (verification would be too short) → disable ProbCut
-            if depth <= 5 {
+            // Guard (Level C-lite): too shallow near root → disable ProbCut（safe時 depth<=9）
+            if depth <= 9 {
                 return None;
             }
             // improving 推定: 2手前の静的評価と比較
@@ -518,7 +544,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         // 既存（従来）モード
-        if depth < 5 {
+        // Make ProbCut slightly more conservative at shallow depths, particularly
+        // when SafePruning is enabled. This reduces over-cutting before
+        // recapture lines are verified.
+        let min_pc_depth = if crate::search::params::pruning_safe_mode() {
+            6
+        } else {
+            5
+        };
+        if depth < min_pc_depth {
             return None;
         }
         if dynp::probcut_skip_verify_lt4() && depth < 4 {

@@ -225,53 +225,61 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         alpha = used_alpha;
         let beta = used_beta;
 
-        if self.should_static_beta_prune(super::pruning::StaticBetaPruneParams {
-            toggles: &self.profile.prune,
-            depth,
-            pos,
-            beta,
-            static_eval,
-            is_pv,
-            ply,
-            stack: &*stack,
-        }) {
+        // Skip SBP when verification is requested at this node
+        let verify_here = stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning);
+        if !verify_here
+            && self.should_static_beta_prune(super::pruning::StaticBetaPruneParams {
+                toggles: &self.profile.prune,
+                depth,
+                pos,
+                beta,
+                static_eval,
+                is_pv,
+                ply,
+                stack: &*stack,
+            })
+        {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (static_eval, None);
         }
 
-        if let Some(r) = self.razor_prune(super::pruning::RazorPruneParams {
-            toggles: &self.profile.prune,
-            depth,
-            pos,
-            alpha,
-            static_eval,
-            ctx,
-            ply,
-            is_pv,
-        }) {
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-            return (r, None);
+        if !verify_here {
+            if let Some(r) = self.razor_prune(super::pruning::RazorPruneParams {
+                toggles: &self.profile.prune,
+                depth,
+                pos,
+                alpha,
+                static_eval,
+                ctx,
+                ply,
+                is_pv,
+            }) {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+                return (r, None);
+            }
         }
 
-        if let Some(score) = self.null_move_prune(NullMovePruneParams {
-            toggles: &self.profile.prune,
-            depth,
-            pos,
-            beta,
-            static_eval,
-            ply,
-            stack: &mut *stack,
-            heur: &mut *heur,
-            tt_hits: &mut *tt_hits,
-            beta_cuts: &mut *beta_cuts,
-            lmr_counter: &mut *lmr_counter,
-            ctx,
-        }) {
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-            return (score, None);
+        if !verify_here {
+            if let Some(score) = self.null_move_prune(NullMovePruneParams {
+                toggles: &self.profile.prune,
+                depth,
+                pos,
+                beta,
+                static_eval,
+                ply,
+                stack: &mut *stack,
+                heur: &mut *heur,
+                tt_hits: &mut *tt_hits,
+                beta_cuts: &mut *beta_cuts,
+                lmr_counter: &mut *lmr_counter,
+                ctx,
+            }) {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+                return (score, None);
+            }
         }
 
         let mut tt_hint: Option<crate::shogi::Move> = None;
@@ -386,24 +394,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             tt_depth_ok,
         });
 
-        if let Some((score, mv)) = self.probcut(ProbcutParams {
-            toggles: &self.profile.prune,
-            depth,
-            pos,
-            beta,
-            static_eval,
-            ply,
-            is_pv,
-            stack: &mut *stack,
-            heur: &mut *heur,
-            tt_hits: &mut *tt_hits,
-            beta_cuts: &mut *beta_cuts,
-            lmr_counter: &mut *lmr_counter,
-            ctx,
-        }) {
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-            return (score, Some(mv));
+        if !verify_here {
+            if let Some((score, mv)) = self.probcut(ProbcutParams {
+                toggles: &self.profile.prune,
+                depth,
+                pos,
+                beta,
+                static_eval,
+                ply,
+                is_pv,
+                stack: &mut *stack,
+                heur: &mut *heur,
+                tt_hits: &mut *tt_hits,
+                beta_cuts: &mut *beta_cuts,
+                lmr_counter: &mut *lmr_counter,
+                ctx,
+            }) {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
+                return (score, Some(mv));
+            }
         }
 
         let prev_move = if ply > 0 {
@@ -447,7 +457,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
 
-            if depth < 14 && is_quiet {
+            if !verify_here && depth < 14 && is_quiet {
                 let mut h = heur.history.get(pos.side_to_move, mv);
                 // 明示的に i16 範囲へクランプ（将来の係数変更でも安全）
                 h = h.clamp(i16::MIN as i32, i16::MAX as i32);
@@ -477,14 +487,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if depth <= 3 && is_quiet {
+            if !verify_here && depth <= 3 && is_quiet {
                 let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
                 }
             }
             // Futility（alpha側）: 静止のみ・チェック静止/良捕獲/昇は除外、depth<=8
-            if dynp::pruning_safe_mode()
+            if !verify_here
+                && dynp::pruning_safe_mode()
                 && dynp::fut_dynamic_enabled()
                 && depth <= 8
                 && is_quiet
@@ -528,18 +539,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             let mut next_depth = depth - 1;
-            let mut reduction = ordering::late_move_reduction(LateMoveReductionParams {
-                lmr_trials: &mut heur.lmr_trials,
-                depth,
-                moveno,
-                is_quiet,
-                is_good_capture,
-                is_pv,
-                gives_check,
-                static_eval,
-                ply,
-                stack: &*stack,
-            });
+            let mut reduction = if verify_here {
+                0
+            } else {
+                ordering::late_move_reduction(LateMoveReductionParams {
+                    lmr_trials: &mut heur.lmr_trials,
+                    depth,
+                    moveno,
+                    is_quiet,
+                    is_good_capture,
+                    is_pv,
+                    gives_check,
+                    static_eval,
+                    ply,
+                    stack: &*stack,
+                })
+            };
             // LMR gating: disable reductions in tactical/sensitive contexts
             if reduction > 0 && Self::gating_enabled() {
                 // 1) Current node is in check (evasion node)

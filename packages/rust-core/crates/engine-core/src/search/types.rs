@@ -509,6 +509,9 @@ pub struct SearchStack {
     pub consecutive_checks: u8,
     /// Principal variation suffix from this ply
     pub pv_line: SmallVec<[Move; 16]>,
+    /// Verification mode: when true, disable aggressive pruning/reduction at this node
+    /// (used by root PV one-move verification to enforce full-depth, zero-window check).
+    pub verify_no_pruning: bool,
 }
 
 impl SearchStack {
@@ -538,6 +541,7 @@ impl SearchStack {
         self.quiet_moves.clear(); // 容量保持
         self.consecutive_checks = 0;
         self.pv_line.clear(); // SmallVec の容量保持
+        self.verify_no_pruning = false;
     }
 
     /// Update killers (convenience method)
