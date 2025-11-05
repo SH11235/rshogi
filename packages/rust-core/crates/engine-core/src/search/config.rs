@@ -19,14 +19,6 @@ static ROOT_RETRY_ENABLED: AtomicBool = AtomicBool::new(false);
 static PROMOTE_VERIFY_ENABLED: AtomicBool = AtomicBool::new(false);
 static PROMOTE_BIAS_CP: AtomicI32 = AtomicI32::new(20);
 
-// PV one-move verification (root/PV限定) — default OFF; Enhanced でON
-static PV_VERIFY_ENABLED: AtomicBool = AtomicBool::new(false);
-static PV_VERIFY_MIN_DEPTH: AtomicU8 = AtomicU8::new(8);
-static PV_VERIFY_REPLY_XSEE_QUIET: AtomicI32 = AtomicI32::new(200);
-static PV_VERIFY_REPLY_XSEE_DROP: AtomicI32 = AtomicI32::new(250);
-static PV_VERIFY_ALPHA_MARGIN_CP: AtomicI32 = AtomicI32::new(0);
-static PV_VERIFY_MAX_PER_ITER: AtomicU8 = AtomicU8::new(6);
-
 /// Enable or disable mate early stop globally
 pub fn set_mate_early_stop_enabled(enabled: bool) {
     MATE_EARLY_STOP_ENABLED.store(enabled, Ordering::Release);
@@ -106,49 +98,4 @@ pub fn set_promote_bias_cp(bias: i32) {
 #[inline]
 pub fn promote_bias_cp() -> i32 {
     PROMOTE_BIAS_CP.load(Ordering::Acquire)
-}
-
-// ---- PV one-move verification (root/PV限定)
-pub fn set_pv_verify_enabled(on: bool) {
-    PV_VERIFY_ENABLED.store(on, Ordering::Release);
-}
-#[inline]
-pub fn pv_verify_enabled() -> bool {
-    PV_VERIFY_ENABLED.load(Ordering::Acquire)
-}
-pub fn set_pv_verify_min_depth(d: u8) {
-    PV_VERIFY_MIN_DEPTH.store(d.max(1), Ordering::Release);
-}
-#[inline]
-pub fn pv_verify_min_depth() -> u8 {
-    PV_VERIFY_MIN_DEPTH.load(Ordering::Acquire)
-}
-pub fn set_pv_verify_reply_xsee_quiet(cp: i32) {
-    PV_VERIFY_REPLY_XSEE_QUIET.store(cp, Ordering::Release);
-}
-#[inline]
-pub fn pv_verify_reply_xsee_quiet() -> i32 {
-    PV_VERIFY_REPLY_XSEE_QUIET.load(Ordering::Acquire)
-}
-pub fn set_pv_verify_reply_xsee_drop(cp: i32) {
-    PV_VERIFY_REPLY_XSEE_DROP.store(cp, Ordering::Release);
-}
-#[inline]
-pub fn pv_verify_reply_xsee_drop() -> i32 {
-    PV_VERIFY_REPLY_XSEE_DROP.load(Ordering::Acquire)
-}
-pub fn set_pv_verify_alpha_margin_cp(cp: i32) {
-    PV_VERIFY_ALPHA_MARGIN_CP.store(cp.max(0), Ordering::Release);
-}
-#[inline]
-pub fn pv_verify_alpha_margin_cp() -> i32 {
-    PV_VERIFY_ALPHA_MARGIN_CP.load(Ordering::Acquire)
-}
-
-pub fn set_pv_verify_max_per_iter(n: u8) {
-    PV_VERIFY_MAX_PER_ITER.store(n.max(1), Ordering::Release);
-}
-#[inline]
-pub fn pv_verify_max_per_iter() -> u8 {
-    PV_VERIFY_MAX_PER_ITER.load(Ordering::Acquire)
 }

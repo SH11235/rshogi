@@ -304,8 +304,6 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
         opts.promote_bias_cp
     ));
-    // PVVerify runtime toggle (default follows EngineType; see apply_options_to_engine)
-    usi_println("option name PVVerify.Enabled type check default true");
     // Reproduction helpers
     usi_println(&format!(
         "option name Warmup.Ms type spin default {} min 0 max 60000",
@@ -1175,15 +1173,6 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
-        "PVVerify.Enabled" => {
-            if let Some(v) = value_ref {
-                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
-                state.opts.pv_verify_enabled = on;
-                mark_override(state, "PVVerify.Enabled");
-                engine_core::search::config::set_pv_verify_enabled(on);
-                info_string(format!("pv_verify={}", on as u8));
-            }
-        }
         "Warmup.Ms" => {
             if let Some(v) = value_ref {
                 if let Ok(ms) = v.parse::<u64>() {
@@ -1501,17 +1490,6 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
             | engine_core::engine::controller::EngineType::EnhancedNnue
     );
     engine_core::search::config::set_root_retry_enabled(retry_on);
-    // PV直下ワンムーブ検証はEnhanced/EnhancedNnueで有効化（ユーザー上書きを優先）
-    if state.user_overrides.contains("PVVerify.Enabled") {
-        engine_core::search::config::set_pv_verify_enabled(state.opts.pv_verify_enabled);
-    } else {
-        engine_core::search::config::set_pv_verify_enabled(retry_on);
-    }
-    if retry_on {
-        // 実戦向け: 深さ≥6で動作、±40cpマージンで危険手を検出
-        engine_core::search::config::set_pv_verify_min_depth(6);
-        engine_core::search::config::set_pv_verify_alpha_margin_cp(40);
-    }
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
 }
