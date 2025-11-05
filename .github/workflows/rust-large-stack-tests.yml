@@ -33,6 +33,37 @@ defaults:
     working-directory: packages/rust-core
 
 jobs:
+  build-only-check:
+    name: Build Check (large-stack-tests feature)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+          key: ubuntu-latest-rust-stable-large-stack-build-only
+          cache-on-failure: true
+
+      - name: Build with large-stack-tests feature
+        run: |
+          echo "Building with large-stack-tests feature (--no-run)"
+          echo "Target files: thread_pool.rs, driver.rs, Cargo.toml"
+          cargo test -p engine-core --features large-stack-tests --no-run
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   test-nnue-engines:
     name: NNUE & Enhanced Engine Tests
     runs-on: ${{ matrix.os }}
