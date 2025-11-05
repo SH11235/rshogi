@@ -944,12 +944,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     && !matches!(node_type, NodeType::Exact)
                     && ((ply <= 2) || (extra_suppr_depth >= 0 && depth < extra_suppr_depth));
                 if !suppress_helper_near_root {
+                    // YaneuraOu-style TT depth degradation: reduce depth by 1 for non-Exact entries
+                    // to prevent overvalued bounds from dominating move ordering in subsequent iterations
+                    let depth_to_store = if matches!(node_type, NodeType::Exact) {
+                        depth as u8
+                    } else {
+                        (depth - 1).max(1) as u8
+                    };
                     let mut args = crate::search::tt::TTStoreArgs::new(
                         pos_hash,
                         best_mv,
                         store_score as i16,
                         static_eval_i16,
-                        depth as u8,
+                        depth_to_store,
                         node_type,
                         pos.side_to_move,
                     );

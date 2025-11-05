@@ -1298,10 +1298,152 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             }
                         }
                         let mut child = root.clone();
-                        let score = {
+                        {
                             let _guard =
                                 ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
                             child.do_move(mv);
+                        }
+
+                        // Optional: root PV one-move verification for risky quiet/drop moves
+                        // Applied to both idx==0 and idx!=0 to ensure proper verification
+                        if pv_idx == 1
+                            && d as u8 >= crate::search::config::pv_verify_min_depth()
+                            && crate::search::config::pv_verify_enabled()
+                        {
+                            // Per-iteration throttle and de-dup for verification
+                            let skip_budget = (pv_verify_attempts as u8)
+                                >= crate::search::config::pv_verify_max_per_iter();
+                            let already_seen = pv_verify_seen.iter().any(|&id| id == mv.to_u32());
+                            let allowed = !(skip_budget || already_seen);
+                            let is_capture = mv.is_capture_hint();
+                            let gives_check = root.gives_check(mv);
+                            let is_quiet = !is_capture && !gives_check;
+                            let is_drop = mv.is_drop();
+                            let mut need_verify = false;
+                            let mut _opp_best_see_log = None;
+                            if is_quiet || is_drop {
+                                // Compute opponent best capture SEE after this move
+                                let mg2 = crate::movegen::MoveGenerator::new();
+                                let mut child2 = root.clone();
+                                {
+                                    let _guard = ordering::EvalMoveGuard::new(
+                                        self.evaluator.as_ref(),
+                                        root,
+                                        mv,
+                                    );
+                                    child2.do_move(mv);
+                                }
+                                let mut opp_best_see = i32::MIN / 2;
+                                if let Ok(list2) = mg2.generate_all(&child2) {
+                                    for mv2 in list2 {
+                                        if mv2.is_capture_hint() {
+                                            let v = child2.see(mv2);
+                                            if v > opp_best_see {
+                                                opp_best_see = v;
+                                            }
+                                        }
+                                    }
+                                }
+                                let th = if is_drop {
+                                    crate::search::config::pv_verify_reply_xsee_drop()
+                                } else {
+                                    crate::search::config::pv_verify_reply_xsee_quiet()
+                                };
+                                if opp_best_see > th {
+                                    need_verify = true;
+                                }
+                                _opp_best_see_log = Some(opp_best_see);
+                            }
+                            if need_verify && allowed {
+                                #[cfg(feature = "diagnostics")]
+                                if let Some(cb) = limits.info_string_callback.as_ref() {
+                                    cb(&format!(
+                                        "pv_verify start depth={} mv={} idx={}",
+                                        d,
+                                        crate::usi::move_to_usi(&mv),
+                                        idx
+                                    ));
+                                }
+                                // account attempt and remember this move for this iteration
+                                pv_verify_attempts = pv_verify_attempts.saturating_add(1);
+                                pv_verify_seen.push(mv.to_u32());
+                                // mark verification flag for child ply only
+                                let child_ply = 1usize;
+                                let saved_flag = stack[child_ply].verify_no_pruning;
+                                stack[child_ply].verify_no_pruning = true;
+                                // zero-window verify around alpha (+optional margin)
+                                let alpha_margin =
+                                    crate::search::config::pv_verify_alpha_margin_cp();
+                                let alpha_p = alpha.saturating_add(alpha_margin);
+                                let alpha_c = -alpha_p;
+                                let beta_c = alpha_c + 1;
+                                let mut v_nodes = 0u64;
+                                let mut v_seldepth = 0u32;
+                                let mut v_qnodes = 0u64;
+                                let v_q_limit = Self::compute_qnodes_limit(limits, d - 1, 1);
+                                #[cfg(feature = "diagnostics")]
+                                let mut v_abdada_detected = 0u64;
+                                #[cfg(feature = "diagnostics")]
+                                let mut v_abdada_set = 0u64;
+                                let mut v_ctx = SearchContext {
+                                    limits,
+                                    start_time: &t0,
+                                    nodes: &mut v_nodes,
+                                    seldepth: &mut v_seldepth,
+                                    qnodes: &mut v_qnodes,
+                                    qnodes_limit: v_q_limit,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_detected: &mut v_abdada_detected,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_set: &mut v_abdada_set,
+                                };
+                                let (v_sc_c, _) = self.alphabeta(
+                                    pvs::ABArgs {
+                                        pos: &child,
+                                        depth: d - 1,
+                                        alpha: alpha_c,
+                                        beta: beta_c,
+                                        ply: 1,
+                                        is_pv: false,
+                                        stack,
+                                        heur: &mut heur,
+                                        tt_hits: &mut tt_hits,
+                                        beta_cuts: &mut beta_cuts,
+                                        lmr_counter: &mut lmr_counter,
+                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
+                                    },
+                                    &mut v_ctx,
+                                );
+                                stack[child_ply].verify_no_pruning = saved_flag;
+                                let parent_sc = -v_sc_c;
+                                let verify_fail = parent_sc <= alpha_p;
+                                if verify_fail {
+                                    #[cfg(feature = "diagnostics")]
+                                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                                        let opp = _opp_best_see_log.unwrap_or(0);
+                                        cb(&format!(
+                                            "pv_verify result=fail idx={} parent_sc={} alpha={} opp_reply_see={}",
+                                            idx,
+                                            parent_sc,
+                                            alpha_p,
+                                            opp
+                                        ));
+                                    }
+                                    // Skip this root move (demote) and continue to next
+                                    continue;
+                                }
+                                // verification passed for this root move
+                                local_best_verified = true;
+                                #[cfg(feature = "diagnostics")]
+                                if let Some(cb) = limits.info_string_callback.as_ref() {
+                                    cb(&format!("pv_verify result=pass idx={} verified=true", idx));
+                                }
+                            }
+                        }
+
+                        let score = {
                             if idx == 0 {
                                 let mut search_ctx = SearchContext {
                                     limits,
@@ -1335,151 +1477,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     &mut search_ctx,
                                 );
                                 // PV head: result of full-window PV search
-                                // Note: this pathは verify_no_pruning を強制しない（コスト抑制）。
-                                // 直前のプリパスが成功していれば local_best_verified を立てる。
                                 -sc
                             } else {
-                                // Optional: root PV one-move verification for risky quiet/drop moves
-                                if pv_idx == 1
-                                    && d as u8 >= crate::search::config::pv_verify_min_depth()
-                                    && crate::search::config::pv_verify_enabled()
-                                {
-                                    // Per-iteration throttle and de-dup for verification
-                                    let skip_budget = (pv_verify_attempts as u8)
-                                        >= crate::search::config::pv_verify_max_per_iter();
-                                    let already_seen =
-                                        pv_verify_seen.iter().any(|&id| id == mv.to_u32());
-                                    let allowed = !(skip_budget || already_seen);
-                                    let is_capture = mv.is_capture_hint();
-                                    let gives_check = root.gives_check(mv);
-                                    let is_quiet = !is_capture && !gives_check;
-                                    let is_drop = mv.is_drop();
-                                    let mut need_verify = false;
-                                    let mut _opp_best_see_log = None;
-                                    if is_quiet || is_drop {
-                                        // Compute opponent best capture SEE after this move
-                                        let mg2 = crate::movegen::MoveGenerator::new();
-                                        let mut child2 = root.clone();
-                                        {
-                                            let _guard = ordering::EvalMoveGuard::new(
-                                                self.evaluator.as_ref(),
-                                                root,
-                                                mv,
-                                            );
-                                            child2.do_move(mv);
-                                        }
-                                        let mut opp_best_see = i32::MIN / 2;
-                                        if let Ok(list2) = mg2.generate_all(&child2) {
-                                            for mv2 in list2 {
-                                                if mv2.is_capture_hint() {
-                                                    let v = child2.see(mv2);
-                                                    if v > opp_best_see {
-                                                        opp_best_see = v;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        let th = if is_drop {
-                                            crate::search::config::pv_verify_reply_xsee_drop()
-                                        } else {
-                                            crate::search::config::pv_verify_reply_xsee_quiet()
-                                        };
-                                        if opp_best_see > th {
-                                            need_verify = true;
-                                        }
-                                        _opp_best_see_log = Some(opp_best_see);
-                                    }
-                                    if need_verify && allowed {
-                                        #[cfg(feature = "diagnostics")]
-                                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                                            cb(&format!(
-                                                "pv_verify start depth={} mv={}",
-                                                d,
-                                                crate::usi::move_to_usi(&mv)
-                                            ));
-                                        }
-                                        // account attempt and remember this move for this iteration
-                                        pv_verify_attempts = pv_verify_attempts.saturating_add(1);
-                                        pv_verify_seen.push(mv.to_u32());
-                                        // mark verification flag for child ply only
-                                        let child_ply = 1usize;
-                                        let saved_flag = stack[child_ply].verify_no_pruning;
-                                        stack[child_ply].verify_no_pruning = true;
-                                        // zero-window verify around alpha (+optional margin)
-                                        let alpha_margin =
-                                            crate::search::config::pv_verify_alpha_margin_cp();
-                                        let alpha_p = alpha.saturating_add(alpha_margin);
-                                        let alpha_c = -alpha_p;
-                                        let beta_c = alpha_c + 1;
-                                        let mut v_nodes = 0u64;
-                                        let mut v_seldepth = 0u32;
-                                        let mut v_qnodes = 0u64;
-                                        let v_q_limit =
-                                            Self::compute_qnodes_limit(limits, d - 1, 1);
-                                        #[cfg(feature = "diagnostics")]
-                                        let mut v_abdada_detected = 0u64;
-                                        #[cfg(feature = "diagnostics")]
-                                        let mut v_abdada_set = 0u64;
-                                        let mut v_ctx = SearchContext {
-                                            limits,
-                                            start_time: &t0,
-                                            nodes: &mut v_nodes,
-                                            seldepth: &mut v_seldepth,
-                                            qnodes: &mut v_qnodes,
-                                            qnodes_limit: v_q_limit,
-                                            #[cfg(feature = "diagnostics")]
-                                            abdada_busy_detected: &mut v_abdada_detected,
-                                            #[cfg(feature = "diagnostics")]
-                                            abdada_busy_set: &mut v_abdada_set,
-                                        };
-                                        let (v_sc_c, _) = self.alphabeta(
-                                            pvs::ABArgs {
-                                                pos: &child,
-                                                depth: d - 1,
-                                                alpha: alpha_c,
-                                                beta: beta_c,
-                                                ply: 1,
-                                                is_pv: false,
-                                                stack,
-                                                heur: &mut heur,
-                                                tt_hits: &mut tt_hits,
-                                                beta_cuts: &mut beta_cuts,
-                                                lmr_counter: &mut lmr_counter,
-                                                lmr_blocked_in_check: Some(
-                                                    &depth_lmr_blocked_in_check,
-                                                ),
-                                                lmr_blocked_recapture: Some(
-                                                    &depth_lmr_blocked_recapture,
-                                                ),
-                                                evasion_sparsity_ext: Some(
-                                                    &depth_evasion_sparsity_ext,
-                                                ),
-                                            },
-                                            &mut v_ctx,
-                                        );
-                                        stack[child_ply].verify_no_pruning = saved_flag;
-                                        let parent_sc = -v_sc_c;
-                                        let verify_fail = parent_sc <= alpha_p;
-                                        if verify_fail {
-                                            #[cfg(feature = "diagnostics")]
-                                            if let Some(cb) = limits.info_string_callback.as_ref() {
-                                                let opp = _opp_best_see_log.unwrap_or(0);
-                                                cb(&format!(
-                                                    "pv_verify result=fail parent_sc={} alpha={} opp_reply_see={}",
-                                                    parent_sc,
-                                                    alpha_p,
-                                                    opp
-                                                ));
-                                            }
-                                            // Skip this root move (demote) and continue to next
-                                            continue;
-                                        }
-                                        // verification passed for this root move
-                                        if idx == 0 {
-                                            local_best_verified = true;
-                                        }
-                                    }
-                                }
                                 let mut search_ctx_nw = SearchContext {
                                     limits,
                                     start_time: &t0,
