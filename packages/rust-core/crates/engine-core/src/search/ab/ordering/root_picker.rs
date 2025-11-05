@@ -94,9 +94,9 @@ impl RootPicker {
             let good_capture = mv.is_capture_hint() && see >= 0;
 
             let mut key = ROOT_BASE_KEY;
-            // チェック/成りは “基礎 + 追加” の二段加点で強調している（既存順位との互換性保持）。
-            key += is_check * 2_000 + see * 10 + is_promo;
-            key += 500 * is_check + 300 * is_promo + 200 * (good_capture as i32);
+            // チェック固定加点は撤廃。SEE/成り/良捕獲での優遇のみ維持。
+            key += see * 10 + is_promo;
+            key += 300 * is_promo + 200 * (good_capture as i32);
 
             // Root SEE Gate (flagged・root限定・王手回避中は除外)
             #[cfg(feature = "diagnostics")]
@@ -106,10 +106,7 @@ impl RootPicker {
                 if see < -x_th {
                     let base = 50;
                     let over = (-see - x_th).max(0);
-                    let mut penalty = base + over;
-                    if is_check != 0 {
-                        penalty /= 2;
-                    }
+                    let penalty = base + over;
                     key = key.saturating_sub(penalty);
                     #[cfg(feature = "diagnostics")]
                     {
@@ -128,7 +125,7 @@ impl RootPicker {
                 let mut opp_best_see = i32::MIN / 2;
                 if let Ok(moves2) = mg.generate_all(&child) {
                     for m2 in moves2 {
-                        if m2.is_capture_hint() {
+                        if m2.is_capture_hint() && child.is_legal_move(m2) {
                             let v = child.see(m2);
                             if v > opp_best_see {
                                 opp_best_see = v;
@@ -140,10 +137,7 @@ impl RootPicker {
                 if opp_best_see > y_th {
                     let base_i64: i64 = 50;
                     let over_i64: i64 = (opp_best_see - y_th).max(0) as i64;
-                    let mut penalty_i64 = base_i64 + over_i64;
-                    if is_check != 0 {
-                        penalty_i64 /= 2;
-                    }
+                    let penalty_i64 = base_i64 + over_i64;
                     let penalty = penalty_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                     key = key.saturating_sub(penalty);
                     #[cfg(feature = "diagnostics")]
