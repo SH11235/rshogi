@@ -1492,11 +1492,14 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     engine_core::search::config::set_root_see_x_cp(state.opts.x_see_cp);
     engine_core::search::config::set_post_verify_enabled(state.opts.post_verify);
     engine_core::search::config::set_post_verify_ydrop_cp(state.opts.y_drop_cp);
-    // Root retry (one-shot) は実戦用Enhancedのみ有効化（学習/評価用途ではOFF）
-    let retry_on =
-        matches!(state.opts.engine_type, engine_core::engine::controller::EngineType::Enhanced);
+    // Root retry (one-shot) は実戦用Enhanced/EnhancedNnueで有効化（学習/評価用途ではOFF）
+    let retry_on = matches!(
+        state.opts.engine_type,
+        engine_core::engine::controller::EngineType::Enhanced
+            | engine_core::engine::controller::EngineType::EnhancedNnue
+    );
     engine_core::search::config::set_root_retry_enabled(retry_on);
-    // PV直下ワンムーブ検証はEnhancedで有効化
+    // PV直下ワンムーブ検証はEnhanced/EnhancedNnueで有効化
     engine_core::search::config::set_pv_verify_enabled(retry_on);
     if retry_on {
         // 実戦向け: 深さ≥8で動作、ゼロ窓（±1cp相当）に近い狭幅
