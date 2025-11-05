@@ -1,3 +1,4 @@
+use engine_core::engine::controller::EngineType;
 use engine_core::engine::controller::{FinalBest, FinalBestSource};
 use engine_core::search::common::is_mate_score;
 use engine_core::search::constants::mate_distance as md;
@@ -1598,6 +1599,81 @@ pub fn finalize_and_send(
                         dist
                     ));
                     mate_post_reject = true;
+                }
+            }
+        }
+
+        // OOB最終化直前のワンムーブ検証（Enhanced限定・FinalizeSanityの有無に依存しない）
+        // 目的: 直前反復の未検証PVがNearHard/Planned経路で確定するのを防ぐ。
+        if matches!(state.opts.engine_type, EngineType::Enhanced)
+            && engine_core::search::config::pv_verify_enabled()
+        {
+            if let Some(bm) = final_best.best_move.or(res.best_move) {
+                // 残りsoft予算から極小延長枠（12〜30ms）を確保
+                let remain_soft = stop_meta
+                    .info
+                    .as_ref()
+                    .map(|si| si.soft_limit_ms.saturating_sub(si.elapsed_ms))
+                    .unwrap_or(0);
+                let ext_ms = remain_soft.min(30);
+                if ext_ms >= 12 {
+                    // 子局面で短時間探索 → 親スコアを近似
+                    let mut child = state.position.clone();
+                    let _ = child.do_move(bm);
+                    let limits = engine_core::search::SearchLimits::builder()
+                        .depth(1)
+                        .fixed_time_ms(ext_ms)
+                        .build();
+                    if let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, 3) {
+                        let r2 = eng.search(&mut child, limits);
+                        drop(eng);
+                        let parent_sc = -r2.score;
+                        // ゼロ窓の近似として rootスコアからの許容ドロップを閾値化（既定60cp）
+                        let verify_delta_cp = 60;
+                        let alpha_p = res.score.saturating_sub(verify_delta_cp);
+                        if parent_sc <= alpha_p {
+                            info_string(format!(
+                                "oob_pv_verify_fail=1 parent_sc={} root_sc={} alpha_p={} ext_ms={}",
+                                parent_sc, res.score, alpha_p, ext_ms
+                            ));
+                            // 小リサーチでTTを温め直し → choose_final_bestmove() で最善を再取得
+                            let remain_soft2 = stop_meta
+                                .info
+                                .as_ref()
+                                .map(|si| si.soft_limit_ms.saturating_sub(si.elapsed_ms))
+                                .unwrap_or(0);
+                            let ext_ms2 = remain_soft2.min(30);
+                            if ext_ms2 >= 10 {
+                                let mut pos = state.position.clone();
+                                let limits2 = engine_core::search::SearchLimits::builder()
+                                    .depth(1)
+                                    .fixed_time_ms(ext_ms2)
+                                    .build();
+                                if let Some((mut eng2, _, _)) =
+                                    try_lock_engine_with_budget(&state.engine, 3)
+                                {
+                                    let _ = eng2.search(&mut pos, limits2);
+                                    drop(eng2);
+                                    let eng3 = state.lock_engine();
+                                    let fb = eng3.choose_final_bestmove(&state.position, None);
+                                    drop(eng3);
+                                    if fb.best_move != final_best.best_move {
+                                        info_string(format!(
+                                            "oob_pv_switch=1 from={} to={}",
+                                            final_best
+                                                .best_move
+                                                .map(|m| move_to_usi(&m))
+                                                .unwrap_or_else(|| "-".to_string()),
+                                            fb.best_move
+                                                .map(|m| move_to_usi(&m))
+                                                .unwrap_or_else(|| "-".to_string())
+                                        ));
+                                        final_best = fb;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -1350,7 +1350,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     let is_quiet = !is_capture && !gives_check;
                                     let is_drop = mv.is_drop();
                                     let mut need_verify = false;
-                                    let mut opp_best_see_log = None;
+                                    let mut _opp_best_see_log = None;
                                     if is_quiet || is_drop {
                                         // Compute opponent best capture SEE after this move
                                         let mg2 = crate::movegen::MoveGenerator::new();
@@ -1382,9 +1382,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         if opp_best_see > th {
                                             need_verify = true;
                                         }
-                                        opp_best_see_log = Some(opp_best_see);
+                                        _opp_best_see_log = Some(opp_best_see);
                                     }
                                     if need_verify && allowed {
+                                        #[cfg(feature = "diagnostics")]
+                                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                                            cb(&format!(
+                                                "pv_verify start depth={} mv={}",
+                                                d,
+                                                crate::usi::move_to_usi(&mv)
+                                            ));
+                                        }
                                         // account attempt and remember this move for this iteration
                                         pv_verify_attempts = pv_verify_attempts.saturating_add(1);
                                         pv_verify_seen.push(mv.to_u32());
@@ -1448,8 +1456,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         let parent_sc = -v_sc_c;
                                         let verify_fail = parent_sc <= alpha_p;
                                         if verify_fail {
+                                            #[cfg(feature = "diagnostics")]
                                             if let Some(cb) = limits.info_string_callback.as_ref() {
-                                                let opp = opp_best_see_log.unwrap_or(0);
+                                                let opp = _opp_best_see_log.unwrap_or(0);
                                                 cb(&format!(
                                                     "pv_verify result=fail parent_sc={} alpha={} opp_reply_see={}",
                                                     parent_sc,
