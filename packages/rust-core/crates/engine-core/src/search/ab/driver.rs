@@ -1200,6 +1200,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
+                let mut local_best_verified = false;
                 let mut local_best = i32::MIN / 2;
                 let mut helper_retries: u32 = 0; // fail‑high のみ 1 回まで許可
                 loop {
@@ -1332,6 +1333,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     },
                                     &mut search_ctx,
                                 );
+                                // PV head: result of full-window PV search
+                                // Note: this pathは verify_no_pruning を強制しない（コスト抑制）。
+                                // 直前のプリパスが成功していれば local_best_verified を立てる。
                                 -sc
                             } else {
                                 // Optional: root PV one-move verification for risky quiet/drop moves
@@ -1468,6 +1472,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             }
                                             // Skip this root move (demote) and continue to next
                                             continue;
+                                        }
+                                        // verification passed for this root move
+                                        if idx == 0 {
+                                            local_best_verified = true;
                                         }
                                     }
                                 }
@@ -1739,17 +1747,51 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if let Some(m) = local_best_mv {
                     // 次反復のAspiration用に pv_idx==1 を採用
                     if pv_idx == 1 {
-                        if prev_best_move_for_iteration.map(|b| b.to_u32()) != Some(m.to_u32()) {
+                        let changed =
+                            prev_best_move_for_iteration.map(|b| b.to_u32()) != Some(m.to_u32());
+                        if changed {
                             cumulative_pv_changed = cumulative_pv_changed.saturating_add(1);
                         }
-                        best = Some(m);
-                        best_score = local_best;
-                        prev_score = local_best;
+                        // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先
+                        use std::time::Duration;
+                        let now = Instant::now();
+                        let mut adopt_mv = m;
+                        let sticky_ms: u64 = 400;
+                        let near_deadline = match hard_deadline {
+                            Some(hd) => {
+                                // hd: Duration until hard deadline from start t0
+                                let elapsed = now.saturating_duration_since(t0);
+                                let rem = if hd > elapsed {
+                                    hd - elapsed
+                                } else {
+                                    Duration::ZERO
+                                };
+                                rem.as_millis() as u64 <= sticky_ms
+                            }
+                            None => false,
+                        };
+                        if changed && near_deadline && !local_best_verified {
+                            if let Some(prev_mv) = prev_best_move_for_iteration {
+                                adopt_mv = prev_mv;
+                                // keep previous score as hint center
+                                if let Some((_bm, prev_sc)) = local_best_for_next_iter {
+                                    prev_score = prev_sc;
+                                }
+                            }
+                        }
+                        best = Some(adopt_mv);
+                        best_score = if adopt_mv.to_u32() == m.to_u32() {
+                            local_best
+                        } else {
+                            // fallback: keep previous score when sticky applied
+                            prev_score
+                        };
+                        prev_score = best_score;
                         // Capture best move and score for use as hint in next iteration
-                        local_best_for_next_iter = Some((m, local_best));
+                        local_best_for_next_iter = Some((adopt_mv, best_score));
                         if let Some(hint) = root_tt_hint_mv {
                             root_tt_hint_exists = 1;
-                            if m.to_u32() == hint.to_u32() {
+                            if adopt_mv.to_u32() == hint.to_u32() {
                                 root_tt_hint_used = 1;
                             }
                         }

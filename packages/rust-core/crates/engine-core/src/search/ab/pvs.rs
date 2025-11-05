@@ -489,7 +489,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if !verify_here && depth <= 3 && is_quiet {
+            if !verify_here && depth <= 3 && is_quiet && !stack[ply as usize].prev_risky {
                 let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
@@ -502,6 +502,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 && depth <= 8
                 && is_quiet
                 && !pos.is_in_check()
+                && !stack[ply as usize].prev_risky
             {
                 use crate::search::constants::MATE_SCORE;
                 if alpha.abs() >= MATE_SCORE - 100 { /* mate帯近傍では futility 無効 */ }
@@ -598,6 +599,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if prev_in_check || tt_depth_ok {
                     reduction = (reduction - 1).max(0);
                 }
+                // 直前手が drop / quiet xSEE<0 のときはさらに1段弱める
+                if stack[ply as usize].prev_risky {
+                    reduction = (reduction - 1).max(0);
+                }
             }
             // ABDADA軽減: busy中は追加で1段だけ減深（静止手のみ）
             if reduction > 0 {
@@ -652,7 +657,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             {
                 // Drop or risky quiet (SEE<0) は事前確認の対象
                 let risky_quiet = is_quiet && pos.see(mv) < 0;
-                if mv.is_drop() || risky_quiet {
+                let mut need_verify = mv.is_drop() || risky_quiet;
+                if !need_verify {
+                    // reply_xSEE ゲート
+                    let mut child_tmp = pos.clone();
+                    child_tmp.do_move(mv);
+                    let mut opp_best_see = i32::MIN / 2;
+                    if let Ok(list2) = MoveGenerator::new().generate_all(&child_tmp) {
+                        for mv2 in list2 {
+                            if mv2.is_capture_hint() {
+                                let v = child_tmp.see(mv2);
+                                if v > opp_best_see {
+                                    opp_best_see = v;
+                                }
+                            }
+                        }
+                    }
+                    let th = if mv.is_drop() {
+                        crate::search::config::pv_verify_reply_xsee_drop()
+                    } else {
+                        crate::search::config::pv_verify_reply_xsee_quiet()
+                    };
+                    if opp_best_see > th {
+                        need_verify = true;
+                    }
+                }
+                if need_verify {
                     let mut child_v = pos.clone();
                     child_v.do_move(mv);
                     // αに対して margin を持ったゼロ窓で即時確認
@@ -709,7 +739,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                 let mut child = pos.clone();
                 child.do_move(mv);
-                if pv_move {
+                // Propagate prev_risky to child
+                let child_ply = (ply + 1) as usize;
+                let save_prev_risky = stack.get(child_ply).map(|st| st.prev_risky).unwrap_or(false);
+                if let Some(st) = stack.get_mut(child_ply) {
+                    st.prev_risky = mv.is_drop() || (is_quiet && pos.see(mv) < 0);
+                }
+                let val = if pv_move {
                     let (sc, _) = self.alphabeta(
                         ABArgs {
                             pos: &child,
@@ -752,11 +788,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     );
                     let mut s = -sc_nw;
                     if s > alpha {
-                        // 再探索条件: 減深が入っている(reduction>0) か、β未到達の上振れ(s<beta) の場合に必ずフル窓
+                        // 再探索条件:
+                        //  - β未到達の上振れ (s < beta)
+                        //  - 減深が入っており、かつ s >= α+δ（δ=80cp）
                         // 無減衰確認: 減深由来の上振れは verify_no_pruning を付けて検証する
-                        if (reduction > 0 || s < beta)
-                            && !std::mem::replace(&mut did_fullwin_research, true)
-                        {
+                        const REDELTA_CP: i32 = 80;
+                        let need_re = (s < beta) || (reduction > 0 && s >= alpha + REDELTA_CP);
+                        if need_re && !std::mem::replace(&mut did_fullwin_research, true) {
                             #[cfg(any(debug_assertions, feature = "diagnostics"))]
                             super::diagnostics::record_tag(pos, "lmr_fullwin_re", None);
                             if reduction > 0 {
@@ -794,7 +832,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                     s
+                };
+                if let Some(st) = stack.get_mut(child_ply) {
+                    st.prev_risky = save_prev_risky;
                 }
+                val
             };
             if pv_move {
                 first_move_done = true;

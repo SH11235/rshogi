@@ -105,7 +105,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stack,
         } = params;
         // Verification: disable SBP entirely when verification flag is set at this node
-        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning) {
+        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning || st.prev_risky) {
             return false;
         }
         // Safety gate (Level C-lite): SBP を浅層では無効化（safe時 depth<=5）。
@@ -238,8 +238,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter,
             ctx,
         } = params;
-        // Verification: disable NMP when verification flag is set at this node
-        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning) {
+        // Verification/risk: disable NMP when verification flag or prev_risky is set at this node
+        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning || st.prev_risky) {
             return None;
         }
         if !toggles.enable_nmp || !dynp::nmp_enabled() {
@@ -395,8 +395,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ..
         } = params;
-        // Verification: disable ProbCut when verification flag is set at this node
-        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning) {
+        // Verification/risk: disable ProbCut when verification flag or prev_risky is set at this node
+        if stack.get(ply as usize).is_some_and(|st| st.verify_no_pruning || st.prev_risky) {
             return None;
         }
         if !toggles.enable_probcut
