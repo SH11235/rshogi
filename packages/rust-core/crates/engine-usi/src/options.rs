@@ -1496,8 +1496,14 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     let retry_on =
         matches!(state.opts.engine_type, engine_core::engine::controller::EngineType::Enhanced);
     engine_core::search::config::set_root_retry_enabled(retry_on);
-    // PV直下ワンムーブ検証はEnhancedで有効化（初期閾値はエンジン側既定）
+    // PV直下ワンムーブ検証はEnhancedで有効化
     engine_core::search::config::set_pv_verify_enabled(retry_on);
+    if retry_on {
+        // 実戦の巻き戻りを抑えるため、最小深さを下げて早期に効かせる
+        engine_core::search::config::set_pv_verify_min_depth(3);
+        // αに対する余裕（cp）。0だとノイズに敏感なので少しだけ余裕を持たせる
+        engine_core::search::config::set_pv_verify_alpha_margin_cp(40);
+    }
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
 }
