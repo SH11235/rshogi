@@ -1,5 +1,8 @@
+mod backend;
 pub mod stop_ctrl;
 mod thread_pool;
+
+pub use backend::ParallelSearcherBackend;
 pub use stop_ctrl::{FinalizeReason, FinalizerMsg, StopController, StopSnapshot};
 
 use self::thread_pool::{SearchJob, ThreadPool};
@@ -110,6 +113,38 @@ where
     {
         let evaluator = evaluator.into();
         let profile = SearchProfile::default();
+        profile.apply_runtime_defaults();
+        let backend =
+            ClassicBackend::with_profile_and_tt(Arc::clone(&evaluator), Arc::clone(&tt), profile);
+        let backend = Arc::new(backend);
+        let helper_threads = threads.max(1).saturating_sub(1);
+        let thread_pool = ThreadPool::new(Arc::clone(&backend), helper_threads);
+
+        Self {
+            backend,
+            tt,
+            stop_controller: stop_ctrl,
+            threads: threads.max(1),
+            thread_pool,
+        }
+    }
+
+    /// Create ParallelSearcher with custom SearchProfile
+    ///
+    /// This allows the Engine to configure different search strategies
+    /// (e.g., Enhanced vs EnhancedNnue) while maintaining a single
+    /// implementation path for both single-threaded and parallel search.
+    pub fn with_profile<T>(
+        evaluator: T,
+        tt: Arc<TranspositionTable>,
+        threads: usize,
+        stop_ctrl: Arc<StopController>,
+        profile: SearchProfile,
+    ) -> Self
+    where
+        T: Into<Arc<E>>,
+    {
+        let evaluator = evaluator.into();
         profile.apply_runtime_defaults();
         let backend =
             ClassicBackend::with_profile_and_tt(Arc::clone(&evaluator), Arc::clone(&tt), profile);
