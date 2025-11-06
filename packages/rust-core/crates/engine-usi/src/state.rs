@@ -177,7 +177,7 @@ impl Default for UsiOptions {
             mate_early_stop: true,
             stop_wait_ms: 50,
             watchdog_poll_ms: 2,
-            byoyomi_deadline_lead_ms: 150,
+            byoyomi_deadline_lead_ms: 0,
             multipv: 1,
             gameover_sends_bestmove: false,
             fail_safe_guard: false,

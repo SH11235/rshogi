@@ -1735,7 +1735,7 @@ fn print_time_policy_options(opts: &UsiOptions) {
     ));
     usi_println(&format!(
         "option name ByoyomiDeadlineLeadMs type spin default {} min 0 max 2000",
-        opts.byoyomi_deadline_lead_ms
+        0
     ));
     usi_println(&format!(
         "option name ByoyomiSafetyMs type spin default {} min 0 max 2000",
