@@ -195,10 +195,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         // Safeモード: YO寄りの深さ依存マージンで強い劣勢のみqsearchで刈る（非PV想定）
         if crate::search::params::pruning_safe_mode() {
-            // eval < alpha - (495 + 290*depth^2) のみ対象
+            // eval < alpha - (495 + 260*depth^2) のみ対象（やや緩和）
             // depthはi32、係数はcp単位
             let d = depth.max(1);
-            let margin = 495i32.saturating_add(290i32.saturating_mul(d.saturating_mul(d)));
+            let margin = 495i32.saturating_add(260i32.saturating_mul(d.saturating_mul(d)));
             if static_eval <= alpha.saturating_sub(margin) {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
                 super::diagnostics::record_tag(
