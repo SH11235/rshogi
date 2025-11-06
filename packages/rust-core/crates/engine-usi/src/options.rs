@@ -255,16 +255,8 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         opts.finalize_non_promote_major_penalty_cp
     ));
 
-    // --- Root guard rails（診断専用表示）。本番ビルドでは非表示。
+    // --- Root guard rails（診断専用表示）はRootSeeGateを廃止。
     if cfg!(any(test, feature = "diagnostics")) {
-        usi_println(&format!(
-            "option name RootSeeGate type check default {}",
-            if opts.root_see_gate { "true" } else { "false" }
-        ));
-        usi_println(&format!(
-            "option name RootSeeGate.XSEE type spin default {} min -2000 max 5000",
-            opts.x_see_cp
-        ));
         usi_println(&format!(
             "option name PostVerify type check default {}",
             if opts.post_verify { "true" } else { "false" }
@@ -1095,22 +1087,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             }
         }
         // --- Root guard rails & warmup knobs
-        "RootSeeGate" => {
-            if let Some(v) = value_ref {
-                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
-                state.opts.root_see_gate = on;
-                info_string(format!("root_see_gate={}", on as u8));
-            }
-            mark_override(state, "RootSeeGate");
-        }
-        "RootSeeGate.XSEE" => {
-            if let Some(v) = value_ref {
-                if let Ok(x) = v.parse::<i32>() {
-                    state.opts.x_see_cp = x.clamp(-2000, 5000);
-                }
-            }
-            mark_override(state, "RootSeeGate.XSEE");
-        }
+        // RootSeeGate 系は廃止
         "PostVerify" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
@@ -1400,8 +1377,6 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 info_string("profile_applied=0 reason=busy");
             } else {
                 let keys = [
-                    "RootSeeGate",
-                    "RootSeeGate.XSEE",
                     "PostVerify",
                     "PostVerify.YDrop",
                     "FinalizeSanity.SwitchMarginCp",
@@ -1494,18 +1469,9 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     engine_core::search::config::set_mate_early_stop_max_distance(
         state.opts.instant_mate_move_max_distance as u8,
     );
-    // Root guard rails & verify parameters (global config)
-    engine_core::search::config::set_root_see_gate_enabled(state.opts.root_see_gate);
-    engine_core::search::config::set_root_see_x_cp(state.opts.x_see_cp);
     engine_core::search::config::set_post_verify_enabled(state.opts.post_verify);
     engine_core::search::config::set_post_verify_ydrop_cp(state.opts.y_drop_cp);
-    // Root retry (one-shot) は実戦用Enhanced/EnhancedNnueで有効化（学習/評価用途ではOFF）
-    let retry_on = matches!(
-        state.opts.engine_type,
-        engine_core::engine::controller::EngineType::Enhanced
-            | engine_core::engine::controller::EngineType::EnhancedNnue
-    );
-    engine_core::search::config::set_root_retry_enabled(retry_on);
+    // Root retry (one-shot) は廃止（YO準拠）。
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
 }
@@ -1526,8 +1492,6 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         }
     };
     if is_t8 {
-        set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
-        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
         set_if_absent("PostVerify.RequirePass", &mut || {
@@ -1557,8 +1521,7 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
     } else {
         // T1 profile
-        set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
-        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
+
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
         set_if_absent("PostVerify.RequirePass", &mut || {
@@ -1621,8 +1584,6 @@ pub fn log_effective_profile(state: &EngineState) {
     };
     let mut overrides: Vec<&str> = Vec::new();
     for k in [
-        "RootSeeGate",
-        "RootSeeGate.XSEE",
         "PostVerify",
         "PostVerify.YDrop",
         "PostVerify.RequirePass",
@@ -1651,13 +1612,11 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
         state.opts.multipv,
-        state.opts.root_see_gate as u8,
-        state.opts.x_see_cp,
         state.opts.post_verify as u8,
         state.opts.y_drop_cp,
         state.opts.finalize_sanity_enabled as u8,
