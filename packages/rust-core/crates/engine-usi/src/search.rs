@@ -15,7 +15,7 @@ use log::info;
 use crate::finalize::{emit_bestmove_once, finalize_and_send, fmt_hash};
 use crate::io::info_string;
 use crate::oob::poll_oob_finalize;
-use crate::state::{EngineState, GoParams, UsiOptions};
+use crate::state::{EngineState, GoParams, LogProfile, UsiOptions};
 use crate::usi_adapter;
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -219,18 +219,21 @@ pub fn limits_from_go(
     if gp.ponder {
         if let Some(flag) = ponder_flag {
             builder = builder.ponder_hit_flag(flag).ponder_with_inner();
-            crate::io::info_string("ponder_wrapper=1");
-        } else {
+            if !opts.log_profile.is_prod() {
+                crate::io::info_string("ponder_wrapper=1");
+            }
+        } else if !opts.log_profile.is_prod() {
             // go ponder だがフラグがないケース（オプションOFFなど）でも挙動明示
             crate::io::info_string("ponder_wrapper=0 (flag_missing)");
         }
-    } else {
+    } else if !opts.log_profile.is_prod() {
         crate::io::info_string("ponder_wrapper=0");
     }
 
     // Set up info callback for search progress reporting
     let multipv = opts.multipv.max(1);
     let stop_for_info = Arc::clone(&stop_flag);
+    let profile = opts.log_profile;
     let info_callback: InfoEventCallback = Arc::new(move |event| {
         if stop_for_info.load(Ordering::Relaxed) {
             return;
@@ -248,6 +251,9 @@ pub fn limits_from_go(
         if stop_for_info_str.load(Ordering::Relaxed) {
             return;
         }
+        if should_suppress_core_info(profile, msg) {
+            return;
+        }
         println!("info string {msg}");
     });
 
@@ -261,7 +267,9 @@ pub fn limits_from_go(
 
 pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // 入口診断ログ（go発行直後にプロセスが落ちるケースの切り分け用）
-    crate::io::info_string(format!("go_enter cmd={}", cmd));
+    if !state.opts.log_profile.is_prod() {
+        crate::io::info_string(format!("go_enter cmd={}", cmd));
+    }
     // 新しい go を受理する前に、前回探索から残っている OOB finalize 要求を掃除しておく。
     // SessionStart が届く前の Finalize を握りつぶすことで stale=1 ログを抑止する。
     poll_oob_finalize(state);
@@ -711,10 +719,12 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
             tm.ensure_scheduled_stop(elapsed);
             let new_deadline = tm.scheduled_end_ms();
             if new_deadline != u64::MAX {
-                info_string(format!(
-                    "tm_watchdog_schedule elapsed_ms={} opt_ms={} scheduled_ms={}",
-                    elapsed, opt, new_deadline
-                ));
+                if state.opts.log_profile.at_least_qa() {
+                    info_string(format!(
+                        "tm_watchdog_schedule elapsed_ms={} opt_ms={} scheduled_ms={}",
+                        elapsed, opt, new_deadline
+                    ));
+                }
                 // 同一 tick 内の再評価は、new_deadline が elapsed より未来にあり、
                 // かつグレース込みで到達している場合にのみ確定させる。
                 if new_deadline > elapsed
@@ -736,6 +746,44 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
         info_string(format!("tm_watchdog_stop reason={:?} elapsed_ms={}", reason, elapsed));
         // StopController 経由で finalize を要求し、優先度制御と stop_flag 連携を統一する。
         state.stop_controller.request_finalize(reason);
+    }
+}
+
+fn should_suppress_core_info(profile: LogProfile, msg: &str) -> bool {
+    const QA_BLOCK_PREFIXES: &[&str] = &[
+        "iter_start ",
+        "iter_complete ",
+        "tt_snapshot ",
+        "root_hint_applied",
+        "depth ",
+        "seldepth ",
+        "hashfull ",
+    ];
+
+    match profile {
+        LogProfile::Dev => false,
+        LogProfile::QA => QA_BLOCK_PREFIXES.iter().any(|prefix| msg.starts_with(prefix)),
+        LogProfile::Prod => {
+            if QA_BLOCK_PREFIXES.iter().any(|prefix| msg.starts_with(prefix)) {
+                return true;
+            }
+            const PROD_EXTRA_PREFIXES: &[&str] = &[
+                "near_deadline_params",
+                "deadline_lead_applied",
+                "deadline_hit ",
+                "aspiration ",
+                "postverify_",
+                "helper_share_pct",
+                "heuristics ",
+                "sanity_",
+                "forced_eval",
+                "ponderhit_time_manager",
+            ];
+            if PROD_EXTRA_PREFIXES.iter().any(|prefix| msg.starts_with(prefix)) {
+                return true;
+            }
+            false
+        }
     }
 }
 

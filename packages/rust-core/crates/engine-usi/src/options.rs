@@ -6,7 +6,7 @@ use engine_core::evaluation::nnue::error::NNUEError;
 use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
-use crate::state::{EngineState, ProfileMode, UsiOptions};
+use crate::state::{EngineState, LogProfile, ProfileMode, UsiOptions};
 use std::sync::OnceLock;
 fn mark_override(state: &mut EngineState, key: &str) {
     state.user_overrides.insert(key.to_string());
@@ -65,6 +65,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println(&format!(
         "option name MinThinkMs type spin default {} min 0 max 10000",
         opts.min_think_ms
+    ));
+    usi_println(&format!(
+        "option name LogProfile type combo default {} var Prod var QA var Dev",
+        opts.log_profile.as_str()
     ));
     print_engine_type_options();
     usi_println("option name EvalFile type filename default ");
@@ -400,6 +404,16 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let v = v.to_lowercase();
                 state.opts.ponder = matches!(v.as_str(), "true" | "1" | "on");
+            }
+        }
+        "LogProfile" => {
+            if let Some(v) = value_ref {
+                if let Some(profile) = LogProfile::from_str(v) {
+                    state.opts.log_profile = profile;
+                    info_string(format!("log_profile_set={}", profile.as_str()));
+                } else {
+                    info_string(format!("log_profile_invalid value={}", v));
+                }
             }
         }
         "BenchAllRun" => {
@@ -1589,6 +1603,10 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
 
 /// Emit a one-line info string with the effective profile and key parameters.
 pub fn log_effective_profile(state: &EngineState) {
+    if state.opts.log_profile.is_prod() {
+        return;
+    }
+
     let mode_str = match state.opts.profile_mode {
         ProfileMode::Auto => "Auto",
         ProfileMode::T1 => "T1",
