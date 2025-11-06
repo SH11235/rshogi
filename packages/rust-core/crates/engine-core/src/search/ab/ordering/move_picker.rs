@@ -40,7 +40,7 @@ enum Stage {
 }
 
 impl Stage {
-    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+    #[cfg(any(test, debug_assertions, feature = "diagnostics"))]
     fn label(self) -> &'static str {
         match self {
             Stage::Tt => "tt",
@@ -97,8 +97,9 @@ pub struct MovePicker<'a> {
     generated_quiets: bool,
     quiet_moves: SmallVec<[Move; 96]>,
     deferred_bad_captures: SmallVec<[CaptureEntry; 32]>,
-    returned: SmallVec<[u32; 128]>,
+    returned: SmallVec<[u16; 128]>,
     probcut_threshold: Option<i32>,
+    #[cfg(any(debug_assertions, feature = "diagnostics"))]
     epoch: u64,
 }
 
@@ -226,6 +227,7 @@ impl<'a> MovePicker<'a> {
             deferred_bad_captures: SmallVec::new(),
             returned: SmallVec::new(),
             probcut_threshold,
+            #[cfg(any(debug_assertions, feature = "diagnostics"))]
             epoch: pos.state_epoch(),
         }
     }
@@ -235,7 +237,8 @@ impl<'a> MovePicker<'a> {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             {
                 if self.epoch != self.pos.state_epoch() {
-                    crate::search::ab::diagnostics::note_fault("move_picker_epoch_mismatch");
+                    use crate::search::ab::diagnostics;
+                    diagnostics::note_fault("move_picker_epoch_mismatch");
                     return None;
                 }
             }
@@ -395,8 +398,7 @@ impl<'a> MovePicker<'a> {
                 self.used_tt = true;
                 return None;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+            self.diag_guard(mv);
             self.used_tt = true;
             self.record_return(mv);
             return Some(mv);
@@ -460,9 +462,9 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
-            let mut key = 2_000_000_i64 + (entry.see as i64) * 10;
+            self.diag_guard(mv);
+            // SEE加点は撤廃。MVV + 履歴で並べ替え。
+            let mut key = 2_000_000_i64;
             if mv.is_promote() {
                 key += 1_000;
             }
@@ -505,9 +507,9 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
-            let mut key = 100_000_i64 + (entry.see as i64);
+            self.diag_guard(mv);
+            // SEE加点は撤廃。
+            let mut key = 100_000_i64;
             if let Some(victim) = mv.captured_piece_type() {
                 key += (mvv(victim) as i64) / 10; // Bad側はMVVの影響を弱く
             }
@@ -516,59 +518,6 @@ impl<'a> MovePicker<'a> {
                 key += (cap_score as i64) * (capture_weight as i64);
             }
             debug_assert!(key.abs() < 3_500_000, "bad capture key overflow: {key}");
-            self.buf.push(ScoredMove {
-                mv,
-                key: Self::clamp_key(key),
-                tiebreak: mv.to_u32(),
-            });
-        }
-        self.buf.sort_unstable_by(Self::cmp_scored);
-    }
-
-    fn prepare_quiets(&mut self, heur: &Heuristics) {
-        self.buf.clear();
-        let quiet_weight = quiet_history_weight();
-        let continuation_weight = continuation_history_weight();
-        for &mv in &self.quiet_moves {
-            if self.should_skip(mv) {
-                continue;
-            }
-            if mv.is_capture_hint() {
-                continue;
-            }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
-            let mut key = 1_000_000_i64
-                + (heur.history.get(self.pos.side_to_move, mv) as i64) * (quiet_weight as i64);
-            if let Some(prev) = self.history_prev_move {
-                if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
-                    if counter.equals_without_piece_type(&mv) {
-                        key += 60_000;
-                    }
-                }
-                if let (Some(prev_piece), Some(curr_piece)) = (prev.piece_type(), mv.piece_type()) {
-                    let cont_key = crate::search::history::ContinuationKey::new(
-                        self.pos.side_to_move,
-                        prev_piece as usize,
-                        prev.to(),
-                        prev.is_drop(),
-                        curr_piece as usize,
-                        mv.to(),
-                        mv.is_drop(),
-                    );
-                    let cont_score = heur.continuation.get(cont_key);
-                    key += (cont_score as i64) * (continuation_weight as i64);
-                }
-            }
-            if self
-                .killers
-                .iter()
-                .any(|k| k.is_some_and(|kk| kk.equals_without_piece_type(&mv)))
-            {
-                key += 50_000;
-            }
-            // チェック微加点は撤廃
-            debug_assert!(key.abs() < 3_000_000, "quiet key overflow: {key}");
             self.buf.push(ScoredMove {
                 mv,
                 key: Self::clamp_key(key),
@@ -601,8 +550,7 @@ impl<'a> MovePicker<'a> {
             if h < thresh {
                 continue;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+            self.diag_guard(mv);
             let mut key = 1_000_000_i64 + (h as i64) * (quiet_weight as i64);
             if let Some(prev) = self.history_prev_move {
                 if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
@@ -631,7 +579,6 @@ impl<'a> MovePicker<'a> {
             {
                 key += 50_000;
             }
-            // チェック微加点は撤廃
             self.buf.push(ScoredMove {
                 mv,
                 key: Self::clamp_key(key),
@@ -654,8 +601,7 @@ impl<'a> MovePicker<'a> {
             if h >= thresh {
                 continue;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+            self.diag_guard(mv);
             let mut key = 1_000_000_i64 + (h as i64) * (quiet_weight as i64);
             if let Some(prev) = self.history_prev_move {
                 if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
@@ -684,7 +630,6 @@ impl<'a> MovePicker<'a> {
             {
                 key += 50_000;
             }
-            // チェック微加点は撤廃
             self.buf.push(ScoredMove {
                 mv,
                 key: Self::clamp_key(key),
@@ -702,11 +647,20 @@ impl<'a> MovePicker<'a> {
                 if self.should_skip(mv) {
                     continue;
                 }
-                #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+                self.diag_guard(mv);
                 let mut key = 1_500_000_i64;
-                if mv.is_capture_hint() {
-                    key += (self.pos.see(mv) as i64) * 10;
+                // 逃れでも並べ替えはMVV + 履歴に限定
+                if let Some(victim) = mv.captured_piece_type() {
+                    key += match victim {
+                        crate::shogi::PieceType::Pawn => 100,
+                        crate::shogi::PieceType::Lance => 300,
+                        crate::shogi::PieceType::Knight => 300,
+                        crate::shogi::PieceType::Silver => 500,
+                        crate::shogi::PieceType::Gold => 600,
+                        crate::shogi::PieceType::Bishop => 800,
+                        crate::shogi::PieceType::Rook => 900,
+                        crate::shogi::PieceType::King => 0,
+                    } as i64;
                 }
                 key += heur.history.get(self.pos.side_to_move, mv) as i64;
                 debug_assert!(key.abs() < 3_000_000, "evasion key overflow: {key}");
@@ -734,9 +688,9 @@ impl<'a> MovePicker<'a> {
             if self.should_skip(mv) {
                 continue;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
-            let mut key = 1_800_000_i64 + (entry.see as i64) * 10;
+            self.diag_guard(mv);
+            // SEE加点は撤廃
+            let mut key = 1_800_000_i64;
             if self.pos.gives_check(mv) {
                 key += 5_000;
             }
@@ -767,8 +721,7 @@ impl<'a> MovePicker<'a> {
                 if self.should_skip(mv) || !self.pos.gives_check(mv) {
                     continue;
                 }
-                #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+                self.diag_guard(mv);
                 let key = 1_200_000_i64 + (heur.history.get(self.pos.side_to_move, mv) as i64);
                 debug_assert!(key.abs() < 2_000_000, "qsearch quiet-check key overflow: {key}");
                 self.buf.push(ScoredMove {
@@ -798,11 +751,24 @@ impl<'a> MovePicker<'a> {
                 if see < threshold {
                     continue;
                 }
-                #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+                self.diag_guard(mv);
+                // 並べ替えは MVV + 履歴（SEEはゲートにのみ使用）
+                let mut key = 2_000_000_i64;
+                if let Some(victim) = mv.captured_piece_type() {
+                    key += match victim {
+                        crate::shogi::PieceType::Pawn => 100,
+                        crate::shogi::PieceType::Lance => 300,
+                        crate::shogi::PieceType::Knight => 300,
+                        crate::shogi::PieceType::Silver => 500,
+                        crate::shogi::PieceType::Gold => 600,
+                        crate::shogi::PieceType::Bishop => 800,
+                        crate::shogi::PieceType::Rook => 900,
+                        crate::shogi::PieceType::King => 0,
+                    } as i64;
+                }
                 self.buf.push(ScoredMove {
                     mv,
-                    key: Self::clamp_key(2_000_000_i64 + (see as i64) * 10),
+                    key: Self::clamp_key(key),
                     tiebreak: mv.to_u32(),
                 });
             }
@@ -830,8 +796,7 @@ impl<'a> MovePicker<'a> {
             if !self.pos.is_legal_move(mv) {
                 continue;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+            self.diag_guard(mv);
             self.record_return(mv);
             return Some(mv);
         }
@@ -848,8 +813,7 @@ impl<'a> MovePicker<'a> {
             if self.targets_enemy_king(mv) {
                 continue;
             }
-            #[cfg(any(debug_assertions, feature = "diagnostics"))]
-            diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+            self.diag_guard(mv);
             if !self.pos.is_legal_move(mv) {
                 continue;
             }
@@ -878,16 +842,19 @@ impl<'a> MovePicker<'a> {
         if self.tt_move.is_some_and(|tt| tt.to_tt_key() == mv.to_tt_key() && self.used_tt) {
             return true;
         }
-        let target = mv.to_u32();
-        self.returned.contains(&target)
+        let key = mv.to_tt_key();
+        self.returned.contains(&key)
     }
 
     fn record_return(&mut self, mv: Move) {
-        self.returned.push(mv.to_u32());
+        self.returned.push(mv.to_tt_key());
         #[cfg(any(debug_assertions, feature = "diagnostics"))]
-        crate::search::ab::diagnostics::record_stage(self.stage.label());
-        #[cfg(any(debug_assertions, feature = "diagnostics"))]
-        diagnostics::warn_quiet_destination_enemy_king(self.pos, mv, self.stage);
+        {
+            use crate::search::ab::diagnostics;
+            diagnostics::record_stage(self.stage.label());
+            crate::search::ab::ordering::move_picker::diagnostics::
+                warn_quiet_destination_enemy_king(self.pos, mv, self.stage);
+        }
     }
 
     #[inline]
@@ -913,9 +880,19 @@ impl<'a> MovePicker<'a> {
     fn clamp_key(key: i64) -> i32 {
         key.clamp(i32::MIN as i64, i32::MAX as i64) as i32
     }
+
+    #[inline]
+    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+    fn diag_guard(&self, mv: Move) {
+        diagnostics::guard_enemy_king_capture(self.pos, mv, self.stage);
+    }
+
+    #[inline]
+    #[cfg(not(any(debug_assertions, feature = "diagnostics")))]
+    fn diag_guard(&self, _mv: Move) {}
 }
 
-#[cfg(any(debug_assertions, feature = "diagnostics"))]
+#[cfg(any(test, debug_assertions, feature = "diagnostics"))]
 mod diagnostics {
     use super::Stage;
     use crate::search::ab::diagnostics as ab_diag;

@@ -251,59 +251,61 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         opts.finalize_non_promote_major_penalty_cp
     ));
 
-    // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
-    usi_println(&format!(
-        "option name RootSeeGate type check default {}",
-        if opts.root_see_gate { "true" } else { "false" }
-    ));
-    usi_println(&format!(
-        "option name RootSeeGate.XSEE type spin default {} min -2000 max 5000",
-        opts.x_see_cp
-    ));
-    usi_println(&format!(
-        "option name PostVerify type check default {}",
-        if opts.post_verify { "true" } else { "false" }
-    ));
-    usi_println(&format!(
-        "option name PostVerify.YDrop type spin default {} min 0 max 5000",
-        opts.y_drop_cp
-    ));
-    usi_println(&format!(
-        "option name PostVerify.RequirePass type check default {}",
-        if opts.post_verify_require_pass {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    usi_println(&format!(
-        "option name PostVerify.ExtendMs type spin default {} min 0 max 5000",
-        opts.post_verify_extend_ms
-    ));
-    usi_println(&format!(
-        "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
-        opts.post_verify_disadvantage_cp
-    ));
-    usi_println(&format!(
-        "option name PostVerify.SkipMateDistance type spin default {} min 1 max 32",
-        opts.mate_postverify_skip_max_dist
-    ));
-    usi_println(&format!(
-        "option name PostVerify.ExactMinDepth type spin default {} min 0 max 64",
-        opts.mate_postverify_exact_min_depth
-    ));
-    usi_println(&format!(
-        "option name PostVerify.ExactMinElapsedMs type spin default {} min 0 max 10000",
-        opts.mate_postverify_exact_min_elapsed_ms
-    ));
-    usi_println(&format!(
-        "option name PromoteVerify type check default {}",
-        if opts.promote_verify { "true" } else { "false" }
-    ));
-    usi_println(&format!(
-        "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
-        opts.promote_bias_cp
-    ));
+    // --- Root guard rails（診断専用表示）。本番ビルドでは非表示。
+    if cfg!(any(test, feature = "diagnostics")) {
+        usi_println(&format!(
+            "option name RootSeeGate type check default {}",
+            if opts.root_see_gate { "true" } else { "false" }
+        ));
+        usi_println(&format!(
+            "option name RootSeeGate.XSEE type spin default {} min -2000 max 5000",
+            opts.x_see_cp
+        ));
+        usi_println(&format!(
+            "option name PostVerify type check default {}",
+            if opts.post_verify { "true" } else { "false" }
+        ));
+        usi_println(&format!(
+            "option name PostVerify.YDrop type spin default {} min 0 max 5000",
+            opts.y_drop_cp
+        ));
+        usi_println(&format!(
+            "option name PostVerify.RequirePass type check default {}",
+            if opts.post_verify_require_pass {
+                "true"
+            } else {
+                "false"
+            }
+        ));
+        usi_println(&format!(
+            "option name PostVerify.ExtendMs type spin default {} min 0 max 5000",
+            opts.post_verify_extend_ms
+        ));
+        usi_println(&format!(
+            "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
+            opts.post_verify_disadvantage_cp
+        ));
+        usi_println(&format!(
+            "option name PostVerify.SkipMateDistance type spin default {} min 1 max 32",
+            opts.mate_postverify_skip_max_dist
+        ));
+        usi_println(&format!(
+            "option name PostVerify.ExactMinDepth type spin default {} min 0 max 64",
+            opts.mate_postverify_exact_min_depth
+        ));
+        usi_println(&format!(
+            "option name PostVerify.ExactMinElapsedMs type spin default {} min 0 max 10000",
+            opts.mate_postverify_exact_min_elapsed_ms
+        ));
+        usi_println(&format!(
+            "option name PromoteVerify type check default {}",
+            if opts.promote_verify { "true" } else { "false" }
+        ));
+        usi_println(&format!(
+            "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
+            opts.promote_bias_cp
+        ));
+    }
     // Reproduction helpers
     usi_println(&format!(
         "option name Warmup.Ms type spin default {} min 0 max 60000",

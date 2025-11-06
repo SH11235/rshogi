@@ -6,7 +6,8 @@ mod pv_extract;
 mod pvs;
 mod qsearch;
 
-#[cfg(any(debug_assertions, feature = "diagnostics"))]
+// 診断モジュールは debugビルドとdiagnostics機能、さらにテストビルドでも有効化
+#[cfg(any(test, debug_assertions, feature = "diagnostics"))]
 pub mod diagnostics;
 
 pub use driver::ClassicBackend;
