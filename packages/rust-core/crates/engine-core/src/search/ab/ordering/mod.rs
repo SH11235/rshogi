@@ -1,7 +1,6 @@
 pub mod constants;
 mod guards;
 mod move_picker;
-mod root_picker;
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -16,8 +15,6 @@ pub(crate) use guards::{EvalMoveGuard, EvalNullGuard};
 pub use move_picker::MovePicker;
 #[cfg(not(any(test, feature = "bench-move-picker")))]
 pub(crate) use move_picker::MovePicker;
-pub(crate) use root_picker::RootPicker;
-pub use root_picker::{RootJitter, RootPickerConfig};
 
 const MOVENO_LOG_TABLE_SIZE: usize = 512;
 

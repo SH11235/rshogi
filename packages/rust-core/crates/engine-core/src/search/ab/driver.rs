@@ -945,82 +945,46 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let throttle_ms = Self::currmove_throttle_ms();
             let mut last_currmove_emit = Instant::now();
             let prev_root_lines = final_lines.as_ref().map(|lines| lines.as_slice());
-            // Build root move list for CurrMove events and basic ordering
+            // Build root move list using standard MovePicker ordering (YaneuraOu-style phases)
             let mg = MoveGenerator::new();
-            let Ok(list) = mg.generate_all(root) else {
+            let Ok(_list) = mg.generate_all(root) else {
                 if incomplete_depth.is_none() {
                     incomplete_depth = Some(d as u8);
                 }
                 break;
             };
-            // Root TT hint boost（存在すれば大ボーナス）
-            let mut root_tt_hint_mv: Option<crate::shogi::Move> = None;
+            // Build MovePicker with TT hint (if any), no killers/counter at root
+            let mut hint_for_picker: Option<crate::shogi::Move> = None;
             if let Some(tt) = &self.tt {
                 if dynp::tt_prefetch_enabled() {
                     tt.prefetch_l2(root_key, root.side_to_move);
                 }
                 if let Some(entry) = tt.probe(root_key, root.side_to_move) {
-                    if let Some(ttm) = entry.get_move() {
-                        root_tt_hint_mv = Some(ttm);
-                    }
+                    hint_for_picker = entry.get_move();
                 }
             }
-
-            // Fallback hint: If TT hint and prev_root_lines are both absent,
-            // use the best move from the previous iteration as a hint.
-            // This ensures RootPicker has ordering guidance even on the first few iterations.
-            let hint_for_picker = root_tt_hint_mv.or_else(|| {
-                if prev_root_lines.is_none() {
-                    best_hint_next_iter.map(|(m, _)| m)
-                } else {
-                    None
-                }
-            });
             if let Some(cb) = limits.info_string_callback.as_ref() {
-                if let Some(hm) = hint_for_picker {
-                    cb(&format!("root_hint_applied=1 move={}", crate::usi::move_to_usi(&hm)));
-                } else {
-                    cb("root_hint_applied=0");
-                }
+                cb(&format!("root_hint_applied={}", if hint_for_picker.is_some() { 1 } else { 0 }));
             }
-
-            let root_jitter = limits.root_jitter_seed.map(|seed| {
-                ordering::RootJitter::new(seed, ordering::constants::ROOT_JITTER_AMPLITUDE)
-            });
-            // 純粋 LazySMP: RootWorkQueue は使用しない
-
-            let mut root_picker = ordering::RootPicker::new(ordering::RootPickerConfig {
-                pos: root,
-                moves: list.as_slice(),
-                tt_move: hint_for_picker,
-                prev_lines: prev_root_lines,
-                jitter: root_jitter,
-            });
-
-            #[cfg(feature = "diagnostics")]
-            if let Some(cb) = limits.info_string_callback.as_ref() {
-                cb(&format!(
-                    "root_penalty_stats see={} post={} promote={} top1_penalized={}",
-                    root_picker.stats_root_see_penalized(),
-                    root_picker.stats_postverify_penalized(),
-                    root_picker.stats_promote_bias_applied(),
-                    root_picker.stats_top1_penalized() as u8
-                ));
+            let mut mp = ordering::MovePicker::new_normal(
+                root,
+                hint_for_picker,
+                None,
+                [None, None],
+                None,
+                None,
+            );
+            let mut root_moves: Vec<crate::shogi::Move> = Vec::new();
+            while let Some(mv) = mp.next(heur_state) {
+                root_moves.push(mv);
             }
-            let mut root_moves: Vec<(crate::shogi::Move, i32, usize)> =
-                Vec::with_capacity(list.as_slice().len());
-            while let Some((mv, key, idx)) = root_picker.next() {
-                root_moves.push((mv, key, idx));
-            }
-            // 純粋 LazySMP: pre-claim は行わない
             if root_moves.is_empty() {
                 if incomplete_depth.is_none() {
                     incomplete_depth = Some(d as u8);
                 }
                 break;
             }
-            let root_rank: Vec<crate::shogi::Move> =
-                root_moves.iter().map(|(m, _, _)| *m).collect();
+            let root_rank: Vec<crate::shogi::Move> = root_moves.clone();
             let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
             for (idx, mv) in root_rank.iter().enumerate() {
                 rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
@@ -1219,12 +1183,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // 作業用root move配列（excludedを除外）
                 let excluded_keys: SmallVec<[u32; 32]> =
                     excluded.iter().map(|m| m.to_u32()).collect();
-                let active_moves: SmallVec<[(crate::shogi::Move, i32, usize); 64]> = root_moves
+                let active_moves: SmallVec<[crate::shogi::Move; 64]> = root_moves
                     .iter()
                     .copied()
-                    .filter(|(m, _, _)| {
+                    .filter(|m| {
                         let key = m.to_u32();
-                        // MultiPV では完全一致の手のみ除外し、昇成・不成などの派生は別ラインとして扱う。
                         !excluded_keys.contains(&key)
                     })
                     .collect();
@@ -1273,7 +1236,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     window_alpha = old_alpha;
                     window_beta = old_beta;
                     // Root move loop with CurrMove events
-                    for (idx, (mv, _, _root_idx)) in active_moves.iter().copied().enumerate() {
+                    for (idx, mv) in active_moves.iter().copied().enumerate() {
                         // 純粋 LazySMP: claim は行わない
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
                         if super::diagnostics::should_abort_now() {
@@ -1668,7 +1631,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         prev_score = best_score;
                         // Capture best move and score for use as hint in next iteration
                         local_best_for_next_iter = Some((adopt_mv, best_score));
-                        if let Some(hint) = root_tt_hint_mv {
+                        if let Some(hint) = hint_for_picker {
                             root_tt_hint_exists = 1;
                             if adopt_mv.to_u32() == hint.to_u32() {
                                 root_tt_hint_used = 1;
@@ -1812,7 +1775,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
                                 // One-shot retry: try the 2nd-ranked root move with a narrow window.
                                 // Keep it conservative and bounded.
-                                if let Some((alt_mv, _, _)) = active_moves.get(1).copied() {
+                                if let Some(alt_mv) = active_moves.get(1).copied() {
                                     let mut alt_child = root.clone();
                                     let alt_sc = {
                                         let _guard = ordering::EvalMoveGuard::new(

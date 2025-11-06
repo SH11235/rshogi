@@ -67,12 +67,7 @@ impl Position {
 
         let captured_value = Self::see_piece_value(captured);
 
-        // For drops, we assume the piece is safe
-        if mv.is_drop() {
-            #[cfg(debug_assertions)]
-            check_state("drop", self, epoch_before, hash_before);
-            return captured_value;
-        }
+        // NOTE: drop moves cannot be captures in shogi; the branch above is unreachable for drops.
 
         // from が存在しない／from に駒が無い場合は不正入力（生成やメタデータの不整合）。
         // SEE は順序付け用のヒューリスティックなので、ここでは安全側に早期終了する。
