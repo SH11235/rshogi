@@ -11,6 +11,42 @@ use engine_core::time_management::{TimeControl, TimeManager, TimeState};
 use engine_core::Color;
 use std::collections::HashSet;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogProfile {
+    Prod,
+    QA,
+    Dev,
+}
+
+impl LogProfile {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "prod" => Some(LogProfile::Prod),
+            "qa" => Some(LogProfile::QA),
+            "dev" => Some(LogProfile::Dev),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogProfile::Prod => "Prod",
+            LogProfile::QA => "QA",
+            LogProfile::Dev => "Dev",
+        }
+    }
+
+    #[inline]
+    pub fn is_prod(self) -> bool {
+        matches!(self, LogProfile::Prod)
+    }
+
+    #[inline]
+    pub fn at_least_qa(self) -> bool {
+        matches!(self, LogProfile::QA | LogProfile::Dev)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
     // Core engine settings
@@ -19,6 +55,7 @@ pub struct UsiOptions {
     pub ponder: bool,
     pub engine_type: EngineType,
     pub eval_file: Option<String>,
+    pub log_profile: LogProfile,
 
     // Time parameters
     pub overhead_ms: u64,
@@ -159,6 +196,7 @@ impl Default for UsiOptions {
             ponder: true,
             engine_type: EngineType::Enhanced,
             eval_file: None,
+            log_profile: LogProfile::Prod,
             overhead_ms: 50,
             network_delay_ms: 120,
             network_delay2_ms: 120,
