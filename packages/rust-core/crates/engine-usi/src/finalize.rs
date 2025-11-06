@@ -2969,6 +2969,11 @@ fn need_verify_from_risks(
     // AND 条件: 両方のゲートを超えたときのみ検証を要求
     opp_cap_see_max >= opp_gate && opp_threat2_max >= threat2_gate
 }
+fn info_verbose(state: &EngineState, msg: impl Into<String>) {
+    if state.opts.log_profile.at_least_qa() {
+        info_string(msg.into());
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3448,10 +3453,5 @@ mod tests {
 
         let unknown_meta = gather_stop_meta(None, None, Some(FinalizeReason::TimeManagerStop));
         assert_eq!(unknown_meta.reason_label, "TimeManagerStop|tm=unknown");
-    }
-}
-fn info_verbose(state: &EngineState, msg: impl Into<String>) {
-    if state.opts.log_profile.at_least_qa() {
-        info_string(msg.into());
     }
 }

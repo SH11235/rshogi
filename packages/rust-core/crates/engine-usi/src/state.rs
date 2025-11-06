@@ -156,9 +156,6 @@ pub struct UsiOptions {
     pub mate_postverify_exact_min_elapsed_ms: u64,
 
     // Root guard rails and experiment flags (DIAG/flags; default OFF)
-    // Root SEE gate: if enabled and SEE(best) < -X, hold commit (re-search/try 2nd best)
-    pub root_see_gate: bool,
-    pub x_see_cp: i32,
     // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
     pub post_verify: bool,
     /// Early finalize linkage: require post-verify to pass; if reject, extend search briefly
@@ -261,9 +258,7 @@ impl Default for UsiOptions {
             mate_postverify_skip_max_dist: 3,
             mate_postverify_exact_min_depth: 8,
             mate_postverify_exact_min_elapsed_ms: 400,
-            // Guard rails（既定 ON）
-            root_see_gate: true,
-            x_see_cp: 0,
+            // Guard rails
             post_verify: true,
             post_verify_require_pass: false,
             post_verify_extend_ms: 300,
