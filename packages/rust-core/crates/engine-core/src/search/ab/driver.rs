@@ -25,10 +25,14 @@ use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
 #[cfg(feature = "diagnostics")]
 use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
+use crate::search::ab::pvs::ABArgs;
 use crate::search::policy::{asp_fail_high_pct, asp_fail_low_pct};
 use crate::search::snapshot::SnapshotSource;
 use crate::search::tt::TTProbe;
 use crate::time_management::TimeControl;
+
+/// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
+const STICKY_PV_WINDOW_MS: u64 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -78,6 +82,34 @@ struct NearDeadlineDecision {
     main_win_ms: u64,
     finalize_win_ms: u64,
     t_rem_ms: u64,
+}
+
+/// Computes remaining time in milliseconds for sticky-PV logic.
+/// Supports TimeManager (hard/soft limits), fixed time_limit, and fallback_deadlines.
+#[inline]
+fn time_remaining_ms_for_sticky(t0: Instant, limits: &SearchLimits) -> Option<u64> {
+    if let Some(tm) = limits.time_manager.as_ref() {
+        let hard = tm.hard_limit_ms();
+        if hard != u64::MAX {
+            let elapsed = tm.elapsed_ms();
+            return Some(hard.saturating_sub(elapsed));
+        }
+        let soft = tm.soft_limit_ms();
+        if soft != u64::MAX {
+            let elapsed = tm.elapsed_ms();
+            return Some(soft.saturating_sub(elapsed));
+        }
+        None
+    } else if let Some(dl) = limits.fallback_deadlines {
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+        Some(dl.hard_limit_ms.saturating_sub(elapsed_ms))
+    } else if let Some(limit) = limits.time_limit() {
+        let cap = limit.as_millis() as u64;
+        let el = t0.elapsed().as_millis() as u64;
+        Some(cap.saturating_sub(el))
+    } else {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -1328,6 +1360,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     },
                                     &mut search_ctx,
                                 );
+                                // PV head: result of full-window PV search
                                 -sc
                             } else {
                                 let mut search_ctx_nw = SearchContext {
@@ -1598,17 +1631,46 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if let Some(m) = local_best_mv {
                     // 次反復のAspiration用に pv_idx==1 を採用
                     if pv_idx == 1 {
-                        if prev_best_move_for_iteration.map(|b| b.to_u32()) != Some(m.to_u32()) {
+                        let changed =
+                            prev_best_move_for_iteration.map(|b| b.to_u32()) != Some(m.to_u32());
+                        if changed {
                             cumulative_pv_changed = cumulative_pv_changed.saturating_add(1);
                         }
-                        best = Some(m);
-                        best_score = local_best;
-                        prev_score = local_best;
+                        // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先
+                        let mut adopt_mv = m;
+                        let near_deadline = time_remaining_ms_for_sticky(t0, limits)
+                            .is_some_and(|t_rem| t_rem <= STICKY_PV_WINDOW_MS);
+                        #[cfg(feature = "diagnostics")]
+                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                            cb(&format!(
+                                "sticky_check changed={} near_deadline={} m={}",
+                                changed as u8,
+                                near_deadline as u8,
+                                crate::usi::move_to_usi(&m)
+                            ));
+                        }
+                        if changed && near_deadline {
+                            if let Some(prev_mv) = prev_best_move_for_iteration {
+                                adopt_mv = prev_mv;
+                                // keep previous score as hint center
+                                if let Some((_bm, prev_sc)) = local_best_for_next_iter {
+                                    prev_score = prev_sc;
+                                }
+                            }
+                        }
+                        best = Some(adopt_mv);
+                        best_score = if adopt_mv.to_u32() == m.to_u32() {
+                            local_best
+                        } else {
+                            // fallback: keep previous score when sticky applied
+                            prev_score
+                        };
+                        prev_score = best_score;
                         // Capture best move and score for use as hint in next iteration
-                        local_best_for_next_iter = Some((m, local_best));
+                        local_best_for_next_iter = Some((adopt_mv, best_score));
                         if let Some(hint) = root_tt_hint_mv {
                             root_tt_hint_exists = 1;
-                            if m.to_u32() == hint.to_u32() {
+                            if adopt_mv.to_u32() == hint.to_u32() {
                                 root_tt_hint_used = 1;
                             }
                         }
@@ -1662,7 +1724,200 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         mate_distance: crate::search::constants::mate_distance(local_best),
                     };
                     let node_type_for_store = line.bound;
-                    let line_arc = Arc::new(line);
+                    let mut line_arc = Arc::new(line);
+
+                    // Root lightweight zero-window verification for PV1 only.
+                    if pv_idx == 1
+                        && d >= Self::near_final_zero_window_min_depth()
+                        && crate::search::config::root_retry_enabled()
+                    {
+                        let verify_delta = Self::near_final_verify_delta_cp();
+                        let margin = local_best.saturating_sub(verify_window_alpha);
+                        if margin >= verify_delta {
+                            // Verify by pushing root move and searching opponent turn with zero window.
+                            let mut child = root.clone();
+                            {
+                                let _guard =
+                                    ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, m);
+                                child.do_move(m);
+                            }
+                            let verify_depth = (d - 2).max(1);
+                            // Build a tiny SearchContext for verification
+                            let mut v_nodes = 0u64;
+                            let mut v_seldepth = 0u32;
+                            let mut v_qnodes = 0u64;
+                            let qlim = Self::compute_qnodes_limit(limits, verify_depth, 1);
+                            #[cfg(feature = "diagnostics")]
+                            let mut v_abdada_detected = 0u64;
+                            #[cfg(feature = "diagnostics")]
+                            let mut v_abdada_set = 0u64;
+                            let mut v_ctx = SearchContext {
+                                limits,
+                                start_time: &t0,
+                                nodes: &mut v_nodes,
+                                seldepth: &mut v_seldepth,
+                                qnodes: &mut v_qnodes,
+                                qnodes_limit: qlim,
+                                #[cfg(feature = "diagnostics")]
+                                abdada_busy_detected: &mut v_abdada_detected,
+                                #[cfg(feature = "diagnostics")]
+                                abdada_busy_set: &mut v_abdada_set,
+                            };
+                            // Zero-window around (parent alpha = local_best - verify_delta)
+                            let alpha_p = local_best.saturating_sub(verify_delta);
+                            let alpha_c = -alpha_p;
+                            let beta_c = alpha_c + 1;
+                            let mut heur_v = shared_heur.clone();
+                            let mut v_tt_hits = 0u64;
+                            let mut v_beta_cuts = 0u64;
+                            let mut v_lmr_cnt = 0u64;
+                            let (sc_child, _) = self.alphabeta(
+                                ABArgs {
+                                    pos: &child,
+                                    depth: verify_depth,
+                                    alpha: alpha_c,
+                                    beta: beta_c,
+                                    ply: 1,
+                                    is_pv: false,
+                                    stack: &mut *stack,
+                                    heur: &mut heur_v,
+                                    tt_hits: &mut v_tt_hits,
+                                    beta_cuts: &mut v_beta_cuts,
+                                    lmr_counter: &mut v_lmr_cnt,
+                                    lmr_blocked_in_check: None,
+                                    lmr_blocked_recapture: None,
+                                    evasion_sparsity_ext: None,
+                                },
+                                &mut v_ctx,
+                            );
+                            let parent_sc = -sc_child;
+                            if parent_sc < alpha_p {
+                                // Downgrade bound and score for publication when verification fails.
+                                let downgraded = {
+                                    let mut l = (*line_arc).clone();
+                                    l.bound = NodeType::UpperBound;
+                                    l.score_internal = parent_sc;
+                                    l.score_cp = crate::search::types::clamp_score_cp(parent_sc);
+                                    l.exact_exhausted = true;
+                                    l.exhaust_reason = Some("postverify".to_string());
+                                    l
+                                };
+                                line_arc = Arc::new(downgraded);
+                                if let Some(cb) = limits.info_string_callback.as_ref() {
+                                    cb(&format!(
+                                        "postverify_downgrade=1 depth={} alpha_p={} parent_sc={}",
+                                        d, alpha_p, parent_sc
+                                    ));
+                                }
+
+                                // One-shot retry: try the 2nd-ranked root move with a narrow window.
+                                // Keep it conservative and bounded.
+                                if let Some((alt_mv, _, _)) = active_moves.get(1).copied() {
+                                    let mut alt_child = root.clone();
+                                    let alt_sc = {
+                                        let _guard = ordering::EvalMoveGuard::new(
+                                            self.evaluator.as_ref(),
+                                            root,
+                                            alt_mv,
+                                        );
+                                        alt_child.do_move(alt_mv);
+                                        let mut v_nodes = 0u64;
+                                        let mut v_seldepth = 0u32;
+                                        let mut v_qnodes = 0u64;
+                                        let qlim =
+                                            Self::compute_qnodes_limit(limits, (d - 2).max(1), 1);
+                                        #[cfg(feature = "diagnostics")]
+                                        let mut v_abdada_detected = 0u64;
+                                        #[cfg(feature = "diagnostics")]
+                                        let mut v_abdada_set = 0u64;
+                                        let mut v_ctx = SearchContext {
+                                            limits,
+                                            start_time: &t0,
+                                            nodes: &mut v_nodes,
+                                            seldepth: &mut v_seldepth,
+                                            qnodes: &mut v_qnodes,
+                                            qnodes_limit: qlim,
+                                            #[cfg(feature = "diagnostics")]
+                                            abdada_busy_detected: &mut v_abdada_detected,
+                                            #[cfg(feature = "diagnostics")]
+                                            abdada_busy_set: &mut v_abdada_set,
+                                        };
+                                        let narrow_a = parent_sc.saturating_sub(100);
+                                        let narrow_b = narrow_a + 1;
+                                        let mut heur_alt = shared_heur.clone();
+                                        let mut v_tt = 0u64;
+                                        let mut v_bc = 0u64;
+                                        let mut v_lmr = 0u64;
+                                        let (sc_alt, _) = self.alphabeta(
+                                            ABArgs {
+                                                pos: &alt_child,
+                                                depth: (d - 2).max(1),
+                                                alpha: -narrow_b,
+                                                beta: -narrow_a,
+                                                ply: 1,
+                                                is_pv: false,
+                                                stack: &mut *stack,
+                                                heur: &mut heur_alt,
+                                                tt_hits: &mut v_tt,
+                                                beta_cuts: &mut v_bc,
+                                                lmr_counter: &mut v_lmr,
+                                                lmr_blocked_in_check: None,
+                                                lmr_blocked_recapture: None,
+                                                evasion_sparsity_ext: None,
+                                            },
+                                            &mut v_ctx,
+                                        );
+                                        -sc_alt
+                                    };
+                                    if alt_sc > parent_sc {
+                                        // Adopt alt as PV1 (for publication within this iteration).
+                                        let alt_bound = Self::classify_root_bound(
+                                            alt_sc, orig_alpha, orig_beta,
+                                        );
+                                        let mut alt_pv = self
+                                            .reconstruct_root_pv_from_tt(root, d, alt_mv)
+                                            .unwrap_or_default();
+                                        if alt_pv.is_empty() {
+                                            alt_pv.push(alt_mv);
+                                        }
+                                        let alt_line = RootLine {
+                                            multipv_index: pv_idx as u8,
+                                            root_move: alt_mv,
+                                            score_internal: alt_sc,
+                                            score_cp: crate::search::types::clamp_score_cp(alt_sc),
+                                            bound: alt_bound,
+                                            depth: d as u32,
+                                            seldepth: Some(
+                                                seldepth
+                                                    .min(d as u32 + SELDEPTH_EXTRA_MARGIN)
+                                                    .min(u8::MAX as u32)
+                                                    as u8,
+                                            ),
+                                            pv: alt_pv,
+                                            nodes: Some(line_nodes),
+                                            time_ms: Some(line_time_ms),
+                                            nps: line_nps,
+                                            exact_exhausted: false,
+                                            exhaust_reason: Some("postverify_retry".to_string()),
+                                            mate_distance: crate::search::constants::mate_distance(
+                                                alt_sc,
+                                            ),
+                                        };
+                                        line_arc = Arc::new(alt_line);
+                                        if pv_idx == 1 {
+                                            best = Some(alt_mv);
+                                            best_score = alt_sc;
+                                        }
+                                        if let Some(cb) = limits.info_string_callback.as_ref() {
+                                            cb("postverify_retry_adopt=1");
+                                        }
+                                    } else if let Some(cb) = limits.info_string_callback.as_ref() {
+                                        cb("postverify_retry_adopt=0");
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // ベンチ時のメイト即停止（冪等）: primary かつ PV1 が Exact mate の場合
                     if !is_helper
                         && pv_idx == 1
@@ -1841,6 +2096,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 d, target, first.bound
                             ));
                         }
+                        // Zero-window 検証の続行可否（skip 条件でのみ false にする）。
+                        let mut proceed_nw = true;
                         if slack > 0 {
                             let near = match first.bound {
                                 NodeType::UpperBound => {
@@ -1870,7 +2127,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     ));
                                 }
                                 zero_window_done = true;
-                                continue;
+                                // 検証自体はスキップするが、反復の最終処理へはフォールスルーさせる。
+                                proceed_nw = false;
                             }
                         }
                         // mate近傍の扱い
@@ -1881,143 +2139,154 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 cb("near_final_zero_window_skip=1 reason=mate_near");
                             }
                             zero_window_done = true;
-                            continue;
+                            // 検証自体はスキップするが、反復の最終処理へはフォールスルーさせる。
+                            proceed_nw = false;
                         }
-                        let mut verify_delta = Self::near_final_verify_delta_cp();
-                        if crate::search::common::is_mate_score(target) {
-                            verify_delta += Self::near_final_zero_window_mate_delta_cp().max(0);
-                        }
-                        // 狭いフル窓: [s-Δ, s+Δ] で Exact を確認（整数スコアで成立する最小窓）
-                        let alpha0 = target.saturating_sub(verify_delta);
-                        let beta0 = target.saturating_add(verify_delta);
-                        let mut child = root.clone();
-                        child.do_move(mv0);
-                        // 局所カウンタ（本確認は軽量・単発）
-                        let mut qnodes_local: u64 = 0;
-                        let mut qnodes_limit_local = Self::compute_qnodes_limit(limits, d, 1);
-                        let qnodes_limit_pre = qnodes_limit_local;
-                        let mut tt_hits_local: u64 = 0;
-                        let mut beta_cuts_local: u64 = 0;
-                        let mut lmr_counter_local: u64 = 0;
-                        let mut heur_local = Heuristics::default();
-                        // 予算ms → qnodesへ換算し、上限を予算にクランプ
-                        let safety_ms: u64 = 20;
-                        let eff_budget_ms = if t_rem == 0 {
-                            budget
-                        } else if t_rem > safety_ms {
-                            budget.min(t_rem.saturating_sub(safety_ms))
-                        } else {
-                            0
-                        };
-                        let budget_qnodes = eff_budget_ms
-                            .saturating_mul(crate::search::constants::QNODES_PER_MS)
-                            .max(crate::search::constants::MIN_QNODES_LIMIT);
-                        if eff_budget_ms == 0 {
-                            zero_window_done = true;
-                            if let Some(cb) = limits.info_string_callback.as_ref() {
-                                cb(&format!(
+                        if proceed_nw {
+                            let mut verify_delta = Self::near_final_verify_delta_cp();
+                            if crate::search::common::is_mate_score(target) {
+                                verify_delta += Self::near_final_zero_window_mate_delta_cp().max(0);
+                            }
+                            // 狭いフル窓: [s-Δ, s+Δ] で Exact を確認（整数スコアで成立する最小窓）
+                            let alpha0 = target.saturating_sub(verify_delta);
+                            let beta0 = target.saturating_add(verify_delta);
+                            let mut child = root.clone();
+                            child.do_move(mv0);
+                            // 局所カウンタ（本確認は軽量・単発）
+                            let mut qnodes_local: u64 = 0;
+                            let mut qnodes_limit_local = Self::compute_qnodes_limit(limits, d, 1);
+                            let qnodes_limit_pre = qnodes_limit_local;
+                            let mut tt_hits_local: u64 = 0;
+                            let mut beta_cuts_local: u64 = 0;
+                            let mut lmr_counter_local: u64 = 0;
+                            let mut heur_local = Heuristics::default();
+                            // 予算ms → qnodesへ換算し、上限を予算にクランプ
+                            let safety_ms: u64 = 20;
+                            let eff_budget_ms = if t_rem == 0 {
+                                budget
+                            } else if t_rem > safety_ms {
+                                budget.min(t_rem.saturating_sub(safety_ms))
+                            } else {
+                                0
+                            };
+                            let budget_qnodes = eff_budget_ms
+                                .saturating_mul(crate::search::constants::QNODES_PER_MS)
+                                .max(crate::search::constants::MIN_QNODES_LIMIT);
+                            if eff_budget_ms == 0 {
+                                zero_window_done = true;
+                                if let Some(cb) = limits.info_string_callback.as_ref() {
+                                    cb(&format!(
                                     "near_final_zero_window_skip=1 reason=no_budget t_rem={} eff_budget_ms={}",
                                     t_rem,
                                     eff_budget_ms
                                 ));
+                                }
+                                // 検証自体はスキップするが、反復の最終処理へはフォールスルーさせる。
+                                proceed_nw = false;
                             }
-                            continue;
-                        }
-                        qnodes_limit_local = qnodes_limit_local.min(budget_qnodes);
-                        let qnodes_limit_post = qnodes_limit_local;
-                        let mut search_ctx_nw = SearchContext {
-                            limits,
-                            start_time: &t0,
-                            nodes: &mut nodes,
-                            seldepth: &mut seldepth,
-                            qnodes: &mut qnodes_local,
-                            qnodes_limit: qnodes_limit_local,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_detected: &mut cum_abdada_busy_detected,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_set: &mut cum_abdada_busy_set,
-                        };
-                        // Attempt once per iteration under gating conditions
-                        near_final_attempted = near_final_attempted.saturating_add(1);
-                        let (sc_vf, _) = self.alphabeta(
-                            pvs::ABArgs {
-                                pos: &child,
-                                depth: d - 1,
-                                alpha: -(beta0),
-                                beta: -alpha0,
-                                ply: 1,
-                                is_pv: true,
-                                stack,
-                                heur: &mut heur_local,
-                                tt_hits: &mut tt_hits_local,
-                                beta_cuts: &mut beta_cuts_local,
-                                lmr_counter: &mut lmr_counter_local,
-                                lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
-                                lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
-                                evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
-                            },
-                            &mut search_ctx_nw,
-                        );
-                        let s_back = -sc_vf;
-                        let confirmed =
-                            Self::classify_root_bound(s_back, alpha0, beta0) == NodeType::Exact;
-                        if confirmed {
-                            near_final_confirmed = near_final_confirmed.saturating_add(1);
-                            first.bound = NodeType::Exact;
-                            // 検証値に寄せる（±Δ内の誤差を吸収）
-                            first.score_internal = s_back;
-                            first.score_cp = crate::search::types::clamp_score_cp(s_back);
-                            first.mate_distance = crate::search::constants::mate_distance(s_back);
-                            // 可能ならPV更新（TTから復元）
-                            let pv =
-                                self.reconstruct_root_pv_from_tt(root, d, mv0).unwrap_or_default();
-                            if !pv.is_empty() {
-                                first.pv = SmallVec::from_vec(pv.to_vec());
-                            }
-                            // TTへ保存（PV1相当のrootラインとしてExactを保持）
-                            if let Some(tt) = &self.tt {
-                                let store_score =
-                                    crate::search::common::adjust_mate_score_for_tt(s_back, 0)
-                                        .clamp(i16::MIN as i32, i16::MAX as i32)
-                                        as i16;
-                                let mut args = crate::search::tt::TTStoreArgs::new(
-                                    root_key,
-                                    Some(mv0),
-                                    store_score,
-                                    root_static_eval_i16,
-                                    d as u8,
-                                    NodeType::Exact,
-                                    root.side_to_move,
+                            // ここから先は proceed_nw=true の場合のみ実施
+                            if proceed_nw {
+                                qnodes_limit_local = qnodes_limit_local.min(budget_qnodes);
+                                let qnodes_limit_post = qnodes_limit_local;
+                                let mut search_ctx_nw = SearchContext {
+                                    limits,
+                                    start_time: &t0,
+                                    nodes: &mut nodes,
+                                    seldepth: &mut seldepth,
+                                    qnodes: &mut qnodes_local,
+                                    qnodes_limit: qnodes_limit_local,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                    #[cfg(feature = "diagnostics")]
+                                    abdada_busy_set: &mut cum_abdada_busy_set,
+                                };
+                                // Attempt once per iteration under gating conditions
+                                near_final_attempted = near_final_attempted.saturating_add(1);
+                                let (sc_vf, _) = self.alphabeta(
+                                    pvs::ABArgs {
+                                        pos: &child,
+                                        depth: d - 1,
+                                        alpha: -(beta0),
+                                        beta: -alpha0,
+                                        ply: 1,
+                                        is_pv: true,
+                                        stack,
+                                        heur: &mut heur_local,
+                                        tt_hits: &mut tt_hits_local,
+                                        beta_cuts: &mut beta_cuts_local,
+                                        lmr_counter: &mut lmr_counter_local,
+                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
+                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
+                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
+                                    },
+                                    &mut search_ctx_nw,
                                 );
-                                args.is_pv = true;
-                                tt.store(args);
-                            }
-                        }
-                        zero_window_done = true;
-                        // qnodes を統計へ反映
-                        cum_qnodes = cum_qnodes.saturating_add(qnodes_local);
-                        if let Some(cb) = limits.info_string_callback.as_ref() {
-                            let (kind, diff) = match first.bound {
-                                NodeType::UpperBound => ("upper", (alpha0 - target).abs()),
-                                NodeType::LowerBound => ("lower", (target - beta0).abs()),
-                                NodeType::Exact => ("exact", 0),
-                            };
-                            cb(&format!(
-                                "near_final_zero_window_result=1 status={} kind={} diff={} alpha={} beta={} target={} budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={}",
-                                if confirmed { "confirmed" } else { "inexact" },
-                                kind,
-                                diff,
-                                alpha0,
-                                beta0,
-                                target,
-                                eff_budget_ms,
-                                budget_qnodes,
-                                qnodes_limit_pre,
-                                qnodes_limit_post,
-                                t_rem,
-                                qnodes_local
-                            ));
-                        }
+                                let s_back = -sc_vf;
+                                let confirmed = Self::classify_root_bound(s_back, alpha0, beta0)
+                                    == NodeType::Exact;
+                                if confirmed {
+                                    near_final_confirmed = near_final_confirmed.saturating_add(1);
+                                    first.bound = NodeType::Exact;
+                                    // 検証値に寄せる（±Δ内の誤差を吸収）
+                                    first.score_internal = s_back;
+                                    first.score_cp = crate::search::types::clamp_score_cp(s_back);
+                                    first.mate_distance =
+                                        crate::search::constants::mate_distance(s_back);
+                                    // 可能ならPV更新（TTから復元）
+                                    let pv = self
+                                        .reconstruct_root_pv_from_tt(root, d, mv0)
+                                        .unwrap_or_default();
+                                    if !pv.is_empty() {
+                                        first.pv = SmallVec::from_vec(pv.to_vec());
+                                    }
+                                    // TTへ保存（PV1相当のrootラインとしてExactを保持）
+                                    if let Some(tt) = &self.tt {
+                                        let store_score =
+                                            crate::search::common::adjust_mate_score_for_tt(
+                                                s_back, 0,
+                                            )
+                                            .clamp(i16::MIN as i32, i16::MAX as i32)
+                                                as i16;
+                                        let mut args = crate::search::tt::TTStoreArgs::new(
+                                            root_key,
+                                            Some(mv0),
+                                            store_score,
+                                            root_static_eval_i16,
+                                            d as u8,
+                                            NodeType::Exact,
+                                            root.side_to_move,
+                                        );
+                                        args.is_pv = true;
+                                        tt.store(args);
+                                    }
+                                }
+                                zero_window_done = true;
+                                // qnodes を統計へ反映
+                                cum_qnodes = cum_qnodes.saturating_add(qnodes_local);
+                                if let Some(cb) = limits.info_string_callback.as_ref() {
+                                    let (kind, diff) = match first.bound {
+                                        NodeType::UpperBound => ("upper", (alpha0 - target).abs()),
+                                        NodeType::LowerBound => ("lower", (target - beta0).abs()),
+                                        NodeType::Exact => ("exact", 0),
+                                    };
+                                    cb(&format!(
+                                        "near_final_zero_window_result=1 status={} kind={} diff={} alpha={} beta={} target={} budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={}",
+                                        if confirmed { "confirmed" } else { "inexact" },
+                                        kind,
+                                        diff,
+                                        alpha0,
+                                        beta0,
+                                        target,
+                                        eff_budget_ms,
+                                        budget_qnodes,
+                                        qnodes_limit_pre,
+                                        qnodes_limit_post,
+                                        t_rem,
+                                        qnodes_local
+                                    ));
+                                }
+                            } // proceed_nw
+                        } // if proceed_nw
                     }
                 }
 

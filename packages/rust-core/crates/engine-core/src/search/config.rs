@@ -13,6 +13,9 @@ static ROOT_SEE_X_CP: AtomicI32 = AtomicI32::new(100);
 static POST_VERIFY_ENABLED: AtomicBool = AtomicBool::new(false);
 static POST_VERIFY_YDROP_CP: AtomicI32 = AtomicI32::new(300);
 
+// Root post-verify one-shot retry (Enhanced実戦向け)
+static ROOT_RETRY_ENABLED: AtomicBool = AtomicBool::new(false);
+
 static PROMOTE_VERIFY_ENABLED: AtomicBool = AtomicBool::new(false);
 static PROMOTE_BIAS_CP: AtomicI32 = AtomicI32::new(20);
 
@@ -70,6 +73,15 @@ pub fn set_post_verify_ydrop_cp(y: i32) {
 #[inline]
 pub fn post_verify_ydrop_cp() -> i32 {
     POST_VERIFY_YDROP_CP.load(Ordering::Acquire)
+}
+
+// ---- Root retry (one-shot) gate
+pub fn set_root_retry_enabled(on: bool) {
+    ROOT_RETRY_ENABLED.store(on, Ordering::Release);
+}
+#[inline]
+pub fn root_retry_enabled() -> bool {
+    ROOT_RETRY_ENABLED.load(Ordering::Acquire)
 }
 
 // ---- Promote verify

@@ -225,24 +225,30 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             if mv.is_capture_hint() {
                 let see = pos.see(mv);
+                // Use promoted-aware captured piece value for pre-filtering to keep
+                // qsearch gating consistent with SEE/Material. This reduces the risk
+                // of underestimating recaptures on promoted pieces (e.g., Dragon/Horse).
+                let captured_val_prom_aware = {
+                    let to = mv.to();
+                    if let Some(piece) = pos.board.squares[to.index()] {
+                        crate::shogi::piece_constants::SEE_PIECE_VALUES[piece.promoted as usize]
+                            [piece.piece_type as usize]
+                    } else {
+                        0
+                    }
+                };
+
                 if see >= 0 {
-                    let captured_val = mv
-                        .captured_piece_type()
-                        .map(|pt| crate::shogi::piece_constants::SEE_PIECE_VALUES[0][pt as usize])
-                        .unwrap_or(0);
-                    let best_gain = stand_pat + captured_val + QS_PROMOTE_BONUS + margin_capture;
+                    let best_gain =
+                        stand_pat + captured_val_prom_aware + QS_PROMOTE_BONUS + margin_capture;
                     if best_gain <= alpha {
                         continue;
                     }
                 } else {
-                    let captured_val = mv
-                        .captured_piece_type()
-                        .map(|pt| crate::shogi::piece_constants::SEE_PIECE_VALUES[0][pt as usize])
-                        .unwrap_or(0);
-                    if captured_val < bad_capture_min && !pos.gives_check(mv) {
+                    if captured_val_prom_aware < bad_capture_min && !pos.gives_check(mv) {
                         continue;
                     }
-                    let best_gain = stand_pat + captured_val + margin_capture;
+                    let best_gain = stand_pat + captured_val_prom_aware + margin_capture;
                     if best_gain <= alpha {
                         continue;
                     }

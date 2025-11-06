@@ -1483,6 +1483,13 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     engine_core::search::config::set_root_see_x_cp(state.opts.x_see_cp);
     engine_core::search::config::set_post_verify_enabled(state.opts.post_verify);
     engine_core::search::config::set_post_verify_ydrop_cp(state.opts.y_drop_cp);
+    // Root retry (one-shot) は実戦用Enhanced/EnhancedNnueで有効化（学習/評価用途ではOFF）
+    let retry_on = matches!(
+        state.opts.engine_type,
+        engine_core::engine::controller::EngineType::Enhanced
+            | engine_core::engine::controller::EngineType::EnhancedNnue
+    );
+    engine_core::search::config::set_root_retry_enabled(retry_on);
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
 }

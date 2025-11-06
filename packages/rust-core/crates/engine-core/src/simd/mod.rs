@@ -109,16 +109,19 @@ pub mod utils {
 
 #[inline(always)]
 fn debug_assert_no_alias(dst: &[f32], row: &[f32]) {
-    #[cfg(debug_assertions)]
-    {
-        let dp = dst.as_ptr() as usize;
-        let rp = row.as_ptr() as usize;
-        let dn = dst.len().saturating_mul(core::mem::size_of::<f32>());
-        let rn = row.len().saturating_mul(core::mem::size_of::<f32>());
-        let dend = dp.saturating_add(dn);
-        let rend = rp.saturating_add(rn);
-        debug_assert!(dend <= rp || rend <= dp, "add_row_scaled_f32: dst/row must not alias");
-    }
+    // Cheap overlap check; always evaluate to keep parameters "used" in release too.
+    let dp = dst.as_ptr() as usize;
+    let rp = row.as_ptr() as usize;
+    let dn = dst.len().saturating_mul(core::mem::size_of::<f32>());
+    let rn = row.len().saturating_mul(core::mem::size_of::<f32>());
+    let dend = dp.saturating_add(dn);
+    let rend = rp.saturating_add(rn);
+    let alias = !(dend <= rp || rend <= dp);
+    debug_assert!(!alias, "add_row_scaled_f32: dst/row must not alias");
+    // Prevent unused warnings in non-debug builds without side effects
+    std::hint::black_box(dp);
+    std::hint::black_box(rp);
+    std::hint::black_box(alias);
 }
 
 // -------------------------------------------------------------------------------------

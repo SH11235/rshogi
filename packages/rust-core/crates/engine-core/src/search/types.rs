@@ -509,6 +509,9 @@ pub struct SearchStack {
     pub consecutive_checks: u8,
     /// Principal variation suffix from this ply
     pub pv_line: SmallVec<[Move; 16]>,
+    /// Whether the previous move leading to this node was risky:
+    /// drop or quiet with xSEE<0. Used to gate NMP/LMP/FUT/LMR conservatively.
+    pub prev_risky: bool,
 }
 
 impl SearchStack {
@@ -538,6 +541,7 @@ impl SearchStack {
         self.quiet_moves.clear(); // 容量保持
         self.consecutive_checks = 0;
         self.pv_line.clear(); // SmallVec の容量保持
+        self.prev_risky = false;
     }
 
     /// Update killers (convenience method)

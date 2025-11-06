@@ -1514,6 +1514,7 @@ fn null_move_respects_runtime_toggle() {
         beta_cuts: &mut beta_cuts,
         lmr_counter: &mut lmr_counter,
         ctx: &mut ctx,
+        is_pv: false,
     });
     assert!(allowed.is_some(), "NMP should run when runtime toggle is enabled");
 
@@ -1548,6 +1549,7 @@ fn null_move_respects_runtime_toggle() {
         beta_cuts: &mut beta_cuts_off,
         lmr_counter: &mut lmr_counter_off,
         ctx: &mut ctx_off,
+        is_pv: false,
     });
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
 
