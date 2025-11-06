@@ -268,6 +268,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             beta_cuts: &mut *beta_cuts,
             lmr_counter: &mut *lmr_counter,
             ctx,
+            is_pv,
         }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
@@ -477,7 +478,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if depth <= 3 && is_quiet {
+            if depth <= 3 && is_quiet && !stack[ply as usize].prev_risky {
                 let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
@@ -489,6 +490,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 && depth <= 8
                 && is_quiet
                 && !pos.is_in_check()
+                && !stack[ply as usize].prev_risky
             {
                 use crate::search::constants::MATE_SCORE;
                 if alpha.abs() >= MATE_SCORE - 100 { /* mate帯近傍では futility 無効 */ }
@@ -581,6 +583,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if prev_in_check || tt_depth_ok {
                     reduction = (reduction - 1).max(0);
                 }
+                // 直前手が drop / quiet xSEE<0 のときはさらに1段弱める
+                if stack[ply as usize].prev_risky {
+                    reduction = (reduction - 1).max(0);
+                }
             }
             // ABDADA軽減: busy中は追加で1段だけ減深（静止手のみ）
             if reduction > 0 {
@@ -630,7 +636,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                 let mut child = pos.clone();
                 child.do_move(mv);
-                if pv_move {
+                // Propagate prev_risky to child
+                let child_ply = (ply + 1) as usize;
+                let save_prev_risky = stack.get(child_ply).map(|st| st.prev_risky).unwrap_or(false);
+                if let Some(st) = stack.get_mut(child_ply) {
+                    st.prev_risky = mv.is_drop() || (is_quiet && pos.see(mv) < 0);
+                }
+                let val = if pv_move {
                     let (sc, _) = self.alphabeta(
                         ABArgs {
                             pos: &child,
@@ -673,12 +685,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     );
                     let mut s = -sc_nw;
                     if s > alpha {
-                        // 再探索条件: 減深が入っている(reduction>0) か、β未到達の上振れ(s<beta) の場合に必ずフル窓
-                        // 安全側: 減深が入っている静止手のnull-window上振れは必ずフル窓で検証
-                        // （従来は s<beta のときのみ再探索）
-                        if (reduction > 0 || s < beta)
-                            && !std::mem::replace(&mut did_fullwin_research, true)
-                        {
+                        // 再探索条件:
+                        //  - β未到達の上振れ (s < beta)
+                        //  - 減深が入っており、かつ s >= α+δ（δ=80cp）
+                        const REDELTA_CP: i32 = 80;
+                        let need_re = (s < beta) || (reduction > 0 && s >= alpha + REDELTA_CP);
+                        if need_re && !std::mem::replace(&mut did_fullwin_research, true) {
                             #[cfg(any(debug_assertions, feature = "diagnostics"))]
                             super::diagnostics::record_tag(pos, "lmr_fullwin_re", None);
                             let (sc_fw, _) = self.alphabeta(
@@ -704,7 +716,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                     s
+                };
+                if let Some(st) = stack.get_mut(child_ply) {
+                    st.prev_risky = save_prev_risky;
                 }
+                val
             };
             if pv_move {
                 first_move_done = true;
@@ -796,12 +812,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     && !matches!(node_type, NodeType::Exact)
                     && ((ply <= 2) || (extra_suppr_depth >= 0 && depth < extra_suppr_depth));
                 if !suppress_helper_near_root {
+                    // YaneuraOu-style TT depth degradation: reduce depth by 1 for non-Exact entries
+                    // to prevent overvalued bounds from dominating move ordering in subsequent iterations
+                    let depth_to_store = if matches!(node_type, NodeType::Exact) {
+                        depth as u8
+                    } else {
+                        (depth - 1).max(1) as u8
+                    };
                     let mut args = crate::search::tt::TTStoreArgs::new(
                         pos_hash,
                         best_mv,
                         store_score as i16,
                         static_eval_i16,
-                        depth as u8,
+                        depth_to_store,
                         node_type,
                         pos.side_to_move,
                     );
