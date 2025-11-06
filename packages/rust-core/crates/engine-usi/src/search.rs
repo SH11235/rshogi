@@ -171,28 +171,6 @@ pub fn limits_from_go(
     tp.move_horizon_trigger_ms = opts.move_horizon_trigger_ms;
     tp.move_horizon_min_moves = opts.move_horizon_min_moves;
 
-    // 純秒読み（main=0）時の締切リードを worst-case ネット遅延に加算して、
-    // エンジンの最終化をGUI締切（byoyomi）より前倒しにする。
-    // goコマンドのパラメータから純秒読みを推定: btime=wtime=0 かつ byoyomi>0
-    let byoyomi_total = gp.byoyomi.unwrap_or(0);
-    let b_main = gp.btime.unwrap_or(0);
-    let w_main = gp.wtime.unwrap_or(0);
-    let side_main_zero = match side {
-        Color::Black => b_main == 0,
-        Color::White => w_main == 0,
-    };
-    let pure_byoyomi = byoyomi_total > 0 && ((b_main == 0 && w_main == 0) || side_main_zero);
-    if pure_byoyomi && opts.byoyomi_deadline_lead_ms > 0 {
-        // 上限 2000ms（オプション側でも clamp 済み）。
-        let before = tp.network_delay2_ms;
-        tp.network_delay2_ms = tp.network_delay2_ms.saturating_add(opts.byoyomi_deadline_lead_ms);
-        // デバッグ容易性のためのログ
-        info_string(format!(
-            "deadline_lead_applied=1 before={} add={} after={}",
-            before, opts.byoyomi_deadline_lead_ms, tp.network_delay2_ms
-        ));
-    }
-
     let mut builder = SearchLimitsBuilder::default();
 
     if let Some(d) = gp.depth {
@@ -434,19 +412,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
             // Record deadlines into EngineState for USI-side OOB finalize enforcement
             state.deadline_hard = Some(hard_deadline);
-            // Conservative: near-hard is optional; if desired, compute as (hard - lead)
-            let lead = if state.opts.byoyomi_deadline_lead_ms > 0 {
-                state.opts.byoyomi_deadline_lead_ms
-            } else if matches!(tc_for_stop, TimeControl::Byoyomi { .. }) {
-                200 // fallback lead for pure byoyomi to match YaneuraOu behavior
-            } else {
-                0
-            };
-            state.deadline_near = if lead > 0 {
-                hard_deadline.checked_sub(Duration::from_millis(lead))
-            } else {
-                None
-            };
+
+            state.deadline_near = None;
             state.deadline_near_notified = false;
         } else {
             // No meaningful time budget → clear deadlines

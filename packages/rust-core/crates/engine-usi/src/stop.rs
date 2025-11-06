@@ -432,18 +432,8 @@ pub fn handle_ponderhit(state: &mut EngineState) {
                 let now = Instant::now();
                 let hard_deadline = now + Duration::from_millis(hard_ms);
                 state.deadline_hard = Some(hard_deadline);
-                let lead_ms = if state.opts.byoyomi_deadline_lead_ms > 0 {
-                    state.opts.byoyomi_deadline_lead_ms
-                } else if matches!(state.current_time_control, Some(TimeControl::Byoyomi { .. })) {
-                    200
-                } else {
-                    0
-                };
-                state.deadline_near = if lead_ms > 0 {
-                    hard_deadline.checked_sub(Duration::from_millis(lead_ms))
-                } else {
-                    None
-                };
+
+                state.deadline_near = None;
                 state.deadline_near_notified = false;
 
                 let stop_info = StopInfo {
