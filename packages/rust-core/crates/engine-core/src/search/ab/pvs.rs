@@ -204,7 +204,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         ctx.tick(ply);
         if depth <= 0 {
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let qs = self.qsearch(pos, alpha, beta, ctx, ply, &mut qbudget);
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (qs, None);
@@ -790,7 +791,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
         let result = if best == i32::MIN / 2 {
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let qs = self.qsearch(pos, alpha, beta, ctx, ply, &mut qbudget);
             (qs, None)
         } else {
             if let Some(tt) = &self.tt {

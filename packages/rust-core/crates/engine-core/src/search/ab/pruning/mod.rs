@@ -206,7 +206,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     "razor_triggered",
                     Some(format!("depth={} margin={}", d, margin)),
                 );
-                let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply);
+                let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+                let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, &mut qbudget);
                 if r <= alpha {
                     return Some(r);
                 }
@@ -216,7 +217,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         // 従来: depth==1のみの簡易Razor
         if depth == 1 {
-            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, &mut qbudget);
             if r <= alpha {
                 return Some(r);
             }
@@ -449,7 +451,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // 事前qsearchにより早すぎる試行を抑制
             let qs_alpha = threshold - 1;
             let qs_beta = threshold;
-            let qs = self.qsearch(pos, qs_alpha, qs_beta, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let qs = self.qsearch(pos, qs_alpha, qs_beta, ctx, ply, &mut qbudget);
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             super::diagnostics::record_tag(
                 pos,
