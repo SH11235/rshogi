@@ -156,6 +156,10 @@ pub struct UsiOptions {
     pub mate_postverify_exact_min_elapsed_ms: u64,
 
     // Root guard rails and experiment flags (DIAG/flags; default OFF)
+    // Root SEE Gate（再導入）
+    pub root_see_gate: bool,
+    /// 拡張SEEのしきい値（cp）。0 で無効。
+    pub root_see_gate_xsee_cp: i32,
     // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
     pub post_verify: bool,
     /// Early finalize linkage: require post-verify to pass; if reject, extend search briefly
@@ -259,6 +263,8 @@ impl Default for UsiOptions {
             mate_postverify_exact_min_depth: 8,
             mate_postverify_exact_min_elapsed_ms: 400,
             // Guard rails
+            root_see_gate: true,
+            root_see_gate_xsee_cp: 0,
             post_verify: true,
             post_verify_require_pass: false,
             post_verify_extend_ms: 300,

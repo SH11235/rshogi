@@ -11,6 +11,7 @@ use log::warn;
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
+use crate::search::config;
 use crate::search::constants::MAX_PLY;
 use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
@@ -984,6 +985,56 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     incomplete_depth = Some(d as u8);
                 }
                 break;
+            }
+
+            // Root SEE Gate: ルートの静か手で、非王手かつ SEE が閾値より悪い手を末尾へ回す。
+            // 直近の安定実装では「全候補保持＋安定ソート」の方針だったため、完全除外はせず順序のみ変更。
+            if config::root_see_gate_enabled() {
+                let xsee = config::root_see_gate_xsee_cp();
+                // 既存順序を保つため index を付与し、安定的に並べ替える
+                let mut annotated: Vec<(usize, crate::shogi::Move, bool, i32)> =
+                    Vec::with_capacity(root_moves.len());
+                for (i, &mv) in root_moves.iter().enumerate() {
+                    // 捕獲や成り、打ちはそのまま優先。非捕獲・非王手のみ評価。
+                    let is_capture = mv.is_capture_hint();
+                    let gives_check = root.gives_check(mv);
+                    let is_quiet_like = !is_capture && !mv.is_promote();
+                    let mut bad = false;
+                    let mut see_val = 0;
+                    if is_quiet_like && !gives_check {
+                        see_val = root.see(mv);
+                        bad = see_val < -xsee;
+                    }
+                    annotated.push((i, mv, bad, see_val));
+                }
+                // 並べ替え規則:
+                //  1) bad==false を先、bad==true を後
+                //  2) bad 同士では SEE の良い順（大→小）
+                //  3) それ以外は元の順序（index）
+                annotated.sort_by(|a, b| {
+                    use std::cmp::Ordering::*;
+                    if a.2 != b.2 {
+                        return (a.2 as u8).cmp(&(b.2 as u8)); // false(0) < true(1)
+                    }
+                    if a.2 {
+                        // both bad: prefer higher SEE
+                        match b.3.cmp(&a.3) {
+                            Equal => a.0.cmp(&b.0),
+                            ord => ord,
+                        }
+                    } else {
+                        // both good: keep original order
+                        a.0.cmp(&b.0)
+                    }
+                });
+                let moved = annotated.iter().filter(|t| t.2).count();
+                if moved > 0 {
+                    if let Some(cb) = limits.info_string_callback.as_ref() {
+                        cb(&format!("root_see_gate_reordered={} xsee={}", moved, xsee));
+                    }
+                }
+                root_moves.clear();
+                root_moves.extend(annotated.into_iter().map(|t| t.1));
             }
             let root_rank: Vec<crate::shogi::Move> = root_moves.clone();
             let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
