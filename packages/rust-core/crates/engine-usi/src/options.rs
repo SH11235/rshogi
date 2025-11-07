@@ -89,6 +89,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name Abdada type check default false");
     // Diagnostics / policy knobs
     usi_println("option name QSearchChecks type combo default On var On var Off");
+    usi_println(&format!(
+        "option name SearchParams.QS.CheckSEEMargin type spin default {} min -5000 max 5000",
+        engine_core::search::params::qs_check_see_margin()
+    ));
     // Root guard rails (revived)
     usi_println(&format!(
         "option name RootSeeGate type check default {}",
@@ -748,6 +752,13 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 } else {
                     "pc_skip_verify_lt4=Off"
                 });
+            }
+        }
+        "SearchParams.QS.CheckSEEMargin" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_check_see_margin(x);
+                }
             }
         }
         // --- Root guard rails (revived) ---

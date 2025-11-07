@@ -80,6 +80,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         beta: i32,
         ctx: &mut SearchContext,
         ply: u32,
+        qcheck_budget: &mut i32,
     ) -> i32 {
         ctx.tick(ply);
 
@@ -96,7 +97,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let sc = {
                     let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                     child.do_move(mv);
-                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1, qcheck_budget)
                 };
                 if sc >= beta {
                     return sc;
@@ -215,7 +216,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let margin_capture = qs_margin_capture();
         let bad_capture_min = qs_bad_capture_min();
         let check_prune_margin = qs_check_prune_margin();
-        let check_see_margin = qs_check_see_margin();
+        let mut check_see_margin = qs_check_see_margin();
+        // tighten SEE in pure byoyomi to curb long quiet-check chains
+        let in_byoyomi = if let Some(tm) = ctx.limits.time_manager.as_ref() {
+            tm.is_in_byoyomi()
+        } else {
+            matches!(ctx.limits.time_control, crate::time_management::TimeControl::Byoyomi { .. })
+        };
+        if in_byoyomi && check_see_margin < -30 {
+            check_see_margin = -30;
+        }
         let mut picker = MovePicker::new_qsearch(pos, None, None, None, quiet_limit);
         let mut remaining_quiet_checks = quiet_limit;
 
@@ -260,7 +270,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let sc = {
                     let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                     child.do_move(mv);
-                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1, qcheck_budget)
                 };
                 if sc >= beta {
                     return sc;
@@ -279,13 +289,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if stand_pat + check_prune_margin <= alpha {
                     continue;
                 }
+                if *qcheck_budget <= 0 {
+                    continue;
+                }
                 #[cfg(feature = "diagnostics")]
                 record_quiet_check_generated();
                 let mut child = pos.clone();
                 let sc = {
                     let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                     child.do_move(mv);
-                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
+                    *qcheck_budget -= 1;
+                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1, qcheck_budget)
                 };
                 remaining_quiet_checks = remaining_quiet_checks.saturating_sub(1);
                 if sc >= beta {
@@ -310,5 +324,19 @@ pub(crate) fn reset_qsearch_diagnostics() {
         QSEARCH_QUIET_CHECKS.with(|cnt| cnt.set(0));
         QSEARCH_QNODES_PEAK.with(|cnt| cnt.set(0));
         QSEARCH_LAST_LIMIT.with(|cnt| cnt.set(0));
+    }
+}
+
+/// Compute initial quiet-check budget for one qsearch invocation.
+/// Byoyomi では 1、それ以外は 2 を返す（保守的）。
+pub(crate) fn initial_quiet_check_budget<'a>(ctx: &SearchContext<'a>) -> i32 {
+    if let Some(tm) = ctx.limits.time_manager.as_ref() {
+        if tm.is_in_byoyomi() {
+            return 1;
+        }
+    }
+    match ctx.limits.time_control {
+        crate::time_management::TimeControl::Byoyomi { .. } => 1,
+        _ => 2,
     }
 }
