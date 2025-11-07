@@ -214,7 +214,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 } else {
                     None
                 };
-                let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, 0, &mut qbudget, prev_move);
+                let r = self.qsearch(
+                    pos,
+                    super::qsearch::SearchWindow {
+                        alpha,
+                        beta: alpha + 1,
+                    },
+                    ctx,
+                    super::qsearch::QSearchFrame {
+                        ply,
+                        qdepth: 0,
+                        prev_move,
+                    },
+                    &mut qbudget,
+                );
                 if r <= alpha {
                     return Some(r);
                 }
@@ -230,7 +243,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else {
                 None
             };
-            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, 0, &mut qbudget, prev_move);
+            let r = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow {
+                    alpha,
+                    beta: alpha + 1,
+                },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                &mut qbudget,
+            );
             if r <= alpha {
                 return Some(r);
             }
@@ -469,7 +495,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else {
                 None
             };
-            let qs = self.qsearch(pos, qs_alpha, qs_beta, ctx, ply, 0, &mut qbudget, prev_move);
+            let qs = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow {
+                    alpha: qs_alpha,
+                    beta: qs_beta,
+                },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                &mut qbudget,
+            );
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             super::diagnostics::record_tag(
                 pos,

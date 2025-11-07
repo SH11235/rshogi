@@ -1,8 +1,7 @@
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::mate_score;
 use crate::search::params::{
-    qs_bad_capture_min, qs_check_prune_margin, qs_check_see_margin, qs_checks_enabled,
-    qs_margin_capture, QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS,
+    qs_check_prune_margin, qs_check_see_margin, qs_checks_enabled, QS_MAX_QUIET_CHECKS,
 };
 use crate::Position;
 
@@ -72,18 +71,38 @@ pub(crate) fn publish_qsearch_diagnostics(depth: i32, cb: Option<&InfoStringCall
     QSEARCH_LAST_LIMIT.with(|cnt| cnt.set(0));
 }
 
+/// 検索窓（alpha/beta）
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SearchWindow {
+    pub alpha: i32,
+    pub beta: i32,
+}
+
+/// qsearch 呼び出しフレームのメタ情報
+/// - `ply`: 現在の手数（root からの距離）
+/// - `qdepth`: qsearch 内部の静止探索深さ（入口は0）
+/// - `prev_move`: 直前手（再捕獲などの判定に利用）
+#[derive(Clone, Copy, Debug)]
+pub(super) struct QSearchFrame {
+    pub ply: u32,
+    pub qdepth: i32,
+    pub prev_move: Option<crate::shogi::Move>,
+}
+
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
-    pub(crate) fn qsearch(
+    pub(super) fn qsearch(
         &self,
         pos: &Position,
-        mut alpha: i32,
-        beta: i32,
+        window: SearchWindow,
         ctx: &mut SearchContext,
-        ply: u32,
-        qdepth: i32,
+        frame: QSearchFrame,
         qcheck_budget: &mut i32,
-        prev_move: Option<crate::shogi::Move>,
     ) -> i32 {
+        let mut alpha = window.alpha;
+        let beta = window.beta;
+        let ply = frame.ply;
+        let qdepth = frame.qdepth;
+        let prev_move = frame.prev_move;
         ctx.tick(ply);
 
         static HEUR_STUB: OnceLock<Heuristics> = OnceLock::new();
@@ -101,13 +120,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     child.do_move(mv);
                     -self.qsearch(
                         &child,
-                        -beta,
-                        -alpha,
+                        SearchWindow {
+                            alpha: -beta,
+                            beta: -alpha,
+                        },
                         ctx,
-                        ply + 1,
-                        qdepth - 1,
+                        QSearchFrame {
+                            ply: ply + 1,
+                            qdepth: qdepth - 1,
+                            prev_move: Some(mv),
+                        },
                         qcheck_budget,
-                        Some(mv),
                     )
                 };
                 if sc >= beta {
@@ -201,8 +224,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return alpha.max(stand_pat);
         }
 
-        // S2: 静かチェックは QS 侵入直後（qdepth==0）のみ生成を許可する。
-        // それ以外の再帰では quiet checks を生成しないため、quiet_limit=0 に固定する。
+        // 静かチェックは qsearch 侵入直後（qdepth==0）のみ生成を許可する。
+        // それ以外の再帰では quiet checks を生成しない（quiet_limit=0）。
+        // 将棋では手駒による連続王手で組合せが急増しやすいため、
+        // 生成位置を浅層に限定して探索の安定性を確保する目的。
         let mut quiet_limit = if qdepth == 0 && qs_checks_enabled() {
             QS_MAX_QUIET_CHECKS
         } else {
@@ -235,8 +260,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 quiet_limit = quiet_limit.min(1);
             }
         }
-        let margin_capture = qs_margin_capture();
-        let bad_capture_min = qs_bad_capture_min();
         let check_prune_margin = qs_check_prune_margin();
         let mut check_see_margin = qs_check_see_margin();
         // tighten SEE in pure byoyomi to curb long quiet-check chains
@@ -253,6 +276,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let own_king_sq = pos.board.king_square(pos.side_to_move);
         let recapture_sq = prev_move.map(|mv| mv.to());
 
+        let mut move_count: i32 = 0;
         while let Some(mv) = picker.next(heur_stub) {
             if ctx.time_up_fast() {
                 #[cfg(feature = "diagnostics")]
@@ -260,10 +284,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 return alpha.max(stand_pat);
             }
             if mv.is_capture_hint() {
+                move_count += 1;
+                // MoveCount-based pruning for captures (YO-aligned):
+                // After the first two capture candidates, skip the rest in
+                // typical non-forcing situations to prevent wide capture
+                // branches from dominating qsearch. Do not apply this to
+                // promotions, checking moves, or recaptures on the previous
+                // move's destination.
+                let is_recapture = recapture_sq.is_some_and(|sq| sq == mv.to());
+                if move_count > 2 && !pos.gives_check(mv) && !mv.is_promote() && !is_recapture {
+                    continue;
+                }
                 let see = pos.see(mv);
-                // Use promoted-aware captured piece value for pre-filtering to keep
-                // qsearch gating consistent with SEE/Material. This reduces the risk
-                // of underestimating recaptures on promoted pieces (e.g., Dragon/Horse).
+                // 取る駒の価値（成りを考慮）
                 let captured_val_prom_aware = {
                     let to = mv.to();
                     if let Some(piece) = pos.board.squares[to.index()] {
@@ -274,20 +307,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                 };
 
-                if see >= 0 {
-                    let best_gain =
-                        stand_pat + captured_val_prom_aware + QS_PROMOTE_BONUS + margin_capture;
-                    if best_gain <= alpha {
-                        continue;
-                    }
-                } else {
-                    if captured_val_prom_aware < bad_capture_min && !pos.gives_check(mv) {
-                        continue;
-                    }
-                    let best_gain = stand_pat + captured_val_prom_aware + margin_capture;
-                    if best_gain <= alpha {
-                        continue;
-                    }
+                // YO準拠: futility + SEE による枝刈り
+                const QS_FUTILITY_BASE_MARGIN: i32 = 352; // cp
+                let futility_base = stand_pat.saturating_add(QS_FUTILITY_BASE_MARGIN);
+
+                // 1) futility: 静的評価 + 捕獲駒価値 が alpha を超えないならスキップ
+                let futility_value = futility_base.saturating_add(captured_val_prom_aware);
+                if futility_value <= alpha {
+                    continue;
+                }
+
+                // 2) SEE が十分でないならスキップ（alpha - futility_base）
+                if see < alpha.saturating_sub(futility_base) {
+                    continue;
+                }
+
+                // 3) SEE の絶対下限（歩損未満は通さない）
+                if see < -74 {
+                    continue;
                 }
 
                 let mut child = pos.clone();
@@ -296,13 +333,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     child.do_move(mv);
                     -self.qsearch(
                         &child,
-                        -beta,
-                        -alpha,
+                        SearchWindow {
+                            alpha: -beta,
+                            beta: -alpha,
+                        },
                         ctx,
-                        ply + 1,
-                        qdepth - 1,
+                        QSearchFrame {
+                            ply: ply + 1,
+                            qdepth: qdepth - 1,
+                            prev_move: Some(mv),
+                        },
                         qcheck_budget,
-                        Some(mv),
                     )
                 };
                 if sc >= beta {
@@ -342,13 +383,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                     -self.qsearch(
                         &child,
-                        -beta,
-                        -alpha,
+                        SearchWindow {
+                            alpha: -beta,
+                            beta: -alpha,
+                        },
                         ctx,
-                        ply + 1,
-                        qdepth - 1,
+                        QSearchFrame {
+                            ply: ply + 1,
+                            qdepth: qdepth - 1,
+                            prev_move: Some(mv),
+                        },
                         qcheck_budget,
-                        Some(mv),
                     )
                 };
                 remaining_quiet_checks = remaining_quiet_checks.saturating_sub(1);
