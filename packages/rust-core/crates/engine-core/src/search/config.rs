@@ -38,7 +38,32 @@ pub fn mate_early_stop_max_distance() -> u8 {
     MATE_EARLY_STOP_MAX_DISTANCE.load(Ordering::Acquire)
 }
 
-// (Root SEE Gateは廃止)
+// ---- Root SEE Gate (revived)
+// やねうら王系のルート近傍ガードに相当する軽量ゲート。
+// ここではフラグと閾値のみを保持し、実際の適用は上位層（USI/検索部）に委ねる。
+static ROOT_SEE_GATE_ENABLED: AtomicBool = AtomicBool::new(true);
+/// 拡張SEE（XSEE）のしきい値（cp相当）。0 で無効。
+static ROOT_SEE_GATE_XSEE_CP: AtomicI32 = AtomicI32::new(0);
+
+pub fn set_root_see_gate_enabled(on: bool) {
+    ROOT_SEE_GATE_ENABLED.store(on, Ordering::Release);
+}
+
+#[inline]
+pub fn root_see_gate_enabled() -> bool {
+    ROOT_SEE_GATE_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn set_root_see_gate_xsee_cp(v: i32) {
+    // 実用域: 0〜1000cp 程度にクランプ
+    let clamped = v.clamp(0, 5000);
+    ROOT_SEE_GATE_XSEE_CP.store(clamped, Ordering::Release);
+}
+
+#[inline]
+pub fn root_see_gate_xsee_cp() -> i32 {
+    ROOT_SEE_GATE_XSEE_CP.load(Ordering::Acquire)
+}
 
 // ---- Post-bestmove Verify
 pub fn set_post_verify_enabled(on: bool) {
