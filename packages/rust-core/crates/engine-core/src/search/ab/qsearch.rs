@@ -1,8 +1,8 @@
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::mate_score;
 use crate::search::params::{
-    qs_bad_capture_min, qs_check_prune_margin, qs_checks_enabled, qs_margin_capture,
-    QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS,
+    qs_bad_capture_min, qs_check_prune_margin, qs_check_see_margin, qs_checks_enabled,
+    qs_margin_capture, QS_MAX_QUIET_CHECKS, QS_PROMOTE_BONUS,
 };
 use crate::Position;
 
@@ -215,7 +215,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let margin_capture = qs_margin_capture();
         let bad_capture_min = qs_bad_capture_min();
         let check_prune_margin = qs_check_prune_margin();
+        let check_see_margin = qs_check_see_margin();
         let mut picker = MovePicker::new_qsearch(pos, None, None, None, quiet_limit);
+        let mut remaining_quiet_checks = quiet_limit;
 
         while let Some(mv) = picker.next(heur_stub) {
             if ctx.time_up_fast() {
@@ -267,6 +269,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     alpha = sc;
                 }
             } else if qs_checks_enabled() && pos.gives_check(mv) {
+                if remaining_quiet_checks == 0 {
+                    continue;
+                }
+                // Require SEE >= margin for quiet checks (YO-aligned guard)
+                if pos.see(mv) < check_see_margin {
+                    continue;
+                }
                 if stand_pat + check_prune_margin <= alpha {
                     continue;
                 }
@@ -278,6 +287,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     child.do_move(mv);
                     -self.qsearch(&child, -beta, -alpha, ctx, ply + 1)
                 };
+                remaining_quiet_checks = remaining_quiet_checks.saturating_sub(1);
                 if sc >= beta {
                     return sc;
                 }
