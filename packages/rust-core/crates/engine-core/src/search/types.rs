@@ -3,7 +3,7 @@
 use crate::search::ab::ordering::Heuristics;
 use crate::search::snapshot::SnapshotSource;
 use crate::shogi::Move;
-use smallvec::SmallVec;
+use smallvec::{Array, SmallVec};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +18,102 @@ pub type InfoStringCallback = Arc<dyn Fn(&str) + Send + Sync>;
 #[inline]
 pub fn clamp_score_cp(score: i32) -> i32 {
     score.clamp(-30_000, 30_000)
+}
+
+/// Mutable PV buffer operations shared by Vec/SmallVec for root normalization.
+pub trait PvBuffer {
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn push_move(&mut self, mv: Move);
+    fn insert_move(&mut self, idx: usize, mv: Move);
+    fn remove_move(&mut self, idx: usize);
+    fn as_slice(&self) -> &[Move];
+}
+
+impl PvBuffer for Vec<Move> {
+    #[inline]
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        Vec::is_empty(self)
+    }
+
+    #[inline]
+    fn push_move(&mut self, mv: Move) {
+        self.push(mv);
+    }
+
+    #[inline]
+    fn insert_move(&mut self, idx: usize, mv: Move) {
+        self.insert(idx, mv);
+    }
+
+    #[inline]
+    fn remove_move(&mut self, idx: usize) {
+        self.remove(idx);
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[Move] {
+        self.as_slice()
+    }
+}
+
+impl<const N: usize> PvBuffer for SmallVec<[Move; N]>
+where
+    [Move; N]: Array<Item = Move>,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        SmallVec::len(self)
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        SmallVec::is_empty(self)
+    }
+
+    #[inline]
+    fn push_move(&mut self, mv: Move) {
+        self.push(mv);
+    }
+
+    #[inline]
+    fn insert_move(&mut self, idx: usize, mv: Move) {
+        self.insert(idx, mv);
+    }
+
+    #[inline]
+    fn remove_move(&mut self, idx: usize) {
+        self.remove(idx);
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[Move] {
+        self.as_slice()
+    }
+}
+
+/// Ensure that a PV is non-empty and starts with the provided root move.
+#[inline]
+pub fn normalize_root_pv<B: PvBuffer>(pv: &mut B, root_move: Move) {
+    if pv.is_empty() {
+        pv.push_move(root_move);
+        return;
+    }
+
+    if pv.as_slice()[0] == root_move {
+        return;
+    }
+
+    if let Some(pos) = pv.as_slice().iter().position(|&mv| mv == root_move) {
+        pv.remove_move(pos);
+    }
+
+    pv.insert_move(0, root_move);
 }
 
 /// Search statistics
