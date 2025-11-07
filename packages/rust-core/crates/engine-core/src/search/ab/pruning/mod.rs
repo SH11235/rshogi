@@ -91,6 +91,7 @@ pub(super) struct RazorPruneParams<'a, 'ctx> {
     pub ctx: &'a mut SearchContext<'ctx>,
     pub ply: u32,
     pub is_pv: bool,
+    pub stack: &'a [SearchStack],
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
@@ -177,6 +178,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ply,
             is_pv,
+            stack,
         } = params;
         // Verification: disable Razor when verification flag is set
         if ctx.limits.info_string_callback.as_ref().is_some() {
@@ -207,7 +209,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     Some(format!("depth={} margin={}", d, margin)),
                 );
                 let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
-                let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, &mut qbudget);
+                let prev_move = if ply > 0 {
+                    stack[(ply - 1) as usize].current_move
+                } else {
+                    None
+                };
+                let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, 0, &mut qbudget, prev_move);
                 if r <= alpha {
                     return Some(r);
                 }
@@ -218,7 +225,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         // 従来: depth==1のみの簡易Razor
         if depth == 1 {
             let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
-            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, &mut qbudget);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply, 0, &mut qbudget, prev_move);
             if r <= alpha {
                 return Some(r);
             }
@@ -452,7 +464,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let qs_alpha = threshold - 1;
             let qs_beta = threshold;
             let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
-            let qs = self.qsearch(pos, qs_alpha, qs_beta, ctx, ply, &mut qbudget);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            let qs = self.qsearch(pos, qs_alpha, qs_beta, ctx, ply, 0, &mut qbudget, prev_move);
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             super::diagnostics::record_tag(
                 pos,

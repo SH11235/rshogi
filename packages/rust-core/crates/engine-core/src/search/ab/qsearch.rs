@@ -80,7 +80,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         beta: i32,
         ctx: &mut SearchContext,
         ply: u32,
+        qdepth: i32,
         qcheck_budget: &mut i32,
+        prev_move: Option<crate::shogi::Move>,
     ) -> i32 {
         ctx.tick(ply);
 
@@ -97,7 +99,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let sc = {
                     let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                     child.do_move(mv);
-                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1, qcheck_budget)
+                    -self.qsearch(
+                        &child,
+                        -beta,
+                        -alpha,
+                        ctx,
+                        ply + 1,
+                        qdepth - 1,
+                        qcheck_budget,
+                        Some(mv),
+                    )
                 };
                 if sc >= beta {
                     return sc;
@@ -130,6 +141,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return alpha;
         }
 
+        // 非チェック時の繰り返し（千日手）を早期検出して即時帰り（YO準拠の方針）。
+        // in-check の場合は回避手生成に委ねるためここでは判定しない。
+        if !pos.is_in_check() && pos.is_draw() {
+            return crate::search::constants::DRAW_SCORE;
+        }
+
         let stand_pat = self.evaluator.evaluate(pos);
 
         if (ply as u16) >= crate::search::constants::MAX_QUIESCE_DEPTH {
@@ -158,7 +175,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
         if stand_pat >= beta {
-            return stand_pat;
+            // YO系のスムージングに合わせ、βへ少し寄せて返す。
+            // （TT汚染抑制・情報の安定化目的。決定的スコアではないため単純平均で十分。）
+            let smoothed = (stand_pat + beta) / 2;
+            return smoothed;
         }
         if stand_pat > alpha {
             alpha = stand_pat;
@@ -181,7 +201,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return alpha.max(stand_pat);
         }
 
-        let mut quiet_limit = if qs_checks_enabled() {
+        // S2: 静かチェックは QS 侵入直後（qdepth==0）のみ生成を許可する。
+        // それ以外の再帰では quiet checks を生成しないため、quiet_limit=0 に固定する。
+        let mut quiet_limit = if qdepth == 0 && qs_checks_enabled() {
             QS_MAX_QUIET_CHECKS
         } else {
             0
@@ -228,6 +250,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         let mut picker = MovePicker::new_qsearch(pos, None, None, None, quiet_limit);
         let mut remaining_quiet_checks = quiet_limit;
+        let own_king_sq = pos.board.king_square(pos.side_to_move);
+        let recapture_sq = prev_move.map(|mv| mv.to());
 
         while let Some(mv) = picker.next(heur_stub) {
             if ctx.time_up_fast() {
@@ -270,7 +294,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let sc = {
                     let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                     child.do_move(mv);
-                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1, qcheck_budget)
+                    -self.qsearch(
+                        &child,
+                        -beta,
+                        -alpha,
+                        ctx,
+                        ply + 1,
+                        qdepth - 1,
+                        qcheck_budget,
+                        Some(mv),
+                    )
                 };
                 if sc >= beta {
                     return sc;
@@ -278,7 +311,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if sc > alpha {
                     alpha = sc;
                 }
-            } else if qs_checks_enabled() && pos.gives_check(mv) {
+            } else if (qdepth == 0) && qs_checks_enabled() && pos.gives_check(mv) {
                 if remaining_quiet_checks == 0 {
                     continue;
                 }
@@ -289,7 +322,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if stand_pat + check_prune_margin <= alpha {
                     continue;
                 }
-                if *qcheck_budget <= 0 {
+                let is_recapture = recapture_sq.is_some_and(|sq| sq == mv.to());
+                let king_adjacent = own_king_sq.is_some_and(|king| {
+                    u8::abs_diff(king.file(), mv.to().file()) <= 1
+                        && u8::abs_diff(king.rank(), mv.to().rank()) <= 1
+                });
+                let history_favored = is_recapture || king_adjacent;
+                if *qcheck_budget <= 0 && !history_favored {
                     continue;
                 }
                 #[cfg(feature = "diagnostics")]
@@ -298,8 +337,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let sc = {
                     let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                     child.do_move(mv);
-                    *qcheck_budget -= 1;
-                    -self.qsearch(&child, -beta, -alpha, ctx, ply + 1, qcheck_budget)
+                    if !history_favored {
+                        *qcheck_budget -= 1;
+                    }
+                    -self.qsearch(
+                        &child,
+                        -beta,
+                        -alpha,
+                        ctx,
+                        ply + 1,
+                        qdepth - 1,
+                        qcheck_budget,
+                        Some(mv),
+                    )
                 };
                 remaining_quiet_checks = remaining_quiet_checks.saturating_sub(1);
                 if sc >= beta {
