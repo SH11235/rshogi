@@ -14,7 +14,9 @@ use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, Search
 use crate::search::constants::MAX_PLY;
 use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
-use crate::search::types::{NodeType, RootLine, SearchStack, StopInfo, TerminationReason};
+use crate::search::types::{
+    normalize_root_pv, NodeType, RootLine, SearchStack, StopInfo, TerminationReason,
+};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::Position;
 use smallvec::SmallVec;
@@ -1648,6 +1650,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         } else {
                             pv = pv_ex;
                         }
+                    }
+                    normalize_root_pv(&mut pv, m);
+                    if pv.len() > 32 {
+                        pv.truncate(32);
                     }
                     let elapsed_ms_total = t0.elapsed().as_millis() as u64;
                     let current_nodes = nodes;
