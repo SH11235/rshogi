@@ -205,7 +205,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         ctx.tick(ply);
         if depth <= 0 {
             let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply, &mut qbudget);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            // S2: qsearch に qdepth を導入。QS侵入直後のみ静かチェックを許可するため、
+            // 入口は qdepth=0 とし、再帰で -1 ずつ減らす。
+            let qs = self.qsearch(pos, alpha, beta, ctx, ply, 0, &mut qbudget, prev_move);
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (qs, None);
@@ -250,6 +257,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ply,
             is_pv,
+            stack: &*stack,
         }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
@@ -792,7 +800,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         let result = if best == i32::MIN / 2 {
             let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply, &mut qbudget);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            let qs = self.qsearch(pos, alpha, beta, ctx, ply, 0, &mut qbudget, prev_move);
             (qs, None)
         } else {
             if let Some(tt) = &self.tt {

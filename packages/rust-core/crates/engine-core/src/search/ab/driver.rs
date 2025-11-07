@@ -35,6 +35,9 @@ use crate::time_management::TimeControl;
 
 /// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
 const STICKY_PV_WINDOW_MS: u64 = 400;
+const ROOT_BEAM_REDUCTION: i32 = 2;
+const ROOT_BEAM_MIN_DEPTH: i32 = 6;
+const ROOT_BEAM_MARGIN_CP: i32 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -1378,40 +1381,59 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 // PV head: result of full-window PV search
                                 -sc
                             } else {
-                                let mut search_ctx_nw = SearchContext {
-                                    limits,
-                                    start_time: &t0,
-                                    nodes: &mut nodes,
-                                    seldepth: &mut seldepth,
-                                    qnodes: &mut qnodes,
-                                    qnodes_limit,
-                                    #[cfg(feature = "diagnostics")]
-                                    abdada_busy_detected: &mut cum_abdada_busy_detected,
-                                    #[cfg(feature = "diagnostics")]
-                                    abdada_busy_set: &mut cum_abdada_busy_set,
-                                };
-                                let (sc_nw, _) = self.alphabeta(
-                                    pvs::ABArgs {
-                                        pos: &child,
-                                        depth: d - 1,
-                                        alpha: -(alpha + 1),
-                                        beta: -alpha,
-                                        ply: 1,
-                                        is_pv: false,
-                                        stack,
-                                        heur: &mut heur,
-                                        tt_hits: &mut tt_hits,
-                                        beta_cuts: &mut beta_cuts,
-                                        lmr_counter: &mut lmr_counter,
-                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
-                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
-                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
-                                    },
-                                    &mut search_ctx_nw,
-                                );
-                                let mut s = -sc_nw;
-                                if s > alpha && s < beta {
-                                    let mut search_ctx_fw = SearchContext {
+                                let mut need_full = true;
+                                let mut s = i32::MIN;
+                                if d > ROOT_BEAM_MIN_DEPTH {
+                                    let shallow_depth = (d - 1).saturating_sub(ROOT_BEAM_REDUCTION);
+                                    if shallow_depth >= 1 {
+                                        let mut search_ctx_shallow = SearchContext {
+                                            limits,
+                                            start_time: &t0,
+                                            nodes: &mut nodes,
+                                            seldepth: &mut seldepth,
+                                            qnodes: &mut qnodes,
+                                            qnodes_limit,
+                                            #[cfg(feature = "diagnostics")]
+                                            abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                            #[cfg(feature = "diagnostics")]
+                                            abdada_busy_set: &mut cum_abdada_busy_set,
+                                        };
+                                        let (sc_shallow, _) = self.alphabeta(
+                                            pvs::ABArgs {
+                                                pos: &child,
+                                                depth: shallow_depth,
+                                                alpha: -(alpha + 1),
+                                                beta: -alpha,
+                                                ply: 1,
+                                                is_pv: false,
+                                                stack,
+                                                heur: &mut heur,
+                                                tt_hits: &mut tt_hits,
+                                                beta_cuts: &mut beta_cuts,
+                                                lmr_counter: &mut lmr_counter,
+                                                lmr_blocked_in_check: Some(
+                                                    &depth_lmr_blocked_in_check,
+                                                ),
+                                                lmr_blocked_recapture: Some(
+                                                    &depth_lmr_blocked_recapture,
+                                                ),
+                                                evasion_sparsity_ext: Some(
+                                                    &depth_evasion_sparsity_ext,
+                                                ),
+                                            },
+                                            &mut search_ctx_shallow,
+                                        );
+                                        s = -sc_shallow;
+                                        need_full = s > alpha - ROOT_BEAM_MARGIN_CP;
+                                        if !need_full {
+                                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                                cb("root_beam_skip_full=1");
+                                            }
+                                        }
+                                    }
+                                }
+                                if need_full {
+                                    let mut search_ctx_nw = SearchContext {
                                         limits,
                                         start_time: &t0,
                                         nodes: &mut nodes,
@@ -1423,14 +1445,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         #[cfg(feature = "diagnostics")]
                                         abdada_busy_set: &mut cum_abdada_busy_set,
                                     };
-                                    let (sc_fw, _) = self.alphabeta(
+                                    let (sc_nw, _) = self.alphabeta(
                                         pvs::ABArgs {
                                             pos: &child,
                                             depth: d - 1,
-                                            alpha: -beta,
+                                            alpha: -(alpha + 1),
                                             beta: -alpha,
                                             ply: 1,
-                                            is_pv: true,
+                                            is_pv: false,
                                             stack,
                                             heur: &mut heur,
                                             tt_hits: &mut tt_hits,
@@ -1442,9 +1464,49 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             ),
                                             evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
                                         },
-                                        &mut search_ctx_fw,
+                                        &mut search_ctx_nw,
                                     );
-                                    s = -sc_fw;
+                                    s = -sc_nw;
+                                    if s > alpha && s < beta {
+                                        let mut search_ctx_fw = SearchContext {
+                                            limits,
+                                            start_time: &t0,
+                                            nodes: &mut nodes,
+                                            seldepth: &mut seldepth,
+                                            qnodes: &mut qnodes,
+                                            qnodes_limit,
+                                            #[cfg(feature = "diagnostics")]
+                                            abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                            #[cfg(feature = "diagnostics")]
+                                            abdada_busy_set: &mut cum_abdada_busy_set,
+                                        };
+                                        let (sc_fw, _) = self.alphabeta(
+                                            pvs::ABArgs {
+                                                pos: &child,
+                                                depth: d - 1,
+                                                alpha: -beta,
+                                                beta: -alpha,
+                                                ply: 1,
+                                                is_pv: true,
+                                                stack,
+                                                heur: &mut heur,
+                                                tt_hits: &mut tt_hits,
+                                                beta_cuts: &mut beta_cuts,
+                                                lmr_counter: &mut lmr_counter,
+                                                lmr_blocked_in_check: Some(
+                                                    &depth_lmr_blocked_in_check,
+                                                ),
+                                                lmr_blocked_recapture: Some(
+                                                    &depth_lmr_blocked_recapture,
+                                                ),
+                                                evasion_sparsity_ext: Some(
+                                                    &depth_evasion_sparsity_ext,
+                                                ),
+                                            },
+                                            &mut search_ctx_fw,
+                                        );
+                                        s = -sc_fw;
+                                    }
                                 }
                                 s
                             }

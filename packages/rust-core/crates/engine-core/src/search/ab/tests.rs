@@ -89,7 +89,7 @@ fn qsearch_detects_mate_when_evasion_missing() {
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
-    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0, &mut budget);
+    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0, 0, &mut budget, None);
 
     assert_eq!(score, mate_score(0, false));
 }
@@ -285,7 +285,7 @@ fn qsearch_respects_qnodes_limit() {
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
-    let _ = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0, &mut budget);
+    let _ = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0, 0, &mut budget, None);
 
     assert!(
         qnodes <= limit_value,
@@ -325,7 +325,7 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
     let alpha = -1000;
     let beta = 1000;
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
-    let _score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0, &mut budget);
+    let _score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0, 0, &mut budget, None);
 
     assert!(
         nodes > 1,
@@ -443,7 +443,7 @@ fn qsearch_detects_mate_with_min_qnodes_budget() {
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
-    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0, &mut budget);
+    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0, 0, &mut budget, None);
 
     assert_eq!(score, mate_score(0, false));
 }
@@ -472,7 +472,7 @@ fn qsearch_returns_stand_pat_when_limit_exhausted() {
     let alpha = stand_pat - 200;
     let beta = stand_pat + 200;
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
-    let score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0, &mut budget);
+    let score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0, 0, &mut budget, None);
 
     assert_eq!(score, stand_pat.max(alpha));
     assert_eq!(qnodes, 1);
@@ -515,7 +515,8 @@ fn qsearch_prunes_negative_see_small_capture() {
     let material = MaterialEvaluator;
     let stand_pat = material.evaluate(&pos);
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
-    let score = backend.qsearch(&pos, stand_pat - 200, stand_pat + 200, &mut ctx, 0, &mut budget);
+    let score =
+        backend.qsearch(&pos, stand_pat - 200, stand_pat + 200, &mut ctx, 0, 0, &mut budget, None);
 
     assert_eq!(score, stand_pat);
     assert_eq!(qnodes, 1, "negative SEE small capture should be pruned without expanding");
@@ -554,7 +555,8 @@ fn qsearch_depth_cap_still_handles_in_check() {
 
     let max_ply = crate::search::constants::MAX_QUIESCE_DEPTH as u32;
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
-    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, max_ply, &mut budget);
+    let score =
+        backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, max_ply, 0, &mut budget, None);
 
     assert_eq!(score, mate_score(max_ply as u8, false));
 }
