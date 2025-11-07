@@ -35,9 +35,13 @@ use crate::time_management::TimeControl;
 
 /// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
 const STICKY_PV_WINDOW_MS: u64 = 400;
-const ROOT_BEAM_REDUCTION: i32 = 2;
+// Root beam parameters (time-independent). Relaxed to promote more candidates
+// to full re-search when they are forcing (checks, SEE>=0) or when shallow
+// score is reasonably close to alpha. This reduces single-step evaluation
+// swings caused by over-reliance on shallow zero-window probes.
+const ROOT_BEAM_REDUCTION: i32 = 1; // shallow probe uses d-1
 const ROOT_BEAM_MIN_DEPTH: i32 = 6;
-const ROOT_BEAM_MARGIN_CP: i32 = 80;
+const ROOT_BEAM_MARGIN_CP: i32 = 140; // widen near-alpha window for full re-search promotion
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -1424,7 +1428,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             &mut search_ctx_shallow,
                                         );
                                         s = -sc_shallow;
-                                        need_full = s > alpha - ROOT_BEAM_MARGIN_CP;
+                                        // Force full re-search for forcing root moves
+                                        // (giving check or SEE>=0), or when shallow
+                                        // score is reasonably close to alpha.
+                                        let root_gives_check = root.gives_check(mv);
+                                        let root_see = root.see(mv);
+                                        // Treat moves that land adjacent to our king as defensive-forcing,
+                                        // because they often resolve immediate threats and deserve a full re-search.
+                                        let root_king_adjacent = {
+                                            if let Some(king) =
+                                                root.board.king_square(root.side_to_move)
+                                            {
+                                                let dx = u8::abs_diff(king.file(), mv.to().file());
+                                                let dy = u8::abs_diff(king.rank(), mv.to().rank());
+                                                dx <= 1 && dy <= 1
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        let forcing =
+                                            root_gives_check || root_see >= 0 || root_king_adjacent;
+                                        need_full = forcing || s > alpha - ROOT_BEAM_MARGIN_CP;
                                         if !need_full {
                                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                                 cb("root_beam_skip_full=1");

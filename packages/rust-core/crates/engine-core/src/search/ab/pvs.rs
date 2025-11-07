@@ -210,9 +210,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else {
                 None
             };
-            // S2: qsearch に qdepth を導入。QS侵入直後のみ静かチェックを許可するため、
-            // 入口は qdepth=0 とし、再帰で -1 ずつ減らす。
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply, 0, &mut qbudget, prev_move);
+            // qsearch の静かチェック生成は“侵入直後のみ”に制限するため、
+            // 入口では qdepth=0 を与え、再帰で -1 ずつ減らす設計。
+            // これにより将棋特有の手駒を用いた連続王手の組合せ爆発を抑制する。
+            let qs = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow { alpha, beta },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                &mut qbudget,
+            );
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (qs, None);
@@ -805,7 +816,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else {
                 None
             };
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply, 0, &mut qbudget, prev_move);
+            let qs = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow { alpha, beta },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                &mut qbudget,
+            );
             (qs, None)
         } else {
             if let Some(tt) = &self.tt {
