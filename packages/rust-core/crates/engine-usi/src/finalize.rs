@@ -8,6 +8,7 @@ use engine_core::search::{
     SearchResult,
 };
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
+use smallvec::SmallVec;
 use std::cmp::Reverse;
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
@@ -247,7 +248,15 @@ fn maybe_emit_forced_eval_info(state: &mut EngineState, final_move_usi: &str) {
         source: FinalBestSource::Committed,
     };
     // hashfullは不明なので0を渡す（表示のみ）。score/bound をroot視点で上書き。
-    emit_single_pv(&res, &final_best_stub, nps, 0, Some(score_for_root), Some(bound_for_root));
+    emit_single_pv(
+        &res,
+        &final_best_stub,
+        nps,
+        0,
+        Some(score_for_root),
+        Some(bound_for_root),
+        &state.position,
+    );
     diag_info_string(format!("forced_eval_ms={} depth=1 nps={}", forced_eval_ms, nps));
 }
 
@@ -1915,9 +1924,12 @@ pub fn finalize_and_send(
                         };
                         let view = score_view_with_clamp(score_used);
                         append_usi_score_and_bound(&mut s, view, bound_used);
-                        if !line.pv.is_empty() {
+                        // 出力前にPVをルート局面でサニタイズ
+                        let sanitized =
+                            crate::usi_adapter::sanitize_line_for_root(line, &state.position);
+                        if !sanitized.pv.is_empty() {
                             s.push_str(" pv");
-                            for m in line.pv.iter() {
+                            for m in sanitized.pv.iter() {
                                 s.push(' ');
                                 s.push_str(&move_to_usi(m));
                             }
@@ -1932,6 +1944,7 @@ pub fn finalize_and_send(
                         hf_permille,
                         info_score_override,
                         info_bound_override,
+                        &state.position,
                     );
                 }
             } else {
@@ -1942,6 +1955,7 @@ pub fn finalize_and_send(
                     hf_permille,
                     info_score_override,
                     info_bound_override,
+                    &state.position,
                 );
             }
         }
@@ -2078,6 +2092,7 @@ fn emit_single_pv(
     hf_permille: u16,
     score_override: Option<i32>,
     bound_override: Option<NodeType>,
+    root_pos: &engine_core::shogi::Position,
 ) {
     let mut s = String::from("info");
     s.push_str(&format!(" depth {}", res.stats.depth));
@@ -2094,14 +2109,30 @@ fn emit_single_pv(
     let bound_to_use = bound_override.unwrap_or(res.node_type);
     append_usi_score_and_bound(&mut s, view, bound_to_use);
 
-    let pv_ref: &[_] = if !final_best.pv.is_empty() {
-        &final_best.pv
-    } else {
-        &res.stats.pv
+    // 出力前にPVをルート局面でサニタイズ
+    let pv_sanitized: SmallVec<[engine_core::shogi::Move; 64]> = {
+        let src: &[_] = if !final_best.pv.is_empty() {
+            &final_best.pv
+        } else {
+            &res.stats.pv
+        };
+        // 可能なら final_best.best_move を head として維持したいが、
+        // sanitize は局面適用のみ（head調整は上流 normalize に依存）。
+        // ここでは単純に合法プレフィックスを抽出する。
+        let mut out: SmallVec<[engine_core::shogi::Move; 64]> = SmallVec::new();
+        let mut pos = root_pos.clone();
+        for &mv in src.iter() {
+            if !pos.is_legal_move(mv) {
+                break;
+            }
+            let _u = pos.do_move(mv);
+            out.push(mv);
+        }
+        out
     };
-    if !pv_ref.is_empty() {
+    if !pv_sanitized.is_empty() {
         s.push_str(" pv");
-        for m in pv_ref.iter() {
+        for m in pv_sanitized.iter() {
             s.push(' ');
             s.push_str(&move_to_usi(m));
         }

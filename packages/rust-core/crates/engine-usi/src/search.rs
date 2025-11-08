@@ -149,6 +149,8 @@ pub fn limits_from_go(
     opts: &UsiOptions,
     ponder_flag: Option<Arc<AtomicBool>>,
     stop_flag: Arc<AtomicBool>,
+    // ルート局面（PVサニタイズ用にUSI出力コールバックが参照）
+    root_position: &engine_core::shogi::Position,
 ) -> SearchLimits {
     let builder = TimeParametersBuilder::new()
         .overhead_ms(opts.overhead_ms)
@@ -234,6 +236,7 @@ pub fn limits_from_go(
     let multipv = opts.multipv.max(1);
     let stop_for_info = Arc::clone(&stop_flag);
     let profile = opts.log_profile;
+    let root_pos_for_info = root_position.clone();
     let info_callback: InfoEventCallback = Arc::new(move |event| {
         if stop_for_info.load(Ordering::Relaxed) {
             return;
@@ -241,7 +244,7 @@ pub fn limits_from_go(
         if let InfoEvent::PV { line } = event {
             // Emit a unified PV info line via the adapter. We pass multipv>1 to
             // decide whether to include a multipv tag in the output for compatibility.
-            usi_adapter::emit_pv_line(line.as_ref(), multipv > 1);
+            usi_adapter::emit_pv_line_sanitized(line.as_ref(), &root_pos_for_info, multipv > 1);
         }
     });
 
@@ -377,6 +380,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         &state.opts,
         ponder_flag.clone(),
         Arc::clone(&stop_flag),
+        &search_position,
     );
 
     let mut tc_for_stop = limits.time_control.clone();
@@ -506,6 +510,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                                 &state.opts,
                                 ponder_flag.clone(),
                                 Arc::clone(&stop_flag),
+                                &state.position,
                             );
                             let mut tc_for_stop = limits.time_control.clone();
                             if let TimeControl::Ponder(inner) = tc_for_stop {
