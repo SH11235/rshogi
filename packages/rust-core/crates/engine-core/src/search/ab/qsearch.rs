@@ -131,6 +131,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         qcheck_budget: &mut i32,
     ) -> i32 {
         let mut alpha = window.alpha;
+        let alpha_orig = alpha;
+        let mut best_move: Option<crate::shogi::Move> = None;
         let beta = window.beta;
         let ply = frame.ply;
         let qdepth = frame.qdepth;
@@ -475,10 +477,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     )
                 };
                 if sc >= beta {
+                    if let Some(tt) = &self.tt {
+                        let store = adjust_mate_score_for_tt(sc, ply as u8)
+                            .clamp(i16::MIN as i32, i16::MAX as i32)
+                            as i16;
+                        let eval_i16 = stand_pat.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        let args = crate::search::tt::TTStoreArgs::new(
+                            pos_hash,
+                            Some(mv),
+                            store,
+                            eval_i16,
+                            0,
+                            NodeType::LowerBound,
+                            pos.side_to_move,
+                        );
+                        tt.store(args);
+                    }
                     return sc;
                 }
                 if sc > alpha {
                     alpha = sc;
+                    best_move = Some(mv);
                 }
             } else if (qdepth == 0) && qs_checks_enabled() && pos.gives_check(mv) {
                 if remaining_quiet_checks == 0 {
@@ -542,20 +561,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
         let result = alpha;
-        // TT保存（fail-low/upper として）
         if let Some(tt) = &self.tt {
-            // ここでのalphaは探索後のbest値。初期alphaと比較してfail-lowか判定するより、
-            // qsearchでは終端扱いのため UpperBound として保存しておく（YOに合わせExactは避ける）。
+            let node_type = if result <= alpha_orig {
+                NodeType::UpperBound
+            } else {
+                NodeType::LowerBound
+            };
             let store = adjust_mate_score_for_tt(result, ply as u8)
                 .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let eval_i16 = stand_pat.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let args = crate::search::tt::TTStoreArgs::new(
                 pos_hash,
-                None,
+                best_move,
                 store,
                 eval_i16,
                 0,
-                NodeType::UpperBound,
+                node_type,
                 pos.side_to_move,
             );
             tt.store(args);

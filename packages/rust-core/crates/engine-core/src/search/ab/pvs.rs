@@ -434,11 +434,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         } else {
             None
         };
-        let prev_self_move = if ply > 1 {
-            stack[(ply - 2) as usize].current_move
-        } else {
-            None
-        };
         let counter_mv = prev_move.and_then(|mv| heur.counter.get(pos.side_to_move, mv));
         let killers = stack[ply as usize].killers;
         let excluded_move = stack[ply as usize].excluded_move;
@@ -474,13 +469,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let is_capture = mv.is_capture_hint();
             let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
-
-            if mv.is_drop()
-                && !gives_check
-                && prev_self_move.is_some_and(|pm| pm.is_drop() && pm.to() == mv.to())
-            {
-                continue;
-            }
 
             if depth < 14 && is_quiet {
                 let mut h = heur.history.get(pos.side_to_move, mv);

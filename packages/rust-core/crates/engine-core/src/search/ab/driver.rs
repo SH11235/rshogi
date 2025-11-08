@@ -35,15 +35,11 @@ use crate::time_management::TimeControl;
 
 /// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
 const STICKY_PV_WINDOW_MS: u64 = 400;
-// Root beam parameters (time-independent). Relaxed to promote more candidates
-// to full re-search when they are forcing (checks, SEE>=0) or when shallow
-// score is reasonably close to alpha. This reduces single-step evaluation
-// swings caused by over-reliance on shallow zero-window probes.
 const ROOT_BEAM_REDUCTION: i32 = 1; // shallow probe uses d-1
 const ROOT_BEAM_MIN_DEPTH: i32 = 6;
-const ROOT_BEAM_MARGIN_CP: i32 = 140; // widen near-alpha window for full re-search promotion
-const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48; // YO相当のナローバンド幅
-const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 32; // ナローバンドでα近傍ならフル再探索
+const ROOT_BEAM_MARGIN_CP: i32 = 140; // legacy constant (used for compatibility)
+const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48;
+const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -1013,54 +1009,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 break;
             }
 
-            // Root SEE Gate: ルートの静か手で、非王手かつ SEE が閾値より悪い手を末尾へ回す。
-            // 直近の安定実装では「全候補保持＋安定ソート」の方針だったため、完全除外はせず順序のみ変更。
+            // Root SEE Gate: YO 仕様に合わせ、非王手の静かな手で xSEE が閾値より悪いものを削除する。
             if config::root_see_gate_enabled() {
                 let xsee = config::root_see_gate_xsee_cp();
-                // 既存順序を保つため index を付与し、安定的に並べ替える
-                let mut annotated: Vec<(usize, crate::shogi::Move, bool, i32)> =
-                    Vec::with_capacity(root_moves.len());
-                for (i, &mv) in root_moves.iter().enumerate() {
-                    // 捕獲や成り、打ちはそのまま優先。非捕獲・非王手のみ評価。
-                    let is_capture = mv.is_capture_hint();
+                let mut filtered: Vec<crate::shogi::Move> = Vec::with_capacity(root_moves.len());
+                let mut rejected = 0usize;
+                for &mv in &root_moves {
+                    let is_quiet = !mv.is_capture_hint() && !mv.is_promote();
                     let gives_check = root.gives_check(mv);
-                    let is_quiet_like = !is_capture && !mv.is_promote();
-                    let mut bad = false;
-                    let mut see_val = 0;
-                    if is_quiet_like && !gives_check {
-                        see_val = root.see(mv);
-                        bad = see_val < -xsee;
-                    }
-                    annotated.push((i, mv, bad, see_val));
-                }
-                // 並べ替え規則:
-                //  1) bad==false を先、bad==true を後
-                //  2) bad 同士では SEE の良い順（大→小）
-                //  3) それ以外は元の順序（index）
-                annotated.sort_by(|a, b| {
-                    use std::cmp::Ordering::*;
-                    if a.2 != b.2 {
-                        return (a.2 as u8).cmp(&(b.2 as u8)); // false(0) < true(1)
-                    }
-                    if a.2 {
-                        // both bad: prefer higher SEE
-                        match b.3.cmp(&a.3) {
-                            Equal => a.0.cmp(&b.0),
-                            ord => ord,
+                    if is_quiet && !gives_check {
+                        let see_val = root.see(mv);
+                        if see_val < -xsee {
+                            rejected += 1;
+                            continue;
                         }
-                    } else {
-                        // both good: keep original order
-                        a.0.cmp(&b.0)
                     }
-                });
-                let moved = annotated.iter().filter(|t| t.2).count();
-                if moved > 0 {
-                    if let Some(cb) = limits.info_string_callback.as_ref() {
-                        cb(&format!("root_see_gate_reordered={} xsee={}", moved, xsee));
+                    filtered.push(mv);
+                }
+                if filtered.is_empty() {
+                    // 最悪でも元の最初の手だけは残す（合法手が空になるのを防ぐため）
+                    filtered.push(root_moves[0]);
+                } else if let Some(cb) = limits.info_string_callback.as_ref() {
+                    if rejected > 0 {
+                        cb(&format!("root_see_gate_filtered={} xsee={}", rejected, xsee));
                     }
                 }
-                root_moves.clear();
-                root_moves.extend(annotated.into_iter().map(|t| t.1));
+                root_moves = filtered;
             }
             let root_rank: Vec<crate::shogi::Move> = root_moves.clone();
             let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
@@ -1405,10 +1379,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 // PV head: result of full-window PV search
                                 -sc
                             } else {
-                                let skip_shallow = idx < force_full_budget;
                                 let mut need_full = true;
                                 let mut s = i32::MIN;
-                                if !skip_shallow && d > ROOT_BEAM_MIN_DEPTH {
+                                if idx >= force_full_budget && d > ROOT_BEAM_MIN_DEPTH {
                                     let shallow_depth = (d - 1).saturating_sub(ROOT_BEAM_REDUCTION);
                                     if shallow_depth >= 1 {
                                         let mut search_ctx_shallow = SearchContext {
