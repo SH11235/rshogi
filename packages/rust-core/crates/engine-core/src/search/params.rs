@@ -102,6 +102,7 @@ static RUNTIME_QS_MARGIN_CAPTURE: AtomicI32 = AtomicI32::new(QS_MARGIN_CAPTURE);
 static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN);
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
+static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(0);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -290,6 +291,11 @@ pub fn root_multipv_bonus(rank: u8) -> i32 {
 }
 
 #[inline]
+pub fn root_beam_force_full_count() -> usize {
+    RUNTIME_ROOT_BEAM_FORCE_FULL.load(Ordering::Relaxed)
+}
+
+#[inline]
 pub fn razor_enabled() -> bool {
     RUNTIME_RAZOR.load(Ordering::Relaxed)
 }
@@ -380,6 +386,11 @@ pub fn set_qs_check_prune_margin(v: i32) {
 pub fn set_qs_check_see_margin(v: i32) {
     let clamped = v.clamp(-5000, 5000);
     RUNTIME_QS_CHECK_SEE_MARGIN.store(clamped, Ordering::Relaxed);
+}
+
+pub fn set_root_beam_force_full_count(v: usize) {
+    let clamped = v.min(8);
+    RUNTIME_ROOT_BEAM_FORCE_FULL.store(clamped, Ordering::Relaxed);
 }
 
 pub fn set_sbp_base(v: i32) {

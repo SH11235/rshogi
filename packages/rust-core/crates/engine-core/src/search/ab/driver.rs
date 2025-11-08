@@ -131,6 +131,23 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    fn effective_root_force_full_count(limits: &SearchLimits) -> usize {
+        let mut force = dynp::root_beam_force_full_count();
+        if force == 0 {
+            return 0;
+        }
+        if limits.multipv > 1 {
+            force = force.min(1);
+        }
+        if let TimeControl::FixedTime { ms_per_move } = &limits.time_control {
+            if *ms_per_move <= 500 {
+                force = force.min(1);
+            } else if *ms_per_move <= 800 {
+                force = force.min(2);
+            }
+        }
+        force
+    }
     #[inline]
     /// Global kill-switch for stabilization gates (near-deadline policy, aspiration safeguards, near-final verify).
     /// New name: SHOGI_DISABLE_STABILIZATION（旧: SHOGI_DISABLE_P1 を後方互換で受理）。
@@ -1252,6 +1269,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         !excluded_keys.contains(&key)
                     })
                     .collect();
+                let force_full_budget = Self::effective_root_force_full_count(limits);
 
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
@@ -1387,9 +1405,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 // PV head: result of full-window PV search
                                 -sc
                             } else {
+                                let skip_shallow = idx < force_full_budget;
                                 let mut need_full = true;
                                 let mut s = i32::MIN;
-                                if d > ROOT_BEAM_MIN_DEPTH {
+                                if !skip_shallow && d > ROOT_BEAM_MIN_DEPTH {
                                     let shallow_depth = (d - 1).saturating_sub(ROOT_BEAM_REDUCTION);
                                     if shallow_depth >= 1 {
                                         let mut search_ctx_shallow = SearchContext {
