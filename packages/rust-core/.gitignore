@@ -53,3 +53,6 @@ docs/reports/fixtures/classic_roundtrip/synthetic_probe_refresh_worst.jsonl
 docs/reports/fixtures/classic_roundtrip/synthetic_probe_refresh.json
 docs/reports/fixtures/classic_roundtrip/synthetic_probe_report.json
 docs/reports/fixtures/classic_roundtrip/synthetic_probe_worst.jsonl
+
+taikyoku-log/
+docs/reports/
