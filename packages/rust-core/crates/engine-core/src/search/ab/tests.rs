@@ -89,6 +89,7 @@ fn qsearch_detects_mate_when_evasion_missing() {
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
     let score = backend.qsearch(
         &pos,
         super::qsearch::SearchWindow {
@@ -101,6 +102,7 @@ fn qsearch_detects_mate_when_evasion_missing() {
             qdepth: 0,
             prev_move: None,
         },
+        &heur,
         &mut budget,
     );
 
@@ -298,6 +300,7 @@ fn qsearch_respects_qnodes_limit() {
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
     let _ = backend.qsearch(
         &pos,
         super::qsearch::SearchWindow {
@@ -310,6 +313,7 @@ fn qsearch_respects_qnodes_limit() {
             qdepth: 0,
             prev_move: None,
         },
+        &heur,
         &mut budget,
     );
 
@@ -351,6 +355,7 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
     let alpha = -1000;
     let beta = 1000;
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
     let _score = backend.qsearch(
         &pos,
         super::qsearch::SearchWindow { alpha, beta },
@@ -360,6 +365,7 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
             qdepth: 0,
             prev_move: None,
         },
+        &heur,
         &mut budget,
     );
 
@@ -479,6 +485,7 @@ fn qsearch_detects_mate_with_min_qnodes_budget() {
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
     let score = backend.qsearch(
         &pos,
         super::qsearch::SearchWindow {
@@ -491,6 +498,7 @@ fn qsearch_detects_mate_with_min_qnodes_budget() {
             qdepth: 0,
             prev_move: None,
         },
+        &heur,
         &mut budget,
     );
 
@@ -521,6 +529,7 @@ fn qsearch_returns_stand_pat_when_limit_exhausted() {
     let alpha = stand_pat - 200;
     let beta = stand_pat + 200;
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
     let score = backend.qsearch(
         &pos,
         super::qsearch::SearchWindow { alpha, beta },
@@ -530,6 +539,7 @@ fn qsearch_returns_stand_pat_when_limit_exhausted() {
             qdepth: 0,
             prev_move: None,
         },
+        &heur,
         &mut budget,
     );
 
@@ -574,6 +584,7 @@ fn qsearch_prunes_negative_see_small_capture() {
     let material = MaterialEvaluator;
     let stand_pat = material.evaluate(&pos);
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
     let score = backend.qsearch(
         &pos,
         super::qsearch::SearchWindow {
@@ -586,6 +597,7 @@ fn qsearch_prunes_negative_see_small_capture() {
             qdepth: 0,
             prev_move: None,
         },
+        &heur,
         &mut budget,
     );
 
@@ -626,6 +638,7 @@ fn qsearch_depth_cap_still_handles_in_check() {
 
     let max_ply = crate::search::constants::MAX_QUIESCE_DEPTH as u32;
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
     let score = backend.qsearch(
         &pos,
         super::qsearch::SearchWindow {
@@ -638,6 +651,7 @@ fn qsearch_depth_cap_still_handles_in_check() {
             qdepth: 0,
             prev_move: None,
         },
+        &heur,
         &mut budget,
     );
 

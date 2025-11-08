@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use crate::search::history::{
-    ButterflyHistory, CaptureHistory, ContinuationHistory, CounterMoveHistory,
+    ButterflyHistory, CaptureHistory, ContinuationHistory, CounterMoveHistory, PawnHistory,
 };
 use crate::search::params as dynp;
 use crate::search::types::SearchStack;
@@ -67,6 +67,7 @@ pub struct Heuristics {
     pub(crate) counter: CounterMoveHistory,
     pub(crate) continuation: ContinuationHistory,
     pub(crate) capture: CaptureHistory,
+    pub(crate) pawn_history: PawnHistory,
     pub(crate) lmr_trials: u64,
 }
 
@@ -75,6 +76,7 @@ pub struct HeuristicsSummary {
     pub quiet_max: i16,
     pub continuation_max: i16,
     pub capture_max: i16,
+    pub pawn_history_max: i16,
     pub counter_filled: u32,
     pub lmr_trials: u64,
 }
@@ -84,6 +86,7 @@ impl Heuristics {
         self.history.age_scores();
         self.continuation.age_scores();
         self.capture.age_scores();
+        self.pawn_history.age_scores();
         // Counter movesは age 概念が薄いためリセットのみ行う場合は別途検討
     }
 
@@ -92,6 +95,7 @@ impl Heuristics {
         self.counter.clear();
         self.continuation.clear();
         self.capture.clear();
+        self.pawn_history.clear();
         self.lmr_trials = 0;
     }
 
@@ -100,6 +104,7 @@ impl Heuristics {
         self.counter.merge_from(&other.counter);
         self.continuation.merge_from(&other.continuation);
         self.capture.merge_from(&other.capture);
+        self.pawn_history.merge_from(&other.pawn_history);
         self.lmr_trials = self.lmr_trials.saturating_add(other.lmr_trials);
     }
 
@@ -108,6 +113,7 @@ impl Heuristics {
             quiet_max: self.history.max_abs(),
             continuation_max: self.continuation.max_abs(),
             capture_max: self.capture.max_abs(),
+            pawn_history_max: self.pawn_history.max_abs(),
             counter_filled: self.counter.filled_count(),
             lmr_trials: self.lmr_trials,
         }
@@ -126,6 +132,7 @@ impl fmt::Debug for Heuristics {
             .field("quiet_max", &summary.quiet_max)
             .field("continuation_max", &summary.continuation_max)
             .field("capture_max", &summary.capture_max)
+            .field("pawn_history_max", &summary.pawn_history_max)
             .field("counter_filled", &summary.counter_filled)
             .finish()
     }

@@ -5,11 +5,15 @@ use crate::search::params::{
 };
 use crate::Position;
 
-use std::sync::OnceLock;
-
 use super::driver::ClassicBackend;
 use super::ordering::{EvalMoveGuard, Heuristics, MovePicker};
 use super::pvs::SearchContext;
+use crate::movegen::MoveGenerator;
+use crate::search::common::{adjust_mate_score_for_tt, adjust_mate_score_from_tt};
+use crate::search::history::ContinuationKey;
+use crate::search::tt::TTProbe;
+use crate::search::types::NodeType;
+use crate::shogi::Move;
 
 #[cfg(feature = "diagnostics")]
 use crate::search::types::InfoStringCallback;
@@ -89,6 +93,33 @@ pub(super) struct QSearchFrame {
     pub prev_move: Option<crate::shogi::Move>,
 }
 
+const CONT_HISTORY_QS_PRUNE_THRESHOLD: i32 = 5_868;
+const DEPTH_QS_RECAPTURES: i32 = -5;
+
+#[inline]
+fn continuation_history_score(
+    heur: &Heuristics,
+    pos: &Position,
+    mv: Move,
+    prev_move: Option<Move>,
+) -> i32 {
+    if let (Some(prev_mv), Some(curr_piece)) = (prev_move, mv.piece_type()) {
+        if let Some(prev_piece) = prev_mv.piece_type() {
+            let key = ContinuationKey::new(
+                pos.side_to_move,
+                prev_piece as usize,
+                prev_mv.to(),
+                prev_mv.is_drop(),
+                curr_piece as usize,
+                mv.to(),
+                mv.is_drop(),
+            );
+            return heur.continuation.get(key);
+        }
+    }
+    0
+}
+
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     pub(super) fn qsearch(
         &self,
@@ -96,6 +127,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         window: SearchWindow,
         ctx: &mut SearchContext,
         frame: QSearchFrame,
+        heur: &Heuristics,
         qcheck_budget: &mut i32,
     ) -> i32 {
         let mut alpha = window.alpha;
@@ -105,14 +137,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let prev_move = frame.prev_move;
         ctx.tick(ply);
 
-        static HEUR_STUB: OnceLock<Heuristics> = OnceLock::new();
-        let heur_stub = HEUR_STUB.get_or_init(Heuristics::default);
-
         if pos.is_in_check() {
             let mut picker = MovePicker::new_evasion(pos, None, None, None);
             let mut has_legal = false;
             let mut aborted = false;
-            while let Some(mv) = picker.next(heur_stub) {
+            while let Some(mv) = picker.next(heur) {
                 has_legal = true;
                 let mut child = pos.clone();
                 let sc = {
@@ -130,6 +159,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             qdepth: qdepth - 1,
                             prev_move: Some(mv),
                         },
+                        heur,
                         qcheck_budget,
                     )
                 };
@@ -170,6 +200,25 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return crate::search::constants::DRAW_SCORE;
         }
 
+        // --- TT probe for qsearch (YO方針の簡易版) ---
+        let pos_hash = pos.zobrist_hash();
+        if let Some(tt) = &self.tt {
+            if let Some(entry) = tt.probe(pos_hash, pos.side_to_move) {
+                // 取得スコアはroot相対 → 現在相対に戻す
+                let tt_score = adjust_mate_score_from_tt(entry.score() as i32, ply as u8);
+                match entry.node_type() {
+                    NodeType::LowerBound if tt_score >= beta => {
+                        return tt_score;
+                    }
+                    NodeType::UpperBound if tt_score <= alpha => {
+                        // 早期fail-low扱い（上下界の信頼は限定的だが、浅層での無駄探索を抑える）
+                        return tt_score.max(alpha);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let stand_pat = self.evaluator.evaluate(pos);
 
         if (ply as u16) >= crate::search::constants::MAX_QUIESCE_DEPTH {
@@ -201,6 +250,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // YO系のスムージングに合わせ、βへ少し寄せて返す。
             // （TT汚染抑制・情報の安定化目的。決定的スコアではないため単純平均で十分。）
             let smoothed = (stand_pat + beta) / 2;
+            // Store lower bound to TT（qsearch）
+            if let Some(tt) = &self.tt {
+                let store = adjust_mate_score_for_tt(smoothed, ply as u8)
+                    .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                let eval_i16 = stand_pat.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                let args = crate::search::tt::TTStoreArgs::new(
+                    pos_hash,
+                    None,
+                    store,
+                    eval_i16,
+                    0, // depth tag for qsearch
+                    NodeType::LowerBound,
+                    pos.side_to_move,
+                );
+                tt.store(args);
+            }
             return smoothed;
         }
         if stand_pat > alpha {
@@ -275,13 +340,58 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut remaining_quiet_checks = quiet_limit;
         let own_king_sq = pos.board.king_square(pos.side_to_move);
         let recapture_sq = prev_move.map(|mv| mv.to());
+        let force_recapture_only = qdepth <= DEPTH_QS_RECAPTURES && recapture_sq.is_some();
+
+        // --- 1手詰め検出（簡易）: 非チェック時のみ、合法手mで進めて相手方に合法手がなければmate-in-1 ---
+        // コストを抑えるため、TT未命中時のみ実施し、検出時は即return。
+        // 注意: 終盤の判定安定化が目的。間違って走るのを避けるため例外は握りつぶさない。
+        if !pos.is_in_check() {
+            let mg = MoveGenerator::new();
+            if let Ok(list) = mg.generate_all(pos) {
+                for &mv in list.as_slice() {
+                    let mut child = pos.clone();
+                    let undo = child.do_move(mv);
+                    // 相手側に合法手がなければ詰み
+                    let opp_mg = MoveGenerator::new();
+                    let mate = match opp_mg.generate_all(&child) {
+                        Ok(ml) => ml.as_slice().is_empty(),
+                        Err(_) => false,
+                    };
+                    child.undo_move(mv, undo);
+                    if mate {
+                        let score = crate::search::mate_score(ply as u8 + 1, true);
+                        if let Some(tt) = &self.tt {
+                            let store = adjust_mate_score_for_tt(score, ply as u8)
+                                .clamp(i16::MIN as i32, i16::MAX as i32)
+                                as i16;
+                            let eval_i16 = stand_pat.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                            let args = crate::search::tt::TTStoreArgs::new(
+                                pos_hash,
+                                Some(mv),
+                                store,
+                                eval_i16,
+                                0,
+                                NodeType::LowerBound,
+                                pos.side_to_move,
+                            );
+                            tt.store(args);
+                        }
+                        return score;
+                    }
+                }
+            }
+        }
 
         let mut move_count: i32 = 0;
-        while let Some(mv) = picker.next(heur_stub) {
+        while let Some(mv) = picker.next(heur) {
             if ctx.time_up_fast() {
                 #[cfg(feature = "diagnostics")]
                 record_qsearch_abort();
                 return alpha.max(stand_pat);
+            }
+            let is_recapture = recapture_sq.is_some_and(|sq| sq == mv.to());
+            if force_recapture_only && !is_recapture {
+                continue;
             }
             if mv.is_capture_hint() {
                 move_count += 1;
@@ -291,10 +401,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // branches from dominating qsearch. Do not apply this to
                 // promotions, checking moves, or recaptures on the previous
                 // move's destination.
-                let is_recapture = recapture_sq.is_some_and(|sq| sq == mv.to());
                 if move_count > 2 && !pos.gives_check(mv) && !mv.is_promote() && !is_recapture {
                     continue;
                 }
+                // 深い静止層では再捕獲以外のキャプチャを抑制（YO: DEPTH_QS_RECAPTURES=-5）
+                if qdepth <= DEPTH_QS_RECAPTURES && !is_recapture {
+                    continue;
+                }
+
+                let cont_score = continuation_history_score(heur, pos, mv, prev_move);
+                let pawn_score = mv
+                    .piece_type()
+                    .map(|pt| heur.pawn_history.get(pos.side_to_move, pt, mv.to()))
+                    .unwrap_or(0);
+                if cont_score + pawn_score <= CONT_HISTORY_QS_PRUNE_THRESHOLD
+                    && !pos.gives_check(mv)
+                    && !mv.is_promote()
+                    && !is_recapture
+                {
+                    continue;
+                }
+
                 let see = pos.see(mv);
                 // 取る駒の価値（成りを考慮）
                 let captured_val_prom_aware = {
@@ -343,6 +470,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             qdepth: qdepth - 1,
                             prev_move: Some(mv),
                         },
+                        heur,
                         qcheck_budget,
                     )
                 };
@@ -356,6 +484,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if remaining_quiet_checks == 0 {
                     continue;
                 }
+                let cont_score = continuation_history_score(heur, pos, mv, prev_move);
+                let pawn_score = mv
+                    .piece_type()
+                    .map(|pt| heur.pawn_history.get(pos.side_to_move, pt, mv.to()))
+                    .unwrap_or(0);
+                if cont_score + pawn_score <= CONT_HISTORY_QS_PRUNE_THRESHOLD {
+                    continue;
+                }
                 // Require SEE >= margin for quiet checks (YO-aligned guard)
                 if pos.see(mv) < check_see_margin {
                     continue;
@@ -363,7 +499,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if stand_pat + check_prune_margin <= alpha {
                     continue;
                 }
-                let is_recapture = recapture_sq.is_some_and(|sq| sq == mv.to());
                 let king_adjacent = own_king_sq.is_some_and(|king| {
                     u8::abs_diff(king.file(), mv.to().file()) <= 1
                         && u8::abs_diff(king.rank(), mv.to().rank()) <= 1
@@ -393,6 +528,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             qdepth: qdepth - 1,
                             prev_move: Some(mv),
                         },
+                        heur,
                         qcheck_budget,
                     )
                 };
@@ -405,8 +541,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
         }
-
-        alpha
+        let result = alpha;
+        // TT保存（fail-low/upper として）
+        if let Some(tt) = &self.tt {
+            // ここでのalphaは探索後のbest値。初期alphaと比較してfail-lowか判定するより、
+            // qsearchでは終端扱いのため UpperBound として保存しておく（YOに合わせExactは避ける）。
+            let store = adjust_mate_score_for_tt(result, ply as u8)
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let eval_i16 = stand_pat.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let args = crate::search::tt::TTStoreArgs::new(
+                pos_hash,
+                None,
+                store,
+                eval_i16,
+                0,
+                NodeType::UpperBound,
+                pos.side_to_move,
+            );
+            tt.store(args);
+        }
+        result
     }
 }
 

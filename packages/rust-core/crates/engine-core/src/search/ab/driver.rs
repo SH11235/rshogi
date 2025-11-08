@@ -42,6 +42,8 @@ const STICKY_PV_WINDOW_MS: u64 = 400;
 const ROOT_BEAM_REDUCTION: i32 = 1; // shallow probe uses d-1
 const ROOT_BEAM_MIN_DEPTH: i32 = 6;
 const ROOT_BEAM_MARGIN_CP: i32 = 140; // widen near-alpha window for full re-search promotion
+const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48; // YO相当のナローバンド幅
+const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 32; // ナローバンドでα近傍ならフル再探索
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -1449,6 +1451,53 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         let forcing =
                                             root_gives_check || root_see >= 0 || root_king_adjacent;
                                         need_full = forcing || s > alpha - ROOT_BEAM_MARGIN_CP;
+                                        if need_full && !forcing {
+                                            // YO流のナローバンド再探索: 浅い結果がα近傍なら、
+                                            // フル探索へ昇格する前に狭窓(±ROOT_BEAM_NARROW_DELTA_CP)で一度だけ検証する。
+                                            let narrow_low =
+                                                alpha.saturating_sub(ROOT_BEAM_NARROW_DELTA_CP);
+                                            let narrow_high =
+                                                alpha.saturating_add(ROOT_BEAM_NARROW_DELTA_CP);
+                                            let mut search_ctx_narrow = SearchContext {
+                                                limits,
+                                                start_time: &t0,
+                                                nodes: &mut nodes,
+                                                seldepth: &mut seldepth,
+                                                qnodes: &mut qnodes,
+                                                qnodes_limit,
+                                                #[cfg(feature = "diagnostics")]
+                                                abdada_busy_detected: &mut cum_abdada_busy_detected,
+                                                #[cfg(feature = "diagnostics")]
+                                                abdada_busy_set: &mut cum_abdada_busy_set,
+                                            };
+                                            let (sc_narrow, _) = self.alphabeta(
+                                                pvs::ABArgs {
+                                                    pos: &child,
+                                                    depth: d - 1,
+                                                    alpha: -narrow_high,
+                                                    beta: -narrow_low,
+                                                    ply: 1,
+                                                    is_pv: false,
+                                                    stack,
+                                                    heur: &mut heur,
+                                                    tt_hits: &mut tt_hits,
+                                                    beta_cuts: &mut beta_cuts,
+                                                    lmr_counter: &mut lmr_counter,
+                                                    lmr_blocked_in_check: Some(
+                                                        &depth_lmr_blocked_in_check,
+                                                    ),
+                                                    lmr_blocked_recapture: Some(
+                                                        &depth_lmr_blocked_recapture,
+                                                    ),
+                                                    evasion_sparsity_ext: Some(
+                                                        &depth_evasion_sparsity_ext,
+                                                    ),
+                                                },
+                                                &mut search_ctx_narrow,
+                                            );
+                                            s = -sc_narrow;
+                                            need_full = s > alpha - ROOT_BEAM_NARROW_PROMOTE_CP;
+                                        }
                                         if !need_full {
                                             if let Some(cb) = limits.info_string_callback.as_ref() {
                                                 cb("root_beam_skip_full=1");
