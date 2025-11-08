@@ -92,6 +92,7 @@ pub(super) struct RazorPruneParams<'a, 'ctx> {
     pub ply: u32,
     pub is_pv: bool,
     pub stack: &'a [SearchStack],
+    pub heur: &'a Heuristics,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
@@ -179,6 +180,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ply,
             is_pv,
             stack,
+            heur,
         } = params;
         // Verification: disable Razor when verification flag is set
         if ctx.limits.info_string_callback.as_ref().is_some() {
@@ -226,6 +228,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         qdepth: 0,
                         prev_move,
                     },
+                    heur,
                     &mut qbudget,
                 );
                 if r <= alpha {
@@ -255,6 +258,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     qdepth: 0,
                     prev_move,
                 },
+                heur,
                 &mut qbudget,
             );
             if r <= alpha {
@@ -507,6 +511,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     qdepth: 0,
                     prev_move,
                 },
+                heur,
                 &mut qbudget,
             );
             #[cfg(any(debug_assertions, feature = "diagnostics"))]

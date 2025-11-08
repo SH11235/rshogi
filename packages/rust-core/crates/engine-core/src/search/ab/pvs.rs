@@ -222,6 +222,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     qdepth: 0,
                     prev_move,
                 },
+                &*heur,
                 &mut qbudget,
             );
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
@@ -269,6 +270,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ply,
             is_pv,
             stack: &*stack,
+            heur: &*heur,
         }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
@@ -757,6 +759,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if is_quiet {
                     stack[ply as usize].update_killers(mv);
                     heur.history.update_good(pos.side_to_move, mv, depth);
+                    if let Some(curr_piece) = mv.piece_type() {
+                        heur.pawn_history.update_good(pos.side_to_move, curr_piece, mv.to(), depth);
+                    }
                     if ply > 0 {
                         if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
                             heur.counter.update(pos.side_to_move, prev_mv, mv);
@@ -825,6 +830,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     qdepth: 0,
                     prev_move,
                 },
+                &*heur,
                 &mut qbudget,
             );
             (qs, None)
@@ -895,6 +901,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             for &qmv in &stack[ply as usize].quiet_moves {
                 if Some(qmv) != best_mv {
                     heur.history.update_bad(pos.side_to_move, qmv, depth);
+                    if let Some(curr_piece) = qmv.piece_type() {
+                        heur.pawn_history.update_bad(pos.side_to_move, curr_piece, qmv.to(), depth);
+                    }
                     if ply > 0 {
                         if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
                             if let (Some(prev_piece), Some(curr_piece)) =
