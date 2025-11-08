@@ -174,13 +174,15 @@ fn log_and_emit_final_selection(
         stop_meta.hard_ms
     ));
     // Emit micro-log before sending bestmove for easier correlation with finalize_event
-    let sid = state.current_session_core_id.unwrap_or(0);
-    info_string(format!(
-        "finalize_emit=1 sid={} label={} source={}",
-        sid,
-        label,
-        source_to_str(source)
-    ));
+    if state.opts.log_profile.at_least_qa() {
+        let sid = state.current_session_core_id.unwrap_or(0);
+        info_string(format!(
+            "finalize_emit=1 sid={} label={} source={}",
+            sid,
+            label,
+            source_to_str(source)
+        ));
+    }
     let _ = emit_bestmove_once(state, final_move.to_string(), ponder);
 }
 

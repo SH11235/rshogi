@@ -285,7 +285,9 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // Create a new stop_flag for each search session to avoid race conditions
     // with concurrent searches (previous session may still be running)
     let stop_flag = Arc::new(AtomicBool::new(false));
-    info_string(format!("stop_flag_create addr={:p}", Arc::as_ptr(&stop_flag)));
+    if state.opts.log_profile.at_least_qa() {
+        info_string(format!("stop_flag_create addr={:p}", Arc::as_ptr(&stop_flag)));
+    }
     let ponder_flag = if state.opts.ponder {
         Some(Arc::new(AtomicBool::new(false)))
     } else {
@@ -405,7 +407,12 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             phase,
             &params,
         );
-        info_string(format!("time_budget soft_ms={} hard_ms={} tc={:?}", soft, hard, tc_for_stop));
+        if state.opts.log_profile.at_least_qa() {
+            info_string(format!(
+                "time_budget soft_ms={} hard_ms={} tc={:?}",
+                soft, hard, tc_for_stop
+            ));
+        }
 
         if hard != u64::MAX && hard > 0 && !gp.ponder {
             let base = Instant::now();
@@ -451,25 +458,31 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.active_time_manager = session.time_manager();
     if gp.ponder {
         state.active_time_manager = None;
-        info_string("ponder_time_manager_detached=1");
+        if state.opts.log_profile.at_least_qa() {
+            info_string("ponder_time_manager_detached=1");
+        }
     }
     state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
     state.current_root_hash = Some(search_position.zobrist_hash());
     state.bestmove_emitted = false;
-    info_string(format!(
-        "search_started sid={} root={} gui={} ponder={} stoch={}",
-        session_id,
-        fmt_hash(search_position.zobrist_hash()),
-        fmt_hash(state.position.zobrist_hash()),
-        gp.ponder,
-        state.current_is_stochastic_ponder
-    ));
+    if state.opts.log_profile.at_least_qa() {
+        info_string(format!(
+            "search_started sid={} root={} gui={} ponder={} stoch={}",
+            session_id,
+            fmt_hash(search_position.zobrist_hash()),
+            fmt_hash(state.position.zobrist_hash()),
+            gp.ponder,
+            state.current_is_stochastic_ponder
+        ));
+    }
 
     // Enhanced diagnostics for time loss investigation
-    let threads = state.opts.threads;
-    info_string(format!("search_diagnostics sid={} threads={}", session_id, threads));
+    if state.opts.log_profile.at_least_qa() {
+        let threads = state.opts.threads;
+        info_string(format!("search_diagnostics sid={} threads={}", session_id, threads));
+    }
 
     Ok(())
 }
@@ -748,7 +761,9 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
 
     if let Some(reason) = finalize_reason {
         stop_flag.store(true, Ordering::Release);
-        info_string(format!("tm_watchdog_stop reason={:?} elapsed_ms={}", reason, elapsed));
+        if !(state.opts.log_profile.is_prod() && matches!(reason, FinalizeReason::Planned)) {
+            info_string(format!("tm_watchdog_stop reason={:?} elapsed_ms={}", reason, elapsed));
+        }
         // StopController 経由で finalize を要求し、優先度制御と stop_flag 連携を統一する。
         state.stop_controller.request_finalize(reason);
     }
@@ -783,6 +798,9 @@ fn should_suppress_core_info(profile: LogProfile, msg: &str) -> bool {
                 "sanity_",
                 "forced_eval",
                 "ponderhit_time_manager",
+                "session_publish ",
+                "smp_mode=",
+                "time_caps ",
             ];
             if PROD_EXTRA_PREFIXES.iter().any(|prefix| msg.starts_with(prefix)) {
                 return true;

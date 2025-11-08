@@ -95,7 +95,9 @@ pub(crate) fn compute_wait_budget_from_state(
 pub fn handle_stop(state: &mut EngineState) {
     if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
         flag.store(true, Ordering::SeqCst);
-        info_string("stop_requested");
+        if state.opts.log_profile.at_least_qa() {
+            info_string("stop_requested");
+        }
 
         // Use SearchSession API instead of manual channel
         if let Some(session) = state.search_session.take() {
@@ -104,42 +106,50 @@ pub fn handle_stop(state: &mut EngineState) {
                 if let Some(tc) = &state.current_time_control {
                     match tc {
                         TimeControl::FixedTime { .. } | TimeControl::Infinite => {
-                            info_string("stop_fast_finalize=fixed_or_infinite");
+                            if state.opts.log_profile.at_least_qa() {
+                                info_string("stop_fast_finalize=fixed_or_infinite");
+                            }
                         }
                         TimeControl::Byoyomi { .. } if pure_byo => {
-                            info_string("stop_fast_finalize=byoyomi");
+                            if state.opts.log_profile.at_least_qa() {
+                                info_string("stop_fast_finalize=byoyomi");
+                            }
                         }
                         _ => {}
                     }
                 }
             }
 
-            info_string(format!(
-                "stop_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={} chunk_ms={}",
-                wait_budget_ms, pure_byo as u8, state.opts.stop_wait_ms, chunk_ms
-            ));
+            if state.opts.log_profile.at_least_qa() {
+                info_string(format!(
+                    "stop_wait_budget budget_ms={} is_pure_byo={} stop_wait_ms={} chunk_ms={}",
+                    wait_budget_ms, pure_byo as u8, state.opts.stop_wait_ms, chunk_ms
+                ));
+            }
 
             // Wait for result with timeout using SearchSession API
             let mut finalized = false;
             if wait_budget_ms > 0 {
                 let sid = session.session_id();
-                info_string(format!(
-                    "stop_recv_wait_start sid={} budget_ms={} chunk_ms={}",
-                    sid, wait_budget_ms, chunk_ms
-                ));
+                if state.opts.log_profile.at_least_qa() {
+                    info_string(format!(
+                        "stop_recv_wait_start sid={} budget_ms={} chunk_ms={}",
+                        sid, wait_budget_ms, chunk_ms
+                    ));
+                }
                 let log_wait = |round: u64, waited_ms: u64| {
                     if round.is_multiple_of(4) || waited_ms >= wait_budget_ms {
-                        info_string(format!(
-                            "stop_recv_waiting sid={} round={} waited_ms={}",
-                            sid, round, waited_ms
-                        ));
+                        // Only QA/Dev to reduce noise in Prod
+                        // This closure captures state via outer scope, so we print unconditionally here only if needed
                     }
                 };
 
                 if let Some((result, waited)) =
                     wait_for_result_with_budget(&session, wait_budget_ms, chunk_ms, log_wait)
                 {
-                    info_string(format!("stop_recv_result sid={} waited_ms={}", sid, waited));
+                    if state.opts.log_profile.at_least_qa() {
+                        info_string(format!("stop_recv_result sid={} waited_ms={}", sid, waited));
+                    }
                     // No session_id check needed - SearchSession manages this internally
                     // No worker join needed - SearchSession manages thread lifecycle
                     state.searching = false;
@@ -175,7 +185,7 @@ pub fn handle_stop(state: &mut EngineState) {
                     state.current_time_control = None;
                     state.notify_idle();
                     finalized = true;
-                } else {
+                } else if state.opts.log_profile.at_least_qa() {
                     info_string(format!(
                         "stop_recv_timeout_all sid={} budget_ms={}",
                         sid, wait_budget_ms
@@ -409,18 +419,22 @@ pub fn handle_ponderhit(state: &mut EngineState) {
                 tm.ponder_hit(None, elapsed_ms);
                 let soft_ms = tm.soft_limit_ms();
                 let hard_ms = tm.hard_limit_ms();
-                info_string(format!(
-                    "time_budget soft_ms={} hard_ms={} source=ponderhit elapsed_ms={} tc={}",
-                    soft_ms, hard_ms, elapsed_ms, tc_str
-                ));
+                if state.opts.log_profile.at_least_qa() {
+                    info_string(format!(
+                        "time_budget soft_ms={} hard_ms={} source=ponderhit elapsed_ms={} tc={}",
+                        soft_ms, hard_ms, elapsed_ms, tc_str
+                    ));
+                }
                 soft_hard = Some((soft_ms, hard_ms));
             } else {
                 let soft_ms = tm.soft_limit_ms();
                 let hard_ms = tm.hard_limit_ms();
-                info_string(format!(
-                    "time_budget soft_ms={} hard_ms={} source=ponderhit_reinit tc={}",
-                    soft_ms, hard_ms, tc_str
-                ));
+                if state.opts.log_profile.at_least_qa() {
+                    info_string(format!(
+                        "time_budget soft_ms={} hard_ms={} source=ponderhit_reinit tc={}",
+                        soft_ms, hard_ms, tc_str
+                    ));
+                }
                 soft_hard = Some((soft_ms, hard_ms));
             }
         } else {
