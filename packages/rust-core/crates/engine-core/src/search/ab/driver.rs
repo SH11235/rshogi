@@ -2108,7 +2108,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     ));
                                 }
                                 zero_window_done = true;
-                                // 検証自体はスキップするが、反復の最終処理へはフォールスルーさせる。
                                 proceed_nw = false;
                             }
                         }
@@ -2128,9 +2127,24 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if crate::search::common::is_mate_score(target) {
                                 verify_delta += Self::near_final_zero_window_mate_delta_cp().max(0);
                             }
-                            // 狭いフル窓: [s-Δ, s+Δ] で Exact を確認（整数スコアで成立する最小窓）
-                            let alpha0 = target.saturating_sub(verify_delta);
-                            let beta0 = target.saturating_add(verify_delta);
+                            // Zero-window: bound側に向けて 1cp 窓を設定（verify_delta は bound との距離許容）
+                            let (alpha0, beta0, bound_kind) = match first.bound {
+                                NodeType::UpperBound => {
+                                    let base = verify_window_alpha.saturating_sub(verify_delta);
+                                    (base, base + 1, "upper")
+                                }
+                                NodeType::LowerBound => {
+                                    let base = verify_window_beta.saturating_add(verify_delta);
+                                    (base - 1, base, "lower")
+                                }
+                                NodeType::Exact => {
+                                    proceed_nw = false;
+                                    (verify_window_alpha, verify_window_beta, "exact")
+                                }
+                            };
+                            if !proceed_nw {
+                                zero_window_done = true;
+                            }
                             let mut child = root.clone();
                             child.do_move(mv0);
                             // 局所カウンタ（本確認は軽量・単発）
@@ -2203,8 +2217,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                     &mut search_ctx_nw,
                                 );
                                 let s_back = -sc_vf;
-                                let confirmed = Self::classify_root_bound(s_back, alpha0, beta0)
-                                    == NodeType::Exact;
+                                // fail-low roots (UpperBound) should confirm when the verification
+                                // window fails high (実値がしきい値を上回る), while fail-high roots
+                                // confirm on fail-low results. こうすることで bound ±Δ 以内のライン
+                                // だけを Exact に昇格させられる。
+                                let confirmed = match first.bound {
+                                    NodeType::UpperBound => s_back >= beta0,
+                                    NodeType::LowerBound => s_back <= alpha0,
+                                    NodeType::Exact => false,
+                                };
                                 if confirmed {
                                     near_final_confirmed = near_final_confirmed.saturating_add(1);
                                     first.bound = NodeType::Exact;
@@ -2245,15 +2266,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 // qnodes を統計へ反映
                                 cum_qnodes = cum_qnodes.saturating_add(qnodes_local);
                                 if let Some(cb) = limits.info_string_callback.as_ref() {
-                                    let (kind, diff) = match first.bound {
-                                        NodeType::UpperBound => ("upper", (alpha0 - target).abs()),
-                                        NodeType::LowerBound => ("lower", (target - beta0).abs()),
-                                        NodeType::Exact => ("exact", 0),
+                                    let diff = match bound_kind {
+                                        "upper" => (alpha0 - target).abs(),
+                                        "lower" => (target - beta0).abs(),
+                                        _ => 0,
                                     };
                                     cb(&format!(
                                         "near_final_zero_window_result=1 status={} kind={} diff={} alpha={} beta={} target={} budget_ms={} budget_qnodes={} qnodes_limit_pre={} qnodes_limit_post={} t_rem={} qnodes_used={}",
                                         if confirmed { "confirmed" } else { "inexact" },
-                                        kind,
+                                        bound_kind,
                                         diff,
                                         alpha0,
                                         beta0,
