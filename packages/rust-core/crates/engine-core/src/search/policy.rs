@@ -29,6 +29,42 @@ pub fn set_abdada(enabled: bool) {
     abdada_atomic().store(if enabled { ABDADA_ON } else { ABDADA_OFF }, Ordering::Relaxed);
 }
 
+// --- Quiet SEE Guard ---
+const QUIET_SEE_GUARD_OFF: u8 = 0;
+const QUIET_SEE_GUARD_ON: u8 = 1;
+
+fn quiet_see_guard_atomic() -> &'static AtomicU8 {
+    static CELL: OnceLock<AtomicU8> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let init = match std::env::var("SHOGI_QUIET_SEE_GUARD") {
+            Ok(s)
+                if matches!(s.as_str(), "0" | "false" | "off" | "disable" | "disabled" | "no") =>
+            {
+                QUIET_SEE_GUARD_OFF
+            }
+            _ => QUIET_SEE_GUARD_ON,
+        };
+        AtomicU8::new(init)
+    })
+}
+
+#[inline]
+pub fn quiet_see_guard_enabled() -> bool {
+    quiet_see_guard_atomic().load(Ordering::Relaxed) == QUIET_SEE_GUARD_ON
+}
+
+#[inline]
+pub fn set_quiet_see_guard_enabled(enabled: bool) {
+    quiet_see_guard_atomic().store(
+        if enabled {
+            QUIET_SEE_GUARD_ON
+        } else {
+            QUIET_SEE_GUARD_OFF
+        },
+        Ordering::Relaxed,
+    );
+}
+
 // --- Helper Aspiration (mode/delta) ---
 // mode: 0=Off, 1=Wide
 const ASP_MODE_OFF: u8 = 0;

@@ -57,6 +57,21 @@ thread_local! {
 }
 
 #[inline]
+pub(crate) fn root_see_gate_should_skip(
+    root: &Position,
+    mv: crate::shogi::Move,
+    xsee_cp: i32,
+) -> bool {
+    if xsee_cp <= 0 {
+        return false;
+    }
+    if mv.is_capture_hint() || root.gives_check(mv) {
+        return false;
+    }
+    root.see(mv) < -xsee_cp
+}
+
+#[inline]
 pub(crate) fn take_stack_cache() -> Vec<SearchStack> {
     STACK_CACHE.with(|cell| {
         let mut v = std::mem::take(&mut *cell.borrow_mut());
@@ -1007,6 +1022,42 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     incomplete_depth = Some(d as u8);
                 }
                 break;
+            }
+
+            if config::root_see_gate_enabled() {
+                let xsee_cp = config::root_see_gate_xsee_cp();
+                if xsee_cp > 0 {
+                    let mut gated: Vec<crate::shogi::Move> = Vec::with_capacity(root_moves.len());
+                    let mut skipped = 0usize;
+                    for mv in root_moves.iter().copied() {
+                        if root_see_gate_should_skip(root, mv, xsee_cp) {
+                            skipped += 1;
+                            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                            super::diagnostics::record_tag(
+                                root,
+                                "root_see_skip",
+                                Some(format!(
+                                    "mv={} see={} xsee={}",
+                                    crate::usi::move_to_usi(&mv),
+                                    root.see(mv),
+                                    xsee_cp,
+                                )),
+                            );
+                            continue;
+                        }
+                        gated.push(mv);
+                    }
+                    if !gated.is_empty() {
+                        root_moves = gated;
+                    } else if skipped > 0 {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        super::diagnostics::record_tag(
+                            root,
+                            "root_see_skip_fallback",
+                            Some(format!("skipped={} xsee={}", skipped, xsee_cp)),
+                        );
+                    }
+                }
             }
 
             // Root SEE Gate: YO 仕様に合わせ、非王手の静かな手で xSEE が閾値より悪いものを削除する。

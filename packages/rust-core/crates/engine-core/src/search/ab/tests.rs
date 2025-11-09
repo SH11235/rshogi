@@ -23,9 +23,9 @@ use crate::usi::{parse_usi_move, parse_usi_square};
 use crate::Position;
 use smallvec::SmallVec;
 
-use super::driver::ClassicBackend;
+use super::driver::{root_see_gate_should_skip, ClassicBackend};
 use super::pruning::NullMovePruneParams;
-use super::pvs::SearchContext;
+use super::pvs::{quiet_see_guard_should_skip, SearchContext};
 use super::SearchProfile;
 
 // NOTE: 検索パラメータはグローバル(Atomic)で共有されるため、
@@ -33,6 +33,19 @@ use super::SearchProfile;
 // 他テストに干渉しうる。CIでの不安定要因になっていたため、
 // グローバル・ロックで該当テストを直列化する。
 static TEST_SEARCH_PARAMS_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+fn make_bad_drop_position() -> Position {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.hands[Color::Black as usize][PieceType::Gold.hand_index().unwrap()] = 1;
+    pos
+}
 
 fn position_after_moves(moves: &[&str]) -> Position {
     let mut pos = Position::startpos();
@@ -107,6 +120,24 @@ fn qsearch_detects_mate_when_evasion_missing() {
     );
 
     assert_eq!(score, mate_score(0, false));
+}
+
+#[test]
+fn quiet_see_gate_skips_bad_sacrifice() {
+    let pos = make_bad_drop_position();
+    let mv = parse_usi_move("G*5e").expect("valid drop move");
+    assert!(pos.see(mv) < 0, "drop should lose material in SEE");
+    assert!(quiet_see_guard_should_skip(&pos, mv, 2, false, true, false));
+    assert!(quiet_see_guard_should_skip(&pos, mv, 0, false, true, false));
+    assert!(!quiet_see_guard_should_skip(&pos, mv, 2, true, true, false));
+}
+
+#[test]
+fn root_see_gate_filters_quiet_drop() {
+    let pos = make_bad_drop_position();
+    let mv = parse_usi_move("G*5e").expect("valid drop move");
+    assert!(root_see_gate_should_skip(&pos, mv, 200));
+    assert!(!root_see_gate_should_skip(&pos, mv, 0));
 }
 
 #[test]
