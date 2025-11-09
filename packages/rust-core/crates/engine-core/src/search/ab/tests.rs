@@ -25,7 +25,7 @@ use smallvec::SmallVec;
 
 use super::driver::{root_see_gate_should_skip, ClassicBackend};
 use super::pruning::NullMovePruneParams;
-use super::pvs::{quiet_see_guard_should_skip, SearchContext};
+use super::pvs::{quiet_see_guard_should_skip, CaptureFutilityArgs, SearchContext};
 use super::SearchProfile;
 
 // NOTE: 検索パラメータはグローバル(Atomic)で共有されるため、
@@ -138,6 +138,40 @@ fn root_see_gate_filters_quiet_drop() {
     let mv = parse_usi_move("G*5e").expect("valid drop move");
     assert!(root_see_gate_should_skip(&pos, mv, 200));
     assert!(!root_see_gate_should_skip(&pos, mv, 0));
+}
+
+#[test]
+fn capture_futility_skips_hopeless_capture() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    let mv = Move::normal_with_piece(
+        parse_usi_square("5g").unwrap(),
+        parse_usi_square("5f").unwrap(),
+        false,
+        PieceType::Silver,
+        Some(PieceType::Gold),
+    );
+    let skip = super::pvs::capture_futility_should_skip(
+        &pos,
+        mv,
+        &CaptureFutilityArgs {
+            depth: 2,
+            alpha: -200,
+            static_eval: -900,
+            is_capture: true,
+            gives_check: false,
+            prev_risky: false,
+        },
+    );
+    assert!(skip, "capture futility should prune hopeless capture with large eval deficit");
 }
 
 #[test]
@@ -1691,6 +1725,93 @@ fn null_move_respects_runtime_toggle() {
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
 
     crate::search::params::set_nmp_enabled(true);
+}
+
+#[test]
+fn nmp_verify_rejects_false_cut() {
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    crate::search::params::__test_reset_runtime_values();
+    crate::search::params::set_nmp_enabled(true);
+    super::pruning::__test_set_nmp_verify_forced_score(Some(-5000));
+
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
+    let pos = Position::startpos();
+    let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+    let mut heur = Heuristics::default();
+    let mut tt_hits = 0;
+    let mut beta_cuts = 0;
+    let mut lmr_counter = 0;
+    let limits = SearchLimitsBuilder::default().depth(5).build();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit,
+    };
+    let static_eval = evaluator.evaluate(&pos);
+    let beta = -50;
+    let rejected = backend.null_move_prune(NullMovePruneParams {
+        toggles: &backend.profile.prune,
+        depth: 20,
+        pos: &pos,
+        beta,
+        static_eval,
+        ply: 0,
+        stack: &mut stack,
+        heur: &mut heur,
+        tt_hits: &mut tt_hits,
+        beta_cuts: &mut beta_cuts,
+        lmr_counter: &mut lmr_counter,
+        ctx: &mut ctx,
+        is_pv: false,
+    });
+    assert!(rejected.is_none(), "verify should reject false cut when forced score < beta");
+
+    super::pruning::__test_set_nmp_verify_forced_score(Some(beta));
+    let mut stack_accept = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+    let mut heur_accept = Heuristics::default();
+    let mut tt_hits_accept = 0;
+    let mut beta_cuts_accept = 0;
+    let mut lmr_counter_accept = 0;
+    let start_time_acc = Instant::now();
+    let mut nodes_acc = 0_u64;
+    let mut seldepth_acc = 0_u32;
+    let mut qnodes_acc = 0_u64;
+    let mut ctx_acc = SearchContext {
+        limits: &limits,
+        start_time: &start_time_acc,
+        nodes: &mut nodes_acc,
+        seldepth: &mut seldepth_acc,
+        qnodes: &mut qnodes_acc,
+        qnodes_limit,
+    };
+    let accepted = backend.null_move_prune(NullMovePruneParams {
+        toggles: &backend.profile.prune,
+        depth: 20,
+        pos: &pos,
+        beta,
+        static_eval,
+        ply: 0,
+        stack: &mut stack_accept,
+        heur: &mut heur_accept,
+        tt_hits: &mut tt_hits_accept,
+        beta_cuts: &mut beta_cuts_accept,
+        lmr_counter: &mut lmr_counter_accept,
+        ctx: &mut ctx_acc,
+        is_pv: false,
+    });
+    assert!(accepted.is_some(), "verify should accept cut when forced score >= beta");
+
+    super::pruning::__test_set_nmp_verify_forced_score(None);
 }
 #[test]
 fn excluded_drop_only_blocks_same_piece_type() {

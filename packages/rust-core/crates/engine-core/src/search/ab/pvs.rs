@@ -11,8 +11,12 @@ use super::driver::ClassicBackend;
 use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, MovePicker};
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::movegen::MoveGenerator;
-use crate::search::policy::{abdada_enabled, quiet_see_guard_enabled, tt_suppress_below_depth};
+use crate::search::policy::{
+    abdada_enabled, capture_futility_enabled, capture_futility_scale_pct, quiet_see_guard_enabled,
+    tt_suppress_below_depth,
+};
 use crate::search::types::NodeType;
+use crate::shogi::piece_constants::SEE_PIECE_VALUES;
 use std::sync::OnceLock;
 
 #[cfg(feature = "diagnostics")]
@@ -22,6 +26,11 @@ use super::qsearch::record_qnodes_peak;
 use super::diagnostics;
 
 const QUIET_SEE_GUARD_CP_SCALE: i32 = 26;
+const CAPTURE_FUT_BASE_CP: i32 = 232;
+const CAPTURE_FUT_SLOPE_CP: i32 = 224;
+const CAPTURE_FUT_MAX_DEPTH: i32 = 6;
+const CAPTURE_SEE_BASE_CP: i32 = 96;
+const CAPTURE_SEE_SLOPE_CP: i32 = 12;
 
 pub(crate) fn quiet_see_guard_should_skip(
     pos: &Position,
@@ -37,6 +46,78 @@ pub(crate) fn quiet_see_guard_should_skip(
     let rd = reduction.max(1);
     let margin = QUIET_SEE_GUARD_CP_SCALE * rd * rd;
     pos.see(mv) < -margin
+}
+
+fn capture_fut_margin(depth: i32) -> i32 {
+    let scale = capture_futility_scale_pct();
+    let base = CAPTURE_FUT_BASE_CP * scale / 100;
+    let slope = CAPTURE_FUT_SLOPE_CP * scale / 100;
+    base + slope * depth.clamp(1, CAPTURE_FUT_MAX_DEPTH)
+}
+
+fn capture_see_margin(depth: i32) -> i32 {
+    let scale = capture_futility_scale_pct();
+    let base = CAPTURE_SEE_BASE_CP * scale / 100;
+    let slope = CAPTURE_SEE_SLOPE_CP * scale / 100;
+    base + slope * depth.clamp(1, CAPTURE_FUT_MAX_DEPTH + 2)
+}
+
+fn capture_victim_bonus(mv: crate::shogi::Move) -> i32 {
+    mv.captured_piece_type().map(|pt| SEE_PIECE_VALUES[0][pt as usize]).unwrap_or(0)
+}
+
+pub(crate) struct CaptureFutilityArgs {
+    pub(crate) depth: i32,
+    pub(crate) alpha: i32,
+    pub(crate) static_eval: i32,
+    pub(crate) is_capture: bool,
+    pub(crate) gives_check: bool,
+    pub(crate) prev_risky: bool,
+}
+
+pub(crate) fn capture_futility_should_skip(
+    pos: &Position,
+    mv: crate::shogi::Move,
+    args: &CaptureFutilityArgs,
+) -> bool {
+    if !capture_futility_enabled()
+        || args.depth > CAPTURE_FUT_MAX_DEPTH
+        || pos.is_in_check()
+        || args.prev_risky
+    {
+        return false;
+    }
+    use crate::search::constants::MATE_SCORE;
+    if args.alpha.abs() >= MATE_SCORE - 100 {
+        return false;
+    }
+    let mut futility_score = args.static_eval + capture_fut_margin(args.depth);
+    if args.is_capture {
+        futility_score += capture_victim_bonus(mv);
+    }
+    if futility_score <= args.alpha && !args.gives_check {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        super::diagnostics::record_tag(
+            pos,
+            "cap_fut_skip",
+            Some(format!(
+                "depth={} eval={} fut_score={} alpha={}",
+                args.depth, args.static_eval, futility_score, args.alpha
+            )),
+        );
+        return true;
+    }
+    let see_margin = capture_see_margin(args.depth);
+    if !pos.see_ge(mv, -see_margin) {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        super::diagnostics::record_tag(
+            pos,
+            "cap_fut_see_skip",
+            Some(format!("depth={} margin={}", args.depth, see_margin)),
+        );
+        return true;
+    }
+    false
 }
 
 pub(crate) struct SearchContext<'a> {
@@ -669,6 +750,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         QUIET_SEE_GUARD_CP_SCALE
                     )),
                 );
+                continue;
+            }
+            if (is_capture || gives_check)
+                && capture_futility_should_skip(
+                    pos,
+                    mv,
+                    &CaptureFutilityArgs {
+                        depth,
+                        alpha,
+                        static_eval,
+                        is_capture,
+                        gives_check,
+                        prev_risky: stack[ply as usize].prev_risky,
+                    },
+                )
+            {
                 continue;
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
