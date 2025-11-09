@@ -423,7 +423,7 @@ impl<'a> MoveGenImpl<'a> {
                 let them = us.opposite();
                 if let Some(their_king_sq) = self.their_king_sq {
                     #[cfg(test)]
-                    println!("Checking drop pawn mate: their_king at {}", their_king_sq);
+                    log::trace!("Checking drop pawn mate: their_king at {}", their_king_sq);
                     let potential_check_sq = match us {
                         Color::Black => {
                             // Black pawn attacks toward rank 0, so it checks from one rank above
@@ -1657,9 +1657,10 @@ impl<'a> MoveGenImpl<'a> {
         // Debug logging - use println for immediate output
         #[cfg(test)]
         {
-            println!(
+            log::trace!(
                 "=== is_drop_pawn_mate called for pawn at {} with king at {} ===",
-                to, their_king_sq
+                to,
+                their_king_sq
             );
         }
 
@@ -1676,7 +1677,7 @@ impl<'a> MoveGenImpl<'a> {
             self.attackers_to_with_occupancy(to, us, occ_after_king_capture);
         if king_capturer_attackers.is_empty() {
             #[cfg(test)]
-            println!("  King can safely capture pawn at {}", to);
+            log::trace!("  King can safely capture pawn at {}", to);
             return false; // King can safely capture
         }
 
@@ -1690,12 +1691,16 @@ impl<'a> MoveGenImpl<'a> {
         let mut defenders = non_king_defenders;
         while let Some(def_sq) = defenders.pop_lsb() {
             #[cfg(test)]
-            println!("  Checking defender at {} for pawn at {}", def_sq, to);
+            log::trace!("  Checking defender at {} for pawn at {}", def_sq, to);
 
             // Quick check: if defender is not aligned with king, it can't be pinned
             if !self.is_aligned(def_sq, their_king_sq) {
                 #[cfg(test)]
-                println!("    Defender at {} not aligned with king at {}", def_sq, their_king_sq);
+                log::trace!(
+                    "    Defender at {} not aligned with king at {}",
+                    def_sq,
+                    their_king_sq
+                );
                 return false; // Not aligned = not pinned
             }
 
@@ -1709,12 +1714,12 @@ impl<'a> MoveGenImpl<'a> {
 
             if attackers.is_empty() {
                 #[cfg(test)]
-                println!("    Defender at {} is not pinned", def_sq);
+                log::trace!("    Defender at {} is not pinned", def_sq);
                 return false; // Defender is not pinned and can capture the pawn
             }
 
             #[cfg(test)]
-            println!("    Defender at {} is pinned by {:?}", def_sq, attackers);
+            log::trace!("    Defender at {} is pinned by {:?}", def_sq, attackers);
         }
 
         // 3) Check if king has escape squares
@@ -1733,10 +1738,10 @@ impl<'a> MoveGenImpl<'a> {
 
         #[cfg(test)]
         {
-            println!("  Escape checking with occupied_after_drop:");
+            log::trace!("  Escape checking with occupied_after_drop:");
             // Show key pieces
             if let Some(gold_1d) = self.pos.board.piece_on(Square::new(8, 3)) {
-                println!("  Gold at 1d present: {:?}", gold_1d);
+                log::trace!("  Gold at 1d present: {:?}", gold_1d);
             }
         }
 
@@ -1760,7 +1765,11 @@ impl<'a> MoveGenImpl<'a> {
             #[cfg(test)]
             {
                 let piece_on_escape = self.pos.board.piece_on(escape_sq);
-                println!("  Checking escape to {}, piece there: {:?}", escape_sq, piece_on_escape);
+                log::trace!(
+                    "  Checking escape to {}, piece there: {:?}",
+                    escape_sq,
+                    piece_on_escape
+                );
             }
 
             let escape_attackers =
@@ -1769,26 +1778,26 @@ impl<'a> MoveGenImpl<'a> {
             #[cfg(test)]
             {
                 if self.pos.board.occupied_bb[us as usize].test(escape_sq) {
-                    println!("  King would capture piece at {}", escape_sq);
+                    log::trace!("  King would capture piece at {}", escape_sq);
                 }
                 // Debug: check if gold at 1d attacks 2c
                 if escape_sq == Square::new(7, 2) {
                     // 2c
                     let gold_1d_sq = Square::new(8, 3); // 1d
                     let gold_attacks_2c = gold_attacks(gold_1d_sq, us);
-                    println!("  Gold at 1d attacks: {:?}", gold_attacks_2c);
-                    println!("  Does it include 2c? {}", gold_attacks_2c.test(escape_sq));
+                    log::trace!("  Gold at 1d attacks: {:?}", gold_attacks_2c);
+                    log::trace!("  Does it include 2c? {}", gold_attacks_2c.test(escape_sq));
 
                     // Check if gold is in the bitboards
                     let gold_bb = self.pos.board.piece_bb[us as usize][PieceType::Gold as usize];
-                    println!("  Gold bitboard includes 1d? {}", gold_bb.test(gold_1d_sq));
+                    log::trace!("  Gold bitboard includes 1d? {}", gold_bb.test(gold_1d_sq));
 
                     // Debug attackers_to calculation step by step
-                    println!("  Debugging attackers_to for 2c:");
+                    log::trace!("  Debugging attackers_to for 2c:");
                     let gold_attackers = gold_attacks_2c & gold_bb;
-                    println!("    Gold attackers: {:?}", gold_attackers);
+                    log::trace!("    Gold attackers: {:?}", gold_attackers);
                 }
-                println!(
+                log::trace!(
                     "  Attackers to {}: {:?} (empty={})",
                     escape_sq,
                     escape_attackers,
@@ -1798,12 +1807,12 @@ impl<'a> MoveGenImpl<'a> {
 
             if escape_attackers.is_empty() {
                 #[cfg(test)]
-                println!("  King has safe escape to {}", escape_sq);
+                log::trace!("  King has safe escape to {}", escape_sq);
                 return false; // Safe escape exists
             }
 
             #[cfg(test)]
-            println!("  Escape to {} is blocked by {:?}", escape_sq, escape_attackers);
+            log::trace!("  Escape to {} is blocked by {:?}", escape_sq, escape_attackers);
         }
 
         true // No defense - it's mate
