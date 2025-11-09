@@ -92,6 +92,10 @@ fn qsearch_detects_mate_when_evasion_missing() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -99,6 +103,10 @@ fn qsearch_detects_mate_when_evasion_missing() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
@@ -260,6 +268,10 @@ fn tt_bound_follows_used_window() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &t0,
@@ -267,6 +279,10 @@ fn tt_bound_follows_used_window() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
     let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
     let mut heur = Heuristics::default();
@@ -355,6 +371,10 @@ fn qsearch_respects_qnodes_limit() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -362,6 +382,10 @@ fn qsearch_respects_qnodes_limit() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: limit_value,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
@@ -408,6 +432,10 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -415,6 +443,10 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: 1,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let alpha = -1000;
@@ -540,6 +572,10 @@ fn qsearch_detects_mate_with_min_qnodes_budget() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = 1;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -547,6 +583,10 @@ fn qsearch_detects_mate_with_min_qnodes_budget() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
@@ -580,6 +620,10 @@ fn qsearch_returns_stand_pat_when_limit_exhausted() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -587,6 +631,10 @@ fn qsearch_returns_stand_pat_when_limit_exhausted() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: 1,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let material = MaterialEvaluator;
@@ -637,6 +685,10 @@ fn qsearch_prunes_negative_see_small_capture() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -644,6 +696,10 @@ fn qsearch_prunes_negative_see_small_capture() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: crate::search::constants::DEFAULT_QNODES_LIMIT,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let material = MaterialEvaluator;
@@ -692,6 +748,10 @@ fn qsearch_depth_cap_still_handles_in_check() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -699,6 +759,10 @@ fn qsearch_depth_cap_still_handles_in_check() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: crate::search::constants::DEFAULT_QNODES_LIMIT,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let max_ply = crate::search::constants::MAX_QUIESCE_DEPTH as u32;
@@ -1663,6 +1727,10 @@ fn null_move_respects_runtime_toggle() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -1670,6 +1738,10 @@ fn null_move_respects_runtime_toggle() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
     let static_eval = evaluator.evaluate(&pos);
     let allowed = backend.null_move_prune(NullMovePruneParams {
@@ -1699,6 +1771,10 @@ fn null_move_respects_runtime_toggle() {
     let mut nodes_off = 0_u64;
     let mut seldepth_off = 0_u32;
     let mut qnodes_off = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected_off = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set_off = 0_u64;
     let mut ctx_off = SearchContext {
         limits: &limits,
         start_time: &start_time_off,
@@ -1706,6 +1782,10 @@ fn null_move_respects_runtime_toggle() {
         seldepth: &mut seldepth_off,
         qnodes: &mut qnodes_off,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected_off,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set_off,
     };
     let denied = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
@@ -1749,6 +1829,10 @@ fn nmp_verify_rejects_false_cut() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -1756,6 +1840,10 @@ fn nmp_verify_rejects_false_cut() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
     let static_eval = evaluator.evaluate(&pos);
     let beta = -50;
@@ -1786,6 +1874,10 @@ fn nmp_verify_rejects_false_cut() {
     let mut nodes_acc = 0_u64;
     let mut seldepth_acc = 0_u32;
     let mut qnodes_acc = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected_acc = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set_acc = 0_u64;
     let mut ctx_acc = SearchContext {
         limits: &limits,
         start_time: &start_time_acc,
@@ -1793,6 +1885,10 @@ fn nmp_verify_rejects_false_cut() {
         seldepth: &mut seldepth_acc,
         qnodes: &mut qnodes_acc,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected_acc,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set_acc,
     };
     let accepted = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
