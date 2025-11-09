@@ -414,6 +414,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter: &mut *lmr_counter,
             ctx,
             is_pv,
+            #[cfg(test)]
+            verify_min_depth_override: None,
         }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");

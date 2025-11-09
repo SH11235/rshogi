@@ -190,6 +190,12 @@ fn capture_futility_skips_hopeless_capture() {
         .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
     pos.board
         .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("8a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("2a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("7b").unwrap(), Piece::new(PieceType::Gold, Color::White));
     let mv = Move::normal_with_piece(
         parse_usi_square("5g").unwrap(),
         parse_usi_square("5f").unwrap(),
@@ -197,13 +203,16 @@ fn capture_futility_skips_hopeless_capture() {
         PieceType::Silver,
         Some(PieceType::Gold),
     );
+    let evaluator = MaterialEvaluator;
+    let static_eval = evaluator.evaluate(&pos);
+    assert!(static_eval <= -1500, "expected large deficit, got {static_eval}");
     let skip = super::pvs::capture_futility_should_skip(
         &pos,
         mv,
         &CaptureFutilityArgs {
             depth: 2,
             alpha: -200,
-            static_eval: -900,
+            static_eval,
             is_capture: true,
             gives_check: false,
             prev_risky: false,
@@ -1123,7 +1132,8 @@ fn evaluator_hooks_balance_for_classic_backend() {
     // 初期局面を使用（探索枝が豊富で、NMPが確実に発動する）
     let pos = Position::startpos();
 
-    let limits = SearchLimitsBuilder::default().depth(5).build();
+    let depth_limit = (crate::search::params::NMP_MIN_DEPTH + 1) as u8;
+    let limits = SearchLimitsBuilder::default().depth(depth_limit).build();
 
     let _ = backend.think_blocking(&pos, &limits, None);
 
@@ -1751,7 +1761,8 @@ fn null_move_respects_runtime_toggle() {
     let mut lmr_counter = 0;
 
     crate::search::params::set_nmp_enabled(true);
-    let limits = SearchLimitsBuilder::default().depth(5).build();
+    let nmp_depth = crate::search::params::NMP_MIN_DEPTH + 1;
+    let limits = SearchLimitsBuilder::default().depth(nmp_depth as u8).build();
     let start_time = Instant::now();
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
@@ -1776,7 +1787,7 @@ fn null_move_respects_runtime_toggle() {
     let static_eval = evaluator.evaluate(&pos);
     let allowed = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
-        depth: 4,
+        depth: nmp_depth,
         pos: &pos,
         beta: 0,
         static_eval,
@@ -1788,6 +1799,8 @@ fn null_move_respects_runtime_toggle() {
         lmr_counter: &mut lmr_counter,
         ctx: &mut ctx,
         is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: None,
     });
     assert!(allowed.is_some(), "NMP should run when runtime toggle is enabled");
 
@@ -1819,7 +1832,7 @@ fn null_move_respects_runtime_toggle() {
     };
     let denied = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
-        depth: 4,
+        depth: nmp_depth,
         pos: &pos,
         beta: 0,
         static_eval,
@@ -1831,6 +1844,8 @@ fn null_move_respects_runtime_toggle() {
         lmr_counter: &mut lmr_counter_off,
         ctx: &mut ctx_off,
         is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: None,
     });
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
 
@@ -1842,7 +1857,6 @@ fn nmp_verify_rejects_false_cut() {
     let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
     crate::search::params::__test_reset_runtime_values();
     crate::search::params::set_nmp_enabled(true);
-    super::pruning::__test_set_nmp_verify_forced_score(Some(-5000));
 
     let evaluator = Arc::new(MaterialEvaluator);
     let backend =
@@ -1853,7 +1867,8 @@ fn nmp_verify_rejects_false_cut() {
     let mut tt_hits = 0;
     let mut beta_cuts = 0;
     let mut lmr_counter = 0;
-    let limits = SearchLimitsBuilder::default().depth(5).build();
+    let nmp_depth = crate::search::params::NMP_MIN_DEPTH + 1;
+    let limits = SearchLimitsBuilder::default().depth(nmp_depth as u8).build();
     let start_time = Instant::now();
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
@@ -1876,10 +1891,11 @@ fn nmp_verify_rejects_false_cut() {
         abdada_busy_set: &mut abdada_busy_set,
     };
     let static_eval = evaluator.evaluate(&pos);
-    let beta = -50;
+    let beta = -5000;
+    super::pruning::__test_set_nmp_verify_forced_score(Some(beta - 500));
     let rejected = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
-        depth: 20,
+        depth: nmp_depth,
         pos: &pos,
         beta,
         static_eval,
@@ -1891,6 +1907,8 @@ fn nmp_verify_rejects_false_cut() {
         lmr_counter: &mut lmr_counter,
         ctx: &mut ctx,
         is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: Some(crate::search::params::NMP_MIN_DEPTH),
     });
     assert!(rejected.is_none(), "verify should reject false cut when forced score < beta");
 
@@ -1920,9 +1938,9 @@ fn nmp_verify_rejects_false_cut() {
         #[cfg(feature = "diagnostics")]
         abdada_busy_set: &mut abdada_busy_set_acc,
     };
-    let accepted = backend.null_move_prune(NullMovePruneParams {
+    let accepted_cut = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
-        depth: 20,
+        depth: nmp_depth,
         pos: &pos,
         beta,
         static_eval,
@@ -1934,8 +1952,10 @@ fn nmp_verify_rejects_false_cut() {
         lmr_counter: &mut lmr_counter_accept,
         ctx: &mut ctx_acc,
         is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: Some(crate::search::params::NMP_MIN_DEPTH),
     });
-    assert!(accepted.is_some(), "verify should accept cut when forced score >= beta");
+    assert!(accepted_cut.is_some(), "verify should accept cut when forced score >= beta");
 
     super::pruning::__test_set_nmp_verify_forced_score(None);
 }

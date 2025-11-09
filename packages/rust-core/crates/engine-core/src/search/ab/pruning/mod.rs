@@ -49,6 +49,8 @@ pub(super) struct NullMovePruneParams<'a, 'ctx> {
     pub lmr_counter: &'a mut u64,
     pub ctx: &'a mut SearchContext<'ctx>,
     pub is_pv: bool,
+    #[cfg(test)]
+    pub verify_min_depth_override: Option<i32>,
 }
 
 pub(super) struct MaybeIidParams<'a, 'ctx> {
@@ -296,6 +298,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter,
             ctx,
             is_pv,
+            #[cfg(test)]
+            verify_min_depth_override,
         } = params;
         // Disable NMP for PV nodes or when previous move was risky
         if is_pv || stack.get(ply as usize).is_some_and(|st| st.prev_risky) {
@@ -365,8 +369,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             -sc
         };
         if score >= beta {
+            #[cfg(test)]
+            let verify_min_depth = verify_min_depth_override.unwrap_or_else(nmp_verify_min_depth);
+            #[cfg(not(test))]
+            let verify_min_depth = nmp_verify_min_depth();
+
             if nmp_verify_enabled()
-                && depth >= nmp_verify_min_depth()
+                && depth >= verify_min_depth
                 && stack.get(ply as usize).map(|st| !st.prev_risky).unwrap_or(true)
             {
                 let verify_depth = (depth - 1).max(1);
