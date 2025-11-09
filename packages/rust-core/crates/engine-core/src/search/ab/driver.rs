@@ -1010,32 +1010,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
 
             // Root SEE Gate: YO 仕様に合わせ、非王手の静かな手で xSEE が閾値より悪いものを削除する。
-            if config::root_see_gate_enabled() {
-                let xsee = config::root_see_gate_xsee_cp();
-                let mut filtered: Vec<crate::shogi::Move> = Vec::with_capacity(root_moves.len());
-                let mut rejected = 0usize;
-                for &mv in &root_moves {
-                    let is_quiet = !mv.is_capture_hint() && !mv.is_promote();
-                    let gives_check = root.gives_check(mv);
-                    if is_quiet && !gives_check {
-                        let see_val = root.see(mv);
-                        if see_val < -xsee {
-                            rejected += 1;
-                            continue;
-                        }
-                    }
-                    filtered.push(mv);
-                }
-                if filtered.is_empty() {
-                    // 最悪でも元の最初の手だけは残す（合法手が空になるのを防ぐため）
-                    filtered.push(root_moves[0]);
-                } else if let Some(cb) = limits.info_string_callback.as_ref() {
-                    if rejected > 0 {
-                        cb(&format!("root_see_gate_filtered={} xsee={}", rejected, xsee));
-                    }
-                }
-                root_moves = filtered;
-            }
+            // NOTE: Reverted quiet landing SEE gating to align with YaneuraOu baseline.
+            // RootSeeGate is not applied to quiet non-check moves.
             let root_rank: Vec<crate::shogi::Move> = root_moves.clone();
             let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
             for (idx, mv) in root_rank.iter().enumerate() {
