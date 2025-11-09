@@ -11,7 +11,7 @@ use super::driver::ClassicBackend;
 use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, MovePicker};
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::movegen::MoveGenerator;
-use crate::search::policy::{abdada_enabled, tt_suppress_below_depth};
+use crate::search::policy::{abdada_enabled, quiet_see_guard_enabled, tt_suppress_below_depth};
 use crate::search::types::NodeType;
 use std::sync::OnceLock;
 
@@ -20,6 +20,24 @@ use super::qsearch::record_qnodes_peak;
 
 #[cfg(any(debug_assertions, feature = "diagnostics"))]
 use super::diagnostics;
+
+const QUIET_SEE_GUARD_CP_SCALE: i32 = 26;
+
+pub(crate) fn quiet_see_guard_should_skip(
+    pos: &Position,
+    mv: crate::shogi::Move,
+    reduction: i32,
+    is_pv: bool,
+    is_quiet: bool,
+    gives_check: bool,
+) -> bool {
+    if is_pv || !is_quiet || gives_check || !quiet_see_guard_enabled() {
+        return false;
+    }
+    let rd = reduction.max(1);
+    let margin = QUIET_SEE_GUARD_CP_SCALE * rd * rd;
+    pos.see(mv) < -margin
+}
 
 pub(crate) struct SearchContext<'a> {
     pub(crate) limits: &'a SearchLimits,
@@ -638,6 +656,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     ));
                 }
                 next_depth -= 1;
+            }
+            if quiet_see_guard_should_skip(pos, mv, reduction, is_pv, is_quiet, gives_check) {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                super::diagnostics::record_tag(
+                    pos,
+                    "quiet_see_skip",
+                    Some(format!(
+                        "see={} rd={} scale={}",
+                        pos.see(mv),
+                        reduction.max(1),
+                        QUIET_SEE_GUARD_CP_SCALE
+                    )),
+                );
+                continue;
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_move_pick(diagnostics::MovePickContext {
