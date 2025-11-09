@@ -3,9 +3,13 @@ use crate::search::params as dynp;
 use crate::search::params::{
     NMP_BASE_R, NMP_BONUS_DELTA_BETA, NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH,
 };
+use crate::search::policy::{nmp_verify_enabled, nmp_verify_min_depth};
 use crate::search::tt::TTProbe;
 use crate::search::types::SearchStack;
 use crate::Position;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 
 #[cfg(any(debug_assertions, feature = "diagnostics"))]
 use self::state_diagnostics::{
@@ -21,6 +25,15 @@ use super::ordering::{EvalMoveGuard, EvalNullGuard, Heuristics, MovePicker};
 use super::profile::PruneToggles;
 use super::pvs::{ABArgs, SearchContext};
 use crate::search::constants::MATE_SCORE;
+
+#[cfg(test)]
+static NMP_VERIFY_FORCE_SCORE: AtomicI32 = AtomicI32::new(i32::MAX);
+
+#[cfg(test)]
+pub(crate) fn __test_set_nmp_verify_forced_score(score: Option<i32>) {
+    let val = score.unwrap_or(i32::MAX);
+    NMP_VERIFY_FORCE_SCORE.store(val, AtomicOrdering::SeqCst);
+}
 
 pub(super) struct NullMovePruneParams<'a, 'ctx> {
     pub toggles: &'a PruneToggles,
@@ -352,6 +365,74 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             -sc
         };
         if score >= beta {
+            if nmp_verify_enabled()
+                && depth >= nmp_verify_min_depth()
+                && stack.get(ply as usize).map(|st| !st.prev_risky).unwrap_or(true)
+            {
+                let verify_depth = (depth - 1).max(1);
+                let verify_alpha = beta - 1;
+                let saved_prev = stack.get(ply as usize).map(|st| st.prev_risky).unwrap_or(false);
+                if let Some(st) = stack.get_mut(ply as usize) {
+                    st.prev_risky = true;
+                }
+                let mut run_verify = |stack: &mut [SearchStack], heur: &mut Heuristics| {
+                    let (sc_verify, _) = self.alphabeta(
+                        ABArgs {
+                            pos,
+                            depth: verify_depth,
+                            alpha: verify_alpha,
+                            beta,
+                            ply,
+                            is_pv: false,
+                            stack,
+                            heur,
+                            tt_hits,
+                            beta_cuts,
+                            lmr_counter,
+                            lmr_blocked_in_check: None,
+                            lmr_blocked_recapture: None,
+                            evasion_sparsity_ext: None,
+                        },
+                        ctx,
+                    );
+                    sc_verify
+                };
+                let verify_score = {
+                    #[cfg(test)]
+                    {
+                        let forced = NMP_VERIFY_FORCE_SCORE.load(AtomicOrdering::SeqCst);
+                        if forced != i32::MAX {
+                            forced
+                        } else {
+                            run_verify(stack, heur)
+                        }
+                    }
+                    #[cfg(not(test))]
+                    {
+                        run_verify(stack, heur)
+                    }
+                };
+                if let Some(st) = stack.get_mut(ply as usize) {
+                    st.prev_risky = saved_prev;
+                }
+                if verify_score >= beta {
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        pos,
+                        "nmp_verify_accept",
+                        Some(format!("depth={} beta={}", depth, beta)),
+                    );
+                    return Some(score);
+                } else {
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        pos,
+                        "nmp_verify_reject",
+                        Some(format!("depth={} beta={} vs={}", depth, beta, verify_score)),
+                    );
+                    return None;
+                }
+            }
             Some(score)
         } else {
             None
