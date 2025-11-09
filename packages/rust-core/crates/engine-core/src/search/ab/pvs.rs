@@ -31,6 +31,9 @@ const CAPTURE_FUT_SLOPE_CP: i32 = 224;
 const CAPTURE_FUT_MAX_DEPTH: i32 = 6;
 const CAPTURE_SEE_BASE_CP: i32 = 96;
 const CAPTURE_SEE_SLOPE_CP: i32 = 12;
+const CAPTURE_SEE_GUARD_BASE_CP: i32 = 160;
+const CAPTURE_SEE_GUARD_SLOPE_CP: i32 = 20;
+const CAPTURE_SEE_GUARD_MAX_CP: i32 = 320;
 
 pub(crate) fn quiet_see_guard_should_skip(
     pos: &Position,
@@ -64,6 +67,27 @@ fn capture_see_margin(depth: i32) -> i32 {
 
 fn capture_victim_bonus(mv: crate::shogi::Move) -> i32 {
     mv.captured_piece_type().map(|pt| SEE_PIECE_VALUES[0][pt as usize]).unwrap_or(0)
+}
+
+fn capture_see_guard_margin(depth: i32) -> i32 {
+    let d = depth.max(1);
+    let base = CAPTURE_SEE_GUARD_BASE_CP + CAPTURE_SEE_GUARD_SLOPE_CP * d;
+    let cap = CAPTURE_SEE_GUARD_MAX_CP * d;
+    base.min(cap)
+}
+
+pub(crate) fn capture_see_guard_should_skip(
+    pos: &Position,
+    mv: crate::shogi::Move,
+    depth: i32,
+    is_capture: bool,
+    gives_check: bool,
+) -> bool {
+    if !(is_capture || gives_check) {
+        return false;
+    }
+    let margin = capture_see_guard_margin(depth);
+    !pos.see_ge(mv, -margin)
 }
 
 pub(crate) struct CaptureFutilityArgs {
@@ -748,6 +772,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         pos.see(mv),
                         reduction.max(1),
                         QUIET_SEE_GUARD_CP_SCALE
+                    )),
+                );
+                continue;
+            }
+            if capture_see_guard_should_skip(pos, mv, depth, is_capture, gives_check) {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                super::diagnostics::record_tag(
+                    pos,
+                    "cap_see_guard_skip",
+                    Some(format!(
+                        "see={} depth={} margin={}",
+                        pos.see(mv),
+                        depth,
+                        capture_see_guard_margin(depth)
                     )),
                 );
                 continue;

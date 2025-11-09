@@ -25,7 +25,9 @@ use smallvec::SmallVec;
 
 use super::driver::{root_see_gate_should_skip, ClassicBackend};
 use super::pruning::NullMovePruneParams;
-use super::pvs::{quiet_see_guard_should_skip, CaptureFutilityArgs, SearchContext};
+use super::pvs::{
+    capture_see_guard_should_skip, quiet_see_guard_should_skip, CaptureFutilityArgs, SearchContext,
+};
 use super::SearchProfile;
 
 // NOTE: 検索パラメータはグローバル(Atomic)で共有されるため、
@@ -146,6 +148,34 @@ fn root_see_gate_filters_quiet_drop() {
     let mv = parse_usi_move("G*5e").expect("valid drop move");
     assert!(root_see_gate_should_skip(&pos, mv, 200));
     assert!(!root_see_gate_should_skip(&pos, mv, 0));
+}
+
+#[test]
+fn capture_see_guard_skips_bad_capture() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("4e").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("4d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("4c").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("4b").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    let mv = Move::normal_with_piece(
+        parse_usi_square("4e").unwrap(),
+        parse_usi_square("4d").unwrap(),
+        false,
+        PieceType::Bishop,
+        Some(PieceType::Pawn),
+    );
+    assert!(pos.is_legal_move(mv));
+    assert!(capture_see_guard_should_skip(&pos, mv, 4, true, false));
+    assert!(!capture_see_guard_should_skip(&pos, mv, 4, false, false));
 }
 
 #[test]
