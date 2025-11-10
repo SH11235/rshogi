@@ -936,14 +936,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             #[cfg(feature = "diagnostics")]
             reset_qsearch_diagnostics();
             if let Some(cb) = limits.info_string_callback.as_ref() {
-                cb(&format!("iter_start depth={} nodes={}", d, nodes));
+                cb(&format!("iter_start depth={d} nodes={nodes}"));
                 if let Some(tt) = &self.tt {
                     cb(&format!(
-                        "tt_snapshot depth={} hf={} hf_phys={} attempts={}",
-                        d,
-                        tt.hashfull_permille(),
-                        tt.hashfull_physical_permille(),
-                        tt.store_attempts()
+                        "tt_snapshot depth={d} hf={hf} hf_phys={hf_phys} attempts={attempts}",
+                        hf = tt.hashfull_permille(),
+                        hf_phys = tt.hashfull_physical_permille(),
+                        attempts = tt.store_attempts()
                     ));
                 }
             }
@@ -1037,10 +1036,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 root,
                                 "root_see_skip",
                                 Some(format!(
-                                    "mv={} see={} xsee={}",
-                                    crate::usi::move_to_usi(&mv),
-                                    root.see(mv),
-                                    xsee_cp,
+                                    "mv={mv_usi} see={see} xsee={xsee}",
+                                    mv_usi = crate::usi::move_to_usi(&mv),
+                                    see = root.see(mv),
+                                    xsee = xsee_cp,
                                 )),
                             );
                             continue;
@@ -1054,7 +1053,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         super::diagnostics::record_tag(
                             root,
                             "root_see_skip_fallback",
-                            Some(format!("skipped={} xsee={}", skipped, xsee_cp)),
+                            Some(format!("skipped={skipped} xsee={xsee}", xsee = xsee_cp)),
                         );
                     }
                 }

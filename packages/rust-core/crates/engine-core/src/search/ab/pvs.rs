@@ -72,7 +72,8 @@ fn capture_victim_bonus(mv: crate::shogi::Move) -> i32 {
 fn capture_see_guard_margin(depth: i32) -> i32 {
     let d = depth.max(1);
     let base = CAPTURE_SEE_GUARD_BASE_CP + CAPTURE_SEE_GUARD_SLOPE_CP * d;
-    let cap = CAPTURE_SEE_GUARD_MAX_CP * d;
+    // Cap the margin to a fixed maximum to avoid overly aggressive pruning at large depths.
+    let cap = CAPTURE_SEE_GUARD_MAX_CP;
     base.min(cap)
 }
 
@@ -125,8 +126,11 @@ pub(crate) fn capture_futility_should_skip(
             pos,
             "cap_fut_skip",
             Some(format!(
-                "depth={} eval={} fut_score={} alpha={}",
-                args.depth, args.static_eval, futility_score, args.alpha
+                "depth={depth} eval={eval} fut_score={fut_score} alpha={alpha}",
+                depth = args.depth,
+                eval = args.static_eval,
+                fut_score = futility_score,
+                alpha = args.alpha
             )),
         );
         return true;
@@ -137,7 +141,7 @@ pub(crate) fn capture_futility_should_skip(
         super::diagnostics::record_tag(
             pos,
             "cap_fut_see_skip",
-            Some(format!("depth={} margin={}", args.depth, see_margin)),
+            Some(format!("depth={depth} margin={see_margin}", depth = args.depth)),
         );
         return true;
     }
@@ -755,11 +759,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // 後着（busy検知）時のみ、静止手に限って追加で −1ply 合流
             if use_abdada && abdada_reduce && is_quiet && next_depth > 0 {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
+                    if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
                     cb(&format!(
-                        "abdada_cut_reduction=1 next_depth={} -> {}",
-                        next_depth,
-                        next_depth - 1
+                        "abdada_cut_reduction=1 next_depth={next_depth} -> {reduced}",
+                        reduced = next_depth - 1
                     ));
                 }
                 next_depth -= 1;
@@ -770,10 +773,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     pos,
                     "quiet_see_skip",
                     Some(format!(
-                        "see={} rd={} scale={}",
-                        pos.see(mv),
-                        reduction.max(1),
-                        QUIET_SEE_GUARD_CP_SCALE
+                        "see={see} rd={rd} scale={scale}",
+                        see = pos.see(mv),
+                        rd = reduction.max(1),
+                        scale = QUIET_SEE_GUARD_CP_SCALE
                     )),
                 );
                 continue;
@@ -784,10 +787,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     pos,
                     "cap_see_guard_skip",
                     Some(format!(
-                        "see={} depth={} margin={}",
-                        pos.see(mv),
-                        depth,
-                        capture_see_guard_margin(depth)
+                        "see={see} depth={depth} margin={margin}",
+                        see = pos.see(mv),
+                        margin = capture_see_guard_margin(depth)
                     )),
                 );
                 continue;
