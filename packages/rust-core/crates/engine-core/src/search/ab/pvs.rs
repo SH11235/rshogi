@@ -759,7 +759,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // 後着（busy検知）時のみ、静止手に限って追加で −1ply 合流
             if use_abdada && abdada_reduce && is_quiet && next_depth > 0 {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
-                    if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
+                if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
                     cb(&format!(
                         "abdada_cut_reduction=1 next_depth={next_depth} -> {reduced}",
                         reduced = next_depth - 1
