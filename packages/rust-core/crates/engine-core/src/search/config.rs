@@ -41,7 +41,7 @@ pub fn mate_early_stop_max_distance() -> u8 {
 // ---- Root SEE Gate (revived)
 // やねうら王系のルート近傍ガードに相当する軽量ゲート。
 // ここではフラグと閾値のみを保持し、実際の適用は上位層（USI/検索部）に委ねる。
-static ROOT_SEE_GATE_ENABLED: AtomicBool = AtomicBool::new(true);
+static ROOT_SEE_GATE_ENABLED: AtomicBool = AtomicBool::new(false);
 /// 拡張SEE（XSEE）のしきい値（cp相当）。0 で無効。
 static ROOT_SEE_GATE_XSEE_CP: AtomicI32 = AtomicI32::new(0);
 

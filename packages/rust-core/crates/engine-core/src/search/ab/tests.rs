@@ -137,8 +137,9 @@ fn quiet_see_gate_skips_bad_sacrifice() {
     let pos = make_bad_drop_position();
     let mv = parse_usi_move("G*5e").expect("valid drop move");
     assert!(pos.see(mv) < 0, "drop should lose material in SEE");
+    // LMR適用後の残り深さ(lmr_depth)>0 で発火
     assert!(quiet_see_guard_should_skip(&pos, mv, 2, false, true, false));
-    assert!(quiet_see_guard_should_skip(&pos, mv, 0, false, true, false));
+    // PVでは発火しない
     assert!(!quiet_see_guard_should_skip(&pos, mv, 2, true, true, false));
 }
 

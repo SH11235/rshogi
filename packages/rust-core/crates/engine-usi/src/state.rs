@@ -263,7 +263,7 @@ impl Default for UsiOptions {
             mate_postverify_exact_min_depth: 8,
             mate_postverify_exact_min_elapsed_ms: 400,
             // Guard rails
-            root_see_gate: true,
+            root_see_gate: false,
             root_see_gate_xsee_cp: 0,
             post_verify: true,
             post_verify_require_pass: false,

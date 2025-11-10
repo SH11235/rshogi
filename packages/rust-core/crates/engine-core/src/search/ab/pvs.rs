@@ -35,10 +35,12 @@ const CAPTURE_SEE_GUARD_BASE_CP: i32 = 160;
 const CAPTURE_SEE_GUARD_SLOPE_CP: i32 = 20;
 const CAPTURE_SEE_GUARD_MAX_CP: i32 = 320;
 
+/// Quiet SEE gate（YO Step14相当）
+/// lmr_depth: LMR適用後の残り深さ（newDepth - r）。
 pub(crate) fn quiet_see_guard_should_skip(
     pos: &Position,
     mv: crate::shogi::Move,
-    reduction: i32,
+    lmr_depth: i32,
     is_pv: bool,
     is_quiet: bool,
     gives_check: bool,
@@ -46,9 +48,12 @@ pub(crate) fn quiet_see_guard_should_skip(
     if is_pv || !is_quiet || gives_check || !quiet_see_guard_enabled() {
         return false;
     }
-    let rd = reduction.max(1);
-    let margin = QUIET_SEE_GUARD_CP_SCALE * rd * rd;
-    pos.see(mv) < -margin
+    let d = lmr_depth.max(0);
+    if d == 0 {
+        return false;
+    }
+    let margin = QUIET_SEE_GUARD_CP_SCALE * d * d;
+    !pos.see_ge(mv, -margin)
 }
 
 fn capture_fut_margin(depth: i32) -> i32 {
@@ -767,16 +772,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
                 next_depth -= 1;
             }
-            if quiet_see_guard_should_skip(pos, mv, reduction, is_pv, is_quiet, gives_check) {
+            if !stack[ply as usize].in_check
+                && quiet_see_guard_should_skip(pos, mv, next_depth, is_pv, is_quiet, gives_check)
+            {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
                 super::diagnostics::record_tag(
                     pos,
                     "quiet_see_skip",
                     Some(format!(
-                        "see={see} rd={rd} scale={scale}",
+                        "see={see} lmr_depth={d} scale={scale}",
                         see = pos.see(mv),
-                        rd = reduction.max(1),
-                        scale = QUIET_SEE_GUARD_CP_SCALE
+                        d = next_depth.max(0),
+                        scale = QUIET_SEE_GUARD_CP_SCALE,
                     )),
                 );
                 continue;

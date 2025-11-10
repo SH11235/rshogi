@@ -102,7 +102,7 @@ static RUNTIME_QS_MARGIN_CAPTURE: AtomicI32 = AtomicI32::new(QS_MARGIN_CAPTURE);
 static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN);
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
-static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(0);
+static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(3);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]

@@ -93,7 +93,7 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name SearchParams.QS.CheckSEEMargin type spin default {} min -5000 max 5000",
         engine_core::search::params::qs_check_see_margin()
     ));
-    usi_println("option name SearchParams.RootBeamForceFullCount type spin default 0 min 0 max 8");
+    usi_println("option name SearchParams.RootBeamForceFullCount type spin default 3 min 0 max 8");
     // Root guard rails (revived)
     usi_println(&format!(
         "option name RootSeeGate type check default {}",
