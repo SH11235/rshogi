@@ -39,7 +39,7 @@ const ROOT_BEAM_REDUCTION: i32 = 1; // shallow probe uses d-1
 const ROOT_BEAM_MIN_DEPTH: i32 = 6;
 const ROOT_BEAM_MARGIN_CP: i32 = 140; // legacy constant (used for compatibility)
 const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48;
-const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 32;
+const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
