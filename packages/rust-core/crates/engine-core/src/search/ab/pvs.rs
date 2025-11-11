@@ -35,6 +35,11 @@ const CAPTURE_SEE_GUARD_BASE_CP: i32 = 160;
 const CAPTURE_SEE_GUARD_SLOPE_CP: i32 = 20;
 const CAPTURE_SEE_GUARD_MAX_CP: i32 = 320;
 
+// History-based futility 緩和（静止手）
+const HIST_FUT_RELAX_THRESH1: i32 = 4_000; // 局所的に“良い手”と見なす下限
+const HIST_FUT_RELAX_THRESH2: i32 = 8_000; // さらに強い手
+const HIST_FUT_RELAX_CP_STEP: i32 = 50;    // しきい値毎に下げるマージン量
+
 /// Quiet SEE gate（YO Step14相当）
 /// lmr_depth: LMR適用後の残り深さ（newDepth - r）。
 pub(crate) fn quiet_see_guard_should_skip(
@@ -598,11 +603,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 break;
             }
             moveno += 1;
+            // 直前手（prev_move）を参照できるよう先に取得
+            let prev_mv_opt = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
             stack[ply as usize].current_move = Some(mv);
             let gives_check = pos.gives_check(mv);
             let is_capture = mv.is_capture_hint();
             let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
+            let same_to = prev_mv_opt.is_some_and(|pm| pm.to() == mv.to());
+            let recap = is_capture && prev_mv_opt.is_some_and(|pm| pm.is_capture_hint() && pm.to() == mv.to());
 
             if depth < 14 && is_quiet {
                 let mut h = heur.history.get(pos.side_to_move, mv);
@@ -664,6 +677,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if improving {
                     margin -= 30;
                 }
+                // 履歴が強い静止手は futility を緩和（skip しにくくする）
+                let h2 = heur.history.get(pos.side_to_move, mv).clamp(i16::MIN as i32, i16::MAX as i32);
+                if h2 >= HIST_FUT_RELAX_THRESH1 {
+                    margin -= HIST_FUT_RELAX_CP_STEP;
+                }
+                if h2 >= HIST_FUT_RELAX_THRESH2 {
+                    margin -= HIST_FUT_RELAX_CP_STEP; // 合計 -100cp
+                }
                 if alpha.abs() < MATE_SCORE - 100 && static_eval + margin <= alpha {
                     #[cfg(any(debug_assertions, feature = "diagnostics"))]
                     {
@@ -708,24 +729,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     reduction = 0;
                 } else {
                     // 2) Recapture: previous move was a capture and we capture back on the same square
-                    let recap = if is_capture {
-                        if ply > 0 {
-                            if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                                prev_mv.is_capture_hint() && prev_mv.to() == mv.to()
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
                     if recap {
                         if let Some(cell) = lmr_blocked_recapture {
                             cell.set(cell.get().saturating_add(1));
                         }
                         reduction = 0;
+                    } else if same_to && is_quiet {
+                        // 3) same-to（同一地点応手）: 静止の即応は1段だけ減衰を緩める
+                        reduction = (reduction - 1).max(0);
                     }
                 }
             }
@@ -771,6 +782,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     ));
                 }
                 next_depth -= 1;
+            }
+            // Recapture / same-to の軽量拡張（+1ply）。深さ上限は親のdepthまで。
+            if Self::gating_enabled() && !stack[ply as usize].in_check && next_depth > 0 && (recap || same_to) {
+                next_depth = (next_depth + 1).min(depth);
             }
             if !stack[ply as usize].in_check
                 && quiet_see_guard_should_skip(pos, mv, next_depth, is_pv, is_quiet, gives_check)
