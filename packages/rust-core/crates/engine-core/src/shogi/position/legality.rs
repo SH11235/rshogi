@@ -256,22 +256,21 @@ mod diagnostics {
     use crate::search::ab::diagnostics as ab_diag;
     use crate::shogi::Move;
     use std::collections::HashSet;
-    use std::env;
     use std::sync::{Mutex, OnceLock};
 
     static REPORTED: OnceLock<Mutex<HashSet<(u64, u32)>>> = OnceLock::new();
     static PANIC_ON_GUARD: OnceLock<bool> = OnceLock::new();
 
     fn should_panic_on_enemy_king_capture() -> bool {
-        *PANIC_ON_GUARD.get_or_init(|| match env::var("SHOGI_PANIC_ON_KING_CAPTURE") {
-            Ok(value) => {
+        *PANIC_ON_GUARD.get_or_init(|| match crate::util::env_var("SHOGI_PANIC_ON_KING_CAPTURE") {
+            Some(value) => {
                 let normalized = value.trim().to_ascii_lowercase();
                 !(normalized == "0"
                     || normalized == "false"
                     || normalized == "no"
                     || normalized == "off")
             }
-            Err(_) => true,
+            None => true,
         })
     }
 

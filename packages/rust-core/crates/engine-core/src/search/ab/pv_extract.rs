@@ -61,8 +61,7 @@ impl<E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static> ClassicB
         let mut first_used = false;
         let t0 = Instant::now();
         // Compute a conservative wall-clock micro budget (cap) and respect TM/fallback/time_limit
-        let cap_ms: u64 = std::env::var("SHOGI_PVEXTRACT_CAP_MS")
-            .ok()
+        let cap_ms: u64 = crate::util::env_var("SHOGI_PVEXTRACT_CAP_MS")
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|&v| v > 0 && v <= 20)
             .unwrap_or(6);
