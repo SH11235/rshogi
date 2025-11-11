@@ -158,6 +158,8 @@ struct RootSearchEnv<'a> {
     qnodes: &'a mut u64,
     qnodes_limit: u64,
     root_beam_skip_tracker: &'a mut HashMap<u32, u8>,
+    root_beam_skip_streak: &'a mut usize,
+    root_beam_skip_force_full: &'a mut bool,
     #[cfg(feature = "diagnostics")]
     abdada_busy_detected: &'a mut u64,
     #[cfg(feature = "diagnostics")]
@@ -272,6 +274,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     && d > dynp::root_beam_min_depth()
                     && !drop_near_enemy_king
                     && !quiet_touching_any_king
+                    && !*env.root_beam_skip_force_full
                 {
                     let shallow_depth = (d - 1).saturating_sub(dynp::root_beam_reduction());
                     if shallow_depth >= 1 {
@@ -355,12 +358,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             *entry = entry.saturating_add(1);
                             if (*entry as usize) >= retry_limit {
                                 *entry = 0;
+                                *env.root_beam_skip_force_full = true;
+                                need_full = true;
+                            }
+                            *env.root_beam_skip_streak =
+                                env.root_beam_skip_streak.saturating_add(1);
+                            if *env.root_beam_skip_streak >= retry_limit {
+                                *env.root_beam_skip_force_full = true;
                                 need_full = true;
                             }
                         }
                     }
                 }
                 if need_full {
+                    *env.root_beam_skip_streak = 0;
                     env.root_beam_skip_tracker.insert(mv.to_u32(), 0);
                     let mut search_ctx_nw = SearchContext {
                         limits: env.limits,
@@ -1576,6 +1587,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     .collect();
                 let force_full_budget = Self::effective_root_force_full_count(limits);
                 let mut root_beam_skip_tracker: HashMap<u32, u8> = HashMap::new();
+                let mut root_beam_skip_streak: usize = 0;
+                let mut root_beam_skip_force_full = false;
 
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
@@ -1679,6 +1692,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             qnodes: &mut qnodes,
                             qnodes_limit,
                             root_beam_skip_tracker: &mut root_beam_skip_tracker,
+                            root_beam_skip_streak: &mut root_beam_skip_streak,
+                            root_beam_skip_force_full: &mut root_beam_skip_force_full,
                             #[cfg(feature = "diagnostics")]
                             abdada_busy_detected: &mut cum_abdada_busy_detected,
                             #[cfg(feature = "diagnostics")]
