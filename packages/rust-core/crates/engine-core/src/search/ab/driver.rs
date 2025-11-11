@@ -18,6 +18,7 @@ use crate::search::types::{
     normalize_root_pv, NodeType, RootLine, SearchStack, StopInfo, TerminationReason,
 };
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
+use crate::shogi::Square;
 use crate::Position;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
@@ -69,6 +70,13 @@ pub(crate) fn root_see_gate_should_skip(
         return false;
     }
     root.see(mv) < -xsee_cp
+}
+
+#[inline]
+fn chebyshev_distance(a: Square, b: Square) -> u8 {
+    let dx = u8::abs_diff(a.file(), b.file());
+    let dy = u8::abs_diff(a.rank(), b.rank());
+    dx.max(dy)
 }
 
 #[inline]
@@ -149,6 +157,7 @@ struct RootSearchEnv<'a> {
     seldepth: &'a mut u32,
     qnodes: &'a mut u64,
     qnodes_limit: u64,
+    root_beam_skip_tracker: &'a mut HashMap<u32, u8>,
     #[cfg(feature = "diagnostics")]
     abdada_busy_detected: &'a mut u64,
     #[cfg(feature = "diagnostics")]
@@ -241,29 +250,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let mut s = i32::MIN;
                 let root_gives_check = root.gives_check(mv);
                 let root_see = root.see(mv);
-                let root_own_king_adjacent = {
-                    if let Some(king) = root.board.king_square(root.side_to_move) {
-                        let dx = u8::abs_diff(king.file(), mv.to().file());
-                        let dy = u8::abs_diff(king.rank(), mv.to().rank());
-                        dx <= 1 && dy <= 1
-                    } else {
-                        false
-                    }
-                };
-                let root_enemy_king_adjacent = {
-                    if let Some(king) = root.board.king_square(root.side_to_move.opposite()) {
-                        let dx = u8::abs_diff(king.file(), mv.to().file());
-                        let dy = u8::abs_diff(king.rank(), mv.to().rank());
-                        dx <= 1 && dy <= 1
-                    } else {
-                        false
-                    }
-                };
+                let root_own_king_near = root
+                    .board
+                    .king_square(root.side_to_move)
+                    .map(|k| chebyshev_distance(k, mv.to()))
+                    .is_some_and(|d| d <= 2);
+                let root_enemy_king_adjacent = root
+                    .board
+                    .king_square(root.side_to_move.opposite())
+                    .map(|k| chebyshev_distance(k, mv.to()))
+                    .is_some_and(|d| d <= 1);
                 let root_quiet_move = !root_gives_check && !mv.is_capture_hint();
                 let drop_near_enemy_king = mv.is_drop() && root_enemy_king_adjacent;
                 let quiet_touching_any_king =
-                    root_quiet_move && (root_own_king_adjacent || root_enemy_king_adjacent);
-                let mut forcing = root_gives_check || root_see >= 0 || root_own_king_adjacent;
+                    root_quiet_move && (root_own_king_near || root_enemy_king_adjacent);
+                let mut forcing = root_gives_check || root_see >= 0 || root_own_king_near;
                 if drop_near_enemy_king || quiet_touching_any_king {
                     forcing = true;
                 }
@@ -349,10 +350,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if let Some(cb) = env.limits.info_string_callback.as_ref() {
                                 cb("root_beam_skip_full=1");
                             }
+                            let retry_limit = dynp::root_beam_skip_retry_limit().max(1);
+                            let entry = env.root_beam_skip_tracker.entry(mv.to_u32()).or_insert(0);
+                            *entry = entry.saturating_add(1);
+                            if (*entry as usize) >= retry_limit {
+                                *entry = 0;
+                                need_full = true;
+                            }
                         }
                     }
                 }
                 if need_full {
+                    env.root_beam_skip_tracker.insert(mv.to_u32(), 0);
                     let mut search_ctx_nw = SearchContext {
                         limits: env.limits,
                         start_time: env.t0,
@@ -1566,6 +1575,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     })
                     .collect();
                 let force_full_budget = Self::effective_root_force_full_count(limits);
+                let mut root_beam_skip_tracker: HashMap<u32, u8> = HashMap::new();
 
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
@@ -1668,6 +1678,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             seldepth: &mut seldepth,
                             qnodes: &mut qnodes,
                             qnodes_limit,
+                            root_beam_skip_tracker: &mut root_beam_skip_tracker,
                             #[cfg(feature = "diagnostics")]
                             abdada_busy_detected: &mut cum_abdada_busy_detected,
                             #[cfg(feature = "diagnostics")]

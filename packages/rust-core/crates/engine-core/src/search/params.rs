@@ -63,6 +63,7 @@ pub const ROOT_BEAM_MIN_DEPTH: i32 = 6; // ビーム適用の最小深さ
 pub const ROOT_BEAM_MARGIN_CP: i32 = 220; // α近傍判定の閾値（140から安全側に拡張）
 pub const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48; // 狭窓幅（±delta）
 pub const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 36; // 狭窓結果からフル窓へ昇格するための閾値
+pub const ROOT_BEAM_SKIP_RETRY_LIMIT: usize = 2; // 連続skip許可回数
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -119,6 +120,7 @@ static RUNTIME_ROOT_BEAM_MIN_DEPTH: AtomicI32 = AtomicI32::new(ROOT_BEAM_MIN_DEP
 static RUNTIME_ROOT_BEAM_MARGIN_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_MARGIN_CP);
 static RUNTIME_ROOT_BEAM_NARROW_DELTA_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_NARROW_DELTA_CP);
 static RUNTIME_ROOT_BEAM_NARROW_PROMOTE_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_NARROW_PROMOTE_CP);
+static RUNTIME_ROOT_BEAM_SKIP_RETRY: AtomicUsize = AtomicUsize::new(ROOT_BEAM_SKIP_RETRY_LIMIT);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -365,6 +367,11 @@ pub fn root_beam_narrow_promote_cp() -> i32 {
 }
 
 #[inline]
+pub fn root_beam_skip_retry_limit() -> usize {
+    RUNTIME_ROOT_BEAM_SKIP_RETRY.load(Ordering::Relaxed).max(1)
+}
+
+#[inline]
 pub fn razor_enabled() -> bool {
     RUNTIME_RAZOR.load(Ordering::Relaxed)
 }
@@ -481,6 +488,11 @@ pub fn set_root_beam_narrow_delta_cp(v: i32) {
 pub fn set_root_beam_narrow_promote_cp(v: i32) {
     let clamped = v.clamp(0, 2000);
     RUNTIME_ROOT_BEAM_NARROW_PROMOTE_CP.store(clamped, Ordering::Relaxed);
+}
+
+pub fn set_root_beam_skip_retry_limit(v: usize) {
+    let clamped = v.clamp(1, 8);
+    RUNTIME_ROOT_BEAM_SKIP_RETRY.store(clamped, Ordering::Relaxed);
 }
 
 pub fn set_sbp_base(v: i32) {
