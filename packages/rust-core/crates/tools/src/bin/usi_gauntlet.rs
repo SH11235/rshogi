@@ -18,6 +18,12 @@ struct Cli {
     /// Path to engine binary (USI)
     #[arg(long, default_value = "target/release/engine-usi")]
     engine: String,
+    /// Optional distinct engine binary for baseline side
+    #[arg(long, value_name = "FILE")]
+    base_engine: Option<String>,
+    /// Optional distinct engine binary for candidate side
+    #[arg(long, value_name = "FILE")]
+    cand_engine: Option<String>,
     /// Init script for baseline (lines: setoption..., Threads/MultiPV etc.)
     #[arg(long, value_name = "FILE")]
     base_init: PathBuf,
@@ -300,7 +306,8 @@ fn main() -> Result<()> {
 
     let openings = Arc::new(openings);
     let out_dir = cli.out.clone();
-    let engine_path = cli.engine.clone();
+    let base_engine_path = cli.base_engine.clone().unwrap_or_else(|| cli.engine.clone());
+    let cand_engine_path = cli.cand_engine.clone().unwrap_or_else(|| cli.engine.clone());
     let base_init = cli.base_init.clone();
     let cand_init = cli.cand_init.clone();
     let eval_file = cli.eval_file.clone();
@@ -325,7 +332,8 @@ fn main() -> Result<()> {
         let draws = draws.clone();
         let games_done = games_done.clone();
         let out_dir = out_dir.clone();
-        let engine_path = engine_path.clone();
+        let base_engine_path = base_engine_path.clone();
+        let cand_engine_path = cand_engine_path.clone();
         let base_init = base_init.clone();
         let cand_init = cand_init.clone();
         let eval_file = eval_file.clone();
@@ -341,12 +349,12 @@ fn main() -> Result<()> {
                 fs::OpenOptions::new().create(true).append(true).open(progress_path)?;
             writeln!(progress, "worker {}: spawn engines", wid)?;
             let mut base = USIProc::spawn(
-                &engine_path,
+                &base_engine_path,
                 &out_dir.join(format!("base.{}.stderr.log", wid)),
                 &base_env,
             )?;
             let mut cand = USIProc::spawn(
-                &engine_path,
+                &cand_engine_path,
                 &out_dir.join(format!("cand.{}.stderr.log", wid)),
                 &cand_env,
             )?;

@@ -55,7 +55,136 @@ impl Position {
 
         let to = mv.to();
 
-        // Not a capture
+        // --- Drop move handling (Shogi-specific) ---
+        // In shogi, a drop is never a capture. For SEE purposes we must
+        // evaluate the exchange sequence that may start with the opponent
+        // capturing the dropped piece.
+        if mv.is_drop() {
+            // Early-out: a drop cannot yield immediate material gain.
+            if threshold > 0 {
+                #[cfg(debug_assertions)]
+                check_state("drop_pos_threshold", self, epoch_before, hash_before);
+                return threshold - 1;
+            }
+
+            // Determine dropped piece value
+            let dropped_pt = match mv.piece_type() {
+                Some(pt) => pt,
+                None => {
+                    #[cfg(debug_assertions)]
+                    check_state("drop_missing_piece_type", self, epoch_before, hash_before);
+                    // 安全側: 駒種不明なdropは常に大きく不利として扱う（see_geでもfalse）
+                    return -10_000;
+                }
+            };
+            let dropped_value = Self::see_piece_type_value(dropped_pt);
+
+            // Occupancy after the drop (before any capture): the destination
+            // square becomes occupied by our dropped piece.
+            let mut occupied = self.board.all_bb;
+            occupied.set(to);
+
+            // Precompute pin information (same as capture branch)
+            let (black_pins, white_pins) = self.calculate_pins_for_see();
+
+            // All attackers to the drop square under the current occupancy
+            let mut attackers = self.get_all_attackers_to(to, occupied);
+
+            // Gain array and bookkeeping
+            let mut gain = [0i32; SEE_GAIN_ARRAY_SIZE];
+            let mut depth = 0;
+            // No capture yet -> initial gain is 0 from side_to_move perspective
+            gain[0] = 0;
+            // Track cumulative evaluation for threshold pruning
+            let mut cumulative_eval = 0;
+
+            // Next move after the drop is the opponent capturing
+            let mut stm = self.side_to_move; // will be flipped at loop head
+                                             // Value of the piece that will be captured next (our dropped piece)
+            let mut last_captured_value = dropped_value;
+
+            loop {
+                // flip side at loop head (first becomes opponent)
+                stm = stm.opposite();
+                attackers &= occupied;
+
+                // Select appropriate pin info
+                let pin_info = match stm {
+                    Color::Black => &black_pins,
+                    Color::White => &white_pins,
+                };
+
+                match self.pop_least_valuable_attacker_with_pins(
+                    &mut attackers,
+                    occupied,
+                    stm,
+                    to,
+                    pin_info,
+                ) {
+                    Some((sq, _piece, attacker_value)) => {
+                        depth += 1;
+                        // Update gain: material swing of capturing the last moved piece
+                        gain[depth] = last_captured_value - gain[depth - 1];
+
+                        // Maximize from our perspective
+                        cumulative_eval = std::cmp::max(-cumulative_eval, gain[depth]);
+
+                        // Threshold pruning for see_ge usage
+                        if threshold != 0 && depth >= 1 {
+                            let current_eval = if depth & 1 == 1 {
+                                -cumulative_eval
+                            } else {
+                                cumulative_eval
+                            };
+
+                            let max_remaining = self.estimate_max_remaining_value(
+                                &attackers,
+                                stm,
+                                threshold,
+                                current_eval,
+                            );
+                            let max_possible = if stm == self.side_to_move {
+                                current_eval + max_remaining
+                            } else {
+                                current_eval
+                            };
+                            if max_possible < threshold {
+                                #[cfg(debug_assertions)]
+                                check_state("drop_delta_prune", self, epoch_before, hash_before);
+                                return current_eval;
+                            }
+                        }
+
+                        if depth >= SEE_MAX_DEPTH {
+                            break;
+                        }
+
+                        // Apply the capture on occupancy and update X-ray
+                        occupied.clear(sq);
+                        occupied.set(to);
+                        last_captured_value = attacker_value;
+                        self.update_xray_attacks(sq, to, &mut attackers, occupied);
+                        // next loop will flip side back
+                    }
+                    None => break,
+                }
+            }
+
+            // Back-propagate results as in the capture branch
+            for d in (0..depth).rev() {
+                gain[d] = std::cmp::max(-gain[d], gain[d + 1]);
+            }
+            if depth & 1 == 1 {
+                gain[0] = -gain[0];
+            }
+
+            #[cfg(debug_assertions)]
+            check_state("drop_final", self, epoch_before, hash_before);
+
+            return gain[0];
+        }
+
+        // --- Normal (capture) moves ---
         let captured = match self.board.piece_on(to) {
             Some(piece) => piece,
             None => {
@@ -67,12 +196,7 @@ impl Position {
 
         let captured_value = Self::see_piece_value(captured);
 
-        // For drops, we assume the piece is safe
-        if mv.is_drop() {
-            #[cfg(debug_assertions)]
-            check_state("drop", self, epoch_before, hash_before);
-            return captured_value;
-        }
+        // NOTE: drop moves cannot be captures in shogi; the branch above is unreachable for drops.
 
         // from が存在しない／from に駒が無い場合は不正入力（生成やメタデータの不整合）。
         // SEE は順序付け用のヒューリスティックなので、ここでは安全側に早期終了する。
@@ -284,6 +408,123 @@ impl Position {
         #[cfg(debug_assertions)]
         check_state("final", self, epoch_before, hash_before);
 
+        gain[0]
+    }
+
+    /// Evaluate the exchange outcome if we make a quiet (non-capture, non-drop)
+    /// move `mv` and the opponent starts by capturing the moved piece on `to`.
+    /// This is effectively a "landing SEE" that answers: is the destination
+    /// square tactically safe for the moved piece?
+    ///
+    /// Returns material gain from our point of view (negative means we lose).
+    pub fn see_landing_after_move(&self, mv: Move, threshold: i32) -> i32 {
+        // Only meaningful for normal non-capturing moves
+        if mv.is_drop() || mv.is_capture_hint() {
+            return self.see(mv);
+        }
+
+        let Some(from) = mv.from() else {
+            return 0;
+        };
+        let to = mv.to();
+        let Some(moved_pt) = mv.piece_type() else {
+            return 0;
+        };
+
+        #[cfg(debug_assertions)]
+        let epoch_before = self.state_epoch();
+        #[cfg(debug_assertions)]
+        let hash_before = self.zobrist_hash();
+        #[cfg(debug_assertions)]
+        let check_state = |label: &str, pos: &Position, epoch: u64, hash: u64| {
+            debug_assert_eq!(pos.state_epoch(), epoch, "see_landing mutated state ({label})");
+            debug_assert_eq!(pos.zobrist_hash(), hash, "see_landing mutated hash ({label})");
+        };
+
+        // Build hypothetical occupancy after making mv (from cleared, to occupied)
+        let mut occupied = self.board.all_bb;
+        occupied.clear(from);
+        occupied.set(to);
+
+        // Pin info and attackers in the hypothetical position
+        let (black_pins, white_pins) = self.calculate_pins_for_see();
+        let mut attackers = self.get_all_attackers_to(to, occupied);
+
+        // Gain-array exchange starting with opponent capture
+        let mut gain = [0i32; SEE_GAIN_ARRAY_SIZE];
+        let mut depth = 0;
+        let moved_value = Self::see_piece_type_value(moved_pt);
+        let mut cumulative_eval = 0;
+        gain[0] = 0; // no capture yet
+        let mut stm = self.side_to_move; // will flip at loop head to opponent
+        let mut last_captured_value = moved_value;
+
+        loop {
+            stm = stm.opposite();
+            attackers &= occupied;
+
+            let pin_info = match stm {
+                crate::shogi::board::Color::Black => &black_pins,
+                crate::shogi::board::Color::White => &white_pins,
+            };
+
+            match self.pop_least_valuable_attacker_with_pins(
+                &mut attackers,
+                occupied,
+                stm,
+                to,
+                pin_info,
+            ) {
+                Some((sq, _piece, attacker_value)) => {
+                    depth += 1;
+                    gain[depth] = last_captured_value - gain[depth - 1];
+                    cumulative_eval = std::cmp::max(-cumulative_eval, gain[depth]);
+
+                    if threshold != 0 && depth >= 1 {
+                        let current_eval = if depth & 1 == 1 {
+                            -cumulative_eval
+                        } else {
+                            cumulative_eval
+                        };
+                        let max_remaining = self.estimate_max_remaining_value(
+                            &attackers,
+                            stm,
+                            threshold,
+                            current_eval,
+                        );
+                        let max_possible = if stm == self.side_to_move {
+                            current_eval + max_remaining
+                        } else {
+                            current_eval
+                        };
+                        if max_possible < threshold {
+                            #[cfg(debug_assertions)]
+                            check_state("landing_delta_prune", self, epoch_before, hash_before);
+                            return current_eval;
+                        }
+                    }
+
+                    if depth >= SEE_MAX_DEPTH {
+                        break;
+                    }
+                    occupied.clear(sq);
+                    occupied.set(to);
+                    last_captured_value = attacker_value;
+                    self.update_xray_attacks(sq, to, &mut attackers, occupied);
+                }
+                None => break,
+            }
+        }
+
+        for d in (0..depth).rev() {
+            gain[d] = std::cmp::max(-gain[d], gain[d + 1]);
+        }
+        if depth & 1 == 1 {
+            gain[0] = -gain[0];
+        }
+
+        #[cfg(debug_assertions)]
+        check_state("landing_final", self, epoch_before, hash_before);
         gain[0]
     }
 }

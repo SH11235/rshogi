@@ -11,7 +11,7 @@ use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
 use crate::search::common::{get_mate_distance, is_mate_score};
 use crate::search::constants::HELPER_SNAPSHOT_MIN_DEPTH;
-use crate::search::types::{clamp_score_cp, RootLine};
+use crate::search::types::{clamp_score_cp, normalize_root_pv, RootLine};
 use crate::search::types::{InfoStringCallback, NodeType};
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Move;
@@ -51,12 +51,19 @@ fn synthesize_primary_line_from_result(result: &mut SearchResult) {
         return;
     }
 
+    let root_hint = result.best_move.unwrap_or(pv[0]);
+    normalize_root_pv(&mut pv, root_hint);
+    if pv.len() > 32 {
+        pv.truncate(32);
+    }
+    let root_move = pv[0];
+
     // Fallback seldepth: prefer stats.seldepth, else derive from result.seldepth
     let seldepth = result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
 
     let line = RootLine {
         multipv_index: 1,
-        root_move: pv.first().copied().unwrap_or_else(Move::null),
+        root_move,
         score_internal: result.score,
         score_cp: clamp_score_cp(result.score),
         bound: result.node_type,
@@ -657,6 +664,11 @@ fn combine_results(
                     if pv.is_empty() {
                         continue;
                     }
+                    let root_hint = res.best_move.unwrap_or(pv[0]);
+                    normalize_root_pv(&mut pv, root_hint);
+                    if pv.len() > 32 {
+                        pv.truncate(32);
+                    }
                     let root = pv[0];
                     let ln = RootLine {
                         multipv_index: 1,
@@ -854,6 +866,7 @@ fn publish_helper_snapshot(
     // chosen_score must be the engine-internal score (mate distances retained)
     let mut chosen_score = result.score;
     let chosen_mate: Option<i32>;
+    let mut chosen_root_move: Option<Move> = result.best_move;
 
     let mut snapshot_source = "stats";
     if let Some(first_line) = result.lines.as_ref().and_then(|ls| ls.first()) {
@@ -870,6 +883,7 @@ fn publish_helper_snapshot(
                 .mate_distance
                 .or_else(|| crate::search::constants::mate_distance(chosen_score));
             snapshot_source = "lines";
+            chosen_root_move = Some(first_line.root_move);
         } else {
             // lines[0] is fail-high/low and stats.pv exists; prefer stats.pv for stability
             pv.extend(result.stats.pv.iter().copied());
@@ -880,17 +894,20 @@ fn publish_helper_snapshot(
         pv.extend(result.stats.pv.iter().copied());
         chosen_mate = crate::search::constants::mate_distance(chosen_score);
     }
-    if pv.len() > 32 {
-        pv.truncate(32);
-    }
     if pv.is_empty() {
         if let Some(best) = result.best_move {
             pv.push(best);
+            chosen_root_move.get_or_insert(best);
         } else {
             return;
         }
     }
 
+    let root_move = chosen_root_move.unwrap_or_else(|| pv[0]);
+    normalize_root_pv(&mut pv, root_move);
+    if pv.len() > 32 {
+        pv.truncate(32);
+    }
     let root_move = pv[0];
     let seldepth = result.stats.seldepth.or(Some(result.seldepth.min(u32::from(u8::MAX)) as u8));
     let elapsed_ms = result.stats.elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
@@ -995,6 +1012,35 @@ mod tests {
 
     fn helper_share(result: &SearchResult) -> f64 {
         result.stats.helper_share_pct.unwrap_or(0.0)
+    }
+
+    #[test]
+    fn synthesize_primary_line_normalizes_pv_head() {
+        use crate::shogi::{Move, Square};
+
+        let best_move = Move::normal(Square::new(7, 6), Square::new(7, 5), false);
+        let tail_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
+
+        let stats = SearchStats {
+            pv: vec![tail_move, best_move],
+            depth: 4,
+            seldepth: Some(4),
+            elapsed: std::time::Duration::from_millis(80),
+            ..Default::default()
+        };
+
+        let mut result = SearchResult::with_node_type(Some(best_move), 120, stats, NodeType::Exact);
+        result.lines = None;
+
+        synthesize_primary_line_from_result(&mut result);
+
+        let lines = result.lines.as_ref().expect("line must be synthesized");
+        let line = lines.first().expect("line should exist");
+        assert_eq!(line.root_move, best_move);
+        assert_eq!(line.pv[0], best_move);
+        assert_eq!(line.pv[1], tail_move);
+        let count = line.pv.iter().filter(|&&mv| mv == best_move).count();
+        assert_eq!(count, 1, "best_move should appear exactly once after normalization");
     }
 
     #[test]
@@ -1335,5 +1381,59 @@ mod tests {
             snapshot.score_cp, 120,
             "Score should be result.score when using stats.pv fallback"
         );
+    }
+
+    #[test]
+    fn helper_snapshot_normalizes_stats_pv_head() {
+        // Regression guard: stats.pv が best_move と異なる先頭を持つ場合でも、
+        // publish_helper_snapshot が head を best_move に揃えることを確認する。
+        use crate::shogi::{Move, Square};
+
+        let stop_ctrl = Arc::new(StopController::new());
+        let session_id = 789u64;
+        let root_key = 0xCAFE_BABE_DEAD_BEEFu64;
+        let worker_id = 3;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        stop_ctrl.publish_session(Some(&stop_flag), session_id);
+
+        let best_move = Move::normal(Square::new(7, 6), Square::new(7, 5), false); // 2g2f
+        let tail_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false); // 7g7f
+
+        // stats.pv の先頭は tail_move（best_move ではない）
+        let stats_pv = vec![tail_move, best_move];
+
+        let result = SearchResult {
+            best_move: Some(best_move),
+            score: 80,
+            depth: HELPER_SNAPSHOT_MIN_DEPTH,
+            seldepth: 6,
+            nodes: 2048,
+            nps: 50_000,
+            node_type: NodeType::Exact,
+            stats: SearchStats {
+                pv: stats_pv,
+                elapsed: std::time::Duration::from_millis(150),
+                depth: HELPER_SNAPSHOT_MIN_DEPTH as u8,
+                seldepth: Some(6),
+                ..Default::default()
+            },
+            lines: None,
+            hashfull: 0,
+            stop_info: None,
+            end_reason: crate::search::types::TerminationReason::Completed,
+            ponder: None,
+        };
+
+        publish_helper_snapshot(&stop_ctrl, session_id, root_key, worker_id, &result, None);
+
+        let snapshot = stop_ctrl
+            .try_read_snapshot()
+            .expect("Snapshot should exist after helper publish");
+
+        assert_eq!(snapshot.pv[0], best_move, "Snapshot PV head must match best_move");
+        let best_count = snapshot.pv.iter().filter(|&&mv| mv == best_move).count();
+        assert_eq!(best_count, 1, "best_move should appear exactly once after normalization");
+        assert_eq!(snapshot.pv[1], tail_move, "Original PV tail should be preserved");
     }
 }

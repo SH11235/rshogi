@@ -23,9 +23,11 @@ use crate::usi::{parse_usi_move, parse_usi_square};
 use crate::Position;
 use smallvec::SmallVec;
 
-use super::driver::ClassicBackend;
+use super::driver::{root_see_gate_should_skip, ClassicBackend};
 use super::pruning::NullMovePruneParams;
-use super::pvs::SearchContext;
+use super::pvs::{
+    capture_see_guard_should_skip, quiet_see_guard_should_skip, CaptureFutilityArgs, SearchContext,
+};
 use super::SearchProfile;
 
 // NOTE: 検索パラメータはグローバル(Atomic)で共有されるため、
@@ -33,6 +35,19 @@ use super::SearchProfile;
 // 他テストに干渉しうる。CIでの不安定要因になっていたため、
 // グローバル・ロックで該当テストを直列化する。
 static TEST_SEARCH_PARAMS_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+fn make_bad_drop_position() -> Position {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.hands[Color::Black as usize][PieceType::Gold.hand_index().unwrap()] = 1;
+    pos
+}
 
 fn position_after_moves(moves: &[&str]) -> Position {
     let mut pos = Position::startpos();
@@ -79,6 +94,10 @@ fn qsearch_detects_mate_when_evasion_missing() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -86,11 +105,121 @@ fn qsearch_detects_mate_when_evasion_missing() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
-    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0);
+    let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
+    let score = backend.qsearch(
+        &pos,
+        super::qsearch::SearchWindow {
+            alpha: -SEARCH_INF,
+            beta: SEARCH_INF,
+        },
+        &mut ctx,
+        super::qsearch::QSearchFrame {
+            ply: 0,
+            qdepth: 0,
+            prev_move: None,
+        },
+        &heur,
+        &mut budget,
+    );
 
     assert_eq!(score, mate_score(0, false));
+}
+
+#[test]
+fn quiet_see_gate_skips_bad_sacrifice() {
+    let pos = make_bad_drop_position();
+    let mv = parse_usi_move("G*5e").expect("valid drop move");
+    assert!(pos.see(mv) < 0, "drop should lose material in SEE");
+    // LMR適用後の残り深さ(lmr_depth)>0 で発火
+    assert!(quiet_see_guard_should_skip(&pos, mv, 2, false, true, false));
+    // PVでは発火しない
+    assert!(!quiet_see_guard_should_skip(&pos, mv, 2, true, true, false));
+}
+
+#[test]
+fn root_see_gate_filters_quiet_drop() {
+    let pos = make_bad_drop_position();
+    let mv = parse_usi_move("G*5e").expect("valid drop move");
+    assert!(root_see_gate_should_skip(&pos, mv, 200));
+    assert!(!root_see_gate_should_skip(&pos, mv, 0));
+}
+
+#[test]
+fn capture_see_guard_skips_bad_capture() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("4e").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("4d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("4c").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("4b").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    let mv = Move::normal_with_piece(
+        parse_usi_square("4e").unwrap(),
+        parse_usi_square("4d").unwrap(),
+        false,
+        PieceType::Bishop,
+        Some(PieceType::Pawn),
+    );
+    assert!(pos.is_legal_move(mv));
+    assert!(capture_see_guard_should_skip(&pos, mv, 4, true, false));
+    assert!(!capture_see_guard_should_skip(&pos, mv, 4, false, false));
+}
+
+#[test]
+fn capture_futility_skips_hopeless_capture() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("8a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("2a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("7b").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    let mv = Move::normal_with_piece(
+        parse_usi_square("5g").unwrap(),
+        parse_usi_square("5f").unwrap(),
+        false,
+        PieceType::Silver,
+        Some(PieceType::Gold),
+    );
+    let evaluator = MaterialEvaluator;
+    let static_eval = evaluator.evaluate(&pos);
+    assert!(static_eval <= -1500, "expected large deficit, got {static_eval}");
+    let skip = super::pvs::capture_futility_should_skip(
+        &pos,
+        mv,
+        &CaptureFutilityArgs {
+            depth: 2,
+            alpha: -200,
+            static_eval,
+            is_capture: true,
+            gives_check: false,
+            prev_risky: false,
+        },
+    );
+    assert!(skip, "capture futility should prune hopeless capture with large eval deficit");
 }
 
 #[test]
@@ -179,6 +308,10 @@ fn tt_bound_follows_used_window() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &t0,
@@ -186,6 +319,10 @@ fn tt_bound_follows_used_window() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
     let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
     let mut heur = Heuristics::default();
@@ -274,6 +411,10 @@ fn qsearch_respects_qnodes_limit() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -281,9 +422,29 @@ fn qsearch_respects_qnodes_limit() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: limit_value,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
-    let _ = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0);
+    let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
+    let _ = backend.qsearch(
+        &pos,
+        super::qsearch::SearchWindow {
+            alpha: -SEARCH_INF,
+            beta: SEARCH_INF,
+        },
+        &mut ctx,
+        super::qsearch::QSearchFrame {
+            ply: 0,
+            qdepth: 0,
+            prev_move: None,
+        },
+        &heur,
+        &mut budget,
+    );
 
     assert!(
         qnodes <= limit_value,
@@ -311,6 +472,10 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -318,11 +483,28 @@ fn qsearch_in_check_processes_evasion_before_qnode_cutoff() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: 1,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let alpha = -1000;
     let beta = 1000;
-    let _score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0);
+    let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
+    let _score = backend.qsearch(
+        &pos,
+        super::qsearch::SearchWindow { alpha, beta },
+        &mut ctx,
+        super::qsearch::QSearchFrame {
+            ply: 0,
+            qdepth: 0,
+            prev_move: None,
+        },
+        &heur,
+        &mut budget,
+    );
 
     assert!(
         nodes > 1,
@@ -430,6 +612,10 @@ fn qsearch_detects_mate_with_min_qnodes_budget() {
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = 1;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -437,9 +623,29 @@ fn qsearch_detects_mate_with_min_qnodes_budget() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
-    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, 0);
+    let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
+    let score = backend.qsearch(
+        &pos,
+        super::qsearch::SearchWindow {
+            alpha: -SEARCH_INF,
+            beta: SEARCH_INF,
+        },
+        &mut ctx,
+        super::qsearch::QSearchFrame {
+            ply: 0,
+            qdepth: 0,
+            prev_move: None,
+        },
+        &heur,
+        &mut budget,
+    );
 
     assert_eq!(score, mate_score(0, false));
 }
@@ -454,6 +660,10 @@ fn qsearch_returns_stand_pat_when_limit_exhausted() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -461,13 +671,30 @@ fn qsearch_returns_stand_pat_when_limit_exhausted() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: 1,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let material = MaterialEvaluator;
     let stand_pat = material.evaluate(&pos);
     let alpha = stand_pat - 200;
     let beta = stand_pat + 200;
-    let score = backend.qsearch(&pos, alpha, beta, &mut ctx, 0);
+    let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
+    let score = backend.qsearch(
+        &pos,
+        super::qsearch::SearchWindow { alpha, beta },
+        &mut ctx,
+        super::qsearch::QSearchFrame {
+            ply: 0,
+            qdepth: 0,
+            prev_move: None,
+        },
+        &heur,
+        &mut budget,
+    );
 
     assert_eq!(score, stand_pat.max(alpha));
     assert_eq!(qnodes, 1);
@@ -498,6 +725,10 @@ fn qsearch_prunes_negative_see_small_capture() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -505,11 +736,31 @@ fn qsearch_prunes_negative_see_small_capture() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: crate::search::constants::DEFAULT_QNODES_LIMIT,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let material = MaterialEvaluator;
     let stand_pat = material.evaluate(&pos);
-    let score = backend.qsearch(&pos, stand_pat - 200, stand_pat + 200, &mut ctx, 0);
+    let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
+    let score = backend.qsearch(
+        &pos,
+        super::qsearch::SearchWindow {
+            alpha: stand_pat - 200,
+            beta: stand_pat + 200,
+        },
+        &mut ctx,
+        super::qsearch::QSearchFrame {
+            ply: 0,
+            qdepth: 0,
+            prev_move: None,
+        },
+        &heur,
+        &mut budget,
+    );
 
     assert_eq!(score, stand_pat);
     assert_eq!(qnodes, 1, "negative SEE small capture should be pruned without expanding");
@@ -537,6 +788,10 @@ fn qsearch_depth_cap_still_handles_in_check() {
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -544,10 +799,30 @@ fn qsearch_depth_cap_still_handles_in_check() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit: crate::search::constants::DEFAULT_QNODES_LIMIT,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
 
     let max_ply = crate::search::constants::MAX_QUIESCE_DEPTH as u32;
-    let score = backend.qsearch(&pos, -SEARCH_INF, SEARCH_INF, &mut ctx, max_ply);
+    let mut budget = super::qsearch::initial_quiet_check_budget(&ctx);
+    let heur = Heuristics::default();
+    let score = backend.qsearch(
+        &pos,
+        super::qsearch::SearchWindow {
+            alpha: -SEARCH_INF,
+            beta: SEARCH_INF,
+        },
+        &mut ctx,
+        super::qsearch::QSearchFrame {
+            ply: max_ply,
+            qdepth: 0,
+            prev_move: None,
+        },
+        &heur,
+        &mut budget,
+    );
 
     assert_eq!(score, mate_score(max_ply as u8, false));
 }
@@ -858,7 +1133,8 @@ fn evaluator_hooks_balance_for_classic_backend() {
     // 初期局面を使用（探索枝が豊富で、NMPが確実に発動する）
     let pos = Position::startpos();
 
-    let limits = SearchLimitsBuilder::default().depth(5).build();
+    let depth_limit = (crate::search::params::NMP_MIN_DEPTH + 1) as u8;
+    let limits = SearchLimitsBuilder::default().depth(depth_limit).build();
 
     let _ = backend.think_blocking(&pos, &limits, None);
 
@@ -1486,12 +1762,17 @@ fn null_move_respects_runtime_toggle() {
     let mut lmr_counter = 0;
 
     crate::search::params::set_nmp_enabled(true);
-    let limits = SearchLimitsBuilder::default().depth(5).build();
+    let nmp_depth = crate::search::params::NMP_MIN_DEPTH + 1;
+    let limits = SearchLimitsBuilder::default().depth(nmp_depth as u8).build();
     let start_time = Instant::now();
     let mut nodes = 0_u64;
     let mut seldepth = 0_u32;
     let mut qnodes = 0_u64;
     let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
     let mut ctx = SearchContext {
         limits: &limits,
         start_time: &start_time,
@@ -1499,11 +1780,15 @@ fn null_move_respects_runtime_toggle() {
         seldepth: &mut seldepth,
         qnodes: &mut qnodes,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
     };
     let static_eval = evaluator.evaluate(&pos);
     let allowed = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
-        depth: 4,
+        depth: nmp_depth,
         pos: &pos,
         beta: 0,
         static_eval,
@@ -1515,6 +1800,8 @@ fn null_move_respects_runtime_toggle() {
         lmr_counter: &mut lmr_counter,
         ctx: &mut ctx,
         is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: None,
     });
     assert!(allowed.is_some(), "NMP should run when runtime toggle is enabled");
 
@@ -1528,6 +1815,10 @@ fn null_move_respects_runtime_toggle() {
     let mut nodes_off = 0_u64;
     let mut seldepth_off = 0_u32;
     let mut qnodes_off = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected_off = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set_off = 0_u64;
     let mut ctx_off = SearchContext {
         limits: &limits,
         start_time: &start_time_off,
@@ -1535,10 +1826,14 @@ fn null_move_respects_runtime_toggle() {
         seldepth: &mut seldepth_off,
         qnodes: &mut qnodes_off,
         qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected_off,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set_off,
     };
     let denied = backend.null_move_prune(NullMovePruneParams {
         toggles: &backend.profile.prune,
-        depth: 4,
+        depth: nmp_depth,
         pos: &pos,
         beta: 0,
         static_eval,
@@ -1550,10 +1845,120 @@ fn null_move_respects_runtime_toggle() {
         lmr_counter: &mut lmr_counter_off,
         ctx: &mut ctx_off,
         is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: None,
     });
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
 
     crate::search::params::set_nmp_enabled(true);
+}
+
+#[test]
+fn nmp_verify_rejects_false_cut() {
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    crate::search::params::__test_reset_runtime_values();
+    crate::search::params::set_nmp_enabled(true);
+
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
+    let pos = Position::startpos();
+    let mut stack = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+    let mut heur = Heuristics::default();
+    let mut tt_hits = 0;
+    let mut beta_cuts = 0;
+    let mut lmr_counter = 0;
+    let nmp_depth = crate::search::params::NMP_MIN_DEPTH + 1;
+    let limits = SearchLimitsBuilder::default().depth(nmp_depth as u8).build();
+    let start_time = Instant::now();
+    let mut nodes = 0_u64;
+    let mut seldepth = 0_u32;
+    let mut qnodes = 0_u64;
+    let qnodes_limit = crate::search::constants::DEFAULT_QNODES_LIMIT;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set = 0_u64;
+    let mut ctx = SearchContext {
+        limits: &limits,
+        start_time: &start_time,
+        nodes: &mut nodes,
+        seldepth: &mut seldepth,
+        qnodes: &mut qnodes,
+        qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set,
+    };
+    let static_eval = evaluator.evaluate(&pos);
+    let beta = -5000;
+    super::pruning::__test_set_nmp_verify_forced_score(Some(beta - 500));
+    let rejected = backend.null_move_prune(NullMovePruneParams {
+        toggles: &backend.profile.prune,
+        depth: nmp_depth,
+        pos: &pos,
+        beta,
+        static_eval,
+        ply: 0,
+        stack: &mut stack,
+        heur: &mut heur,
+        tt_hits: &mut tt_hits,
+        beta_cuts: &mut beta_cuts,
+        lmr_counter: &mut lmr_counter,
+        ctx: &mut ctx,
+        is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: Some(crate::search::params::NMP_MIN_DEPTH),
+    });
+    assert!(rejected.is_none(), "verify should reject false cut when forced score < beta");
+
+    super::pruning::__test_set_nmp_verify_forced_score(Some(beta));
+    let mut stack_accept = vec![SearchStack::default(); crate::search::constants::MAX_PLY + 1];
+    let mut heur_accept = Heuristics::default();
+    let mut tt_hits_accept = 0;
+    let mut beta_cuts_accept = 0;
+    let mut lmr_counter_accept = 0;
+    let start_time_acc = Instant::now();
+    let mut nodes_acc = 0_u64;
+    let mut seldepth_acc = 0_u32;
+    let mut qnodes_acc = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_detected_acc = 0_u64;
+    #[cfg(feature = "diagnostics")]
+    let mut abdada_busy_set_acc = 0_u64;
+    let mut ctx_acc = SearchContext {
+        limits: &limits,
+        start_time: &start_time_acc,
+        nodes: &mut nodes_acc,
+        seldepth: &mut seldepth_acc,
+        qnodes: &mut qnodes_acc,
+        qnodes_limit,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_detected: &mut abdada_busy_detected_acc,
+        #[cfg(feature = "diagnostics")]
+        abdada_busy_set: &mut abdada_busy_set_acc,
+    };
+    let accepted_cut = backend.null_move_prune(NullMovePruneParams {
+        toggles: &backend.profile.prune,
+        depth: nmp_depth,
+        pos: &pos,
+        beta,
+        static_eval,
+        ply: 0,
+        stack: &mut stack_accept,
+        heur: &mut heur_accept,
+        tt_hits: &mut tt_hits_accept,
+        beta_cuts: &mut beta_cuts_accept,
+        lmr_counter: &mut lmr_counter_accept,
+        ctx: &mut ctx_acc,
+        is_pv: false,
+        #[cfg(test)]
+        verify_min_depth_override: Some(crate::search::params::NMP_MIN_DEPTH),
+    });
+    assert!(accepted_cut.is_some(), "verify should accept cut when forced score >= beta");
+
+    super::pruning::__test_set_nmp_verify_forced_score(None);
 }
 #[test]
 fn excluded_drop_only_blocks_same_piece_type() {

@@ -15,7 +15,7 @@ use log::info;
 use crate::finalize::{emit_bestmove_once, finalize_and_send, fmt_hash};
 use crate::io::info_string;
 use crate::oob::poll_oob_finalize;
-use crate::state::{EngineState, GoParams, UsiOptions};
+use crate::state::{EngineState, GoParams, LogProfile, UsiOptions};
 use crate::usi_adapter;
 
 pub fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -149,6 +149,8 @@ pub fn limits_from_go(
     opts: &UsiOptions,
     ponder_flag: Option<Arc<AtomicBool>>,
     stop_flag: Arc<AtomicBool>,
+    // ルート局面（PVサニタイズ用にUSI出力コールバックが参照）
+    root_position: &engine_core::shogi::Position,
 ) -> SearchLimits {
     let builder = TimeParametersBuilder::new()
         .overhead_ms(opts.overhead_ms)
@@ -170,28 +172,6 @@ pub fn limits_from_go(
     tp.max_time_ratio = (opts.max_time_ratio_pct as f64 / 100.0).max(1.0);
     tp.move_horizon_trigger_ms = opts.move_horizon_trigger_ms;
     tp.move_horizon_min_moves = opts.move_horizon_min_moves;
-
-    // 純秒読み（main=0）時の締切リードを worst-case ネット遅延に加算して、
-    // エンジンの最終化をGUI締切（byoyomi）より前倒しにする。
-    // goコマンドのパラメータから純秒読みを推定: btime=wtime=0 かつ byoyomi>0
-    let byoyomi_total = gp.byoyomi.unwrap_or(0);
-    let b_main = gp.btime.unwrap_or(0);
-    let w_main = gp.wtime.unwrap_or(0);
-    let side_main_zero = match side {
-        Color::Black => b_main == 0,
-        Color::White => w_main == 0,
-    };
-    let pure_byoyomi = byoyomi_total > 0 && ((b_main == 0 && w_main == 0) || side_main_zero);
-    if pure_byoyomi && opts.byoyomi_deadline_lead_ms > 0 {
-        // 上限 2000ms（オプション側でも clamp 済み）。
-        let before = tp.network_delay2_ms;
-        tp.network_delay2_ms = tp.network_delay2_ms.saturating_add(opts.byoyomi_deadline_lead_ms);
-        // デバッグ容易性のためのログ
-        info_string(format!(
-            "deadline_lead_applied=1 before={} add={} after={}",
-            before, opts.byoyomi_deadline_lead_ms, tp.network_delay2_ms
-        ));
-    }
 
     let mut builder = SearchLimitsBuilder::default();
 
@@ -241,18 +221,22 @@ pub fn limits_from_go(
     if gp.ponder {
         if let Some(flag) = ponder_flag {
             builder = builder.ponder_hit_flag(flag).ponder_with_inner();
-            crate::io::info_string("ponder_wrapper=1");
-        } else {
+            if !opts.log_profile.is_prod() {
+                crate::io::info_string("ponder_wrapper=1");
+            }
+        } else if !opts.log_profile.is_prod() {
             // go ponder だがフラグがないケース（オプションOFFなど）でも挙動明示
             crate::io::info_string("ponder_wrapper=0 (flag_missing)");
         }
-    } else {
+    } else if !opts.log_profile.is_prod() {
         crate::io::info_string("ponder_wrapper=0");
     }
 
     // Set up info callback for search progress reporting
     let multipv = opts.multipv.max(1);
     let stop_for_info = Arc::clone(&stop_flag);
+    let profile = opts.log_profile;
+    let root_pos_for_info = root_position.clone();
     let info_callback: InfoEventCallback = Arc::new(move |event| {
         if stop_for_info.load(Ordering::Relaxed) {
             return;
@@ -260,7 +244,7 @@ pub fn limits_from_go(
         if let InfoEvent::PV { line } = event {
             // Emit a unified PV info line via the adapter. We pass multipv>1 to
             // decide whether to include a multipv tag in the output for compatibility.
-            usi_adapter::emit_pv_line(line.as_ref(), multipv > 1);
+            usi_adapter::emit_pv_line_sanitized(line.as_ref(), &root_pos_for_info, multipv > 1);
         }
     });
 
@@ -268,6 +252,9 @@ pub fn limits_from_go(
     let stop_for_info_str = Arc::clone(&stop_flag);
     let info_string_callback: InfoStringCallback = Arc::new(move |msg: &str| {
         if stop_for_info_str.load(Ordering::Relaxed) {
+            return;
+        }
+        if should_suppress_core_info(profile, msg) {
             return;
         }
         println!("info string {msg}");
@@ -283,7 +270,9 @@ pub fn limits_from_go(
 
 pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // 入口診断ログ（go発行直後にプロセスが落ちるケースの切り分け用）
-    crate::io::info_string(format!("go_enter cmd={}", cmd));
+    if !state.opts.log_profile.is_prod() {
+        crate::io::info_string(format!("go_enter cmd={}", cmd));
+    }
     // 新しい go を受理する前に、前回探索から残っている OOB finalize 要求を掃除しておく。
     // SessionStart が届く前の Finalize を握りつぶすことで stale=1 ログを抑止する。
     poll_oob_finalize(state);
@@ -296,7 +285,9 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // Create a new stop_flag for each search session to avoid race conditions
     // with concurrent searches (previous session may still be running)
     let stop_flag = Arc::new(AtomicBool::new(false));
-    info_string(format!("stop_flag_create addr={:p}", Arc::as_ptr(&stop_flag)));
+    if state.opts.log_profile.at_least_qa() {
+        info_string(format!("stop_flag_create addr={:p}", Arc::as_ptr(&stop_flag)));
+    }
     let ponder_flag = if state.opts.ponder {
         Some(Arc::new(AtomicBool::new(false)))
     } else {
@@ -391,6 +382,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
         &state.opts,
         ponder_flag.clone(),
         Arc::clone(&stop_flag),
+        &search_position,
     );
 
     let mut tc_for_stop = limits.time_control.clone();
@@ -415,7 +407,12 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
             phase,
             &params,
         );
-        info_string(format!("time_budget soft_ms={} hard_ms={} tc={:?}", soft, hard, tc_for_stop));
+        if state.opts.log_profile.at_least_qa() {
+            info_string(format!(
+                "time_budget soft_ms={} hard_ms={} tc={:?}",
+                soft, hard, tc_for_stop
+            ));
+        }
 
         if hard != u64::MAX && hard > 0 && !gp.ponder {
             let base = Instant::now();
@@ -434,19 +431,8 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
 
             // Record deadlines into EngineState for USI-side OOB finalize enforcement
             state.deadline_hard = Some(hard_deadline);
-            // Conservative: near-hard is optional; if desired, compute as (hard - lead)
-            let lead = if state.opts.byoyomi_deadline_lead_ms > 0 {
-                state.opts.byoyomi_deadline_lead_ms
-            } else if matches!(tc_for_stop, TimeControl::Byoyomi { .. }) {
-                200 // fallback lead for pure byoyomi to match YaneuraOu behavior
-            } else {
-                0
-            };
-            state.deadline_near = if lead > 0 {
-                hard_deadline.checked_sub(Duration::from_millis(lead))
-            } else {
-                None
-            };
+
+            state.deadline_near = None;
             state.deadline_near_notified = false;
         } else {
             // No meaningful time budget → clear deadlines
@@ -472,25 +458,31 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     state.active_time_manager = session.time_manager();
     if gp.ponder {
         state.active_time_manager = None;
-        info_string("ponder_time_manager_detached=1");
+        if state.opts.log_profile.at_least_qa() {
+            info_string("ponder_time_manager_detached=1");
+        }
     }
     state.search_session = Some(session);
     state.current_is_stochastic_ponder = current_is_stochastic_ponder;
     state.current_is_ponder = gp.ponder;
     state.current_root_hash = Some(search_position.zobrist_hash());
     state.bestmove_emitted = false;
-    info_string(format!(
-        "search_started sid={} root={} gui={} ponder={} stoch={}",
-        session_id,
-        fmt_hash(search_position.zobrist_hash()),
-        fmt_hash(state.position.zobrist_hash()),
-        gp.ponder,
-        state.current_is_stochastic_ponder
-    ));
+    if state.opts.log_profile.at_least_qa() {
+        info_string(format!(
+            "search_started sid={} root={} gui={} ponder={} stoch={}",
+            session_id,
+            fmt_hash(search_position.zobrist_hash()),
+            fmt_hash(state.position.zobrist_hash()),
+            gp.ponder,
+            state.current_is_stochastic_ponder
+        ));
+    }
 
     // Enhanced diagnostics for time loss investigation
-    let threads = state.opts.threads;
-    info_string(format!("search_diagnostics sid={} threads={}", session_id, threads));
+    if state.opts.log_profile.at_least_qa() {
+        let threads = state.opts.threads;
+        info_string(format!("search_diagnostics sid={} threads={}", session_id, threads));
+    }
 
     Ok(())
 }
@@ -531,6 +523,7 @@ pub fn poll_search_completion(state: &mut EngineState) {
                                 &state.opts,
                                 ponder_flag.clone(),
                                 Arc::clone(&stop_flag),
+                                &state.position,
                             );
                             let mut tc_for_stop = limits.time_control.clone();
                             if let TimeControl::Ponder(inner) = tc_for_stop {
@@ -744,10 +737,12 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
             tm.ensure_scheduled_stop(elapsed);
             let new_deadline = tm.scheduled_end_ms();
             if new_deadline != u64::MAX {
-                info_string(format!(
-                    "tm_watchdog_schedule elapsed_ms={} opt_ms={} scheduled_ms={}",
-                    elapsed, opt, new_deadline
-                ));
+                if state.opts.log_profile.at_least_qa() {
+                    info_string(format!(
+                        "tm_watchdog_schedule elapsed_ms={} opt_ms={} scheduled_ms={}",
+                        elapsed, opt, new_deadline
+                    ));
+                }
                 // 同一 tick 内の再評価は、new_deadline が elapsed より未来にあり、
                 // かつグレース込みで到達している場合にのみ確定させる。
                 if new_deadline > elapsed
@@ -766,9 +761,52 @@ pub fn tick_time_watchdog(state: &mut EngineState) {
 
     if let Some(reason) = finalize_reason {
         stop_flag.store(true, Ordering::Release);
-        info_string(format!("tm_watchdog_stop reason={:?} elapsed_ms={}", reason, elapsed));
+        if !(state.opts.log_profile.is_prod() && matches!(reason, FinalizeReason::Planned)) {
+            info_string(format!("tm_watchdog_stop reason={:?} elapsed_ms={}", reason, elapsed));
+        }
         // StopController 経由で finalize を要求し、優先度制御と stop_flag 連携を統一する。
         state.stop_controller.request_finalize(reason);
+    }
+}
+
+fn should_suppress_core_info(profile: LogProfile, msg: &str) -> bool {
+    const QA_BLOCK_PREFIXES: &[&str] = &[
+        "iter_start ",
+        "iter_complete ",
+        "tt_snapshot ",
+        "root_hint_applied",
+        "depth ",
+        "seldepth ",
+        "hashfull ",
+    ];
+
+    match profile {
+        LogProfile::Dev => false,
+        LogProfile::QA => QA_BLOCK_PREFIXES.iter().any(|prefix| msg.starts_with(prefix)),
+        LogProfile::Prod => {
+            if QA_BLOCK_PREFIXES.iter().any(|prefix| msg.starts_with(prefix)) {
+                return true;
+            }
+            const PROD_EXTRA_PREFIXES: &[&str] = &[
+                "near_deadline_params",
+                "deadline_lead_applied",
+                "deadline_hit ",
+                "aspiration ",
+                "postverify_",
+                "helper_share_pct",
+                "heuristics ",
+                "sanity_",
+                "forced_eval",
+                "ponderhit_time_manager",
+                "session_publish ",
+                "smp_mode=",
+                "time_caps ",
+            ];
+            if PROD_EXTRA_PREFIXES.iter().any(|prefix| msg.starts_with(prefix)) {
+                return true;
+            }
+            false
+        }
     }
 }
 

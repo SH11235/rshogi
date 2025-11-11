@@ -359,6 +359,93 @@ impl ContinuationHistory {
     }
 }
 
+/// Pawn history (YO-style, simplified) – tracks quiet-move success by piece/to square
+#[derive(Clone)]
+pub struct PawnHistory {
+    scores: [[[i16; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; 2],
+}
+
+impl Default for PawnHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PawnHistory {
+    pub fn new() -> Self {
+        PawnHistory {
+            scores: [[[0; SHOGI_BOARD_SIZE]; NUM_PIECE_TYPES]; 2],
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, color: Color, piece: PieceType, to: Square) -> i32 {
+        i32::from(self.scores[color as usize][piece as usize][to.index()])
+    }
+
+    pub fn update_good(&mut self, color: Color, piece: PieceType, to: Square, depth: i32) {
+        let bonus = scaled_bonus(depth, QUIET_HISTORY_BONUS_FACTOR);
+        self.apply(color, piece, to, bonus);
+    }
+
+    pub fn update_bad(&mut self, color: Color, piece: PieceType, to: Square, depth: i32) {
+        let penalty = -scaled_bonus(depth, QUIET_HISTORY_BONUS_FACTOR);
+        self.apply(color, piece, to, penalty);
+    }
+
+    fn apply(&mut self, color: Color, piece: PieceType, to: Square, delta: i32) {
+        let score = &mut self.scores[color as usize][piece as usize][to.index()];
+        apply_history_update(score, delta, QUIET_HISTORY_MAX, QUIET_HISTORY_SHIFT);
+    }
+
+    pub fn age_scores(&mut self) {
+        for color_scores in &mut self.scores {
+            for piece_scores in color_scores {
+                for score in piece_scores {
+                    age_value(score, QUIET_HISTORY_AGING_SHIFT);
+                }
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for color_scores in &mut self.scores {
+            for piece_scores in color_scores {
+                piece_scores.fill(0);
+            }
+        }
+    }
+
+    pub(crate) fn merge_from(&mut self, other: &Self) {
+        for color in 0..2 {
+            for piece in 0..NUM_PIECE_TYPES {
+                for to in 0..SHOGI_BOARD_SIZE {
+                    merge_history_value(
+                        &mut self.scores[color][piece][to],
+                        other.scores[color][piece][to],
+                        QUIET_HISTORY_MAX,
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn max_abs(&self) -> i16 {
+        let mut max_val = 0i16;
+        for color_scores in &self.scores {
+            for piece_scores in color_scores {
+                for &score in piece_scores {
+                    let val = score.abs();
+                    if val > max_val {
+                        max_val = val;
+                    }
+                }
+            }
+        }
+        max_val
+    }
+}
+
 /// Capture history - tracks success of captures by attacker/victim/to square
 #[derive(Clone)]
 pub struct CaptureHistory {
@@ -484,6 +571,8 @@ pub struct History {
     pub continuation: ContinuationHistory,
     /// Capture history
     pub capture: CaptureHistory,
+    /// Pawn history (quiet move success)
+    pub pawn_history: PawnHistory,
 }
 
 impl Default for History {
@@ -500,6 +589,7 @@ impl History {
             counter_moves: CounterMoveHistory::new(),
             continuation: ContinuationHistory::new(),
             capture: CaptureHistory::new(),
+            pawn_history: PawnHistory::new(),
         }
     }
 
@@ -549,6 +639,10 @@ impl History {
                 self.continuation.update_good(key, depth);
             }
         }
+
+        if let Some(curr_piece) = mv.piece_type() {
+            self.pawn_history.update_good(color, curr_piece, mv.to(), depth);
+        }
     }
 
     /// Update history tables for tried moves that didn't cause cut-off
@@ -571,6 +665,10 @@ impl History {
                 );
                 self.continuation.update_bad(key, depth);
             }
+        }
+
+        if let Some(curr_piece) = mv.piece_type() {
+            self.pawn_history.update_bad(color, curr_piece, mv.to(), depth);
         }
     }
 
