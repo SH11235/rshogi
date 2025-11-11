@@ -9,11 +9,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{arg, Command};
-use engine_core::{
-    evaluation::nnue::features::{extract_features, FE_END},
-    shogi::SHOGI_BOARD_SIZE,
-    Color, Position,
-};
+use engine_core::{evaluation::nnue::features::extract_features, Color, Position};
 use serde::Deserialize;
 use tools::io_detect::open_maybe_compressed_reader;
 use tools::nnfc_v1::{
@@ -513,6 +509,7 @@ fn write_position_samples<W: Write>(
         }
         #[cfg(debug_assertions)]
         {
+            use engine_core::{evaluation::nnue::features::FE_END, shogi::SHOGI_BOARD_SIZE};
             let max_dim = (SHOGI_BOARD_SIZE * FE_END) as u32;
             debug_assert!(
                 features_buf.iter().all(|&f| f < max_dim),

@@ -10,9 +10,74 @@ use crate::{
     },
     Color, Piece, PieceType, Position, Square,
 };
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Once;
 
 #[cfg(debug_assertions)]
 use log::{error, warn};
+
+/// Variants of HalfKP feature layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HalfKpVariant {
+    Standard = 0,
+    Vm = 1,
+}
+
+static HALF_KP_VARIANT: AtomicU8 = AtomicU8::new(HalfKpVariant::Standard as u8);
+static HALF_KP_VARIANT_INIT: Once = Once::new();
+
+fn ensure_halfkp_variant_initialized() {
+    HALF_KP_VARIANT_INIT.call_once(|| {
+        let default = if cfg!(feature = "half_kp_vm_default") {
+            HalfKpVariant::Vm
+        } else {
+            HalfKpVariant::Standard
+        };
+        HALF_KP_VARIANT.store(default as u8, Ordering::Relaxed);
+        if let Some(env_variant) = read_halfkp_variant_from_env() {
+            HALF_KP_VARIANT.store(env_variant as u8, Ordering::Relaxed);
+        }
+    });
+}
+
+fn read_halfkp_variant_from_env() -> Option<HalfKpVariant> {
+    const KEYS: [&str; 3] = [
+        "SHOGI_HALF_KP_VARIANT",
+        "NNUE_HALF_KP_VARIANT",
+        "HALF_KP_VARIANT",
+    ];
+    for key in KEYS {
+        if let Ok(value) = std::env::var(key) {
+            if let Some(parsed) = parse_halfkp_variant(&value) {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
+fn parse_halfkp_variant(raw: &str) -> Option<HalfKpVariant> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "vm" | "halfkp_vm" | "mirror" | "vmirror" => Some(HalfKpVariant::Vm),
+        "standard" | "std" | "classic" | "halfkp" => Some(HalfKpVariant::Standard),
+        _ => None,
+    }
+}
+
+/// Return the currently active HalfKP variant (default: Standard).
+pub fn halfkp_variant() -> HalfKpVariant {
+    ensure_halfkp_variant_initialized();
+    match HALF_KP_VARIANT.load(Ordering::Relaxed) {
+        1 => HalfKpVariant::Vm,
+        _ => HalfKpVariant::Standard,
+    }
+}
+
+/// Override the active HalfKP variant at runtime.
+pub fn set_halfkp_variant(variant: HalfKpVariant) {
+    ensure_halfkp_variant_initialized();
+    HALF_KP_VARIANT.store(variant as u8, Ordering::Relaxed);
+}
 
 // Use global MAX_HAND_PIECES from piece_constants
 
@@ -105,6 +170,53 @@ pub fn halfkp_index(king_sq: Square, piece: BonaPiece) -> usize {
     index
 }
 
+#[inline]
+fn feature_index_from_bona(king_sq: Square, piece: BonaPiece) -> usize {
+    encode_feature_index(king_sq, piece.index())
+}
+
+#[inline]
+fn encode_feature_index(king_sq: Square, piece_idx: usize) -> usize {
+    let (king_sq_adj, mirror_board) = adjust_king_for_variant(king_sq);
+    let piece_idx_adj = if mirror_board {
+        mirror_board_piece_idx(piece_idx)
+    } else {
+        piece_idx
+    };
+    king_sq_adj.index() * FE_END + piece_idx_adj
+}
+
+#[inline]
+fn adjust_king_for_variant(king_sq: Square) -> (Square, bool) {
+    if halfkp_variant() == HalfKpVariant::Vm && should_mirror_for_vm(king_sq) {
+        (king_sq.mirror_file(), true)
+    } else {
+        (king_sq, false)
+    }
+}
+
+#[inline]
+fn should_mirror_for_vm(king_sq: Square) -> bool {
+    king_sq.file() <= 3
+}
+
+#[inline]
+fn mirror_board_piece_idx(piece_idx: usize) -> usize {
+    if piece_idx >= HAND_BASE_INDEX {
+        return piece_idx;
+    }
+    let per_color = BOARD_FEATURE_GROUPS * SHOGI_BOARD_SIZE;
+    let (color_offset, piece_within_color) = if piece_idx >= per_color {
+        (per_color, piece_idx - per_color)
+    } else {
+        (0, piece_idx)
+    };
+    let piece_group = piece_within_color / SHOGI_BOARD_SIZE;
+    let sq_idx = piece_within_color % SHOGI_BOARD_SIZE;
+    let mirrored_sq_idx = Square(sq_idx as u8).mirror_file().index();
+    color_offset + piece_group * SHOGI_BOARD_SIZE + mirrored_sq_idx
+}
+
 /// us 視点の HalfKP インデックスを them 視点へ写像する
 ///
 /// - 王位置は盤面反転 (`Square::flip()`)
@@ -122,7 +234,7 @@ pub fn flip_us_them(feature_idx: usize) -> usize {
 
     let flipped_piece_idx = flip_bona_piece_index(piece_idx);
 
-    king_sq_flipped.index() * FE_END + flipped_piece_idx
+    encode_feature_index(king_sq_flipped, flipped_piece_idx)
 }
 
 const BOARD_FEATURE_GROUPS: usize = 13;
@@ -315,7 +427,7 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                 };
 
                 if let Some(bona_piece) = BonaPiece::from_board(piece_adj, sq_adj) {
-                    let index = halfkp_index(king_sq, bona_piece);
+                    let index = feature_index_from_bona(king_sq, bona_piece);
                     features.push(index);
                 }
             }
@@ -337,7 +449,7 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
 
                 match BonaPiece::from_hand(pt, color_adj, count) {
                     Ok(bona_piece) => {
-                        let index = halfkp_index(king_sq, bona_piece);
+                        let index = feature_index_from_bona(king_sq, bona_piece);
                         features.push(index);
                     }
                     Err(_e) => {
@@ -380,7 +492,7 @@ pub fn oriented_board_feature_index(
     square: Square,
 ) -> Option<usize> {
     let (piece_adj, square_adj) = orient_board_piece(perspective, piece, square);
-    BonaPiece::from_board(piece_adj, square_adj).map(|bp| halfkp_index(king_sq, bp))
+    BonaPiece::from_board(piece_adj, square_adj).map(|bp| feature_index_from_bona(king_sq, bp))
 }
 
 /// 手駒を単一視点で HalfKP インデックスへ写像する。
@@ -395,14 +507,29 @@ pub fn oriented_hand_feature_index(
 ) -> Result<usize, &'static str> {
     let color_adj = orient_hand_color(perspective, owner);
     let bona = BonaPiece::from_hand(piece_type, color_adj, count)?;
-    Ok(halfkp_index(king_sq, bona))
+    Ok(feature_index_from_bona(king_sq, bona))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::usi::parse_usi_square;
+    use std::sync::Mutex;
 
     use super::*;
+
+    static HALF_KP_VARIANT_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    fn with_halfkp_variant<F, R>(variant: HalfKpVariant, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _lock = HALF_KP_VARIANT_TEST_GUARD.lock().unwrap();
+        let prev = halfkp_variant();
+        set_halfkp_variant(variant);
+        let out = f();
+        set_halfkp_variant(prev);
+        out
+    }
 
     #[test]
     fn test_bona_piece_from_board() {
@@ -436,13 +563,38 @@ mod tests {
 
     #[test]
     fn test_extract_features() {
-        let pos = Position::startpos();
-        let king_sq = parse_usi_square("5i").unwrap(); // Black king position
-        let features = extract_features(&pos, king_sq, Color::Black);
+        with_halfkp_variant(HalfKpVariant::Standard, || {
+            let pos = Position::startpos();
+            let king_sq = parse_usi_square("5i").unwrap(); // Black king position
+            let features = extract_features(&pos, king_sq, Color::Black);
 
-        // Starting position has 40 pieces (including kings)
-        // Minus 2 kings = 38 features
-        assert_eq!(features.len(), 38);
+            // Starting position has 40 pieces (including kings)
+            // Minus 2 kings = 38 features
+            assert_eq!(features.len(), 38);
+        });
+    }
+
+    #[test]
+    fn test_halfkp_vm_mirrors_files() {
+        with_halfkp_variant(HalfKpVariant::Vm, || {
+            let king_sq = parse_usi_square("7i").unwrap(); // file 7 -> mirror region
+            let pawn_sq = parse_usi_square("8h").unwrap();
+            let pawn = Piece::new(PieceType::Pawn, Color::Black);
+            let bona = BonaPiece::from_board(pawn, pawn_sq).unwrap();
+
+            let vm_idx = feature_index_from_bona(king_sq, bona);
+
+            // Expected: matches standard variant index when both king/piece are mirrored.
+            let mirrored_king = king_sq.mirror_file();
+            let mirrored_sq = pawn_sq.mirror_file();
+            let mirrored_bona = BonaPiece::from_board(pawn, mirrored_sq).unwrap();
+
+            set_halfkp_variant(HalfKpVariant::Standard);
+            let standard_idx = feature_index_from_bona(mirrored_king, mirrored_bona);
+            set_halfkp_variant(HalfKpVariant::Vm);
+
+            assert_eq!(vm_idx, standard_idx);
+        });
     }
 
     #[test]

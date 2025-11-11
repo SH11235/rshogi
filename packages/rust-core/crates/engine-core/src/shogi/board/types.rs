@@ -2,6 +2,9 @@
 //!
 //! This module contains fundamental types like Square, PieceType, Piece, and Color.
 
+use crate::shogi::piece_constants::{
+    APERY_PIECE_VALUES, APERY_PROMOTED_PIECE_VALUES, APERY_PROMOTION_GAINS,
+};
 use std::fmt;
 
 /// Square on shogi board (0-80)
@@ -71,6 +74,13 @@ impl Square {
     #[inline]
     pub const fn flip(self) -> Self {
         Square(((crate::shogi::board_constants::SHOGI_BOARD_SIZE as u8) - 1) - self.0)
+    }
+
+    /// Mirror across the vertical axis (files only, ranks preserved).
+    #[inline]
+    pub const fn mirror_file(self) -> Self {
+        let files = crate::shogi::board_constants::BOARD_FILES as u8;
+        Square::new(files - 1 - self.file(), self.rank())
     }
 
     /// Create square from USI notation characters (low-level API)
@@ -257,16 +267,13 @@ impl PieceType {
     /// Get piece value for simple evaluation
     #[inline]
     pub const fn value(self) -> i32 {
-        match self {
-            PieceType::King => 0, // King has special handling
-            PieceType::Rook => 1100,
-            PieceType::Bishop => 950,
-            PieceType::Gold => 600,
-            PieceType::Silver => 550,
-            PieceType::Knight => 450,
-            PieceType::Lance => 350,
-            PieceType::Pawn => 100,
-        }
+        APERY_PIECE_VALUES[self as usize]
+    }
+
+    /// Promotion gain (promoted - base); 0 if piece cannot promote.
+    #[inline]
+    pub const fn promotion_gain(self) -> i32 {
+        APERY_PROMOTION_GAINS[self as usize]
     }
 }
 
@@ -302,16 +309,21 @@ impl Piece {
     /// Get piece value
     #[inline]
     pub fn value(self) -> i32 {
-        let base_value = self.piece_type.value();
-        if self.promoted {
-            match self.piece_type {
-                PieceType::Rook => 1500,   // Dragon
-                PieceType::Bishop => 1300, // Horse
-                PieceType::Silver | PieceType::Knight | PieceType::Lance | PieceType::Pawn => 600, // Same as Gold
-                _ => base_value,
-            }
+        let base = self.piece_type.value();
+        if self.promoted && self.piece_type.can_promote() {
+            APERY_PROMOTED_PIECE_VALUES[self.piece_type as usize]
         } else {
-            base_value
+            base
+        }
+    }
+
+    /// Capture value: material swing (board piece removed + piece gained in hand).
+    #[inline]
+    pub fn capture_value(self) -> i32 {
+        if self.piece_type == PieceType::King {
+            0
+        } else {
+            self.value() + self.piece_type.value()
         }
     }
 
