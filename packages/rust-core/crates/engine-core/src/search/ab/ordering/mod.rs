@@ -6,10 +6,15 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use crate::search::history::{
-    ButterflyHistory, CaptureHistory, ContinuationHistory, CounterMoveHistory, PawnHistory,
+    ButterflyHistory, CaptureHistory, ContinuationHistory, ContinuationKey, CounterMoveHistory,
+    PawnHistory,
 };
 use crate::search::params as dynp;
 use crate::search::types::SearchStack;
+use crate::shogi::board::Piece;
+use crate::shogi::piece_constants::SEE_PIECE_VALUES;
+use crate::shogi::{Move, PieceType};
+use crate::Position;
 pub(crate) use guards::{EvalMoveGuard, EvalNullGuard};
 #[cfg(any(test, feature = "bench-move-picker"))]
 pub use move_picker::MovePicker;
@@ -181,4 +186,75 @@ pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_>) -> i32 {
         r -= 1;
     }
     r.clamp(0, params.depth - 1)
+}
+
+fn infer_piece_type(pos: &Position, mv: Move, prefer_from: bool) -> Option<PieceType> {
+    if let Some(pt) = mv.piece_type() {
+        return Some(pt);
+    }
+    if prefer_from {
+        if let Some(from) = mv.from() {
+            if let Some(piece) = pos.board.piece_on(from) {
+                return Some(piece.piece_type);
+            }
+        }
+    }
+    pos.board.piece_on(mv.to()).map(|p: Piece| p.piece_type)
+}
+
+fn infer_captured_piece(pos: &Position, mv: Move) -> Option<PieceType> {
+    if let Some(pt) = mv.captured_piece_type() {
+        return Some(pt);
+    }
+    pos.board.piece_on(mv.to()).map(|p: Piece| p.piece_type)
+}
+
+fn continuation_score(heur: &Heuristics, pos: &Position, mv: Move, prev_move: Option<Move>) -> i32 {
+    if let Some(prev_mv) = prev_move {
+        if let (Some(prev_piece), Some(curr_piece)) =
+            (infer_piece_type(pos, prev_mv, false), infer_piece_type(pos, mv, true))
+        {
+            let key = ContinuationKey::new(
+                pos.side_to_move,
+                prev_piece as usize,
+                prev_mv.to(),
+                prev_mv.is_drop(),
+                curr_piece as usize,
+                mv.to(),
+                mv.is_drop(),
+            );
+            return heur.continuation.get(key);
+        }
+    }
+    0
+}
+
+/// YO準拠の statScore（履歴ベースの手の良さ指標）
+pub(crate) fn stat_score(
+    heur: &Heuristics,
+    pos: &Position,
+    mv: Move,
+    prev_move: Option<Move>,
+    prev2_move: Option<Move>,
+    is_capture: bool,
+) -> i32 {
+    let stm = pos.side_to_move;
+    if is_capture {
+        if let (Some(attacker), Some(victim)) =
+            (infer_piece_type(pos, mv, true), infer_captured_piece(pos, mv))
+        {
+            let mut score = heur.capture.get(stm, attacker, victim, mv.to());
+            score += SEE_PIECE_VALUES[0][victim as usize];
+            return score;
+        }
+        return 0;
+    }
+
+    let mut score = heur.history.get(stm, mv);
+    if let Some(curr_piece) = infer_piece_type(pos, mv, true) {
+        score += heur.pawn_history.get(stm, curr_piece, mv.to());
+    }
+    score += continuation_score(heur, pos, mv, prev_move);
+    score += continuation_score(heur, pos, mv, prev2_move);
+    score
 }
