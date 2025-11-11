@@ -557,15 +557,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
                 if sc > alpha {
                     alpha = sc;
+                    best_move = Some(mv);
                 }
             }
         }
         let result = alpha;
         if let Some(tt) = &self.tt {
+            // qsearch のTT格納分類:
+            // - fail-low: result <= alpha_orig → UpperBound
+            // - fail-high: result >= beta → LowerBound（上で早期return済みだが安全のため条件化）
+            // - 範囲内: alpha_orig < result < beta → Exact（後続の再利用で有効）
             let node_type = if result <= alpha_orig {
                 NodeType::UpperBound
-            } else {
+            } else if result >= beta {
                 NodeType::LowerBound
+            } else {
+                NodeType::Exact
             };
             let store = adjust_mate_score_for_tt(result, ply as u8)
                 .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
