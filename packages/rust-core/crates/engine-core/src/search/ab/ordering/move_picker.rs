@@ -5,7 +5,7 @@ use crate::movegen::MoveGenerator;
 use crate::search::params::{
     capture_history_weight, continuation_history_weight, quiet_history_weight, QS_PROMOTE_BONUS,
 };
-use crate::shogi::Move;
+use crate::shogi::{Move, PieceType};
 use crate::Position;
 use std::cmp::Ordering;
 
@@ -57,6 +57,24 @@ impl Stage {
             Stage::Done => "done",
         }
     }
+}
+
+fn attacker_piece_type(pos: &Position, mv: Move) -> Option<PieceType> {
+    mv.piece_type()
+        .or_else(|| mv.from().and_then(|sq| pos.board.piece_on(sq)).map(|piece| piece.piece_type))
+}
+
+fn capture_value_plus_promote(pos: &Position, mv: Move) -> i32 {
+    let mut value = 0;
+    if let Some(captured) = pos.board.piece_on(mv.to()) {
+        value += captured.capture_value();
+    }
+    if mv.is_promote() {
+        if let Some(attacker) = attacker_piece_type(pos, mv) {
+            value += attacker.promotion_gain();
+        }
+    }
+    value
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -440,20 +458,6 @@ impl<'a> MovePicker<'a> {
     fn prepare_good_captures(&mut self, heur: &Heuristics) {
         self.buf.clear();
         let capture_weight = capture_history_weight();
-        #[inline]
-        fn mvv(pt: crate::shogi::PieceType) -> i32 {
-            use crate::shogi::PieceType::*;
-            match pt {
-                Pawn => 100,
-                Lance => 300,
-                Knight => 300,
-                Silver => 500,
-                Gold => 600,
-                Bishop => 800,
-                Rook => 900,
-                King => 0,
-            }
-        }
         for entry in &self.capture_entries {
             if entry.see < 0 {
                 continue;
@@ -463,14 +467,9 @@ impl<'a> MovePicker<'a> {
                 continue;
             }
             self.diag_guard(mv);
-            // SEE加点は撤廃。MVV + 履歴で並べ替え。
+            // SEE加点は撤廃。CapturePieceValuePlusPromote(互換) + 履歴で並べ替え。
             let mut key = 2_000_000_i64;
-            if mv.is_promote() {
-                key += 1_000;
-            }
-            if let Some(victim) = mv.captured_piece_type() {
-                key += mvv(victim) as i64;
-            }
+            key += capture_value_plus_promote(self.pos, mv) as i64;
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += (cap_score as i64) * (capture_weight as i64);
@@ -488,20 +487,6 @@ impl<'a> MovePicker<'a> {
     fn prepare_bad_captures(&mut self, heur: &Heuristics) {
         self.buf.clear();
         let capture_weight = capture_history_weight();
-        #[inline]
-        fn mvv(pt: crate::shogi::PieceType) -> i32 {
-            use crate::shogi::PieceType::*;
-            match pt {
-                Pawn => 100,
-                Lance => 300,
-                Knight => 300,
-                Silver => 500,
-                Gold => 600,
-                Bishop => 800,
-                Rook => 900,
-                King => 0,
-            }
-        }
         for entry in &self.deferred_bad_captures {
             let mv = entry.mv;
             if self.should_skip(mv) {
@@ -510,9 +495,7 @@ impl<'a> MovePicker<'a> {
             self.diag_guard(mv);
             // SEE加点は撤廃。
             let mut key = 100_000_i64;
-            if let Some(victim) = mv.captured_piece_type() {
-                key += (mvv(victim) as i64) / 10; // Bad側はMVVの影響を弱く
-            }
+            key += capture_value_plus_promote(self.pos, mv) as i64;
             if let (Some(attacker), Some(victim)) = (mv.piece_type(), mv.captured_piece_type()) {
                 let cap_score = heur.capture.get(self.pos.side_to_move, attacker, victim, mv.to());
                 key += (cap_score as i64) * (capture_weight as i64);
