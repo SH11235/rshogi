@@ -60,9 +60,9 @@ pub const ROOT_MULTIPV_BONUS_2: i32 = 25_000;
 // Root Beam（浅探索→狭窓→フル窓）の既定チューニング
 pub const ROOT_BEAM_REDUCTION: i32 = 1; // shallow = (d-1)-reduction
 pub const ROOT_BEAM_MIN_DEPTH: i32 = 6; // ビーム適用の最小深さ
-pub const ROOT_BEAM_MARGIN_CP: i32 = 140; // α近傍判定の閾値
+pub const ROOT_BEAM_MARGIN_CP: i32 = 220; // α近傍判定の閾値（140から安全側に拡張）
 pub const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48; // 狭窓幅（±delta）
-pub const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 16; // 狭窓結果からフル窓へ昇格するための閾値
+pub const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 36; // 狭窓結果からフル窓へ昇格するための閾値
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;

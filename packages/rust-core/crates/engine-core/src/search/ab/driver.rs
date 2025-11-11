@@ -239,7 +239,39 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else {
                 let mut need_full = true;
                 let mut s = i32::MIN;
-                if idx >= force_full_budget && d > dynp::root_beam_min_depth() {
+                let root_gives_check = root.gives_check(mv);
+                let root_see = root.see(mv);
+                let root_own_king_adjacent = {
+                    if let Some(king) = root.board.king_square(root.side_to_move) {
+                        let dx = u8::abs_diff(king.file(), mv.to().file());
+                        let dy = u8::abs_diff(king.rank(), mv.to().rank());
+                        dx <= 1 && dy <= 1
+                    } else {
+                        false
+                    }
+                };
+                let root_enemy_king_adjacent = {
+                    if let Some(king) = root.board.king_square(root.side_to_move.opposite()) {
+                        let dx = u8::abs_diff(king.file(), mv.to().file());
+                        let dy = u8::abs_diff(king.rank(), mv.to().rank());
+                        dx <= 1 && dy <= 1
+                    } else {
+                        false
+                    }
+                };
+                let root_quiet_move = !root_gives_check && !mv.is_capture_hint();
+                let drop_near_enemy_king = mv.is_drop() && root_enemy_king_adjacent;
+                let quiet_touching_any_king =
+                    root_quiet_move && (root_own_king_adjacent || root_enemy_king_adjacent);
+                let mut forcing = root_gives_check || root_see >= 0 || root_own_king_adjacent;
+                if drop_near_enemy_king || quiet_touching_any_king {
+                    forcing = true;
+                }
+                if idx >= force_full_budget
+                    && d > dynp::root_beam_min_depth()
+                    && !drop_near_enemy_king
+                    && !quiet_touching_any_king
+                {
                     let shallow_depth = (d - 1).saturating_sub(dynp::root_beam_reduction());
                     if shallow_depth >= 1 {
                         let mut search_ctx_shallow = SearchContext {
@@ -274,18 +306,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             &mut search_ctx_shallow,
                         );
                         s = -sc_shallow;
-                        let root_gives_check = root.gives_check(mv);
-                        let root_see = root.see(mv);
-                        let root_king_adjacent = {
-                            if let Some(king) = root.board.king_square(root.side_to_move) {
-                                let dx = u8::abs_diff(king.file(), mv.to().file());
-                                let dy = u8::abs_diff(king.rank(), mv.to().rank());
-                                dx <= 1 && dy <= 1
-                            } else {
-                                false
-                            }
-                        };
-                        let forcing = root_gives_check || root_see >= 0 || root_king_adjacent;
                         need_full = forcing || s > alpha - dynp::root_beam_margin_cp();
                         if need_full && !forcing {
                             let delta = dynp::root_beam_narrow_delta_cp();
