@@ -7,7 +7,6 @@ use crate::usi::{move_to_usi, position_to_sfen};
 use log::warn;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
-use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -60,22 +59,22 @@ thread_local! {
 }
 
 fn abort_on_warn_enabled() -> bool {
-    *ABORT_ON_WARN.get_or_init(|| match env::var("DIAG_ABORT_ON_WARN") {
-        Ok(val) => {
+    *ABORT_ON_WARN.get_or_init(|| match crate::util::env_var("DIAG_ABORT_ON_WARN") {
+        Some(val) => {
             let normalized = val.trim().to_ascii_lowercase();
             !(normalized == "0"
                 || normalized == "false"
                 || normalized == "off"
                 || normalized == "no")
         }
-        Err(_) => false,
+        None => false,
     })
 }
 
 fn trace_window() -> Option<(u16, u16)> {
     *TRACE_WINDOW.get_or_init(|| {
-        let min = env::var("TRACE_PLY_MIN").ok().and_then(|v| v.trim().parse::<u16>().ok());
-        let max = env::var("TRACE_PLY_MAX").ok().and_then(|v| v.trim().parse::<u16>().ok());
+        let min = crate::util::env_var("TRACE_PLY_MIN").and_then(|v| v.trim().parse::<u16>().ok());
+        let max = crate::util::env_var("TRACE_PLY_MAX").and_then(|v| v.trim().parse::<u16>().ok());
         match (min, max) {
             (Some(lo), Some(hi)) => Some((lo, hi.max(lo))),
             (Some(lo), None) => Some((lo, u16::MAX)),
@@ -93,12 +92,12 @@ fn within_trace_window(ply: u16) -> bool {
 
 fn echo_tags_enabled() -> bool {
     static ECHO: OnceLock<bool> = OnceLock::new();
-    *ECHO.get_or_init(|| match env::var("DIAG_ECHO_TAGS") {
-        Ok(val) => {
+    *ECHO.get_or_init(|| match crate::util::env_var("DIAG_ECHO_TAGS") {
+        Some(val) => {
             let s = val.trim().to_ascii_lowercase();
             !(s == "0" || s == "off" || s == "false" || s == "no")
         }
-        Err(_) => false,
+        None => false,
     })
 }
 

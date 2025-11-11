@@ -124,7 +124,7 @@ impl SimdDispatcher {
         use std::sync::OnceLock;
         static CLAMP: OnceLock<Option<String>> = OnceLock::new();
         CLAMP
-            .get_or_init(|| std::env::var("SHOGI_NNUE_SIMD").ok().map(|s| s.to_ascii_lowercase()))
+            .get_or_init(|| crate::util::env_var("SHOGI_NNUE_SIMD").map(|s| s.to_ascii_lowercase()))
             .as_deref()
     }
 

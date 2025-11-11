@@ -44,12 +44,12 @@ fn search_profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
 #[inline]
 fn info_currmove_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("SHOGI_INFO_CURRMOVE") {
-        Ok(v) => {
+    *FLAG.get_or_init(|| match crate::util::env_var("SHOGI_INFO_CURRMOVE") {
+        Some(v) => {
             let v = v.trim().to_ascii_lowercase();
             v == "1" || v == "true" || v == "on"
         }
-        Err(_) => false,
+        None => false,
     })
 }
 
@@ -315,7 +315,7 @@ impl Engine {
 
     fn build_backend(&mut self) -> Option<Arc<dyn SearcherBackend + Send + Sync>> {
         // Legacy escape hatch for emergency rollback
-        if std::env::var("SHOGI_FORCE_CLASSIC_BACKEND").is_ok() {
+        if crate::util::env_var("SHOGI_FORCE_CLASSIC_BACKEND").is_some() {
             warn!("Using legacy ClassicBackend (SHOGI_FORCE_CLASSIC_BACKEND is set)");
             return self.build_legacy_backend();
         }

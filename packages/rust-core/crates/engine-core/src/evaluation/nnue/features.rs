@@ -41,19 +41,28 @@ fn ensure_halfkp_variant_initialized() {
 }
 
 fn read_halfkp_variant_from_env() -> Option<HalfKpVariant> {
-    const KEYS: [&str; 3] = [
-        "SHOGI_HALF_KP_VARIANT",
-        "NNUE_HALF_KP_VARIANT",
-        "HALF_KP_VARIANT",
-    ];
-    for key in KEYS {
-        if let Ok(value) = std::env::var(key) {
-            if let Some(parsed) = parse_halfkp_variant(&value) {
-                return Some(parsed);
+    // WASM では環境変数を読まない（常に None）
+    #[cfg(target_family = "wasm")]
+    {
+        None
+    }
+    // ネイティブ環境では既存のキーを順にチェック
+    #[cfg(not(target_family = "wasm"))]
+    {
+        const KEYS: [&str; 3] = [
+            "SHOGI_HALF_KP_VARIANT",
+            "NNUE_HALF_KP_VARIANT",
+            "HALF_KP_VARIANT",
+        ];
+        for key in KEYS {
+            if let Some(value) = crate::util::env_var(key) {
+                if let Some(parsed) = parse_halfkp_variant(&value) {
+                    return Some(parsed);
+                }
             }
         }
+        None
     }
-    None
 }
 
 fn parse_halfkp_variant(raw: &str) -> Option<HalfKpVariant> {

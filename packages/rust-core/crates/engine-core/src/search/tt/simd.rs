@@ -51,7 +51,7 @@ pub fn simd_kind() -> SimdKind {
 #[inline]
 pub fn simd_enabled() -> bool {
     // Allow forcing scalar path for diagnostics via env var
-    if std::env::var("TT_FORCE_SCALAR").map(|v| v == "1").unwrap_or(false) {
+    if crate::util::env_var("TT_FORCE_SCALAR").map(|v| v == "1").unwrap_or(false) {
         return false;
     }
     simd_kind() != SimdKind::None

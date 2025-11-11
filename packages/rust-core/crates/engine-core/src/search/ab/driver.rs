@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
@@ -266,17 +265,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn qnodes_limit_relax_mult() -> u64 {
         #[cfg(test)]
         {
-            match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
-                Err(_) => 1,
+            match crate::util::env_var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
+                Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                None => 1,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<u64> = OnceLock::new();
-            *VAL.get_or_init(|| match std::env::var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
-                Err(_) => 1,
+            *VAL.get_or_init(|| match crate::util::env_var("SHOGI_QNODES_LIMIT_RELAX_MULT") {
+                Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                None => 1,
             })
         }
     }
@@ -298,17 +297,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn multipv_scheduler_bias() -> u64 {
         #[cfg(test)]
         {
-            match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
-                Err(_) => 4,
+            match crate::util::env_var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
+                Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
+                None => 4,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<u64> = OnceLock::new();
-            *VAL.get_or_init(|| match std::env::var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
-                Err(_) => 4,
+            *VAL.get_or_init(|| match crate::util::env_var("SHOGI_MULTIPV_SCHEDULER_PV2_DIV") {
+                Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(2, 32)).unwrap_or(4),
+                None => 4,
             })
         }
     }
@@ -438,8 +437,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
     fn currmove_throttle_ms() -> Option<u64> {
         static POLICY: OnceLock<Option<u64>> = OnceLock::new();
-        *POLICY.get_or_init(|| match env::var("SHOGI_CURRMOVE_THROTTLE_MS") {
-            Ok(val) => {
+        *POLICY.get_or_init(|| match crate::util::env_var("SHOGI_CURRMOVE_THROTTLE_MS") {
+            Some(val) => {
                 let val = val.trim().to_ascii_lowercase();
                 if val == "off" || val == "0" || val == "false" {
                     None
@@ -449,19 +448,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
             // Default: 100ms provides good responsiveness in parallel search with multiple
             // helpers while avoiding excessive USI output spam.
-            Err(_) => Some(100),
+            None => Some(100),
         })
     }
 
     // Parse common boolean env values (1/true/on/yes) with default
     #[inline]
     fn parse_bool_env(var: &str, default: bool) -> bool {
-        match env::var(var) {
-            Ok(v) => {
+        match crate::util::env_var(var) {
+            Some(v) => {
                 let v = v.trim().to_ascii_lowercase();
                 matches!(v.as_str(), "1" | "true" | "on" | "yes")
             }
-            Err(_) => default,
+            None => default,
         }
     }
 
@@ -483,17 +482,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_zero_window_budget_ms() -> u64 {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
-                Err(_) => 80,
+            match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
+                Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
+                None => 80,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<u64> = OnceLock::new();
-            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
-                Err(_) => 80,
+            *VAL.get_or_init(|| {
+                match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_BUDGET_MS") {
+                    Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(10, 200)).unwrap_or(80),
+                    None => 80,
+                }
             })
         }
     }
@@ -502,17 +503,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_zero_window_min_depth() -> i32 {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
-                Err(_) => 4,
+            match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
+                Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
+                None => 4,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<i32> = OnceLock::new();
-            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
-                Err(_) => 4,
+            *VAL.get_or_init(|| {
+                match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_DEPTH") {
+                    Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 64)).unwrap_or(4),
+                    None => 4,
+                }
             })
         }
     }
@@ -521,17 +524,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_zero_window_min_trem_ms() -> u64 {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
-                Err(_) => 60,
+            match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
+                Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
+                None => 60,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<u64> = OnceLock::new();
-            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
-                Ok(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
-                Err(_) => 60,
+            *VAL.get_or_init(|| {
+                match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_TREM_MS") {
+                    Some(v) => v.parse::<u64>().ok().map(|x| x.clamp(5, 500)).unwrap_or(60),
+                    None => 60,
+                }
             })
         }
     }
@@ -540,17 +545,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_zero_window_min_multipv() -> u8 {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV") {
-                Ok(v) => v.parse::<u8>().ok().unwrap_or(0),
-                Err(_) => 0,
+            match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV") {
+                Some(v) => v.parse::<u8>().ok().unwrap_or(0),
+                None => 0,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<u8> = OnceLock::new();
-            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV") {
-                Ok(v) => v.parse::<u8>().ok().unwrap_or(0),
-                Err(_) => 0,
+            *VAL.get_or_init(|| {
+                match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MIN_MULTIPV") {
+                    Some(v) => v.parse::<u8>().ok().unwrap_or(0),
+                    None => 0,
+                }
             })
         }
     }
@@ -559,17 +566,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_verify_delta_cp() -> i32 {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
-                Err(_) => 1,
+            match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
+                Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                None => 1,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<i32> = OnceLock::new();
-            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
-                Err(_) => 1,
+            *VAL.get_or_init(|| {
+                match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_VERIFY_DELTA_CP") {
+                    Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 32)).unwrap_or(1),
+                    None => 1,
+                }
             })
         }
     }
@@ -592,17 +601,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_zero_window_mate_delta_cp() -> i32 {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 32)).unwrap_or(0),
-                Err(_) => 0,
+            match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP") {
+                Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 32)).unwrap_or(0),
+                None => 0,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<i32> = OnceLock::new();
-            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 32)).unwrap_or(0),
-                Err(_) => 0,
+            *VAL.get_or_init(|| {
+                match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_MATE_DELTA_CP") {
+                    Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 32)).unwrap_or(0),
+                    None => 0,
+                }
             })
         }
     }
@@ -611,17 +622,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     fn near_final_zero_window_bound_slack_cp() -> i32 {
         #[cfg(test)]
         {
-            match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 64)).unwrap_or(0),
-                Err(_) => 0,
+            match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP") {
+                Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 64)).unwrap_or(0),
+                None => 0,
             }
         }
         #[cfg(not(test))]
         {
             static VAL: OnceLock<i32> = OnceLock::new();
-            *VAL.get_or_init(|| match env::var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP") {
-                Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 64)).unwrap_or(0),
-                Err(_) => 0,
+            *VAL.get_or_init(|| {
+                match crate::util::env_var("SHOGI_ZERO_WINDOW_FINALIZE_BOUND_SLACK_CP") {
+                    Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(0, 64)).unwrap_or(0),
+                    None => 0,
+                }
             })
         }
     }
@@ -829,12 +842,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         static LEAD_WINDOW_FINALIZE_ENABLED: OnceLock<bool> = OnceLock::new();
         let lead_window_finalize = *LEAD_WINDOW_FINALIZE_ENABLED.get_or_init(|| {
-            match env::var("SHOGI_LEAD_WINDOW_FINALIZE") {
-                Ok(val) => {
+            match crate::util::env_var("SHOGI_LEAD_WINDOW_FINALIZE") {
+                Some(val) => {
                     let normalized = val.trim().to_ascii_lowercase();
                     !(normalized == "off" || normalized == "0" || normalized == "false")
                 }
-                Err(_) => true,
+                None => true,
             }
         });
 

@@ -88,9 +88,9 @@ fn jitter_enabled() -> bool {
     if crate::search::policy::bench_allrun_enabled() {
         return false;
     }
-    match std::env::var("SHOGI_TEST_FORCE_JITTER") {
-        Ok(val) => val != "0",
-        Err(_) => true,
+    match crate::util::env_var("SHOGI_TEST_FORCE_JITTER") {
+        Some(val) => val != "0",
+        None => true,
     }
 }
 
@@ -956,7 +956,7 @@ fn helper_snapshot_min_depth() -> u32 {
     use std::sync::OnceLock;
     static OVERRIDE: OnceLock<u32> = OnceLock::new();
     *OVERRIDE.get_or_init(|| {
-        if let Ok(v) = std::env::var("SHOGI_HELPER_SNAPSHOT_MIN_DEPTH") {
+        if let Some(v) = crate::util::env_var("SHOGI_HELPER_SNAPSHOT_MIN_DEPTH") {
             if let Ok(n) = v.parse::<u32>() {
                 return n.max(1);
             }
@@ -979,8 +979,8 @@ fn helper_asp_delta_str() -> String {
 }
 
 fn currmove_throttle_display() -> String {
-    match std::env::var("SHOGI_CURRMOVE_THROTTLE_MS") {
-        Ok(val) => {
+    match crate::util::env_var("SHOGI_CURRMOVE_THROTTLE_MS") {
+        Some(val) => {
             let val = val.trim().to_ascii_lowercase();
             if val == "off" || val == "0" || val == "false" {
                 "off".to_string()
@@ -992,7 +992,7 @@ fn currmove_throttle_display() -> String {
                     .unwrap_or_else(|| "100".to_string())
             }
         }
-        Err(_) => "100".to_string(),
+        None => "100".to_string(),
     }
 }
 
