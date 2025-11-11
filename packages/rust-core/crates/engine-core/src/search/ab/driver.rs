@@ -35,11 +35,6 @@ use crate::time_management::TimeControl;
 
 /// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
 const STICKY_PV_WINDOW_MS: u64 = 400;
-const ROOT_BEAM_REDUCTION: i32 = 1; // shallow probe uses d-1
-const ROOT_BEAM_MIN_DEPTH: i32 = 6;
-const ROOT_BEAM_MARGIN_CP: i32 = 140; // legacy constant (used for compatibility)
-const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48;
-const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -1412,8 +1407,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             } else {
                                 let mut need_full = true;
                                 let mut s = i32::MIN;
-                                if idx >= force_full_budget && d > ROOT_BEAM_MIN_DEPTH {
-                                    let shallow_depth = (d - 1).saturating_sub(ROOT_BEAM_REDUCTION);
+                                if idx >= force_full_budget && d > dynp::root_beam_min_depth() {
+                                    let shallow_depth =
+                                        (d - 1).saturating_sub(dynp::root_beam_reduction());
                                     if shallow_depth >= 1 {
                                         let mut search_ctx_shallow = SearchContext {
                                             limits,
@@ -1473,14 +1469,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                         };
                                         let forcing =
                                             root_gives_check || root_see >= 0 || root_king_adjacent;
-                                        need_full = forcing || s > alpha - ROOT_BEAM_MARGIN_CP;
+                                        need_full =
+                                            forcing || s > alpha - dynp::root_beam_margin_cp();
                                         if need_full && !forcing {
                                             // YO流のナローバンド再探索: 浅い結果がα近傍なら、
-                                            // フル探索へ昇格する前に狭窓(±ROOT_BEAM_NARROW_DELTA_CP)で一度だけ検証する。
-                                            let narrow_low =
-                                                alpha.saturating_sub(ROOT_BEAM_NARROW_DELTA_CP);
-                                            let narrow_high =
-                                                alpha.saturating_add(ROOT_BEAM_NARROW_DELTA_CP);
+                                            // フル探索へ昇格する前に狭窓(±delta)で1回だけ検証する。
+                                            // 注: 意図通り“1回のみ”であることを保つ（将来の改修時の保険）。
+                                            let delta = dynp::root_beam_narrow_delta_cp();
+                                            let narrow_low = alpha.saturating_sub(delta);
+                                            let narrow_high = alpha.saturating_add(delta);
                                             let mut search_ctx_narrow = SearchContext {
                                                 limits,
                                                 start_time: &t0,
@@ -1519,7 +1516,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                                 &mut search_ctx_narrow,
                                             );
                                             s = -sc_narrow;
-                                            need_full = s > alpha - ROOT_BEAM_NARROW_PROMOTE_CP;
+                                            need_full =
+                                                s > alpha - dynp::root_beam_narrow_promote_cp();
                                         }
                                         if !need_full {
                                             if let Some(cb) = limits.info_string_callback.as_ref() {
