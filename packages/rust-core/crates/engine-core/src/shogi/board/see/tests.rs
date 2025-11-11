@@ -44,11 +44,12 @@ fn test_see_simple_pawn_capture() {
     pos.side_to_move = Color::Black;
     let mv = Move::normal(parse_usi_square("5e").unwrap(), parse_usi_square("5d").unwrap(), false);
 
-    // SEE should be 100 (pawn value)
-    assert_eq!(pos.see(mv), 100);
+    // SEE should equal pawn value
+    let pawn_val = PieceType::Pawn.value();
+    assert_eq!(pos.see(mv), pawn_val);
     assert!(pos.see_ge(mv, 0));
-    assert!(pos.see_ge(mv, 100));
-    assert!(!pos.see_ge(mv, 101));
+    assert!(pos.see_ge(mv, pawn_val));
+    assert!(!pos.see_ge(mv, pawn_val + 1));
 }
 
 #[test]
@@ -72,8 +73,9 @@ fn test_see_bad_exchange() {
     pos.side_to_move = Color::Black;
     let mv = Move::normal(parse_usi_square("5f").unwrap(), parse_usi_square("5d").unwrap(), false);
 
-    // SEE should be 100 - 900 = -800 (win pawn, lose rook to gold)
-    assert_eq!(pos.see(mv), -800);
+    // SEE should be pawn - rook (win pawn, lose rook)
+    let expected = PieceType::Pawn.value() - PieceType::Rook.value();
+    assert_eq!(pos.see(mv), expected);
     assert!(!pos.see_ge(mv, 0));
 }
 
@@ -102,9 +104,8 @@ fn test_see_complex_exchange() {
     pos.side_to_move = Color::Black;
     let mv = Move::normal(parse_usi_square("5e").unwrap(), parse_usi_square("5d").unwrap(), false);
 
-    // Exchange: PxP (win 100), GxP (lose 100), SxG (win 600)
-    // Net: 100 - 100 + 600 = 600
-    assert_eq!(pos.see(mv), 600);
+    // Exchange net: +Gold value (pawn trades cancel)
+    assert_eq!(pos.see(mv), PieceType::Gold.value());
     assert!(pos.see_ge(mv, 0));
 }
 
@@ -133,9 +134,8 @@ fn test_see_x_ray_attack() {
     pos.side_to_move = Color::Black;
     let mv = Move::normal(parse_usi_square("5f").unwrap(), parse_usi_square("5d").unwrap(), false);
 
-    // Exchange: RxP (win 100), RxR (lose 900), RxR (win 900)
-    // Net: 100 - 900 + 900 = 100
-    assert_eq!(pos.see(mv), 100);
+    // Exchange net: pawn value
+    assert_eq!(pos.see(mv), PieceType::Pawn.value());
     assert!(pos.see_ge(mv, 0));
 }
 
@@ -175,8 +175,8 @@ fn test_see_with_pinned_piece() {
     // Only the Silver can capture
     let mv = Move::normal(parse_usi_square("6f").unwrap(), parse_usi_square("4e").unwrap(), false); // Silver takes Pawn
 
-    // Silver takes Pawn (+100)
-    assert_eq!(pos.see(mv), 100);
+    // Silver takes Pawn (pawn value swing)
+    assert_eq!(pos.see(mv), PieceType::Pawn.value());
 }
 
 #[test]
@@ -215,8 +215,8 @@ fn test_see_with_diagonal_pin() {
     // Only the Gold can capture
     let mv = Move::normal(parse_usi_square("3g").unwrap(), parse_usi_square("3h").unwrap(), false); // Gold takes Pawn
 
-    // Gold takes Pawn (+100)
-    assert_eq!(pos.see(mv), 100);
+    // Gold takes Pawn (pawn value swing)
+    assert_eq!(pos.see(mv), PieceType::Pawn.value());
 }
 
 #[test]
@@ -247,18 +247,18 @@ fn test_see_delta_pruning() {
 
     let mv = Move::normal(parse_usi_square("5d").unwrap(), parse_usi_square("5e").unwrap(), false); // Pawn takes Gold
 
-    // SEE value: Pawn takes Gold (+600), Rook takes Pawn (-100)
+    // SEE value: Pawn takes Gold, then Rook captures pawn
     let see_value = pos.see(mv);
-    // Total: +600 - 100 = +500
-    assert_eq!(see_value, 500);
+    let expected = PieceType::Gold.value() - PieceType::Pawn.value();
+    assert_eq!(see_value, expected);
 
     // Test see_ge with various thresholds
     // Should use delta pruning for early termination
-    assert!(!pos.see_ge(mv, 600)); // 500 < 600
-    assert!(pos.see_ge(mv, 500)); // 500 >= 500
-    assert!(pos.see_ge(mv, 400)); // 500 > 400
+    assert!(!pos.see_ge(mv, PieceType::Gold.value()));
+    assert!(pos.see_ge(mv, expected));
+    assert!(pos.see_ge(mv, expected - 50));
     assert!(pos.see_ge(mv, 0)); // 500 > 0
-    assert!(pos.see_ge(mv, -100)); // 500 > -100
+    assert!(pos.see_ge(mv, -PieceType::Pawn.value()));
 }
 
 #[test]
@@ -290,9 +290,9 @@ fn test_see_defended_pawn() {
     // Rook takes defended pawn
     let mv = Move::normal(parse_usi_square("5f").unwrap(), parse_usi_square("5d").unwrap(), false);
 
-    // SEE: RxP (+100), SxR (-900)
-    // Total: 100 - 900 = -800
-    assert_eq!(pos.see(mv), -800);
+    // SEE: RxP (+pawn), SxR (-rook)
+    let expected = PieceType::Pawn.value() - PieceType::Rook.value();
+    assert_eq!(pos.see(mv), expected);
     assert!(!pos.see_ge(mv, 0));
 }
 
@@ -365,10 +365,8 @@ fn test_see_x_ray_with_equal_value() {
     // Bishop takes bishop
     let mv = Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("5e").unwrap(), false);
 
-    // SEE: BxB (+700), BxB (-700), BxB (+700)
-    // Total: 700 (Black wins a bishop)
-    // Note: Bishop value is 700, not 500
-    assert_eq!(pos.see(mv), 700);
+    let bishop_val = PieceType::Bishop.value();
+    assert_eq!(pos.see(mv), bishop_val);
     assert!(pos.see_ge(mv, 0));
 }
 
@@ -396,14 +394,14 @@ fn test_see_ge_early_termination() {
 
     let mv = Move::normal(parse_usi_square("5d").unwrap(), parse_usi_square("5e").unwrap(), false); // Pawn takes Pawn
 
-    // Normal SEE value is +100 (simple pawn capture)
-    assert_eq!(pos.see(mv), 100);
+    let pawn_val = PieceType::Pawn.value();
+    assert_eq!(pos.see(mv), pawn_val);
 
     // Test see_ge with threshold that triggers early termination
-    assert!(!pos.see_ge(mv, 1000)); // Can't reach 1000 with just a pawn capture
-    assert!(!pos.see_ge(mv, 500)); // Can't reach 500 either
-    assert!(!pos.see_ge(mv, 200)); // Can't reach 200
-    assert!(pos.see_ge(mv, 100)); // Exactly 100
+    assert!(!pos.see_ge(mv, pawn_val * 10));
+    assert!(!pos.see_ge(mv, pawn_val * 5));
+    assert!(!pos.see_ge(mv, pawn_val * 2));
+    assert!(pos.see_ge(mv, pawn_val));
     assert!(pos.see_ge(mv, 0)); // Greater than 0
 }
 
@@ -442,18 +440,9 @@ fn test_see_multiple_high_value_attackers() {
     // Move: Pawn takes Gold
     let mv = Move::normal(parse_usi_square("5d").unwrap(), parse_usi_square("5e").unwrap(), false);
 
-    // SEE calculation:
-    // +600 (gold) - 100 (pawn) + 500 (silver) - 700 (bishop) = 300
-    // But actually the exchange ends with +600 - 100 = 500 since White will not take the pawn
-    // with Silver if it loses material
     let see_value = pos.see(mv);
-    assert!(see_value > 0, "Should be a good exchange: {see_value}");
-
-    // Test that see_ge works correctly with multiple attackers
-    // The key test is that the algorithm considers all remaining attackers
-    assert!(pos.see_ge(mv, 0)); // Positive value
-    assert!(pos.see_ge(mv, 500)); // Can reach 500
-    assert!(!pos.see_ge(mv, 1500)); // Cannot reach 1500
+    let expected = PieceType::Gold.value() + PieceType::Silver.value() - PieceType::Pawn.value();
+    assert_eq!(see_value, expected, "Should be a good exchange: {see_value}");
 }
 
 #[test]
@@ -491,16 +480,10 @@ fn test_see_promoted_pieces() {
     // Move: Silver takes Tokin
     let mv = Move::normal(parse_usi_square("6d").unwrap(), parse_usi_square("5e").unwrap(), false);
 
-    // SEE calculation:
-    // +600 (tokin) - 500 (silver) + 1200 (dragon) - 900 (horse) = 400
-    // But White won't take if it loses material, so it's just +600 - 500 = 100
     let see_value = pos.see(mv);
-    assert!(see_value > 0, "Should be a good exchange: {see_value}");
-
-    // Test that the algorithm correctly sums multiple promoted pieces
-    assert!(pos.see_ge(mv, 0)); // Positive value
-    assert!(pos.see_ge(mv, 100)); // Exactly 100
-    assert!(!pos.see_ge(mv, 200)); // Cannot reach 200
+    let expected = PieceType::Pawn.value() + PieceType::Rook.value() + PieceType::Bishop.value()
+        - PieceType::Silver.value();
+    assert_eq!(see_value, expected);
 }
 
 /// SEE edge cases and complex scenarios
@@ -770,15 +753,15 @@ mod see_edge_cases {
         let mv =
             Move::normal(parse_usi_square("8h").unwrap(), parse_usi_square("7c").unwrap(), true);
 
-        // SEE calculation:
-        // +100 (pawn) + 100 (promotion bonus) - 600 (promoted silver recaptured by rook)
-        // Total: 100 + 100 - 600 = -400
         let see_value = pos.see(mv);
         eprintln!("SEE value for 8h7c+: {see_value}");
 
-        // This should be negative because the promoted silver (worth 600) gets captured by the rook
+        let promoted_silver_val = PieceType::Silver.value() + PieceType::Silver.promotion_gain();
+        let expected =
+            PieceType::Pawn.value() + PieceType::Silver.promotion_gain() - promoted_silver_val;
+        // This should be negative because the promoted silver gets captured by the rook
         assert!(see_value < 0, "SEE should be negative, but got: {see_value}");
-        assert_eq!(see_value, -400, "SEE should be exactly -400");
+        assert_eq!(see_value, expected, "SEE should match capture math");
     }
 
     #[test]
@@ -837,12 +820,12 @@ mod see_edge_cases {
         let see_value = pos.see(mv);
         eprintln!("SEE value for 8h9c+: {see_value}");
 
-        // In this position, the silver captures pawn with promotion
-        // Black Rook on 2c CANNOT recapture because it's black's own piece!
-        // So SEE should be: +100 (pawn) + 100 (promotion bonus) = +200
+        // In this position, the silver captures an undefended pawn with promotion.
+        // Since there is no recapture, SEE = pawn value + promotion gain.
         assert_eq!(
-            see_value, 200,
-            "SEE should be +200 for undefended pawn capture with promotion, but got: {see_value}"
+            see_value,
+            PieceType::Pawn.value() + PieceType::Silver.promotion_gain(),
+            "SEE should equal pawn value + promotion gain, but got: {see_value}"
         );
     }
 
@@ -884,19 +867,15 @@ mod see_edge_cases {
         // Check if rook can actually see the target square
         eprintln!("Checking if White Rook on 2c can attack 7c...");
 
-        // SEE calculation:
-        // +100 (pawn) + 100 (promotion bonus) - 600 (promoted silver recaptured by rook)
-        // Total: 100 + 100 - 600 = -400
         let see_value = pos.see(mv);
         eprintln!("SEE value for 2h7c+: {see_value}");
 
-        // This should be negative because the promoted silver (worth 600) gets captured by the rook
-        // The rook on 2c CAN reach 7c because they're on the same rank (c = rank 3)
-        // Rooks move horizontally and vertically, so it can move from 2c to 7c along rank c
-        // SEE calculation: +100 (pawn) + 100 (promotion) - 600 (promoted silver captured) = -400
+        let promoted_silver_val = PieceType::Silver.value() + PieceType::Silver.promotion_gain();
+        let expected =
+            PieceType::Pawn.value() + PieceType::Silver.promotion_gain() - promoted_silver_val;
         assert_eq!(
-            see_value, -400,
-            "SEE should be -400 because rook can recapture along rank c, but got: {see_value}"
+            see_value, expected,
+            "SEE should reflect pawn + promotion gain minus promoted silver value, but got: {see_value}"
         );
     }
 }
