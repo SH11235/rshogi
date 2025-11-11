@@ -142,7 +142,270 @@ pub struct ClassicBackend<E: Evaluator + Send + Sync + 'static> {
     pub(super) profile: SearchProfile,
 }
 
+// 環境（SearchContextの素材）
+struct RootSearchEnv<'a> {
+    limits: &'a SearchLimits,
+    t0: &'a Instant,
+    nodes: &'a mut u64,
+    seldepth: &'a mut u32,
+    qnodes: &'a mut u64,
+    qnodes_limit: u64,
+    #[cfg(feature = "diagnostics")]
+    abdada_busy_detected: &'a mut u64,
+    #[cfg(feature = "diagnostics")]
+    abdada_busy_set: &'a mut u64,
+}
+
+// 探索状態（ABArgsの共通部）
+struct RootSearchState<'a> {
+    stack: &'a mut [SearchStack],
+    heur: &'a mut Heuristics,
+    tt_hits: &'a mut u64,
+    beta_cuts: &'a mut u64,
+    lmr_counter: &'a mut u64,
+}
+
+// 深さローカルの計測カウンタ（Cell群）
+struct DepthCounters<'a> {
+    lmr_blocked_in_check: &'a std::cell::Cell<u64>,
+    lmr_blocked_recapture: &'a std::cell::Cell<u64>,
+    evasion_sparsity_ext: &'a std::cell::Cell<u64>,
+}
+
+// ルート手ごとのキー引数
+struct RootMoveKeyArgs<'a> {
+    root: &'a Position,
+    mv: crate::shogi::Move,
+    d: i32,
+    alpha: i32,
+    beta: i32,
+    idx: usize,
+    force_full_budget: usize,
+}
+
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    fn search_root_move(
+        &self,
+        key: RootMoveKeyArgs,
+        env: &mut RootSearchEnv,
+        state: &mut RootSearchState,
+        counters: &DepthCounters,
+    ) -> i32 {
+        let RootMoveKeyArgs {
+            root,
+            mv,
+            d,
+            alpha,
+            beta,
+            idx,
+            force_full_budget,
+        } = key;
+        let mut child = root.clone();
+        let score = {
+            let _guard = ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
+            child.do_move(mv);
+            if idx == 0 {
+                let mut search_ctx = SearchContext {
+                    limits: env.limits,
+                    start_time: env.t0,
+                    nodes: env.nodes,
+                    seldepth: env.seldepth,
+                    qnodes: env.qnodes,
+                    qnodes_limit: env.qnodes_limit,
+                    #[cfg(feature = "diagnostics")]
+                    abdada_busy_detected: env.abdada_busy_detected,
+                    #[cfg(feature = "diagnostics")]
+                    abdada_busy_set: env.abdada_busy_set,
+                };
+                let (sc, _) = self.alphabeta(
+                    pvs::ABArgs {
+                        pos: &child,
+                        depth: d - 1,
+                        alpha: -beta,
+                        beta: -alpha,
+                        ply: 1,
+                        is_pv: true,
+                        stack: state.stack,
+                        heur: state.heur,
+                        tt_hits: state.tt_hits,
+                        beta_cuts: state.beta_cuts,
+                        lmr_counter: state.lmr_counter,
+                        lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
+                        lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
+                        evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
+                    },
+                    &mut search_ctx,
+                );
+                -sc
+            } else {
+                let mut need_full = true;
+                let mut s = i32::MIN;
+                if idx >= force_full_budget && d > dynp::root_beam_min_depth() {
+                    let shallow_depth = (d - 1).saturating_sub(dynp::root_beam_reduction());
+                    if shallow_depth >= 1 {
+                        let mut search_ctx_shallow = SearchContext {
+                            limits: env.limits,
+                            start_time: env.t0,
+                            nodes: env.nodes,
+                            seldepth: env.seldepth,
+                            qnodes: env.qnodes,
+                            qnodes_limit: env.qnodes_limit,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_detected: env.abdada_busy_detected,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_set: env.abdada_busy_set,
+                        };
+                        let (sc_shallow, _) = self.alphabeta(
+                            pvs::ABArgs {
+                                pos: &child,
+                                depth: shallow_depth,
+                                alpha: -(alpha + 1),
+                                beta: -alpha,
+                                ply: 1,
+                                is_pv: false,
+                                stack: state.stack,
+                                heur: state.heur,
+                                tt_hits: state.tt_hits,
+                                beta_cuts: state.beta_cuts,
+                                lmr_counter: state.lmr_counter,
+                                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
+                                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
+                                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
+                            },
+                            &mut search_ctx_shallow,
+                        );
+                        s = -sc_shallow;
+                        let root_gives_check = root.gives_check(mv);
+                        let root_see = root.see(mv);
+                        let root_king_adjacent = {
+                            if let Some(king) = root.board.king_square(root.side_to_move) {
+                                let dx = u8::abs_diff(king.file(), mv.to().file());
+                                let dy = u8::abs_diff(king.rank(), mv.to().rank());
+                                dx <= 1 && dy <= 1
+                            } else {
+                                false
+                            }
+                        };
+                        let forcing = root_gives_check || root_see >= 0 || root_king_adjacent;
+                        need_full = forcing || s > alpha - dynp::root_beam_margin_cp();
+                        if need_full && !forcing {
+                            let delta = dynp::root_beam_narrow_delta_cp();
+                            let narrow_low = alpha.saturating_sub(delta);
+                            let narrow_high = alpha.saturating_add(delta);
+                            let mut search_ctx_narrow = SearchContext {
+                                limits: env.limits,
+                                start_time: env.t0,
+                                nodes: env.nodes,
+                                seldepth: env.seldepth,
+                                qnodes: env.qnodes,
+                                qnodes_limit: env.qnodes_limit,
+                                #[cfg(feature = "diagnostics")]
+                                abdada_busy_detected: env.abdada_busy_detected,
+                                #[cfg(feature = "diagnostics")]
+                                abdada_busy_set: env.abdada_busy_set,
+                            };
+                            let (sc_narrow, _) = self.alphabeta(
+                                pvs::ABArgs {
+                                    pos: &child,
+                                    depth: d - 1,
+                                    alpha: -narrow_high,
+                                    beta: -narrow_low,
+                                    ply: 1,
+                                    is_pv: false,
+                                    stack: state.stack,
+                                    heur: state.heur,
+                                    tt_hits: state.tt_hits,
+                                    beta_cuts: state.beta_cuts,
+                                    lmr_counter: state.lmr_counter,
+                                    lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
+                                    lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
+                                    evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
+                                },
+                                &mut search_ctx_narrow,
+                            );
+                            s = -sc_narrow;
+                            need_full = s > alpha - dynp::root_beam_narrow_promote_cp();
+                        }
+                        if !need_full {
+                            if let Some(cb) = env.limits.info_string_callback.as_ref() {
+                                cb("root_beam_skip_full=1");
+                            }
+                        }
+                    }
+                }
+                if need_full {
+                    let mut search_ctx_nw = SearchContext {
+                        limits: env.limits,
+                        start_time: env.t0,
+                        nodes: env.nodes,
+                        seldepth: env.seldepth,
+                        qnodes: env.qnodes,
+                        qnodes_limit: env.qnodes_limit,
+                        #[cfg(feature = "diagnostics")]
+                        abdada_busy_detected: env.abdada_busy_detected,
+                        #[cfg(feature = "diagnostics")]
+                        abdada_busy_set: env.abdada_busy_set,
+                    };
+                    let (sc_nw, _) = self.alphabeta(
+                        pvs::ABArgs {
+                            pos: &child,
+                            depth: d - 1,
+                            alpha: -(alpha + 1),
+                            beta: -alpha,
+                            ply: 1,
+                            is_pv: false,
+                            stack: state.stack,
+                            heur: state.heur,
+                            tt_hits: state.tt_hits,
+                            beta_cuts: state.beta_cuts,
+                            lmr_counter: state.lmr_counter,
+                            lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
+                            lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
+                            evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
+                        },
+                        &mut search_ctx_nw,
+                    );
+                    s = -sc_nw;
+                    if s > alpha && s < beta {
+                        let mut search_ctx_fw = SearchContext {
+                            limits: env.limits,
+                            start_time: env.t0,
+                            nodes: env.nodes,
+                            seldepth: env.seldepth,
+                            qnodes: env.qnodes,
+                            qnodes_limit: env.qnodes_limit,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_detected: env.abdada_busy_detected,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_set: env.abdada_busy_set,
+                        };
+                        let (sc_fw, _) = self.alphabeta(
+                            pvs::ABArgs {
+                                pos: &child,
+                                depth: d - 1,
+                                alpha: -beta,
+                                beta: -alpha,
+                                ply: 1,
+                                is_pv: true,
+                                stack: state.stack,
+                                heur: state.heur,
+                                tt_hits: state.tt_hits,
+                                beta_cuts: state.beta_cuts,
+                                lmr_counter: state.lmr_counter,
+                                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
+                                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
+                                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
+                            },
+                            &mut search_ctx_fw,
+                        );
+                        s = -sc_fw;
+                    }
+                }
+                s
+            }
+        };
+        score
+    }
     fn effective_root_force_full_count(limits: &SearchLimits) -> usize {
         let mut force = dynp::root_beam_force_full_count();
         if force == 0 {
@@ -1365,246 +1628,44 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 cb(InfoEvent::CurrMove { mv, number });
                             }
                         }
-                        let mut child = root.clone();
-                        let score = {
-                            let _guard =
-                                ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
-                            child.do_move(mv);
-                            if idx == 0 {
-                                let mut search_ctx = SearchContext {
-                                    limits,
-                                    start_time: &t0,
-                                    nodes: &mut nodes,
-                                    seldepth: &mut seldepth,
-                                    qnodes: &mut qnodes,
-                                    qnodes_limit,
-                                    #[cfg(feature = "diagnostics")]
-                                    abdada_busy_detected: &mut cum_abdada_busy_detected,
-                                    #[cfg(feature = "diagnostics")]
-                                    abdada_busy_set: &mut cum_abdada_busy_set,
-                                };
-                                let (sc, _) = self.alphabeta(
-                                    pvs::ABArgs {
-                                        pos: &child,
-                                        depth: d - 1,
-                                        alpha: -beta,
-                                        beta: -alpha,
-                                        ply: 1,
-                                        is_pv: true,
-                                        stack,
-                                        heur: &mut heur,
-                                        tt_hits: &mut tt_hits,
-                                        beta_cuts: &mut beta_cuts,
-                                        lmr_counter: &mut lmr_counter,
-                                        lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
-                                        lmr_blocked_recapture: Some(&depth_lmr_blocked_recapture),
-                                        evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
-                                    },
-                                    &mut search_ctx,
-                                );
-                                // PV head: result of full-window PV search
-                                -sc
-                            } else {
-                                let mut need_full = true;
-                                let mut s = i32::MIN;
-                                if idx >= force_full_budget && d > dynp::root_beam_min_depth() {
-                                    let shallow_depth =
-                                        (d - 1).saturating_sub(dynp::root_beam_reduction());
-                                    if shallow_depth >= 1 {
-                                        let mut search_ctx_shallow = SearchContext {
-                                            limits,
-                                            start_time: &t0,
-                                            nodes: &mut nodes,
-                                            seldepth: &mut seldepth,
-                                            qnodes: &mut qnodes,
-                                            qnodes_limit,
-                                            #[cfg(feature = "diagnostics")]
-                                            abdada_busy_detected: &mut cum_abdada_busy_detected,
-                                            #[cfg(feature = "diagnostics")]
-                                            abdada_busy_set: &mut cum_abdada_busy_set,
-                                        };
-                                        let (sc_shallow, _) = self.alphabeta(
-                                            pvs::ABArgs {
-                                                pos: &child,
-                                                depth: shallow_depth,
-                                                alpha: -(alpha + 1),
-                                                beta: -alpha,
-                                                ply: 1,
-                                                is_pv: false,
-                                                stack,
-                                                heur: &mut heur,
-                                                tt_hits: &mut tt_hits,
-                                                beta_cuts: &mut beta_cuts,
-                                                lmr_counter: &mut lmr_counter,
-                                                lmr_blocked_in_check: Some(
-                                                    &depth_lmr_blocked_in_check,
-                                                ),
-                                                lmr_blocked_recapture: Some(
-                                                    &depth_lmr_blocked_recapture,
-                                                ),
-                                                evasion_sparsity_ext: Some(
-                                                    &depth_evasion_sparsity_ext,
-                                                ),
-                                            },
-                                            &mut search_ctx_shallow,
-                                        );
-                                        s = -sc_shallow;
-                                        // Force full re-search for forcing root moves
-                                        // (giving check or SEE>=0), or when shallow
-                                        // score is reasonably close to alpha.
-                                        let root_gives_check = root.gives_check(mv);
-                                        let root_see = root.see(mv);
-                                        // Treat moves that land adjacent to our king as defensive-forcing,
-                                        // because they often resolve immediate threats and deserve a full re-search.
-                                        let root_king_adjacent = {
-                                            if let Some(king) =
-                                                root.board.king_square(root.side_to_move)
-                                            {
-                                                let dx = u8::abs_diff(king.file(), mv.to().file());
-                                                let dy = u8::abs_diff(king.rank(), mv.to().rank());
-                                                dx <= 1 && dy <= 1
-                                            } else {
-                                                false
-                                            }
-                                        };
-                                        let forcing =
-                                            root_gives_check || root_see >= 0 || root_king_adjacent;
-                                        need_full =
-                                            forcing || s > alpha - dynp::root_beam_margin_cp();
-                                        if need_full && !forcing {
-                                            // YO流のナローバンド再探索: 浅い結果がα近傍なら、
-                                            // フル探索へ昇格する前に狭窓(±delta)で1回だけ検証する。
-                                            // 注: 意図通り“1回のみ”であることを保つ（将来の改修時の保険）。
-                                            let delta = dynp::root_beam_narrow_delta_cp();
-                                            let narrow_low = alpha.saturating_sub(delta);
-                                            let narrow_high = alpha.saturating_add(delta);
-                                            let mut search_ctx_narrow = SearchContext {
-                                                limits,
-                                                start_time: &t0,
-                                                nodes: &mut nodes,
-                                                seldepth: &mut seldepth,
-                                                qnodes: &mut qnodes,
-                                                qnodes_limit,
-                                                #[cfg(feature = "diagnostics")]
-                                                abdada_busy_detected: &mut cum_abdada_busy_detected,
-                                                #[cfg(feature = "diagnostics")]
-                                                abdada_busy_set: &mut cum_abdada_busy_set,
-                                            };
-                                            let (sc_narrow, _) = self.alphabeta(
-                                                pvs::ABArgs {
-                                                    pos: &child,
-                                                    depth: d - 1,
-                                                    alpha: -narrow_high,
-                                                    beta: -narrow_low,
-                                                    ply: 1,
-                                                    is_pv: false,
-                                                    stack,
-                                                    heur: &mut heur,
-                                                    tt_hits: &mut tt_hits,
-                                                    beta_cuts: &mut beta_cuts,
-                                                    lmr_counter: &mut lmr_counter,
-                                                    lmr_blocked_in_check: Some(
-                                                        &depth_lmr_blocked_in_check,
-                                                    ),
-                                                    lmr_blocked_recapture: Some(
-                                                        &depth_lmr_blocked_recapture,
-                                                    ),
-                                                    evasion_sparsity_ext: Some(
-                                                        &depth_evasion_sparsity_ext,
-                                                    ),
-                                                },
-                                                &mut search_ctx_narrow,
-                                            );
-                                            s = -sc_narrow;
-                                            need_full =
-                                                s > alpha - dynp::root_beam_narrow_promote_cp();
-                                        }
-                                        if !need_full {
-                                            if let Some(cb) = limits.info_string_callback.as_ref() {
-                                                cb("root_beam_skip_full=1");
-                                            }
-                                        }
-                                    }
-                                }
-                                if need_full {
-                                    let mut search_ctx_nw = SearchContext {
-                                        limits,
-                                        start_time: &t0,
-                                        nodes: &mut nodes,
-                                        seldepth: &mut seldepth,
-                                        qnodes: &mut qnodes,
-                                        qnodes_limit,
-                                        #[cfg(feature = "diagnostics")]
-                                        abdada_busy_detected: &mut cum_abdada_busy_detected,
-                                        #[cfg(feature = "diagnostics")]
-                                        abdada_busy_set: &mut cum_abdada_busy_set,
-                                    };
-                                    let (sc_nw, _) = self.alphabeta(
-                                        pvs::ABArgs {
-                                            pos: &child,
-                                            depth: d - 1,
-                                            alpha: -(alpha + 1),
-                                            beta: -alpha,
-                                            ply: 1,
-                                            is_pv: false,
-                                            stack,
-                                            heur: &mut heur,
-                                            tt_hits: &mut tt_hits,
-                                            beta_cuts: &mut beta_cuts,
-                                            lmr_counter: &mut lmr_counter,
-                                            lmr_blocked_in_check: Some(&depth_lmr_blocked_in_check),
-                                            lmr_blocked_recapture: Some(
-                                                &depth_lmr_blocked_recapture,
-                                            ),
-                                            evasion_sparsity_ext: Some(&depth_evasion_sparsity_ext),
-                                        },
-                                        &mut search_ctx_nw,
-                                    );
-                                    s = -sc_nw;
-                                    if s > alpha && s < beta {
-                                        let mut search_ctx_fw = SearchContext {
-                                            limits,
-                                            start_time: &t0,
-                                            nodes: &mut nodes,
-                                            seldepth: &mut seldepth,
-                                            qnodes: &mut qnodes,
-                                            qnodes_limit,
-                                            #[cfg(feature = "diagnostics")]
-                                            abdada_busy_detected: &mut cum_abdada_busy_detected,
-                                            #[cfg(feature = "diagnostics")]
-                                            abdada_busy_set: &mut cum_abdada_busy_set,
-                                        };
-                                        let (sc_fw, _) = self.alphabeta(
-                                            pvs::ABArgs {
-                                                pos: &child,
-                                                depth: d - 1,
-                                                alpha: -beta,
-                                                beta: -alpha,
-                                                ply: 1,
-                                                is_pv: true,
-                                                stack,
-                                                heur: &mut heur,
-                                                tt_hits: &mut tt_hits,
-                                                beta_cuts: &mut beta_cuts,
-                                                lmr_counter: &mut lmr_counter,
-                                                lmr_blocked_in_check: Some(
-                                                    &depth_lmr_blocked_in_check,
-                                                ),
-                                                lmr_blocked_recapture: Some(
-                                                    &depth_lmr_blocked_recapture,
-                                                ),
-                                                evasion_sparsity_ext: Some(
-                                                    &depth_evasion_sparsity_ext,
-                                                ),
-                                            },
-                                            &mut search_ctx_fw,
-                                        );
-                                        s = -sc_fw;
-                                    }
-                                }
-                                s
-                            }
+                        let mut env = RootSearchEnv {
+                            limits,
+                            t0: &t0,
+                            nodes: &mut nodes,
+                            seldepth: &mut seldepth,
+                            qnodes: &mut qnodes,
+                            qnodes_limit,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_detected: &mut cum_abdada_busy_detected,
+                            #[cfg(feature = "diagnostics")]
+                            abdada_busy_set: &mut cum_abdada_busy_set,
                         };
+                        let mut state = RootSearchState {
+                            stack,
+                            heur: &mut heur,
+                            tt_hits: &mut tt_hits,
+                            beta_cuts: &mut beta_cuts,
+                            lmr_counter: &mut lmr_counter,
+                        };
+                        let counters = DepthCounters {
+                            lmr_blocked_in_check: &depth_lmr_blocked_in_check,
+                            lmr_blocked_recapture: &depth_lmr_blocked_recapture,
+                            evasion_sparsity_ext: &depth_evasion_sparsity_ext,
+                        };
+                        let score = self.search_root_move(
+                            RootMoveKeyArgs {
+                                root,
+                                mv,
+                                d,
+                                alpha,
+                                beta,
+                                idx,
+                                force_full_budget,
+                            },
+                            &mut env,
+                            &mut state,
+                            &counters,
+                        );
                         if score > local_best {
                             local_best = score;
                             local_best_mv = Some(mv);
