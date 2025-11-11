@@ -131,6 +131,10 @@ pub struct UsiOptions {
     pub finalize_sanity_king_alt_penalty_cp: i32,
     /// R/B 非成りに与える軽ペナルティ（cp）
     pub finalize_non_promote_major_penalty_cp: i32,
+    /// 最終PVで要求する最小手数（1=既存動作, 2=PV1+応手を保証）
+    pub finalize_min_pv_len: usize,
+    /// 最終PVが短い場合に救済探索へ使うミリ秒予算
+    pub finalize_rescue_max_ms: u64,
     // Instant mate move options
     pub instant_mate_move_enabled: bool,
     pub instant_mate_move_max_distance: u32,
@@ -241,6 +245,8 @@ impl Default for UsiOptions {
             finalize_sanity_king_alt_min_gain_cp: 150,
             finalize_sanity_king_alt_penalty_cp: 0,
             finalize_non_promote_major_penalty_cp: 120,
+            finalize_min_pv_len: 2,
+            finalize_rescue_max_ms: 20,
             instant_mate_move_enabled: true,
             instant_mate_move_max_distance: 1,
             // より安全側に倒す（PV全体を確認）
