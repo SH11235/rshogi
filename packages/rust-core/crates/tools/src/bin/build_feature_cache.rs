@@ -512,6 +512,10 @@ fn write_position_samples<W: Write>(
         }
         #[cfg(debug_assertions)]
         {
+            use engine_core::{
+                evaluation::nnue::features::FE_END,
+                shogi::SHOGI_BOARD_SIZE,
+            };
             let max_dim = (SHOGI_BOARD_SIZE * FE_END) as u32;
             debug_assert!(
                 features_buf.iter().all(|&f| f < max_dim),
