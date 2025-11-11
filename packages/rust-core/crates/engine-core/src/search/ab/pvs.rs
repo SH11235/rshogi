@@ -34,6 +34,7 @@ const CAPTURE_SEE_SLOPE_CP: i32 = 12;
 const CAPTURE_SEE_GUARD_BASE_CP: i32 = 160;
 const CAPTURE_SEE_GUARD_SLOPE_CP: i32 = 20;
 const CAPTURE_SEE_GUARD_MAX_CP: i32 = 320;
+const DROP_BAD_HISTORY_PENALTY_CP: i32 = 400;
 
 /// Quiet SEE gate（YO Step14相当）
 /// lmr_depth: LMR適用後の残り深さ（newDepth - r）。
@@ -585,6 +586,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_cleared");
         let mut best_mv = None;
         let mut best = i32::MIN / 2;
+        let mut best_drop_bad = false;
         let mut moveno: usize = 0;
         let mut first_move_done = false;
         let mut tried_captures: SmallVec<[crate::shogi::Move; 16]> = SmallVec::new();
@@ -606,13 +608,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stack[ply as usize].current_move = Some(mv);
             let gives_check = pos.gives_check(mv);
             let is_capture = mv.is_capture_hint();
-            let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
+            let need_see = is_capture || mv.is_drop() || is_quiet;
+            let see = if need_see { pos.see(mv) } else { 0 };
+            let is_good_capture = is_capture && see >= 0;
+            let drop_bad = mv.is_drop() && see < 0;
+            let quiet_bad = is_quiet && see < 0;
             let same_to = prev_move.is_some_and(|pm| pm.to() == mv.to());
             let recap = is_capture
                 && prev_move.is_some_and(|pm| pm.is_capture_hint() && pm.to() == mv.to());
-            let stat_score =
+            let mut stat_score =
                 ordering::stat_score(heur, pos, mv, prev_move, prev_prev_move, is_capture);
+            if drop_bad {
+                stat_score -= DROP_BAD_HISTORY_PENALTY_CP;
+            }
 
             if depth < 14 && is_quiet {
                 let mut h = heur.history.get(pos.side_to_move, mv);
@@ -861,7 +870,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let child_ply = (ply + 1) as usize;
                 let save_prev_risky = stack.get(child_ply).map(|st| st.prev_risky).unwrap_or(false);
                 if let Some(st) = stack.get_mut(child_ply) {
-                    st.prev_risky = mv.is_drop() || (is_quiet && pos.see(mv) < 0);
+                    st.prev_risky = drop_bad || quiet_bad;
                 }
                 let val = if pv_move {
                     let (sc, _) = self.alphabeta(
@@ -949,6 +958,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if score > best {
                 best = score;
                 best_mv = Some(mv);
+                best_drop_bad = drop_bad;
             }
             if score > alpha {
                 alpha = score;
@@ -956,27 +966,34 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if alpha >= beta {
                 *beta_cuts += 1;
                 if is_quiet {
-                    stack[ply as usize].update_killers(mv);
-                    heur.history.update_good(pos.side_to_move, mv, depth);
-                    if let Some(curr_piece) = mv.piece_type() {
-                        heur.pawn_history.update_good(pos.side_to_move, curr_piece, mv.to(), depth);
-                    }
-                    if ply > 0 {
-                        if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                            heur.counter.update(pos.side_to_move, prev_mv, mv);
-                            if let (Some(prev_piece), Some(curr_piece)) =
-                                (prev_mv.piece_type(), mv.piece_type())
-                            {
-                                let key = crate::search::history::ContinuationKey::new(
-                                    pos.side_to_move,
-                                    prev_piece as usize,
-                                    prev_mv.to(),
-                                    prev_mv.is_drop(),
-                                    curr_piece as usize,
-                                    mv.to(),
-                                    mv.is_drop(),
-                                );
-                                heur.continuation.update_good(key, depth);
+                    if !drop_bad {
+                        stack[ply as usize].update_killers(mv);
+                        heur.history.update_good(pos.side_to_move, mv, depth);
+                        if let Some(curr_piece) = mv.piece_type() {
+                            heur.pawn_history.update_good(
+                                pos.side_to_move,
+                                curr_piece,
+                                mv.to(),
+                                depth,
+                            );
+                        }
+                        if ply > 0 {
+                            if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
+                                heur.counter.update(pos.side_to_move, prev_mv, mv);
+                                if let (Some(prev_piece), Some(curr_piece)) =
+                                    (prev_mv.piece_type(), mv.piece_type())
+                                {
+                                    let key = crate::search::history::ContinuationKey::new(
+                                        pos.side_to_move,
+                                        prev_piece as usize,
+                                        prev_mv.to(),
+                                        prev_mv.is_drop(),
+                                        curr_piece as usize,
+                                        mv.to(),
+                                        mv.is_drop(),
+                                    );
+                                    heur.continuation.update_good(key, depth);
+                                }
                             }
                         }
                     }
@@ -1011,6 +1028,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 return (best, best_mv);
             } else {
                 return (static_eval, None);
+            }
+        }
+
+        if best_drop_bad {
+            if let Some(bmv) = best_mv {
+                heur.history.update_bad(pos.side_to_move, bmv, depth.max(1));
+                if let Some(curr_piece) = bmv.piece_type() {
+                    heur.pawn_history.update_bad(
+                        pos.side_to_move,
+                        curr_piece,
+                        bmv.to(),
+                        depth.max(1),
+                    );
+                }
             }
         }
         let result = if best == i32::MIN / 2 {
@@ -1102,6 +1133,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     heur.history.update_bad(pos.side_to_move, qmv, depth);
                     if let Some(curr_piece) = qmv.piece_type() {
                         heur.pawn_history.update_bad(pos.side_to_move, curr_piece, qmv.to(), depth);
+                    }
+                    if qmv.is_drop() && pos.see(qmv) < 0 {
+                        heur.history.update_bad(pos.side_to_move, qmv, depth);
+                        if let Some(curr_piece) = qmv.piece_type() {
+                            heur.pawn_history.update_bad(
+                                pos.side_to_move,
+                                curr_piece,
+                                qmv.to(),
+                                depth,
+                            );
+                        }
                     }
                     if ply > 0 {
                         if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
