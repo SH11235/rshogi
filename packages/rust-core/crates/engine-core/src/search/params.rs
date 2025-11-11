@@ -75,6 +75,9 @@ static RUNTIME_SBP_BASE: AtomicI32 = AtomicI32::new(SBP_MARGIN_BASE);
 static RUNTIME_SBP_SLOPE: AtomicI32 = AtomicI32::new(SBP_MARGIN_SLOPE);
 static RUNTIME_FUT_BASE: AtomicI32 = AtomicI32::new(FUT_MARGIN_BASE);
 static RUNTIME_FUT_SLOPE: AtomicI32 = AtomicI32::new(FUT_MARGIN_SLOPE);
+static RUNTIME_FUT_STAT_DEN: AtomicI32 = AtomicI32::new(356);
+static RUNTIME_LMR_STAT_NUM: AtomicI32 = AtomicI32::new(1);
+static RUNTIME_LMR_STAT_DEN_BASE: AtomicI32 = AtomicI32::new(8192);
 static RUNTIME_PROBCUT_D5: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D5);
 static RUNTIME_PROBCUT_D6P: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D6P);
 static RUNTIME_ENABLE_NMP: AtomicBool = AtomicBool::new(true);
@@ -103,6 +106,7 @@ static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
 static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(3);
+static RUNTIME_SAME_TO_EXTENSION: AtomicBool = AtomicBool::new(false);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -177,6 +181,29 @@ pub fn fut_margin_base() -> i32 {
 #[inline]
 pub fn fut_margin_slope() -> i32 {
     RUNTIME_FUT_SLOPE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn fut_stat_den() -> i32 {
+    RUNTIME_FUT_STAT_DEN.load(Ordering::Relaxed).max(1)
+}
+
+#[inline]
+pub fn lmr_stat_num() -> i32 {
+    RUNTIME_LMR_STAT_NUM.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn lmr_stat_den(depth: i32) -> i32 {
+    let base = RUNTIME_LMR_STAT_DEN_BASE.load(Ordering::Relaxed).max(1);
+    let depth_scale = depth.max(1) as u32;
+    let shift = depth_scale.ilog2() as i32;
+    (base >> shift).max(1)
+}
+
+#[inline]
+pub fn same_to_extension_enabled() -> bool {
+    RUNTIME_SAME_TO_EXTENSION.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -404,6 +431,22 @@ pub fn set_fut_base(v: i32) {
 }
 pub fn set_fut_slope(v: i32) {
     RUNTIME_FUT_SLOPE.store(v, Ordering::Relaxed);
+}
+
+pub fn set_fut_stat_den(v: i32) {
+    RUNTIME_FUT_STAT_DEN.store(v.max(1), Ordering::Relaxed);
+}
+
+pub fn set_lmr_stat_num(v: i32) {
+    RUNTIME_LMR_STAT_NUM.store(v, Ordering::Relaxed);
+}
+
+pub fn set_lmr_stat_den_base(v: i32) {
+    RUNTIME_LMR_STAT_DEN_BASE.store(v.max(1), Ordering::Relaxed);
+}
+
+pub fn set_same_to_extension(on: bool) {
+    RUNTIME_SAME_TO_EXTENSION.store(on, Ordering::Relaxed);
 }
 
 pub fn set_quiet_history_weight(v: i32) {
