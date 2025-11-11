@@ -56,6 +56,12 @@ thread_local! {
     static STACK_CACHE: RefCell<Vec<SearchStack>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Root SEE Gate 判定関数
+///
+/// 仕様:
+/// - xSEE 閾値 `xsee_cp` が正のときのみ有効（0 以下は無効）
+/// - ルートでの「静かな非王手」の手に対し、`see(mv) < -xsee_cp` なら候補から除外
+/// - 捕獲手（`is_capture_hint()`）と王手（`gives_check()`）は除外対象から外す（強制力の高い手は温存）
 #[inline]
 pub(crate) fn root_see_gate_should_skip(
     root: &Position,
@@ -1059,9 +1065,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            // Root SEE Gate: YO 仕様に合わせ、非王手の静かな手で xSEE が閾値より悪いものを削除する。
-            // NOTE: Reverted quiet landing SEE gating to align with YaneuraOu baseline.
-            // RootSeeGate is not applied to quiet non-check moves.
+            // Root SEE Gate: 非王手の静かな手（quiet non-check）に対してだけ xSEE を適用し、
+            // see(mv) < -xsee_cp の手を除外する。捕獲手と王手は温存（強制力の高い手の見落とし抑止）。
             let root_rank: Vec<crate::shogi::Move> = root_moves.clone();
             let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
             for (idx, mv) in root_rank.iter().enumerate() {

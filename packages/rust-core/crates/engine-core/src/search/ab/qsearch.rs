@@ -403,7 +403,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 // branches from dominating qsearch. Do not apply this to
                 // promotions, checking moves, or recaptures on the previous
                 // move's destination.
-                if move_count > 2 && !pos.gives_check(mv) && !mv.is_promote() && !is_recapture {
+                let gives_check = pos.gives_check(mv);
+                if move_count > 2 && !gives_check && !mv.is_promote() && !is_recapture {
                     continue;
                 }
                 // 深い静止層では再捕獲以外のキャプチャを抑制（YO: DEPTH_QS_RECAPTURES=-5）
@@ -417,7 +418,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     .map(|pt| heur.pawn_history.get(pos.side_to_move, pt, mv.to()))
                     .unwrap_or(0);
                 if cont_score + pawn_score <= CONT_HISTORY_QS_PRUNE_THRESHOLD
-                    && !pos.gives_check(mv)
+                    && !gives_check
                     && !mv.is_promote()
                     && !is_recapture
                 {
@@ -425,30 +426,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
 
                 let see = pos.see(mv);
-                // 取る駒の価値（成りを考慮）
-                let captured_val_prom_aware = {
-                    let to = mv.to();
-                    if let Some(piece) = pos.board.squares[to.index()] {
-                        crate::shogi::piece_constants::SEE_PIECE_VALUES[piece.promoted as usize]
-                            [piece.piece_type as usize]
-                    } else {
-                        0
+                if !gives_check && !is_recapture {
+                    // 取る駒の価値（成りを考慮）
+                    let captured_val_prom_aware = {
+                        let to = mv.to();
+                        if let Some(piece) = pos.board.squares[to.index()] {
+                            crate::shogi::piece_constants::SEE_PIECE_VALUES[piece.promoted as usize]
+                                [piece.piece_type as usize]
+                        } else {
+                            0
+                        }
+                    };
+
+                    // YO準拠: futility + SEE による枝刈り
+                    const QS_FUTILITY_BASE_MARGIN: i32 = 352; // cp
+                    let futility_base = stand_pat.saturating_add(QS_FUTILITY_BASE_MARGIN);
+
+                    // 1) futility: 静的評価 + 捕獲駒価値 が alpha を超えないならスキップ
+                    let futility_value = futility_base.saturating_add(captured_val_prom_aware);
+                    if futility_value <= alpha {
+                        continue;
                     }
-                };
 
-                // YO準拠: futility + SEE による枝刈り
-                const QS_FUTILITY_BASE_MARGIN: i32 = 352; // cp
-                let futility_base = stand_pat.saturating_add(QS_FUTILITY_BASE_MARGIN);
-
-                // 1) futility: 静的評価 + 捕獲駒価値 が alpha を超えないならスキップ
-                let futility_value = futility_base.saturating_add(captured_val_prom_aware);
-                if futility_value <= alpha {
-                    continue;
-                }
-
-                // 2) SEE が十分でないならスキップ（alpha - futility_base）
-                if see < alpha.saturating_sub(futility_base) {
-                    continue;
+                    // 2) SEE が十分でないならスキップ（alpha - futility_base）
+                    if see < alpha.saturating_sub(futility_base) {
+                        continue;
+                    }
                 }
 
                 // 3) SEE の絶対下限（歩損未満は通さない）

@@ -73,11 +73,8 @@ impl Position {
                 None => {
                     #[cfg(debug_assertions)]
                     check_state("drop_missing_piece_type", self, epoch_before, hash_before);
-                    return if threshold != 0 {
-                        threshold - 1
-                    } else {
-                        -10_000
-                    };
+                    // 安全側: 駒種不明なdropは常に大きく不利として扱う（see_geでもfalse）
+                    return -10_000;
                 }
             };
             let dropped_value = Self::see_piece_type_value(dropped_pt);
