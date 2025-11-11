@@ -212,7 +212,7 @@ where
             // Stack size override for deep recursion (diagnostic/debug builds).
             // Default OS stack (typically 2MB release, 8MB on some Linux) is sufficient for
             // normal operation. Override only when needed via env var or feature flag.
-            if let Ok(mb_str) = std::env::var("SHOGI_WORKER_STACK_MB") {
+            if let Some(mb_str) = crate::util::env_var("SHOGI_WORKER_STACK_MB") {
                 if let Ok(mb) = mb_str.parse::<usize>() {
                     builder = builder.stack_size(mb * 1024 * 1024);
                 }
@@ -284,7 +284,7 @@ where
             }
         }
         // Optional metrics logging (env opt-in)
-        if std::env::var("SHOGI_THREADPOOL_METRICS").ok().as_deref() == Some("1") {
+        if crate::util::env_var("SHOGI_THREADPOOL_METRICS").as_deref() == Some("1") {
             let hi = METRICS_HI.load(std::sync::atomic::Ordering::Relaxed);
             let lo = METRICS_NORMAL.load(std::sync::atomic::Ordering::Relaxed);
             let idle = METRICS_IDLE.load(std::sync::atomic::Ordering::Relaxed);
@@ -409,9 +409,8 @@ fn worker_loop<E>(
 {
     let mut local = WorkerLocal::new();
     let biased = matches!(
-        std::env::var("SHOGI_THREADPOOL_BIASED")
+        crate::util::env_var("SHOGI_THREADPOOL_BIASED")
             .map(|s| s.to_ascii_lowercase())
-            .ok()
             .as_deref(),
         Some("1" | "true" | "on")
     );

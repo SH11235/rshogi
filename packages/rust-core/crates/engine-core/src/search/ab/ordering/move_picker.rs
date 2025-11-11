@@ -884,20 +884,19 @@ mod diagnostics {
     use crate::Position;
     use log::warn;
     use std::collections::HashSet;
-    use std::env;
     use std::sync::{Mutex, OnceLock};
 
     fn should_panic_on_enemy_king_capture() -> bool {
         static PANIC_ON_GUARD: OnceLock<bool> = OnceLock::new();
-        *PANIC_ON_GUARD.get_or_init(|| match env::var("SHOGI_PANIC_ON_KING_CAPTURE") {
-            Ok(value) => {
+        *PANIC_ON_GUARD.get_or_init(|| match crate::util::env_var("SHOGI_PANIC_ON_KING_CAPTURE") {
+            Some(value) => {
                 let normalized = value.trim().to_ascii_lowercase();
                 !(normalized == "0"
                     || normalized == "false"
                     || normalized == "no"
                     || normalized == "off")
             }
-            Err(_) => true,
+            None => true,
         })
     }
 

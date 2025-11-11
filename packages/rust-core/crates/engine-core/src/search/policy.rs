@@ -11,8 +11,8 @@ const ABDADA_ON: u8 = 1;
 fn abdada_atomic() -> &'static AtomicU8 {
     static CELL: OnceLock<AtomicU8> = OnceLock::new();
     CELL.get_or_init(|| {
-        let init = match std::env::var("SHOGI_ABDADA") {
-            Ok(s) if matches!(s.as_str(), "1" | "true" | "on") => ABDADA_ON,
+        let init = match crate::util::env_var("SHOGI_ABDADA") {
+            Some(s) if matches!(s.as_str(), "1" | "true" | "on") => ABDADA_ON,
             _ => ABDADA_OFF,
         };
         AtomicU8::new(init)
@@ -36,8 +36,8 @@ const QUIET_SEE_GUARD_ON: u8 = 1;
 fn quiet_see_guard_atomic() -> &'static AtomicU8 {
     static CELL: OnceLock<AtomicU8> = OnceLock::new();
     CELL.get_or_init(|| {
-        let init = match std::env::var("SHOGI_QUIET_SEE_GUARD") {
-            Ok(s)
+        let init = match crate::util::env_var("SHOGI_QUIET_SEE_GUARD") {
+            Some(s)
                 if matches!(s.as_str(), "0" | "false" | "off" | "disable" | "disabled" | "no") =>
             {
                 QUIET_SEE_GUARD_OFF
@@ -72,8 +72,8 @@ const CAPTURE_FUT_ON: u8 = 1;
 fn capture_fut_atomic() -> &'static AtomicU8 {
     static CELL: OnceLock<AtomicU8> = OnceLock::new();
     CELL.get_or_init(|| {
-        let init = match std::env::var("SHOGI_CAPTURE_FUT_ENABLE") {
-            Ok(s)
+        let init = match crate::util::env_var("SHOGI_CAPTURE_FUT_ENABLE") {
+            Some(s)
                 if matches!(s.as_str(), "0" | "false" | "off" | "disable" | "disabled" | "no") =>
             {
                 CAPTURE_FUT_OFF
@@ -92,8 +92,7 @@ pub fn capture_futility_enabled() -> bool {
 fn capture_fut_scale_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
-        let val = std::env::var("SHOGI_CAPTURE_FUT_SCALE")
-            .ok()
+        let val = crate::util::env_var("SHOGI_CAPTURE_FUT_SCALE")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(75)
             .clamp(25, 150);
@@ -111,9 +110,8 @@ fn nmp_verify_enabled_atomic() -> &'static AtomicBool {
     static CELL: OnceLock<AtomicBool> = OnceLock::new();
     CELL.get_or_init(|| {
         let disabled = matches!(
-            std::env::var("SEARCH_NMP_VERIFY_ENABLED"),
-            Ok(s)
-                if matches!(s.as_str(), "0" | "false" | "off" | "disable" | "disabled" | "no")
+            crate::util::env_var("SEARCH_NMP_VERIFY_ENABLED").as_deref(),
+            Some("0" | "false" | "off" | "disable" | "disabled" | "no")
         );
         let on = !disabled;
         AtomicBool::new(on)
@@ -128,8 +126,7 @@ pub fn nmp_verify_enabled() -> bool {
 fn nmp_verify_min_depth_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
-        let v = std::env::var("SEARCH_NMP_VERIFY_MIN_DEPTH")
-            .ok()
+        let v = crate::util::env_var("SEARCH_NMP_VERIFY_MIN_DEPTH")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(16)
             .clamp(2, 64);
@@ -150,8 +147,8 @@ const ASP_MODE_WIDE: u8 = 1;
 fn helper_asp_mode_atomic() -> &'static AtomicU8 {
     static CELL: OnceLock<AtomicU8> = OnceLock::new();
     CELL.get_or_init(|| {
-        let init = match std::env::var("SHOGI_HELPER_ASP_MODE") {
-            Ok(s) if s.eq_ignore_ascii_case("off") || s == "0" => ASP_MODE_OFF,
+        let init = match crate::util::env_var("SHOGI_HELPER_ASP_MODE") {
+            Some(s) if s.eq_ignore_ascii_case("off") || s == "0" => ASP_MODE_OFF,
             _ => ASP_MODE_WIDE,
         };
         AtomicU8::new(init)
@@ -161,8 +158,7 @@ fn helper_asp_mode_atomic() -> &'static AtomicU8 {
 fn helper_asp_delta_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
-        let raw = std::env::var("SHOGI_HELPER_ASP_DELTA")
-            .ok()
+        let raw = crate::util::env_var("SHOGI_HELPER_ASP_DELTA")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(350);
         AtomicI32::new(raw.clamp(50, 600))
@@ -219,8 +215,7 @@ pub fn set_helper_asp(mode_off_wide: u8, delta: i32) {
 fn tt_suppress_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
-        let init = std::env::var("SHOGI_TT_SUPPRESS_BELOW_DEPTH")
-            .ok()
+        let init = crate::util::env_var("SHOGI_TT_SUPPRESS_BELOW_DEPTH")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(-1);
         AtomicI32::new(init)
@@ -241,8 +236,7 @@ pub fn tt_suppress_below_depth() -> Option<i32> {
 fn asp_fail_low_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
-        let v = std::env::var("SHOGI_ASP_FAILLOW_PCT")
-            .ok()
+        let v = crate::util::env_var("SHOGI_ASP_FAILLOW_PCT")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(33);
         AtomicI32::new(v.clamp(10, 200))
@@ -252,8 +246,7 @@ fn asp_fail_low_atomic() -> &'static AtomicI32 {
 fn asp_fail_high_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
-        let v = std::env::var("SHOGI_ASP_FAILHIGH_PCT")
-            .ok()
+        let v = crate::util::env_var("SHOGI_ASP_FAILHIGH_PCT")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(33);
         AtomicI32::new(v.clamp(10, 200))
@@ -284,8 +277,8 @@ pub fn set_asp_fail_high_pct(pct: i32) {
 fn bench_allrun_atomic() -> &'static AtomicU8 {
     static CELL: OnceLock<AtomicU8> = OnceLock::new();
     CELL.get_or_init(|| {
-        let on = match std::env::var("SHOGI_PAR_BENCH_ALLRUN") {
-            Ok(v) if matches!(v.as_str(), "1" | "true" | "on") => 1u8,
+        let on = match crate::util::env_var("SHOGI_PAR_BENCH_ALLRUN") {
+            Some(v) if matches!(v.as_str(), "1" | "true" | "on") => 1u8,
             _ => 0u8,
         };
         AtomicU8::new(on)
@@ -300,8 +293,8 @@ pub fn bench_allrun_enabled() -> bool {
 fn bench_stop_on_mate_atomic() -> &'static AtomicU8 {
     static CELL: OnceLock<AtomicU8> = OnceLock::new();
     CELL.get_or_init(|| {
-        let on = match std::env::var("SHOGI_BENCH_STOP_ON_MATE") {
-            Ok(v) if matches!(v.as_str(), "0" | "false" | "off") => 0u8,
+        let on = match crate::util::env_var("SHOGI_BENCH_STOP_ON_MATE") {
+            Some(v) if matches!(v.as_str(), "0" | "false" | "off") => 0u8,
             _ => 1u8,
         };
         AtomicU8::new(on)
@@ -330,8 +323,7 @@ pub fn set_bench_stop_on_mate(enabled: bool) {
 pub fn lead_window_base_ms() -> u64 {
     static CELL: OnceLock<u64> = OnceLock::new();
     *CELL.get_or_init(|| {
-        std::env::var("SHOGI_LEAD_WINDOW_MS")
-            .ok()
+        crate::util::env_var("SHOGI_LEAD_WINDOW_MS")
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&v| v <= 5_000)
             .unwrap_or(10)
@@ -346,9 +338,9 @@ pub fn lead_window_base_ms() -> u64 {
 pub fn bench_join_timeout_ms() -> Option<u64> {
     static CELL: OnceLock<Option<u64>> = OnceLock::new();
     *CELL.get_or_init(|| {
-        match std::env::var("SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS") {
-            Ok(s) => s.parse::<u64>().ok().filter(|&v| v > 0).map(|v| v.min(60_000)), // sanity cap 60s
-            Err(_) => None,
+        match crate::util::env_var("SHOGI_PAR_BENCH_JOIN_TIMEOUT_MS") {
+            Some(s) => s.parse::<u64>().ok().filter(|&v| v > 0).map(|v| v.min(60_000)), // sanity cap 60s
+            None => None,
         }
     })
 }
@@ -359,8 +351,7 @@ pub fn bench_join_timeout_ms() -> Option<u64> {
 pub fn stop_drain_budget_ms() -> u64 {
     static CELL: OnceLock<u64> = OnceLock::new();
     *CELL.get_or_init(|| {
-        std::env::var("SHOGI_STOP_DRAIN_MS")
-            .ok()
+        crate::util::env_var("SHOGI_STOP_DRAIN_MS")
             .and_then(|s| s.parse::<u64>().ok())
             .map(|v| v.min(5_000))
             .unwrap_or(45)
@@ -372,8 +363,8 @@ pub fn stop_drain_budget_ms() -> u64 {
 fn cancel_on_primary_atomic() -> &'static AtomicU8 {
     static CELL: OnceLock<AtomicU8> = OnceLock::new();
     CELL.get_or_init(|| {
-        let on = match std::env::var("SHOGI_PAR_CANCEL_ON_PRIMARY") {
-            Ok(v) if matches!(v.as_str(), "1" | "true" | "on") => 1u8,
+        let on = match crate::util::env_var("SHOGI_PAR_CANCEL_ON_PRIMARY") {
+            Some(v) if matches!(v.as_str(), "1" | "true" | "on") => 1u8,
             _ => 0u8,
         };
         AtomicU8::new(on)

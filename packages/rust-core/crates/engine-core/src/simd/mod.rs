@@ -148,15 +148,15 @@ fn hw_detect_with_clamp() -> dispatch::SimdLevel {
     };
 
     // 2) Optional runtime clamp via env var
-    let clamp = match std::env::var("SHOGI_SIMD_MAX") {
-        Ok(val) => match val.to_ascii_lowercase().as_str() {
+    let clamp = match crate::util::env_var("SHOGI_SIMD_MAX") {
+        Some(val) => match val.to_ascii_lowercase().as_str() {
             "scalar" => Scalar,
             "sse2" => Sse2,
             "avx" => Avx,
             "avx512" | "avx512f" => Avx512f,
             _ => hw,
         },
-        Err(_) => hw,
+        None => hw,
     };
 
     match (hw, clamp) {
