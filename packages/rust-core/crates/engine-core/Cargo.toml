@@ -35,6 +35,8 @@ diagnostics = []
 bench-move-picker = []
 # Enforce panic on session mismatch in StopController::publish_root_line (デフォルトOFF)
 strict-stop-session-assert = []
+# Build-time toggle to make HalfKP_vm the default variant
+half_kp_vm_default = []
 
 # Quiescence-search checking-moves policy compile-time overrides
 # - qs_checks_force_off: disable checking moves in QS regardless of env/USI option

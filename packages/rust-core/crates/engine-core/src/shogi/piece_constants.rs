@@ -3,7 +3,7 @@
 //! This module provides compile-time constants for piece types and type-safe
 //! conversion functions, eliminating the need for unsafe match statements.
 
-use super::board::PieceType;
+use super::board::{PieceType, NUM_PIECE_TYPES};
 
 /// Number of hand piece types (King excluded)
 pub const NUM_HAND_PIECE_TYPES: usize = 7;
@@ -42,6 +42,33 @@ pub const HAND_PIECE_TYPES: [PieceType; NUM_HAND_PIECE_TYPES] = [
     PieceType::Knight, // index 4
     PieceType::Lance,  // index 5
     PieceType::Pawn,   // index 6
+];
+
+/// Apery (YaneuraOu) piece values in centipawns, unpromoted.
+///
+/// 基準: 歩=90, 王=15000。駒割り同期のため評価器全体で共有する。
+pub const APERY_PIECE_VALUES: [i32; NUM_PIECE_TYPES] = [
+    15000, // King
+    990,   // Rook
+    855,   // Bishop
+    540,   // Gold
+    495,   // Silver
+    405,   // Knight
+    315,   // Lance
+    90,    // Pawn
+];
+
+/// Apery piece values for promoted pieces (same order as `PieceType`).
+/// 非成りの Gold/King は据え置き。Pro 系は 540、馬=945、龍=1395。
+pub const APERY_PROMOTED_PIECE_VALUES: [i32; NUM_PIECE_TYPES] = [
+    15000, // King (no promotion, keep base)
+    1395,  // Dragon
+    945,   // Horse
+    540,   // Gold (no promotion)
+    540,   // Promoted silver
+    540,   // Promoted knight
+    540,   // Promoted lance
+    540,   // Tokin
 ];
 
 /// Maximum number of each piece type that can be in hand
@@ -127,31 +154,25 @@ pub const SEE_GAIN_ARRAY_SIZE: usize = 32;
 
 /// SEE piece values table indexed by [promoted][piece_type]
 /// Index 0: unpromoted, Index 1: promoted
-use super::board::NUM_PIECE_TYPES;
+pub const SEE_PIECE_VALUES: [[i32; NUM_PIECE_TYPES]; 2] =
+    [APERY_PIECE_VALUES, APERY_PROMOTED_PIECE_VALUES];
 
-pub const SEE_PIECE_VALUES: [[i32; NUM_PIECE_TYPES]; 2] = [
-    // Unpromoted values
-    [
-        10000, // King (0)
-        900,   // Rook (1)
-        700,   // Bishop (2)
-        600,   // Gold (3)
-        500,   // Silver (4)
-        400,   // Knight (5)
-        300,   // Lance (6)
-        100,   // Pawn (7)
-    ],
-    // Promoted values
-    [
-        10000, // King cannot promote (0)
-        1200,  // Dragon (promoted Rook) (1)
-        900,   // Horse (promoted Bishop) (2)
-        600,   // Gold cannot promote (3)
-        600,   // Promoted Silver (4)
-        600,   // Promoted Knight (5)
-        600,   // Promoted Lance (6)
-        600,   // Tokin (promoted Pawn) (7)
-    ],
+/// Promotion gain (promoted value - base value) per piece type.
+pub const APERY_PROMOTION_GAINS: [i32; NUM_PIECE_TYPES] = [
+    0,
+    APERY_PROMOTED_PIECE_VALUES[PieceType::Rook as usize]
+        - APERY_PIECE_VALUES[PieceType::Rook as usize],
+    APERY_PROMOTED_PIECE_VALUES[PieceType::Bishop as usize]
+        - APERY_PIECE_VALUES[PieceType::Bishop as usize],
+    0,
+    APERY_PROMOTED_PIECE_VALUES[PieceType::Silver as usize]
+        - APERY_PIECE_VALUES[PieceType::Silver as usize],
+    APERY_PROMOTED_PIECE_VALUES[PieceType::Knight as usize]
+        - APERY_PIECE_VALUES[PieceType::Knight as usize],
+    APERY_PROMOTED_PIECE_VALUES[PieceType::Lance as usize]
+        - APERY_PIECE_VALUES[PieceType::Lance as usize],
+    APERY_PROMOTED_PIECE_VALUES[PieceType::Pawn as usize]
+        - APERY_PIECE_VALUES[PieceType::Pawn as usize],
 ];
 
 #[cfg(test)]
