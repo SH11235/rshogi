@@ -285,12 +285,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     #[inline]
     fn gating_enabled() -> bool {
         static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| match std::env::var("SEARCH_GATING_ENABLE") {
-            Ok(v) => {
+        *FLAG.get_or_init(|| match crate::util::env_var("SEARCH_GATING_ENABLE") {
+            Some(v) => {
                 let v = v.trim().to_ascii_lowercase();
                 !(v == "0" || v == "false" || v == "off")
             }
-            Err(_) => true,
+            None => true,
         })
     }
     pub(crate) fn alphabeta(

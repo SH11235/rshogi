@@ -289,9 +289,9 @@ pub fn tt_prefetch_enabled() -> bool {
 }
 
 fn default_prefetch_value() -> bool {
-    match std::env::var("SHOGI_TT_PREFETCH") {
-        Ok(val) => matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
-        Err(_) => true,
+    match crate::util::env_var("SHOGI_TT_PREFETCH") {
+        Some(val) => matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
+        None => true,
     }
 }
 
@@ -564,23 +564,23 @@ pub fn set_probcut_skip_verify_lt4(on: bool) {
 pub fn shallow_gate_enabled() -> bool {
     #[cfg(test)]
     {
-        match std::env::var("SEARCH_SHALLOW_GATE") {
-            Ok(v) => {
+        match crate::util::env_var("SEARCH_SHALLOW_GATE") {
+            Some(v) => {
                 let v = v.trim().to_ascii_lowercase();
                 matches!(v.as_str(), "1" | "true" | "on" | "yes")
             }
-            Err(_) => false,
+            None => false,
         }
     }
     #[cfg(not(test))]
     {
         static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| match std::env::var("SEARCH_SHALLOW_GATE") {
-            Ok(v) => {
+        *FLAG.get_or_init(|| match crate::util::env_var("SEARCH_SHALLOW_GATE") {
+            Some(v) => {
                 let v = v.trim().to_ascii_lowercase();
                 matches!(v.as_str(), "1" | "true" | "on" | "yes")
             }
-            Err(_) => false,
+            None => false,
         })
     }
 }
@@ -588,18 +588,18 @@ pub fn shallow_gate_enabled() -> bool {
 #[inline]
 pub fn shallow_gate_depth() -> i32 {
     static VAL: OnceLock<i32> = OnceLock::new();
-    *VAL.get_or_init(|| match std::env::var("SEARCH_SHALLOW_GATE_DEPTH") {
-        Ok(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 8)).unwrap_or(3),
-        Err(_) => 3,
+    *VAL.get_or_init(|| match crate::util::env_var("SEARCH_SHALLOW_GATE_DEPTH") {
+        Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 8)).unwrap_or(3),
+        None => 3,
     })
 }
 
 #[inline]
 fn shallow_lmr_factor() -> f32 {
     static VAL: OnceLock<f32> = OnceLock::new();
-    *VAL.get_or_init(|| match std::env::var("SEARCH_SHALLOW_LMR_FACTOR_X100") {
-        Ok(v) => v.parse::<u32>().ok().map(|x| (x.clamp(50, 400) as f32) / 100.0).unwrap_or(1.2),
-        Err(_) => 1.2,
+    *VAL.get_or_init(|| match crate::util::env_var("SEARCH_SHALLOW_LMR_FACTOR_X100") {
+        Some(v) => v.parse::<u32>().ok().map(|x| (x.clamp(50, 400) as f32) / 100.0).unwrap_or(1.2),
+        None => 1.2,
     })
 }
 
