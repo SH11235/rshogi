@@ -10,8 +10,7 @@ use std::time::Instant;
 
 use clap::{arg, Command};
 use engine_core::{
-    evaluation::nnue::features::{extract_features, FE_END},
-    shogi::SHOGI_BOARD_SIZE,
+    evaluation::nnue::features::extract_features,
     Color, Position,
 };
 use serde::Deserialize;
