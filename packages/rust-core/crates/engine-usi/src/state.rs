@@ -11,6 +11,42 @@ use engine_core::time_management::{TimeControl, TimeManager, TimeState};
 use engine_core::Color;
 use std::collections::HashSet;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogProfile {
+    Prod,
+    QA,
+    Dev,
+}
+
+impl LogProfile {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "prod" => Some(LogProfile::Prod),
+            "qa" => Some(LogProfile::QA),
+            "dev" => Some(LogProfile::Dev),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogProfile::Prod => "Prod",
+            LogProfile::QA => "QA",
+            LogProfile::Dev => "Dev",
+        }
+    }
+
+    #[inline]
+    pub fn is_prod(self) -> bool {
+        matches!(self, LogProfile::Prod)
+    }
+
+    #[inline]
+    pub fn at_least_qa(self) -> bool {
+        matches!(self, LogProfile::QA | LogProfile::Dev)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
     // Core engine settings
@@ -19,6 +55,7 @@ pub struct UsiOptions {
     pub ponder: bool,
     pub engine_type: EngineType,
     pub eval_file: Option<String>,
+    pub log_profile: LogProfile,
 
     // Time parameters
     pub overhead_ms: u64,
@@ -119,9 +156,10 @@ pub struct UsiOptions {
     pub mate_postverify_exact_min_elapsed_ms: u64,
 
     // Root guard rails and experiment flags (DIAG/flags; default OFF)
-    // Root SEE gate: if enabled and SEE(best) < -X, hold commit (re-search/try 2nd best)
+    // Root SEE Gate（再導入）
     pub root_see_gate: bool,
-    pub x_see_cp: i32,
+    /// 拡張SEEのしきい値（cp）。0 で無効。
+    pub root_see_gate_xsee_cp: i32,
     // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
     pub post_verify: bool,
     /// Early finalize linkage: require post-verify to pass; if reject, extend search briefly
@@ -159,6 +197,7 @@ impl Default for UsiOptions {
             ponder: true,
             engine_type: EngineType::Enhanced,
             eval_file: None,
+            log_profile: LogProfile::Prod,
             overhead_ms: 50,
             network_delay_ms: 120,
             network_delay2_ms: 120,
@@ -177,7 +216,7 @@ impl Default for UsiOptions {
             mate_early_stop: true,
             stop_wait_ms: 50,
             watchdog_poll_ms: 2,
-            byoyomi_deadline_lead_ms: 150,
+            byoyomi_deadline_lead_ms: 0,
             multipv: 1,
             gameover_sends_bestmove: false,
             fail_safe_guard: false,
@@ -223,9 +262,9 @@ impl Default for UsiOptions {
             mate_postverify_skip_max_dist: 3,
             mate_postverify_exact_min_depth: 8,
             mate_postverify_exact_min_elapsed_ms: 400,
-            // Guard rails（既定 ON）
-            root_see_gate: true,
-            x_see_cp: 0,
+            // Guard rails
+            root_see_gate: false,
+            root_see_gate_xsee_cp: 0,
             post_verify: true,
             post_verify_require_pass: false,
             post_verify_extend_ms: 300,

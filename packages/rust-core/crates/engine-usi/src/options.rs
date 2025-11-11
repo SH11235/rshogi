@@ -6,7 +6,7 @@ use engine_core::evaluation::nnue::error::NNUEError;
 use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
-use crate::state::{EngineState, ProfileMode, UsiOptions};
+use crate::state::{EngineState, LogProfile, ProfileMode, UsiOptions};
 use std::sync::OnceLock;
 fn mark_override(state: &mut EngineState, key: &str) {
     state.user_overrides.insert(key.to_string());
@@ -66,6 +66,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name MinThinkMs type spin default {} min 0 max 10000",
         opts.min_think_ms
     ));
+    usi_println(&format!(
+        "option name LogProfile type combo default {} var Prod var QA var Dev",
+        opts.log_profile.as_str()
+    ));
     print_engine_type_options();
     usi_println("option name EvalFile type filename default ");
     usi_println("option name ClearHash type button");
@@ -85,6 +89,20 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name Abdada type check default false");
     // Diagnostics / policy knobs
     usi_println("option name QSearchChecks type combo default On var On var Off");
+    usi_println(&format!(
+        "option name SearchParams.QS.CheckSEEMargin type spin default {} min -5000 max 5000",
+        engine_core::search::params::qs_check_see_margin()
+    ));
+    usi_println("option name SearchParams.RootBeamForceFullCount type spin default 4 min 0 max 8");
+    // Root guard rails (revived)
+    usi_println(&format!(
+        "option name RootSeeGate type check default {}",
+        if opts.root_see_gate { "true" } else { "false" }
+    ));
+    usi_println(&format!(
+        "option name RootSeeGate.XSEE type spin default {} min 0 max 5000",
+        opts.root_see_gate_xsee_cp
+    ));
     // Search parameter knobs (runtime-adjustable)
     usi_println("option name SearchParams.LMR_K_x100 type spin default 170 min 80 max 400");
     usi_println("option name SearchParams.LMP_D1 type spin default 6 min 0 max 64");
@@ -101,6 +119,10 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.FUT_Dyn_Enable type check default true");
     usi_println("option name SearchParams.FUT_Dyn_Base type spin default 100 min 0 max 2000");
     usi_println("option name SearchParams.FUT_Dyn_Slope type spin default 80 min 0 max 500");
+    usi_println("option name SearchParams.FutStatDen type spin default 356 min 1 max 10000");
+    usi_println("option name SearchParams.LMR_StatNum type spin default 1 min 0 max 64");
+    usi_println("option name SearchParams.LMR_StatDenBase type spin default 8192 min 1 max 65536");
+    usi_println("option name SearchParams.SameToExtension type check default false");
     usi_println("option name SearchParams.ProbCut_D5 type spin default 250 min 0 max 2000");
     usi_println("option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000");
     usi_println("option name SearchParams.IID_MinDepth type spin default 6 min 0 max 20");
@@ -251,59 +273,53 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         opts.finalize_non_promote_major_penalty_cp
     ));
 
-    // --- Root guard rails (flags; default OFF). Only printed; logic is flag-gated elsewhere.
-    usi_println(&format!(
-        "option name RootSeeGate type check default {}",
-        if opts.root_see_gate { "true" } else { "false" }
-    ));
-    usi_println(&format!(
-        "option name RootSeeGate.XSEE type spin default {} min -2000 max 5000",
-        opts.x_see_cp
-    ));
-    usi_println(&format!(
-        "option name PostVerify type check default {}",
-        if opts.post_verify { "true" } else { "false" }
-    ));
-    usi_println(&format!(
-        "option name PostVerify.YDrop type spin default {} min 0 max 5000",
-        opts.y_drop_cp
-    ));
-    usi_println(&format!(
-        "option name PostVerify.RequirePass type check default {}",
-        if opts.post_verify_require_pass {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    usi_println(&format!(
-        "option name PostVerify.ExtendMs type spin default {} min 0 max 5000",
-        opts.post_verify_extend_ms
-    ));
-    usi_println(&format!(
-        "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
-        opts.post_verify_disadvantage_cp
-    ));
-    usi_println(&format!(
-        "option name PostVerify.SkipMateDistance type spin default {} min 1 max 32",
-        opts.mate_postverify_skip_max_dist
-    ));
-    usi_println(&format!(
-        "option name PostVerify.ExactMinDepth type spin default {} min 0 max 64",
-        opts.mate_postverify_exact_min_depth
-    ));
-    usi_println(&format!(
-        "option name PostVerify.ExactMinElapsedMs type spin default {} min 0 max 10000",
-        opts.mate_postverify_exact_min_elapsed_ms
-    ));
-    usi_println(&format!(
-        "option name PromoteVerify type check default {}",
-        if opts.promote_verify { "true" } else { "false" }
-    ));
-    usi_println(&format!(
-        "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
-        opts.promote_bias_cp
-    ));
+    // --- Root guard rails（診断専用表示）はRootSeeGateを廃止。
+    if cfg!(any(test, feature = "diagnostics")) {
+        usi_println(&format!(
+            "option name PostVerify type check default {}",
+            if opts.post_verify { "true" } else { "false" }
+        ));
+        usi_println(&format!(
+            "option name PostVerify.YDrop type spin default {} min 0 max 5000",
+            opts.y_drop_cp
+        ));
+        usi_println(&format!(
+            "option name PostVerify.RequirePass type check default {}",
+            if opts.post_verify_require_pass {
+                "true"
+            } else {
+                "false"
+            }
+        ));
+        usi_println(&format!(
+            "option name PostVerify.ExtendMs type spin default {} min 0 max 5000",
+            opts.post_verify_extend_ms
+        ));
+        usi_println(&format!(
+            "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
+            opts.post_verify_disadvantage_cp
+        ));
+        usi_println(&format!(
+            "option name PostVerify.SkipMateDistance type spin default {} min 1 max 32",
+            opts.mate_postverify_skip_max_dist
+        ));
+        usi_println(&format!(
+            "option name PostVerify.ExactMinDepth type spin default {} min 0 max 64",
+            opts.mate_postverify_exact_min_depth
+        ));
+        usi_println(&format!(
+            "option name PostVerify.ExactMinElapsedMs type spin default {} min 0 max 10000",
+            opts.mate_postverify_exact_min_elapsed_ms
+        ));
+        usi_println(&format!(
+            "option name PromoteVerify type check default {}",
+            if opts.promote_verify { "true" } else { "false" }
+        ));
+        usi_println(&format!(
+            "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
+            opts.promote_bias_cp
+        ));
+    }
     // Reproduction helpers
     usi_println(&format!(
         "option name Warmup.Ms type spin default {} min 0 max 60000",
@@ -398,6 +414,16 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let v = v.to_lowercase();
                 state.opts.ponder = matches!(v.as_str(), "true" | "1" | "on");
+            }
+        }
+        "LogProfile" => {
+            if let Some(v) = value_ref {
+                if let Some(profile) = LogProfile::from_str(v) {
+                    state.opts.log_profile = profile;
+                    info_string(format!("log_profile_set={}", profile.as_str()));
+                } else {
+                    info_string(format!("log_profile_invalid value={}", v));
+                }
             }
         }
         "BenchAllRun" => {
@@ -656,6 +682,33 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "SearchParams.FutStatDen" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_fut_stat_den(x);
+                }
+            }
+        }
+        "SearchParams.LMR_StatNum" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_lmr_stat_num(x);
+                }
+            }
+        }
+        "SearchParams.LMR_StatDenBase" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_lmr_stat_den_base(x);
+                }
+            }
+        }
+        "SearchParams.SameToExtension" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_same_to_extension(on);
+            }
+        }
         "SearchParams.ProbCut_D5" => {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
@@ -731,6 +784,40 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 } else {
                     "pc_skip_verify_lt4=Off"
                 });
+            }
+        }
+        "SearchParams.QS.CheckSEEMargin" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_qs_check_see_margin(x);
+                }
+            }
+        }
+        "SearchParams.RootBeamForceFullCount" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<usize>() {
+                    engine_core::search::params::set_root_beam_force_full_count(x);
+                }
+            }
+        }
+        // --- Root guard rails (revived) ---
+        "RootSeeGate" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                state.opts.root_see_gate = on;
+                engine_core::search::config::set_root_see_gate_enabled(on);
+                mark_override(state, "RootSeeGate");
+            }
+        }
+        "RootSeeGate.XSEE" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    state.opts.root_see_gate_xsee_cp = x.clamp(0, 5000);
+                    engine_core::search::config::set_root_see_gate_xsee_cp(
+                        state.opts.root_see_gate_xsee_cp,
+                    );
+                    mark_override(state, "RootSeeGate.XSEE");
+                }
             }
         }
         // --- Finalize sanity options ---
@@ -1079,22 +1166,7 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             }
         }
         // --- Root guard rails & warmup knobs
-        "RootSeeGate" => {
-            if let Some(v) = value_ref {
-                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
-                state.opts.root_see_gate = on;
-                info_string(format!("root_see_gate={}", on as u8));
-            }
-            mark_override(state, "RootSeeGate");
-        }
-        "RootSeeGate.XSEE" => {
-            if let Some(v) = value_ref {
-                if let Ok(x) = v.parse::<i32>() {
-                    state.opts.x_see_cp = x.clamp(-2000, 5000);
-                }
-            }
-            mark_override(state, "RootSeeGate.XSEE");
-        }
+        // RootSeeGate 系は廃止
         "PostVerify" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
@@ -1384,8 +1456,6 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 info_string("profile_applied=0 reason=busy");
             } else {
                 let keys = [
-                    "RootSeeGate",
-                    "RootSeeGate.XSEE",
                     "PostVerify",
                     "PostVerify.YDrop",
                     "FinalizeSanity.SwitchMarginCp",
@@ -1478,18 +1548,12 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     engine_core::search::config::set_mate_early_stop_max_distance(
         state.opts.instant_mate_move_max_distance as u8,
     );
-    // Root guard rails & verify parameters (global config)
-    engine_core::search::config::set_root_see_gate_enabled(state.opts.root_see_gate);
-    engine_core::search::config::set_root_see_x_cp(state.opts.x_see_cp);
     engine_core::search::config::set_post_verify_enabled(state.opts.post_verify);
     engine_core::search::config::set_post_verify_ydrop_cp(state.opts.y_drop_cp);
-    // Root retry (one-shot) は実戦用Enhanced/EnhancedNnueで有効化（学習/評価用途ではOFF）
-    let retry_on = matches!(
-        state.opts.engine_type,
-        engine_core::engine::controller::EngineType::Enhanced
-            | engine_core::engine::controller::EngineType::EnhancedNnue
-    );
-    engine_core::search::config::set_root_retry_enabled(retry_on);
+    // Root SEE Gate (revived)
+    engine_core::search::config::set_root_see_gate_enabled(state.opts.root_see_gate);
+    engine_core::search::config::set_root_see_gate_xsee_cp(state.opts.root_see_gate_xsee_cp);
+    // Root retry (one-shot) は廃止（YO準拠）。
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
 }
@@ -1510,8 +1574,6 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         }
     };
     if is_t8 {
-        set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
-        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
         set_if_absent("PostVerify.RequirePass", &mut || {
@@ -1541,8 +1603,7 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
     } else {
         // T1 profile
-        set_if_absent("RootSeeGate", &mut || state.opts.root_see_gate = true);
-        set_if_absent("RootSeeGate.XSEE", &mut || state.opts.x_see_cp = 0);
+
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
         set_if_absent("PostVerify.RequirePass", &mut || {
@@ -1587,6 +1648,10 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
 
 /// Emit a one-line info string with the effective profile and key parameters.
 pub fn log_effective_profile(state: &EngineState) {
+    if state.opts.log_profile.is_prod() {
+        return;
+    }
+
     let mode_str = match state.opts.profile_mode {
         ProfileMode::Auto => "Auto",
         ProfileMode::T1 => "T1",
@@ -1601,8 +1666,6 @@ pub fn log_effective_profile(state: &EngineState) {
     };
     let mut overrides: Vec<&str> = Vec::new();
     for k in [
-        "RootSeeGate",
-        "RootSeeGate.XSEE",
         "PostVerify",
         "PostVerify.YDrop",
         "PostVerify.RequirePass",
@@ -1637,7 +1700,7 @@ pub fn log_effective_profile(state: &EngineState) {
         state.opts.threads,
         state.opts.multipv,
         state.opts.root_see_gate as u8,
-        state.opts.x_see_cp,
+        state.opts.root_see_gate_xsee_cp,
         state.opts.post_verify as u8,
         state.opts.y_drop_cp,
         state.opts.finalize_sanity_enabled as u8,
@@ -1733,7 +1796,7 @@ fn print_time_policy_options(opts: &UsiOptions) {
     ));
     usi_println(&format!(
         "option name ByoyomiDeadlineLeadMs type spin default {} min 0 max 2000",
-        opts.byoyomi_deadline_lead_ms
+        0
     ));
     usi_println(&format!(
         "option name ByoyomiSafetyMs type spin default {} min 0 max 2000",

@@ -11,8 +11,12 @@ use super::driver::ClassicBackend;
 use super::ordering::{self, EvalMoveGuard, Heuristics, LateMoveReductionParams, MovePicker};
 use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::movegen::MoveGenerator;
-use crate::search::policy::{abdada_enabled, tt_suppress_below_depth};
+use crate::search::policy::{
+    abdada_enabled, capture_futility_enabled, capture_futility_scale_pct, quiet_see_guard_enabled,
+    tt_suppress_below_depth,
+};
 use crate::search::types::NodeType;
+use crate::shogi::piece_constants::SEE_PIECE_VALUES;
 use std::sync::OnceLock;
 
 #[cfg(feature = "diagnostics")]
@@ -20,6 +24,135 @@ use super::qsearch::record_qnodes_peak;
 
 #[cfg(any(debug_assertions, feature = "diagnostics"))]
 use super::diagnostics;
+
+const QUIET_SEE_GUARD_CP_SCALE: i32 = 26;
+const CAPTURE_FUT_BASE_CP: i32 = 232;
+const CAPTURE_FUT_SLOPE_CP: i32 = 224;
+const CAPTURE_FUT_MAX_DEPTH: i32 = 6;
+const CAPTURE_SEE_BASE_CP: i32 = 96;
+const CAPTURE_SEE_SLOPE_CP: i32 = 12;
+const CAPTURE_SEE_GUARD_BASE_CP: i32 = 160;
+const CAPTURE_SEE_GUARD_SLOPE_CP: i32 = 20;
+const CAPTURE_SEE_GUARD_MAX_CP: i32 = 320;
+const DROP_BAD_HISTORY_PENALTY_CP: i32 = 400;
+
+/// Quiet SEE gate（YO Step14相当）
+/// lmr_depth: LMR適用後の残り深さ（newDepth - r）。
+pub(crate) fn quiet_see_guard_should_skip(
+    pos: &Position,
+    mv: crate::shogi::Move,
+    lmr_depth: i32,
+    is_pv: bool,
+    is_quiet: bool,
+    gives_check: bool,
+) -> bool {
+    if is_pv || !is_quiet || gives_check || !quiet_see_guard_enabled() {
+        return false;
+    }
+    let d = lmr_depth.max(0);
+    if d == 0 {
+        return false;
+    }
+    let margin = QUIET_SEE_GUARD_CP_SCALE * d * d;
+    !pos.see_ge(mv, -margin)
+}
+
+fn capture_fut_margin(depth: i32) -> i32 {
+    let scale = capture_futility_scale_pct();
+    let base = CAPTURE_FUT_BASE_CP * scale / 100;
+    let slope = CAPTURE_FUT_SLOPE_CP * scale / 100;
+    base + slope * depth.clamp(1, CAPTURE_FUT_MAX_DEPTH)
+}
+
+fn capture_see_margin(depth: i32) -> i32 {
+    let scale = capture_futility_scale_pct();
+    let base = CAPTURE_SEE_BASE_CP * scale / 100;
+    let slope = CAPTURE_SEE_SLOPE_CP * scale / 100;
+    base + slope * depth.clamp(1, CAPTURE_FUT_MAX_DEPTH + 2)
+}
+
+fn capture_victim_bonus(mv: crate::shogi::Move) -> i32 {
+    mv.captured_piece_type().map(|pt| SEE_PIECE_VALUES[0][pt as usize]).unwrap_or(0)
+}
+
+fn capture_see_guard_margin(depth: i32) -> i32 {
+    let d = depth.max(1);
+    let base = CAPTURE_SEE_GUARD_BASE_CP + CAPTURE_SEE_GUARD_SLOPE_CP * d;
+    // Cap the margin to a fixed maximum to avoid overly aggressive pruning at large depths.
+    let cap = CAPTURE_SEE_GUARD_MAX_CP;
+    base.min(cap)
+}
+
+pub(crate) fn capture_see_guard_should_skip(
+    pos: &Position,
+    mv: crate::shogi::Move,
+    depth: i32,
+    is_capture: bool,
+    gives_check: bool,
+) -> bool {
+    if !(is_capture || gives_check) {
+        return false;
+    }
+    let margin = capture_see_guard_margin(depth);
+    !pos.see_ge(mv, -margin)
+}
+
+pub(crate) struct CaptureFutilityArgs {
+    pub(crate) depth: i32,
+    pub(crate) alpha: i32,
+    pub(crate) static_eval: i32,
+    pub(crate) is_capture: bool,
+    pub(crate) gives_check: bool,
+    pub(crate) prev_risky: bool,
+}
+
+pub(crate) fn capture_futility_should_skip(
+    pos: &Position,
+    mv: crate::shogi::Move,
+    args: &CaptureFutilityArgs,
+) -> bool {
+    if !capture_futility_enabled()
+        || args.depth > CAPTURE_FUT_MAX_DEPTH
+        || pos.is_in_check()
+        || args.prev_risky
+    {
+        return false;
+    }
+    use crate::search::constants::MATE_SCORE;
+    if args.alpha.abs() >= MATE_SCORE - 100 {
+        return false;
+    }
+    let mut futility_score = args.static_eval + capture_fut_margin(args.depth);
+    if args.is_capture {
+        futility_score += capture_victim_bonus(mv);
+    }
+    if futility_score <= args.alpha && !args.gives_check {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        super::diagnostics::record_tag(
+            pos,
+            "cap_fut_skip",
+            Some(format!(
+                "depth={depth} eval={eval} fut_score={fut_score} alpha={alpha}",
+                depth = args.depth,
+                eval = args.static_eval,
+                fut_score = futility_score,
+                alpha = args.alpha
+            )),
+        );
+        return true;
+    }
+    let see_margin = capture_see_margin(args.depth);
+    if !pos.see_ge(mv, -see_margin) {
+        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+        super::diagnostics::record_tag(
+            pos,
+            "cap_fut_see_skip",
+            Some(format!("depth={depth} margin={see_margin}", depth = args.depth)),
+        );
+        return true;
+    }
+    false
+}
 
 pub(crate) struct SearchContext<'a> {
     pub(crate) limits: &'a SearchLimits,
@@ -204,7 +337,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         ctx.tick(ply);
         if depth <= 0 {
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            // qsearch の静かチェック生成は“侵入直後のみ”に制限するため、
+            // 入口では qdepth=0 を与え、再帰で -1 ずつ減らす設計。
+            // これにより将棋特有の手駒を用いた連続王手の組合せ爆発を抑制する。
+            let qs = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow { alpha, beta },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                &*heur,
+                &mut qbudget,
+            );
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
             return (qs, None);
@@ -249,6 +402,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ply,
             is_pv,
+            stack: &*stack,
+            heur: &*heur,
         }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
@@ -269,6 +424,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter: &mut *lmr_counter,
             ctx,
             is_pv,
+            #[cfg(test)]
+            verify_min_depth_override: None,
         }) {
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
@@ -412,6 +569,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         } else {
             None
         };
+        let prev_prev_move = if ply > 1 {
+            stack[(ply - 2) as usize].current_move
+        } else {
+            None
+        };
         let counter_mv = prev_move.and_then(|mv| heur.counter.get(pos.side_to_move, mv));
         let killers = stack[ply as usize].killers;
         let excluded_move = stack[ply as usize].excluded_move;
@@ -424,6 +586,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_cleared");
         let mut best_mv = None;
         let mut best = i32::MIN / 2;
+        let mut best_drop_bad = false;
         let mut moveno: usize = 0;
         let mut first_move_done = false;
         let mut tried_captures: SmallVec<[crate::shogi::Move; 16]> = SmallVec::new();
@@ -445,8 +608,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             stack[ply as usize].current_move = Some(mv);
             let gives_check = pos.gives_check(mv);
             let is_capture = mv.is_capture_hint();
-            let is_good_capture = if is_capture { pos.see(mv) >= 0 } else { false };
             let is_quiet = !is_capture && !gives_check;
+            let need_see = is_capture || mv.is_drop() || is_quiet;
+            let see = if need_see { pos.see(mv) } else { 0 };
+            let is_good_capture = is_capture && see >= 0;
+            let drop_bad = mv.is_drop() && see < 0;
+            let quiet_bad = is_quiet && see < 0;
+            let same_to = prev_move.is_some_and(|pm| pm.to() == mv.to());
+            let recap = is_capture
+                && prev_move.is_some_and(|pm| pm.is_capture_hint() && pm.to() == mv.to());
+            let mut stat_score =
+                ordering::stat_score(heur, pos, mv, prev_move, prev_prev_move, is_capture);
+            if drop_bad {
+                stat_score -= DROP_BAD_HISTORY_PENALTY_CP;
+            }
 
             if depth < 14 && is_quiet {
                 let mut h = heur.history.get(pos.side_to_move, mv);
@@ -508,6 +683,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if improving {
                     margin -= 30;
                 }
+                let fut_stat_den = dynp::fut_stat_den().max(1);
+                margin += stat_score / fut_stat_den;
                 if alpha.abs() < MATE_SCORE - 100 && static_eval + margin <= alpha {
                     #[cfg(any(debug_assertions, feature = "diagnostics"))]
                     {
@@ -552,24 +729,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     reduction = 0;
                 } else {
                     // 2) Recapture: previous move was a capture and we capture back on the same square
-                    let recap = if is_capture {
-                        if ply > 0 {
-                            if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                                prev_mv.is_capture_hint() && prev_mv.to() == mv.to()
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
                     if recap {
                         if let Some(cell) = lmr_blocked_recapture {
                             cell.set(cell.get().saturating_add(1));
                         }
                         reduction = 0;
+                    } else if same_to && is_quiet {
+                        // 3) same-to（同一地点応手）: 静止の即応は1段だけ減衰を緩める
+                        reduction = (reduction - 1).max(0);
                     }
                 }
             }
@@ -589,6 +756,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
             // ABDADA軽減: busy中は追加で1段だけ減深（静止手のみ）
+            if reduction > 0 && is_quiet {
+                let denom = dynp::lmr_stat_den(depth).max(1);
+                let numer = dynp::lmr_stat_num();
+                if numer != 0 {
+                    reduction -= (stat_score * numer) / denom;
+                    if reduction < 0 {
+                        reduction = 0;
+                    }
+                }
+            }
             if reduction > 0 {
                 next_depth -= reduction;
                 *lmr_counter += 1;
@@ -610,12 +787,64 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
                 if let Some(cb) = ctx.limits.info_string_callback.as_ref() {
                     cb(&format!(
-                        "abdada_cut_reduction=1 next_depth={} -> {}",
-                        next_depth,
-                        next_depth - 1
+                        "abdada_cut_reduction=1 next_depth={next_depth} -> {reduced}",
+                        reduced = next_depth - 1
                     ));
                 }
                 next_depth -= 1;
+            }
+            // Recapture / same-to の軽量拡張（+1ply）。深さ上限は親のdepthまで。
+            if Self::gating_enabled()
+                && !stack[ply as usize].in_check
+                && next_depth > 0
+                && (recap || (same_to && dynp::same_to_extension_enabled()))
+            {
+                next_depth = (next_depth + 1).min(depth);
+            }
+            if !stack[ply as usize].in_check
+                && quiet_see_guard_should_skip(pos, mv, next_depth, is_pv, is_quiet, gives_check)
+            {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                super::diagnostics::record_tag(
+                    pos,
+                    "quiet_see_skip",
+                    Some(format!(
+                        "see={see} lmr_depth={d} scale={scale}",
+                        see = pos.see(mv),
+                        d = next_depth.max(0),
+                        scale = QUIET_SEE_GUARD_CP_SCALE,
+                    )),
+                );
+                continue;
+            }
+            if capture_see_guard_should_skip(pos, mv, depth, is_capture, gives_check) {
+                #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                super::diagnostics::record_tag(
+                    pos,
+                    "cap_see_guard_skip",
+                    Some(format!(
+                        "see={see} depth={depth} margin={margin}",
+                        see = pos.see(mv),
+                        margin = capture_see_guard_margin(depth)
+                    )),
+                );
+                continue;
+            }
+            if (is_capture || gives_check)
+                && capture_futility_should_skip(
+                    pos,
+                    mv,
+                    &CaptureFutilityArgs {
+                        depth,
+                        alpha,
+                        static_eval,
+                        is_capture,
+                        gives_check,
+                        prev_risky: stack[ply as usize].prev_risky,
+                    },
+                )
+            {
+                continue;
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_move_pick(diagnostics::MovePickContext {
@@ -632,6 +861,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             });
             let pv_move = !first_move_done;
             let mut did_fullwin_research = false;
+            stack[ply as usize].history_score = stat_score;
             let score = {
                 let _guard = EvalMoveGuard::new(self.evaluator.as_ref(), pos, mv);
                 let mut child = pos.clone();
@@ -640,7 +870,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let child_ply = (ply + 1) as usize;
                 let save_prev_risky = stack.get(child_ply).map(|st| st.prev_risky).unwrap_or(false);
                 if let Some(st) = stack.get_mut(child_ply) {
-                    st.prev_risky = mv.is_drop() || (is_quiet && pos.see(mv) < 0);
+                    st.prev_risky = drop_bad || quiet_bad;
                 }
                 let val = if pv_move {
                     let (sc, _) = self.alphabeta(
@@ -728,6 +958,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if score > best {
                 best = score;
                 best_mv = Some(mv);
+                best_drop_bad = drop_bad;
             }
             if score > alpha {
                 alpha = score;
@@ -735,24 +966,34 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             if alpha >= beta {
                 *beta_cuts += 1;
                 if is_quiet {
-                    stack[ply as usize].update_killers(mv);
-                    heur.history.update_good(pos.side_to_move, mv, depth);
-                    if ply > 0 {
-                        if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                            heur.counter.update(pos.side_to_move, prev_mv, mv);
-                            if let (Some(prev_piece), Some(curr_piece)) =
-                                (prev_mv.piece_type(), mv.piece_type())
-                            {
-                                let key = crate::search::history::ContinuationKey::new(
-                                    pos.side_to_move,
-                                    prev_piece as usize,
-                                    prev_mv.to(),
-                                    prev_mv.is_drop(),
-                                    curr_piece as usize,
-                                    mv.to(),
-                                    mv.is_drop(),
-                                );
-                                heur.continuation.update_good(key, depth);
+                    if !drop_bad {
+                        stack[ply as usize].update_killers(mv);
+                        heur.history.update_good(pos.side_to_move, mv, depth);
+                        if let Some(curr_piece) = mv.piece_type() {
+                            heur.pawn_history.update_good(
+                                pos.side_to_move,
+                                curr_piece,
+                                mv.to(),
+                                depth,
+                            );
+                        }
+                        if ply > 0 {
+                            if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
+                                heur.counter.update(pos.side_to_move, prev_mv, mv);
+                                if let (Some(prev_piece), Some(curr_piece)) =
+                                    (prev_mv.piece_type(), mv.piece_type())
+                                {
+                                    let key = crate::search::history::ContinuationKey::new(
+                                        pos.side_to_move,
+                                        prev_piece as usize,
+                                        prev_mv.to(),
+                                        prev_mv.is_drop(),
+                                        curr_piece as usize,
+                                        mv.to(),
+                                        mv.is_drop(),
+                                    );
+                                    heur.continuation.update_good(key, depth);
+                                }
                             }
                         }
                     }
@@ -789,8 +1030,39 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 return (static_eval, None);
             }
         }
+
+        if best_drop_bad {
+            if let Some(bmv) = best_mv {
+                heur.history.update_bad(pos.side_to_move, bmv, depth.max(1));
+                if let Some(curr_piece) = bmv.piece_type() {
+                    heur.pawn_history.update_bad(
+                        pos.side_to_move,
+                        curr_piece,
+                        bmv.to(),
+                        depth.max(1),
+                    );
+                }
+            }
+        }
         let result = if best == i32::MIN / 2 {
-            let qs = self.qsearch(pos, alpha, beta, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            let qs = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow { alpha, beta },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                &*heur,
+                &mut qbudget,
+            );
             (qs, None)
         } else {
             if let Some(tt) = &self.tt {
@@ -859,6 +1131,20 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             for &qmv in &stack[ply as usize].quiet_moves {
                 if Some(qmv) != best_mv {
                     heur.history.update_bad(pos.side_to_move, qmv, depth);
+                    if let Some(curr_piece) = qmv.piece_type() {
+                        heur.pawn_history.update_bad(pos.side_to_move, curr_piece, qmv.to(), depth);
+                    }
+                    if qmv.is_drop() && pos.see(qmv) < 0 {
+                        heur.history.update_bad(pos.side_to_move, qmv, depth);
+                        if let Some(curr_piece) = qmv.piece_type() {
+                            heur.pawn_history.update_bad(
+                                pos.side_to_move,
+                                curr_piece,
+                                qmv.to(),
+                                depth,
+                            );
+                        }
+                    }
                     if ply > 0 {
                         if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
                             if let (Some(prev_piece), Some(curr_piece)) =

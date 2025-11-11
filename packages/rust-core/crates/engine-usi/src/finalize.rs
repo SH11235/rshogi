@@ -8,6 +8,7 @@ use engine_core::search::{
     SearchResult,
 };
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
+use smallvec::SmallVec;
 use std::cmp::Reverse;
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
 use engine_core::{movegen::MoveGenerator, shogi::PieceType};
@@ -173,13 +174,15 @@ fn log_and_emit_final_selection(
         stop_meta.hard_ms
     ));
     // Emit micro-log before sending bestmove for easier correlation with finalize_event
-    let sid = state.current_session_core_id.unwrap_or(0);
-    info_string(format!(
-        "finalize_emit=1 sid={} label={} source={}",
-        sid,
-        label,
-        source_to_str(source)
-    ));
+    if state.opts.log_profile.at_least_qa() {
+        let sid = state.current_session_core_id.unwrap_or(0);
+        info_string(format!(
+            "finalize_emit=1 sid={} label={} source={}",
+            sid,
+            label,
+            source_to_str(source)
+        ));
+    }
     let _ = emit_bestmove_once(state, final_move.to_string(), ponder);
 }
 
@@ -247,7 +250,15 @@ fn maybe_emit_forced_eval_info(state: &mut EngineState, final_move_usi: &str) {
         source: FinalBestSource::Committed,
     };
     // hashfullは不明なので0を渡す（表示のみ）。score/bound をroot視点で上書き。
-    emit_single_pv(&res, &final_best_stub, nps, 0, Some(score_for_root), Some(bound_for_root));
+    emit_single_pv(
+        &res,
+        &final_best_stub,
+        nps,
+        0,
+        Some(score_for_root),
+        Some(bound_for_root),
+        &state.position,
+    );
     diag_info_string(format!("forced_eval_ms={} depth=1 nps={}", forced_eval_ms, nps));
 }
 
@@ -294,7 +305,7 @@ fn finalize_sanity_check(
     path_label: &str,
 ) -> Option<engine_core::shogi::Move> {
     if !state.opts.finalize_sanity_enabled {
-        info_string("sanity_skipped=1 reason=disabled");
+        info_verbose(state, "sanity_skipped=1 reason=disabled");
         return None;
     }
     // 時間ゲート: ハード締切までの残りで判断する（ソフト超過でも、ハードに十分余裕があれば最小検証を実施）
@@ -308,7 +319,7 @@ fn finalize_sanity_check(
         if !limits_unknown {
             let remain_hard = si.hard_limit_ms.saturating_sub(si.elapsed_ms);
             if si.hard_timeout || remain_hard <= state.opts.finalize_sanity_min_ms {
-                info_string("sanity_skipped=1 reason=tm_hard");
+                info_verbose(state, "sanity_skipped=1 reason=tm_hard");
                 return None;
             }
         }
@@ -414,7 +425,10 @@ fn finalize_sanity_check(
     // stop_finalize 等で期限が不明(unknown)のときは、低リスクならミニ検証を省略する。
     // 高リスクの定義: need_verify=1（SEE/Threat2）、または PV1 が王手、または PV1 が玉手。
     if limits_unknown && !(need_verify || state.position.gives_check(pv1) || pv1_is_king) {
-        info_string(format!("sanity_skipped=1 path={} reason=tm_unknown_low_risk", path_label));
+        info_verbose(
+            state,
+            format!("sanity_skipped=1 path={} reason=tm_unknown_low_risk", path_label),
+        );
         return None;
     }
 
@@ -438,7 +452,7 @@ fn finalize_sanity_check(
     // Candidate: prefer PV2 if available and legal; fallback to best SEE>=0 (または最高SEE)
     let mg = MoveGenerator::new();
     let Ok(list) = mg.generate_all(&state.position) else {
-        info_string("sanity_checked=1 switched=0 reason=no_moves");
+        info_verbose(state, "sanity_checked=1 switched=0 reason=no_moves");
         return None;
     };
     // Prefer PV2 (from SearchResult lines, if available)
@@ -488,7 +502,10 @@ fn finalize_sanity_check(
     let mut pv2_illegal = false;
     if let Some(mv0) = best_alt {
         if !state.position.is_legal_move(mv0) {
-            info_string(format!("sanity_pv2_illegal=1 path={} fallback=see_best", path_label));
+            info_verbose(
+                state,
+                format!("sanity_pv2_illegal=1 path={} fallback=see_best", path_label),
+            );
             best_alt = None; // Fallback to SEE-best candidate
             pv2_illegal = true;
         } else if mv0.equals_without_piece_type(&pv1) {
@@ -619,10 +636,13 @@ fn finalize_sanity_check(
         return None;
     }
     if total_budget == 0 {
-        info_string(format!(
-            "sanity_skipped=1 reason=no_budget opp_cap_see_max={} opp_threat2_max={}",
-            opp_cap_see_max, opp_threat2_max
-        ));
+        info_verbose(
+            state,
+            format!(
+                "sanity_skipped=1 reason=no_budget opp_cap_see_max={} opp_threat2_max={}",
+                opp_cap_see_max, opp_threat2_max
+            ),
+        );
         return None;
     }
     // Mini search: PV1=玉・非チェック時のみ局所的に深さを強める（MiniDepth>=3）
@@ -641,16 +661,19 @@ fn finalize_sanity_check(
             // 予算厳守: ロックに消費した時間を差し引く
             let remain_budget = total_budget.saturating_sub(spent_ms);
             if spent_ms > (total_budget / 2) {
-                info_string(format!(
-                    "sanity_lock_heavy=1 spent_ms={} total_ms={}",
-                    spent_ms, total_budget
-                ));
+                info_verbose(
+                    state,
+                    format!("sanity_lock_heavy=1 spent_ms={} total_ms={}", spent_ms, total_budget),
+                );
             }
             if remain_budget == 0 {
-                info_string(format!(
-                    "sanity_skipped=1 reason=lock_spent_budget total_ms={} spent_ms={}",
-                    total_budget, spent_ms
-                ));
+                info_verbose(
+                    state,
+                    format!(
+                        "sanity_skipped=1 reason=lock_spent_budget total_ms={} spent_ms={}",
+                        total_budget, spent_ms
+                    ),
+                );
                 return None;
             }
             // 2回合計がremain_budgetを超えないよう逐次分配
@@ -705,7 +728,7 @@ fn finalize_sanity_check(
             let s2_root = normalize_for_root(root_side, &pos2, s2_local);
             (s1_root, s2_root, pv1_check, alt_check)
         } else {
-            info_string("sanity_skipped=1 reason=lock_failed");
+            info_verbose(state, "sanity_skipped=1 reason=lock_failed");
             return None;
         }
     };
@@ -1700,19 +1723,22 @@ pub fn finalize_and_send(
         ));
 
         if let Some(helper_share) = res.stats.helper_share_pct {
-            info_string(format!("helper_share_pct={helper_share:.2}"));
+            info_verbose(state, format!("helper_share_pct={helper_share:.2}"));
         }
         if let Some(heur) = res.stats.heuristics.as_ref() {
             let summary = heur.summary();
             let lmr_trials = res.stats.lmr_trials.unwrap_or(summary.lmr_trials);
-            info_string(format!(
-                "heuristics quiet_max={} cont_max={} capture_max={} counter_filled={} lmr_trials={}",
-                summary.quiet_max,
-                summary.continuation_max,
-                summary.capture_max,
-                summary.counter_filled,
-                lmr_trials
-            ));
+            info_verbose(
+                state,
+                format!(
+                    "heuristics quiet_max={} cont_max={} capture_max={} counter_filled={} lmr_trials={}",
+                    summary.quiet_max,
+                    summary.continuation_max,
+                    summary.capture_max,
+                    summary.counter_filled,
+                    lmr_trials
+                ),
+            );
         }
 
         if let Some(tt_hits) = res.stats.tt_hits {
@@ -1900,9 +1926,12 @@ pub fn finalize_and_send(
                         };
                         let view = score_view_with_clamp(score_used);
                         append_usi_score_and_bound(&mut s, view, bound_used);
-                        if !line.pv.is_empty() {
+                        // 出力前にPVをルート局面でサニタイズ
+                        let sanitized =
+                            crate::usi_adapter::sanitize_line_for_root(line, &state.position);
+                        if !sanitized.pv.is_empty() {
                             s.push_str(" pv");
-                            for m in line.pv.iter() {
+                            for m in sanitized.pv.iter() {
                                 s.push(' ');
                                 s.push_str(&move_to_usi(m));
                             }
@@ -1917,6 +1946,7 @@ pub fn finalize_and_send(
                         hf_permille,
                         info_score_override,
                         info_bound_override,
+                        &state.position,
                     );
                 }
             } else {
@@ -1927,6 +1957,7 @@ pub fn finalize_and_send(
                     hf_permille,
                     info_score_override,
                     info_bound_override,
+                    &state.position,
                 );
             }
         }
@@ -2063,6 +2094,7 @@ fn emit_single_pv(
     hf_permille: u16,
     score_override: Option<i32>,
     bound_override: Option<NodeType>,
+    root_pos: &engine_core::shogi::Position,
 ) {
     let mut s = String::from("info");
     s.push_str(&format!(" depth {}", res.stats.depth));
@@ -2079,14 +2111,30 @@ fn emit_single_pv(
     let bound_to_use = bound_override.unwrap_or(res.node_type);
     append_usi_score_and_bound(&mut s, view, bound_to_use);
 
-    let pv_ref: &[_] = if !final_best.pv.is_empty() {
-        &final_best.pv
-    } else {
-        &res.stats.pv
+    // 出力前にPVをルート局面でサニタイズ
+    let pv_sanitized: SmallVec<[engine_core::shogi::Move; 64]> = {
+        let src: &[_] = if !final_best.pv.is_empty() {
+            &final_best.pv
+        } else {
+            &res.stats.pv
+        };
+        // 可能なら final_best.best_move を head として維持したいが、
+        // sanitize は局面適用のみ（head調整は上流 normalize に依存）。
+        // ここでは単純に合法プレフィックスを抽出する。
+        let mut out: SmallVec<[engine_core::shogi::Move; 64]> = SmallVec::new();
+        let mut pos = root_pos.clone();
+        for &mv in src.iter() {
+            if !pos.is_legal_move(mv) {
+                break;
+            }
+            let _u = pos.do_move(mv);
+            out.push(mv);
+        }
+        out
     };
-    if !pv_ref.is_empty() {
+    if !pv_sanitized.is_empty() {
         s.push_str(" pv");
-        for m in pv_ref.iter() {
+        for m in pv_sanitized.iter() {
             s.push(' ');
             s.push_str(&move_to_usi(m));
         }
@@ -2953,6 +3001,11 @@ fn need_verify_from_risks(
 ) -> bool {
     // AND 条件: 両方のゲートを超えたときのみ検証を要求
     opp_cap_see_max >= opp_gate && opp_threat2_max >= threat2_gate
+}
+fn info_verbose(state: &EngineState, msg: impl Into<String>) {
+    if state.opts.log_profile.at_least_qa() {
+        info_string(msg.into());
+    }
 }
 
 #[cfg(test)]

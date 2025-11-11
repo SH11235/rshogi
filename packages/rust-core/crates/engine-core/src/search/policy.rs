@@ -1,7 +1,7 @@
 //! Centralized policy store for environment-driven search options.
 //! Hot-path reads use atomic loads to allow runtime updates via USI setoption.
 
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 // --- ABDADA ---
@@ -27,6 +27,119 @@ pub fn abdada_enabled() -> bool {
 #[inline]
 pub fn set_abdada(enabled: bool) {
     abdada_atomic().store(if enabled { ABDADA_ON } else { ABDADA_OFF }, Ordering::Relaxed);
+}
+
+// --- Quiet SEE Guard ---
+const QUIET_SEE_GUARD_OFF: u8 = 0;
+const QUIET_SEE_GUARD_ON: u8 = 1;
+
+fn quiet_see_guard_atomic() -> &'static AtomicU8 {
+    static CELL: OnceLock<AtomicU8> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let init = match std::env::var("SHOGI_QUIET_SEE_GUARD") {
+            Ok(s)
+                if matches!(s.as_str(), "0" | "false" | "off" | "disable" | "disabled" | "no") =>
+            {
+                QUIET_SEE_GUARD_OFF
+            }
+            _ => QUIET_SEE_GUARD_ON,
+        };
+        AtomicU8::new(init)
+    })
+}
+
+#[inline]
+pub fn quiet_see_guard_enabled() -> bool {
+    quiet_see_guard_atomic().load(Ordering::Relaxed) == QUIET_SEE_GUARD_ON
+}
+
+#[inline]
+pub fn set_quiet_see_guard_enabled(enabled: bool) {
+    quiet_see_guard_atomic().store(
+        if enabled {
+            QUIET_SEE_GUARD_ON
+        } else {
+            QUIET_SEE_GUARD_OFF
+        },
+        Ordering::Relaxed,
+    );
+}
+
+// --- Capture futility / SEE gating ---
+const CAPTURE_FUT_OFF: u8 = 0;
+const CAPTURE_FUT_ON: u8 = 1;
+
+fn capture_fut_atomic() -> &'static AtomicU8 {
+    static CELL: OnceLock<AtomicU8> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let init = match std::env::var("SHOGI_CAPTURE_FUT_ENABLE") {
+            Ok(s)
+                if matches!(s.as_str(), "0" | "false" | "off" | "disable" | "disabled" | "no") =>
+            {
+                CAPTURE_FUT_OFF
+            }
+            _ => CAPTURE_FUT_ON,
+        };
+        AtomicU8::new(init)
+    })
+}
+
+#[inline]
+pub fn capture_futility_enabled() -> bool {
+    capture_fut_atomic().load(Ordering::Relaxed) == CAPTURE_FUT_ON
+}
+
+fn capture_fut_scale_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let val = std::env::var("SHOGI_CAPTURE_FUT_SCALE")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(75)
+            .clamp(25, 150);
+        AtomicI32::new(val)
+    })
+}
+
+#[inline]
+pub fn capture_futility_scale_pct() -> i32 {
+    capture_fut_scale_atomic().load(Ordering::Relaxed)
+}
+
+// --- NMP verify ---
+fn nmp_verify_enabled_atomic() -> &'static AtomicBool {
+    static CELL: OnceLock<AtomicBool> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let disabled = matches!(
+            std::env::var("SEARCH_NMP_VERIFY_ENABLED"),
+            Ok(s)
+                if matches!(s.as_str(), "0" | "false" | "off" | "disable" | "disabled" | "no")
+        );
+        let on = !disabled;
+        AtomicBool::new(on)
+    })
+}
+
+#[inline]
+pub fn nmp_verify_enabled() -> bool {
+    nmp_verify_enabled_atomic().load(Ordering::Relaxed)
+}
+
+fn nmp_verify_min_depth_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = std::env::var("SEARCH_NMP_VERIFY_MIN_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(16)
+            .clamp(2, 64);
+        AtomicI32::new(v)
+    })
+}
+
+#[inline]
+pub fn nmp_verify_min_depth() -> i32 {
+    nmp_verify_min_depth_atomic().load(Ordering::Relaxed)
 }
 
 // --- Helper Aspiration (mode/delta) ---

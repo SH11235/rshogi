@@ -3,9 +3,13 @@ use crate::search::params as dynp;
 use crate::search::params::{
     NMP_BASE_R, NMP_BONUS_DELTA_BETA, NMP_HAND_SUM_DISABLE, NMP_MIN_DEPTH,
 };
+use crate::search::policy::{nmp_verify_enabled, nmp_verify_min_depth};
 use crate::search::tt::TTProbe;
 use crate::search::types::SearchStack;
 use crate::Position;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 
 #[cfg(any(debug_assertions, feature = "diagnostics"))]
 use self::state_diagnostics::{
@@ -22,6 +26,15 @@ use super::profile::PruneToggles;
 use super::pvs::{ABArgs, SearchContext};
 use crate::search::constants::MATE_SCORE;
 
+#[cfg(test)]
+static NMP_VERIFY_FORCE_SCORE: AtomicI32 = AtomicI32::new(i32::MAX);
+
+#[cfg(test)]
+pub(crate) fn __test_set_nmp_verify_forced_score(score: Option<i32>) {
+    let val = score.unwrap_or(i32::MAX);
+    NMP_VERIFY_FORCE_SCORE.store(val, AtomicOrdering::SeqCst);
+}
+
 pub(super) struct NullMovePruneParams<'a, 'ctx> {
     pub toggles: &'a PruneToggles,
     pub depth: i32,
@@ -36,6 +49,8 @@ pub(super) struct NullMovePruneParams<'a, 'ctx> {
     pub lmr_counter: &'a mut u64,
     pub ctx: &'a mut SearchContext<'ctx>,
     pub is_pv: bool,
+    #[cfg(test)]
+    pub verify_min_depth_override: Option<i32>,
 }
 
 pub(super) struct MaybeIidParams<'a, 'ctx> {
@@ -91,6 +106,8 @@ pub(super) struct RazorPruneParams<'a, 'ctx> {
     pub ctx: &'a mut SearchContext<'ctx>,
     pub ply: u32,
     pub is_pv: bool,
+    pub stack: &'a [SearchStack],
+    pub heur: &'a Heuristics,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
@@ -177,6 +194,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             ctx,
             ply,
             is_pv,
+            stack,
+            heur,
         } = params;
         // Verification: disable Razor when verification flag is set
         if ctx.limits.info_string_callback.as_ref().is_some() {
@@ -195,10 +214,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         // Safeモード: YO寄りの深さ依存マージンで強い劣勢のみqsearchで刈る（非PV想定）
         if crate::search::params::pruning_safe_mode() {
-            // eval < alpha - (495 + 290*depth^2) のみ対象
+            // eval < alpha - (495 + 260*depth^2) のみ対象（やや緩和）
             // depthはi32、係数はcp単位
             let d = depth.max(1);
-            let margin = 495i32.saturating_add(290i32.saturating_mul(d.saturating_mul(d)));
+            let margin = 495i32.saturating_add(260i32.saturating_mul(d.saturating_mul(d)));
             if static_eval <= alpha.saturating_sub(margin) {
                 #[cfg(any(debug_assertions, feature = "diagnostics"))]
                 super::diagnostics::record_tag(
@@ -206,7 +225,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     "razor_triggered",
                     Some(format!("depth={} margin={}", d, margin)),
                 );
-                let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply);
+                let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+                let prev_move = if ply > 0 {
+                    stack[(ply - 1) as usize].current_move
+                } else {
+                    None
+                };
+                let r = self.qsearch(
+                    pos,
+                    super::qsearch::SearchWindow {
+                        alpha,
+                        beta: alpha + 1,
+                    },
+                    ctx,
+                    super::qsearch::QSearchFrame {
+                        ply,
+                        qdepth: 0,
+                        prev_move,
+                    },
+                    heur,
+                    &mut qbudget,
+                );
                 if r <= alpha {
                     return Some(r);
                 }
@@ -216,7 +255,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
         // 従来: depth==1のみの簡易Razor
         if depth == 1 {
-            let r = self.qsearch(pos, alpha, alpha + 1, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            let r = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow {
+                    alpha,
+                    beta: alpha + 1,
+                },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                heur,
+                &mut qbudget,
+            );
             if r <= alpha {
                 return Some(r);
             }
@@ -239,6 +298,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             lmr_counter,
             ctx,
             is_pv,
+            #[cfg(test)]
+            verify_min_depth_override,
         } = params;
         // Disable NMP for PV nodes or when previous move was risky
         if is_pv || stack.get(ply as usize).is_some_and(|st| st.prev_risky) {
@@ -308,6 +369,79 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             -sc
         };
         if score >= beta {
+            #[cfg(test)]
+            let verify_min_depth = verify_min_depth_override.unwrap_or_else(nmp_verify_min_depth);
+            #[cfg(not(test))]
+            let verify_min_depth = nmp_verify_min_depth();
+
+            if nmp_verify_enabled()
+                && depth >= verify_min_depth
+                && stack.get(ply as usize).map(|st| !st.prev_risky).unwrap_or(true)
+            {
+                let verify_depth = (depth - 1).max(1);
+                let verify_alpha = beta - 1;
+                let saved_prev = stack.get(ply as usize).map(|st| st.prev_risky).unwrap_or(false);
+                if let Some(st) = stack.get_mut(ply as usize) {
+                    st.prev_risky = true;
+                }
+                let mut run_verify = |stack: &mut [SearchStack], heur: &mut Heuristics| {
+                    let (sc_verify, _) = self.alphabeta(
+                        ABArgs {
+                            pos,
+                            depth: verify_depth,
+                            alpha: verify_alpha,
+                            beta,
+                            ply,
+                            is_pv: false,
+                            stack,
+                            heur,
+                            tt_hits,
+                            beta_cuts,
+                            lmr_counter,
+                            lmr_blocked_in_check: None,
+                            lmr_blocked_recapture: None,
+                            evasion_sparsity_ext: None,
+                        },
+                        ctx,
+                    );
+                    sc_verify
+                };
+                let verify_score = {
+                    #[cfg(test)]
+                    {
+                        let forced = NMP_VERIFY_FORCE_SCORE.load(AtomicOrdering::SeqCst);
+                        if forced != i32::MAX {
+                            forced
+                        } else {
+                            run_verify(stack, heur)
+                        }
+                    }
+                    #[cfg(not(test))]
+                    {
+                        run_verify(stack, heur)
+                    }
+                };
+                if let Some(st) = stack.get_mut(ply as usize) {
+                    st.prev_risky = saved_prev;
+                }
+                if verify_score >= beta {
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        pos,
+                        "nmp_verify_accept",
+                        Some(format!("depth={} beta={}", depth, beta)),
+                    );
+                    return Some(score);
+                } else {
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        pos,
+                        "nmp_verify_reject",
+                        Some(format!("depth={} beta={} vs={}", depth, beta, verify_score)),
+                    );
+                    return None;
+                }
+            }
             Some(score)
         } else {
             None
@@ -449,7 +583,27 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // 事前qsearchにより早すぎる試行を抑制
             let qs_alpha = threshold - 1;
             let qs_beta = threshold;
-            let qs = self.qsearch(pos, qs_alpha, qs_beta, ctx, ply);
+            let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
+            let prev_move = if ply > 0 {
+                stack[(ply - 1) as usize].current_move
+            } else {
+                None
+            };
+            let qs = self.qsearch(
+                pos,
+                super::qsearch::SearchWindow {
+                    alpha: qs_alpha,
+                    beta: qs_beta,
+                },
+                ctx,
+                super::qsearch::QSearchFrame {
+                    ply,
+                    qdepth: 0,
+                    prev_move,
+                },
+                heur,
+                &mut qbudget,
+            );
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             super::diagnostics::record_tag(
                 pos,

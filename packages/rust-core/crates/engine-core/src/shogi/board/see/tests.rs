@@ -665,7 +665,7 @@ mod see_edge_cases {
 
     #[test]
     fn test_see_drop_move_evaluation() {
-        // Test SEE evaluation for drop moves
+        // Test SEE evaluation for drop moves (Shogi-specific)
         let mut pos = Position::empty();
 
         // Add gold to hand manually
@@ -686,13 +686,15 @@ mod see_edge_cases {
         pos.side_to_move = Color::Black;
         pos.board.rebuild_occupancy_bitboards();
 
-        // Drop gold to attack silver
+        // Drop gold to attack silver; the drop square is defended by a white Gold,
+        // so the drop is tactically losing and SEE should be negative.
         let mv = Move::drop(PieceType::Gold, parse_usi_square("5f").unwrap());
 
         let see_value = pos.see(mv);
-        // Drop moves should be evaluated for their tactical value
-        // Not a capture move, so SEE might be 0 or consider tactical threats
-        assert!(see_value >= 0, "Drop moves should not be negative in SEE: {see_value}");
+        // With drop-aware SEE, disadvantageous drops yield negative values.
+        assert!(see_value < 0, "Disadvantageous drop should be negative in SEE, got {see_value}");
+        // And threshold check must reflect that
+        assert!(!pos.see_ge(mv, 0));
     }
 
     #[test]

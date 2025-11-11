@@ -7,14 +7,9 @@ static MATE_EARLY_STOP_ENABLED: AtomicBool = AtomicBool::new(true);
 static MATE_EARLY_STOP_MAX_DISTANCE: AtomicU8 = AtomicU8::new(1);
 
 // Root guard rails (global, set by USI layer; default OFF)
-static ROOT_SEE_GATE_ENABLED: AtomicBool = AtomicBool::new(false);
-static ROOT_SEE_X_CP: AtomicI32 = AtomicI32::new(100);
 
 static POST_VERIFY_ENABLED: AtomicBool = AtomicBool::new(false);
 static POST_VERIFY_YDROP_CP: AtomicI32 = AtomicI32::new(300);
-
-// Root post-verify one-shot retry (Enhanced実戦向け)
-static ROOT_RETRY_ENABLED: AtomicBool = AtomicBool::new(false);
 
 static PROMOTE_VERIFY_ENABLED: AtomicBool = AtomicBool::new(false);
 static PROMOTE_BIAS_CP: AtomicI32 = AtomicI32::new(20);
@@ -43,20 +38,31 @@ pub fn mate_early_stop_max_distance() -> u8 {
     MATE_EARLY_STOP_MAX_DISTANCE.load(Ordering::Acquire)
 }
 
-// ---- Root SEE Gate
+// ---- Root SEE Gate (revived)
+// やねうら王系のルート近傍ガードに相当する軽量ゲート。
+// ここではフラグと閾値のみを保持し、実際の適用は上位層（USI/検索部）に委ねる。
+static ROOT_SEE_GATE_ENABLED: AtomicBool = AtomicBool::new(false);
+/// 拡張SEE（XSEE）のしきい値（cp相当）。0 で無効。
+static ROOT_SEE_GATE_XSEE_CP: AtomicI32 = AtomicI32::new(0);
+
 pub fn set_root_see_gate_enabled(on: bool) {
     ROOT_SEE_GATE_ENABLED.store(on, Ordering::Release);
 }
+
 #[inline]
 pub fn root_see_gate_enabled() -> bool {
     ROOT_SEE_GATE_ENABLED.load(Ordering::Acquire)
 }
-pub fn set_root_see_x_cp(x: i32) {
-    ROOT_SEE_X_CP.store(x, Ordering::Release);
+
+pub fn set_root_see_gate_xsee_cp(v: i32) {
+    // 実用域: 0〜1000cp 程度にクランプ
+    let clamped = v.clamp(0, 5000);
+    ROOT_SEE_GATE_XSEE_CP.store(clamped, Ordering::Release);
 }
+
 #[inline]
-pub fn root_see_x_cp() -> i32 {
-    ROOT_SEE_X_CP.load(Ordering::Acquire)
+pub fn root_see_gate_xsee_cp() -> i32 {
+    ROOT_SEE_GATE_XSEE_CP.load(Ordering::Acquire)
 }
 
 // ---- Post-bestmove Verify
@@ -73,15 +79,6 @@ pub fn set_post_verify_ydrop_cp(y: i32) {
 #[inline]
 pub fn post_verify_ydrop_cp() -> i32 {
     POST_VERIFY_YDROP_CP.load(Ordering::Acquire)
-}
-
-// ---- Root retry (one-shot) gate
-pub fn set_root_retry_enabled(on: bool) {
-    ROOT_RETRY_ENABLED.store(on, Ordering::Release);
-}
-#[inline]
-pub fn root_retry_enabled() -> bool {
-    ROOT_RETRY_ENABLED.load(Ordering::Acquire)
 }
 
 // ---- Promote verify

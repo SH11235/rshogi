@@ -1,4 +1,4 @@
-#![cfg(any(debug_assertions, feature = "diagnostics"))]
+#![cfg(any(test, debug_assertions, feature = "diagnostics"))]
 
 use crate::search::parallel::StopController;
 use crate::search::types::SearchStack;

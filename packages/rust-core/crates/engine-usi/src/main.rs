@@ -308,7 +308,9 @@ fn main() -> Result<()> {
 
             if cmd.starts_with("go") {
                 // go 実行の安全ラッパー。パニック/エラー伝播でプロセスが落ちないようにする。
-                info_string("go_dispatch_enter");
+                if state.opts.log_profile.at_least_qa() {
+                    info_string("go_dispatch_enter");
+                }
                 match catch_unwind(AssertUnwindSafe(|| {
                     // テスト用: 環境変数でpanicを強制（リリースでも有効にしてフォールバック経路を検証可能にする）
                     if std::env::var("USI_TEST_GO_PANIC").ok().as_deref() == Some("1") {
