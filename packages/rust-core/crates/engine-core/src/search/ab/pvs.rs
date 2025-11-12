@@ -16,6 +16,7 @@ use crate::search::policy::{
     tt_suppress_below_depth,
 };
 use crate::search::types::NodeType;
+use crate::shogi::board::{Color, PieceType, Square};
 use crate::shogi::piece_constants::SEE_PIECE_VALUES;
 use std::sync::OnceLock;
 
@@ -289,6 +290,77 @@ pub(crate) struct ABArgs<'a> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    /// 浅層用の軽量 Threat2 検出
+    ///
+    /// 直前が非チェックで、次手に相手が「角頭/桂頭に歩を打てる」場合を
+    /// 危険局面として検知し、HP/LMP/FUT/LMR の静止刈りを弱めるために使用する。
+    /// コストを抑えるため、対象は自玉側の角・桂のみ、判定は 1ply 先の
+    /// 合法性（null move → is_legal_move(drop)）で最小限に留める。
+    #[inline]
+    fn detect_head_pawn_threat(pos: &Position) -> bool {
+        // チェック中は通常の回避生成に委ねる
+        if pos.is_in_check() {
+            return false;
+        }
+        let us = pos.side_to_move;
+        let them = us.opposite();
+        // 手駒に歩が無ければ不成立
+        let Some(pawn_hand_idx) = PieceType::Pawn.hand_index() else {
+            return false;
+        };
+        if pos.hands[them as usize][pawn_hand_idx] == 0 {
+            return false;
+        }
+        // ヘッド（1マス前）の算出ヘルパ
+        let head_of = |sq: Square, side: Color| -> Option<Square> {
+            let f = sq.file();
+            let r = sq.rank();
+            match side {
+                Color::Black => {
+                    if r > 0 {
+                        Some(Square::new(f, r - 1))
+                    } else {
+                        None
+                    }
+                }
+                Color::White => {
+                    if r < 8 {
+                        Some(Square::new(f, r + 1))
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        // 相手手番にして合法な P*head があるか（角頭/桂頭のみを見る）
+        let mut opp = pos.clone();
+        let _undo = opp.do_null_move();
+        // 角
+        let bishops = pos.board.pieces_of_type_and_color(PieceType::Bishop, us);
+        for sq in bishops {
+            if let Some(hd) = head_of(sq, us) {
+                if pos.board.piece_on(hd).is_none() {
+                    let mv = crate::shogi::Move::drop(PieceType::Pawn, hd);
+                    if opp.is_legal_move(mv) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // 桂
+        let knights = pos.board.pieces_of_type_and_color(PieceType::Knight, us);
+        for sq in knights {
+            if let Some(hd) = head_of(sq, us) {
+                if pos.board.piece_on(hd).is_none() {
+                    let mv = crate::shogi::Move::drop(PieceType::Pawn, hd);
+                    if opp.is_legal_move(mv) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
     #[inline]
     fn gating_enabled() -> bool {
         static FLAG: OnceLock<bool> = OnceLock::new();
@@ -343,6 +415,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (eval, None);
         }
         ctx.tick(ply);
+        // Threat2（角頭/桂頭 打歩）の簡易検出（浅層のみ）
+        // 将棋特有の“頭に歩”で大駒が取られる筋を見逃さないため、
+        // d<=4 で検出された場合は静止刈りを弱める。
+        let threat_head_pawn = depth <= 4 && Self::detect_head_pawn_threat(pos);
         if depth <= 0 {
             let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
             let prev_move = if ply > 0 {
@@ -649,7 +725,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 hp_thresh = hp_thresh.clamp(i16::MIN as i32, i16::MAX as i32);
                 // 遅手のみHP対象（move_no>3）。TT手/カウンター/キラー/チェック静止は除外。
                 let is_late = moveno > 3;
-                if is_late
+                if !threat_head_pawn
+                    && is_late
                     && !gives_check
                     && h < hp_thresh
                     && !stack[ply as usize].is_killer(mv)
@@ -669,7 +746,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if depth <= 3 && is_quiet && !stack[ply as usize].prev_risky {
+            if depth <= 3 && is_quiet && !stack[ply as usize].prev_risky && !threat_head_pawn {
                 let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
@@ -682,6 +759,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 && is_quiet
                 && !pos.is_in_check()
                 && !stack[ply as usize].prev_risky
+                && !threat_head_pawn
             {
                 use crate::search::constants::MATE_SCORE;
                 if alpha.abs() >= MATE_SCORE - 100 { /* mate帯近傍では futility 無効 */ }
@@ -752,6 +830,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         reduction = 0;
                     } else if same_to && is_quiet {
                         // 3) same-to（同一地点応手）: 静止の即応は1段だけ減衰を緩める
+                        reduction = (reduction - 1).max(0);
+                    } else if is_quiet && threat_head_pawn {
+                        // 4) 頭に歩の脅威下: 静止手の減深を1段弱める
                         reduction = (reduction - 1).max(0);
                     }
                 }
@@ -984,32 +1065,41 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if is_quiet {
                     if !drop_bad {
                         stack[ply as usize].update_killers(mv);
-                        heur.history.update_good(pos.side_to_move, mv, depth);
-                        if let Some(curr_piece) = mv.piece_type() {
-                            heur.pawn_history.update_good(
-                                pos.side_to_move,
-                                curr_piece,
-                                mv.to(),
-                                depth,
-                            );
-                        }
-                        if ply > 0 {
-                            if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                                heur.counter.update(pos.side_to_move, prev_mv, mv);
-                                if let (Some(prev_piece), Some(curr_piece)) =
-                                    (prev_mv.piece_type(), mv.piece_type())
-                                {
-                                    let key = crate::search::history::ContinuationKey::new(
-                                        pos.side_to_move,
-                                        prev_piece as usize,
-                                        prev_mv.to(),
-                                        prev_mv.is_drop(),
-                                        curr_piece as usize,
-                                        mv.to(),
-                                        mv.is_drop(),
-                                    );
-                                    heur.continuation.update_good(key, depth);
+                        let is_quiet_king =
+                            mv.piece_type().is_some_and(|pt| pt == crate::PieceType::King);
+                        let skip_history =
+                            is_quiet_king && (pos.ply as u32) <= KING_QUIET_HISTORY_PLY_LIMIT;
+                        if !skip_history {
+                            heur.history.update_good(pos.side_to_move, mv, depth);
+                            if let Some(curr_piece) = mv.piece_type() {
+                                heur.pawn_history.update_good(
+                                    pos.side_to_move,
+                                    curr_piece,
+                                    mv.to(),
+                                    depth,
+                                );
+                            }
+                            if ply > 0 {
+                                if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
+                                    heur.counter.update(pos.side_to_move, prev_mv, mv);
+                                    if let (Some(prev_piece), Some(curr_piece)) =
+                                        (prev_mv.piece_type(), mv.piece_type())
+                                    {
+                                        let key = crate::search::history::ContinuationKey::new(
+                                            pos.side_to_move,
+                                            prev_piece as usize,
+                                            prev_mv.to(),
+                                            prev_mv.is_drop(),
+                                            curr_piece as usize,
+                                            mv.to(),
+                                            mv.is_drop(),
+                                        );
+                                        heur.continuation.update_good(key, depth);
+                                    }
                                 }
+                            }
+                            if gives_check && see >= QUIET_CHECK_SEE_MARGIN {
+                                heur.history.update_good(pos.side_to_move, mv, depth);
                             }
                         }
                     }
@@ -1189,3 +1279,5 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     }
 }
 // abdada_enabled(): see crate::search::policy
+const KING_QUIET_HISTORY_PLY_LIMIT: u32 = 30;
+const QUIET_CHECK_SEE_MARGIN: i32 = -75;
