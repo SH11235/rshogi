@@ -571,39 +571,54 @@ pub fn set_probcut_skip_verify_lt4(on: bool) {
     RUNTIME_PROBCUT_SKIP_VERIFY_LT4.store(on, Ordering::Relaxed);
 }
 
-// Shallow gating (d<=D) — optional runtime policy
+// Shallow gating (d<=D) — runtime-toggleable (defaults derive from env)
+fn default_shallow_gate_enabled() -> bool {
+    match crate::util::env_var("SEARCH_SHALLOW_GATE") {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "on" | "yes")
+        }
+        None => false,
+    }
+}
+
+fn default_shallow_gate_depth() -> i32 {
+    match crate::util::env_var("SEARCH_SHALLOW_GATE_DEPTH") {
+        Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 8)).unwrap_or(3),
+        None => 3,
+    }
+}
+
+static RUNTIME_SHALLOW_GATE: OnceLock<AtomicBool> = OnceLock::new();
+static RUNTIME_SHALLOW_GATE_DEPTH: OnceLock<AtomicI32> = OnceLock::new();
+
 #[inline]
 pub fn shallow_gate_enabled() -> bool {
-    #[cfg(test)]
-    {
-        match crate::util::env_var("SEARCH_SHALLOW_GATE") {
-            Some(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                matches!(v.as_str(), "1" | "true" | "on" | "yes")
-            }
-            None => false,
-        }
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| match crate::util::env_var("SEARCH_SHALLOW_GATE") {
-            Some(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                matches!(v.as_str(), "1" | "true" | "on" | "yes")
-            }
-            None => false,
-        })
-    }
+    RUNTIME_SHALLOW_GATE
+        .get_or_init(|| AtomicBool::new(default_shallow_gate_enabled()))
+        .load(Ordering::Relaxed)
 }
 
 #[inline]
 pub fn shallow_gate_depth() -> i32 {
-    static VAL: OnceLock<i32> = OnceLock::new();
-    *VAL.get_or_init(|| match crate::util::env_var("SEARCH_SHALLOW_GATE_DEPTH") {
-        Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 8)).unwrap_or(3),
-        None => 3,
-    })
+    RUNTIME_SHALLOW_GATE_DEPTH
+        .get_or_init(|| AtomicI32::new(default_shallow_gate_depth()))
+        .load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_shallow_gate_enabled(on: bool) {
+    RUNTIME_SHALLOW_GATE
+        .get_or_init(|| AtomicBool::new(default_shallow_gate_enabled()))
+        .store(on, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_shallow_gate_depth(v: i32) {
+    let clamped = v.clamp(1, 8);
+    RUNTIME_SHALLOW_GATE_DEPTH
+        .get_or_init(|| AtomicI32::new(default_shallow_gate_depth()))
+        .store(clamped, Ordering::Relaxed);
 }
 
 #[inline]
