@@ -8,9 +8,9 @@
 pub const LMR_K_COEFF: f32 = 1.7; // 既定: r = floor(ln(depth)*ln(moveno)/LMR_K_COEFF)
 
 // LMP (late quiet skip) thresholds per depth (depth<=3 only)
-pub const LMP_LIMIT_D1: usize = 6;
-pub const LMP_LIMIT_D2: usize = 12;
-pub const LMP_LIMIT_D3: usize = 18;
+pub const LMP_LIMIT_D1: usize = 8;
+pub const LMP_LIMIT_D2: usize = 14;
+pub const LMP_LIMIT_D3: usize = 20;
 
 // History Pruning threshold (skip quiet if history < HP_THRESHOLD at shallow depth)
 pub const HP_THRESHOLD: i32 = -2000;
@@ -76,7 +76,7 @@ static RUNTIME_LMP_D3: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D3);
 static RUNTIME_HP_THRESHOLD: AtomicI32 = AtomicI32::new(HP_THRESHOLD);
 /// HP の深さ比例スケール（safeモード時のみ使用）。
 /// 例: history < -HP_DEPTH_SCALE * depth
-static RUNTIME_HP_DEPTH_SCALE: AtomicI32 = AtomicI32::new(4361);
+static RUNTIME_HP_DEPTH_SCALE: AtomicI32 = AtomicI32::new(3200);
 static RUNTIME_SBP_D1: AtomicI32 = AtomicI32::new(SBP_MARGIN_D1);
 static RUNTIME_SBP_D2: AtomicI32 = AtomicI32::new(SBP_MARGIN_D2);
 static RUNTIME_SBP_BASE: AtomicI32 = AtomicI32::new(SBP_MARGIN_BASE);
@@ -113,7 +113,7 @@ static RUNTIME_QS_MARGIN_CAPTURE: AtomicI32 = AtomicI32::new(QS_MARGIN_CAPTURE);
 static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN);
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
-static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(4);
+static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(0);
 static RUNTIME_SAME_TO_EXTENSION: AtomicBool = AtomicBool::new(false);
 static RUNTIME_ROOT_BEAM_REDUCTION: AtomicI32 = AtomicI32::new(ROOT_BEAM_REDUCTION);
 static RUNTIME_ROOT_BEAM_MIN_DEPTH: AtomicI32 = AtomicI32::new(ROOT_BEAM_MIN_DEPTH);

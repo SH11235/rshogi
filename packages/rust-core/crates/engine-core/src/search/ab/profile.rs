@@ -47,7 +47,7 @@ impl SearchTuning {
     const fn material_basic() -> Self {
         Self {
             lmr_k_x100: 170,
-            lmp_limits: [6, 12, 18],
+            lmp_limits: [8, 14, 20],
             hp_threshold: -2000,
             sbp_margin_d1: 200,
             sbp_margin_d2: 300,
@@ -62,7 +62,7 @@ impl SearchTuning {
     const fn nnue_basic() -> Self {
         Self {
             lmr_k_x100: 170,
-            lmp_limits: [6, 12, 18],
+            lmp_limits: [8, 14, 20],
             hp_threshold: -2000,
             sbp_margin_d1: 200,
             sbp_margin_d2: 300,
@@ -77,7 +77,7 @@ impl SearchTuning {
     const fn material_enhanced() -> Self {
         Self {
             lmr_k_x100: 170,
-            lmp_limits: [6, 12, 18],
+            lmp_limits: [8, 14, 20],
             hp_threshold: -2000,
             sbp_margin_d1: 200,
             sbp_margin_d2: 300,
@@ -92,7 +92,7 @@ impl SearchTuning {
     const fn nnue_enhanced() -> Self {
         Self {
             lmr_k_x100: 170,
-            lmp_limits: [6, 12, 18],
+            lmp_limits: [8, 14, 20],
             hp_threshold: -2000,
             sbp_margin_d1: 200,
             sbp_margin_d2: 300,
@@ -179,7 +179,7 @@ impl SearchProfile {
         params::set_lmp_d3(self.tuning.lmp_limits[2]);
         params::set_hp_threshold(self.tuning.hp_threshold);
         // Safeモード用のHP深さスケール（デフォルト）
-        params::set_hp_depth_scale(4361);
+        params::set_hp_depth_scale(3200);
         params::set_sbp_d1(self.tuning.sbp_margin_d1);
         params::set_sbp_d2(self.tuning.sbp_margin_d2);
         params::set_probcut_d5(self.tuning.probcut_margin_d5);
