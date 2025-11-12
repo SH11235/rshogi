@@ -99,7 +99,7 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     // Shallow gate (runtime-toggle; previously env-only)
     usi_println("option name Search.ShallowGate type check default false");
     usi_println("option name Search.ShallowGate.Depth type spin default 3 min 1 max 8");
-    usi_println("option name SearchParams.RootBeamForceFullCount type spin default 4 min 0 max 8");
+    usi_println("option name SearchParams.RootBeamForceFullCount type spin default 0 min 0 max 8");
     // Root guard rails (revived)
     usi_println(&format!(
         "option name RootSeeGate type check default {}",
@@ -111,9 +111,9 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     ));
     // Search parameter knobs (runtime-adjustable)
     usi_println("option name SearchParams.LMR_K_x100 type spin default 170 min 80 max 400");
-    usi_println("option name SearchParams.LMP_D1 type spin default 6 min 0 max 64");
-    usi_println("option name SearchParams.LMP_D2 type spin default 12 min 0 max 64");
-    usi_println("option name SearchParams.LMP_D3 type spin default 18 min 0 max 64");
+    usi_println("option name SearchParams.LMP_D1 type spin default 8 min 0 max 64");
+    usi_println("option name SearchParams.LMP_D2 type spin default 14 min 0 max 64");
+    usi_println("option name SearchParams.LMP_D3 type spin default 20 min 0 max 64");
     usi_println(
         "option name SearchParams.HP_Threshold type spin default -2000 min -10000 max 10000",
     );
@@ -167,7 +167,7 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println(
         "option name SearchParams.QS_CheckPruneMargin type spin default 150 min 0 max 5000",
     );
-    usi_println("option name SearchParams.HP_DepthScale type spin default 4361 min 0 max 20000");
+    usi_println("option name SearchParams.HP_DepthScale type spin default 3200 min 0 max 20000");
     usi_println("option name SearchParams.QuietHistoryWeight type spin default 4 min -64 max 64");
     usi_println(
         "option name SearchParams.ContinuationHistoryWeight type spin default 2 min -32 max 32",
