@@ -51,327 +51,899 @@ fn profile_allows_static_beta(state: &EngineState) -> bool {
     profile.prune.enable_static_beta_pruning
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OptionSection {
+    Core,
+    Time,
+    Search,
+    Finalize,
+    Diagnostics,
+    Utility,
+}
+
+struct PrintableOption {
+    section: OptionSection,
+    sort_key: String,
+    text: String,
+}
+
+impl PrintableOption {
+    fn new(section: OptionSection, name: &str, text: String) -> Self {
+        Self {
+            section,
+            sort_key: name.to_ascii_lowercase(),
+            text,
+        }
+    }
+}
+
+#[derive(Default)]
+struct OptionBuilder {
+    entries: Vec<PrintableOption>,
+}
+
+impl OptionBuilder {
+    fn push(&mut self, section: OptionSection, name: &'static str, text: String) {
+        self.entries.push(PrintableOption::new(section, name, text));
+    }
+
+    fn core(&mut self, name: &'static str, text: String) {
+        self.push(OptionSection::Core, name, text);
+    }
+
+    fn time(&mut self, name: &'static str, text: String) {
+        self.push(OptionSection::Time, name, text);
+    }
+
+    fn search(&mut self, name: &'static str, text: String) {
+        self.push(OptionSection::Search, name, text);
+    }
+
+    fn finalize(&mut self, name: &'static str, text: String) {
+        self.push(OptionSection::Finalize, name, text);
+    }
+
+    fn diagnostics(&mut self, name: &'static str, text: String) {
+        self.push(OptionSection::Diagnostics, name, text);
+    }
+
+    fn utility(&mut self, name: &'static str, text: String) {
+        self.push(OptionSection::Utility, name, text);
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        self.entries
+            .sort_by(|a, b| a.section.cmp(&b.section).then_with(|| a.sort_key.cmp(&b.sort_key)));
+        self.entries.into_iter().map(|entry| entry.text).collect()
+    }
+}
+
+fn bool_to_usi(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("id name RustShogi USI (core)");
     usi_println("id author RustShogi Team");
 
-    usi_println(&format!(
-        "option name USI_Hash type spin default {} min 1 max 1024",
-        opts.hash_mb
-    ));
-    usi_println(&format!("option name Threads type spin default {} min 1 max 256", opts.threads));
-    usi_println("option name USI_Ponder type check default true");
-    usi_println(&format!("option name MultiPV type spin default {} min 1 max 20", opts.multipv));
-    usi_println(&format!(
-        "option name MinThinkMs type spin default {} min 0 max 10000",
-        opts.min_think_ms
-    ));
-    usi_println(&format!(
-        "option name LogProfile type combo default {} var Prod var QA var Dev",
-        opts.log_profile.as_str()
-    ));
-    print_engine_type_options();
-    usi_println("option name EvalFile type filename default ");
-    usi_println("option name ClearHash type button");
-    usi_println("option name SIMDMaxLevel type combo default Auto var Auto var Scalar var SSE2 var AVX var AVX512F");
-    usi_println(
-        "option name NNUE_Simd type combo default Auto var Auto var Scalar var SSE41 var AVX2",
-    );
-    print_time_policy_options(opts);
-    usi_println("option name Stochastic_Ponder type check default false");
-    usi_println("option name ForceTerminateOnHardDeadline type check default true");
-    usi_println("option name MateEarlyStop type check default true");
-    // Parallel policy knobs (LazySMP)
-    usi_println("option name BenchAllRun type check default false");
-    usi_println("option name BenchStopOnMate type check default true");
-    usi_println("option name HelperAspiration type combo default Wide var Off var Wide");
-    usi_println("option name HelperAspirationDelta type spin default 350 min 50 max 600");
-    usi_println("option name Abdada type check default false");
-    // Diagnostics / policy knobs
-    usi_println("option name QSearchChecks type combo default On var On var Off");
-    usi_println(&format!(
-        "option name SearchParams.QS.CheckSEEMargin type spin default {} min -5000 max 5000",
-        engine_core::search::params::qs_check_see_margin()
-    ));
-    // NMP verify (浅層からの検証を許可)
-    usi_println("option name Search.NMP.Verify type check default true");
-    usi_println("option name Search.NMP.VerifyMinDepth type spin default 16 min 2 max 64");
-    // Quiet SEE Gate (本探索の静止ゲート)
-    usi_println("option name Search.QuietSeeGuard type check default true");
-    // Capture Futility/SEE gating
-    usi_println("option name Search.CaptureFutility type check default true");
-    usi_println("option name Search.CaptureFutility.ScalePct type spin default 75 min 25 max 150");
-    // Singular Extension (最小導入; 既定OFF)
-    usi_println("option name Search.Singular.Enabled type check default false");
-    usi_println("option name Search.Singular.MinDepth type spin default 6 min 2 max 64");
-    usi_println("option name Search.Singular.MarginBase type spin default 56 min 0 max 512");
-    usi_println("option name Search.Singular.MarginScalePct type spin default 70 min 10 max 300");
-    // Shallow gate (runtime-toggle; previously env-only)
-    usi_println("option name Search.ShallowGate type check default false");
-    usi_println("option name Search.ShallowGate.Depth type spin default 3 min 1 max 8");
-    usi_println("option name SearchParams.RootBeamForceFullCount type spin default 0 min 0 max 8");
-    // Root guard rails (revived)
-    usi_println(&format!(
-        "option name RootSeeGate type check default {}",
-        if opts.root_see_gate { "true" } else { "false" }
-    ));
-    usi_println(&format!(
-        "option name RootSeeGate.XSEE type spin default {} min 0 max 5000",
-        opts.root_see_gate_xsee_cp
-    ));
-    // Search parameter knobs (runtime-adjustable)
-    usi_println("option name SearchParams.LMR_K_x100 type spin default 170 min 80 max 400");
-    usi_println("option name SearchParams.LMP_D1 type spin default 8 min 0 max 64");
-    usi_println("option name SearchParams.LMP_D2 type spin default 14 min 0 max 64");
-    usi_println("option name SearchParams.LMP_D3 type spin default 20 min 0 max 64");
-    usi_println(
-        "option name SearchParams.HP_Threshold type spin default -2000 min -10000 max 10000",
-    );
-    usi_println("option name SearchParams.SBP_D1 type spin default 200 min 0 max 2000");
-    usi_println("option name SearchParams.SBP_D2 type spin default 300 min 0 max 2000");
-    usi_println("option name SearchParams.SBP_Dyn_Enable type check default true");
-    usi_println("option name SearchParams.SBP_Dyn_Base type spin default 120 min 0 max 2000");
-    usi_println("option name SearchParams.SBP_Dyn_Slope type spin default 60 min 0 max 500");
-    usi_println("option name SearchParams.FUT_Dyn_Enable type check default true");
-    usi_println("option name SearchParams.FUT_Dyn_Base type spin default 100 min 0 max 2000");
-    usi_println("option name SearchParams.FUT_Dyn_Slope type spin default 80 min 0 max 500");
-    usi_println("option name SearchParams.FutStatDen type spin default 356 min 1 max 10000");
-    usi_println("option name SearchParams.LMR_StatNum type spin default 1 min 0 max 64");
-    usi_println("option name SearchParams.LMR_StatDenBase type spin default 8192 min 1 max 65536");
-    usi_println("option name SearchParams.LMR type check default true");
-    usi_println("option name SearchParams.SameToExtension type check default false");
-    usi_println("option name SearchParams.ProbCut_D5 type spin default 250 min 0 max 2000");
-    usi_println("option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000");
-    usi_println("option name SearchParams.IID_MinDepth type spin default 6 min 0 max 20");
-    usi_println("option name SearchParams.Razor type check default true");
-    usi_println("option name SearchParams.EnableNMP type check default true");
-    usi_println("option name SearchParams.EnableIID type check default true");
-    usi_println("option name SearchParams.EnableProbCut type check default true");
-    usi_println("option name SearchParams.EnableStaticBeta type check default true");
-    usi_println("option name SearchParams.ProbCut_SkipVerifyLt4 type check default false");
-    // Finalize sanity (light guard before emitting bestmove)
-    usi_println(&format!(
-        "option name FinalizeSanity.Enabled type check default {}",
-        if opts.finalize_sanity_enabled {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.BudgetMs type spin default {} min 0 max 10",
-        opts.finalize_sanity_budget_ms
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.MinMs type spin default {} min 0 max 10",
-        opts.finalize_sanity_min_ms
-    ));
-    usi_println("option name FinalizeSanity.MiniDepth type spin default 2 min 1 max 3");
-    usi_println("option name FinalizeSanity.SEE_MinCp type spin default -90 min -1000 max 1000");
-    usi_println(&format!(
-        "option name FinalizeSanity.SwitchMarginCp type spin default {} min 0 max 500",
-        opts.finalize_sanity_switch_margin_cp
-    ));
-    usi_println("option name SearchParams.SafePruning type check default true");
-    usi_println("option name SearchParams.QS_MarginCapture type spin default 150 min 0 max 5000");
-    usi_println("option name SearchParams.QS_BadCaptureMin type spin default 450 min 0 max 5000");
-    usi_println(
-        "option name SearchParams.QS_CheckPruneMargin type spin default 150 min 0 max 5000",
-    );
-    usi_println("option name SearchParams.HP_DepthScale type spin default 3200 min 0 max 20000");
-    usi_println("option name SearchParams.QuietHistoryWeight type spin default 4 min -64 max 64");
-    usi_println(
-        "option name SearchParams.ContinuationHistoryWeight type spin default 2 min -32 max 32",
-    );
-    usi_println("option name SearchParams.CaptureHistoryWeight type spin default 2 min -32 max 32");
-    usi_println("option name SearchParams.RootTTBonus type spin default 1500000 min 0 max 5000000");
-    usi_println("option name SearchParams.RootPrevScoreScale type spin default 200 min 0 max 2000");
-    usi_println(
-        "option name SearchParams.RootMultiPV1 type spin default 50000 min -200000 max 200000",
-    );
-    usi_println(
-        "option name SearchParams.RootMultiPV2 type spin default 25000 min -200000 max 200000",
-    );
-    // Instant mate move options
-    usi_println("option name InstantMateMove.Enabled type check default true");
-    usi_println("option name InstantMateMove.MaxDistance type spin default 1 min 1 max 5");
-    // MateGate thresholds (YO流ゲートの閾値を調整可能に)
-    usi_println(&format!(
-        "option name MateGate.MinStableDepth type spin default {} min 0 max 64",
-        opts.mate_gate_min_stable_depth
-    ));
-    usi_println(&format!(
-        "option name MateGate.FastOkMinDepth type spin default {} min 0 max 64",
-        opts.mate_gate_fast_ok_min_depth
-    ));
-    usi_println(&format!(
-        "option name MateGate.FastOkMinElapsedMs type spin default {} min 0 max 5000",
-        opts.mate_gate_fast_ok_min_elapsed_ms
-    ));
-    // Finalize: Optional mini mate-probe (opponent turn, shallow)
-    usi_println(&format!(
-        "option name FinalizeSanity.MateProbe.Enabled type check default {}",
-        if opts.finalize_mate_probe_enabled {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.MateProbe.Depth type spin default {} min 1 max 8",
-        opts.finalize_mate_probe_depth
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.MateProbe.TimeMs type spin default {} min 1 max 20",
-        opts.finalize_mate_probe_time_ms
-    ));
-    // Opponent SEE gate for finalize sanity
-    usi_println(&format!(
-        "option name FinalizeSanity.OppSEE_MinCp type spin default {} min 0 max 5000",
-        opts.finalize_sanity_opp_see_min_cp
-    ));
-    // Independent penalty cap for opponent capture SEE in finalize sanity
-    usi_println(&format!(
-        "option name FinalizeSanity.OppSEE_PenaltyCapCp type spin default {} min 0 max 5000",
-        opts.finalize_sanity_opp_see_penalty_cap_cp
-    ));
-    // Symmetric check-move penalty for finalize sanity
-    usi_println(&format!(
-        "option name FinalizeSanity.CheckPenaltyCp type spin default {} min 0 max 100",
-        opts.finalize_sanity_check_penalty_cp
-    ));
-    // Threat2 gate (opponent quiet -> capture) for finalize sanity
-    usi_println(&format!(
-        "option name FinalizeSanity.Threat2_MinCp type spin default {} min 0 max 5000",
-        opts.finalize_threat2_min_cp
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.Threat2_BeamK type spin default {} min 0 max 64",
-        opts.finalize_threat2_beam_k
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.Threat2_ExtremeMinCp type spin default {} min 0 max 5000",
-        opts.finalize_threat2_extreme_min_cp
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.Threat2_ExtremeWinDisableCp type spin default {} min 0 max 5000",
-        opts.finalize_threat2_extreme_win_disable_cp
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.AllowSEElt0Alt type check default {}",
-        if opts.finalize_allow_see_lt0_alt {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    // High-risk defense window: allow small negative SEE for defensive candidates
-    usi_println(&format!(
-        "option name FinalizeSanity.DefenseSEE_NegFloorCp type spin default {} min -500 max 0",
-        opts.finalize_defense_see_neg_floor_cp
-    ));
-    // Minimum risk reduction to allow switching
-    usi_println(&format!(
-        "option name FinalizeSanity.RiskMinDeltaCp type spin default {} min 0 max 600",
-        opts.finalize_risk_min_delta_cp
-    ));
-    // King-alt guard options
-    usi_println(&format!(
-        "option name FinalizeSanity.KingAltMinGainCp type spin default {} min 0 max 1000",
-        opts.finalize_sanity_king_alt_min_gain_cp
-    ));
-    usi_println(&format!(
-        "option name FinalizeSanity.KingAltPenaltyCp type spin default {} min 0 max 300",
-        opts.finalize_sanity_king_alt_penalty_cp
-    ));
-    // Non-promote penalty for major pieces (R/B)
-    usi_println(&format!(
-        "option name FinalizeSanity.NonPromoteMajorPenaltyCp type spin default {} min 0 max 300",
-        opts.finalize_non_promote_major_penalty_cp
-    ));
+    let mut builder = OptionBuilder::default();
+    collect_core_options(opts, &mut builder);
+    collect_time_options(opts, &mut builder);
+    collect_search_options(opts, &mut builder);
+    collect_finalize_options(opts, &mut builder);
+    collect_diagnostics_options(opts, &mut builder);
+    collect_utility_options(opts, &mut builder);
 
-    // --- Root guard rails（診断専用表示）はRootSeeGateを廃止。
-    if cfg!(any(test, feature = "diagnostics")) {
-        usi_println(&format!(
-            "option name PostVerify type check default {}",
-            if opts.post_verify { "true" } else { "false" }
-        ));
-        usi_println(&format!(
-            "option name PostVerify.YDrop type spin default {} min 0 max 5000",
-            opts.y_drop_cp
-        ));
-        usi_println(&format!(
-            "option name PostVerify.RequirePass type check default {}",
-            if opts.post_verify_require_pass {
-                "true"
-            } else {
-                "false"
-            }
-        ));
-        usi_println(&format!(
-            "option name PostVerify.ExtendMs type spin default {} min 0 max 5000",
-            opts.post_verify_extend_ms
-        ));
-        usi_println(&format!(
-            "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
-            opts.post_verify_disadvantage_cp
-        ));
-        usi_println(&format!(
-            "option name PostVerify.SkipMateDistance type spin default {} min 1 max 32",
-            opts.mate_postverify_skip_max_dist
-        ));
-        usi_println(&format!(
-            "option name PostVerify.ExactMinDepth type spin default {} min 0 max 64",
-            opts.mate_postverify_exact_min_depth
-        ));
-        usi_println(&format!(
-            "option name PostVerify.ExactMinElapsedMs type spin default {} min 0 max 10000",
-            opts.mate_postverify_exact_min_elapsed_ms
-        ));
-        usi_println(&format!(
-            "option name PromoteVerify type check default {}",
-            if opts.promote_verify { "true" } else { "false" }
-        ));
-        usi_println(&format!(
-            "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
-            opts.promote_bias_cp
-        ));
+    for line in builder.finish() {
+        usi_println(&line);
     }
-    // Reproduction helpers
-    usi_println(&format!(
-        "option name Warmup.Ms type spin default {} min 0 max 60000",
-        opts.warmup_ms
-    ));
-    usi_println(&format!(
-        "option name Warmup.PrevMoves type spin default {} min 0 max 20",
-        opts.warmup_prev_moves
-    ));
-    // Profile controls (GUIで自動既定を明示適用)
-    // Profile.Mode default is now taken from opts to avoid drift
+}
+
+fn collect_core_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
+    builder.core("ClearHash", "option name ClearHash type button".to_string());
+    builder.core(
+        "EngineType",
+        "option name EngineType type combo default Enhanced var Material var Enhanced var Nnue var EnhancedNnue"
+            .to_string(),
+    );
+    builder.core("EvalFile", "option name EvalFile type filename default ".to_string());
+    builder.core(
+        "LogProfile",
+        format!(
+            "option name LogProfile type combo default {} var Prod var QA var Dev",
+            opts.log_profile.as_str()
+        ),
+    );
+    builder.core(
+        "MultiPV",
+        format!("option name MultiPV type spin default {} min 1 max 20", opts.multipv),
+    );
+    builder.core(
+        "NNUE_Simd",
+        "option name NNUE_Simd type combo default Auto var Auto var Scalar var SSE41 var AVX2"
+            .to_string(),
+    );
+    builder.core(
+        "SIMDMaxLevel",
+        "option name SIMDMaxLevel type combo default Auto var Auto var Scalar var SSE2 var AVX var AVX512F"
+            .to_string(),
+    );
+    builder.core(
+        "Threads",
+        format!("option name Threads type spin default {} min 1 max 256", opts.threads),
+    );
+    builder.core(
+        "USI_Hash",
+        format!("option name USI_Hash type spin default {} min 1 max 1024", opts.hash_mb),
+    );
+    builder.core(
+        "USI_Ponder",
+        format!("option name USI_Ponder type check default {}", bool_to_usi(opts.ponder)),
+    );
+}
+
+fn collect_time_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
+    builder.time(
+        "ByoyomiDeadlineLeadMs",
+        format!(
+            "option name ByoyomiDeadlineLeadMs type spin default {} min 0 max 2000",
+            opts.byoyomi_deadline_lead_ms
+        ),
+    );
+    builder.time(
+        "ByoyomiEarlyFinishRatio",
+        format!(
+            "option name ByoyomiEarlyFinishRatio type spin default {} min 50 max 95",
+            opts.byoyomi_early_finish_ratio
+        ),
+    );
+    builder.time(
+        "ByoyomiOverheadMs",
+        format!(
+            "option name ByoyomiOverheadMs type spin default {} min 0 max 5000",
+            opts.network_delay2_ms
+        ),
+    );
+    builder.time(
+        "ByoyomiPeriods",
+        format!(
+            "option name ByoyomiPeriods type spin default {} min 1 max 10",
+            opts.byoyomi_periods
+        ),
+    );
+    builder.time(
+        "ByoyomiSafetyMs",
+        format!(
+            "option name ByoyomiSafetyMs type spin default {} min 0 max 2000",
+            opts.byoyomi_safety_ms
+        ),
+    );
+    builder.time(
+        "ForceTerminateOnHardDeadline",
+        format!(
+            "option name ForceTerminateOnHardDeadline type check default {}",
+            bool_to_usi(opts.force_terminate_on_hard_deadline)
+        ),
+    );
+    builder.time(
+        "MaxTimeRatioPct",
+        format!(
+            "option name MaxTimeRatioPct type spin default {} min 100 max 800",
+            opts.max_time_ratio_pct
+        ),
+    );
+    builder.time(
+        "MinThinkMs",
+        format!("option name MinThinkMs type spin default {} min 0 max 10000", opts.min_think_ms),
+    );
+    builder.time(
+        "MoveHorizonMinMoves",
+        format!(
+            "option name MoveHorizonMinMoves type spin default {} min 0 max 200",
+            opts.move_horizon_min_moves
+        ),
+    );
+    builder.time(
+        "MoveHorizonTriggerMs",
+        format!(
+            "option name MoveHorizonTriggerMs type spin default {} min 0 max 600000",
+            opts.move_horizon_trigger_ms
+        ),
+    );
+    builder.time(
+        "OverheadMs",
+        format!("option name OverheadMs type spin default {} min 0 max 5000", opts.overhead_ms),
+    );
+    builder.time(
+        "PVStabilityBase",
+        format!(
+            "option name PVStabilityBase type spin default {} min 10 max 200",
+            opts.pv_stability_base
+        ),
+    );
+    builder.time(
+        "PVStabilitySlope",
+        format!(
+            "option name PVStabilitySlope type spin default {} min 0 max 20",
+            opts.pv_stability_slope
+        ),
+    );
+    builder.time(
+        "SlowMover",
+        format!("option name SlowMover type spin default {} min 50 max 200", opts.slow_mover_pct),
+    );
+    builder.time(
+        "Stochastic_Ponder",
+        format!(
+            "option name Stochastic_Ponder type check default {}",
+            bool_to_usi(opts.stochastic_ponder)
+        ),
+    );
+    builder.time(
+        "StopWaitMs",
+        format!("option name StopWaitMs type spin default {} min 0 max 2000", opts.stop_wait_ms),
+    );
+    builder.time(
+        "USI_ByoyomiPeriods",
+        format!(
+            "option name USI_ByoyomiPeriods type spin default {} min 1 max 10",
+            opts.byoyomi_periods
+        ),
+    );
+    builder.time(
+        "WatchdogPollMs",
+        format!(
+            "option name WatchdogPollMs type spin default {} min 1 max 20",
+            opts.watchdog_poll_ms
+        ),
+    );
+}
+
+fn collect_search_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
+    builder.search("Abdada", "option name Abdada type check default false".to_string());
+    builder.search("BenchAllRun", "option name BenchAllRun type check default false".to_string());
+    builder.search(
+        "BenchStopOnMate",
+        "option name BenchStopOnMate type check default true".to_string(),
+    );
+    builder.search(
+        "HelperAspiration",
+        "option name HelperAspiration type combo default Wide var Off var Wide".to_string(),
+    );
+    builder.search(
+        "HelperAspirationDelta",
+        "option name HelperAspirationDelta type spin default 350 min 50 max 600".to_string(),
+    );
+    builder.search(
+        "QSearchChecks",
+        "option name QSearchChecks type combo default On var On var Off".to_string(),
+    );
+    builder.search(
+        "RootSeeGate",
+        format!("option name RootSeeGate type check default {}", bool_to_usi(opts.root_see_gate)),
+    );
+    builder.search(
+        "RootSeeGate.XSEE",
+        format!(
+            "option name RootSeeGate.XSEE type spin default {} min 0 max 5000",
+            opts.root_see_gate_xsee_cp
+        ),
+    );
+    builder.search(
+        "Search.CaptureFutility",
+        "option name Search.CaptureFutility type check default true".to_string(),
+    );
+    builder.search(
+        "Search.CaptureFutility.ScalePct",
+        "option name Search.CaptureFutility.ScalePct type spin default 75 min 25 max 150"
+            .to_string(),
+    );
+    builder.search(
+        "Search.NMP.Verify",
+        "option name Search.NMP.Verify type check default true".to_string(),
+    );
+    builder.search(
+        "Search.NMP.VerifyMinDepth",
+        "option name Search.NMP.VerifyMinDepth type spin default 16 min 2 max 64".to_string(),
+    );
+    builder.search(
+        "Search.QuietSeeGuard",
+        "option name Search.QuietSeeGuard type check default true".to_string(),
+    );
+    builder.search(
+        "Search.ShallowGate",
+        "option name Search.ShallowGate type check default false".to_string(),
+    );
+    builder.search(
+        "Search.ShallowGate.Depth",
+        "option name Search.ShallowGate.Depth type spin default 3 min 1 max 8".to_string(),
+    );
+    builder.search(
+        "Search.Singular.Enabled",
+        "option name Search.Singular.Enabled type check default false".to_string(),
+    );
+    builder.search(
+        "Search.Singular.MarginBase",
+        "option name Search.Singular.MarginBase type spin default 56 min 0 max 512".to_string(),
+    );
+    builder.search(
+        "Search.Singular.MarginScalePct",
+        "option name Search.Singular.MarginScalePct type spin default 70 min 10 max 300"
+            .to_string(),
+    );
+    builder.search(
+        "Search.Singular.MinDepth",
+        "option name Search.Singular.MinDepth type spin default 6 min 2 max 64".to_string(),
+    );
+    builder.search(
+        "SearchParams.CaptureHistoryWeight",
+        "option name SearchParams.CaptureHistoryWeight type spin default 2 min -32 max 32"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.ContinuationHistoryWeight",
+        "option name SearchParams.ContinuationHistoryWeight type spin default 2 min -32 max 32"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.EnableIID",
+        "option name SearchParams.EnableIID type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.EnableNMP",
+        "option name SearchParams.EnableNMP type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.EnableProbCut",
+        "option name SearchParams.EnableProbCut type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.EnableStaticBeta",
+        "option name SearchParams.EnableStaticBeta type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.FUT_Dyn_Base",
+        "option name SearchParams.FUT_Dyn_Base type spin default 100 min 0 max 2000".to_string(),
+    );
+    builder.search(
+        "SearchParams.FUT_Dyn_Enable",
+        "option name SearchParams.FUT_Dyn_Enable type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.FUT_Dyn_Slope",
+        "option name SearchParams.FUT_Dyn_Slope type spin default 80 min 0 max 500".to_string(),
+    );
+    builder.search(
+        "SearchParams.FutStatDen",
+        "option name SearchParams.FutStatDen type spin default 356 min 1 max 10000".to_string(),
+    );
+    builder.search(
+        "SearchParams.HP_DepthScale",
+        "option name SearchParams.HP_DepthScale type spin default 3200 min 0 max 20000".to_string(),
+    );
+    builder.search(
+        "SearchParams.HP_Threshold",
+        "option name SearchParams.HP_Threshold type spin default -2000 min -10000 max 10000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.IID_MinDepth",
+        "option name SearchParams.IID_MinDepth type spin default 6 min 0 max 20".to_string(),
+    );
+    builder.search(
+        "SearchParams.LMP_D1",
+        "option name SearchParams.LMP_D1 type spin default 8 min 0 max 64".to_string(),
+    );
+    builder.search(
+        "SearchParams.LMP_D2",
+        "option name SearchParams.LMP_D2 type spin default 14 min 0 max 64".to_string(),
+    );
+    builder.search(
+        "SearchParams.LMP_D3",
+        "option name SearchParams.LMP_D3 type spin default 20 min 0 max 64".to_string(),
+    );
+    builder.search(
+        "SearchParams.LMR",
+        "option name SearchParams.LMR type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.LMR_K_x100",
+        "option name SearchParams.LMR_K_x100 type spin default 170 min 80 max 400".to_string(),
+    );
+    builder.search(
+        "SearchParams.LMR_StatDenBase",
+        "option name SearchParams.LMR_StatDenBase type spin default 8192 min 1 max 65536"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.LMR_StatNum",
+        "option name SearchParams.LMR_StatNum type spin default 1 min 0 max 64".to_string(),
+    );
+    builder.search(
+        "SearchParams.ProbCut_D5",
+        "option name SearchParams.ProbCut_D5 type spin default 250 min 0 max 2000".to_string(),
+    );
+    builder.search(
+        "SearchParams.ProbCut_D6P",
+        "option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000".to_string(),
+    );
+    builder.search(
+        "SearchParams.ProbCut_SkipVerifyLt4",
+        "option name SearchParams.ProbCut_SkipVerifyLt4 type check default false".to_string(),
+    );
+    builder.search(
+        "SearchParams.QS.CheckSEEMargin",
+        format!(
+            "option name SearchParams.QS.CheckSEEMargin type spin default {} min -5000 max 5000",
+            engine_core::search::params::qs_check_see_margin()
+        ),
+    );
+    builder.search(
+        "SearchParams.QS_BadCaptureMin",
+        "option name SearchParams.QS_BadCaptureMin type spin default 450 min 0 max 5000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.QS_CheckPruneMargin",
+        "option name SearchParams.QS_CheckPruneMargin type spin default 150 min 0 max 5000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.QS_MarginCapture",
+        "option name SearchParams.QS_MarginCapture type spin default 150 min 0 max 5000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.QuietHistoryWeight",
+        "option name SearchParams.QuietHistoryWeight type spin default 4 min -64 max 64"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.RootBeamForceFullCount",
+        "option name SearchParams.RootBeamForceFullCount type spin default 0 min 0 max 8"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.RootMultiPV1",
+        "option name SearchParams.RootMultiPV1 type spin default 50000 min -200000 max 200000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.RootMultiPV2",
+        "option name SearchParams.RootMultiPV2 type spin default 25000 min -200000 max 200000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.RootPrevScoreScale",
+        "option name SearchParams.RootPrevScoreScale type spin default 200 min 0 max 2000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.RootTTBonus",
+        "option name SearchParams.RootTTBonus type spin default 1500000 min 0 max 5000000"
+            .to_string(),
+    );
+    builder.search(
+        "SearchParams.SBP_D1",
+        "option name SearchParams.SBP_D1 type spin default 200 min 0 max 2000".to_string(),
+    );
+    builder.search(
+        "SearchParams.SBP_D2",
+        "option name SearchParams.SBP_D2 type spin default 300 min 0 max 2000".to_string(),
+    );
+    builder.search(
+        "SearchParams.SBP_Dyn_Base",
+        "option name SearchParams.SBP_Dyn_Base type spin default 120 min 0 max 2000".to_string(),
+    );
+    builder.search(
+        "SearchParams.SBP_Dyn_Enable",
+        "option name SearchParams.SBP_Dyn_Enable type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.SBP_Dyn_Slope",
+        "option name SearchParams.SBP_Dyn_Slope type spin default 60 min 0 max 500".to_string(),
+    );
+    builder.search(
+        "SearchParams.SafePruning",
+        "option name SearchParams.SafePruning type check default true".to_string(),
+    );
+    builder.search(
+        "SearchParams.SameToExtension",
+        "option name SearchParams.SameToExtension type check default false".to_string(),
+    );
+}
+
+fn collect_finalize_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
+    builder.finalize(
+        "FailSafeGuard",
+        format!(
+            "option name FailSafeGuard type check default {}",
+            bool_to_usi(opts.fail_safe_guard)
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.AllowSEElt0Alt",
+        format!(
+            "option name FinalizeSanity.AllowSEElt0Alt type check default {}",
+            bool_to_usi(opts.finalize_allow_see_lt0_alt)
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.BudgetMs",
+        format!(
+            "option name FinalizeSanity.BudgetMs type spin default {} min 0 max 10",
+            opts.finalize_sanity_budget_ms
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.CheckPenaltyCp",
+        format!(
+            "option name FinalizeSanity.CheckPenaltyCp type spin default {} min 0 max 100",
+            opts.finalize_sanity_check_penalty_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.DefenseSEE_NegFloorCp",
+        format!(
+            "option name FinalizeSanity.DefenseSEE_NegFloorCp type spin default {} min -500 max 0",
+            opts.finalize_defense_see_neg_floor_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.Enabled",
+        format!(
+            "option name FinalizeSanity.Enabled type check default {}",
+            bool_to_usi(opts.finalize_sanity_enabled)
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.KingAltMinGainCp",
+        format!(
+            "option name FinalizeSanity.KingAltMinGainCp type spin default {} min 0 max 1000",
+            opts.finalize_sanity_king_alt_min_gain_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.KingAltPenaltyCp",
+        format!(
+            "option name FinalizeSanity.KingAltPenaltyCp type spin default {} min 0 max 300",
+            opts.finalize_sanity_king_alt_penalty_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.MateProbe.Depth",
+        format!(
+            "option name FinalizeSanity.MateProbe.Depth type spin default {} min 1 max 8",
+            opts.finalize_mate_probe_depth
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.MateProbe.Enabled",
+        format!(
+            "option name FinalizeSanity.MateProbe.Enabled type check default {}",
+            bool_to_usi(opts.finalize_mate_probe_enabled)
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.MateProbe.TimeMs",
+        format!(
+            "option name FinalizeSanity.MateProbe.TimeMs type spin default {} min 1 max 20",
+            opts.finalize_mate_probe_time_ms
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.MinMs",
+        format!(
+            "option name FinalizeSanity.MinMs type spin default {} min 0 max 10",
+            opts.finalize_sanity_min_ms
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.MiniDepth",
+        format!(
+            "option name FinalizeSanity.MiniDepth type spin default {} min 1 max 3",
+            opts.finalize_sanity_mini_depth
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.NonPromoteMajorPenaltyCp",
+        format!(
+            "option name FinalizeSanity.NonPromoteMajorPenaltyCp type spin default {} min 0 max 300",
+            opts.finalize_non_promote_major_penalty_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.OppSEE_MinCp",
+        format!(
+            "option name FinalizeSanity.OppSEE_MinCp type spin default {} min 0 max 5000",
+            opts.finalize_sanity_opp_see_min_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.OppSEE_PenaltyCapCp",
+        format!(
+            "option name FinalizeSanity.OppSEE_PenaltyCapCp type spin default {} min 0 max 5000",
+            opts.finalize_sanity_opp_see_penalty_cap_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.RiskMinDeltaCp",
+        format!(
+            "option name FinalizeSanity.RiskMinDeltaCp type spin default {} min 0 max 600",
+            opts.finalize_risk_min_delta_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.SEE_MinCp",
+        format!(
+            "option name FinalizeSanity.SEE_MinCp type spin default {} min -1000 max 1000",
+            opts.finalize_sanity_see_min_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.SwitchMarginCp",
+        format!(
+            "option name FinalizeSanity.SwitchMarginCp type spin default {} min 0 max 500",
+            opts.finalize_sanity_switch_margin_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.Threat2_BeamK",
+        format!(
+            "option name FinalizeSanity.Threat2_BeamK type spin default {} min 0 max 64",
+            opts.finalize_threat2_beam_k
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.Threat2_ExtremeMinCp",
+        format!(
+            "option name FinalizeSanity.Threat2_ExtremeMinCp type spin default {} min 0 max 5000",
+            opts.finalize_threat2_extreme_min_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.Threat2_ExtremeWinDisableCp",
+        format!(
+            "option name FinalizeSanity.Threat2_ExtremeWinDisableCp type spin default {} min 0 max 5000",
+            opts.finalize_threat2_extreme_win_disable_cp
+        ),
+    );
+    builder.finalize(
+        "FinalizeSanity.Threat2_MinCp",
+        format!(
+            "option name FinalizeSanity.Threat2_MinCp type spin default {} min 0 max 5000",
+            opts.finalize_threat2_min_cp
+        ),
+    );
+    builder.finalize(
+        "GameoverSendsBestmove",
+        format!(
+            "option name GameoverSendsBestmove type check default {}",
+            bool_to_usi(opts.gameover_sends_bestmove)
+        ),
+    );
+    builder.finalize(
+        "InstantMateMove.CheckAllPV",
+        format!(
+            "option name InstantMateMove.CheckAllPV type check default {}",
+            bool_to_usi(opts.instant_mate_check_all_pv)
+        ),
+    );
+    builder.finalize(
+        "InstantMateMove.Enabled",
+        format!(
+            "option name InstantMateMove.Enabled type check default {}",
+            bool_to_usi(opts.instant_mate_move_enabled)
+        ),
+    );
+    builder.finalize(
+        "InstantMateMove.MaxDistance",
+        format!(
+            "option name InstantMateMove.MaxDistance type spin default {} min 1 max 5",
+            opts.instant_mate_move_max_distance
+        ),
+    );
+    builder.finalize(
+        "InstantMateMove.MinDepth",
+        format!(
+            "option name InstantMateMove.MinDepth type spin default {} min 0 max 64",
+            opts.instant_mate_min_depth
+        ),
+    );
+    builder.finalize(
+        "InstantMateMove.MinRespectMs",
+        format!(
+            "option name InstantMateMove.MinRespectMs type spin default {} min 0 max 1000",
+            opts.instant_mate_min_respect_ms
+        ),
+    );
+    let snapshot_default = if opts.instant_mate_require_stable {
+        "Stable"
+    } else {
+        "Any"
+    };
+    builder.finalize(
+        "InstantMateMove.RequiredSnapshot",
+        format!(
+            "option name InstantMateMove.RequiredSnapshot type combo default {} var Stable var Any",
+            snapshot_default
+        ),
+    );
+    builder.finalize(
+        "InstantMateMove.RespectMinThinkMs",
+        format!(
+            "option name InstantMateMove.RespectMinThinkMs type check default {}",
+            bool_to_usi(opts.instant_mate_respect_min_think_ms)
+        ),
+    );
+    let verify_mode = match opts.instant_mate_verify_mode {
+        crate::state::InstantMateVerifyMode::Off => "Off",
+        crate::state::InstantMateVerifyMode::CheckOnly => "CheckOnly",
+        crate::state::InstantMateVerifyMode::QSearch => "QSearch",
+    };
+    builder.finalize(
+        "InstantMateMove.VerifyMode",
+        format!(
+            "option name InstantMateMove.VerifyMode type combo default {} var Off var CheckOnly var QSearch",
+            verify_mode
+        ),
+    );
+    builder.finalize(
+        "InstantMateMove.VerifyNodes",
+        format!(
+            "option name InstantMateMove.VerifyNodes type spin default {} min 0 max 100000",
+            opts.instant_mate_verify_nodes
+        ),
+    );
+    builder.finalize(
+        "MateEarlyStop",
+        format!(
+            "option name MateEarlyStop type check default {}",
+            bool_to_usi(opts.mate_early_stop)
+        ),
+    );
+    builder.finalize(
+        "MateGate.FastOkMinDepth",
+        format!(
+            "option name MateGate.FastOkMinDepth type spin default {} min 0 max 64",
+            opts.mate_gate_fast_ok_min_depth
+        ),
+    );
+    builder.finalize(
+        "MateGate.FastOkMinElapsedMs",
+        format!(
+            "option name MateGate.FastOkMinElapsedMs type spin default {} min 0 max 5000",
+            opts.mate_gate_fast_ok_min_elapsed_ms
+        ),
+    );
+    builder.finalize(
+        "MateGate.MinStableDepth",
+        format!(
+            "option name MateGate.MinStableDepth type spin default {} min 0 max 64",
+            opts.mate_gate_min_stable_depth
+        ),
+    );
+}
+
+fn collect_diagnostics_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
+    if cfg!(any(test, feature = "diagnostics")) {
+        builder.diagnostics(
+            "PostVerify",
+            format!("option name PostVerify type check default {}", bool_to_usi(opts.post_verify)),
+        );
+        builder.diagnostics(
+            "PostVerify.DisadvantageCp",
+            format!(
+                "option name PostVerify.DisadvantageCp type spin default {} min -10000 max 0",
+                opts.post_verify_disadvantage_cp
+            ),
+        );
+        builder.diagnostics(
+            "PostVerify.ExactMinDepth",
+            format!(
+                "option name PostVerify.ExactMinDepth type spin default {} min 0 max 64",
+                opts.mate_postverify_exact_min_depth
+            ),
+        );
+        builder.diagnostics(
+            "PostVerify.ExactMinElapsedMs",
+            format!(
+                "option name PostVerify.ExactMinElapsedMs type spin default {} min 0 max 10000",
+                opts.mate_postverify_exact_min_elapsed_ms
+            ),
+        );
+        builder.diagnostics(
+            "PostVerify.ExtendMs",
+            format!(
+                "option name PostVerify.ExtendMs type spin default {} min 0 max 5000",
+                opts.post_verify_extend_ms
+            ),
+        );
+        builder.diagnostics(
+            "PostVerify.RequirePass",
+            format!(
+                "option name PostVerify.RequirePass type check default {}",
+                bool_to_usi(opts.post_verify_require_pass)
+            ),
+        );
+        builder.diagnostics(
+            "PostVerify.SkipMateDistance",
+            format!(
+                "option name PostVerify.SkipMateDistance type spin default {} min 1 max 32",
+                opts.mate_postverify_skip_max_dist
+            ),
+        );
+        builder.diagnostics(
+            "PostVerify.YDrop",
+            format!(
+                "option name PostVerify.YDrop type spin default {} min 0 max 5000",
+                opts.y_drop_cp
+            ),
+        );
+        builder.diagnostics(
+            "PromoteVerify",
+            format!(
+                "option name PromoteVerify type check default {}",
+                bool_to_usi(opts.promote_verify)
+            ),
+        );
+        builder.diagnostics(
+            "PromoteVerify.BiasCp",
+            format!(
+                "option name PromoteVerify.BiasCp type spin default {} min -1000 max 1000",
+                opts.promote_bias_cp
+            ),
+        );
+    }
+}
+
+fn collect_utility_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
+    builder.utility(
+        "ForcedMove.EmitEval",
+        format!(
+            "option name ForcedMove.EmitEval type check default {}",
+            bool_to_usi(opts.forced_move_emit_eval)
+        ),
+    );
+    builder.utility(
+        "ForcedMove.MinSearchMs",
+        format!(
+            "option name ForcedMove.MinSearchMs type spin default {} min 0 max 50",
+            opts.forced_move_min_search_ms
+        ),
+    );
+    builder.utility(
+        "Profile.ApplyAutoDefaults",
+        "option name Profile.ApplyAutoDefaults type button".to_string(),
+    );
     let profile_mode_default = match opts.profile_mode {
         crate::state::ProfileMode::Auto => "Auto",
         crate::state::ProfileMode::T1 => "T1",
         crate::state::ProfileMode::T8 => "T8",
         crate::state::ProfileMode::Off => "Off",
     };
-    usi_println(&format!(
-        "option name Profile.Mode type combo default {} var Auto var T1 var T8 var Off",
-        profile_mode_default
-    ));
-    usi_println("option name Profile.ApplyAutoDefaults type button");
-    // Forced move info emit
-    usi_println(&format!(
-        "option name ForcedMove.EmitEval type check default {}",
-        if opts.forced_move_emit_eval {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    usi_println(&format!(
-        "option name ForcedMove.MinSearchMs type spin default {} min 0 max 50",
-        opts.forced_move_min_search_ms
-    ));
+    builder.utility(
+        "Profile.Mode",
+        format!(
+            "option name Profile.Mode type combo default {} var Auto var T1 var T8 var Off",
+            profile_mode_default
+        ),
+    );
+    builder.utility(
+        "Warmup.Ms",
+        format!("option name Warmup.Ms type spin default {} min 0 max 60000", opts.warmup_ms),
+    );
+    builder.utility(
+        "Warmup.PrevMoves",
+        format!(
+            "option name Warmup.PrevMoves type spin default {} min 0 max 20",
+            opts.warmup_prev_moves
+        ),
+    );
 }
 
 pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
@@ -1923,139 +2495,6 @@ fn log_nnue_load_error(path: &str, err: &(dyn StdError + 'static)) {
     }
 
     log::error!("[NNUE] Failed to load NNUE weights '{}': {}", path, err);
-}
-
-fn print_engine_type_options() {
-    // Default is Enhanced (Material/Enhanced/Nnue/EnhancedNnue)
-    usi_println("option name EngineType type combo default Enhanced var Material var Enhanced var Nnue var EnhancedNnue");
-}
-
-fn print_time_policy_options(opts: &UsiOptions) {
-    usi_println(&format!(
-        "option name OverheadMs type spin default {} min 0 max 5000",
-        opts.overhead_ms
-    ));
-    usi_println(&format!(
-        "option name ByoyomiOverheadMs type spin default {} min 0 max 5000",
-        opts.network_delay2_ms
-    ));
-    usi_println(&format!(
-        "option name ByoyomiDeadlineLeadMs type spin default {} min 0 max 2000",
-        0
-    ));
-    usi_println(&format!(
-        "option name ByoyomiSafetyMs type spin default {} min 0 max 2000",
-        opts.byoyomi_safety_ms
-    ));
-    usi_println(&format!(
-        "option name ByoyomiPeriods type spin default {} min 1 max 10",
-        opts.byoyomi_periods
-    ));
-    // Alias for GUI compatibility
-    usi_println(&format!(
-        "option name USI_ByoyomiPeriods type spin default {} min 1 max 10",
-        opts.byoyomi_periods
-    ));
-    usi_println(&format!(
-        "option name ByoyomiEarlyFinishRatio type spin default {} min 50 max 95",
-        opts.byoyomi_early_finish_ratio
-    ));
-    usi_println(&format!(
-        "option name PVStabilityBase type spin default {} min 10 max 200",
-        opts.pv_stability_base
-    ));
-    usi_println(&format!(
-        "option name PVStabilitySlope type spin default {} min 0 max 20",
-        opts.pv_stability_slope
-    ));
-    usi_println(&format!(
-        "option name SlowMover type spin default {} min 50 max 200",
-        opts.slow_mover_pct
-    ));
-    usi_println(&format!(
-        "option name MaxTimeRatioPct type spin default {} min 100 max 800",
-        opts.max_time_ratio_pct
-    ));
-    usi_println(&format!(
-        "option name MoveHorizonTriggerMs type spin default {} min 0 max 600000",
-        opts.move_horizon_trigger_ms
-    ));
-    usi_println(&format!(
-        "option name MoveHorizonMinMoves type spin default {} min 0 max 200",
-        opts.move_horizon_min_moves
-    ));
-    usi_println(&format!(
-        "option name StopWaitMs type spin default {} min 0 max 2000",
-        opts.stop_wait_ms
-    ));
-    usi_println(&format!(
-        "option name WatchdogPollMs type spin default {} min 1 max 20",
-        opts.watchdog_poll_ms
-    ));
-    usi_println(&format!(
-        "option name GameoverSendsBestmove type check default {}",
-        if opts.gameover_sends_bestmove {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    usi_println(&format!(
-        "option name FailSafeGuard type check default {}",
-        if opts.fail_safe_guard {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    // Instant-mate detection policy (USI-led)
-    usi_println(&format!(
-        "option name InstantMateMove.CheckAllPV type check default {}",
-        if opts.instant_mate_check_all_pv {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    // Snapshot gating
-    usi_println(&format!(
-        "option name InstantMateMove.RequiredSnapshot type combo default {} var Stable var Any",
-        if opts.instant_mate_require_stable {
-            "Stable"
-        } else {
-            "Any"
-        }
-    ));
-    usi_println(&format!(
-        "option name InstantMateMove.MinDepth type spin default {} min 0 max 64",
-        opts.instant_mate_min_depth
-    ));
-    // Verification
-    let verify_mode = match opts.instant_mate_verify_mode {
-        crate::state::InstantMateVerifyMode::Off => "Off",
-        crate::state::InstantMateVerifyMode::CheckOnly => "CheckOnly",
-        crate::state::InstantMateVerifyMode::QSearch => "QSearch",
-    };
-    usi_println(&format!(
-        "option name InstantMateMove.VerifyMode type combo default {} var Off var CheckOnly var QSearch",
-        verify_mode
-    ));
-    usi_println(&format!(
-        "option name InstantMateMove.VerifyNodes type spin default {} min 0 max 100000",
-        opts.instant_mate_verify_nodes
-    ));
-    usi_println(&format!(
-        "option name InstantMateMove.RespectMinThinkMs type check default {}",
-        if opts.instant_mate_respect_min_think_ms {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    usi_println(&format!(
-        "option name InstantMateMove.MinRespectMs type spin default {} min 0 max 1000",
-        opts.instant_mate_min_respect_ms
-    ));
 }
 
 #[cfg(test)]
