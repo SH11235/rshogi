@@ -515,7 +515,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     continue;
                 }
                 // Require SEE >= margin for quiet checks (YO-aligned guard)
-                if pos.see(mv) < check_see_margin {
+                // For non-capturing checks, use landing SEE to evaluate destination safety.
+                let check_see = if mv.is_capture_hint() || mv.is_drop() {
+                    pos.see(mv)
+                } else {
+                    pos.see_landing_after_move(mv, check_see_margin)
+                };
+                if check_see < check_see_margin {
                     continue;
                 }
                 if stand_pat + check_prune_margin <= alpha {

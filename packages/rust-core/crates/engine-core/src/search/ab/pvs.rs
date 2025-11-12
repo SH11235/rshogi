@@ -54,7 +54,9 @@ pub(crate) fn quiet_see_guard_should_skip(
         return false;
     }
     let margin = QUIET_SEE_GUARD_CP_SCALE * d * d;
-    !pos.see_ge(mv, -margin)
+    // Use landing SEE (XSEE) for quiet non-captures to measure destination safety
+    // and reduce late quiets that drop material.
+    pos.see_landing_after_move(mv, -margin) < -margin
 }
 
 fn capture_fut_margin(depth: i32) -> i32 {
@@ -610,7 +612,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let is_capture = mv.is_capture_hint();
             let is_quiet = !is_capture && !gives_check;
             let need_see = is_capture || mv.is_drop() || is_quiet;
-            let see = if need_see { pos.see(mv) } else { 0 };
+            let see = if need_see {
+                if is_quiet {
+                    // For quiet non-captures, evaluate landing safety (XSEE)
+                    pos.see_landing_after_move(mv, 0)
+                } else {
+                    pos.see(mv)
+                }
+            } else {
+                0
+            };
             let is_good_capture = is_capture && see >= 0;
             let drop_bad = mv.is_drop() && see < 0;
             let quiet_bad = is_quiet && see < 0;
