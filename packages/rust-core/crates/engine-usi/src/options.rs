@@ -96,6 +96,11 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     // NMP verify (浅層からの検証を許可)
     usi_println("option name Search.NMP.Verify type check default true");
     usi_println("option name Search.NMP.VerifyMinDepth type spin default 16 min 2 max 64");
+    // Singular Extension (最小導入; 既定OFF)
+    usi_println("option name Search.Singular.Enabled type check default false");
+    usi_println("option name Search.Singular.MinDepth type spin default 6 min 2 max 64");
+    usi_println("option name Search.Singular.MarginBase type spin default 56 min 0 max 512");
+    usi_println("option name Search.Singular.MarginScalePct type spin default 70 min 10 max 300");
     // Shallow gate (runtime-toggle; previously env-only)
     usi_println("option name Search.ShallowGate type check default false");
     usi_println("option name Search.ShallowGate.Depth type spin default 3 min 1 max 8");
@@ -817,6 +822,42 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     engine_core::search::policy::set_nmp_verify_min_depth(x);
                     info_string(format!("nmp_verify_min_depth={}", x.clamp(2, 64)));
                     mark_override(state, "Search.NMP.VerifyMinDepth");
+                }
+            }
+        }
+        // Singular Extension (runtime toggles)
+        "Search.Singular.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::policy::set_singular_enabled(on);
+                info_string(if on { "singular=On" } else { "singular=Off" });
+                mark_override(state, "Search.Singular.Enabled");
+            }
+        }
+        "Search.Singular.MinDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::policy::set_singular_min_depth(x);
+                    info_string(format!("singular_min_depth={}", x.clamp(2, 64)));
+                    mark_override(state, "Search.Singular.MinDepth");
+                }
+            }
+        }
+        "Search.Singular.MarginBase" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::policy::set_singular_margin_base(x);
+                    info_string(format!("singular_margin_base={}", x.clamp(0, 512)));
+                    mark_override(state, "Search.Singular.MarginBase");
+                }
+            }
+        }
+        "Search.Singular.MarginScalePct" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::policy::set_singular_margin_scale_pct(x);
+                    info_string(format!("singular_margin_scale_pct={}", x.clamp(10, 300)));
+                    mark_override(state, "Search.Singular.MarginScalePct");
                 }
             }
         }
