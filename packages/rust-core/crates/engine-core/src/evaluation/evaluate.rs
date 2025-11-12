@@ -2,11 +2,15 @@
 //!
 //! Simple material-based evaluation
 
+use crate::shogi::attacks::sliding_attacks;
 use crate::shogi::piece_constants::{APERY_PIECE_VALUES, APERY_PROMOTED_PIECE_VALUES};
+use crate::shogi::Square;
 use crate::{
     shogi::{ALL_PIECE_TYPES, NUM_HAND_PIECE_TYPES},
-    PieceType, Position,
+    Color, PieceType, Position,
 };
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::OnceLock;
 
 /// Trait for position evaluation
 ///
@@ -109,6 +113,80 @@ pub fn evaluate(pos: &Position) -> i32 {
         score += value * (our_hand - their_hand);
     }
 
+    // --- Lightweight material-side heuristics (enabled for Material evaluator)
+    // 1) Rook mobility (difference)
+    let rook_mob_cp = material_rook_mobility_cp();
+    if rook_mob_cp != 0 {
+        let occupied = pos.board.all_bb;
+        let our_rooks = pos.board.piece_bb[us as usize][PieceType::Rook as usize];
+        let their_rooks = pos.board.piece_bb[them as usize][PieceType::Rook as usize];
+        let our_occ = pos.board.occupied_bb[us as usize];
+        let their_occ = pos.board.occupied_bb[them as usize];
+
+        let mut mob_our = 0i32;
+        let mut bb = our_rooks;
+        while let Some(sq) = bb.pop_lsb() {
+            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !our_occ;
+            mob_our += moves.count_ones() as i32;
+        }
+        let mut mob_their = 0i32;
+        let mut bb2 = their_rooks;
+        while let Some(sq) = bb2.pop_lsb() {
+            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !their_occ;
+            mob_their += moves.count_ones() as i32;
+        }
+        score += rook_mob_cp * (mob_our - mob_their);
+    }
+
+    // 2) Rook trap (0-mobility) penalty (difference)
+    let rook_trap_pen = material_rook_trapped_penalty_cp();
+    if rook_trap_pen != 0 {
+        let occupied = pos.board.all_bb;
+        let our_rooks = pos.board.piece_bb[us as usize][PieceType::Rook as usize];
+        let their_rooks = pos.board.piece_bb[them as usize][PieceType::Rook as usize];
+        let our_occ = pos.board.occupied_bb[us as usize];
+        let their_occ = pos.board.occupied_bb[them as usize];
+
+        let mut trapped_our = 0i32;
+        let mut bb = our_rooks;
+        while let Some(sq) = bb.pop_lsb() {
+            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !our_occ;
+            if moves.count_ones() == 0 {
+                trapped_our += 1;
+            }
+        }
+        let mut trapped_their = 0i32;
+        let mut bb2 = their_rooks;
+        while let Some(sq) = bb2.pop_lsb() {
+            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !their_occ;
+            if moves.count_ones() == 0 {
+                trapped_their += 1;
+            }
+        }
+        // 相手側が閉じ込められていればプラス、自分側が閉じ込められていればマイナス
+        score += rook_trap_pen * (trapped_their - trapped_our);
+    }
+
+    // 3) Early king move penalty (difference)
+    let king_pen = material_king_early_move_penalty_cp();
+    let max_ply = material_king_early_move_max_ply();
+    if king_pen != 0 && (pos.ply as i32) <= max_ply {
+        let (bk_start, wk_start) = king_start_squares();
+        let our_king_moved = match us {
+            Color::Black => pos.board.king_square(us) != Some(bk_start),
+            Color::White => pos.board.king_square(us) != Some(wk_start),
+        } as i32;
+        let their_king_moved = match them {
+            Color::Black => pos.board.king_square(them) != Some(bk_start),
+            Color::White => pos.board.king_square(them) != Some(wk_start),
+        } as i32;
+        // 自分の早期王移動はペナルティ、相手の早期王移動はボーナス
+        score += king_pen * (their_king_moved - our_king_moved);
+    }
+
+    // 4) Tempo bonus
+    score += material_tempo_cp();
+
     score
 }
 
@@ -120,6 +198,94 @@ impl Evaluator for MaterialEvaluator {
     fn evaluate(&self, pos: &Position) -> i32 {
         evaluate(pos)
     }
+}
+
+// --- Runtime knobs for MaterialEvaluator lightweight terms
+fn tempo_cp_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| AtomicI32::new(10))
+}
+
+fn rook_mobility_cp_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| AtomicI32::new(2))
+}
+
+fn rook_trapped_penalty_cp_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| AtomicI32::new(30))
+}
+
+fn king_early_move_penalty_cp_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| AtomicI32::new(12))
+}
+
+fn king_early_move_max_ply_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| AtomicI32::new(20))
+}
+
+#[inline]
+pub fn material_tempo_cp() -> i32 {
+    tempo_cp_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_material_tempo_cp(v: i32) {
+    tempo_cp_atomic().store(v.clamp(-200, 200), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn material_rook_mobility_cp() -> i32 {
+    rook_mobility_cp_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_material_rook_mobility_cp(v: i32) {
+    rook_mobility_cp_atomic().store(v.clamp(0, 50), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn material_rook_trapped_penalty_cp() -> i32 {
+    rook_trapped_penalty_cp_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_material_rook_trapped_penalty_cp(v: i32) {
+    rook_trapped_penalty_cp_atomic().store(v.clamp(0, 500), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn material_king_early_move_penalty_cp() -> i32 {
+    king_early_move_penalty_cp_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_material_king_early_move_penalty_cp(v: i32) {
+    king_early_move_penalty_cp_atomic().store(v.clamp(0, 200), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn material_king_early_move_max_ply() -> i32 {
+    king_early_move_max_ply_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_material_king_early_move_max_ply(v: i32) {
+    king_early_move_max_ply_atomic().store(v.clamp(0, 100), Ordering::Relaxed);
+}
+
+#[inline]
+fn king_start_squares() -> (Square, Square) {
+    // Cache computed squares
+    static CELL: OnceLock<(Square, Square)> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        // Black king start: 5i, White king start: 5a
+        let bk = Square::from_usi_chars('5', 'i').expect("valid square 5i");
+        let wk = Square::from_usi_chars('5', 'a').expect("valid square 5a");
+        (bk, wk)
+    })
 }
 
 #[cfg(test)]
