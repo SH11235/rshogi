@@ -96,6 +96,11 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     // NMP verify (浅層からの検証を許可)
     usi_println("option name Search.NMP.Verify type check default true");
     usi_println("option name Search.NMP.VerifyMinDepth type spin default 16 min 2 max 64");
+    // Quiet SEE Gate (本探索の静止ゲート)
+    usi_println("option name Search.QuietSeeGuard type check default true");
+    // Capture Futility/SEE gating
+    usi_println("option name Search.CaptureFutility type check default true");
+    usi_println("option name Search.CaptureFutility.ScalePct type spin default 75 min 25 max 150");
     // Singular Extension (最小導入; 既定OFF)
     usi_println("option name Search.Singular.Enabled type check default false");
     usi_println("option name Search.Singular.MinDepth type spin default 6 min 2 max 64");
@@ -831,6 +836,41 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     engine_core::search::policy::set_nmp_verify_min_depth(x);
                     info_string(format!("nmp_verify_min_depth={}", x.clamp(2, 64)));
                     mark_override(state, "Search.NMP.VerifyMinDepth");
+                }
+            }
+        }
+        // Quiet SEE Gate (Non-PV静止のxSEEゲート)
+        "Search.QuietSeeGuard" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::policy::set_quiet_see_guard_enabled(on);
+                info_string(if on {
+                    "quiet_see_guard=On"
+                } else {
+                    "quiet_see_guard=Off"
+                });
+                mark_override(state, "Search.QuietSeeGuard");
+            }
+        }
+        // Capture Futility + SEE（深さ比例）
+        "Search.CaptureFutility" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::policy::set_capture_futility_enabled(on);
+                info_string(if on {
+                    "capture_fut=On"
+                } else {
+                    "capture_fut=Off"
+                });
+                mark_override(state, "Search.CaptureFutility");
+            }
+        }
+        "Search.CaptureFutility.ScalePct" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::policy::set_capture_futility_scale_pct(x);
+                    info_string(format!("capture_fut_scale_pct={}", x.clamp(25, 150)));
+                    mark_override(state, "Search.CaptureFutility.ScalePct");
                 }
             }
         }

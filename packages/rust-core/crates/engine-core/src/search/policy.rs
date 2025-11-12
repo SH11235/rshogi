@@ -89,6 +89,12 @@ pub fn capture_futility_enabled() -> bool {
     capture_fut_atomic().load(Ordering::Relaxed) == CAPTURE_FUT_ON
 }
 
+#[inline]
+pub fn set_capture_futility_enabled(on: bool) {
+    capture_fut_atomic()
+        .store(if on { CAPTURE_FUT_ON } else { CAPTURE_FUT_OFF }, Ordering::Relaxed);
+}
+
 fn capture_fut_scale_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
@@ -103,6 +109,12 @@ fn capture_fut_scale_atomic() -> &'static AtomicI32 {
 #[inline]
 pub fn capture_futility_scale_pct() -> i32 {
     capture_fut_scale_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_capture_futility_scale_pct(pct: i32) {
+    let v = pct.clamp(25, 150);
+    capture_fut_scale_atomic().store(v, Ordering::Relaxed);
 }
 
 // --- NMP verify ---
