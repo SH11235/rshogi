@@ -1,12 +1,8 @@
-use std::collections::HashMap;
-use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
-
-use log::warn;
-
+use super::ordering::{self, Heuristics};
+use super::profile::{PruneToggles, SearchProfile};
+use super::pvs::{self, SearchContext};
+#[cfg(feature = "diagnostics")]
+use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
@@ -14,24 +10,26 @@ use crate::search::config;
 use crate::search::constants::MAX_PLY;
 use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
+use crate::search::policy::bench_stop_on_mate_enabled;
+use crate::search::policy::{asp_fail_high_pct, asp_fail_low_pct};
+use crate::search::snapshot::SnapshotSource;
+use crate::search::tt::TTProbe;
 use crate::search::types::{
     normalize_root_pv, NodeType, RootLine, SearchStack, StopInfo, TerminationReason,
 };
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
 use crate::shogi::Square;
+use crate::time_management::TimeControl;
 use crate::Position;
+use log::warn;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
-
-use super::ordering::{self, Heuristics};
-use super::profile::{PruneToggles, SearchProfile};
-use super::pvs::{self, SearchContext};
-#[cfg(feature = "diagnostics")]
-use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
-use crate::search::policy::{asp_fail_high_pct, asp_fail_low_pct};
-use crate::search::snapshot::SnapshotSource;
-use crate::search::tt::TTProbe;
-use crate::time_management::TimeControl;
+use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
 const STICKY_PV_WINDOW_MS: u64 = 400;
@@ -2993,6 +2991,27 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelperAspMode {
+    Off,
+    Wide,
+}
+
+fn helper_asp_mode() -> HelperAspMode {
+    match crate::search::policy::helper_asp_mode_value() {
+        0 => HelperAspMode::Off,
+        _ => HelperAspMode::Wide,
+    }
+}
+
+#[inline]
+fn helper_asp_delta() -> i32 {
+    use crate::search::constants::ASPIRATION_DELTA_MAX;
+    crate::search::policy::helper_asp_delta_value()
+        .clamp(50, 600)
+        .min(ASPIRATION_DELTA_MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3097,31 +3116,4 @@ mod tests {
         let got = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
         assert_eq!(got, DEFAULT_QNODES_LIMIT, "should clamp to default when no override");
     }
-
-    // RootWorkQueue/claim は純粋 LazySMP では使用しないため、関連テストは削除しました。
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HelperAspMode {
-    Off,
-    Wide,
-}
-
-fn helper_asp_mode() -> HelperAspMode {
-    match crate::search::policy::helper_asp_mode_value() {
-        0 => HelperAspMode::Off,
-        _ => HelperAspMode::Wide,
-    }
-}
-
-#[inline]
-fn helper_asp_delta() -> i32 {
-    use crate::search::constants::ASPIRATION_DELTA_MAX;
-    crate::search::policy::helper_asp_delta_value()
-        .clamp(50, 600)
-        .min(ASPIRATION_DELTA_MAX)
-}
-
-// asp_fail_low_pct / asp_fail_high_pct: see crate::search::policy
-
-// Use shared policy getter from parallel module to avoid divergence
-use crate::search::policy::bench_stop_on_mate_enabled;
