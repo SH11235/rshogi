@@ -93,6 +93,9 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name SearchParams.QS.CheckSEEMargin type spin default {} min -5000 max 5000",
         engine_core::search::params::qs_check_see_margin()
     ));
+    // NMP verify (浅層からの検証を許可)
+    usi_println("option name Search.NMP.Verify type check default true");
+    usi_println("option name Search.NMP.VerifyMinDepth type spin default 16 min 2 max 64");
     // Shallow gate (runtime-toggle; previously env-only)
     usi_println("option name Search.ShallowGate type check default false");
     usi_println("option name Search.ShallowGate.Depth type spin default 3 min 1 max 8");
@@ -793,6 +796,27 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     engine_core::search::params::set_qs_check_see_margin(x);
+                }
+            }
+        }
+        "Search.NMP.Verify" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::policy::set_nmp_verify_enabled(on);
+                info_string(if on {
+                    "nmp_verify=On"
+                } else {
+                    "nmp_verify=Off"
+                });
+                mark_override(state, "Search.NMP.Verify");
+            }
+        }
+        "Search.NMP.VerifyMinDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::policy::set_nmp_verify_min_depth(x);
+                    info_string(format!("nmp_verify_min_depth={}", x.clamp(2, 64)));
+                    mark_override(state, "Search.NMP.VerifyMinDepth");
                 }
             }
         }

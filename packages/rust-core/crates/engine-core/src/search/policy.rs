@@ -123,6 +123,11 @@ pub fn nmp_verify_enabled() -> bool {
     nmp_verify_enabled_atomic().load(Ordering::Relaxed)
 }
 
+#[inline]
+pub fn set_nmp_verify_enabled(on: bool) {
+    nmp_verify_enabled_atomic().store(on, Ordering::Relaxed);
+}
+
 fn nmp_verify_min_depth_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
@@ -137,6 +142,12 @@ fn nmp_verify_min_depth_atomic() -> &'static AtomicI32 {
 #[inline]
 pub fn nmp_verify_min_depth() -> i32 {
     nmp_verify_min_depth_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_nmp_verify_min_depth(depth: i32) {
+    let d = depth.clamp(2, 64);
+    nmp_verify_min_depth_atomic().store(d, Ordering::Relaxed);
 }
 
 // --- Helper Aspiration (mode/delta) ---
