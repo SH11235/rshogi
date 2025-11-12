@@ -150,6 +150,91 @@ pub fn set_nmp_verify_min_depth(depth: i32) {
     nmp_verify_min_depth_atomic().store(d, Ordering::Relaxed);
 }
 
+// --- Singular Extension (env-initialized, USI-overridable) ---
+fn singular_enabled_atomic() -> &'static AtomicBool {
+    static CELL: OnceLock<AtomicBool> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let on = match crate::util::env_var("SHOGI_SINGULAR_ENABLE") {
+            Some(s) if matches!(s.as_str(), "1" | "true" | "on") => true,
+            _ => false,
+        };
+        AtomicBool::new(on)
+    })
+}
+
+#[inline]
+pub fn singular_enabled() -> bool {
+    singular_enabled_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_enabled(on: bool) {
+    singular_enabled_atomic().store(on, Ordering::Relaxed);
+}
+
+fn singular_min_depth_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = crate::util::env_var("SHOGI_SINGULAR_MIN_DEPTH")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(6)
+            .clamp(2, 64);
+        AtomicI32::new(v)
+    })
+}
+
+#[inline]
+pub fn singular_min_depth() -> i32 {
+    singular_min_depth_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_min_depth(d: i32) {
+    singular_min_depth_atomic().store(d.clamp(2, 64), Ordering::Relaxed);
+}
+
+fn singular_margin_base_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = crate::util::env_var("SHOGI_SINGULAR_MARGIN_BASE")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(56)
+            .clamp(0, 512);
+        AtomicI32::new(v)
+    })
+}
+
+#[inline]
+pub fn singular_margin_base() -> i32 {
+    singular_margin_base_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_margin_base(v: i32) {
+    singular_margin_base_atomic().store(v.clamp(0, 512), Ordering::Relaxed);
+}
+
+fn singular_margin_scale_pct_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = crate::util::env_var("SHOGI_SINGULAR_MARGIN_SCALE_PCT")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(70)
+            .clamp(10, 300);
+        AtomicI32::new(v)
+    })
+}
+
+#[inline]
+pub fn singular_margin_scale_pct() -> i32 {
+    singular_margin_scale_pct_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_margin_scale_pct(v: i32) {
+    singular_margin_scale_pct_atomic().store(v.clamp(10, 300), Ordering::Relaxed);
+}
+
 // --- Helper Aspiration (mode/delta) ---
 // mode: 0=Off, 1=Wide
 const ASP_MODE_OFF: u8 = 0;

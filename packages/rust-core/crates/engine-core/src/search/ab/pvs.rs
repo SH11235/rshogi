@@ -13,6 +13,7 @@ use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::movegen::MoveGenerator;
 use crate::search::policy::{
     abdada_enabled, capture_futility_enabled, capture_futility_scale_pct, quiet_see_guard_enabled,
+    singular_enabled, singular_margin_base, singular_margin_scale_pct, singular_min_depth,
     tt_suppress_below_depth,
 };
 use crate::search::types::NodeType;
@@ -516,6 +517,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         let mut tt_hint: Option<crate::shogi::Move> = None;
+        let mut tt_value_for_singular: Option<i32> = None;
         let mut tt_depth_ok = false;
         let pos_hash = pos.zobrist_hash();
         // --- ABDADA (in-progress) 簡易版：重複探索の緩和（Non-PV/非王手/十分深い）
@@ -605,6 +607,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                     _ => {
                         tt_hint = entry.get_move();
+                        tt_value_for_singular = Some(score);
                     }
                 }
             }
@@ -942,6 +945,87 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 )
             {
                 continue;
+            }
+
+            // Singular Extension (Non-PV, TT手のみ、控えめ +1ply)
+            if singular_enabled()
+                && !is_pv
+                && !stack[ply as usize].in_check
+                && stack[ply as usize].excluded_move.is_none()
+                && !stack[ply as usize].prev_risky
+                && next_depth >= singular_min_depth()
+                && tt_depth_ok
+                && tt_hint.is_some_and(|h| h == mv)
+            {
+                if let Some(ttv) = tt_value_for_singular {
+                    let base = singular_margin_base();
+                    let scale = singular_margin_scale_pct();
+                    let margin = (base + (79 * depth) / 58) * scale / 100;
+                    let singular_beta = ttv - margin;
+                    let verify_depth = (next_depth / 2).max(1);
+                    // Exclude TT move in this node and run zero-window verify
+                    let saved_ex = stack[ply as usize].excluded_move;
+                    if let Some(st) = stack.get_mut(ply as usize) {
+                        st.excluded_move = Some(mv);
+                    }
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        pos,
+                        "singular_probe",
+                        Some(format!(
+                            "depth={} sd={} beta={} ttv={} marg={}",
+                            depth, verify_depth, singular_beta, ttv, margin
+                        )),
+                    );
+                    let sc_verify = {
+                        let (sc, _) = self.alphabeta(
+                            ABArgs {
+                                pos,
+                                depth: verify_depth,
+                                alpha: singular_beta - 1,
+                                beta: singular_beta,
+                                ply,
+                                is_pv: false,
+                                stack: &mut *stack,
+                                heur: &mut *heur,
+                                tt_hits: &mut *tt_hits,
+                                beta_cuts: &mut *beta_cuts,
+                                lmr_counter: &mut *lmr_counter,
+                                lmr_blocked_in_check: None,
+                                lmr_blocked_recapture: None,
+                                evasion_sparsity_ext: None,
+                            },
+                            ctx,
+                        );
+                        sc
+                    };
+                    if let Some(st) = stack.get_mut(ply as usize) {
+                        st.excluded_move = saved_ex;
+                    }
+                    if sc_verify < singular_beta {
+                        // singular 確定 → +1ply（親 depth を超えない）
+                        next_depth = (next_depth + 1).min(depth);
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        super::diagnostics::record_tag(
+                            pos,
+                            "singular_hit",
+                            Some(format!(
+                                "sd={} beta={} v={}",
+                                verify_depth, singular_beta, sc_verify
+                            )),
+                        );
+                    } else {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        super::diagnostics::record_tag(
+                            pos,
+                            "singular_miss",
+                            Some(format!(
+                                "sd={} beta={} v={}",
+                                verify_depth, singular_beta, sc_verify
+                            )),
+                        );
+                    }
+                }
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_move_pick(diagnostics::MovePickContext {
