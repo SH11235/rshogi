@@ -64,7 +64,7 @@ pub(crate) fn root_see_gate_should_skip(
     if xsee_cp <= 0 {
         return false;
     }
-    if mv.is_capture_hint() || root.gives_check(mv) {
+    if mv.is_capture_hint() {
         return false;
     }
     // For quiet non-captures, use landing SEE (XSEE) so that

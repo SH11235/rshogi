@@ -96,7 +96,12 @@ pub(crate) fn capture_see_guard_should_skip(
         return false;
     }
     let margin = capture_see_guard_margin(depth);
-    !pos.see_ge(mv, -margin)
+    // 非捕獲のチェックは着地SEE（XSEE）で評価し、明確に不利ならスキップ
+    if is_capture {
+        !pos.see_ge(mv, -margin)
+    } else {
+        pos.see_landing_after_move(mv, -margin) < -margin
+    }
 }
 
 pub(crate) struct CaptureFutilityArgs {
