@@ -322,6 +322,30 @@ fn collect_search_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
         "QSearchChecks",
         "option name QSearchChecks type combo default On var On var Off".to_string(),
     );
+    // Material evaluator (lightweight) evaluation knobs
+    builder.search(
+        "Eval.Material.TempoCp",
+        "option name Eval.Material.TempoCp type spin default 10 min -200 max 200".to_string(),
+    );
+    builder.search(
+        "Eval.Material.RookMobilityCp",
+        "option name Eval.Material.RookMobilityCp type spin default 2 min 0 max 50".to_string(),
+    );
+    builder.search(
+        "Eval.Material.RookTrappedPenalty",
+        "option name Eval.Material.RookTrappedPenalty type spin default 30 min 0 max 500"
+            .to_string(),
+    );
+    builder.search(
+        "Eval.Material.KingEarlyMovePenaltyCp",
+        "option name Eval.Material.KingEarlyMovePenaltyCp type spin default 12 min 0 max 200"
+            .to_string(),
+    );
+    builder.search(
+        "Eval.Material.KingEarlyMoveMaxPly",
+        "option name Eval.Material.KingEarlyMoveMaxPly type spin default 20 min 0 max 100"
+            .to_string(),
+    );
     builder.search(
         "RootSeeGate",
         format!("option name RootSeeGate type check default {}", bool_to_usi(opts.root_see_gate)),
@@ -1173,6 +1197,47 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 } else {
                     "qsearch_checks=Off"
                 });
+            }
+        }
+        // --- Material evaluator (lightweight) knobs ---
+        "Eval.Material.TempoCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::evaluation::evaluate::set_material_tempo_cp(x);
+                    info_string(format!("eval_material_tempo_cp={}", x.clamp(-200, 200)));
+                }
+            }
+        }
+        "Eval.Material.RookMobilityCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::evaluation::evaluate::set_material_rook_mobility_cp(x);
+                    info_string(format!("eval_material_rook_mob_cp={}", x.clamp(0, 50)));
+                }
+            }
+        }
+        "Eval.Material.RookTrappedPenalty" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::evaluation::evaluate::set_material_rook_trapped_penalty_cp(x);
+                    info_string(format!("eval_material_rook_trap_cp={}", x.clamp(0, 500)));
+                }
+            }
+        }
+        "Eval.Material.KingEarlyMovePenaltyCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::evaluation::evaluate::set_material_king_early_move_penalty_cp(x);
+                    info_string(format!("eval_material_king_early_pen_cp={}", x.clamp(0, 200)));
+                }
+            }
+        }
+        "Eval.Material.KingEarlyMoveMaxPly" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::evaluation::evaluate::set_material_king_early_move_max_ply(x);
+                    info_string(format!("eval_material_king_early_max_ply={}", x.clamp(0, 100)));
+                }
             }
         }
         "ClearHash" => {
@@ -2252,6 +2317,13 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
                     }
                 }
             }
+        }
+        // If NNUE is active, disable Material-only lightweight heuristics to avoid double counting
+        if matches!(state.opts.engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
+            engine_core::evaluation::evaluate::set_material_tempo_cp(0);
+            engine_core::evaluation::evaluate::set_material_rook_mobility_cp(0);
+            engine_core::evaluation::evaluate::set_material_rook_trapped_penalty_cp(0);
+            engine_core::evaluation::evaluate::set_material_king_early_move_penalty_cp(0);
         }
     }
     engine_core::search::config::set_mate_early_stop_enabled(state.opts.mate_early_stop);
