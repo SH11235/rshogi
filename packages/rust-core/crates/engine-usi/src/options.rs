@@ -133,6 +133,7 @@ pub fn send_id_and_options(opts: &UsiOptions) {
     usi_println("option name SearchParams.FutStatDen type spin default 356 min 1 max 10000");
     usi_println("option name SearchParams.LMR_StatNum type spin default 1 min 0 max 64");
     usi_println("option name SearchParams.LMR_StatDenBase type spin default 8192 min 1 max 65536");
+    usi_println("option name SearchParams.LMR type check default true");
     usi_println("option name SearchParams.SameToExtension type check default false");
     usi_println("option name SearchParams.ProbCut_D5 type spin default 250 min 0 max 2000");
     usi_println("option name SearchParams.ProbCut_D6P type spin default 300 min 0 max 2000");
@@ -712,6 +713,14 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 if let Ok(x) = v.parse::<i32>() {
                     engine_core::search::params::set_lmr_stat_den_base(x);
                 }
+            }
+        }
+        "SearchParams.LMR" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_lmr_enabled(on);
+                info_string(if on { "lmr=On" } else { "lmr=Off" });
+                mark_override(state, "SearchParams.LMR");
             }
         }
         "SearchParams.SameToExtension" => {

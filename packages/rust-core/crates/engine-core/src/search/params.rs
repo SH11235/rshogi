@@ -91,6 +91,7 @@ static RUNTIME_PROBCUT_D6P: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D6P);
 static RUNTIME_ENABLE_NMP: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_IID: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_PROBCUT: AtomicBool = AtomicBool::new(true);
+static RUNTIME_ENABLE_LMR: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_STATIC_BETA: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_SBP_DYNAMIC: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_FUT_DYNAMIC: AtomicBool = AtomicBool::new(true);
@@ -135,6 +136,11 @@ pub fn lmr_k_coeff_for_depth(depth: i32) -> f32 {
         return base * shallow_lmr_factor();
     }
     base
+}
+
+#[inline]
+pub fn lmr_enabled() -> bool {
+    RUNTIME_ENABLE_LMR.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -430,6 +436,9 @@ pub fn set_iid_enabled(b: bool) {
 }
 pub fn set_probcut_enabled(b: bool) {
     RUNTIME_ENABLE_PROBCUT.store(b, Ordering::Relaxed);
+}
+pub fn set_lmr_enabled(b: bool) {
+    RUNTIME_ENABLE_LMR.store(b, Ordering::Relaxed);
 }
 pub fn set_static_beta_enabled(b: bool) {
     RUNTIME_ENABLE_STATIC_BETA.store(b, Ordering::Relaxed);

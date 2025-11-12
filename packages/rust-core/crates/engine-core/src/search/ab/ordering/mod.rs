@@ -170,6 +170,9 @@ pub(crate) struct LateMoveReductionParams<'stack> {
 }
 
 pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_>) -> i32 {
+    if !dynp::lmr_enabled() {
+        return 0;
+    }
     if params.depth < 3 || params.moveno < 3 || !params.is_quiet || params.is_good_capture {
         return 0;
     }

@@ -154,11 +154,10 @@ pub fn set_nmp_verify_min_depth(depth: i32) {
 fn singular_enabled_atomic() -> &'static AtomicBool {
     static CELL: OnceLock<AtomicBool> = OnceLock::new();
     CELL.get_or_init(|| {
-        let on = match crate::util::env_var("SHOGI_SINGULAR_ENABLE") {
-            Some(s) if matches!(s.as_str(), "1" | "true" | "on") => true,
-            _ => false,
-        };
-        AtomicBool::new(on)
+        AtomicBool::new(matches!(
+            crate::util::env_var("SHOGI_SINGULAR_ENABLE").as_deref(),
+            Some("1" | "true" | "on")
+        ))
     })
 }
 
