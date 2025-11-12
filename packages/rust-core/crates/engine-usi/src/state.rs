@@ -269,8 +269,10 @@ impl Default for UsiOptions {
             mate_postverify_exact_min_depth: 8,
             mate_postverify_exact_min_elapsed_ms: 400,
             // Guard rails
-            root_see_gate: false,
-            root_see_gate_xsee_cp: 0,
+            // デフォルトで Root SEE Gate を有効化し、XSEE=74cp（歩損相当）を初期値にする。
+            // YO系の運用に合わせ、危険な静手（着地でタダ取りされる手）を初期状態で抑制する。
+            root_see_gate: true,
+            root_see_gate_xsee_cp: 74,
             post_verify: true,
             post_verify_require_pass: false,
             post_verify_extend_ms: 300,
