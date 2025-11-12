@@ -93,6 +93,9 @@ pub fn send_id_and_options(opts: &UsiOptions) {
         "option name SearchParams.QS.CheckSEEMargin type spin default {} min -5000 max 5000",
         engine_core::search::params::qs_check_see_margin()
     ));
+    // Shallow gate (runtime-toggle; previously env-only)
+    usi_println("option name Search.ShallowGate type check default false");
+    usi_println("option name Search.ShallowGate.Depth type spin default 3 min 1 max 8");
     usi_println("option name SearchParams.RootBeamForceFullCount type spin default 4 min 0 max 8");
     // Root guard rails (revived)
     usi_println(&format!(
@@ -790,6 +793,28 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 if let Ok(x) = v.parse::<i32>() {
                     engine_core::search::params::set_qs_check_see_margin(x);
+                }
+            }
+        }
+        // ShallowGate runtime toggles (previously env-only)
+        "Search.ShallowGate" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_shallow_gate_enabled(on);
+                info_string(if on {
+                    "shallow_gate=On"
+                } else {
+                    "shallow_gate=Off"
+                });
+                mark_override(state, "Search.ShallowGate");
+            }
+        }
+        "Search.ShallowGate.Depth" => {
+            if let Some(v) = value_ref {
+                if let Ok(x) = v.parse::<i32>() {
+                    engine_core::search::params::set_shallow_gate_depth(x);
+                    info_string(format!("shallow_gate_depth={}", x.clamp(1, 8)));
+                    mark_override(state, "Search.ShallowGate.Depth");
                 }
             }
         }
@@ -1601,6 +1626,9 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
             state.opts.finalize_allow_see_lt0_alt = false
         });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
+        // ShallowGate: enable in common profile by default (YO寄せ; 浅層の過剰刈り抑制)
+        engine_core::search::params::set_shallow_gate_enabled(true);
+        engine_core::search::params::set_shallow_gate_depth(3);
     } else {
         // T1 profile
 
@@ -1631,6 +1659,9 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
             state.opts.finalize_allow_see_lt0_alt = false
         });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
+        // ShallowGate for T1 as well (保守的既定)
+        engine_core::search::params::set_shallow_gate_enabled(true);
+        engine_core::search::params::set_shallow_gate_depth(3);
     }
 
     if !state.opts.finalize_sanity_enabled
