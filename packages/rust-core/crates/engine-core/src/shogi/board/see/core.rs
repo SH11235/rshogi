@@ -85,7 +85,7 @@ impl Position {
             occupied.set(to);
 
             // Precompute pin information (same as capture branch)
-            let (black_pins, white_pins) = self.calculate_pins_for_see();
+            let (black_pins, white_pins) = self.calculate_pins_for_see(occupied);
 
             // All attackers to the drop square under the current occupancy
             let mut attackers = self.get_all_attackers_to(to, occupied);
@@ -236,7 +236,7 @@ impl Position {
 
         // 初手のピン合法性を確認（違法なら早期リターン）
         {
-            let initial_pins = self.calculate_pins_for_color(self.side_to_move);
+            let initial_pins = self.calculate_pins_for_color(self.side_to_move, self.board.all_bb);
             if !initial_pins.can_move(from, to) {
                 // 閾値比較を考慮し、到達不能にする十分小さい値を返す
                 #[cfg(debug_assertions)]
@@ -273,8 +273,8 @@ impl Position {
             return captured_value + promotion_bonus;
         }
 
-        // Calculate pin information for both colors
-        let (black_pins, white_pins) = self.calculate_pins_for_see();
+        // Calculate pin information for both colors（実局面の occupancy 基準）
+        let (black_pins, white_pins) = self.calculate_pins_for_see(occupied);
 
         // Gain array to track material balance at each ply
         let mut gain = [0i32; SEE_GAIN_ARRAY_SIZE];
@@ -447,7 +447,7 @@ impl Position {
         occupied.set(to);
 
         // Pin info and attackers in the hypothetical position
-        let (black_pins, white_pins) = self.calculate_pins_for_see();
+        let (black_pins, white_pins) = self.calculate_pins_for_see(occupied);
         let mut attackers = self.get_all_attackers_to(to, occupied);
 
         // Gain-array exchange starting with opponent capture
