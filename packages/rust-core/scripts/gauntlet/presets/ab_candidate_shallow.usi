@@ -1,0 +1,21 @@
+; Candidate preset with proposed shallow/ordering-friendly settings
+setoption name EngineType value Enhanced
+setoption name MultiPV value 1
+setoption name Threads value 8
+setoption name USI_Hash value 1024
+
+; Ensure shallow gate active and depth=3 (also auto defaults in profiles, but set explicitly)
+setoption name Search.ShallowGate value true
+setoption name Search.ShallowGate.Depth value 3
+
+; Root beam: avoid early fixed full-search slots to reduce early lock-in
+setoption name SearchParams.RootBeamForceFullCount value 0
+
+; LMP: relax opening skip limits (depth<=3)
+setoption name SearchParams.LMP_D1 value 8
+setoption name SearchParams.LMP_D2 value 14
+setoption name SearchParams.LMP_D3 value 20
+
+; HP: weaken depth-scale to avoid over-pruning early quiets
+setoption name SearchParams.HP_DepthScale value 3200
+

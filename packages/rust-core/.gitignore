@@ -56,3 +56,4 @@ docs/reports/fixtures/classic_roundtrip/synthetic_probe_worst.jsonl
 
 taikyoku-log/
 docs/reports/
+scripts/analysis/__pycache__/
