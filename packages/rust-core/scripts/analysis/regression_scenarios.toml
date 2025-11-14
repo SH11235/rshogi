@@ -1,0 +1,63 @@
+# Regression detection scenarios for qsearch/root beam tuning
+# Each scenario defines a log to replay, the prefixes (pre-N) to analyze,
+# and optional bounds for evaluation/seldepth/bestmove.
+
+[[scenario]]
+name = "log_20251108_1040_baseline"
+log = "taikyoku-log/taikyoku_log_enhanced-parallel-202511081040.md"
+prefixes = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+threads = 8
+multipv = 1
+byoyomi_ms = 10000
+# Expect the engine to keep evaluations inside a safe band.
+score_cp_min = -400
+score_cp_max = 2000
+seldepth_max = 24
+
+[[scenario]]
+name = "log_20251108_1059_tail"
+log = "taikyoku-log/taikyoku_log_enhanced-parallel-202511081059.md"
+prefixes = [17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+threads = 8
+multipv = 1
+byoyomi_ms = 10000
+score_cp_min = -500
+score_cp_max = 500
+seldepth_max = 24
+
+  [[scenario.prefix_guard]]
+  number = 23
+  allowed_moves = ["4c5d", "6a7a", "6a7a+"]
+  min_cp = -400
+  max_cp = 200
+
+  [[scenario.prefix_guard]]
+  number = 25
+  min_cp = -400
+  max_cp = 400
+
+  [[scenario.prefix_guard]]
+  number = 26
+  min_cp = -200
+  max_cp = 500
+
+[[scenario]]
+name = "log_20251109_0347_mid"
+log = "taikyoku-log/taikyoku_log_enhanced-parallel-202511090347.md"
+prefixes = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+threads = 8
+multipv = 1
+byoyomi_ms = 10000
+score_cp_min = -600
+score_cp_max = 600
+seldepth_max = 24
+
+  [[scenario.prefix_guard]]
+  number = 18
+  min_cp = -400
+  max_cp = 400
+
+  [[scenario.prefix_guard]]
+  number = 23
+  min_cp = -400
+  max_cp = 400

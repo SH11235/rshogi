@@ -47,7 +47,6 @@ diff-agg-hash = ["engine-core/diff_agg_hash"]
 nnue_telemetry = ["engine-core/nnue_telemetry"]
 
 [dev-dependencies]
-criterion = { version = "0.6", features = ["html_reports"] }
 tempfile = "3.10"
 assert_cmd = "2.0"
 predicates = "3.1"
