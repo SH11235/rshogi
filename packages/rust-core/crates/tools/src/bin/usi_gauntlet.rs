@@ -78,6 +78,9 @@ struct Cli {
     /// Override USI_Hash (MB) setoption (sent for both engines after usiok)
     #[arg(long)]
     hash_mb: Option<usize>,
+    /// 1手ごとの構造化ログ (moves.jsonl) を出力
+    #[arg(long)]
+    log_moves: bool,
 }
 
 struct USIProc {
@@ -238,6 +241,21 @@ struct Summary {
     score_rate: f64,
 }
 
+#[derive(Serialize)]
+struct MoveLog {
+    game_index: usize,
+    ply: u32,
+    stm_black: bool,
+    side: String,
+    cand_black: bool,
+    open_index: usize,
+    sfen: String,
+    position: String,
+    bestmove: String,
+    eval_cp: Option<i32>,
+    eval_mate: Option<i32>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     fs::create_dir_all(&cli.out)?;
@@ -291,6 +309,15 @@ fn main() -> Result<()> {
     let g_oob_switch = Arc::new(AtomicUsize::new(0));
     let g_finalize_event = Arc::new(AtomicUsize::new(0));
 
+    // 1手ごとの構造化ログ (JSON Lines)
+    let moves_w: Option<Arc<Mutex<fs::File>>> = if cli.log_moves {
+        let path = cli.out.join("moves.jsonl");
+        let file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        Some(Arc::new(Mutex::new(file)))
+    } else {
+        None
+    };
+
     let chunks = {
         let c = cli.concurrency.max(1);
         let mut v = Vec::new();
@@ -343,19 +370,20 @@ fn main() -> Result<()> {
         let w_ov = g_oob_verify_fail.clone();
         let w_sw = g_oob_switch.clone();
         let w_fn = g_finalize_event.clone();
-        let progress_path = out_dir.join(format!("run_worker_{}.log", wid));
+        let moves_w = moves_w.clone();
+        let progress_path = out_dir.join(format!("run_worker_{wid}.log"));
         let handle = thread::spawn(move || -> Result<()> {
             let mut progress =
                 fs::OpenOptions::new().create(true).append(true).open(progress_path)?;
-            writeln!(progress, "worker {}: spawn engines", wid)?;
+            writeln!(progress, "worker {wid}: spawn engines")?;
             let mut base = USIProc::spawn(
                 &base_engine_path,
-                &out_dir.join(format!("base.{}.stderr.log", wid)),
+                &out_dir.join(format!("base.{wid}.stderr.log")),
                 &base_env,
             )?;
             let mut cand = USIProc::spawn(
                 &cand_engine_path,
-                &out_dir.join(format!("cand.{}.stderr.log", wid)),
+                &out_dir.join(format!("cand.{wid}.stderr.log")),
                 &cand_env,
             )?;
             for (proc, init) in [(&mut base, &base_init), (&mut cand, &cand_init)] {
@@ -391,6 +419,11 @@ fn main() -> Result<()> {
                 let mut moves: Vec<String> = Vec::new();
                 let mut plies: u32 = 0;
                 let cand_black = g % 2 == 1;
+                writeln!(
+                    progress,
+                    "worker {wid}: start game {g} (open_idx={open_idx}, cand_black={cand_black})"
+                )?;
+                progress.flush().ok();
                 let pos_cmd = |moves: &Vec<String>| {
                     if moves.is_empty() {
                         format!("position sfen {}", sfen)
@@ -414,12 +447,46 @@ fn main() -> Result<()> {
                         &mut base
                     };
                     to_move.send(format!("go byoyomi {}", byoyomi))?;
+                    let pos_before_full = pos_cmd(&moves);
+                    let pos_before = pos_before_full
+                        .strip_prefix("position ")
+                        .unwrap_or(&pos_before_full)
+                        .to_string();
                     let (bm, eval) = to_move.recv_bestmove(byoyomi + 200)?;
                     // accumulate lightweight counters from the side that just searched
                     let (ovf, swc, fin) = to_move.take_counters();
                     w_ov.fetch_add(ovf, Ordering::Relaxed);
                     w_sw.fetch_add(swc, Ordering::Relaxed);
                     w_fn.fetch_add(fin, Ordering::Relaxed);
+                    if let Some(moves_w) = moves_w.as_ref() {
+                        let (eval_cp, eval_mate) = match eval {
+                            Some(LastEval::Cp(v)) => (Some(v), None),
+                            Some(LastEval::Mate(v)) => (None, Some(v)),
+                            None => (None, None),
+                        };
+                        let side = if to_move_is_cand {
+                            "cand".to_string()
+                        } else {
+                            "base".to_string()
+                        };
+                        let log = MoveLog {
+                            game_index: g,
+                            ply: plies + 1,
+                            stm_black,
+                            side,
+                            cand_black,
+                            open_index: open_idx,
+                            sfen: sfen.to_string(),
+                            position: pos_before,
+                            bestmove: bm.split_whitespace().next().unwrap_or("resign").to_string(),
+                            eval_cp,
+                            eval_mate,
+                        };
+                        let mut w = moves_w.lock().unwrap();
+                        serde_json::to_writer(&mut *w, &log)?;
+                        writeln!(&mut *w)?;
+                        w.flush().ok();
+                    }
                     if adj_enable {
                         match eval {
                             Some(LastEval::Mate(m)) if adj_mate_enable => {
@@ -494,6 +561,8 @@ fn main() -> Result<()> {
                 if result == "draw" {
                     draws.fetch_add(1, Ordering::Relaxed);
                 }
+                writeln!(progress, "worker {wid}: end game {g} (result={result}, plies={plies})")?;
+                progress.flush().ok();
                 games_done.fetch_add(1, Ordering::Relaxed);
                 let mut w = csv_w.lock().unwrap();
                 writeln!(&mut *w, "{},{},{},{}", g, open_idx, result, plies)?;
@@ -526,6 +595,7 @@ fn main() -> Result<()> {
     let ovf = g_oob_verify_fail.load(Ordering::Relaxed);
     let swc = g_oob_switch.load(Ordering::Relaxed);
     let fin = g_finalize_event.load(Ordering::Relaxed);
+    let now = chrono::Utc::now().to_rfc3339();
     fs::write(
         cli.out.join("summary.txt"),
         format!(
@@ -543,5 +613,14 @@ fn main() -> Result<()> {
             score_rate,
         })?,
     )?;
+    let mut progress =
+        fs::OpenOptions::new().create(true).append(true).open(cli.out.join("run.log"))?;
+    writeln!(progress, "finished at {now}")?;
+    writeln!(
+        progress,
+        "summary: games={games}, cand_wins={cw}, base_wins={bw}, draws={dr}, \
+score_rate={score_rate:.3}, oob_verify_fail={ovf}, oob_switch={swc}, finalize_event={fin}"
+    )?;
+    progress.flush().ok();
     Ok(())
 }
