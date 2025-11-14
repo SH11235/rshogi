@@ -1,16 +1,6 @@
+; Baseline preset (defaults)
 setoption name EngineType value Enhanced
 setoption name MultiPV value 1
 setoption name Threads value 8
 setoption name USI_Hash value 1024
-# Disable aggressive pruning family for repro
-setoption name SearchParams.Razor value false
-setoption name SearchParams.EnableProbCut value false
-setoption name SearchParams.EnableStaticBeta value false
-# FinalizeSanity off; rely on core search
-setoption name FinalizeSanity.Enabled value false
-# PostVerify on
-setoption name PostVerify value true
-# Root guard rails on (xsee=0 default)
-setoption name RootSeeGate value true
-# Disable PVVerify for A baseline
-setoption name PVVerify.Enabled value false
+; All other options use engine defaults.

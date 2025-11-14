@@ -1,0 +1,11 @@
+{
+  "name": "f1e47_lmp_mid_lmr180",
+  "params": {
+    "LMP_D1": 7,
+    "LMP_D2": 13,
+    "LMP_D3": 19,
+    "LMR_K_x100": 180,
+    "HP_DepthScale": 4361,
+    "QS.CheckSEEMargin": -5000
+  }
+}

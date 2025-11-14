@@ -987,6 +987,11 @@ impl Engine {
         crate::search::tt::reconstruct_pv_generic(self.shared_tt.as_ref(), &mut tmp, max_depth)
     }
 
+    /// Expose TT-based PV reconstruction for finalize/diagnostics consumers.
+    pub fn reconstruct_root_pv(&self, pos: &Position, max_depth: u8) -> Vec<crate::shogi::Move> {
+        self.reconstruct_root_pv_from_tt(pos, max_depth)
+    }
+
     /// Choose final bestmove from book/committed/TT/legal
     /// - Must be lock-free and return in a few milliseconds
     /// - Ensures returned move is legal in the given position

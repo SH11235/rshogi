@@ -1,0 +1,7 @@
+{
+  "name": "root_bias_down",
+  "params": {
+    "RootTTBonus": 750000,
+    "RootPrevScoreScale": 100
+  }
+}

@@ -1,12 +1,8 @@
-use std::collections::HashMap;
-use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
-
-use log::warn;
-
+use super::ordering::{self, Heuristics};
+use super::profile::{PruneToggles, SearchProfile};
+use super::pvs::{self, SearchContext};
+#[cfg(feature = "diagnostics")]
+use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
@@ -14,26 +10,32 @@ use crate::search::config;
 use crate::search::constants::MAX_PLY;
 use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
+use crate::search::policy::bench_stop_on_mate_enabled;
+use crate::search::policy::{asp_fail_high_pct, asp_fail_low_pct};
+use crate::search::snapshot::SnapshotSource;
+use crate::search::tt::TTProbe;
 use crate::search::types::{
     normalize_root_pv, NodeType, RootLine, SearchStack, StopInfo, TerminationReason,
 };
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
+use crate::shogi::Square;
+use crate::time_management::TimeControl;
 use crate::Position;
+use log::warn;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
-
-use super::ordering::{self, Heuristics};
-use super::profile::{PruneToggles, SearchProfile};
-use super::pvs::{self, SearchContext};
-#[cfg(feature = "diagnostics")]
-use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
-use crate::search::policy::{asp_fail_high_pct, asp_fail_low_pct};
-use crate::search::snapshot::SnapshotSource;
-use crate::search::tt::TTProbe;
-use crate::time_management::TimeControl;
+use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
 const STICKY_PV_WINDOW_MS: u64 = 400;
+/// Sticky-PV を適用する際に許容する評価値の改善幅（cp）。
+/// 新しいPV1のスコアがこれを大きく超えて改善している場合は、near-deadline でも切り替えを優先する。
+const STICKY_PV_MAX_IMPROVE_CP: i32 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -65,10 +67,25 @@ pub(crate) fn root_see_gate_should_skip(
     if xsee_cp <= 0 {
         return false;
     }
+    // Captures and checking moves are always kept; gate is only for quiet non-check moves.
     if mv.is_capture_hint() || root.gives_check(mv) {
         return false;
     }
-    root.see(mv) < -xsee_cp
+    // For quiet non-captures, use landing SEE (XSEE) so that
+    // moves that walk into a tactically lost square are rejected.
+    let xsee = if mv.is_drop() {
+        root.see(mv)
+    } else {
+        root.see_landing_after_move(mv, 0)
+    };
+    xsee < -xsee_cp
+}
+
+#[inline]
+fn chebyshev_distance(a: Square, b: Square) -> u8 {
+    let dx = u8::abs_diff(a.file(), b.file());
+    let dy = u8::abs_diff(a.rank(), b.rank());
+    dx.max(dy)
 }
 
 #[inline]
@@ -149,6 +166,9 @@ struct RootSearchEnv<'a> {
     seldepth: &'a mut u32,
     qnodes: &'a mut u64,
     qnodes_limit: u64,
+    root_beam_skip_tracker: &'a mut HashMap<u32, u8>,
+    root_beam_skip_streak: &'a mut usize,
+    root_beam_skip_force_full: &'a mut bool,
     #[cfg(feature = "diagnostics")]
     abdada_busy_detected: &'a mut u64,
     #[cfg(feature = "diagnostics")]
@@ -239,7 +259,32 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             } else {
                 let mut need_full = true;
                 let mut s = i32::MIN;
-                if idx >= force_full_budget && d > dynp::root_beam_min_depth() {
+                let root_gives_check = root.gives_check(mv);
+                let root_see = root.see(mv);
+                let root_own_king_near = root
+                    .board
+                    .king_square(root.side_to_move)
+                    .map(|k| chebyshev_distance(k, mv.to()))
+                    .is_some_and(|d| d <= 2);
+                let root_enemy_king_adjacent = root
+                    .board
+                    .king_square(root.side_to_move.opposite())
+                    .map(|k| chebyshev_distance(k, mv.to()))
+                    .is_some_and(|d| d <= 1);
+                let root_quiet_move = !root_gives_check && !mv.is_capture_hint();
+                let drop_near_enemy_king = mv.is_drop() && root_enemy_king_adjacent;
+                let quiet_touching_any_king =
+                    root_quiet_move && (root_own_king_near || root_enemy_king_adjacent);
+                let mut forcing = root_gives_check || root_see >= 0 || root_own_king_near;
+                if drop_near_enemy_king || quiet_touching_any_king {
+                    forcing = true;
+                }
+                if idx >= force_full_budget
+                    && d > dynp::root_beam_min_depth()
+                    && !drop_near_enemy_king
+                    && !quiet_touching_any_king
+                    && !*env.root_beam_skip_force_full
+                {
                     let shallow_depth = (d - 1).saturating_sub(dynp::root_beam_reduction());
                     if shallow_depth >= 1 {
                         let mut search_ctx_shallow = SearchContext {
@@ -274,18 +319,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             &mut search_ctx_shallow,
                         );
                         s = -sc_shallow;
-                        let root_gives_check = root.gives_check(mv);
-                        let root_see = root.see(mv);
-                        let root_king_adjacent = {
-                            if let Some(king) = root.board.king_square(root.side_to_move) {
-                                let dx = u8::abs_diff(king.file(), mv.to().file());
-                                let dy = u8::abs_diff(king.rank(), mv.to().rank());
-                                dx <= 1 && dy <= 1
-                            } else {
-                                false
-                            }
-                        };
-                        let forcing = root_gives_check || root_see >= 0 || root_king_adjacent;
                         need_full = forcing || s > alpha - dynp::root_beam_margin_cp();
                         if need_full && !forcing {
                             let delta = dynp::root_beam_narrow_delta_cp();
@@ -329,10 +362,26 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             if let Some(cb) = env.limits.info_string_callback.as_ref() {
                                 cb("root_beam_skip_full=1");
                             }
+                            let retry_limit = dynp::root_beam_skip_retry_limit().max(1);
+                            let entry = env.root_beam_skip_tracker.entry(mv.to_u32()).or_insert(0);
+                            *entry = entry.saturating_add(1);
+                            if (*entry as usize) >= retry_limit {
+                                *entry = 0;
+                                *env.root_beam_skip_force_full = true;
+                                need_full = true;
+                            }
+                            *env.root_beam_skip_streak =
+                                env.root_beam_skip_streak.saturating_add(1);
+                            if *env.root_beam_skip_streak >= retry_limit {
+                                *env.root_beam_skip_force_full = true;
+                                need_full = true;
+                            }
                         }
                     }
                 }
                 if need_full {
+                    *env.root_beam_skip_streak = 0;
+                    env.root_beam_skip_tracker.insert(mv.to_u32(), 0);
                     let mut search_ctx_nw = SearchContext {
                         limits: env.limits,
                         start_time: env.t0,
@@ -1546,6 +1595,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     })
                     .collect();
                 let force_full_budget = Self::effective_root_force_full_count(limits);
+                let mut root_beam_skip_tracker: HashMap<u32, u8> = HashMap::new();
+                let mut root_beam_skip_streak: usize = 0;
+                let mut root_beam_skip_force_full = false;
 
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
@@ -1648,6 +1700,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             seldepth: &mut seldepth,
                             qnodes: &mut qnodes,
                             qnodes_limit,
+                            root_beam_skip_tracker: &mut root_beam_skip_tracker,
+                            root_beam_skip_streak: &mut root_beam_skip_streak,
+                            root_beam_skip_force_full: &mut root_beam_skip_force_full,
                             #[cfg(feature = "diagnostics")]
                             abdada_busy_detected: &mut cum_abdada_busy_detected,
                             #[cfg(feature = "diagnostics")]
@@ -1881,7 +1936,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if changed {
                             cumulative_pv_changed = cumulative_pv_changed.saturating_add(1);
                         }
-                        // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先
+                        // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先。
+                        // ただし、新しいPV1のスコアが大幅に改善している場合（改善幅が閾値超え）は
+                        // Sticky を無効化し、素直に新しいPV1へ切り替える。
                         let mut adopt_mv = m;
                         let near_deadline = time_remaining_ms_for_sticky(t0, limits)
                             .is_some_and(|t_rem| t_rem <= STICKY_PV_WINDOW_MS);
@@ -1894,7 +1951,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 crate::usi::move_to_usi(&m)
                             ));
                         }
+                        let mut adopt_prev = false;
                         if changed && near_deadline {
+                            // prev_score は前反復の PV1 スコア（side-to-move 視点）。
+                            // 改善幅が小さい場合のみ Sticky-PV を適用し、大きく改善している場合は切り替える。
+                            let improve_cp = local_best.saturating_sub(prev_score);
+                            if improve_cp <= STICKY_PV_MAX_IMPROVE_CP {
+                                adopt_prev = true;
+                            }
+                        }
+                        if adopt_prev {
                             if let Some(prev_mv) = prev_best_move_for_iteration {
                                 adopt_mv = prev_mv;
                                 // keep previous score as hint center
@@ -2947,6 +3013,27 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ClassicBackend<E>
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelperAspMode {
+    Off,
+    Wide,
+}
+
+fn helper_asp_mode() -> HelperAspMode {
+    match crate::search::policy::helper_asp_mode_value() {
+        0 => HelperAspMode::Off,
+        _ => HelperAspMode::Wide,
+    }
+}
+
+#[inline]
+fn helper_asp_delta() -> i32 {
+    use crate::search::constants::ASPIRATION_DELTA_MAX;
+    crate::search::policy::helper_asp_delta_value()
+        .clamp(50, 600)
+        .min(ASPIRATION_DELTA_MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3051,31 +3138,4 @@ mod tests {
         let got = ClassicBackend::<MaterialEvaluator>::compute_qnodes_limit_for_test(&limits, 8, 1);
         assert_eq!(got, DEFAULT_QNODES_LIMIT, "should clamp to default when no override");
     }
-
-    // RootWorkQueue/claim は純粋 LazySMP では使用しないため、関連テストは削除しました。
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HelperAspMode {
-    Off,
-    Wide,
-}
-
-fn helper_asp_mode() -> HelperAspMode {
-    match crate::search::policy::helper_asp_mode_value() {
-        0 => HelperAspMode::Off,
-        _ => HelperAspMode::Wide,
-    }
-}
-
-#[inline]
-fn helper_asp_delta() -> i32 {
-    use crate::search::constants::ASPIRATION_DELTA_MAX;
-    crate::search::policy::helper_asp_delta_value()
-        .clamp(50, 600)
-        .min(ASPIRATION_DELTA_MAX)
-}
-
-// asp_fail_low_pct / asp_fail_high_pct: see crate::search::policy
-
-// Use shared policy getter from parallel module to avoid divergence
-use crate::search::policy::bench_stop_on_mate_enabled;
