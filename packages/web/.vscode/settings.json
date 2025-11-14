@@ -1,6 +1,0 @@
-{
-    "typescript.preferences.includePackageJsonAutoImports": "on",
-    "typescript.preferences.includeCompletionsForModuleExports": true,
-    "typescript.suggest.autoImports": true,
-    "typescript.workspaceSymbols.scope": "allOpenProjects"
-}
