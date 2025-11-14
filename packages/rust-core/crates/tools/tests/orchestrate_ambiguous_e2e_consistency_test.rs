@@ -14,10 +14,8 @@ fn write_pass1_jsonl(path: &PathBuf, n: usize) {
     let mut s = String::new();
     for i in 0..n {
         // 両玉のみのシンプルな局面（4k4/9/.../4K4）
-        let rec = format!(
-            "{{\"sfen\":\"4k4/9/9/9/9/9/9/9/4K4 b - {}\",\"best2_gap_cp\":5}}\n",
-            i + 1
-        );
+        let rec =
+            format!("{{\"sfen\":\"4k4/9/9/9/9/9/9/9/4K4 b - {}\",\"best2_gap_cp\":5}}\n", i + 1);
         s.push_str(&rec);
     }
     fs::write(path, s).expect("write pass1");
