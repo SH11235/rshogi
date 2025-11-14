@@ -1,0 +1,13 @@
+{
+  "name": "f1e47_low_history",
+  "params": {
+    "LMP_D1": 6,
+    "LMP_D2": 12,
+    "LMP_D3": 18,
+    "HP_DepthScale": 4361,
+    "QS.CheckSEEMargin": -5000,
+    "QuietHistoryWeight": 1,
+    "ContinuationHistoryWeight": 1,
+    "CaptureHistoryWeight": 1
+  }
+}

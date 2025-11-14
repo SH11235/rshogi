@@ -1,0 +1,18 @@
+{
+  "name": "spsa-qs-focus",
+  "bad_th": -600,
+  "a0": 0.6,
+  "c0": 1.0,
+  "A": 5,
+  "alpha": 0.602,
+  "gamma": 0.101,
+  "params": {
+    "QS_BadCaptureMin": {"init": 450, "min": 350, "max": 600, "step": 10},
+    "QS_MarginCapture": {"init": 160, "min": 120, "max": 240, "step": 5},
+    "QS_CheckPruneMargin": {"init": 180, "min": 100, "max": 260, "step": 10},
+    "QS.CheckSEEMargin": {"init": 50, "min": -50, "max": 200, "step": 10}
+  },
+  "env": {
+    "SHOGI_QUIET_SEE_GUARD": "0"
+  }
+}
