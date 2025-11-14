@@ -1805,7 +1805,13 @@ fn null_move_respects_runtime_toggle() {
         #[cfg(test)]
         verify_min_depth_override: None,
     });
-    assert!(allowed.is_some(), "NMP should run when runtime toggle is enabled");
+    // ランタイムトグルが有効なときは、少なくとも null move 探索が実行されていることを確認する。
+    assert!(
+        nodes > 0 || qnodes > 0,
+        "NMP search should run when runtime toggle is enabled (nodes={}, qnodes={}, allowed={allowed:?})",
+        nodes,
+        qnodes
+    );
 
     crate::search::params::set_nmp_enabled(false);
     assert!(!crate::search::params::nmp_enabled(), "runtime toggle should report disabled");
@@ -1851,10 +1857,12 @@ fn null_move_respects_runtime_toggle() {
         #[cfg(test)]
         verify_min_depth_override: None,
     });
-    if denied.is_some() {
-        eprintln!("[test] null move pruning still attempted despite runtime toggle");
-    }
+    // NMP 無効時は探索自体が実行されず、ノードカウンタも増えないことを確認する。
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
+    assert_eq!(
+        nodes_off, 0,
+        "NMP should not search any nodes when disabled (nodes_off={nodes_off}, qnodes_off={qnodes_off}, denied={denied:?})"
+    );
 
     crate::search::params::set_nmp_enabled(true);
 }
