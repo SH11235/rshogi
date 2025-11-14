@@ -296,6 +296,85 @@ fn normalize_for_root_with_bound(
     }
 }
 
+fn ensure_minimum_final_pv(
+    state: &mut EngineState,
+    final_best: &mut FinalBest,
+    min_len: usize,
+    rescue_budget_ms: u64,
+    label: &str,
+) {
+    if min_len <= 1 || final_best.pv.len() >= min_len {
+        return;
+    }
+    if let Some(head) = final_best.best_move {
+        if !state.position.is_legal_move(head) {
+            final_best.best_move = None;
+            final_best.pv.clear();
+        }
+    }
+    if final_best.pv.len() >= min_len {
+        return;
+    }
+    let tt_pv = {
+        let eng = state.lock_engine();
+        eng.reconstruct_root_pv(&state.position, min_len.min(48) as u8)
+    };
+    if tt_pv.len() >= min_len {
+        if let Some(&head) = tt_pv.first() {
+            if state.position.is_legal_move(head) {
+                final_best.best_move = Some(head);
+                final_best.pv = tt_pv;
+                final_best.source = FinalBestSource::TT;
+                diag_info_string(format!("{}_pv_rescue=tt len={}", label, final_best.pv.len()));
+                return;
+            }
+        }
+    }
+    if rescue_budget_ms == 0 {
+        return;
+    }
+    if let Some(rescued) = run_rescue_search(state, rescue_budget_ms.min(100), min_len) {
+        diag_info_string(format!("{}_pv_rescue=search len={}", label, rescued.pv.len()));
+        *final_best = rescued;
+    }
+}
+
+fn run_rescue_search(state: &mut EngineState, budget_ms: u64, min_len: usize) -> Option<FinalBest> {
+    if budget_ms == 0 {
+        return None;
+    }
+    let lock_budget = budget_ms.min(100);
+    let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, lock_budget) else {
+        diag_info_string("finalize_rescue_skip=lock_unavailable");
+        return None;
+    };
+    let mut pos = state.position.clone();
+    let limits = engine_core::search::SearchLimits::builder()
+        .depth(4)
+        .fixed_time_ms(budget_ms)
+        .build();
+    let res = eng.search(&mut pos, limits);
+    drop(eng);
+    let best = res.best_move?;
+    if !state.position.is_legal_move(best) {
+        diag_info_string("finalize_rescue_skip=illegal_move");
+        return None;
+    }
+    let mut pv = res.stats.pv.clone();
+    if pv.is_empty() {
+        pv.push(best);
+    }
+    if pv.len() < min_len {
+        diag_info_string("finalize_rescue_skip=pv_short");
+        return None;
+    }
+    Some(FinalBest {
+        best_move: Some(best),
+        pv,
+        source: FinalBestSource::Committed,
+    })
+}
+
 fn finalize_sanity_check(
     state: &mut EngineState,
     stop_meta: &StopMeta,
@@ -1496,6 +1575,13 @@ pub fn finalize_and_send(
             eng.choose_final_bestmove(&state.position, committed.as_ref())
         }
     };
+    ensure_minimum_final_pv(
+        state,
+        &mut final_best,
+        state.opts.finalize_min_pv_len.max(1),
+        state.opts.finalize_rescue_max_ms,
+        label,
+    );
 
     // Mate gating (YO流): Lower/Upper の mate距離では確定扱いしない。安定条件不足も抑止。
     let mut mate_gate_blocked = false;

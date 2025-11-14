@@ -89,6 +89,12 @@ pub fn capture_futility_enabled() -> bool {
     capture_fut_atomic().load(Ordering::Relaxed) == CAPTURE_FUT_ON
 }
 
+#[inline]
+pub fn set_capture_futility_enabled(on: bool) {
+    capture_fut_atomic()
+        .store(if on { CAPTURE_FUT_ON } else { CAPTURE_FUT_OFF }, Ordering::Relaxed);
+}
+
 fn capture_fut_scale_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
@@ -103,6 +109,12 @@ fn capture_fut_scale_atomic() -> &'static AtomicI32 {
 #[inline]
 pub fn capture_futility_scale_pct() -> i32 {
     capture_fut_scale_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_capture_futility_scale_pct(pct: i32) {
+    let v = pct.clamp(25, 150);
+    capture_fut_scale_atomic().store(v, Ordering::Relaxed);
 }
 
 // --- NMP verify ---
@@ -123,6 +135,11 @@ pub fn nmp_verify_enabled() -> bool {
     nmp_verify_enabled_atomic().load(Ordering::Relaxed)
 }
 
+#[inline]
+pub fn set_nmp_verify_enabled(on: bool) {
+    nmp_verify_enabled_atomic().store(on, Ordering::Relaxed);
+}
+
 fn nmp_verify_min_depth_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
     CELL.get_or_init(|| {
@@ -137,6 +154,96 @@ fn nmp_verify_min_depth_atomic() -> &'static AtomicI32 {
 #[inline]
 pub fn nmp_verify_min_depth() -> i32 {
     nmp_verify_min_depth_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_nmp_verify_min_depth(depth: i32) {
+    let d = depth.clamp(2, 64);
+    nmp_verify_min_depth_atomic().store(d, Ordering::Relaxed);
+}
+
+// --- Singular Extension (env-initialized, USI-overridable) ---
+fn singular_enabled_atomic() -> &'static AtomicBool {
+    static CELL: OnceLock<AtomicBool> = OnceLock::new();
+    CELL.get_or_init(|| {
+        AtomicBool::new(matches!(
+            crate::util::env_var("SHOGI_SINGULAR_ENABLE").as_deref(),
+            Some("1" | "true" | "on")
+        ))
+    })
+}
+
+#[inline]
+pub fn singular_enabled() -> bool {
+    singular_enabled_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_enabled(on: bool) {
+    singular_enabled_atomic().store(on, Ordering::Relaxed);
+}
+
+fn singular_min_depth_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = crate::util::env_var("SHOGI_SINGULAR_MIN_DEPTH")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(6)
+            .clamp(2, 64);
+        AtomicI32::new(v)
+    })
+}
+
+#[inline]
+pub fn singular_min_depth() -> i32 {
+    singular_min_depth_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_min_depth(d: i32) {
+    singular_min_depth_atomic().store(d.clamp(2, 64), Ordering::Relaxed);
+}
+
+fn singular_margin_base_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = crate::util::env_var("SHOGI_SINGULAR_MARGIN_BASE")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(56)
+            .clamp(0, 512);
+        AtomicI32::new(v)
+    })
+}
+
+#[inline]
+pub fn singular_margin_base() -> i32 {
+    singular_margin_base_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_margin_base(v: i32) {
+    singular_margin_base_atomic().store(v.clamp(0, 512), Ordering::Relaxed);
+}
+
+fn singular_margin_scale_pct_atomic() -> &'static AtomicI32 {
+    static CELL: OnceLock<AtomicI32> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let v = crate::util::env_var("SHOGI_SINGULAR_MARGIN_SCALE_PCT")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(70)
+            .clamp(10, 300);
+        AtomicI32::new(v)
+    })
+}
+
+#[inline]
+pub fn singular_margin_scale_pct() -> i32 {
+    singular_margin_scale_pct_atomic().load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_singular_margin_scale_pct(v: i32) {
+    singular_margin_scale_pct_atomic().store(v.clamp(10, 300), Ordering::Relaxed);
 }
 
 // --- Helper Aspiration (mode/delta) ---

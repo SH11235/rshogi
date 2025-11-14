@@ -8,9 +8,9 @@
 pub const LMR_K_COEFF: f32 = 1.7; // 既定: r = floor(ln(depth)*ln(moveno)/LMR_K_COEFF)
 
 // LMP (late quiet skip) thresholds per depth (depth<=3 only)
-pub const LMP_LIMIT_D1: usize = 6;
-pub const LMP_LIMIT_D2: usize = 12;
-pub const LMP_LIMIT_D3: usize = 18;
+pub const LMP_LIMIT_D1: usize = 8;
+pub const LMP_LIMIT_D2: usize = 14;
+pub const LMP_LIMIT_D3: usize = 20;
 
 // History Pruning threshold (skip quiet if history < HP_THRESHOLD at shallow depth)
 pub const HP_THRESHOLD: i32 = -2000;
@@ -60,9 +60,10 @@ pub const ROOT_MULTIPV_BONUS_2: i32 = 25_000;
 // Root Beam（浅探索→狭窓→フル窓）の既定チューニング
 pub const ROOT_BEAM_REDUCTION: i32 = 1; // shallow = (d-1)-reduction
 pub const ROOT_BEAM_MIN_DEPTH: i32 = 6; // ビーム適用の最小深さ
-pub const ROOT_BEAM_MARGIN_CP: i32 = 140; // α近傍判定の閾値
+pub const ROOT_BEAM_MARGIN_CP: i32 = 220; // α近傍判定の閾値（140から安全側に拡張）
 pub const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48; // 狭窓幅（±delta）
-pub const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 16; // 狭窓結果からフル窓へ昇格するための閾値
+pub const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 36; // 狭窓結果からフル窓へ昇格するための閾値
+pub const ROOT_BEAM_SKIP_RETRY_LIMIT: usize = 2; // 連続skip許可回数
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -75,7 +76,7 @@ static RUNTIME_LMP_D3: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D3);
 static RUNTIME_HP_THRESHOLD: AtomicI32 = AtomicI32::new(HP_THRESHOLD);
 /// HP の深さ比例スケール（safeモード時のみ使用）。
 /// 例: history < -HP_DEPTH_SCALE * depth
-static RUNTIME_HP_DEPTH_SCALE: AtomicI32 = AtomicI32::new(4361);
+static RUNTIME_HP_DEPTH_SCALE: AtomicI32 = AtomicI32::new(3200);
 static RUNTIME_SBP_D1: AtomicI32 = AtomicI32::new(SBP_MARGIN_D1);
 static RUNTIME_SBP_D2: AtomicI32 = AtomicI32::new(SBP_MARGIN_D2);
 static RUNTIME_SBP_BASE: AtomicI32 = AtomicI32::new(SBP_MARGIN_BASE);
@@ -90,6 +91,7 @@ static RUNTIME_PROBCUT_D6P: AtomicI32 = AtomicI32::new(PROBCUT_MARGIN_D6P);
 static RUNTIME_ENABLE_NMP: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_IID: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_PROBCUT: AtomicBool = AtomicBool::new(true);
+static RUNTIME_ENABLE_LMR: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_STATIC_BETA: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_SBP_DYNAMIC: AtomicBool = AtomicBool::new(true);
 static RUNTIME_ENABLE_FUT_DYNAMIC: AtomicBool = AtomicBool::new(true);
@@ -112,13 +114,14 @@ static RUNTIME_QS_MARGIN_CAPTURE: AtomicI32 = AtomicI32::new(QS_MARGIN_CAPTURE);
 static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN);
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
-static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(4);
+static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(0);
 static RUNTIME_SAME_TO_EXTENSION: AtomicBool = AtomicBool::new(false);
 static RUNTIME_ROOT_BEAM_REDUCTION: AtomicI32 = AtomicI32::new(ROOT_BEAM_REDUCTION);
 static RUNTIME_ROOT_BEAM_MIN_DEPTH: AtomicI32 = AtomicI32::new(ROOT_BEAM_MIN_DEPTH);
 static RUNTIME_ROOT_BEAM_MARGIN_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_MARGIN_CP);
 static RUNTIME_ROOT_BEAM_NARROW_DELTA_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_NARROW_DELTA_CP);
 static RUNTIME_ROOT_BEAM_NARROW_PROMOTE_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_NARROW_PROMOTE_CP);
+static RUNTIME_ROOT_BEAM_SKIP_RETRY: AtomicUsize = AtomicUsize::new(ROOT_BEAM_SKIP_RETRY_LIMIT);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -133,6 +136,11 @@ pub fn lmr_k_coeff_for_depth(depth: i32) -> f32 {
         return base * shallow_lmr_factor();
     }
     base
+}
+
+#[inline]
+pub fn lmr_enabled() -> bool {
+    RUNTIME_ENABLE_LMR.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -365,6 +373,11 @@ pub fn root_beam_narrow_promote_cp() -> i32 {
 }
 
 #[inline]
+pub fn root_beam_skip_retry_limit() -> usize {
+    RUNTIME_ROOT_BEAM_SKIP_RETRY.load(Ordering::Relaxed).max(1)
+}
+
+#[inline]
 pub fn razor_enabled() -> bool {
     RUNTIME_RAZOR.load(Ordering::Relaxed)
 }
@@ -424,6 +437,9 @@ pub fn set_iid_enabled(b: bool) {
 pub fn set_probcut_enabled(b: bool) {
     RUNTIME_ENABLE_PROBCUT.store(b, Ordering::Relaxed);
 }
+pub fn set_lmr_enabled(b: bool) {
+    RUNTIME_ENABLE_LMR.store(b, Ordering::Relaxed);
+}
 pub fn set_static_beta_enabled(b: bool) {
     RUNTIME_ENABLE_STATIC_BETA.store(b, Ordering::Relaxed);
 }
@@ -481,6 +497,11 @@ pub fn set_root_beam_narrow_delta_cp(v: i32) {
 pub fn set_root_beam_narrow_promote_cp(v: i32) {
     let clamped = v.clamp(0, 2000);
     RUNTIME_ROOT_BEAM_NARROW_PROMOTE_CP.store(clamped, Ordering::Relaxed);
+}
+
+pub fn set_root_beam_skip_retry_limit(v: usize) {
+    let clamped = v.clamp(1, 8);
+    RUNTIME_ROOT_BEAM_SKIP_RETRY.store(clamped, Ordering::Relaxed);
 }
 
 pub fn set_sbp_base(v: i32) {
@@ -559,39 +580,54 @@ pub fn set_probcut_skip_verify_lt4(on: bool) {
     RUNTIME_PROBCUT_SKIP_VERIFY_LT4.store(on, Ordering::Relaxed);
 }
 
-// Shallow gating (d<=D) — optional runtime policy
+// Shallow gating (d<=D) — runtime-toggleable (defaults derive from env)
+fn default_shallow_gate_enabled() -> bool {
+    match crate::util::env_var("SEARCH_SHALLOW_GATE") {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "on" | "yes")
+        }
+        None => false,
+    }
+}
+
+fn default_shallow_gate_depth() -> i32 {
+    match crate::util::env_var("SEARCH_SHALLOW_GATE_DEPTH") {
+        Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 8)).unwrap_or(3),
+        None => 3,
+    }
+}
+
+static RUNTIME_SHALLOW_GATE: OnceLock<AtomicBool> = OnceLock::new();
+static RUNTIME_SHALLOW_GATE_DEPTH: OnceLock<AtomicI32> = OnceLock::new();
+
 #[inline]
 pub fn shallow_gate_enabled() -> bool {
-    #[cfg(test)]
-    {
-        match crate::util::env_var("SEARCH_SHALLOW_GATE") {
-            Some(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                matches!(v.as_str(), "1" | "true" | "on" | "yes")
-            }
-            None => false,
-        }
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: OnceLock<bool> = OnceLock::new();
-        *FLAG.get_or_init(|| match crate::util::env_var("SEARCH_SHALLOW_GATE") {
-            Some(v) => {
-                let v = v.trim().to_ascii_lowercase();
-                matches!(v.as_str(), "1" | "true" | "on" | "yes")
-            }
-            None => false,
-        })
-    }
+    RUNTIME_SHALLOW_GATE
+        .get_or_init(|| AtomicBool::new(default_shallow_gate_enabled()))
+        .load(Ordering::Relaxed)
 }
 
 #[inline]
 pub fn shallow_gate_depth() -> i32 {
-    static VAL: OnceLock<i32> = OnceLock::new();
-    *VAL.get_or_init(|| match crate::util::env_var("SEARCH_SHALLOW_GATE_DEPTH") {
-        Some(v) => v.parse::<i32>().ok().map(|x| x.clamp(1, 8)).unwrap_or(3),
-        None => 3,
-    })
+    RUNTIME_SHALLOW_GATE_DEPTH
+        .get_or_init(|| AtomicI32::new(default_shallow_gate_depth()))
+        .load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_shallow_gate_enabled(on: bool) {
+    RUNTIME_SHALLOW_GATE
+        .get_or_init(|| AtomicBool::new(default_shallow_gate_enabled()))
+        .store(on, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_shallow_gate_depth(v: i32) {
+    let clamped = v.clamp(1, 8);
+    RUNTIME_SHALLOW_GATE_DEPTH
+        .get_or_init(|| AtomicI32::new(default_shallow_gate_depth()))
+        .store(clamped, Ordering::Relaxed);
 }
 
 #[inline]

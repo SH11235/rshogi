@@ -66,6 +66,19 @@ fn ln_moveno(moveno: usize) -> f32 {
     }
 }
 
+#[inline]
+fn king_quiet_opening_penalty_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| match crate::util::env_var("SHOGI_KING_QUIET_PENALTY") {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            // allow opt-out by explicit false/0/off
+            !(v == "0" || v == "false" || v == "off" || v == "no")
+        }
+        None => true,
+    })
+}
+
 #[derive(Clone, Default)]
 pub struct Heuristics {
     pub(crate) history: ButterflyHistory,
@@ -157,6 +170,9 @@ pub(crate) struct LateMoveReductionParams<'stack> {
 }
 
 pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_>) -> i32 {
+    if !dynp::lmr_enabled() {
+        return 0;
+    }
     if params.depth < 3 || params.moveno < 3 || !params.is_quiet || params.is_good_capture {
         return 0;
     }
@@ -253,6 +269,16 @@ pub(crate) fn stat_score(
     let mut score = heur.history.get(stm, mv);
     if let Some(curr_piece) = infer_piece_type(pos, mv, true) {
         score += heur.pawn_history.get(stm, curr_piece, mv.to());
+        // YO寄せ: 序盤における玉の静止手（小手先の玉移動）をわずかに後回しにする。
+        // 評価関数がMaterialの場合に中立になりやすく、探索順で温存されがちなため、
+        // ごく小さなオーダリングペナルティを浅い手数帯のみ付与する（副作用を最小化）。
+        if curr_piece == PieceType::King && king_quiet_opening_penalty_enabled() {
+            const OPENING_PLY_LIMIT: u32 = 30; // 初期の30手（片側15手）程度を目安
+            const KING_QUIET_OPENING_PENALTY: i32 = 192; // 軽量なペナルティ（履歴スコアスケール内）
+            if (pos.ply as u32) <= OPENING_PLY_LIMIT {
+                score -= KING_QUIET_OPENING_PENALTY;
+            }
+        }
     }
     score += continuation_score(heur, pos, mv, prev_move);
     score += continuation_score(heur, pos, mv, prev2_move);

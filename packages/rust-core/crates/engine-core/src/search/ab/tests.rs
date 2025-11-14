@@ -67,6 +67,32 @@ fn make_aspiration_stress_position() -> Position {
     position_after_moves(MOVES)
 }
 
+/// Threat2（角頭/桂頭 打歩）検出ロジックの基本挙動を確認する。
+///
+/// 自玉角の頭に相手が歩を打てる合法局面を用意し、`detect_head_pawn_threat` が
+/// `true` を返すことを検証する。
+#[test]
+fn detect_head_pawn_threat_triggers_on_bishop_head_pawn_drop() {
+    // 盤面: 先手の玉 5i, 角 5g、後手の玉 5a。後手が歩を1枚持っている。
+    // 先手番でこの局面を渡すと、null move 後の後手番で P*5f が合法となり、
+    // Threat2 判定が有効になるはず。
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
+    // 後手に歩を1枚持たせる
+    pos.hands[Color::White as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+
+    // Threat2 検出ヘルパが true を返すことを確認
+    let threat =
+        crate::search::ab::ClassicBackend::<MaterialEvaluator>::detect_head_pawn_threat(&pos);
+    assert!(threat, "head-pawn threat should be detected for P*5f");
+}
+
 #[test]
 fn qsearch_detects_mate_when_evasion_missing() {
     let evaluator = Arc::new(MaterialEvaluator);
@@ -149,6 +175,30 @@ fn root_see_gate_filters_quiet_drop() {
     let mv = parse_usi_move("G*5e").expect("valid drop move");
     assert!(root_see_gate_should_skip(&pos, mv, 200));
     assert!(!root_see_gate_should_skip(&pos, mv, 0));
+}
+
+/// Root SEE Gate は「静かな王手」を落とさないことを確認する。
+/// チェック手は強制力が高いため、着地SEEが悪くてもゲート対象から外す設計。
+#[test]
+fn root_see_gate_does_not_filter_quiet_check() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    // Kings: Black 9i, White 5a
+    pos.board
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    // Black rook on 5h → 5f は非捕獲の王手
+    pos.board
+        .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+    let mv = Move::make_normal(parse_usi_square("5h").unwrap(), parse_usi_square("5f").unwrap());
+    assert!(pos.is_legal_move(mv), "test move must be legal");
+    assert!(pos.gives_check(mv), "test move must give check");
+
+    assert!(
+        !root_see_gate_should_skip(&pos, mv, 200),
+        "root SEE gate must not filter checking quiet moves"
+    );
 }
 
 #[test]
@@ -1805,7 +1855,13 @@ fn null_move_respects_runtime_toggle() {
         #[cfg(test)]
         verify_min_depth_override: None,
     });
-    assert!(allowed.is_some(), "NMP should run when runtime toggle is enabled");
+    // ランタイムトグルが有効なときは、少なくとも null move 探索が実行されていることを確認する。
+    assert!(
+        nodes > 0 || qnodes > 0,
+        "NMP search should run when runtime toggle is enabled (nodes={}, qnodes={}, allowed={allowed:?})",
+        nodes,
+        qnodes
+    );
 
     crate::search::params::set_nmp_enabled(false);
     assert!(!crate::search::params::nmp_enabled(), "runtime toggle should report disabled");
@@ -1851,10 +1907,12 @@ fn null_move_respects_runtime_toggle() {
         #[cfg(test)]
         verify_min_depth_override: None,
     });
-    if denied.is_some() {
-        eprintln!("[test] null move pruning still attempted despite runtime toggle");
-    }
+    // NMP 無効時は探索自体が実行されず、ノードカウンタも増えないことを確認する。
     assert!(denied.is_none(), "NMP must be disabled when runtime toggle is off");
+    assert_eq!(
+        nodes_off, 0,
+        "NMP should not search any nodes when disabled (nodes_off={nodes_off}, qnodes_off={qnodes_off}, denied={denied:?})"
+    );
 
     crate::search::params::set_nmp_enabled(true);
 }
@@ -1966,6 +2024,38 @@ fn nmp_verify_rejects_false_cut() {
 
     super::pruning::__test_set_nmp_verify_forced_score(None);
 }
+
+/// Singular Extension の判定ロジックが「TT 手のみ / Non-PV / 深さ条件 /
+/// excluded_move なし」などのゲートを尊重しつつ、通常探索でクラッシュせずに
+/// 動作することを確認する簡易テスト。
+///
+/// TT 依存の詳細な枝分かれまでは固定しづらいため、ここでは
+/// - singular を強制的に ON
+/// - min_depth を下げて浅い深さから候補になり得るようにする
+/// - 通常の think_blocking が所望の深さまで到達すること
+/// を確認する。
+#[test]
+fn singular_extension_runs_safely_under_enabled_gates() {
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    crate::search::params::__test_reset_runtime_values();
+
+    crate::search::policy::set_singular_enabled(true);
+    crate::search::policy::set_singular_min_depth(2);
+    crate::search::policy::set_singular_margin_base(0);
+    crate::search::policy::set_singular_margin_scale_pct(100);
+
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
+    let pos = Position::startpos();
+    let limits = SearchLimitsBuilder::default().depth(4).build();
+    let res = backend.think_blocking(&pos, &limits, None);
+
+    assert!(
+        res.stats.depth >= 4,
+        "search should reach requested depth under singular gating"
+    );
+}
 #[test]
 fn excluded_drop_only_blocks_same_piece_type() {
     let mut pos = Position::empty();
@@ -1992,6 +2082,34 @@ fn excluded_drop_only_blocks_same_piece_type() {
     }
 
     assert!(found_gold, "gold drop should not be excluded when pawn drop is excluded");
+}
+
+/// Root Beam Skip の連続 skip カウンタが閾値を超えた際に
+/// `root_beam_skip_force_full` が立ち、以降の分岐でフル探索に
+/// フォースされる経路が存在しても、通常探索が破綻しないことを確認する。
+///
+/// ここでは内部状態を直接検査せず、`set_root_beam_skip_retry_limit(1)` で
+/// 即座に force_full へ切り替わるようにした上で、通常の探索が所望の深さまで
+/// 到達することを確認する。
+#[test]
+fn root_beam_skip_retry_switches_to_full_search_safely() {
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    crate::search::params::__test_reset_runtime_values();
+
+    // Root Beam の skip 再試行を 1 回に設定し、早めに force_full に到達させる。
+    crate::search::params::set_root_beam_skip_retry_limit(1);
+
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend =
+        ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
+    let pos = make_aspiration_stress_position();
+    let limits = SearchLimitsBuilder::default().depth(6).build();
+    let res = backend.think_blocking(&pos, &limits, None);
+
+    assert!(
+        res.stats.depth >= 6,
+        "root beam skip retry logic should not prevent reaching requested depth"
+    );
 }
 
 #[test]

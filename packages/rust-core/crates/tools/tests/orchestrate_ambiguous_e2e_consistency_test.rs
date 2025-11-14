@@ -7,11 +7,15 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn write_pass1_jsonl(path: &PathBuf, n: usize) {
-    // Minimal JSONL with sfen + best2_gap_cp to satisfy extractor
-    // Use distinct SFENs to avoid dedup collapsing in merge
+    // Minimal JSONL with sfen + best2_gap_cp to satisfy extractor。
+    // 盤上が完全空だと Zobrist hash が 0 になり TT 側の debug_assert
+    // （hash!=0 前提）に引っかかるため、王だけを配置した簡単な合法局面を使う。
+    // また、マージ経路での重複排除を避けるため SFEN 文字列は手数だけ変えて distinct にする。
     let mut s = String::new();
     for i in 0..n {
-        let rec = format!("{{\"sfen\":\"9/9/9/9/9/9/9/9/9 b - {}\",\"best2_gap_cp\":5}}\n", i + 1);
+        // 両玉のみのシンプルな局面（4k4/9/.../4K4）
+        let rec =
+            format!("{{\"sfen\":\"4k4/9/9/9/9/9/9/9/4K4 b - {}\",\"best2_gap_cp\":5}}\n", i + 1);
         s.push_str(&rec);
     }
     fs::write(path, s).expect("write pass1");

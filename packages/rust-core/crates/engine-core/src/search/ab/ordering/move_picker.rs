@@ -2,6 +2,7 @@ use smallvec::SmallVec;
 
 use super::Heuristics;
 use crate::movegen::MoveGenerator;
+use crate::search::config;
 use crate::search::params::{
     capture_history_weight, continuation_history_weight, quiet_history_weight, QS_PROMOTE_BONUS,
 };
@@ -535,6 +536,16 @@ impl<'a> MovePicker<'a> {
             }
             self.diag_guard(mv);
             let mut key = 1_000_000_i64 + (h as i64) * (quiet_weight as i64);
+            // Promote preference for quiet moves（駒種依存・YO寄せ）
+            if mv.is_promote() {
+                if let Some(pt) = attacker_piece_type(self.pos, mv) {
+                    let gain_cp = pt.promotion_gain() as i64; // cp差（R/Bは大、L/N/Sは小）
+                    if gain_cp > 0 {
+                        let bias = config::promote_bias_cp().clamp(0, 1000) as i64; // スケール係数（USI）
+                        key += gain_cp * bias; // 例: 600cp*20 => +12,000
+                    }
+                }
+            }
             if let Some(prev) = self.history_prev_move {
                 if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
                     if counter.equals_without_piece_type(&mv) {
@@ -586,6 +597,15 @@ impl<'a> MovePicker<'a> {
             }
             self.diag_guard(mv);
             let mut key = 1_000_000_i64 + (h as i64) * (quiet_weight as i64);
+            if mv.is_promote() {
+                if let Some(pt) = attacker_piece_type(self.pos, mv) {
+                    let gain_cp = pt.promotion_gain() as i64;
+                    if gain_cp > 0 {
+                        let bias = config::promote_bias_cp().clamp(0, 1000) as i64;
+                        key += gain_cp * bias;
+                    }
+                }
+            }
             if let Some(prev) = self.history_prev_move {
                 if let Some(counter) = heur.counter.get(self.pos.side_to_move, prev) {
                     if counter.equals_without_piece_type(&mv) {

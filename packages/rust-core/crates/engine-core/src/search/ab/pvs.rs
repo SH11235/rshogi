@@ -13,9 +13,11 @@ use super::pruning::{MaybeIidParams, NullMovePruneParams, ProbcutParams};
 use crate::movegen::MoveGenerator;
 use crate::search::policy::{
     abdada_enabled, capture_futility_enabled, capture_futility_scale_pct, quiet_see_guard_enabled,
+    singular_enabled, singular_margin_base, singular_margin_scale_pct, singular_min_depth,
     tt_suppress_below_depth,
 };
 use crate::search::types::NodeType;
+use crate::shogi::board::{Color, PieceType, Square};
 use crate::shogi::piece_constants::SEE_PIECE_VALUES;
 use std::sync::OnceLock;
 
@@ -54,7 +56,9 @@ pub(crate) fn quiet_see_guard_should_skip(
         return false;
     }
     let margin = QUIET_SEE_GUARD_CP_SCALE * d * d;
-    !pos.see_ge(mv, -margin)
+    // Use landing SEE (XSEE) for quiet non-captures to measure destination safety
+    // and reduce late quiets that drop material.
+    pos.see_landing_after_move(mv, -margin) < -margin
 }
 
 fn capture_fut_margin(depth: i32) -> i32 {
@@ -94,7 +98,12 @@ pub(crate) fn capture_see_guard_should_skip(
         return false;
     }
     let margin = capture_see_guard_margin(depth);
-    !pos.see_ge(mv, -margin)
+    // 非捕獲のチェックは着地SEE（XSEE）で評価し、明確に不利ならスキップ
+    if is_capture {
+        !pos.see_ge(mv, -margin)
+    } else {
+        pos.see_landing_after_move(mv, -margin) < -margin
+    }
 }
 
 pub(crate) struct CaptureFutilityArgs {
@@ -282,6 +291,77 @@ pub(crate) struct ABArgs<'a> {
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
+    /// 浅層用の軽量 Threat2 検出
+    ///
+    /// 直前が非チェックで、次手に相手が「角頭/桂頭に歩を打てる」場合を
+    /// 危険局面として検知し、HP/LMP/FUT/LMR の静止刈りを弱めるために使用する。
+    /// コストを抑えるため、対象は自玉側の角・桂のみ、判定は 1ply 先の
+    /// 合法性（null move → is_legal_move(drop)）で最小限に留める。
+    #[inline]
+    pub(crate) fn detect_head_pawn_threat(pos: &Position) -> bool {
+        // チェック中は通常の回避生成に委ねる
+        if pos.is_in_check() {
+            return false;
+        }
+        let us = pos.side_to_move;
+        let them = us.opposite();
+        // 手駒に歩が無ければ不成立
+        let Some(pawn_hand_idx) = PieceType::Pawn.hand_index() else {
+            return false;
+        };
+        if pos.hands[them as usize][pawn_hand_idx] == 0 {
+            return false;
+        }
+        // ヘッド（1マス前）の算出ヘルパ
+        let head_of = |sq: Square, side: Color| -> Option<Square> {
+            let f = sq.file();
+            let r = sq.rank();
+            match side {
+                Color::Black => {
+                    if r > 0 {
+                        Some(Square::new(f, r - 1))
+                    } else {
+                        None
+                    }
+                }
+                Color::White => {
+                    if r < 8 {
+                        Some(Square::new(f, r + 1))
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        // 相手手番にして合法な P*head があるか（角頭/桂頭のみを見る）
+        let mut opp = pos.clone();
+        let _undo = opp.do_null_move();
+        // 角
+        let bishops = pos.board.pieces_of_type_and_color(PieceType::Bishop, us);
+        for sq in bishops {
+            if let Some(hd) = head_of(sq, us) {
+                if pos.board.piece_on(hd).is_none() {
+                    let mv = crate::shogi::Move::drop(PieceType::Pawn, hd);
+                    if opp.is_legal_move(mv) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // 桂
+        let knights = pos.board.pieces_of_type_and_color(PieceType::Knight, us);
+        for sq in knights {
+            if let Some(hd) = head_of(sq, us) {
+                if pos.board.piece_on(hd).is_none() {
+                    let mv = crate::shogi::Move::drop(PieceType::Pawn, hd);
+                    if opp.is_legal_move(mv) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
     #[inline]
     fn gating_enabled() -> bool {
         static FLAG: OnceLock<bool> = OnceLock::new();
@@ -336,6 +416,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             return (eval, None);
         }
         ctx.tick(ply);
+        // Threat2（角頭/桂頭 打歩）の簡易検出（浅層のみ）
+        // 将棋特有の“頭に歩”で大駒が取られる筋を見逃さないため、
+        // d<=4 で検出された場合は静止刈りを弱める。
+        let threat_head_pawn = depth <= 4 && Self::detect_head_pawn_threat(pos);
         if depth <= 0 {
             let mut qbudget = super::qsearch::initial_quiet_check_budget(ctx);
             let prev_move = if ply > 0 {
@@ -433,6 +517,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         let mut tt_hint: Option<crate::shogi::Move> = None;
+        let mut tt_value_for_singular: Option<i32> = None;
         let mut tt_depth_ok = false;
         let pos_hash = pos.zobrist_hash();
         // --- ABDADA (in-progress) 簡易版：重複探索の緩和（Non-PV/非王手/十分深い）
@@ -522,6 +607,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                     _ => {
                         tt_hint = entry.get_move();
+                        tt_value_for_singular = Some(score);
                     }
                 }
             }
@@ -610,7 +696,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let is_capture = mv.is_capture_hint();
             let is_quiet = !is_capture && !gives_check;
             let need_see = is_capture || mv.is_drop() || is_quiet;
-            let see = if need_see { pos.see(mv) } else { 0 };
+            let see = if need_see {
+                if is_quiet {
+                    // For quiet non-captures, evaluate landing safety (XSEE)
+                    pos.see_landing_after_move(mv, 0)
+                } else {
+                    pos.see(mv)
+                }
+            } else {
+                0
+            };
             let is_good_capture = is_capture && see >= 0;
             let drop_bad = mv.is_drop() && see < 0;
             let quiet_bad = is_quiet && see < 0;
@@ -633,7 +728,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 hp_thresh = hp_thresh.clamp(i16::MIN as i32, i16::MAX as i32);
                 // 遅手のみHP対象（move_no>3）。TT手/カウンター/キラー/チェック静止は除外。
                 let is_late = moveno > 3;
-                if is_late
+                if !threat_head_pawn
+                    && is_late
                     && !gives_check
                     && h < hp_thresh
                     && !stack[ply as usize].is_killer(mv)
@@ -653,7 +749,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if depth <= 3 && is_quiet && !stack[ply as usize].prev_risky {
+            if depth <= 3 && is_quiet && !stack[ply as usize].prev_risky && !threat_head_pawn {
                 let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
@@ -666,6 +762,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 && is_quiet
                 && !pos.is_in_check()
                 && !stack[ply as usize].prev_risky
+                && !threat_head_pawn
             {
                 use crate::search::constants::MATE_SCORE;
                 if alpha.abs() >= MATE_SCORE - 100 { /* mate帯近傍では futility 無効 */ }
@@ -736,6 +833,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         reduction = 0;
                     } else if same_to && is_quiet {
                         // 3) same-to（同一地点応手）: 静止の即応は1段だけ減衰を緩める
+                        reduction = (reduction - 1).max(0);
+                    } else if is_quiet && threat_head_pawn {
+                        // 4) 頭に歩の脅威下: 静止手の減深を1段弱める
                         reduction = (reduction - 1).max(0);
                     }
                 }
@@ -845,6 +945,87 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 )
             {
                 continue;
+            }
+
+            // Singular Extension (Non-PV, TT手のみ、控えめ +1ply)
+            if singular_enabled()
+                && !is_pv
+                && !stack[ply as usize].in_check
+                && stack[ply as usize].excluded_move.is_none()
+                && !stack[ply as usize].prev_risky
+                && next_depth >= singular_min_depth()
+                && tt_depth_ok
+                && tt_hint.is_some_and(|h| h == mv)
+            {
+                if let Some(ttv) = tt_value_for_singular {
+                    let base = singular_margin_base();
+                    let scale = singular_margin_scale_pct();
+                    let margin = (base + (79 * depth) / 58) * scale / 100;
+                    let singular_beta = ttv - margin;
+                    let verify_depth = (next_depth / 2).max(1);
+                    // Exclude TT move in this node and run zero-window verify
+                    let saved_ex = stack[ply as usize].excluded_move;
+                    if let Some(st) = stack.get_mut(ply as usize) {
+                        st.excluded_move = Some(mv);
+                    }
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        pos,
+                        "singular_probe",
+                        Some(format!(
+                            "depth={} sd={} beta={} ttv={} marg={}",
+                            depth, verify_depth, singular_beta, ttv, margin
+                        )),
+                    );
+                    let sc_verify = {
+                        let (sc, _) = self.alphabeta(
+                            ABArgs {
+                                pos,
+                                depth: verify_depth,
+                                alpha: singular_beta - 1,
+                                beta: singular_beta,
+                                ply,
+                                is_pv: false,
+                                stack: &mut *stack,
+                                heur: &mut *heur,
+                                tt_hits: &mut *tt_hits,
+                                beta_cuts: &mut *beta_cuts,
+                                lmr_counter: &mut *lmr_counter,
+                                lmr_blocked_in_check: None,
+                                lmr_blocked_recapture: None,
+                                evasion_sparsity_ext: None,
+                            },
+                            ctx,
+                        );
+                        sc
+                    };
+                    if let Some(st) = stack.get_mut(ply as usize) {
+                        st.excluded_move = saved_ex;
+                    }
+                    if sc_verify < singular_beta {
+                        // singular 確定 → +1ply（親 depth を超えない）
+                        next_depth = (next_depth + 1).min(depth);
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        super::diagnostics::record_tag(
+                            pos,
+                            "singular_hit",
+                            Some(format!(
+                                "sd={} beta={} v={}",
+                                verify_depth, singular_beta, sc_verify
+                            )),
+                        );
+                    } else {
+                        #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                        super::diagnostics::record_tag(
+                            pos,
+                            "singular_miss",
+                            Some(format!(
+                                "sd={} beta={} v={}",
+                                verify_depth, singular_beta, sc_verify
+                            )),
+                        );
+                    }
+                }
             }
             #[cfg(any(debug_assertions, feature = "diagnostics"))]
             diagnostics::record_move_pick(diagnostics::MovePickContext {
@@ -968,32 +1149,41 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if is_quiet {
                     if !drop_bad {
                         stack[ply as usize].update_killers(mv);
-                        heur.history.update_good(pos.side_to_move, mv, depth);
-                        if let Some(curr_piece) = mv.piece_type() {
-                            heur.pawn_history.update_good(
-                                pos.side_to_move,
-                                curr_piece,
-                                mv.to(),
-                                depth,
-                            );
-                        }
-                        if ply > 0 {
-                            if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
-                                heur.counter.update(pos.side_to_move, prev_mv, mv);
-                                if let (Some(prev_piece), Some(curr_piece)) =
-                                    (prev_mv.piece_type(), mv.piece_type())
-                                {
-                                    let key = crate::search::history::ContinuationKey::new(
-                                        pos.side_to_move,
-                                        prev_piece as usize,
-                                        prev_mv.to(),
-                                        prev_mv.is_drop(),
-                                        curr_piece as usize,
-                                        mv.to(),
-                                        mv.is_drop(),
-                                    );
-                                    heur.continuation.update_good(key, depth);
+                        let is_quiet_king =
+                            mv.piece_type().is_some_and(|pt| pt == crate::PieceType::King);
+                        let skip_history =
+                            is_quiet_king && (pos.ply as u32) <= KING_QUIET_HISTORY_PLY_LIMIT;
+                        if !skip_history {
+                            heur.history.update_good(pos.side_to_move, mv, depth);
+                            if let Some(curr_piece) = mv.piece_type() {
+                                heur.pawn_history.update_good(
+                                    pos.side_to_move,
+                                    curr_piece,
+                                    mv.to(),
+                                    depth,
+                                );
+                            }
+                            if ply > 0 {
+                                if let Some(prev_mv) = stack[(ply - 1) as usize].current_move {
+                                    heur.counter.update(pos.side_to_move, prev_mv, mv);
+                                    if let (Some(prev_piece), Some(curr_piece)) =
+                                        (prev_mv.piece_type(), mv.piece_type())
+                                    {
+                                        let key = crate::search::history::ContinuationKey::new(
+                                            pos.side_to_move,
+                                            prev_piece as usize,
+                                            prev_mv.to(),
+                                            prev_mv.is_drop(),
+                                            curr_piece as usize,
+                                            mv.to(),
+                                            mv.is_drop(),
+                                        );
+                                        heur.continuation.update_good(key, depth);
+                                    }
                                 }
+                            }
+                            if gives_check && see >= QUIET_CHECK_SEE_MARGIN {
+                                heur.history.update_good(pos.side_to_move, mv, depth);
                             }
                         }
                     }
@@ -1173,3 +1363,5 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     }
 }
 // abdada_enabled(): see crate::search::policy
+const KING_QUIET_HISTORY_PLY_LIMIT: u32 = 30;
+const QUIET_CHECK_SEE_MARGIN: i32 = -75;
