@@ -177,6 +177,30 @@ fn root_see_gate_filters_quiet_drop() {
     assert!(!root_see_gate_should_skip(&pos, mv, 0));
 }
 
+/// Root SEE Gate は「静かな王手」を落とさないことを確認する。
+/// チェック手は強制力が高いため、着地SEEが悪くてもゲート対象から外す設計。
+#[test]
+fn root_see_gate_does_not_filter_quiet_check() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    // Kings: Black 9i, White 5a
+    pos.board
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    // Black rook on 5h → 5f は非捕獲の王手
+    pos.board
+        .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+    let mv = Move::make_normal(parse_usi_square("5h").unwrap(), parse_usi_square("5f").unwrap());
+    assert!(pos.is_legal_move(mv), "test move must be legal");
+    assert!(pos.gives_check(mv), "test move must give check");
+
+    assert!(
+        !root_see_gate_should_skip(&pos, mv, 200),
+        "root SEE gate must not filter checking quiet moves"
+    );
+}
+
 #[test]
 fn capture_see_guard_skips_bad_capture() {
     let mut pos = Position::empty();
