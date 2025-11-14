@@ -60,14 +60,12 @@ parking_lot = "0.12"
 crossbeam = "0.8"
 crossbeam-utils = "0.8"
 crossbeam-deque = "0.8"
-chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true }
 thread_local = "1.1"
 thiserror = "1"
 
 [dev-dependencies]
 criterion = { version = "0.6", features = ["html_reports"] }
-serde_yaml = { workspace = true }
 proptest = "1"
 
 [[bench]]

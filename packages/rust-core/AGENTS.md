@@ -10,9 +10,7 @@
 ### 構成
 - `crates/engine-core`: 探索・評価・時間管理・USI 型。Criterion ベンチやユニットテストが併設。
 - `crates/engine-usi`: USI CLI バイナリ（薄いエントリポイント）。
-- `crates/engine-wasm`: WebAssembly ブリッジ（wasm-bindgen, wasm-pack）。
 - `crates/tools`: ベンチ/ユーティリティバイナリ（TT テスト、NNUE 解析など）。
-- `crates/webrtc-p2p`: WebRTC P2P 伝送層。
 - `docs/`: 設計/NNUE/パフォーマンス/USI ビルド手順。`docs/nnue-*`, `docs/performance/*`, `docs/usi-engine-build.md` を参照。
 - `scripts/analysis|bench|gauntlet|nnue|repro|utils`: エンジン比較、NNUE 評価、バグ再現用スクリプト群。
 - `runs/`, `data/`, `converted_openings/`, `logs/`: ガントレット、開幕集、学習ログなどの成果物置き場。
@@ -23,7 +21,6 @@
 - テスト: `cargo test`, `cargo test -p engine-core`, 任意モジュールは `cargo test path::to::case -- --nocapture`。
 - ベンチ: `cargo bench -p engine-core`（結果は `target/criterion/`）。
 - Lint/Format: `cargo fmt --all`, `cargo clippy --workspace -- -D warnings`（CI 準拠）。
-- WASM: `wasm-pack build crates/engine-wasm --release --target web|nodejs`。ブラウザテストは `wasm-pack test --chrome --headless`。
 - USI ログ解析の定石（seldepth や評価揺れの確認手順）:
   1. `rg(){ command rg "$@" || true; }; export -f rg` で `rg` が空振りでも落ちないようラッパを用意。
   2. `bash scripts/analysis/analyze_usi_logs.sh <log>` を流し、`max_depth`/`max_seldepth`/PV 切替回数/締切ヒットを CSV で取得する。
@@ -47,7 +44,6 @@
 ### テスト指針
 - ユニットテストは各モジュール内の `mod tests` または `src/.../tests/*.rs` に配置。
 - Criterion ベンチは `[[bench]]` に登録し、`cargo bench` で回す。
-- WASM 専用検証は `crates/engine-wasm` + `wasm-pack test`。
 - Focused Test Naming（zstd 系）: `test_zstd_*` プレフィックスを付け、`cargo test --release -p tools --features zstd -- test_zstd` で抽出可能に。zstd 系テストは常に `--features zstd` を付けて実行。
 
 ### NNUE Training Ops — Quick SOP（必読）
