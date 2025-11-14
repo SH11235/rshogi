@@ -1,8 +1,8 @@
 {
-  "name": "low_history",
-  "params": {
-    "QuietHistoryWeight": 1,
-    "ContinuationHistoryWeight": 1,
-    "CaptureHistoryWeight": 1
-  }
+    "name": "low_history",
+    "params": {
+        "QuietHistoryWeight": 1,
+        "ContinuationHistoryWeight": 1,
+        "CaptureHistoryWeight": 1
+    }
 }

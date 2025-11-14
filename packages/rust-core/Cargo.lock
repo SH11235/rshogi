@@ -325,7 +325,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -736,7 +735,6 @@ name = "engine-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "criterion",
  "crossbeam",
@@ -752,7 +750,6 @@ dependencies = [
  "rand_xoshiro",
  "serde",
  "serde_json",
- "serde_yaml",
  "smallvec",
  "thiserror 1.0.69",
  "thread_local",
@@ -769,7 +766,6 @@ dependencies = [
  "log",
  "regex",
  "serde",
- "serde_json",
  "smallvec",
 ]
 
@@ -2637,7 +2633,6 @@ dependencies = [
  "bytemuck",
  "chrono",
  "clap",
- "criterion",
  "csv",
  "ctrlc",
  "engine-core",

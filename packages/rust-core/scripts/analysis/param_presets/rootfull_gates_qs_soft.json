@@ -1,14 +1,14 @@
 {
-  "name": "rootfull_gates_qs_soft",
-  "params": {
-    "RootBeamForceFullCount": 4,
-    "RootSeeGate.XSEE": 0,
-    "QS_BadCaptureMin": 500,
-    "QS_MarginCapture": 200,
-    "QS_CheckPruneMargin": 200,
-    "QS.CheckSEEMargin": 100
-  },
-  "env": {
-    "SHOGI_QUIET_SEE_GUARD": "0"
-  }
+    "name": "rootfull_gates_qs_soft",
+    "params": {
+        "RootBeamForceFullCount": 4,
+        "RootSeeGate.XSEE": 0,
+        "QS_BadCaptureMin": 500,
+        "QS_MarginCapture": 200,
+        "QS_CheckPruneMargin": 200,
+        "QS.CheckSEEMargin": 100
+    },
+    "env": {
+        "SHOGI_QUIET_SEE_GUARD": "0"
+    }
 }
