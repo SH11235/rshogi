@@ -33,6 +33,9 @@ use std::time::{Duration, Instant};
 
 /// Sticky-PV window: when remaining time <= this value (ms), avoid PV changes to unverified moves
 const STICKY_PV_WINDOW_MS: u64 = 400;
+/// Sticky-PV を適用する際に許容する評価値の改善幅（cp）。
+/// 新しいPV1のスコアがこれを大きく超えて改善している場合は、near-deadline でも切り替えを優先する。
+const STICKY_PV_MAX_IMPROVE_CP: i32 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -1932,7 +1935,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if changed {
                             cumulative_pv_changed = cumulative_pv_changed.saturating_add(1);
                         }
-                        // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先
+                        // Sticky-PV: near hard deadlineかつ未検証で切替なら、前反復のPVを優先。
+                        // ただし、新しいPV1のスコアが大幅に改善している場合（改善幅が閾値超え）は
+                        // Sticky を無効化し、素直に新しいPV1へ切り替える。
                         let mut adopt_mv = m;
                         let near_deadline = time_remaining_ms_for_sticky(t0, limits)
                             .is_some_and(|t_rem| t_rem <= STICKY_PV_WINDOW_MS);
@@ -1945,7 +1950,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 crate::usi::move_to_usi(&m)
                             ));
                         }
+                        let mut adopt_prev = false;
                         if changed && near_deadline {
+                            // prev_score は前反復の PV1 スコア（side-to-move 視点）。
+                            // 改善幅が小さい場合のみ Sticky-PV を適用し、大きく改善している場合は切り替える。
+                            let improve_cp = local_best.saturating_sub(prev_score);
+                            if improve_cp <= STICKY_PV_MAX_IMPROVE_CP {
+                                adopt_prev = true;
+                            }
+                        }
+                        if adopt_prev {
                             if let Some(prev_mv) = prev_best_move_for_iteration {
                                 adopt_mv = prev_mv;
                                 // keep previous score as hint center
