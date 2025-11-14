@@ -69,8 +69,11 @@ impl<T: Evaluator + ?Sized> Evaluator for std::sync::Arc<T> {
     }
 }
 
-/// Evaluate position from side to move perspective
-pub fn evaluate(pos: &Position) -> i32 {
+/// Apery 駒価値の純粋な物質評価（軽量ヒューリスティック無し）。
+///
+/// - 手番側視点のスコアを返す（正なら手番有利）。
+/// - 盤上の駒＋持ち駒のみを APERY_PIECE_VALUES/APERY_PROMOTED_PIECE_VALUES で集計する。
+fn evaluate_material_apery_only(pos: &Position) -> i32 {
     let us = pos.side_to_move;
     let them = us.opposite();
 
@@ -112,6 +115,17 @@ pub fn evaluate(pos: &Position) -> i32 {
 
         score += value * (our_hand - their_hand);
     }
+
+    score
+}
+
+/// Evaluate position from side to move perspective
+pub fn evaluate(pos: &Position) -> i32 {
+    // まず純粋な物質評価（Apery 駒価値＋持ち駒）を計算し、その上に軽量ヒューリスティックを積む。
+    let mut score = evaluate_material_apery_only(pos);
+
+    let us = pos.side_to_move;
+    let them = us.opposite();
 
     // --- Lightweight material-side heuristics (enabled for Material evaluator)
     // 1) Rook mobility (difference)
@@ -304,8 +318,9 @@ mod tests {
     #[test]
     fn test_evaluate_startpos_is_zero() {
         let pos = Position::startpos();
-        let evaluator = MaterialEvaluator;
-        assert_eq!(evaluator.evaluate(&pos), 0);
+        // 純粋な駒割りのみを検証するため、テンポや飛車利きなどの軽量項は含めない。
+        let score = evaluate_material_apery_only(&pos);
+        assert_eq!(score, 0);
     }
 
     #[test]
@@ -319,7 +334,8 @@ mod tests {
             Piece::new(PieceType::Bishop, Color::White),
         );
 
-        let score = MaterialEvaluator.evaluate(&pos);
+        // APERY 駒価値のみを検証（R=990, B=855）。
+        let score = evaluate_material_apery_only(&pos);
         // 990 (R) - 855 (B) = 135
         assert_eq!(score, 135);
     }
@@ -337,7 +353,8 @@ mod tests {
         tokin_white.promoted = true;
         pos.board.put_piece(parse_usi_square("5f").unwrap(), tokin_white);
 
-        let score = MaterialEvaluator.evaluate(&pos);
+        // 成り歩は双方とも 540（= 金相当）なので互いに打ち消し合うはず。
+        let score = evaluate_material_apery_only(&pos);
         assert_eq!(score, 0, "Tokin vs Tokin should cancel out");
     }
 
@@ -351,7 +368,8 @@ mod tests {
         pos.hands[Color::Black as usize][0] = 1; // Rook
         pos.hands[Color::White as usize][6] = 2; // Pawns
 
-        let score = MaterialEvaluator.evaluate(&pos);
+        // 盤上は対称なので 0、持ち駒だけで 990 - 2 * 90 = 810 となるはず。
+        let score = evaluate_material_apery_only(&pos);
         assert_eq!(score, 990 - 2 * 90);
     }
 }
