@@ -2,49 +2,27 @@
 
 [![codecov](https://codecov.io/gh/SH11235/shogi/branch/main/graph/badge.svg?flag=rust-core)](https://codecov.io/gh/SH11235/shogi)
 
-This workspace contains the Rust core engine and WebAssembly (WASM) modules for advanced Shogi features, including WebRTC communication, mate search, and opening book functionality.
+This workspace contains the Rust core engine and analysis / tooling stack for Shogi, including USI engine binaries and NNUE training utilities.
 
 ## Features
 
-- 🌐 WebRTC peer-to-peer communication for online play
-- 🔍 Mate search algorithm implementation
-- 📚 Opening book with binary format support
-- 🎯 High-performance position hashing and move encoding
 - 🤖 USI protocol engine with multiple search/evaluation modes
 - 🧠 NNUE evaluation function support
-- ⚡ Enhanced search with advanced pruning techniques
-- 📊 NNUE training tools for machine learning
+- ⚡ Enhanced search with advanced pruning and safety features
+- 📊 NNUE training / evaluation tools and pipelines
 
 ## Prerequisites
 
 - Rust toolchain (install from https://rustup.rs/)
-- wasm-pack (`cargo install wasm-pack`) — only required for WASM builds
 - cargo-tarpaulin (optional, for coverage reports): `cargo install cargo-tarpaulin`
 
 ## Project Structure
 
 ```
 crates/
-├── engine-core/             # Core engine implementation
-│   ├── search/             # Search algorithms (basic & enhanced)
-│   ├── evaluation/         # Evaluation functions (material & NNUE)
-│   └── time_management/    # Time control
-├── engine-usi/              # USI protocol command-line interface
-└── webrtc-p2p/             # WebRTC communication
-
-src/                         # Legacy WASM modules
-├── lib.rs                   # Main library entry point
-├── simple_webrtc.rs        # WebRTC implementation
-├── mate_search.rs          # Mate search algorithm
-├── opening_book/           # Opening book module
-│   ├── mod.rs             # Module exports
-│   ├── binary_converter.rs # Binary format conversion
-│   ├── data_structures.rs  # Core data types
-│   ├── move_encoder.rs     # Move encoding/decoding
-│   ├── position_filter.rs  # Position filtering logic
-│   ├── position_hasher.rs  # Position hashing
-│   └── sfen_parser.rs      # SFEN format parsing
-└── opening_book_reader.rs  # Opening book reader interface
+├── engine-core/   # Core engine implementation（探索・評価・時間管理など）
+├── engine-usi/    # USI protocol command-line interface
+└── tools/         # NNUE 学習・評価・ガントレット等のユーティリティ群
 ```
 
 ## Documentation
