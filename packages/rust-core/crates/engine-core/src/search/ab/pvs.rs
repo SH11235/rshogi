@@ -298,7 +298,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
     /// コストを抑えるため、対象は自玉側の角・桂のみ、判定は 1ply 先の
     /// 合法性（null move → is_legal_move(drop)）で最小限に留める。
     #[inline]
-    fn detect_head_pawn_threat(pos: &Position) -> bool {
+    pub(crate) fn detect_head_pawn_threat(pos: &Position) -> bool {
         // チェック中は通常の回避生成に委ねる
         if pos.is_in_check() {
             return false;

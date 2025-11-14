@@ -372,4 +372,98 @@ mod tests {
         let score = evaluate_material_apery_only(&pos);
         assert_eq!(score, 990 - 2 * 90);
     }
+
+    /// 飛車の機動力評価が「利きの多い側を優先する」向きに働くことを確認する。
+    #[test]
+    fn rook_mobility_bonus_prefers_more_mobility() {
+        // 既存ノブを退避し、飛車機動力以外の軽量項は 0 にしておく
+        let tempo_old = material_tempo_cp();
+        let mob_old = material_rook_mobility_cp();
+        let trap_old = material_rook_trapped_penalty_cp();
+        let king_pen_old = material_king_early_move_penalty_cp();
+
+        set_material_tempo_cp(0);
+        set_material_rook_trapped_penalty_cp(0);
+        set_material_king_early_move_penalty_cp(0);
+        set_material_rook_mobility_cp(10);
+
+        // 単純な局面: 自玉の飛車のみを配置し、敵側には飛車を置かない。
+        // Kings: 5i / 5a, Black rook: 5e
+        let mut pos = Position::empty();
+        place_kings(&mut pos);
+        pos.board
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+        pos.side_to_move = Color::Black;
+
+        // 純粋な駒割りとの差分として、飛車機動力項が正のボーナスになっていることを確認する。
+        let base = evaluate_material_apery_only(&pos);
+        let full = MaterialEvaluator.evaluate(&pos);
+        let mob = full - base;
+
+        assert!(
+            mob > 0,
+            "rook mobility term should give positive bonus when only our rook is present (mob={mob})"
+        );
+
+        // ノブを元に戻す
+        set_material_tempo_cp(tempo_old);
+        set_material_rook_mobility_cp(mob_old);
+        set_material_rook_trapped_penalty_cp(trap_old);
+        set_material_king_early_move_penalty_cp(king_pen_old);
+    }
+
+    /// 早期玉移動ペナルティが「自玉だけが初期位置から動いた場合」にマイナス、
+    /// 「相手玉だけが動いた場合」にプラスとして働くことを確認する。
+    #[test]
+    fn early_king_move_penalty_applies_symmetrically() {
+        let tempo_old = material_tempo_cp();
+        let mob_old = material_rook_mobility_cp();
+        let trap_old = material_rook_trapped_penalty_cp();
+        let king_pen_old = material_king_early_move_penalty_cp();
+        let king_max_old = material_king_early_move_max_ply();
+
+        set_material_tempo_cp(0);
+        set_material_rook_mobility_cp(0);
+        set_material_rook_trapped_penalty_cp(0);
+        set_material_king_early_move_penalty_cp(50);
+        set_material_king_early_move_max_ply(10);
+
+        // ベース: 初期局面（早期判定が効くように ply を 1 に揃える）
+        let mut base = Position::startpos();
+        base.ply = 1;
+        let base_eval = MaterialEvaluator.evaluate(&base);
+
+        // 自玉のみ動かした局面（先手 5i→4i に移動）
+        let mut pos_self_move = base.clone();
+        pos_self_move.board.remove_piece(parse_usi_square("5i").unwrap());
+        pos_self_move
+            .board
+            .put_piece(parse_usi_square("4i").unwrap(), Piece::new(PieceType::King, Color::Black));
+
+        let eval_self = MaterialEvaluator.evaluate(&pos_self_move);
+
+        // 相手玉のみ動かした局面（後手 5a→6a に移動）
+        let mut pos_opp_move = base.clone();
+        pos_opp_move.board.remove_piece(parse_usi_square("5a").unwrap());
+        pos_opp_move
+            .board
+            .put_piece(parse_usi_square("6a").unwrap(), Piece::new(PieceType::King, Color::White));
+        let eval_opp = MaterialEvaluator.evaluate(&pos_opp_move);
+
+        assert!(
+            eval_self < base_eval,
+            "early king move by side-to-move should be penalized (eval_self={eval_self}, base={base_eval})"
+        );
+        assert!(
+            eval_opp > base_eval,
+            "early king move by opponent should be rewarded (eval_opp={eval_opp}, base={base_eval})"
+        );
+
+        // ノブを元に戻す
+        set_material_tempo_cp(tempo_old);
+        set_material_rook_mobility_cp(mob_old);
+        set_material_rook_trapped_penalty_cp(trap_old);
+        set_material_king_early_move_penalty_cp(king_pen_old);
+        set_material_king_early_move_max_ply(king_max_old);
+    }
 }
