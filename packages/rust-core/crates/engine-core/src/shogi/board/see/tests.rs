@@ -3,7 +3,7 @@
 use crate::shogi::board::{Color, Piece, PieceType};
 use crate::shogi::moves::Move;
 use crate::shogi::position::Position;
-use crate::usi::parse_usi_square;
+use crate::usi::{parse_usi_move, parse_usi_square};
 
 #[test]
 fn test_see_handles_missing_from_piece_gracefully() {
@@ -484,6 +484,39 @@ fn test_see_promoted_pieces() {
     let expected = PieceType::Pawn.value() + PieceType::Rook.value() + PieceType::Bishop.value()
         - PieceType::Silver.value();
     assert_eq!(see_value, expected);
+}
+
+/// 対局ログ由来の問題局面を構築するヘルパ。
+/// `6f6d` を指す直前の局面を返す。
+fn problem_position_before_6f6d() -> Position {
+    const MOVES_BEFORE_6F6D: &[&str] = &[
+        "3g3f", "3c3d", "2h1h", "4a3b", "1h3h", "8c8d", "3f3e", "3d3e", "3h3e", "8d8e", "6i7h",
+        "7a7b", "3e3f", "5a4a", "3f5f", "3a4b", "4i4h", "4a3a", "5f3f", "4b3c", "3i2h", "4c4d",
+        "5i6h", "7b8c", "3f6f", "6a5b", "6f3f", "7c7d", "6h5i", "7d7e", "7g7f", "7e7f", "8h5e",
+        "8b9b", "3f7f", "P*7d", "8i7g", "5b4c", "7f6f", "8c7b", "7g8e", "7d7e",
+    ];
+
+    let mut pos = Position::startpos();
+    for usi in MOVES_BEFORE_6F6D {
+        let mv = parse_usi_move(usi).expect("valid usi move in sequence");
+        assert!(pos.is_legal_move(mv), "illegal move in sequence: {}", usi);
+        pos.do_move(mv);
+    }
+    pos
+}
+
+/// Quiet XSEE（着地点 SEE）が問題手 `6f6d` に対して十分大きなマイナスになることを検証する。
+/// これにより Root SEE Gate でタダ損級の静かな手をルートから除外できる。
+#[test]
+fn landing_see_for_6f6d_is_strongly_negative() {
+    let pos = problem_position_before_6f6d();
+    let mv_6f6d = parse_usi_move("6f6d").expect("valid usi move 6f6d");
+    assert!(pos.is_legal_move(mv_6f6d), "6f6d must be legal in problem position");
+
+    let xsee = pos.xsee_quiet_after_make(mv_6f6d);
+
+    // 歩4枚分相当の大きな損失として扱えることを要求する（-400cp以下）。
+    assert!(xsee <= -400, "XSEE(6f6d) should be strongly negative (<= -400cp), got {}", xsee);
 }
 
 /// SEE edge cases and complex scenarios

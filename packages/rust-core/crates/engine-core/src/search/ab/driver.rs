@@ -74,12 +74,12 @@ pub(crate) fn root_see_gate_should_skip(
     if mv.is_capture_hint() || root.gives_check(mv) {
         return false;
     }
-    // For quiet non-captures, use landing SEE (XSEE) so that
+    // For quiet non-captures, use dedicated quiet XSEE so that
     // moves that walk into a tactically lost square are rejected.
     let xsee = if mv.is_drop() {
         root.see(mv)
     } else {
-        root.see_landing_after_move(mv, 0)
+        root.xsee_quiet_after_make(mv)
     };
     xsee < -xsee_cp
 }
