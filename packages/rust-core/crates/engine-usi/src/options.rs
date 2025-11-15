@@ -2383,6 +2383,10 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("FinalizeSanity.AllowSEElt0Alt", &mut || {
             state.opts.finalize_allow_see_lt0_alt = false
         });
+        // ルートビーム: 上位2手までは必ずフル探索する
+        set_if_absent("SearchParams.RootBeamForceFullCount", &mut || {
+            engine_core::search::params::set_root_beam_force_full_count(2);
+        });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
         // ShallowGate: enable in common profile by default (YO寄せ; 浅層の過剰刈り抑制)
         engine_core::search::params::set_shallow_gate_enabled(true);
