@@ -36,6 +36,9 @@ const STICKY_PV_WINDOW_MS: u64 = 400;
 /// Sticky-PV を適用する際に許容する評価値の改善幅（cp）。
 /// 新しいPV1のスコアがこれを大きく超えて改善している場合は、near-deadline でも切り替えを優先する。
 const STICKY_PV_MAX_IMPROVE_CP: i32 = 200;
+/// Root での捕獲手に対する SEE ゲートの閾値（cp）。
+/// see(mv) がこの値よりも大きくマイナスの場合、その捕獲手は「明確に損」とみなす。
+const ROOT_CAPTURE_SEE_MARGIN_CP: i32 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -1387,15 +1390,59 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
 
             // Root SEE Gate: 非王手の静かな手（quiet non-check）に対してだけ xSEE を適用し、
             // see(mv) < -xsee_cp の手を除外する。捕獲手と王手は温存（強制力の高い手の見落とし抑止）。
-            let root_rank: Vec<crate::shogi::Move> = root_moves.clone();
-            let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
-            for (idx, mv) in root_rank.iter().enumerate() {
-                rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
-            }
-
             let root_static_eval = self.evaluator.evaluate(root);
             let root_static_eval_i16 =
                 root_static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+            // Root Capture SEE Gate:
+            // - Root での捕獲手のうち、SEE が ROOT_CAPTURE_SEE_MARGIN_CP よりも悪いものを除外する。
+            // - 探索構造側で取りきれなかった「明らかな大駒損（飛車 vs 歩 など）」を入口で抑止する目的。
+            // - pruning_safe_mode() 有効時のみ適用し、USIオプションで無効化可能とする。
+            if crate::search::params::pruning_safe_mode() {
+                let mut gated: Vec<crate::shogi::Move> = Vec::with_capacity(root_moves.len());
+                let mut skipped = 0usize;
+                for mv in root_moves.iter().copied() {
+                    if mv.is_capture_hint() {
+                        let see = root.see(mv);
+                        if see < -ROOT_CAPTURE_SEE_MARGIN_CP {
+                            skipped += 1;
+                            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                            super::diagnostics::record_tag(
+                                root,
+                                "root_cap_see_skip",
+                                Some(format!(
+                                    "mv={mv_usi} see={see} margin={margin} eval={eval}",
+                                    mv_usi = crate::usi::move_to_usi(&mv),
+                                    see = see,
+                                    margin = ROOT_CAPTURE_SEE_MARGIN_CP,
+                                    eval = root_static_eval,
+                                )),
+                            );
+                            continue;
+                        }
+                    }
+                    gated.push(mv);
+                }
+                if !gated.is_empty() {
+                    root_moves = gated;
+                } else if skipped > 0 {
+                    // すべての候補が SEE 的に悪い場合は、gate を無効化して元のリストを残す。
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        root,
+                        "root_cap_see_skip_fallback",
+                        Some(format!(
+                            "skipped={skipped} margin={margin}",
+                            margin = ROOT_CAPTURE_SEE_MARGIN_CP
+                        )),
+                    );
+                }
+            }
+
+            let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_moves.len());
+            for (idx, mv) in root_moves.iter().enumerate() {
+                rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
+            }
 
             // MultiPV（逐次選抜）— near‑deadline では PV1 仕上げを優先（縮退）
             let mut k = limits.multipv.max(1) as usize;

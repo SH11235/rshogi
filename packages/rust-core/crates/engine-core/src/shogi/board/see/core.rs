@@ -4,10 +4,13 @@
 //! for evaluating capture sequences and determining whether a capture is likely
 //! to be profitable.
 
-use crate::shogi::board::Color;
+use crate::shogi::board::{Bitboard, Color, Square};
 use crate::shogi::moves::Move;
 use crate::shogi::piece_constants::{SEE_GAIN_ARRAY_SIZE, SEE_MAX_DEPTH};
 use crate::shogi::position::Position;
+
+const VACATED_THREAT_MIN_VALUE_CP: i32 = 500;
+const VACATED_THREAT_MARGIN_CP: i32 = 120;
 
 impl Position {
     /// Static Exchange Evaluation (SEE)
@@ -83,9 +86,16 @@ impl Position {
             // square becomes occupied by our dropped piece.
             let mut occupied = self.board.all_bb;
             occupied.set(to);
+            let mut black_occupied = self.board.occupied_bb[Color::Black as usize];
+            let mut white_occupied = self.board.occupied_bb[Color::White as usize];
+            match self.side_to_move {
+                Color::Black => black_occupied.set(to),
+                Color::White => white_occupied.set(to),
+            }
 
             // Precompute pin information (same as capture branch)
-            let (black_pins, white_pins) = self.calculate_pins_for_see(occupied);
+            let (black_pins, white_pins) =
+                self.calculate_pins_for_see(occupied, black_occupied, white_occupied);
 
             // All attackers to the drop square under the current occupancy
             let mut attackers = self.get_all_attackers_to(to, occupied);
@@ -236,7 +246,11 @@ impl Position {
 
         // 初手のピン合法性を確認（違法なら早期リターン）
         {
-            let initial_pins = self.calculate_pins_for_color(self.side_to_move, self.board.all_bb);
+            let initial_pins = self.calculate_pins_for_color(
+                self.side_to_move,
+                self.board.all_bb,
+                self.board.occupied_bb[self.side_to_move as usize],
+            );
             if !initial_pins.can_move(from, to) {
                 // 閾値比較を考慮し、到達不能にする十分小さい値を返す
                 #[cfg(debug_assertions)]
@@ -274,7 +288,11 @@ impl Position {
         }
 
         // Calculate pin information for both colors（実局面の occupancy 基準）
-        let (black_pins, white_pins) = self.calculate_pins_for_see(occupied);
+        let (black_pins, white_pins) = self.calculate_pins_for_see(
+            occupied,
+            self.board.occupied_bb[Color::Black as usize],
+            self.board.occupied_bb[Color::White as usize],
+        );
 
         // Gain array to track material balance at each ply
         let mut gain = [0i32; SEE_GAIN_ARRAY_SIZE];
@@ -442,12 +460,38 @@ impl Position {
         };
 
         // Build hypothetical occupancy after making mv (from cleared, to occupied)
-        let mut occupied = self.board.all_bb;
+        let occupied_before = self.board.all_bb;
+        let mut occupied = occupied_before;
         occupied.clear(from);
         occupied.set(to);
+        let mut black_occupied = self.board.occupied_bb[Color::Black as usize];
+        let mut white_occupied = self.board.occupied_bb[Color::White as usize];
+        let color_occupied_after = match self.side_to_move {
+            Color::Black => {
+                black_occupied.clear(from);
+                black_occupied.set(to);
+                black_occupied
+            }
+            Color::White => {
+                white_occupied.clear(from);
+                white_occupied.set(to);
+                white_occupied
+            }
+        };
+
+        let post_move_occupied = occupied;
+        let vacated_penalty = self.evaluate_vacated_major_penalty(
+            self.side_to_move,
+            from,
+            to,
+            occupied_before,
+            post_move_occupied,
+            color_occupied_after,
+        );
 
         // Pin info and attackers in the hypothetical position
-        let (black_pins, white_pins) = self.calculate_pins_for_see(occupied);
+        let (black_pins, white_pins) =
+            self.calculate_pins_for_see(occupied, black_occupied, white_occupied);
         let mut attackers = self.get_all_attackers_to(to, occupied);
 
         // Gain-array exchange starting with opponent capture
@@ -525,6 +569,58 @@ impl Position {
 
         #[cfg(debug_assertions)]
         check_state("landing_final", self, epoch_before, hash_before);
-        gain[0]
+        let mut result = gain[0];
+        if let Some(extra_penalty) = vacated_penalty {
+            result = result.min(extra_penalty);
+        }
+        result
+    }
+
+    fn evaluate_vacated_major_penalty(
+        &self,
+        color: Color,
+        from: Square,
+        to: Square,
+        occupied_before: Bitboard,
+        occupied_after: Bitboard,
+        color_occupied_after: Bitboard,
+    ) -> Option<i32> {
+        let mut friendly = color_occupied_after;
+        let enemy = color.opposite();
+        let mut worst = 0;
+        while let Some(sq) = friendly.pop_lsb() {
+            if sq == from || sq == to {
+                continue;
+            }
+            if !occupied_after.test(sq) {
+                continue;
+            }
+            let Some(piece) = self.board.piece_on(sq) else {
+                continue;
+            };
+            if piece.color != color {
+                continue;
+            }
+            let value = Self::see_piece_value(piece);
+            if value < VACATED_THREAT_MIN_VALUE_CP {
+                continue;
+            }
+            let after_attackers = self.get_attackers_to_with_occupancy(sq, enemy, occupied_after);
+            if after_attackers.is_empty() {
+                continue;
+            }
+            let before_attackers = self.get_attackers_to_with_occupancy(sq, enemy, occupied_before);
+            let newly = after_attackers & (!before_attackers);
+            if newly.is_empty() {
+                continue;
+            }
+            let penalty = -value.saturating_sub(VACATED_THREAT_MARGIN_CP);
+            worst = worst.min(penalty);
+        }
+        if worst < 0 {
+            Some(worst)
+        } else {
+            None
+        }
     }
 }
