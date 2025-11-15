@@ -1,6 +1,10 @@
 //! Basic move generation tests
 
-use crate::{movegen::MoveGenerator, usi::parse_usi_square, Color, Piece, PieceType, Position};
+use crate::{
+    movegen::MoveGenerator,
+    usi::{parse_usi_move, parse_usi_square},
+    Color, Piece, PieceType, Position,
+};
 
 #[test]
 fn test_movegen_startpos() {
@@ -132,4 +136,44 @@ fn test_all_pseudo_legal_moves_generated_completeness() {
 
     // Verify no duplicates
     assert_eq!(all_moves.len(), move_set.len(), "Should have no duplicate moves");
+}
+
+/// 対局ログ由来の問題局面:
+/// `6f6d` の直後局面で、後手の応手 `6c6d` が合法かつ手生成されていることを確認する。
+#[test]
+fn problem_position_generates_opponent_6c6d_after_6f6d() {
+    // 局面: PLANS.md に記載の「6f6d 直前」までの手順
+    const MOVES_BEFORE_6F6D: &[&str] = &[
+        "3g3f", "3c3d", "2h1h", "4a3b", "1h3h", "8c8d", "3f3e", "3d3e", "3h3e", "8d8e", "6i7h",
+        "7a7b", "3e3f", "5a4a", "3f5f", "3a4b", "4i4h", "4a3a", "5f3f", "4b3c", "3i2h", "4c4d",
+        "5i6h", "7b8c", "3f6f", "6a5b", "6f3f", "7c7d", "6h5i", "7d7e", "7g7f", "7e7f", "8h5e",
+        "8b9b", "3f7f", "P*7d", "8i7g", "5b4c", "7f6f", "8c7b", "7g8e", "7d7e",
+    ];
+
+    let mut pos = Position::startpos();
+    for usi in MOVES_BEFORE_6F6D {
+        let mv = parse_usi_move(usi).expect("valid usi move in sequence");
+        assert!(pos.is_legal_move(mv), "illegal move in sequence: {}", usi);
+        pos.do_move(mv);
+    }
+
+    // 先手の問題手 6f6d を指した直後の局面にする。
+    let mv_6f6d = parse_usi_move("6f6d").expect("valid usi move 6f6d");
+    assert!(pos.is_legal_move(mv_6f6d), "6f6d must be legal in problem position");
+    pos.do_move(mv_6f6d);
+
+    // この局面で後手の応手 6c6d が合法かつ generate_all の結果に含まれることを確認
+    let reply_6c6d = parse_usi_move("6c6d").expect("valid usi move 6c6d");
+    assert!(pos.is_legal_move(reply_6c6d), "6c6d must be legal reply after 6f6d");
+
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
+    let has_6c6d = moves.as_slice().iter().any(|m| m.equals_without_piece_type(&reply_6c6d));
+    if !has_6c6d {
+        println!("Generated moves from problem position after 6f6d:");
+        for m in moves.as_slice() {
+            println!("  {}", crate::usi::move_to_usi(m));
+        }
+    }
+    assert!(has_6c6d, "generated moves must contain 6c6d reply");
 }

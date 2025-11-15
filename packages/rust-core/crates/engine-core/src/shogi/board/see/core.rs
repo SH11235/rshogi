@@ -460,38 +460,16 @@ impl Position {
         };
 
         // Build hypothetical occupancy after making mv (from cleared, to occupied)
-        let occupied_before = self.board.all_bb;
-        let mut occupied = occupied_before;
+        let mut occupied = self.board.all_bb;
         occupied.clear(from);
         occupied.set(to);
-        let mut black_occupied = self.board.occupied_bb[Color::Black as usize];
-        let mut white_occupied = self.board.occupied_bb[Color::White as usize];
-        let color_occupied_after = match self.side_to_move {
-            Color::Black => {
-                black_occupied.clear(from);
-                black_occupied.set(to);
-                black_occupied
-            }
-            Color::White => {
-                white_occupied.clear(from);
-                white_occupied.set(to);
-                white_occupied
-            }
-        };
-
-        let post_move_occupied = occupied;
-        let vacated_penalty = self.evaluate_vacated_major_penalty(
-            self.side_to_move,
-            from,
-            to,
-            occupied_before,
-            post_move_occupied,
-            color_occupied_after,
-        );
 
         // Pin info and attackers in the hypothetical position
-        let (black_pins, white_pins) =
-            self.calculate_pins_for_see(occupied, black_occupied, white_occupied);
+        let (black_pins, white_pins) = self.calculate_pins_for_see(
+            occupied,
+            self.board.occupied_bb[Color::Black as usize],
+            self.board.occupied_bb[Color::White as usize],
+        );
         let mut attackers = self.get_all_attackers_to(to, occupied);
 
         // Gain-array exchange starting with opponent capture
@@ -569,11 +547,54 @@ impl Position {
 
         #[cfg(debug_assertions)]
         check_state("landing_final", self, epoch_before, hash_before);
-        let mut result = gain[0];
-        if let Some(extra_penalty) = vacated_penalty {
-            result = result.min(extra_penalty);
+        gain[0]
+    }
+
+    /// Quiet move XSEE helper.
+    ///
+    /// Evaluate a quiet (non-capture, non-drop) move `mv` by:
+    /// 1. Applying the move to a child position.
+    /// 2. Letting the opponent choose the best capture on the landing square.
+    /// 3. Returning the opponent's best SEE gain with sign flipped
+    ///    (negative values are bad for the side to move in the original position).
+    pub fn xsee_quiet_after_make(&self, mv: Move) -> i32 {
+        // Drops/captures fall back to standard SEE.
+        if mv.is_drop() || mv.is_capture_hint() {
+            return self.see(mv);
         }
-        result
+
+        let Some(_from) = mv.from() else {
+            return 0;
+        };
+        let to = mv.to();
+
+        // Build child position after the quiet move.
+        let mut child = self.clone();
+        child.do_move(mv);
+        let occupied_after = child.board.all_bb;
+
+        let color = self.side_to_move;
+        let enemy = color.opposite();
+
+        // All opponent attackers to the landing square in the child position.
+        let mut attackers = child.get_all_attackers_to(to, occupied_after)
+            & child.board.occupied_bb[enemy as usize];
+
+        if attackers.is_empty() {
+            return 0;
+        }
+
+        // Opponent chooses the capture with the largest static exchange gain.
+        let mut best_for_enemy = 0;
+        while let Some(sq) = attackers.pop_lsb() {
+            let cap = Move::normal(sq, to, false);
+            let gain = child.see(cap);
+            if gain > best_for_enemy {
+                best_for_enemy = gain;
+            }
+        }
+
+        -best_for_enemy
     }
 
     fn evaluate_vacated_major_penalty(
