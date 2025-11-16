@@ -8,7 +8,7 @@ use crate::search::api::{InfoEvent, InfoEventCallback};
 use crate::search::config;
 use crate::search::constants::{mate_distance, MIN_QNODES_LIMIT, SEARCH_INF};
 use crate::search::tt::TTProbe;
-use crate::search::types::{normalize_root_pv, RootLine, SearchResult};
+use crate::search::types::{normalize_root_pv, InfoStringCallback, RootLine, SearchResult};
 use crate::search::SearchLimits;
 use crate::shogi::{Color, Move, Piece, PieceType, Position, Square};
 use smallvec::SmallVec;
@@ -80,15 +80,19 @@ enum VerifyFailReason {
     OppXsee { piece: PieceType, score: i32 },
     PawnDropHead { piece: PieceType },
     EvalDrop(i32),
+    MateInOne { mv: Move },
 }
 
 impl VerifyFailReason {
-    fn as_str(&self) -> (&'static str, i32, Option<PieceType>) {
+    fn as_str(&self) -> (&'static str, i32, Option<PieceType>, Option<Move>) {
         match *self {
-            VerifyFailReason::SelfSee(see) => ("self_see", see, None),
-            VerifyFailReason::OppXsee { piece, score } => ("opp_xsee_neg", score, Some(piece)),
-            VerifyFailReason::PawnDropHead { piece } => ("opp_drop_head", 0, Some(piece)),
-            VerifyFailReason::EvalDrop(delta) => ("eval_drop", delta, None),
+            VerifyFailReason::SelfSee(see) => ("self_see", see, None, None),
+            VerifyFailReason::OppXsee { piece, score } => {
+                ("opp_xsee_neg", score, Some(piece), None)
+            }
+            VerifyFailReason::PawnDropHead { piece } => ("opp_drop_head", 0, Some(piece), None),
+            VerifyFailReason::EvalDrop(delta) => ("eval_drop", delta, None, None),
+            VerifyFailReason::MateInOne { mv } => ("opp_mate_in_one", -32_000, None, Some(mv)),
         }
     }
 }
@@ -137,12 +141,19 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
         summary.total_elapsed_ms = summary.total_elapsed_ms.saturating_add(res.report.elapsed_ms);
         if let Some(reason) = res.fail_reason {
             summary.fail_count = summary.fail_count.saturating_add(1);
-            emit_fail_log(info, cand.mv, &reason);
+            emit_fail_log(info, limits.info_string_callback.as_ref(), cand.mv, &reason);
             if fallback.as_ref().map(|(_, rep)| rep.eval < res.report.eval).unwrap_or(true) {
                 fallback = Some((*cand, res.report));
             }
         } else {
-            emit_pass_log(info, cand.mv, res.report.eval, best_score, win_protect_active);
+            emit_pass_log(
+                info,
+                limits.info_string_callback.as_ref(),
+                cand.mv,
+                res.report.eval,
+                best_score,
+                win_protect_active,
+            );
             accepted = Some((*cand, res.report));
             break;
         }
@@ -323,6 +334,9 @@ fn detect_major_threat(pos: &Position, us: Color, threshold: i32) -> Option<Veri
     {
         return Some(VerifyFailReason::OppXsee { piece, score: loss });
     }
+    if let Some(mv) = detect_enemy_mate_in_one(pos) {
+        return Some(VerifyFailReason::MateInOne { mv });
+    }
     None
 }
 
@@ -376,6 +390,24 @@ fn pawn_drop_head_threat(pos: &Position, target: Square, us: Color) -> bool {
     }
     let mv = Move::drop(PieceType::Pawn, head);
     pos.is_legal_move(mv)
+}
+
+fn detect_enemy_mate_in_one(pos: &Position) -> Option<Move> {
+    let mg = MoveGenerator::new();
+    let Ok(enemy_moves) = mg.generate_all(pos) else {
+        return None;
+    };
+    for mv in enemy_moves.as_slice() {
+        let mut reply = pos.clone();
+        reply.do_move(*mv);
+        let checker = MoveGenerator::new();
+        if let Ok(has_moves) = checker.has_legal_moves(&reply) {
+            if !has_moves {
+                return Some(*mv);
+            }
+        }
+    }
+    None
 }
 
 fn detect_shortest_attack_after_enemy_move(
@@ -489,6 +521,32 @@ fn head_square(sq: Square, owner: Color) -> Option<Square> {
                 Some(Square::new(sq.file(), sq.rank() + 1))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usi::{move_to_usi, parse_usi_move};
+
+    #[test]
+    fn detects_enemy_mate_in_one_after_bad_bishop_drop() {
+        let mut pos = Position::from_sfen(
+            "+R5bnl/5b3/pl1+P1gkp1/s3pps2/7gp/P1P1R4/1KN1P1PPP/5S3/L1S1GG1NL b N6P 46",
+        )
+        .expect("valid sfen");
+        let mv = parse_usi_move("8g9h").expect("valid move");
+        pos.do_move(mv);
+        let mate_mv = parse_usi_move("4b9g+").expect("valid mate move");
+        let mut after = pos.clone();
+        after.do_move(mate_mv);
+        let checker = MoveGenerator::new();
+        assert!(
+            !checker.has_legal_moves(&after).expect("movegen ok"),
+            "should be a terminal position"
+        );
+        let threat = detect_enemy_mate_in_one(&pos).expect("mate threat expected");
+        assert_eq!(move_to_usi(&threat), "4b9g+");
     }
 }
 
@@ -631,32 +689,55 @@ fn normalize_line_pv(line: &mut RootLine) {
     normalize_root_pv(&mut line.pv, line.root_move);
 }
 
-fn emit_fail_log(info: Option<&InfoEventCallback>, mv: Move, reason: &VerifyFailReason) {
+fn emit_fail_log(
+    info: Option<&InfoEventCallback>,
+    info_str: Option<&InfoStringCallback>,
+    mv: Move,
+    reason: &VerifyFailReason,
+) {
+    let (tag, value, piece, mate_mv) = reason.as_str();
+    let mut extra = String::new();
+    if let Some(pt) = piece {
+        extra = format!(" piece={:?}", pt);
+    }
+    if let Some(mate) = mate_mv {
+        extra = format!("{} mate_move={}", extra, crate::usi::move_to_usi(&mate));
+    }
+    let msg = format!(
+        "root_verify fail after={} reason={} delta={}{}",
+        crate::usi::move_to_usi(&mv),
+        tag,
+        value,
+        extra
+    );
     if let Some(cb) = info {
-        let (tag, value, piece) = reason.as_str();
-        let mut extra = String::new();
-        if let Some(pt) = piece {
-            extra = format!(" piece={:?}", pt);
-        }
-        cb(InfoEvent::String(format!(
-            "root_verify fail after={} reason={} delta={}{}",
-            crate::usi::move_to_usi(&mv),
-            tag,
-            value,
-            extra
-        )));
+        cb(InfoEvent::String(msg.clone()));
+    }
+    if let Some(cb) = info_str {
+        cb(&msg);
     }
 }
 
-fn emit_pass_log(info: Option<&InfoEventCallback>, mv: Move, eval: i32, base: i32, win_mode: bool) {
+fn emit_pass_log(
+    info: Option<&InfoEventCallback>,
+    info_str: Option<&InfoStringCallback>,
+    mv: Move,
+    eval: i32,
+    base: i32,
+    win_mode: bool,
+) {
+    let msg = format!(
+        "root_verify pass after={} score={} delta={} win_protect={}",
+        crate::usi::move_to_usi(&mv),
+        eval,
+        eval - base,
+        win_mode as u8
+    );
     if let Some(cb) = info {
-        cb(InfoEvent::String(format!(
-            "root_verify pass after={} score={} delta={} win_protect={}",
-            crate::usi::move_to_usi(&mv),
-            eval,
-            eval - base,
-            win_mode as u8
-        )));
+        cb(InfoEvent::String(msg.clone()));
+    }
+    if let Some(cb) = info_str {
+        cb(&msg);
     }
 }
 
