@@ -70,18 +70,28 @@ pub(crate) fn root_see_gate_should_skip(
     if xsee_cp <= 0 {
         return false;
     }
-    // Captures and checking moves are always kept; gate is only for quiet non-check moves.
-    if mv.is_capture_hint() || root.gives_check(mv) {
+    // Captures are always kept; gate is only for quiet moves (drops included).
+    if mv.is_capture_hint() {
         return false;
     }
     // For quiet non-captures, use dedicated quiet XSEE so that
-    // moves that walk into a tactically lost square are rejected.
+    // moves that walk into a tactically lost square are rejected. Quiet checks
+    // remain eligible for gating but require a stronger negative SEE to drop.
+    let is_check = root.gives_check(mv);
     let xsee = if mv.is_drop() {
         root.see(mv)
     } else {
         root.xsee_quiet_after_make(mv)
     };
-    xsee < -xsee_cp
+    let mut threshold = xsee_cp;
+    if is_check {
+        // Allow mildly speculative checks, but still reject obviously losing ones.
+        threshold = threshold.saturating_mul(3) / 2;
+        if threshold == 0 {
+            threshold = 1;
+        }
+    }
+    xsee < -threshold
 }
 
 #[inline]
@@ -282,7 +292,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 if drop_near_enemy_king || quiet_touching_any_king {
                     forcing = true;
                 }
-                if idx >= force_full_budget
+                if dynp::root_beam_enabled()
+                    && idx >= force_full_budget
                     && d > dynp::root_beam_min_depth()
                     && !drop_near_enemy_king
                     && !quiet_touching_any_king
@@ -458,6 +469,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         score
     }
     fn effective_root_force_full_count(limits: &SearchLimits) -> usize {
+        if !dynp::root_beam_enabled() {
+            return 0;
+        }
         let mut force = dynp::root_beam_force_full_count();
         if force == 0 {
             return 0;
@@ -1388,8 +1402,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            // Root SEE Gate: 非王手の静かな手（quiet non-check）に対してだけ xSEE を適用し、
-            // see(mv) < -xsee_cp の手を除外する。捕獲手と王手は温存（強制力の高い手の見落とし抑止）。
+            // Root SEE Gate: 静かな手（ドロップ含む）に対して xSEE を適用し、
+            // see(mv) < -xsee_cp の手を除外する。捕獲手のみ常に許可。
             let root_static_eval = self.evaluator.evaluate(root);
             let root_static_eval_i16 =
                 root_static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;

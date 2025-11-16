@@ -115,6 +115,7 @@ static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
 static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(0);
+static RUNTIME_ROOT_BEAM_ENABLED: AtomicBool = AtomicBool::new(false);
 static RUNTIME_SAME_TO_EXTENSION: AtomicBool = AtomicBool::new(false);
 static RUNTIME_ROOT_BEAM_REDUCTION: AtomicI32 = AtomicI32::new(ROOT_BEAM_REDUCTION);
 static RUNTIME_ROOT_BEAM_MIN_DEPTH: AtomicI32 = AtomicI32::new(ROOT_BEAM_MIN_DEPTH);
@@ -342,6 +343,11 @@ pub fn root_beam_force_full_count() -> usize {
     RUNTIME_ROOT_BEAM_FORCE_FULL.load(Ordering::Relaxed)
 }
 
+#[inline]
+pub fn root_beam_enabled() -> bool {
+    RUNTIME_ROOT_BEAM_ENABLED.load(Ordering::Relaxed)
+}
+
 /// Root Beam の shallow 探索縮小量（d→(d-1)-reduction）
 #[inline]
 pub fn root_beam_reduction() -> i32 {
@@ -476,6 +482,10 @@ pub fn set_qs_check_see_margin(v: i32) {
 pub fn set_root_beam_force_full_count(v: usize) {
     let clamped = v.min(8);
     RUNTIME_ROOT_BEAM_FORCE_FULL.store(clamped, Ordering::Relaxed);
+}
+
+pub fn set_root_beam_enabled(on: bool) {
+    RUNTIME_ROOT_BEAM_ENABLED.store(on, Ordering::Relaxed);
 }
 
 pub fn set_root_beam_reduction(v: i32) {
@@ -700,6 +710,7 @@ pub fn __test_reset_runtime_values() {
     set_razor_enabled(RAZOR_ENABLED);
     set_iid_min_depth(6);
     set_pruning_safe_mode(true);
+    set_root_beam_enabled(false);
     set_probcut_skip_verify_lt4(false);
     set_tt_prefetch_enabled_runtime(default_prefetch_value());
 }

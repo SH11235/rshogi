@@ -532,6 +532,10 @@ fn collect_search_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
             .to_string(),
     );
     builder.search(
+        "SearchParams.RootBeamEnabled",
+        "option name SearchParams.RootBeamEnabled type check default false".to_string(),
+    );
+    builder.search(
         "SearchParams.RootMultiPV1",
         "option name SearchParams.RootMultiPV1 type spin default 50000 min -200000 max 200000"
             .to_string(),
@@ -1576,6 +1580,14 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "SearchParams.RootBeamEnabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                engine_core::search::params::set_root_beam_enabled(on);
+                info_string(if on { "root_beam=On" } else { "root_beam=Off" });
+                mark_override(state, "SearchParams.RootBeamEnabled");
+            }
+        }
         // --- Root guard rails (revived) ---
         "RootSeeGate" => {
             if let Some(v) = value_ref {
@@ -2383,9 +2395,11 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         set_if_absent("FinalizeSanity.AllowSEElt0Alt", &mut || {
             state.opts.finalize_allow_see_lt0_alt = false
         });
-        // ルートビーム: 上位2手までは必ずフル探索する
+        set_if_absent("SearchParams.RootBeamEnabled", &mut || {
+            engine_core::search::params::set_root_beam_enabled(false);
+        });
         set_if_absent("SearchParams.RootBeamForceFullCount", &mut || {
-            engine_core::search::params::set_root_beam_force_full_count(2);
+            engine_core::search::params::set_root_beam_force_full_count(0);
         });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
         // ShallowGate: enable in common profile by default (YO寄せ; 浅層の過剰刈り抑制)
@@ -2419,6 +2433,12 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         });
         set_if_absent("FinalizeSanity.AllowSEElt0Alt", &mut || {
             state.opts.finalize_allow_see_lt0_alt = false
+        });
+        set_if_absent("SearchParams.RootBeamEnabled", &mut || {
+            engine_core::search::params::set_root_beam_enabled(false);
+        });
+        set_if_absent("SearchParams.RootBeamForceFullCount", &mut || {
+            engine_core::search::params::set_root_beam_force_full_count(0);
         });
         set_if_absent("MultiPV", &mut || state.opts.multipv = 1);
         // ShallowGate for T1 as well (保守的既定)
