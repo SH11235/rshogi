@@ -282,9 +282,27 @@ fn main() -> Result<()> {
                         let engine = state.lock_engine();
                         engine.stop_controller_handle()
                     };
-                    let _ = session
+                    // Try to get result with 1500ms timeout
+                    let got_result = session
                         .request_stop_and_wait(stop_ctrl.as_ref(), Duration::from_millis(1500));
-                    session.join_blocking();
+
+                    // Join only if search completed or disconnected; detach if still pending
+                    if got_result.is_some() {
+                        session.join_blocking();
+                    } else {
+                        use engine_core::engine::TryResult;
+                        match session.try_poll() {
+                            TryResult::Pending => {
+                                // Detach: drop session without joining to avoid hang
+                                info_string("quit_join_skipped pending=1");
+                                // session drops here, JoinHandle detaches
+                            }
+                            _ => {
+                                // Disconnected or late result: safe to join
+                                session.join_blocking();
+                            }
+                        }
+                    }
                 }
 
                 // Notify idle after cleanup is complete
