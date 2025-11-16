@@ -294,6 +294,7 @@ fn run_probe<E: Evaluator + Send + Sync + 'static>(
 }
 
 fn detect_major_threat(pos: &Position, us: Color, threshold: i32) -> Option<VerifyFailReason> {
+    let mut major_targets: Vec<(Square, PieceType)> = Vec::new();
     let mut friendly = pos.board.occupied_bb[us as usize];
     while let Some(sq) = friendly.pop_lsb() {
         let Some(piece) = pos.board.piece_on(sq) else {
@@ -315,6 +316,12 @@ fn detect_major_threat(pos: &Position, us: Color, threshold: i32) -> Option<Veri
                 piece: piece.piece_type,
             });
         }
+        major_targets.push((sq, piece.piece_type));
+    }
+    if let Some((piece, loss)) =
+        detect_shortest_attack_after_enemy_move(pos, us, threshold, &major_targets)
+    {
+        return Some(VerifyFailReason::OppXsee { piece, score: loss });
     }
     None
 }
@@ -369,6 +376,101 @@ fn pawn_drop_head_threat(pos: &Position, target: Square, us: Color) -> bool {
     }
     let mv = Move::drop(PieceType::Pawn, head);
     pos.is_legal_move(mv)
+}
+
+fn detect_shortest_attack_after_enemy_move(
+    pos: &Position,
+    us: Color,
+    threshold: i32,
+    majors: &[(Square, PieceType)],
+) -> Option<(PieceType, i32)> {
+    if majors.is_empty() {
+        return None;
+    }
+    let enemy = us.opposite();
+    let mg = MoveGenerator::new();
+    let Ok(move_list) = mg.generate_all(pos) else {
+        return None;
+    };
+    for mv in move_list.as_slice() {
+        if !pos.is_legal_move(*mv) {
+            continue;
+        }
+        let mut child = pos.clone();
+        child.do_move(*mv);
+        for &(sq, piece_type) in majors {
+            let Some(piece) = child.board.piece_on(sq) else {
+                continue;
+            };
+            if piece.color != us {
+                continue;
+            }
+            if !child.is_attacked(sq, enemy) {
+                continue;
+            }
+            if let Some(loss) = evaluate_attackers_loss(&mut child, sq, enemy, threshold) {
+                return Some((piece_type, loss));
+            }
+        }
+    }
+    None
+}
+
+fn evaluate_attackers_loss(
+    child: &mut Position,
+    target: Square,
+    enemy: Color,
+    threshold: i32,
+) -> Option<i32> {
+    let prev_side = child.side_to_move;
+    child.side_to_move = enemy;
+    let mut attackers = child.get_attackers_to(target, enemy);
+    while let Some(from) = attackers.pop_lsb() {
+        let Some(piece) = child.board.piece_on(from) else {
+            continue;
+        };
+        for promote in promotion_options(piece, enemy, from, target) {
+            let mv = Move::normal(from, target, promote);
+            if !child.is_legal_move(mv) {
+                continue;
+            }
+            let gain = child.see(mv);
+            let loss = -gain;
+            if loss <= -threshold {
+                child.side_to_move = prev_side;
+                return Some(loss);
+            }
+        }
+    }
+    child.side_to_move = prev_side;
+    None
+}
+
+fn promotion_options(piece: Piece, color: Color, from: Square, to: Square) -> SmallVec<[bool; 2]> {
+    let mut opts = SmallVec::<[bool; 2]>::new();
+    if piece.promoted || !piece.piece_type.can_promote() {
+        opts.push(false);
+        return opts;
+    }
+    if must_promote(color, piece.piece_type, to) {
+        opts.push(true);
+        return opts;
+    }
+    if can_promote(color, from, to) {
+        opts.push(true);
+    }
+    opts.push(false);
+    opts
+}
+
+fn must_promote(color: Color, piece_type: PieceType, to: Square) -> bool {
+    match (color, piece_type) {
+        (Color::Black, PieceType::Pawn | PieceType::Lance) => to.rank() == 0,
+        (Color::White, PieceType::Pawn | PieceType::Lance) => to.rank() == 8,
+        (Color::Black, PieceType::Knight) => to.rank() <= 1,
+        (Color::White, PieceType::Knight) => to.rank() >= 7,
+        _ => false,
+    }
 }
 
 fn head_square(sq: Square, owner: Color) -> Option<Square> {
