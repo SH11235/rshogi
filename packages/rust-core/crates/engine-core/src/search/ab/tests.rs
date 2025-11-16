@@ -2182,34 +2182,6 @@ fn excluded_drop_only_blocks_same_piece_type() {
     assert!(found_gold, "gold drop should not be excluded when pawn drop is excluded");
 }
 
-/// Root Beam Skip の連続 skip カウンタが閾値を超えた際に
-/// `root_beam_skip_force_full` が立ち、以降の分岐でフル探索に
-/// フォースされる経路が存在しても、通常探索が破綻しないことを確認する。
-///
-/// ここでは内部状態を直接検査せず、`set_root_beam_skip_retry_limit(1)` で
-/// 即座に force_full へ切り替わるようにした上で、通常の探索が所望の深さまで
-/// 到達することを確認する。
-#[test]
-fn root_beam_skip_retry_switches_to_full_search_safely() {
-    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
-    crate::search::params::__test_reset_runtime_values();
-
-    // Root Beam の skip 再試行を 1 回に設定し、早めに force_full に到達させる。
-    crate::search::params::set_root_beam_skip_retry_limit(1);
-
-    let evaluator = Arc::new(MaterialEvaluator);
-    let backend =
-        ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
-    let pos = make_aspiration_stress_position();
-    let limits = SearchLimitsBuilder::default().depth(6).build();
-    let res = backend.think_blocking(&pos, &limits, None);
-
-    assert!(
-        res.stats.depth >= 6,
-        "root beam skip retry logic should not prevent reaching requested depth"
-    );
-}
-
 #[test]
 fn generate_evasions_matches_all_single_check() {
     let mut pos = Position::empty();

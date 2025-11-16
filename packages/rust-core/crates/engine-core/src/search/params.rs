@@ -57,14 +57,6 @@ pub const ROOT_PREV_SCORE_CLAMP: i32 = 300;
 pub const ROOT_MULTIPV_BONUS_1: i32 = 50_000;
 pub const ROOT_MULTIPV_BONUS_2: i32 = 25_000;
 
-// Root Beam（浅探索→狭窓→フル窓）の既定チューニング
-pub const ROOT_BEAM_REDUCTION: i32 = 1; // shallow = (d-1)-reduction
-pub const ROOT_BEAM_MIN_DEPTH: i32 = 6; // ビーム適用の最小深さ
-pub const ROOT_BEAM_MARGIN_CP: i32 = 220; // α近傍判定の閾値（140から安全側に拡張）
-pub const ROOT_BEAM_NARROW_DELTA_CP: i32 = 48; // 狭窓幅（±delta）
-pub const ROOT_BEAM_NARROW_PROMOTE_CP: i32 = 36; // 狭窓結果からフル窓へ昇格するための閾値
-pub const ROOT_BEAM_SKIP_RETRY_LIMIT: usize = 2; // 連続skip許可回数
-
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
@@ -114,15 +106,7 @@ static RUNTIME_QS_MARGIN_CAPTURE: AtomicI32 = AtomicI32::new(QS_MARGIN_CAPTURE);
 static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN);
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
-static RUNTIME_ROOT_BEAM_FORCE_FULL: AtomicUsize = AtomicUsize::new(0);
-static RUNTIME_ROOT_BEAM_ENABLED: AtomicBool = AtomicBool::new(false);
 static RUNTIME_SAME_TO_EXTENSION: AtomicBool = AtomicBool::new(false);
-static RUNTIME_ROOT_BEAM_REDUCTION: AtomicI32 = AtomicI32::new(ROOT_BEAM_REDUCTION);
-static RUNTIME_ROOT_BEAM_MIN_DEPTH: AtomicI32 = AtomicI32::new(ROOT_BEAM_MIN_DEPTH);
-static RUNTIME_ROOT_BEAM_MARGIN_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_MARGIN_CP);
-static RUNTIME_ROOT_BEAM_NARROW_DELTA_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_NARROW_DELTA_CP);
-static RUNTIME_ROOT_BEAM_NARROW_PROMOTE_CP: AtomicI32 = AtomicI32::new(ROOT_BEAM_NARROW_PROMOTE_CP);
-static RUNTIME_ROOT_BEAM_SKIP_RETRY: AtomicUsize = AtomicUsize::new(ROOT_BEAM_SKIP_RETRY_LIMIT);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -339,51 +323,6 @@ pub fn root_multipv_bonus(rank: u8) -> i32 {
 }
 
 #[inline]
-pub fn root_beam_force_full_count() -> usize {
-    RUNTIME_ROOT_BEAM_FORCE_FULL.load(Ordering::Relaxed)
-}
-
-#[inline]
-pub fn root_beam_enabled() -> bool {
-    RUNTIME_ROOT_BEAM_ENABLED.load(Ordering::Relaxed)
-}
-
-/// Root Beam の shallow 探索縮小量（d→(d-1)-reduction）
-#[inline]
-pub fn root_beam_reduction() -> i32 {
-    RUNTIME_ROOT_BEAM_REDUCTION.load(Ordering::Relaxed)
-}
-
-/// Root Beam を適用する最小深さ
-#[inline]
-pub fn root_beam_min_depth() -> i32 {
-    RUNTIME_ROOT_BEAM_MIN_DEPTH.load(Ordering::Relaxed)
-}
-
-/// α近傍判定の閾値（浅探索結果が alpha-閾値 より大きければ再探索）
-#[inline]
-pub fn root_beam_margin_cp() -> i32 {
-    RUNTIME_ROOT_BEAM_MARGIN_CP.load(Ordering::Relaxed)
-}
-
-/// 狭窓再探索の半幅（±delta）
-#[inline]
-pub fn root_beam_narrow_delta_cp() -> i32 {
-    RUNTIME_ROOT_BEAM_NARROW_DELTA_CP.load(Ordering::Relaxed)
-}
-
-/// 狭窓結果からフル窓へ昇格するための閾値
-#[inline]
-pub fn root_beam_narrow_promote_cp() -> i32 {
-    RUNTIME_ROOT_BEAM_NARROW_PROMOTE_CP.load(Ordering::Relaxed)
-}
-
-#[inline]
-pub fn root_beam_skip_retry_limit() -> usize {
-    RUNTIME_ROOT_BEAM_SKIP_RETRY.load(Ordering::Relaxed).max(1)
-}
-
-#[inline]
 pub fn razor_enabled() -> bool {
     RUNTIME_RAZOR.load(Ordering::Relaxed)
 }
@@ -477,41 +416,6 @@ pub fn set_qs_check_prune_margin(v: i32) {
 pub fn set_qs_check_see_margin(v: i32) {
     let clamped = v.clamp(-5000, 5000);
     RUNTIME_QS_CHECK_SEE_MARGIN.store(clamped, Ordering::Relaxed);
-}
-
-pub fn set_root_beam_force_full_count(v: usize) {
-    let clamped = v.min(8);
-    RUNTIME_ROOT_BEAM_FORCE_FULL.store(clamped, Ordering::Relaxed);
-}
-
-pub fn set_root_beam_enabled(on: bool) {
-    RUNTIME_ROOT_BEAM_ENABLED.store(on, Ordering::Relaxed);
-}
-
-pub fn set_root_beam_reduction(v: i32) {
-    let clamped = v.clamp(0, 8);
-    RUNTIME_ROOT_BEAM_REDUCTION.store(clamped, Ordering::Relaxed);
-}
-pub fn set_root_beam_min_depth(v: i32) {
-    let clamped = v.clamp(0, 64);
-    RUNTIME_ROOT_BEAM_MIN_DEPTH.store(clamped, Ordering::Relaxed);
-}
-pub fn set_root_beam_margin_cp(v: i32) {
-    let clamped = v.clamp(0, 5000);
-    RUNTIME_ROOT_BEAM_MARGIN_CP.store(clamped, Ordering::Relaxed);
-}
-pub fn set_root_beam_narrow_delta_cp(v: i32) {
-    let clamped = v.clamp(0, 2000);
-    RUNTIME_ROOT_BEAM_NARROW_DELTA_CP.store(clamped, Ordering::Relaxed);
-}
-pub fn set_root_beam_narrow_promote_cp(v: i32) {
-    let clamped = v.clamp(0, 2000);
-    RUNTIME_ROOT_BEAM_NARROW_PROMOTE_CP.store(clamped, Ordering::Relaxed);
-}
-
-pub fn set_root_beam_skip_retry_limit(v: usize) {
-    let clamped = v.clamp(1, 8);
-    RUNTIME_ROOT_BEAM_SKIP_RETRY.store(clamped, Ordering::Relaxed);
 }
 
 pub fn set_sbp_base(v: i32) {
@@ -710,7 +614,6 @@ pub fn __test_reset_runtime_values() {
     set_razor_enabled(RAZOR_ENABLED);
     set_iid_min_depth(6);
     set_pruning_safe_mode(true);
-    set_root_beam_enabled(false);
     set_probcut_skip_verify_lt4(false);
     set_tt_prefetch_enabled_runtime(default_prefetch_value());
 }

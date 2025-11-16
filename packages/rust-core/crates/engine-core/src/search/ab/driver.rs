@@ -18,7 +18,6 @@ use crate::search::types::{
     normalize_root_pv, NodeType, RootLine, SearchStack, StopInfo, TerminationReason,
 };
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
-use crate::shogi::Square;
 use crate::time_management::TimeControl;
 use crate::Position;
 use log::warn;
@@ -92,13 +91,6 @@ pub(crate) fn root_see_gate_should_skip(
         }
     }
     xsee < -threshold
-}
-
-#[inline]
-fn chebyshev_distance(a: Square, b: Square) -> u8 {
-    let dx = u8::abs_diff(a.file(), b.file());
-    let dy = u8::abs_diff(a.rank(), b.rank());
-    dx.max(dy)
 }
 
 #[inline]
@@ -179,9 +171,6 @@ struct RootSearchEnv<'a> {
     seldepth: &'a mut u32,
     qnodes: &'a mut u64,
     qnodes_limit: u64,
-    root_beam_skip_tracker: &'a mut HashMap<u32, u8>,
-    root_beam_skip_streak: &'a mut usize,
-    root_beam_skip_force_full: &'a mut bool,
     #[cfg(feature = "diagnostics")]
     abdada_busy_detected: &'a mut u64,
     #[cfg(feature = "diagnostics")]
@@ -212,7 +201,6 @@ struct RootMoveKeyArgs<'a> {
     alpha: i32,
     beta: i32,
     idx: usize,
-    force_full_budget: usize,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
@@ -230,263 +218,48 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             alpha,
             beta,
             idx,
-            force_full_budget,
         } = key;
         let mut child = root.clone();
-        let score = {
-            let _guard = ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
-            child.do_move(mv);
-            if idx == 0 {
-                let mut search_ctx = SearchContext {
-                    limits: env.limits,
-                    start_time: env.t0,
-                    nodes: env.nodes,
-                    seldepth: env.seldepth,
-                    qnodes: env.qnodes,
-                    qnodes_limit: env.qnodes_limit,
-                    #[cfg(feature = "diagnostics")]
-                    abdada_busy_detected: env.abdada_busy_detected,
-                    #[cfg(feature = "diagnostics")]
-                    abdada_busy_set: env.abdada_busy_set,
-                };
-                let (sc, _) = self.alphabeta(
-                    pvs::ABArgs {
-                        pos: &child,
-                        depth: d - 1,
-                        alpha: -beta,
-                        beta: -alpha,
-                        ply: 1,
-                        is_pv: true,
-                        stack: state.stack,
-                        heur: state.heur,
-                        tt_hits: state.tt_hits,
-                        beta_cuts: state.beta_cuts,
-                        lmr_counter: state.lmr_counter,
-                        lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                        lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                        evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                    },
-                    &mut search_ctx,
-                );
-                -sc
-            } else {
-                let mut need_full = true;
-                let mut s = i32::MIN;
-                let root_gives_check = root.gives_check(mv);
-                let root_see = root.see(mv);
-                let root_own_king_near = root
-                    .board
-                    .king_square(root.side_to_move)
-                    .map(|k| chebyshev_distance(k, mv.to()))
-                    .is_some_and(|d| d <= 2);
-                let root_enemy_king_adjacent = root
-                    .board
-                    .king_square(root.side_to_move.opposite())
-                    .map(|k| chebyshev_distance(k, mv.to()))
-                    .is_some_and(|d| d <= 1);
-                let root_quiet_move = !root_gives_check && !mv.is_capture_hint();
-                let drop_near_enemy_king = mv.is_drop() && root_enemy_king_adjacent;
-                let quiet_touching_any_king =
-                    root_quiet_move && (root_own_king_near || root_enemy_king_adjacent);
-                let mut forcing = root_gives_check || root_see >= 0 || root_own_king_near;
-                if drop_near_enemy_king || quiet_touching_any_king {
-                    forcing = true;
-                }
-                if dynp::root_beam_enabled()
-                    && idx >= force_full_budget
-                    && d > dynp::root_beam_min_depth()
-                    && !drop_near_enemy_king
-                    && !quiet_touching_any_king
-                    && !*env.root_beam_skip_force_full
-                {
-                    let shallow_depth = (d - 1).saturating_sub(dynp::root_beam_reduction());
-                    if shallow_depth >= 1 {
-                        let mut search_ctx_shallow = SearchContext {
-                            limits: env.limits,
-                            start_time: env.t0,
-                            nodes: env.nodes,
-                            seldepth: env.seldepth,
-                            qnodes: env.qnodes,
-                            qnodes_limit: env.qnodes_limit,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_detected: env.abdada_busy_detected,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_set: env.abdada_busy_set,
-                        };
-                        let (sc_shallow, _) = self.alphabeta(
-                            pvs::ABArgs {
-                                pos: &child,
-                                depth: shallow_depth,
-                                alpha: -(alpha + 1),
-                                beta: -alpha,
-                                ply: 1,
-                                is_pv: false,
-                                stack: state.stack,
-                                heur: state.heur,
-                                tt_hits: state.tt_hits,
-                                beta_cuts: state.beta_cuts,
-                                lmr_counter: state.lmr_counter,
-                                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                            },
-                            &mut search_ctx_shallow,
-                        );
-                        s = -sc_shallow;
-                        need_full = forcing || s > alpha - dynp::root_beam_margin_cp();
-                        if need_full && !forcing {
-                            let delta = dynp::root_beam_narrow_delta_cp();
-                            let narrow_low = alpha.saturating_sub(delta);
-                            let narrow_high = alpha.saturating_add(delta);
-                            let mut search_ctx_narrow = SearchContext {
-                                limits: env.limits,
-                                start_time: env.t0,
-                                nodes: env.nodes,
-                                seldepth: env.seldepth,
-                                qnodes: env.qnodes,
-                                qnodes_limit: env.qnodes_limit,
-                                #[cfg(feature = "diagnostics")]
-                                abdada_busy_detected: env.abdada_busy_detected,
-                                #[cfg(feature = "diagnostics")]
-                                abdada_busy_set: env.abdada_busy_set,
-                            };
-                            let (sc_narrow, _) = self.alphabeta(
-                                pvs::ABArgs {
-                                    pos: &child,
-                                    depth: d - 1,
-                                    alpha: -narrow_high,
-                                    beta: -narrow_low,
-                                    ply: 1,
-                                    is_pv: false,
-                                    stack: state.stack,
-                                    heur: state.heur,
-                                    tt_hits: state.tt_hits,
-                                    beta_cuts: state.beta_cuts,
-                                    lmr_counter: state.lmr_counter,
-                                    lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                                    lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                                    evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                                },
-                                &mut search_ctx_narrow,
-                            );
-                            s = -sc_narrow;
-                            need_full = s > alpha - dynp::root_beam_narrow_promote_cp();
-                        }
-                        if !need_full {
-                            if let Some(cb) = env.limits.info_string_callback.as_ref() {
-                                cb("root_beam_skip_full=1");
-                            }
-                            let retry_limit = dynp::root_beam_skip_retry_limit().max(1);
-                            let entry = env.root_beam_skip_tracker.entry(mv.to_u32()).or_insert(0);
-                            *entry = entry.saturating_add(1);
-                            if (*entry as usize) >= retry_limit {
-                                *entry = 0;
-                                *env.root_beam_skip_force_full = true;
-                                need_full = true;
-                            }
-                            *env.root_beam_skip_streak =
-                                env.root_beam_skip_streak.saturating_add(1);
-                            if *env.root_beam_skip_streak >= retry_limit {
-                                *env.root_beam_skip_force_full = true;
-                                need_full = true;
-                            }
-                        }
-                    }
-                }
-                if need_full {
-                    *env.root_beam_skip_streak = 0;
-                    env.root_beam_skip_tracker.insert(mv.to_u32(), 0);
-                    let mut search_ctx_nw = SearchContext {
-                        limits: env.limits,
-                        start_time: env.t0,
-                        nodes: env.nodes,
-                        seldepth: env.seldepth,
-                        qnodes: env.qnodes,
-                        qnodes_limit: env.qnodes_limit,
-                        #[cfg(feature = "diagnostics")]
-                        abdada_busy_detected: env.abdada_busy_detected,
-                        #[cfg(feature = "diagnostics")]
-                        abdada_busy_set: env.abdada_busy_set,
-                    };
-                    let (sc_nw, _) = self.alphabeta(
-                        pvs::ABArgs {
-                            pos: &child,
-                            depth: d - 1,
-                            alpha: -(alpha + 1),
-                            beta: -alpha,
-                            ply: 1,
-                            is_pv: false,
-                            stack: state.stack,
-                            heur: state.heur,
-                            tt_hits: state.tt_hits,
-                            beta_cuts: state.beta_cuts,
-                            lmr_counter: state.lmr_counter,
-                            lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                            lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                            evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                        },
-                        &mut search_ctx_nw,
-                    );
-                    s = -sc_nw;
-                    if s > alpha && s < beta {
-                        let mut search_ctx_fw = SearchContext {
-                            limits: env.limits,
-                            start_time: env.t0,
-                            nodes: env.nodes,
-                            seldepth: env.seldepth,
-                            qnodes: env.qnodes,
-                            qnodes_limit: env.qnodes_limit,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_detected: env.abdada_busy_detected,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_set: env.abdada_busy_set,
-                        };
-                        let (sc_fw, _) = self.alphabeta(
-                            pvs::ABArgs {
-                                pos: &child,
-                                depth: d - 1,
-                                alpha: -beta,
-                                beta: -alpha,
-                                ply: 1,
-                                is_pv: true,
-                                stack: state.stack,
-                                heur: state.heur,
-                                tt_hits: state.tt_hits,
-                                beta_cuts: state.beta_cuts,
-                                lmr_counter: state.lmr_counter,
-                                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                            },
-                            &mut search_ctx_fw,
-                        );
-                        s = -sc_fw;
-                    }
-                }
-                s
-            }
+        let _guard = ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
+        child.do_move(mv);
+        let is_pv = idx == 0;
+        let mut search_ctx = SearchContext {
+            limits: env.limits,
+            start_time: env.t0,
+            nodes: env.nodes,
+            seldepth: env.seldepth,
+            qnodes: env.qnodes,
+            qnodes_limit: env.qnodes_limit,
+            #[cfg(feature = "diagnostics")]
+            abdada_busy_detected: env.abdada_busy_detected,
+            #[cfg(feature = "diagnostics")]
+            abdada_busy_set: env.abdada_busy_set,
         };
-        score
-    }
-    fn effective_root_force_full_count(limits: &SearchLimits) -> usize {
-        if !dynp::root_beam_enabled() {
-            return 0;
-        }
-        let mut force = dynp::root_beam_force_full_count();
-        if force == 0 {
-            return 0;
-        }
-        if limits.multipv > 1 {
-            force = force.min(1);
-        }
-        if let TimeControl::FixedTime { ms_per_move } = &limits.time_control {
-            if *ms_per_move <= 500 {
-                force = force.min(1);
-            } else if *ms_per_move <= 800 {
-                force = force.min(2);
-            }
-        }
-        force
+        let (alpha_for_search, beta_for_search) = if is_pv {
+            (-beta, -alpha)
+        } else {
+            (-(alpha + 1), -alpha)
+        };
+        let (sc, _) = self.alphabeta(
+            pvs::ABArgs {
+                pos: &child,
+                depth: d - 1,
+                alpha: alpha_for_search,
+                beta: beta_for_search,
+                ply: 1,
+                is_pv,
+                stack: state.stack,
+                heur: state.heur,
+                tt_hits: state.tt_hits,
+                beta_cuts: state.beta_cuts,
+                lmr_counter: state.lmr_counter,
+                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
+                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
+                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
+            },
+            &mut search_ctx,
+        );
+        -sc
     }
     #[inline]
     /// Global kill-switch for stabilization gates (near-deadline policy, aspiration safeguards, near-final verify).
@@ -1655,11 +1428,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         !excluded_keys.contains(&key)
                     })
                     .collect();
-                let force_full_budget = Self::effective_root_force_full_count(limits);
-                let mut root_beam_skip_tracker: HashMap<u32, u8> = HashMap::new();
-                let mut root_beam_skip_streak: usize = 0;
-                let mut root_beam_skip_force_full = false;
-
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
@@ -1761,9 +1529,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             seldepth: &mut seldepth,
                             qnodes: &mut qnodes,
                             qnodes_limit,
-                            root_beam_skip_tracker: &mut root_beam_skip_tracker,
-                            root_beam_skip_streak: &mut root_beam_skip_streak,
-                            root_beam_skip_force_full: &mut root_beam_skip_force_full,
                             #[cfg(feature = "diagnostics")]
                             abdada_busy_detected: &mut cum_abdada_busy_detected,
                             #[cfg(feature = "diagnostics")]
@@ -1789,7 +1554,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 alpha,
                                 beta,
                                 idx,
-                                force_full_budget,
                             },
                             &mut env,
                             &mut state,
