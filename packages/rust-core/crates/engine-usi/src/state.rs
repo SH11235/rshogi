@@ -164,6 +164,15 @@ pub struct UsiOptions {
     pub root_see_gate: bool,
     /// 拡張SEEのしきい値（cp）。0 で無効。
     pub root_see_gate_xsee_cp: i32,
+    // Root Verify guard
+    pub root_verify_enabled: bool,
+    pub root_verify_max_ms: u64,
+    pub root_verify_max_nodes: u64,
+    pub root_verify_check_depth: u32,
+    pub root_verify_opp_see_min_cp: i32,
+    pub root_verify_major_loss_penalty_cp: i32,
+    pub win_protect_enabled: bool,
+    pub win_protect_threshold_cp: i32,
     // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
     pub post_verify: bool,
     /// Early finalize linkage: require post-verify to pass; if reject, extend search briefly
@@ -275,6 +284,14 @@ impl Default for UsiOptions {
             // YO系の運用に合わせ、危険な静手（着地でタダ取りされる手）を初期状態で抑制する。
             root_see_gate: true,
             root_see_gate_xsee_cp: 74,
+            root_verify_enabled: true,
+            root_verify_max_ms: 8,
+            root_verify_max_nodes: 150_000,
+            root_verify_check_depth: 3,
+            root_verify_opp_see_min_cp: 0,
+            root_verify_major_loss_penalty_cp: 1_200,
+            win_protect_enabled: true,
+            win_protect_threshold_cp: 1_200,
             post_verify: true,
             post_verify_require_pass: false,
             post_verify_extend_ms: 300,
