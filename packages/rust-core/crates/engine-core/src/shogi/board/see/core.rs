@@ -555,15 +555,20 @@ impl Position {
     /// Evaluate a quiet (non-capture, non-drop) move `mv` by:
     /// 1. Applying the move to a child position.
     /// 2. Letting the opponent choose the best capture on the landing square.
-    /// 3. Returning the opponent's best SEE gain with sign flipped
-    ///    (negative values are bad for the side to move in the original position).
+    /// 3. Additionally checking for newly exposed attacks on our own major pieces
+    ///    that become hanging due to vacating the original square.
+    /// 4. Returning the worst (most negative) of:
+    ///    - opponent's best SEE gain on the landing square, and
+    ///    - any vacated-major penalty.
+    ///
+    /// Negative values are bad for the side to move in the original position.
     pub fn xsee_quiet_after_make(&self, mv: Move) -> i32 {
         // Drops/captures fall back to standard SEE.
         if mv.is_drop() || mv.is_capture_hint() {
             return self.see(mv);
         }
 
-        let Some(_from) = mv.from() else {
+        let Some(from) = mv.from() else {
             return 0;
         };
         let to = mv.to();
@@ -571,6 +576,7 @@ impl Position {
         // Build child position after the quiet move.
         let mut child = self.clone();
         child.do_move(mv);
+        let occupied_before = self.board.all_bb;
         let occupied_after = child.board.all_bb;
 
         let color = self.side_to_move;
@@ -580,11 +586,8 @@ impl Position {
         let mut attackers = child.get_all_attackers_to(to, occupied_after)
             & child.board.occupied_bb[enemy as usize];
 
-        if attackers.is_empty() {
-            return 0;
-        }
-
-        // Opponent chooses the capture with the largest static exchange gain.
+        // Landing-square XSEE component: if there is no attack on the landing
+        // square, this part contributes 0.
         let mut best_for_enemy = 0;
         while let Some(sq) = attackers.pop_lsb() {
             let cap = Move::normal(sq, to, false);
@@ -593,8 +596,24 @@ impl Position {
                 best_for_enemy = gain;
             }
         }
+        let landing_xsee = -best_for_enemy;
 
-        -best_for_enemy
+        // Vacated‑major component: look for our own heavy pieces that newly
+        // become attacked after the quiet move (discovered attack / line opening).
+        let color_occupied_after = child.board.occupied_bb[color as usize];
+        let vacated_penalty = self.evaluate_vacated_major_penalty(
+            color,
+            from,
+            to,
+            occupied_before,
+            occupied_after,
+            color_occupied_after,
+        );
+
+        match vacated_penalty {
+            Some(penalty) => std::cmp::min(landing_xsee, penalty),
+            None => landing_xsee,
+        }
     }
 
     fn evaluate_vacated_major_penalty(
