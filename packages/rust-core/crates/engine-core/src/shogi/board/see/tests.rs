@@ -519,6 +519,68 @@ fn landing_see_for_6f6d_is_strongly_negative() {
     assert!(xsee <= -400, "XSEE(6f6d) should be strongly negative (<= -400cp), got {}", xsee);
 }
 
+/// Quiet XSEE が「味方大駒が新たに利きを通される」型のタダ損手 `5b4b` を強くマイナスと判定できることを検証する。
+#[test]
+fn vacated_major_threat_for_5b4b_is_strongly_negative() {
+    let mut pos = Position::empty();
+    // Black pieces
+    pos.board
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    // White pieces
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+    pos.board.rebuild_occupancy_bitboards();
+    pos.side_to_move = Color::Black;
+
+    let mv_5b4b =
+        Move::normal(parse_usi_square("5b").unwrap(), parse_usi_square("4b").unwrap(), false);
+    assert!(pos.is_legal_move(mv_5b4b), "5b4b must be legal in test position");
+
+    let xsee = pos.xsee_quiet_after_make(mv_5b4b);
+    assert!(
+        xsee <= -400,
+        "XSEE(5b4b) should be strongly negative (<= -400cp) due to vacated major threat, got {}",
+        xsee
+    );
+}
+
+/// Quiet XSEE が「着地点が即座に大駒を取られる」型のタダ損手 `7b7a` を強くマイナスと判定できることを検証する。
+#[test]
+fn landing_see_for_7b7a_is_strongly_negative() {
+    let mut pos = Position::empty();
+    // Black pieces
+    pos.board
+        .put_piece(parse_usi_square("7b").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    // White pieces
+    pos.board
+        .put_piece(parse_usi_square("7c").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+    pos.board.rebuild_occupancy_bitboards();
+    pos.side_to_move = Color::Black;
+
+    let mv_7b7a =
+        Move::normal(parse_usi_square("7b").unwrap(), parse_usi_square("7a").unwrap(), false);
+    assert!(pos.is_legal_move(mv_7b7a), "7b7a must be legal in test position");
+
+    let xsee = pos.xsee_quiet_after_make(mv_7b7a);
+    assert!(
+        xsee <= -400,
+        "XSEE(7b7a) should be strongly negative (<= -400cp) due to immediate capture on landing square, got {}",
+        xsee
+    );
+}
+
 /// SEE edge cases and complex scenarios
 #[cfg(test)]
 mod see_edge_cases {
