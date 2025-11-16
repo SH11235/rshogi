@@ -7,6 +7,7 @@ use crate::movegen::MoveGenerator;
 use crate::search::api::{InfoEvent, InfoEventCallback};
 use crate::search::config;
 use crate::search::constants::{mate_distance, MIN_QNODES_LIMIT, SEARCH_INF};
+use crate::search::mate1ply;
 use crate::search::tt::TTProbe;
 use crate::search::types::{normalize_root_pv, InfoStringCallback, RootLine, SearchResult};
 use crate::search::SearchLimits;
@@ -141,6 +142,10 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
         summary.total_elapsed_ms = summary.total_elapsed_ms.saturating_add(res.report.elapsed_ms);
         if let Some(reason) = res.fail_reason {
             summary.fail_count = summary.fail_count.saturating_add(1);
+            if let VerifyFailReason::MateInOne { mv: mate_mv } = &reason {
+                result.stats.root_verify_rejected_move = Some(cand.mv);
+                result.stats.root_verify_mate_move = Some(*mate_mv);
+            }
             emit_fail_log(info, limits.info_string_callback.as_ref(), cand.mv, &reason);
             if fallback.as_ref().map(|(_, rep)| rep.eval < res.report.eval).unwrap_or(true) {
                 fallback = Some((*cand, res.report));
@@ -187,6 +192,16 @@ fn verify_candidate<E: Evaluator + Send + Sync + 'static>(
     mv: Move,
     settings: &RootVerifySettings,
 ) -> VerifyResult {
+    let mut child = root.clone();
+    if let Some(mate_mv) = mate1ply::enemy_mate_in_one_after(&mut child, mv) {
+        return VerifyResult {
+            report: ProbeReport {
+                eval: original_score,
+                elapsed_ms: 0,
+            },
+            fail_reason: Some(VerifyFailReason::MateInOne { mv: mate_mv }),
+        };
+    }
     if !mv.is_drop() {
         let xsee = if mv.is_capture_hint() {
             root.see(mv)
@@ -203,7 +218,6 @@ fn verify_candidate<E: Evaluator + Send + Sync + 'static>(
             };
         }
     }
-    let mut child = root.clone();
     let eval_guard = EvalMoveGuard::new(backend.evaluator.as_ref(), root, mv);
     child.do_move(mv);
     if let Some(reason) = detect_major_threat(&child, root.side_to_move, settings.opp_see_min_cp) {
@@ -334,9 +348,6 @@ fn detect_major_threat(pos: &Position, us: Color, threshold: i32) -> Option<Veri
     {
         return Some(VerifyFailReason::OppXsee { piece, score: loss });
     }
-    if let Some(mv) = detect_enemy_mate_in_one(pos) {
-        return Some(VerifyFailReason::MateInOne { mv });
-    }
     None
 }
 
@@ -390,24 +401,6 @@ fn pawn_drop_head_threat(pos: &Position, target: Square, us: Color) -> bool {
     }
     let mv = Move::drop(PieceType::Pawn, head);
     pos.is_legal_move(mv)
-}
-
-fn detect_enemy_mate_in_one(pos: &Position) -> Option<Move> {
-    let mg = MoveGenerator::new();
-    let Ok(enemy_moves) = mg.generate_all(pos) else {
-        return None;
-    };
-    for mv in enemy_moves.as_slice() {
-        let mut reply = pos.clone();
-        reply.do_move(*mv);
-        let checker = MoveGenerator::new();
-        if let Ok(has_moves) = checker.has_legal_moves(&reply) {
-            if !has_moves {
-                return Some(*mv);
-            }
-        }
-    }
-    None
 }
 
 fn detect_shortest_attack_after_enemy_move(
@@ -521,32 +514,6 @@ fn head_square(sq: Square, owner: Color) -> Option<Square> {
                 Some(Square::new(sq.file(), sq.rank() + 1))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::usi::{move_to_usi, parse_usi_move};
-
-    #[test]
-    fn detects_enemy_mate_in_one_after_bad_bishop_drop() {
-        let mut pos = Position::from_sfen(
-            "+R5bnl/5b3/pl1+P1gkp1/s3pps2/7gp/P1P1R4/1KN1P1PPP/5S3/L1S1GG1NL b N6P 46",
-        )
-        .expect("valid sfen");
-        let mv = parse_usi_move("8g9h").expect("valid move");
-        pos.do_move(mv);
-        let mate_mv = parse_usi_move("4b9g+").expect("valid mate move");
-        let mut after = pos.clone();
-        after.do_move(mate_mv);
-        let checker = MoveGenerator::new();
-        assert!(
-            !checker.has_legal_moves(&after).expect("movegen ok"),
-            "should be a terminal position"
-        );
-        let threat = detect_enemy_mate_in_one(&pos).expect("mate threat expected");
-        assert_eq!(move_to_usi(&threat), "4b9g+");
     }
 }
 
@@ -744,4 +711,32 @@ fn emit_pass_log(
 struct VerifyResult {
     report: ProbeReport,
     fail_reason: Option<VerifyFailReason>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usi::{move_to_usi, parse_usi_move};
+
+    #[test]
+    fn detects_enemy_mate_in_one_after_bad_bishop_drop() {
+        let mut root = Position::from_sfen(
+            "+R5bnl/5b3/pl1+P1gkp1/s3pps2/7gp/P1P1R4/1KN1P1PPP/5S3/L1S1GG1NL b N6P 46",
+        )
+        .expect("valid sfen");
+        let mv = parse_usi_move("8g9h").expect("valid move");
+        let mut pos = root.clone();
+        pos.do_move(mv);
+        let mate_mv = parse_usi_move("4b9g+").expect("valid mate move");
+        let mut after = pos.clone();
+        after.do_move(mate_mv);
+        let checker = MoveGenerator::new();
+        assert!(
+            !checker.has_legal_moves(&after).expect("movegen ok"),
+            "should be a terminal position"
+        );
+        let threat =
+            mate1ply::enemy_mate_in_one_after(&mut root, mv).expect("mate threat expected");
+        assert_eq!(move_to_usi(&threat), "4b9g+");
+    }
 }

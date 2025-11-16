@@ -4,6 +4,7 @@ use engine_core::search::constants::mate_distance as md;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
+    mate1ply,
     types::{NodeType, StopInfo},
     SearchResult,
 };
@@ -11,10 +12,13 @@ use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
 use smallvec::SmallVec;
 use std::cmp::Reverse;
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
-use engine_core::{movegen::MoveGenerator, shogi::PieceType};
+use engine_core::{
+    movegen::MoveGenerator,
+    shogi::{Move, PieceType},
+};
 
 use crate::io::{diag_info_string, info_string, usi_println};
-use crate::state::EngineState;
+use crate::state::{EngineState, InstantMateVerifyMode};
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -86,6 +90,83 @@ fn has_immediate_mate_after(
         }
     }
     true
+}
+
+#[derive(Clone, Copy)]
+struct InstantMateTrigger {
+    mv: Move,
+    snapshot: SnapshotSource,
+    depth: u8,
+    elapsed_ms: u64,
+    distance: i32,
+}
+
+fn snapshot_label(src: SnapshotSource) -> &'static str {
+    match src {
+        SnapshotSource::Stable => "Stable",
+        SnapshotSource::Partial => "Partial",
+    }
+}
+
+fn multipv_all_mate_in_one(res: &SearchResult, max_distance: u32, multipv: u8) -> bool {
+    let Some(lines) = res.lines.as_ref() else {
+        return false;
+    };
+    let required = multipv.min(lines.len() as u8) as usize;
+    if required == 0 {
+        return false;
+    }
+    lines.iter().take(required).all(|line| match line.mate_distance {
+        Some(d) if d > 0 => (d as u32) <= max_distance,
+        _ => false,
+    })
+}
+
+fn try_instant_mate_trigger(
+    state: &mut EngineState,
+    res: &SearchResult,
+) -> Option<InstantMateTrigger> {
+    let opts = &state.opts;
+    if !opts.instant_mate_move_enabled {
+        return None;
+    }
+    if opts.instant_mate_verify_mode != InstantMateVerifyMode::CheckOnly {
+        return None;
+    }
+    let dist = match md(res.score) {
+        Some(d) if d > 0 => d,
+        _ => return None,
+    };
+    if (dist as u32) > opts.instant_mate_move_max_distance {
+        return None;
+    }
+    let depth = res.stats.stable_depth.unwrap_or(res.stats.depth);
+    if depth < opts.instant_mate_min_depth {
+        return None;
+    }
+    let snapshot = res.stats.root_report_source.unwrap_or(SnapshotSource::Partial);
+    if opts.instant_mate_require_stable && snapshot != SnapshotSource::Stable {
+        return None;
+    }
+    if opts.instant_mate_check_all_pv
+        && opts.multipv > 1
+        && !multipv_all_mate_in_one(res, opts.instant_mate_move_max_distance, opts.multipv)
+    {
+        return None;
+    }
+    let elapsed_ms = res.stats.elapsed.as_millis() as u64;
+    if opts.instant_mate_respect_min_think_ms && elapsed_ms < opts.instant_mate_min_respect_ms {
+        return None;
+    }
+    let side = state.position.side_to_move;
+    let mv = mate1ply::mate_in_one_for_side(&mut state.position, side)?;
+    Some(InstantMateTrigger {
+        mv,
+        snapshot,
+        depth,
+        elapsed_ms,
+        distance: dist,
+    })
 }
 
 #[cfg(test)]
@@ -1583,38 +1664,61 @@ pub fn finalize_and_send(
         label,
     );
 
+    let mut instant_mate_forced = false;
+    if let Some(res) = result.as_ref() {
+        if let Some(trigger) = try_instant_mate_trigger(state, res) {
+            final_best.best_move = Some(trigger.mv);
+            final_best.pv.clear();
+            final_best.pv.push(trigger.mv);
+            final_best.source = FinalBestSource::Committed;
+            instant_mate_forced = true;
+            let mv_usi = move_to_usi(&trigger.mv);
+            let snap = snapshot_label(trigger.snapshot);
+            info_string(format!(
+                "instant_mate_move fired=1 move={} dist={} snapshot={} depth={} elapsed_ms={}",
+                mv_usi, trigger.distance, snap, trigger.depth, trigger.elapsed_ms
+            ));
+            info_string(format!(
+                "self_mate_in_one move={} dist={} depth={} snapshot={}",
+                mv_usi, trigger.distance, trigger.depth, snap
+            ));
+        }
+    }
+
     // Mate gating (YO流): Lower/Upper の mate距離では確定扱いしない。安定条件不足も抑止。
     let mut mate_gate_blocked = false;
     let mut mate_post_reject = false;
-    if let Some(res) = result.as_ref() {
-        if is_mate_score(res.score) {
-            let cfg = MateGateCfg {
-                min_stable_depth: state.opts.mate_gate_min_stable_depth,
-                fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
-                fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
-            };
-            let block = mate_gate_should_block(
-                res.node_type,
-                res.stats.stable_depth,
-                res.stats.depth,
-                res.stats.elapsed.as_millis() as u64,
-                &cfg,
-            );
-            if block {
-                let dist = md(res.score).unwrap_or(0);
-                info_string(format!(
-                    "mate_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
-                    match res.node_type {
-                        engine_core::search::types::NodeType::LowerBound => "lb",
-                        engine_core::search::types::NodeType::UpperBound => "ub",
-                        _ => "pv",
-                    },
+    if !instant_mate_forced {
+        if let Some(res) = result.as_ref() {
+            if is_mate_score(res.score) {
+                let cfg = MateGateCfg {
+                    min_stable_depth: state.opts.mate_gate_min_stable_depth,
+                    fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
+                    fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
+                };
+                let block = mate_gate_should_block(
+                    res.node_type,
+                    res.stats.stable_depth,
                     res.stats.depth,
-                    res.stats.elapsed.as_millis(),
-                    dist
-                ));
-                // 距離1はゲート免除（必ずCheckOnlyのpost-verifyを実施）
-                mate_gate_blocked = dist > 1;
+                    res.stats.elapsed.as_millis() as u64,
+                    &cfg,
+                );
+                if block {
+                    let dist = md(res.score).unwrap_or(0);
+                    info_string(format!(
+                        "mate_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
+                        match res.node_type {
+                            engine_core::search::types::NodeType::LowerBound => "lb",
+                            engine_core::search::types::NodeType::UpperBound => "ub",
+                            _ => "pv",
+                        },
+                        res.stats.depth,
+                        res.stats.elapsed.as_millis(),
+                        dist
+                    ));
+                    // 距離1はゲート免除（必ずCheckOnlyのpost-verifyを実施）
+                    mate_gate_blocked = dist > 1;
+                }
             }
         }
     }
@@ -1817,6 +1921,15 @@ pub fn finalize_and_send(
             info_string(format!(
                 "root_verify summary checked={} fail={} total_ms={}",
                 checked, fail, total_ms
+            ));
+        }
+        if let (Some(rejected), Some(mate_mv)) =
+            (res.stats.root_verify_rejected_move, res.stats.root_verify_mate_move)
+        {
+            info_string(format!(
+                "root_verify fail after={} reason=opp_mate_in_one delta=-32000 mate_move={}",
+                move_to_usi(&rejected),
+                move_to_usi(&mate_mv)
             ));
         }
         if let Some(heur) = res.stats.heuristics.as_ref() {
@@ -2073,11 +2186,16 @@ pub fn finalize_and_send(
     // Optional finalize sanity check (may switch PV1)
     // joined 経路でも near_draw 可視化を揃えるため、score_hint を渡す
     let score_hint_joined = result.map(|r| r.score);
-    let mut maybe_switch =
-        finalize_sanity_check(state, &stop_meta, &final_best, result, score_hint_joined, "joined");
+    let mut maybe_switch = if instant_mate_forced {
+        None
+    } else {
+        finalize_sanity_check(state, &stop_meta, &final_best, result, score_hint_joined, "joined")
+    };
 
     // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
-    if mate_gate_blocked || (mate_post_reject && state.opts.post_verify_require_pass) {
+    if !instant_mate_forced
+        && (mate_gate_blocked || (mate_post_reject && state.opts.post_verify_require_pass))
+    {
         let pv1 = final_best.best_move;
         let mut forced_alt: Option<engine_core::shogi::Move> = None;
         if let Some(snap) = snapshot_valid.as_ref() {

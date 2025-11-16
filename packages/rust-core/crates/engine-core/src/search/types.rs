@@ -201,6 +201,9 @@ pub struct SearchStats {
     pub root_verify_fail_count: Option<u64>,
     pub root_verify_checked_moves: Option<u64>,
     pub root_verify_total_ms: Option<u64>,
+    /// Root verify diagnostics for mate-in-one rejection
+    pub root_verify_rejected_move: Option<Move>,
+    pub root_verify_mate_move: Option<Move>,
     /// LMR gating: times LMR was disabled/blocked due to in_check/evasion at current node
     pub lmr_blocked_in_check: Option<u64>,
     /// LMR gating: times LMR was disabled/blocked due to recapture heuristic
