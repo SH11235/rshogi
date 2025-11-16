@@ -6,6 +6,7 @@ pub mod config;
 pub mod constants;
 pub mod history;
 pub mod limits;
+pub mod mate1ply;
 pub mod parallel;
 pub mod params;
 pub mod policy;
