@@ -224,9 +224,8 @@ println!("Note: {final_errors} positions had errors and were skipped");
 - スクリプト: `scripts/analysis/run_eval_targets.py`
 - 目的: 同一局面を3つの探索プロファイルで再評価し、落下の再現性や軽減度合いを可視化。
 - 既定プロファイル（スクリプト内定義）
-  - `base`: `SearchParams.RootBeamForceFullCount=0`
-  - `rootfull`: `SearchParams.RootBeamForceFullCount=4`
-  - `gates`: `SearchParams.RootBeamForceFullCount=0`, `RootSeeGate.XSEE=0`, `SHOGI_QUIET_SEE_GUARD=0`
+  - `base`: 既定設定
+  - `gates`: `RootSeeGate.XSEE=0`, `SHOGI_QUIET_SEE_GUARD=0`
 - 主なオプション/環境変数:
   - `--threads <n>`（既定 1）, `--byoyomi <ms>`（既定 2000）, `--minthink <ms>`, `--warmupms <ms>`
   - `ENGINE_BIN=<path>` を設定すると別バイナリを使用可。
