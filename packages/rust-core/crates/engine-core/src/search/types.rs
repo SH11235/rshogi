@@ -197,6 +197,10 @@ pub struct SearchStats {
     pub near_final_attempted: Option<u64>,
     /// Near-final verify confirmations (number of times Exact was confirmed)
     pub near_final_confirmed: Option<u64>,
+    /// Root verification statistics (drop-aware guard)
+    pub root_verify_fail_count: Option<u64>,
+    pub root_verify_checked_moves: Option<u64>,
+    pub root_verify_total_ms: Option<u64>,
     /// LMR gating: times LMR was disabled/blocked due to in_check/evasion at current node
     pub lmr_blocked_in_check: Option<u64>,
     /// LMR gating: times LMR was disabled/blocked due to recapture heuristic

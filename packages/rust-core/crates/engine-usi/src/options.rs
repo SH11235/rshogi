@@ -358,6 +358,62 @@ fn collect_search_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
         ),
     );
     builder.search(
+        "RootVerify.Enabled",
+        format!(
+            "option name RootVerify.Enabled type check default {}",
+            bool_to_usi(opts.root_verify_enabled)
+        ),
+    );
+    builder.search(
+        "RootVerify.MaxMs",
+        format!(
+            "option name RootVerify.MaxMs type spin default {} min 0 max 50",
+            opts.root_verify_max_ms
+        ),
+    );
+    builder.search(
+        "RootVerify.MaxNodes",
+        format!(
+            "option name RootVerify.MaxNodes type spin default {} min 0 max 5000000",
+            opts.root_verify_max_nodes
+        ),
+    );
+    builder.search(
+        "RootVerify.CheckDepth",
+        format!(
+            "option name RootVerify.CheckDepth type spin default {} min 1 max 5",
+            opts.root_verify_check_depth
+        ),
+    );
+    builder.search(
+        "RootVerify.OppSEE_MinCp",
+        format!(
+            "option name RootVerify.OppSEE_MinCp type spin default {} min -200 max 300",
+            opts.root_verify_opp_see_min_cp
+        ),
+    );
+    builder.search(
+        "RootVerify.MajorLossPenaltyCp",
+        format!(
+            "option name RootVerify.MajorLossPenaltyCp type spin default {} min 200 max 3000",
+            opts.root_verify_major_loss_penalty_cp
+        ),
+    );
+    builder.search(
+        "WinProtect.Enabled",
+        format!(
+            "option name WinProtect.Enabled type check default {}",
+            bool_to_usi(opts.win_protect_enabled)
+        ),
+    );
+    builder.search(
+        "WinProtect.ThresholdCp",
+        format!(
+            "option name WinProtect.ThresholdCp type spin default {} min 600 max 3000",
+            opts.win_protect_threshold_cp
+        ),
+    );
+    builder.search(
         "Search.CaptureFutility",
         "option name Search.CaptureFutility type check default true".to_string(),
     );
@@ -1584,6 +1640,88 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "RootVerify.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                state.opts.root_verify_enabled = on;
+                engine_core::search::config::set_root_verify_enabled(on);
+                mark_override(state, "RootVerify.Enabled");
+            }
+        }
+        "RootVerify.MaxMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.root_verify_max_ms = ms.clamp(0, 50);
+                    engine_core::search::config::set_root_verify_max_ms(
+                        state.opts.root_verify_max_ms,
+                    );
+                    mark_override(state, "RootVerify.MaxMs");
+                }
+            }
+        }
+        "RootVerify.MaxNodes" => {
+            if let Some(v) = value_ref {
+                if let Ok(nodes) = v.parse::<u64>() {
+                    state.opts.root_verify_max_nodes = nodes.clamp(0, 5_000_000);
+                    engine_core::search::config::set_root_verify_max_nodes(
+                        state.opts.root_verify_max_nodes,
+                    );
+                    mark_override(state, "RootVerify.MaxNodes");
+                }
+            }
+        }
+        "RootVerify.CheckDepth" => {
+            if let Some(v) = value_ref {
+                if let Ok(depth) = v.parse::<u32>() {
+                    state.opts.root_verify_check_depth = depth.clamp(1, 5);
+                    engine_core::search::config::set_root_verify_check_depth(
+                        state.opts.root_verify_check_depth,
+                    );
+                    mark_override(state, "RootVerify.CheckDepth");
+                }
+            }
+        }
+        "RootVerify.OppSEE_MinCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(cp) = v.parse::<i32>() {
+                    state.opts.root_verify_opp_see_min_cp = cp.clamp(-200, 300);
+                    engine_core::search::config::set_root_verify_opp_see_min_cp(
+                        state.opts.root_verify_opp_see_min_cp,
+                    );
+                    mark_override(state, "RootVerify.OppSEE_MinCp");
+                }
+            }
+        }
+        "RootVerify.MajorLossPenaltyCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(cp) = v.parse::<i32>() {
+                    state.opts.root_verify_major_loss_penalty_cp = cp.clamp(200, 3000);
+                    engine_core::search::config::set_root_verify_major_loss_penalty_cp(
+                        state.opts.root_verify_major_loss_penalty_cp,
+                    );
+                    mark_override(state, "RootVerify.MajorLossPenaltyCp");
+                }
+            }
+        }
+        "WinProtect.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "on" | "true" | "1");
+                state.opts.win_protect_enabled = on;
+                engine_core::search::config::set_win_protect_enabled(on);
+                mark_override(state, "WinProtect.Enabled");
+            }
+        }
+        "WinProtect.ThresholdCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(cp) = v.parse::<i32>() {
+                    state.opts.win_protect_threshold_cp = cp.clamp(600, 3000);
+                    engine_core::search::config::set_win_protect_threshold_cp(
+                        state.opts.win_protect_threshold_cp,
+                    );
+                    mark_override(state, "WinProtect.ThresholdCp");
+                }
+            }
+        }
         // --- Finalize sanity options ---
         "FinalizeSanity.Enabled" => {
             if let Some(v) = value_ref {
@@ -2324,6 +2462,18 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     // Root SEE Gate (revived)
     engine_core::search::config::set_root_see_gate_enabled(state.opts.root_see_gate);
     engine_core::search::config::set_root_see_gate_xsee_cp(state.opts.root_see_gate_xsee_cp);
+    engine_core::search::config::set_root_verify_enabled(state.opts.root_verify_enabled);
+    engine_core::search::config::set_root_verify_max_ms(state.opts.root_verify_max_ms);
+    engine_core::search::config::set_root_verify_max_nodes(state.opts.root_verify_max_nodes);
+    engine_core::search::config::set_root_verify_check_depth(state.opts.root_verify_check_depth);
+    engine_core::search::config::set_root_verify_opp_see_min_cp(
+        state.opts.root_verify_opp_see_min_cp,
+    );
+    engine_core::search::config::set_root_verify_major_loss_penalty_cp(
+        state.opts.root_verify_major_loss_penalty_cp,
+    );
+    engine_core::search::config::set_win_protect_enabled(state.opts.win_protect_enabled);
+    engine_core::search::config::set_win_protect_threshold_cp(state.opts.win_protect_threshold_cp);
     // Root retry (one-shot) は廃止（YO準拠）。
     engine_core::search::config::set_promote_verify_enabled(state.opts.promote_verify);
     engine_core::search::config::set_promote_bias_cp(state.opts.promote_bias_cp);
@@ -2471,13 +2621,21 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} root_verify={} rv_ms={} rv_nodes={} rv_depth={} rv_oppsee={} rv_major={} win_protect={} win_cp={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
         state.opts.multipv,
         state.opts.root_see_gate as u8,
         state.opts.root_see_gate_xsee_cp,
+        state.opts.root_verify_enabled as u8,
+        state.opts.root_verify_max_ms,
+        state.opts.root_verify_max_nodes,
+        state.opts.root_verify_check_depth,
+        state.opts.root_verify_opp_see_min_cp,
+        state.opts.root_verify_major_loss_penalty_cp,
+        state.opts.win_protect_enabled as u8,
+        state.opts.win_protect_threshold_cp,
         state.opts.post_verify as u8,
         state.opts.y_drop_cp,
         state.opts.finalize_sanity_enabled as u8,

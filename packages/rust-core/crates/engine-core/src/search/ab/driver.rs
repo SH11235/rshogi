@@ -3,6 +3,9 @@ use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
 #[cfg(feature = "diagnostics")]
 use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
+use super::root_verify::{
+    apply_root_post_verify, WinProtectConfig, WIN_PROTECT_DEPTH_LIMIT, WIN_PROTECT_MIN_THINK_MS,
+};
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
@@ -845,12 +848,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         } else {
             (None, None)
         };
-        let min_think_ms = if limits.is_ponder {
+        let mut min_think_ms_effective = if limits.is_ponder {
             0
         } else {
             limits.time_parameters.as_ref().map(|tp| tp.min_think_ms).unwrap_or(0)
         };
         let mut prev_score: i32 = 0;
+        let win_protect_cfg = WinProtectConfig::load();
+        let mut win_protect_guard_active = false;
         use crate::search::constants::{
             ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX, ASPIRATION_DELTA_THREADS_K,
         };
@@ -898,6 +903,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
         let mut final_seldepth_raw: Option<u32> = None;
+        let mut last_root_order: Vec<crate::shogi::Move> = Vec::new();
         let mut incomplete_depth: Option<u8> = None;
         let mut cumulative_pv_changed: u32 = 0;
         let mut cumulative_asp_failures: u32 = 0;
@@ -1062,9 +1068,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     ));
                 }
             }
-            if let Some(hit) =
-                Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
-            {
+            if let Some(hit) = Self::deadline_hit(
+                t0,
+                soft_deadline,
+                hard_deadline,
+                limits,
+                min_think_ms_effective,
+                nodes,
+            ) {
                 if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
                     // ignore Soft after NearHard
                 } else {
@@ -1174,6 +1185,8 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     }
                 }
             }
+
+            last_root_order = root_moves.clone();
 
             // Root SEE Gate: 静かな手（ドロップ含む）に対して xSEE を適用し、
             // see(mv) < -xsee_cp の手を除外する。捕獲手のみ常に許可。
@@ -1319,7 +1332,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     soft_deadline,
                     hard_deadline,
                     limits,
-                    min_think_ms,
+                    min_think_ms_effective,
                     nodes,
                 ) {
                     if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
@@ -1438,7 +1451,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         soft_deadline,
                         hard_deadline,
                         limits,
-                        min_think_ms,
+                        min_think_ms_effective,
                         nodes,
                     ) {
                         if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
@@ -1484,7 +1497,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             soft_deadline,
                             hard_deadline,
                             limits,
-                            min_think_ms,
+                            min_think_ms_effective,
                             nodes,
                         ) {
                             if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
@@ -1582,7 +1595,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         soft_deadline,
                         hard_deadline,
                         limits,
-                        min_think_ms,
+                        min_think_ms_effective,
                         nodes,
                     ) {
                         if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
@@ -1802,6 +1815,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             prev_score
                         };
                         prev_score = best_score;
+                        if !win_protect_guard_active
+                            && win_protect_cfg.enabled
+                            && best_score >= win_protect_cfg.threshold_cp
+                            && d < WIN_PROTECT_DEPTH_LIMIT as i32
+                        {
+                            win_protect_guard_active = true;
+                            if min_think_ms_effective < WIN_PROTECT_MIN_THINK_MS {
+                                min_think_ms_effective = WIN_PROTECT_MIN_THINK_MS;
+                            }
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb(&format!(
+                                    "win_protect_trigger depth={} score={}",
+                                    d, best_score
+                                ));
+                            }
+                        }
                         // Capture best move and score for use as hint in next iteration
                         local_best_for_next_iter = Some((adopt_mv, best_score));
                         if let Some(hint) = hint_for_picker {
@@ -2561,6 +2590,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // call-site以降で best_move/score/node_type/stats.pv を個別に変更しないこと。
             result.sync_from_primary_line();
         }
+        apply_root_post_verify(self, root, limits, info, &mut result, score_out, &last_root_order);
 
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;

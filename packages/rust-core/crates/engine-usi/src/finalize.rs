@@ -1811,6 +1811,14 @@ pub fn finalize_and_send(
         if let Some(helper_share) = res.stats.helper_share_pct {
             info_verbose(state, format!("helper_share_pct={helper_share:.2}"));
         }
+        if let Some(checked) = res.stats.root_verify_checked_moves {
+            let fail = res.stats.root_verify_fail_count.unwrap_or(0);
+            let total_ms = res.stats.root_verify_total_ms.unwrap_or(0);
+            info_string(format!(
+                "root_verify summary checked={} fail={} total_ms={}",
+                checked, fail, total_ms
+            ));
+        }
         if let Some(heur) = res.stats.heuristics.as_ref() {
             let summary = heur.summary();
             let lmr_trials = res.stats.lmr_trials.unwrap_or(summary.lmr_trials);
