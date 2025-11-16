@@ -267,38 +267,24 @@ fn main() -> Result<()> {
             }
 
             if cmd == "quit" {
-                if let Some(flag) = &state.stop_flag {
-                    flag.store(true, Ordering::SeqCst);
+                // Treat quit as a hard stop request only when a normal search
+                // is in progress. Mate-mode (`go mate ...`) uses a separate
+                // path and must not emit bestmove.
+                if state.searching {
+                    handle_stop(&mut state);
                 }
 
-                // Ensure any ongoing search completes before quit
+                // Best-effort cleanup: if a search session is still present
+                // (e.g., in edge cases where handle_stop did not consume it),
+                // request a final stop and join the worker thread for clean shutdown.
                 if let Some(session) = state.search_session.take() {
                     let stop_ctrl = {
                         let engine = state.lock_engine();
                         engine.stop_controller_handle()
                     };
-
-                    // Try to get result with 1500ms timeout
-                    let got_result = session
+                    let _ = session
                         .request_stop_and_wait(stop_ctrl.as_ref(), Duration::from_millis(1500));
-
-                    // Join only if search completed or disconnected; detach if still pending
-                    if got_result.is_some() {
-                        session.join_blocking();
-                    } else {
-                        use engine_core::engine::TryResult;
-                        match session.try_poll() {
-                            TryResult::Pending => {
-                                // Detach: drop session without joining to avoid hang
-                                info_string("quit_join_skipped pending=1");
-                                // session drops here, JoinHandle detaches
-                            }
-                            _ => {
-                                // Disconnected or late result: safe to join
-                                session.join_blocking();
-                            }
-                        }
-                    }
+                    session.join_blocking();
                 }
 
                 // Notify idle after cleanup is complete
