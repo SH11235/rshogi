@@ -226,8 +226,9 @@ impl Default for UsiOptions {
             fail_safe_guard: false,
             simd_max_level: None,
             nnue_simd: None,
-            // FinalizeSanity: デフォルトで有効化し、PV1を軽く検証してからbestmoveを出す。
-            finalize_sanity_enabled: true,
+            // FinalizeSanity: デフォルトでは無効（finalize 層では手を差し替えず、
+            // 探索内のガードで安全性を確保する方針）。
+            finalize_sanity_enabled: false,
             finalize_sanity_budget_ms: 8,
             finalize_sanity_min_ms: 2,
             finalize_sanity_mini_depth: 2,
