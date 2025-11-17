@@ -200,7 +200,7 @@ NNUE 学習前の探索パラメータ調整では、「大駒タダ取り・評
 ### バンドル別調整ステップ（例）
 
 1. LMR/LMP/統計リダクション塊  
-   - 対象: `SearchParams.LMR*`, `SearchParams.LMP_D*`, `SearchParams.SameToExtension`, `SearchParams.RootBeamForceFullCount` など。
+   - 対象: `SearchParams.LMR*`, `SearchParams.LMP_D*`, `SearchParams.SameToExtension` など。
    - 手順: 既定値 → LMR ゲートをやや緩める → `run_eval_targets.py --profile base --threads 8 --byoyomi 1000` で depth/NPS/落下局面の PV を確認。
 
 2. NMP / ProbCut / IID / StaticBeta 塊  
