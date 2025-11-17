@@ -4,8 +4,8 @@ use engine_core::search::constants::mate_distance as md;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
-    mate1ply,
-    types::{NodeType, StopInfo},
+    mate1ply, root_escape,
+    types::{NodeType, RootLine, StopInfo},
     SearchResult,
 };
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
@@ -18,7 +18,7 @@ use engine_core::{
 };
 
 use crate::io::{diag_info_string, info_string, usi_println};
-use crate::state::{EngineState, InstantMateVerifyMode};
+use crate::state::{EngineState, InstantMateVerifyMode, RootEscapeLogDetail, RootEscapePickPolicy};
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -2231,11 +2231,18 @@ pub fn finalize_and_send(
             // no-op for test probe: PV2優先の有無は現状検査対象外
         }
     }
-    let (chosen_mv, chosen_src) = if let Some(m) = maybe_switch {
+    let snapshot_lines = snapshot_valid.as_ref().map(|snap| snap.lines.as_slice());
+    let (mut chosen_mv, mut chosen_src) = if let Some(m) = maybe_switch {
         (Some(m), FinalBestSource::Committed)
     } else {
         (final_best.best_move, final_best.source)
     };
+    if let Some((_, replacement)) =
+        enforce_root_escape_guard(state, chosen_mv, result, snapshot_lines, &final_best)
+    {
+        chosen_mv = Some(replacement);
+        chosen_src = FinalBestSource::Committed;
+    }
 
     let final_usi = chosen_mv.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
     let ponder_mv = if state.opts.ponder {
@@ -3199,6 +3206,172 @@ fn choose_safe_nonking_fallback(
             .map(|(m, _)| m)
         {
             return Some(mv);
+        }
+    }
+    None
+}
+
+fn root_escape_should_log(
+    detail: RootEscapeLogDetail,
+    summary: &root_escape::RootEscapeSummary,
+) -> bool {
+    match detail {
+        RootEscapeLogDetail::Off => false,
+        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty(),
+        RootEscapeLogDetail::Full => true,
+    }
+}
+
+fn root_escape_should_log_risky(
+    detail: RootEscapeLogDetail,
+    summary: &root_escape::RootEscapeSummary,
+) -> bool {
+    match detail {
+        RootEscapeLogDetail::Off => false,
+        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty(),
+        RootEscapeLogDetail::Full => true,
+    }
+}
+
+fn log_root_escape_summary(
+    state: &mut EngineState,
+    summary: &root_escape::RootEscapeSummary,
+    best_is_risky: bool,
+    best_mate: Option<Move>,
+) {
+    if !state.opts.log_profile.at_least_qa() {
+        return;
+    }
+    if !root_escape_should_log(state.opts.root_escape_log_detail, summary) {
+        return;
+    }
+    info_string(format!(
+        "root_escape summary safe={} risky={}",
+        summary.safe.len(),
+        summary.risky.len()
+    ));
+    if root_escape_should_log_risky(state.opts.root_escape_log_detail, summary) {
+        for &(mv, mate) in summary.risky.iter() {
+            info_string(format!(
+                "root_escape risky after={} mate_move={}",
+                move_to_usi(&mv),
+                move_to_usi(&mate)
+            ));
+        }
+    }
+    if best_is_risky {
+        if let Some(mate_mv) = best_mate {
+            info_string(format!("root_escape best_risky=1 mate_move={}", move_to_usi(&mate_mv)));
+        }
+    }
+}
+
+fn push_safe_unique(order: &mut Vec<Move>, summary: &root_escape::RootEscapeSummary, mv: Move) {
+    if summary.is_safe(mv) && !order.contains(&mv) {
+        order.push(mv);
+    }
+}
+
+fn pick_root_escape_safe_pv_order(
+    summary: &root_escape::RootEscapeSummary,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+) -> Option<Move> {
+    let mut ordered: Vec<Move> = Vec::new();
+    if let Some(res) = result {
+        if let Some(lines) = res.lines.as_ref() {
+            for line in lines.iter() {
+                push_safe_unique(&mut ordered, summary, line.root_move);
+            }
+        }
+    }
+    if ordered.is_empty() {
+        if let Some(lines) = snapshot_lines {
+            for line in lines.iter() {
+                push_safe_unique(&mut ordered, summary, line.root_move);
+            }
+        }
+    }
+    if ordered.is_empty() {
+        if let Some(bm) = final_best.best_move {
+            push_safe_unique(&mut ordered, summary, bm);
+        }
+    }
+    if ordered.is_empty() {
+        ordered.extend(summary.safe.iter().copied());
+    }
+    ordered.into_iter().next()
+}
+
+fn pick_root_escape_safe_move(
+    policy: RootEscapePickPolicy,
+    summary: &root_escape::RootEscapeSummary,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+) -> Option<Move> {
+    match policy {
+        RootEscapePickPolicy::PvOrder | RootEscapePickPolicy::MiniQSearch => {
+            pick_root_escape_safe_pv_order(summary, result, snapshot_lines, final_best)
+        }
+        RootEscapePickPolicy::Static => summary.safe.first().copied(),
+    }
+}
+
+fn enforce_root_escape_guard(
+    state: &mut EngineState,
+    current_best: Option<Move>,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+) -> Option<(Move, Move)> {
+    if !state.opts.root_escape_enabled {
+        return None;
+    }
+    let best_mv = current_best?;
+    let max_moves = state.opts.root_escape_max_moves;
+    if max_moves == 0 {
+        return None;
+    }
+    let mut summary = root_escape::root_escape_scan(&state.position, Some(max_moves));
+    let mut best_mate = summary.risky_mate_move(best_mv);
+    let mut best_is_risky = best_mate.is_some();
+    if !best_is_risky {
+        if let Some(res) = result {
+            if res.stats.root_verify_rejected_move == Some(best_mv) {
+                if let Some(mate_mv) = res.stats.root_verify_mate_move {
+                    summary.risky.push((best_mv, mate_mv));
+                    best_mate = Some(mate_mv);
+                    best_is_risky = true;
+                }
+            }
+        }
+    }
+    if best_is_risky {
+        summary.safe.retain(|&mv| mv != best_mv);
+    }
+    let replacement = if best_is_risky && !summary.safe.is_empty() {
+        pick_root_escape_safe_move(
+            state.opts.root_escape_pick_policy,
+            &summary,
+            result,
+            snapshot_lines,
+            final_best,
+        )
+    } else {
+        None
+    };
+    log_root_escape_summary(state, &summary, best_is_risky, best_mate);
+    if let Some(new_mv) = replacement {
+        if new_mv != best_mv {
+            info_string(format!(
+                "root_escape switch from={} to={} policy={}",
+                move_to_usi(&best_mv),
+                move_to_usi(&new_mv),
+                state.opts.root_escape_pick_policy.as_str()
+            ));
+            return Some((best_mv, new_mv));
         }
     }
     None

@@ -6,7 +6,9 @@ use engine_core::evaluation::nnue::error::NNUEError;
 use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
-use crate::state::{EngineState, LogProfile, ProfileMode, UsiOptions};
+use crate::state::{
+    EngineState, LogProfile, ProfileMode, RootEscapeLogDetail, RootEscapePickPolicy, UsiOptions,
+};
 use std::sync::OnceLock;
 fn mark_override(state: &mut EngineState, key: &str) {
     state.user_overrides.insert(key.to_string());
@@ -872,6 +874,34 @@ fn collect_finalize_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
         format!(
             "option name InstantMateMove.VerifyNodes type spin default {} min 0 max 100000",
             opts.instant_mate_verify_nodes
+        ),
+    );
+    builder.finalize(
+        "RootEscape.Enabled",
+        format!(
+            "option name RootEscape.Enabled type check default {}",
+            bool_to_usi(opts.root_escape_enabled)
+        ),
+    );
+    builder.finalize(
+        "RootEscape.PickPolicy",
+        format!(
+            "option name RootEscape.PickPolicy type combo default {} var PvOrder var MiniQSearch var Static",
+            opts.root_escape_pick_policy.as_str()
+        ),
+    );
+    builder.finalize(
+        "RootEscape.MaxMoves",
+        format!(
+            "option name RootEscape.MaxMoves type spin default {} min 0 max 1024",
+            opts.root_escape_max_moves
+        ),
+    );
+    builder.finalize(
+        "RootEscape.LogDetail",
+        format!(
+            "option name RootEscape.LogDetail type combo default {} var Off var FailOnly var Full",
+            opts.root_escape_log_detail.as_str()
         ),
     );
     builder.finalize(
@@ -2067,6 +2097,47 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "RootEscape.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.root_escape_enabled = on;
+                info_string(format!("root_escape_enabled={}", on as u8));
+            }
+        }
+        "RootEscape.PickPolicy" => {
+            if let Some(v) = value_ref {
+                if let Some(policy) = RootEscapePickPolicy::from_str(v) {
+                    state.opts.root_escape_pick_policy = policy;
+                    info_string(format!("root_escape_pick_policy={}", policy.as_str()));
+                    if matches!(policy, RootEscapePickPolicy::MiniQSearch) {
+                        info_string("root_escape_pick_policy_note=MiniQSearch currently falls back to PvOrder");
+                    }
+                } else {
+                    info_string(format!("root_escape_pick_policy_invalid value={}", v));
+                }
+            }
+        }
+        "RootEscape.MaxMoves" => {
+            if let Some(v) = value_ref {
+                if let Ok(m) = v.parse::<usize>() {
+                    state.opts.root_escape_max_moves = m.min(1024);
+                    info_string(format!(
+                        "root_escape_max_moves={}",
+                        state.opts.root_escape_max_moves
+                    ));
+                }
+            }
+        }
+        "RootEscape.LogDetail" => {
+            if let Some(v) = value_ref {
+                if let Some(detail) = RootEscapeLogDetail::from_str(v) {
+                    state.opts.root_escape_log_detail = detail;
+                    info_string(format!("root_escape_log_detail={}", detail.as_str()));
+                } else {
+                    info_string(format!("root_escape_log_detail_invalid value={}", v));
+                }
+            }
+        }
         // --- Root guard rails & warmup knobs
         // RootSeeGate 系は廃止
         "PostVerify" => {
@@ -2621,11 +2692,15 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_see_gate={} xsee={} root_verify={} rv_ms={} rv_nodes={} rv_depth={} rv_oppsee={} rv_major={} win_protect={} win_cp={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} root_escape={} root_escape_policy={} root_escape_max={} root_escape_log={} root_see_gate={} xsee={} root_verify={} rv_ms={} rv_nodes={} rv_depth={} rv_oppsee={} rv_major={} win_protect={} win_cp={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
         state.opts.multipv,
+        state.opts.root_escape_enabled as u8,
+        state.opts.root_escape_pick_policy.as_str(),
+        state.opts.root_escape_max_moves,
+        state.opts.root_escape_log_detail.as_str(),
         state.opts.root_see_gate as u8,
         state.opts.root_see_gate_xsee_cp,
         state.opts.root_verify_enabled as u8,
