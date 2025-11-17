@@ -3393,15 +3393,13 @@ fn enforce_root_escape_guard(
             &mut summary,
             state.opts.root_escape_see_threshold_cp,
         );
-        if !best_mv.is_drop() {
-            root_escape::apply_threat_risks(
-                &state.position,
-                &mut summary,
-                &[best_mv],
-                1,
-                state.opts.root_escape_see_threshold_cp,
-            );
-        }
+        root_escape::apply_threat_risks(
+            &state.position,
+            &mut summary,
+            &[best_mv],
+            1,
+            state.opts.root_escape_see_threshold_cp,
+        );
     }
     if let Some(res) = result {
         if res.stats.root_verify_last_fail_move == Some(best_mv) {
@@ -3483,8 +3481,8 @@ fn should_replace_bestmove(
     if has_mate {
         return true;
     }
-    let summary_score = result.and_then(|res| res.score.checked_sub(0)).unwrap_or(0);
-    if summary_score >= state.opts.root_escape_min_score_for_switch_cp {
+    let score = result.map(|res| res.score).unwrap_or(0);
+    if score >= state.opts.root_escape_min_score_for_switch_cp {
         if let Some(loss) = see_loss {
             if loss.abs() <= state.opts.root_escape_safe_guard_cp {
                 return false;
