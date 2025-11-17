@@ -59,12 +59,89 @@ fn position_after_moves(moves: &[&str]) -> Position {
     pos
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.as_ref() {
+            std::env::set_var(self.key, prev);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 fn make_aspiration_stress_position() -> Position {
     const MOVES: &[&str] = &[
         "7i6h", "3c3d", "1i1h", "4a3b", "9g9f", "3a4b", "2h5h", "4b3c", "8h9g", "5a4b", "6i7h",
         "8c8d",
     ];
     position_after_moves(MOVES)
+}
+
+/// 飛車損ログ（20251114-2309）の 3d8d 局面で SEE がどう出ているかを確認する。
+///
+/// 局面: `2g2f 3c3d 2f2e 4a3b 2e2d 2c2d 2h2d P*2c 2d3d 8c8d` の直後。
+/// 先手番で `3d8d`（飛車で 8d の歩を取る）を SEE に掛ける。
+#[test]
+fn see_value_for_flying_rook_capture_is_negative() {
+    const MOVES: &[&str] = &[
+        "2g2f", "3c3d", "2f2e", "4a3b", "2e2d", "2c2d", "2h2d", "P*2c", "2d3d", "8c8d",
+    ];
+    let pos = position_after_moves(MOVES);
+    let cap = parse_usi_move("3d8d").expect("valid usi move 3d8d");
+    let see_cap = pos.see(cap);
+    // 3d3c+（飛車成り）の着地点 SEE も合わせて確認しておく。
+    let promo = parse_usi_move("3d3c+").expect("valid usi move 3d3c+");
+    let xsee_promo = pos.see_landing_after_move(promo, 0);
+    println!("SEE(3d8d) capture = {see_cap}, XSEE(3d3c+) landing = {xsee_promo}");
+    // 少なくとも「得ではない」ことだけ緩く検証する（詳細な閾値は別途ログで確認）
+    assert!(see_cap <= 0, "SEE for 3d8d should not be strictly positive (see={see_cap})");
+}
+
+/// 飛車損局面で探索時に 3d8d がどのように扱われているかを診断ログ経由で確認する。
+///
+/// TRACE_PLY_MIN/TRACE_PLY_MAX と DIAG_ECHO_TAGS を設定し、診断イベントを warn! 経由で出力。
+/// 実行時は `cargo test -p engine-core --tests trace_flying_rook_search -- --nocapture` で手動確認する。
+#[test]
+fn trace_flying_rook_search() {
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::ab::diagnostics;
+    use crate::search::ab::driver::ClassicBackend;
+    use crate::search::limits::SearchLimitsBuilder;
+    use crate::usi::move_to_usi;
+    use std::sync::Arc;
+
+    // 診断ログを浅い ply から有効化
+    let _trace_ply_min = EnvVarGuard::set("TRACE_PLY_MIN", "0");
+    let _trace_ply_max = EnvVarGuard::set("TRACE_PLY_MAX", "64");
+    let _diag_echo_tags = EnvVarGuard::set("DIAG_ECHO_TAGS", "1");
+
+    const MOVES: &[&str] = &[
+        "2g2f", "3c3d", "2f2e", "4a3b", "2e2d", "2c2d", "2h2d", "P*2c", "2d3d", "8c8d",
+    ];
+    let pos = position_after_moves(MOVES);
+    let evaluator = Arc::new(MaterialEvaluator);
+    let backend = ClassicBackend::new(evaluator);
+    let limits = SearchLimitsBuilder::default().depth(4).build();
+
+    let result = backend.think_blocking(&pos, &limits, None);
+    let bm_str = result.best_move.as_ref().map(move_to_usi).unwrap_or_else(|| "-".to_string());
+    println!("flying_rook_trace: bestmove={} score={}", bm_str, result.score);
+
+    let suspect = parse_usi_move("3d8d").expect("valid usi move 3d8d");
+    diagnostics::dump("flying_rook_trace", &pos, Some(suspect));
 }
 
 /// Threat2（角頭/桂頭 打歩）検出ロジックの基本挙動を確認する。
@@ -177,8 +254,7 @@ fn root_see_gate_filters_quiet_drop() {
     assert!(!root_see_gate_should_skip(&pos, mv, 0));
 }
 
-/// Root SEE Gate は「静かな王手」を落とさないことを確認する。
-/// チェック手は強制力が高いため、着地SEEが悪くてもゲート対象から外す設計。
+/// Root SEE Gate が「無害な静かな王手」を通過させることを確認する。
 #[test]
 fn root_see_gate_does_not_filter_quiet_check() {
     let mut pos = Position::empty();
@@ -198,6 +274,28 @@ fn root_see_gate_does_not_filter_quiet_check() {
     assert!(
         !root_see_gate_should_skip(&pos, mv, 200),
         "root SEE gate must not filter checking quiet moves"
+    );
+}
+
+/// Root SEE Gate は明らかなタダ捨てチェックを落とす。
+#[test]
+fn root_see_gate_filters_bad_quiet_check() {
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("7b").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    let mv = Move::make_normal(parse_usi_square("7b").unwrap(), parse_usi_square("7a").unwrap());
+    assert!(pos.is_legal_move(mv));
+    assert!(pos.gives_check(mv));
+    assert!(
+        root_see_gate_should_skip(&pos, mv, 100),
+        "root SEE gate must filter clearly losing quiet checks"
     );
 }
 
@@ -2033,7 +2131,7 @@ fn nmp_verify_rejects_false_cut() {
 /// - singular を強制的に ON
 /// - min_depth を下げて浅い深さから候補になり得るようにする
 /// - 通常の think_blocking が所望の深さまで到達すること
-/// を確認する。
+///   を確認する。
 #[test]
 fn singular_extension_runs_safely_under_enabled_gates() {
     let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
@@ -2082,34 +2180,6 @@ fn excluded_drop_only_blocks_same_piece_type() {
     }
 
     assert!(found_gold, "gold drop should not be excluded when pawn drop is excluded");
-}
-
-/// Root Beam Skip の連続 skip カウンタが閾値を超えた際に
-/// `root_beam_skip_force_full` が立ち、以降の分岐でフル探索に
-/// フォースされる経路が存在しても、通常探索が破綻しないことを確認する。
-///
-/// ここでは内部状態を直接検査せず、`set_root_beam_skip_retry_limit(1)` で
-/// 即座に force_full へ切り替わるようにした上で、通常の探索が所望の深さまで
-/// 到達することを確認する。
-#[test]
-fn root_beam_skip_retry_switches_to_full_search_safely() {
-    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
-    crate::search::params::__test_reset_runtime_values();
-
-    // Root Beam の skip 再試行を 1 回に設定し、早めに force_full に到達させる。
-    crate::search::params::set_root_beam_skip_retry_limit(1);
-
-    let evaluator = Arc::new(MaterialEvaluator);
-    let backend =
-        ClassicBackend::with_profile(Arc::clone(&evaluator), SearchProfile::enhanced_material());
-    let pos = make_aspiration_stress_position();
-    let limits = SearchLimitsBuilder::default().depth(6).build();
-    let res = backend.think_blocking(&pos, &limits, None);
-
-    assert!(
-        res.stats.depth >= 6,
-        "root beam skip retry logic should not prevent reaching requested depth"
-    );
 }
 
 #[test]

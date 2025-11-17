@@ -267,17 +267,21 @@ fn main() -> Result<()> {
             }
 
             if cmd == "quit" {
-                if let Some(flag) = &state.stop_flag {
-                    flag.store(true, Ordering::SeqCst);
+                // Treat quit as a hard stop request only when a normal search
+                // is in progress. Mate-mode (`go mate ...`) uses a separate
+                // path and must not emit bestmove.
+                if state.searching {
+                    handle_stop(&mut state);
                 }
 
-                // Ensure any ongoing search completes before quit
+                // Best-effort cleanup: if a search session is still present
+                // (e.g., in edge cases where handle_stop did not consume it),
+                // request a final stop and join the worker thread for clean shutdown.
                 if let Some(session) = state.search_session.take() {
                     let stop_ctrl = {
                         let engine = state.lock_engine();
                         engine.stop_controller_handle()
                     };
-
                     // Try to get result with 1500ms timeout
                     let got_result = session
                         .request_stop_and_wait(stop_ctrl.as_ref(), Duration::from_millis(1500));

@@ -30,14 +30,32 @@ impl Position {
     }
 
     /// SEE用の軽量なピン計算（両陣営分）
-    pub(super) fn calculate_pins_for_see(&self) -> (SeePinInfo, SeePinInfo) {
-        let black_pins = self.calculate_pins_for_color(Color::Black);
-        let white_pins = self.calculate_pins_for_color(Color::White);
+    ///
+    /// `occupied` には「現在の仮想局面」での全占有ビットボードを渡す。
+    /// これにより、仮想手（capture / drop / quiet move 後）のピン関係も
+    /// 正しく再計算できる。
+    pub(super) fn calculate_pins_for_see(
+        &self,
+        occupied: Bitboard,
+        black_occupied: Bitboard,
+        white_occupied: Bitboard,
+    ) -> (SeePinInfo, SeePinInfo) {
+        let black_pins = self.calculate_pins_for_color(Color::Black, occupied, black_occupied);
+        let white_pins = self.calculate_pins_for_color(Color::White, occupied, white_occupied);
         (black_pins, white_pins)
     }
 
     /// 特定色のピン計算
-    pub(super) fn calculate_pins_for_color(&self, color: Color) -> SeePinInfo {
+    ///
+    /// `occupied` はピン計算に用いる全占有ビットボード。
+    /// 通常の SEE では実局面の `all_bb`、着地点 SEE など仮想局面では
+    /// 仮想 occupancy を渡す。
+    pub(super) fn calculate_pins_for_color(
+        &self,
+        color: Color,
+        occupied: Bitboard,
+        our_occupied: Bitboard,
+    ) -> SeePinInfo {
         // ピンが存在しない場合の早期リターン最適化
         let king_bb = self.board.piece_bb[color as usize][PieceType::King as usize];
         let king_sq = match king_bb.lsb() {
@@ -47,8 +65,7 @@ impl Position {
 
         let mut pin_info = SeePinInfo::empty();
         let enemy = color.opposite();
-        let occupied = self.board.all_bb;
-        let our_pieces = self.board.occupied_bb[color as usize];
+        let our_pieces = our_occupied;
 
         // 敵のスライダー駒を取得
         let enemy_rooks = self.board.piece_bb[enemy as usize][PieceType::Rook as usize];

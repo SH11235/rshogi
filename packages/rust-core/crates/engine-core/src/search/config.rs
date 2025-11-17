@@ -1,6 +1,6 @@
 //! Global search configuration toggles
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 // Mate early stop (distance-based) toggle
 static MATE_EARLY_STOP_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -13,6 +13,18 @@ static POST_VERIFY_YDROP_CP: AtomicI32 = AtomicI32::new(300);
 
 static PROMOTE_VERIFY_ENABLED: AtomicBool = AtomicBool::new(false);
 static PROMOTE_BIAS_CP: AtomicI32 = AtomicI32::new(20);
+
+// Root verification (drop-aware SEE gate + shallow re-search)
+static ROOT_VERIFY_ENABLED: AtomicBool = AtomicBool::new(true);
+static ROOT_VERIFY_MAX_MS: AtomicU64 = AtomicU64::new(8);
+static ROOT_VERIFY_MAX_NODES: AtomicU64 = AtomicU64::new(150_000);
+static ROOT_VERIFY_CHECK_DEPTH: AtomicU32 = AtomicU32::new(3);
+static ROOT_VERIFY_OPP_SEE_MIN_CP: AtomicI32 = AtomicI32::new(0);
+static ROOT_VERIFY_MAJOR_LOSS_PENALTY_CP: AtomicI32 = AtomicI32::new(1_200);
+
+// Win-Protect (victory-state guard rails)
+static WIN_PROTECT_ENABLED: AtomicBool = AtomicBool::new(true);
+static WIN_PROTECT_THRESHOLD_CP: AtomicI32 = AtomicI32::new(1_200);
 
 /// Enable or disable mate early stop globally
 pub fn set_mate_early_stop_enabled(enabled: bool) {
@@ -95,4 +107,66 @@ pub fn set_promote_bias_cp(bias: i32) {
 #[inline]
 pub fn promote_bias_cp() -> i32 {
     PROMOTE_BIAS_CP.load(Ordering::Acquire)
+}
+
+// ---- Root Verify (drop-aware post-check)
+pub fn set_root_verify_enabled(on: bool) {
+    ROOT_VERIFY_ENABLED.store(on, Ordering::Release);
+}
+#[inline]
+pub fn root_verify_enabled() -> bool {
+    ROOT_VERIFY_ENABLED.load(Ordering::Acquire)
+}
+pub fn set_root_verify_max_ms(ms: u64) {
+    ROOT_VERIFY_MAX_MS.store(ms.clamp(0, 50), Ordering::Release);
+}
+#[inline]
+pub fn root_verify_max_ms() -> u64 {
+    ROOT_VERIFY_MAX_MS.load(Ordering::Acquire)
+}
+pub fn set_root_verify_max_nodes(nodes: u64) {
+    let clamped = nodes.clamp(0, 5_000_000);
+    ROOT_VERIFY_MAX_NODES.store(clamped, Ordering::Release);
+}
+#[inline]
+pub fn root_verify_max_nodes() -> u64 {
+    ROOT_VERIFY_MAX_NODES.load(Ordering::Acquire)
+}
+pub fn set_root_verify_check_depth(depth: u32) {
+    let d = depth.clamp(1, 5);
+    ROOT_VERIFY_CHECK_DEPTH.store(d, Ordering::Release);
+}
+#[inline]
+pub fn root_verify_check_depth() -> u32 {
+    ROOT_VERIFY_CHECK_DEPTH.load(Ordering::Acquire)
+}
+pub fn set_root_verify_opp_see_min_cp(cp: i32) {
+    ROOT_VERIFY_OPP_SEE_MIN_CP.store(cp.clamp(-200, 300), Ordering::Release);
+}
+#[inline]
+pub fn root_verify_opp_see_min_cp() -> i32 {
+    ROOT_VERIFY_OPP_SEE_MIN_CP.load(Ordering::Acquire)
+}
+pub fn set_root_verify_major_loss_penalty_cp(cp: i32) {
+    ROOT_VERIFY_MAJOR_LOSS_PENALTY_CP.store(cp.clamp(200, 3000), Ordering::Release);
+}
+#[inline]
+pub fn root_verify_major_loss_penalty_cp() -> i32 {
+    ROOT_VERIFY_MAJOR_LOSS_PENALTY_CP.load(Ordering::Acquire)
+}
+
+// ---- Win-Protect guard
+pub fn set_win_protect_enabled(on: bool) {
+    WIN_PROTECT_ENABLED.store(on, Ordering::Release);
+}
+#[inline]
+pub fn win_protect_enabled() -> bool {
+    WIN_PROTECT_ENABLED.load(Ordering::Acquire)
+}
+pub fn set_win_protect_threshold_cp(cp: i32) {
+    WIN_PROTECT_THRESHOLD_CP.store(cp.clamp(600, 3000), Ordering::Release);
+}
+#[inline]
+pub fn win_protect_threshold_cp() -> i32 {
+    WIN_PROTECT_THRESHOLD_CP.load(Ordering::Acquire)
 }
