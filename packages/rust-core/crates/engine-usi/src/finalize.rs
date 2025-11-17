@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 // near-draw の判定しきい値（cp換算）。README にも注記あり。
 const NEAR_DRAW_CP: i32 = 10;
 const ROOT_ESCAPE_LOG_LIMIT: usize = 8;
+const ROOT_ESCAPE_THREAT_ORDER_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MateSkipInfo {
@@ -3212,24 +3213,18 @@ fn choose_safe_nonking_fallback(
     None
 }
 
-fn root_escape_should_log(
-    detail: RootEscapeLogDetail,
-    summary: &root_escape::RootEscapeSummary,
-) -> bool {
+fn root_escape_should_log(detail: RootEscapeLogDetail, best_is_risky: bool) -> bool {
     match detail {
         RootEscapeLogDetail::Off => false,
-        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty() || !summary.see_risky.is_empty(),
+        RootEscapeLogDetail::FailOnly => best_is_risky,
         RootEscapeLogDetail::Full => true,
     }
 }
 
-fn root_escape_should_log_risky(
-    detail: RootEscapeLogDetail,
-    summary: &root_escape::RootEscapeSummary,
-) -> bool {
+fn root_escape_should_log_risky(detail: RootEscapeLogDetail, best_is_risky: bool) -> bool {
     match detail {
         RootEscapeLogDetail::Off => false,
-        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty() || !summary.see_risky.is_empty(),
+        RootEscapeLogDetail::FailOnly => best_is_risky,
         RootEscapeLogDetail::Full => true,
     }
 }
@@ -3244,7 +3239,7 @@ fn log_root_escape_summary(
     if !state.opts.log_profile.at_least_qa() {
         return;
     }
-    if !root_escape_should_log(state.opts.root_escape_log_detail, summary) {
+    if !root_escape_should_log(state.opts.root_escape_log_detail, best_is_risky) {
         return;
     }
     info_string(format!(
@@ -3253,7 +3248,7 @@ fn log_root_escape_summary(
         summary.risky.len(),
         summary.see_risky.len()
     ));
-    if root_escape_should_log_risky(state.opts.root_escape_log_detail, summary) {
+    if root_escape_should_log_risky(state.opts.root_escape_log_detail, best_is_risky) {
         for &(mv, mate) in summary.risky.iter() {
             info_string(format!(
                 "root_escape risky after={} mate_move={}",
@@ -3430,13 +3425,13 @@ fn enforce_root_escape_guard(
         root_escape::apply_threat_risks(
             &state.position,
             &mut summary,
-            &[best_mv],
-            1,
+            &candidate_order,
+            ROOT_ESCAPE_THREAT_ORDER_LIMIT,
             see_threshold,
         );
     }
     if state.opts.log_profile.at_least_qa()
-        && root_escape_should_log_risky(state.opts.root_escape_log_detail, &summary)
+        && matches!(state.opts.root_escape_log_detail, RootEscapeLogDetail::Full)
     {
         log_root_escape_candidate_threats(
             &state.position,
@@ -3488,10 +3483,16 @@ fn enforce_root_escape_guard(
         summary.risky_mate_move(best_mv).is_some(),
     );
     if best_is_risky && !guard_allows && state.opts.log_profile.at_least_qa() {
+        let (score, node_label) = if let Some(res) = result {
+            (res.score, format!("{:?}", res.node_type))
+        } else {
+            (0, String::from("-"))
+        };
         info_string(format!(
-            "root_escape guard skip score={} loss={} threshold={}",
-            result.map(|res| res.score).unwrap_or(0),
+            "root_escape guard skip score={} loss={} node={} threshold={}",
+            score,
             summary.see_loss(best_mv).unwrap_or(0),
+            node_label,
             state.opts.root_escape_safe_guard_cp
         ));
     }
@@ -3531,8 +3532,13 @@ fn should_replace_bestmove(
     if has_mate {
         return true;
     }
-    let score = result.map(|res| res.score).unwrap_or(0);
-    if score >= state.opts.root_escape_min_score_for_switch_cp {
+    let Some(res) = result else {
+        return true;
+    };
+    if res.node_type != NodeType::Exact {
+        return true;
+    }
+    if res.score >= state.opts.root_escape_min_score_for_switch_cp {
         if let Some(loss) = see_loss {
             if loss.abs() <= state.opts.root_escape_safe_guard_cp {
                 return false;
