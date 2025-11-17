@@ -4,7 +4,7 @@ use engine_core::search::constants::mate_distance as md;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
-    mate1ply, root_escape, root_threat,
+    mate1ply, root_escape,
     types::{NodeType, RootLine, RootVerifyFailKind, StopInfo},
     SearchResult,
 };
@@ -3279,13 +3279,34 @@ fn push_safe_unique(order: &mut Vec<Move>, summary: &root_escape::RootEscapeSumm
     }
 }
 
-fn pick_root_escape_safe_pv_order(
+fn promote_same_destination_risks(
+    summary: &mut root_escape::RootEscapeSummary,
+    target_mv: Move,
+    loss: i32,
+) {
+    let mut affected: Vec<Move> = Vec::new();
+    for &mv in summary.safe.iter() {
+        if mv != target_mv && mv.to() == target_mv.to() {
+            affected.push(mv);
+        }
+    }
+    for mv in affected {
+        summary.remove_safe(mv);
+        summary.push_see_risky(mv, loss);
+    }
+}
+
+fn collect_root_escape_safe_candidates(
     summary: &root_escape::RootEscapeSummary,
     result: Option<&SearchResult>,
     snapshot_lines: Option<&[RootLine]>,
     final_best: &FinalBest,
-) -> Option<Move> {
+    current_best: Option<Move>,
+) -> Vec<Move> {
     let mut ordered: Vec<Move> = Vec::new();
+    if let Some(bm) = current_best {
+        push_safe_unique(&mut ordered, summary, bm);
+    }
     if let Some(res) = result {
         if let Some(lines) = res.lines.as_ref() {
             for line in lines.iter() {
@@ -3293,22 +3314,39 @@ fn pick_root_escape_safe_pv_order(
             }
         }
     }
-    if ordered.is_empty() {
-        if let Some(lines) = snapshot_lines {
-            for line in lines.iter() {
-                push_safe_unique(&mut ordered, summary, line.root_move);
-            }
+    if let Some(lines) = snapshot_lines {
+        for line in lines.iter() {
+            push_safe_unique(&mut ordered, summary, line.root_move);
         }
     }
-    if ordered.is_empty() {
-        if let Some(bm) = final_best.best_move {
-            push_safe_unique(&mut ordered, summary, bm);
+    if let Some(bm) = final_best.best_move {
+        push_safe_unique(&mut ordered, summary, bm);
+    }
+    let mut drop_moves: Vec<Move> = Vec::new();
+    let mut quiet_moves: Vec<Move> = Vec::new();
+    for &mv in summary.safe.iter() {
+        if mv.is_drop() {
+            drop_moves.push(mv);
+        } else {
+            quiet_moves.push(mv);
         }
     }
-    if ordered.is_empty() {
-        ordered.extend(summary.safe.iter().copied());
+    for mv in drop_moves.into_iter().chain(quiet_moves.into_iter()) {
+        push_safe_unique(&mut ordered, summary, mv);
     }
-    ordered.into_iter().next()
+    ordered
+}
+
+fn pick_root_escape_safe_pv_order(
+    summary: &root_escape::RootEscapeSummary,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+    current_best: Option<Move>,
+) -> Option<Move> {
+    collect_root_escape_safe_candidates(summary, result, snapshot_lines, final_best, current_best)
+        .into_iter()
+        .next()
 }
 
 fn pick_root_escape_safe_move(
@@ -3317,10 +3355,17 @@ fn pick_root_escape_safe_move(
     result: Option<&SearchResult>,
     snapshot_lines: Option<&[RootLine]>,
     final_best: &FinalBest,
+    current_best: Option<Move>,
 ) -> Option<Move> {
     match policy {
         RootEscapePickPolicy::PvOrder | RootEscapePickPolicy::MiniQSearch => {
-            pick_root_escape_safe_pv_order(summary, result, snapshot_lines, final_best)
+            pick_root_escape_safe_pv_order(
+                summary,
+                result,
+                snapshot_lines,
+                final_best,
+                current_best,
+            )
         }
         RootEscapePickPolicy::Static => summary.safe.first().copied(),
     }
@@ -3348,31 +3393,13 @@ fn enforce_root_escape_guard(
             &mut summary,
             state.opts.root_escape_see_threshold_cp,
         );
-        if summary.see_loss(best_mv).is_none() {
-            if let Some(loss) = root_escape::see_loss_for_move(&state.position, best_mv) {
-                if loss <= -state.opts.root_escape_see_threshold_cp {
-                    summary.remove_safe(best_mv);
-                    summary.push_see_risky(best_mv, loss);
-                }
-            }
-        }
-        let mut child = state.position.clone();
-        let undo = child.do_move(best_mv);
-        if let Some(threat) = root_threat::detect_major_threat(
-            &child,
-            state.position.side_to_move,
+        root_escape::apply_threat_risks(
+            &state.position,
+            &mut summary,
+            &[best_mv],
+            1,
             state.opts.root_escape_see_threshold_cp,
-        ) {
-            let loss = match threat {
-                root_threat::RootThreat::OppXsee { loss, .. } => loss,
-                root_threat::RootThreat::PawnDropHead { .. } => {
-                    -state.opts.root_escape_see_threshold_cp.max(1)
-                }
-            };
-            summary.remove_safe(best_mv);
-            summary.push_see_risky(best_mv, loss);
-        }
-        child.undo_move(best_mv, undo);
+        );
     }
     if let Some(res) = result {
         if res.stats.root_verify_last_fail_move == Some(best_mv) {
@@ -3403,7 +3430,11 @@ fn enforce_root_escape_guard(
     if !best_is_risky {
         best_is_risky = summary.see_loss(best_mv).is_some();
     }
+    let best_see_loss = summary.see_loss(best_mv);
     if best_is_risky {
+        if let Some(loss) = best_see_loss {
+            promote_same_destination_risks(&mut summary, best_mv, loss);
+        }
         summary.safe.retain(|&mv| mv != best_mv);
     }
     let replacement = if best_is_risky && !summary.safe.is_empty() {
@@ -3413,11 +3444,11 @@ fn enforce_root_escape_guard(
             result,
             snapshot_lines,
             final_best,
+            Some(best_mv),
         )
     } else {
         None
     };
-    let best_see_loss = summary.see_loss(best_mv);
     log_root_escape_summary(state, &summary, best_is_risky, best_mate, best_see_loss);
     if let Some(new_mv) = replacement {
         if new_mv != best_mv {

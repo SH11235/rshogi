@@ -1,5 +1,5 @@
 use crate::movegen::MoveGenerator;
-use crate::search::mate1ply;
+use crate::search::{mate1ply, root_threat};
 use crate::shogi::{Move, Position};
 
 /// Summary of root escape scan results.
@@ -101,4 +101,42 @@ pub fn see_loss_for_move(pos: &Position, mv: Move) -> Option<i32> {
         pos.see_landing_after_move(mv, 0)
     };
     (see < 0).then_some(see)
+}
+
+pub fn apply_threat_risks(
+    pos: &Position,
+    summary: &mut RootEscapeSummary,
+    candidates: &[Move],
+    max_candidates: usize,
+    threshold_cp: i32,
+) {
+    if threshold_cp <= 0 || candidates.is_empty() {
+        return;
+    }
+    let us = pos.side_to_move;
+    let mut child = pos.clone();
+    let mut evaluated = 0usize;
+    for &mv in candidates {
+        if max_candidates != usize::MAX && evaluated >= max_candidates {
+            break;
+        }
+        if !summary.is_safe(mv) {
+            continue;
+        }
+        evaluated += 1;
+        let undo = child.do_move(mv);
+        if let Some(threat) = root_threat::detect_major_threat(&child, us, threshold_cp) {
+            let loss = threat_loss(threat, threshold_cp);
+            summary.remove_safe(mv);
+            summary.push_see_risky(mv, loss);
+        }
+        child.undo_move(mv, undo);
+    }
+}
+
+fn threat_loss(threat: root_threat::RootThreat, threshold_cp: i32) -> i32 {
+    match threat {
+        root_threat::RootThreat::OppXsee { loss, .. } => loss,
+        root_threat::RootThreat::PawnDropHead { .. } => -threshold_cp.max(1),
+    }
 }
