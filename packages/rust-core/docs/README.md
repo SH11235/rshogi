@@ -47,6 +47,7 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**NNUE 教師データ生成**](tools/nnue-training-data-guide.md) - generate_nnue_training_data の運用ガイド（構造化ログ/manifest v2）
 - [**曖昧掘りオーケストレーション**](tools/ambiguous-mining-orchestrator.md) - 抽出→再注釈→マージを1コマンドで実行（系譜/整合性を記録）
 - [**PSV→JSONL 直変換（psv2jsonl）**](tools/psv2jsonl.md) - YaneuraOu PSV(yo_v1) を学習用 JSONL にストリーム変換
+- **Selfplay ログ/KIF**: `cargo run --release -p tools --bin selfplay_basic -- --games 1 --max-moves 180 --think-ms 5000 --threads 8 --basic-depth 2` で自動対局ログ (`JSONL + KIF`) を収集可能。
 
 ### 📖 Reference
 - [**YaneuraOu SFEN形式**](reference/yaneuraou-sfen-format.md) - SFEN形式の仕様
