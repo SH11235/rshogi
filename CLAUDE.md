@@ -9,7 +9,7 @@ This is a **Rust-based Shogi AI Engine** project implementing a high-performance
 - Professional-grade Shogi engine with USI protocol support
 - Advanced search algorithms (alpha-beta, iterative deepening, transposition tables)
 - NNUE evaluation system with FMA optimizations
-- Comprehensive training and analysis tools (45+ utility programs)
+- Comprehensive training and analysis tools (60+ utility programs)
 - 119,000+ lines of well-tested Rust code
 
 ## Repository Structure
@@ -20,7 +20,7 @@ packages/
     ├── crates/
     │   ├── engine-core/    # Core engine implementation (152 .rs files)
     │   ├── engine-usi/     # USI protocol command-line interface
-    │   └── tools/          # NNUE training/analysis tools (45+ binaries)
+    │   └── tools/          # NNUE training/analysis tools (60+ binaries)
     ├── docs/               # Comprehensive documentation (50+ markdown files)
     └── Cargo.toml          # Workspace definition
 ```
@@ -38,7 +38,7 @@ packages/
 
 ### Rust Development (packages/rust-core/)
 
-**IMPORTANT**: All development work happens in `/home/user/shogi/packages/rust-core/`
+**IMPORTANT**: All development work happens in `packages/rust-core/`
 
 #### Building
 
@@ -243,7 +243,7 @@ Command-line USI protocol interface for integration with GUI applications.
 
 #### 3. Tools (`crates/tools/`)
 
-45+ utility programs for:
+60+ utility programs for:
 - Position analysis (`debug_position`)
 - NNUE benchmarking and inspection
 - Training data generation
@@ -315,8 +315,8 @@ Comprehensive documentation in `packages/rust-core/docs/`:
 
 **WARNING**: The following documentation is outdated and describes deleted packages:
 
-- `/home/user/shogi/README.md` - Describes 7 packages, only rust-core exists
-- `/home/user/shogi/AGENTS.md` - References deleted TypeScript packages
+- `README.md` - Describes 7 packages, only rust-core exists
+- `AGENTS.md` - References deleted TypeScript packages
 
 These files describe a multi-package TypeScript/React monorepo that was removed on November 14, 2025.
 
@@ -663,7 +663,7 @@ cargo clippy --fix --allow-dirty
 - **Code**: 119,000+ lines of Rust
 - **Tests**: 13 test files, all passing
 - **Benchmarks**: 8 criterion benchmarks
-- **Tools**: 45+ analysis and training utilities
+- **Tools**: 60+ analysis and training utilities
 - **Documentation**: 50+ markdown files
 
 ### Recently Removed (Nov 14, 2025)
