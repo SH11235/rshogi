@@ -4,7 +4,7 @@ use engine_core::search::constants::mate_distance as md;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
-    mate1ply, root_escape,
+    mate1ply, root_escape, root_threat,
     types::{NodeType, RootLine, RootVerifyFailKind, StopInfo},
     SearchResult,
 };
@@ -14,7 +14,7 @@ use std::cmp::Reverse;
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
 use engine_core::{
     movegen::MoveGenerator,
-    shogi::{Move, PieceType},
+    shogi::{Move, PieceType, Position},
 };
 
 use crate::io::{diag_info_string, info_string, usi_println};
@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 // near-draw の判定しきい値（cp換算）。README にも注記あり。
 const NEAR_DRAW_CP: i32 = 10;
+const ROOT_ESCAPE_LOG_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MateSkipInfo {
@@ -3273,6 +3274,34 @@ fn log_root_escape_summary(
     }
 }
 
+fn log_root_escape_candidate_threats(
+    pos: &Position,
+    candidates: &[Move],
+    best_mv: Move,
+    threshold_cp: i32,
+) {
+    if threshold_cp <= 0 {
+        return;
+    }
+    let mut child = pos.clone();
+    for &mv in candidates.iter().take(ROOT_ESCAPE_LOG_LIMIT) {
+        if mv == best_mv {
+            continue;
+        }
+        let undo = child.do_move(mv);
+        if let Some(threat) =
+            root_threat::detect_major_threat(&child, pos.side_to_move, threshold_cp)
+        {
+            let loss = match threat {
+                root_threat::RootThreat::OppXsee { loss, .. } => loss,
+                root_threat::RootThreat::PawnDropHead { .. } => -threshold_cp.max(1),
+            };
+            info_string(format!("root_escape risky after={} see_loss={}", move_to_usi(&mv), loss));
+        }
+        child.undo_move(mv, undo);
+    }
+}
+
 fn push_safe_unique(order: &mut Vec<Move>, summary: &root_escape::RootEscapeSummary, mv: Move) {
     if summary.is_safe(mv) && !order.contains(&mv) {
         order.push(mv);
@@ -3387,18 +3416,33 @@ fn enforce_root_escape_guard(
         return None;
     }
     let mut summary = root_escape::root_escape_scan(&state.position, Some(max_moves));
-    if state.opts.root_escape_see_threshold_cp > 0 {
-        root_escape::apply_static_risks(
-            &state.position,
-            &mut summary,
-            state.opts.root_escape_see_threshold_cp,
-        );
+    let candidate_order = collect_root_escape_safe_candidates(
+        &summary,
+        result,
+        snapshot_lines,
+        final_best,
+        Some(best_mv),
+    );
+    let score_for_threshold = result.map(|res| res.score.max(0)).unwrap_or(0);
+    let see_threshold = state.opts.root_escape_see_threshold_cp + score_for_threshold / 4;
+    if see_threshold > 0 {
+        root_escape::apply_static_risks(&state.position, &mut summary, see_threshold);
         root_escape::apply_threat_risks(
             &state.position,
             &mut summary,
             &[best_mv],
             1,
-            state.opts.root_escape_see_threshold_cp,
+            see_threshold,
+        );
+    }
+    if state.opts.log_profile.at_least_qa()
+        && root_escape_should_log_risky(state.opts.root_escape_log_detail, &summary)
+    {
+        log_root_escape_candidate_threats(
+            &state.position,
+            &candidate_order,
+            best_mv,
+            see_threshold,
         );
     }
     if let Some(res) = result {
@@ -3437,15 +3481,21 @@ fn enforce_root_escape_guard(
         }
         summary.safe.retain(|&mv| mv != best_mv);
     }
-    let should_replace = best_is_risky
-        && !summary.safe.is_empty()
-        && should_replace_bestmove(
-            state,
-            result,
-            summary.see_loss(best_mv),
-            summary.risky_mate_move(best_mv).is_some(),
-        );
-    let replacement = if should_replace {
+    let guard_allows = should_replace_bestmove(
+        state,
+        result,
+        summary.see_loss(best_mv),
+        summary.risky_mate_move(best_mv).is_some(),
+    );
+    if best_is_risky && !guard_allows && state.opts.log_profile.at_least_qa() {
+        info_string(format!(
+            "root_escape guard skip score={} loss={} threshold={}",
+            result.map(|res| res.score).unwrap_or(0),
+            summary.see_loss(best_mv).unwrap_or(0),
+            state.opts.root_escape_safe_guard_cp
+        ));
+    }
+    let replacement = if best_is_risky && guard_allows && !summary.safe.is_empty() {
         pick_root_escape_safe_move(
             state.opts.root_escape_pick_policy,
             &summary,
