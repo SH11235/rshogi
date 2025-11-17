@@ -24,9 +24,17 @@ struct EvalLog {
     #[serde(default)]
     score_cp: Option<i32>,
     #[serde(default)]
+    score_mate: Option<i32>,
+    #[serde(default)]
     depth: Option<u32>,
     #[serde(default)]
+    seldepth: Option<u32>,
+    #[serde(default)]
     nodes: Option<u64>,
+    #[serde(default)]
+    time_ms: Option<u64>,
+    #[serde(default)]
+    nps: Option<u64>,
     #[serde(default)]
     pv: Option<Vec<String>>,
 }
@@ -239,20 +247,41 @@ fn square_rank_digit(sq: Square) -> char {
 fn format_eval_comments(eval: Option<&EvalLog>, pos: &Position) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(eval) = eval {
-        if let Some(score) = eval.score_cp {
-            lines.push(format!("  **評価値={:+}", score));
+        if let Some(mate) = eval.score_mate {
+            lines.push(format_mate_line(mate));
+        } else if let Some(score) = eval.score_cp {
+            lines.push(format!("**評価値={:+}", score));
         }
         if let Some(text) = format_pv_text(pos, eval.pv.as_ref()) {
-            lines.push(format!("  **読み筋={}", text));
+            lines.push(format!("**読み筋={}", text));
         }
         if let Some(depth) = eval.depth {
-            lines.push(format!("  **深さ={}", depth));
+            lines.push(format!("**深さ={}", depth));
+        }
+        if let Some(seldepth) = eval.seldepth {
+            lines.push(format!("**選択深さ={}", seldepth));
         }
         if let Some(nodes) = eval.nodes {
-            lines.push(format!("  **ノード数={}", nodes));
+            lines.push(format!("**ノード数={}", nodes));
+        }
+        if let Some(time_ms) = eval.time_ms {
+            lines.push(format!("**探索時間={}ms", time_ms));
+        }
+        if let Some(nps) = eval.nps {
+            lines.push(format!("**NPS={}", nps));
         }
     }
     lines
+}
+
+fn format_mate_line(mate: i32) -> String {
+    let winner = if mate > 0 {
+        "先手勝ち"
+    } else {
+        "後手勝ち"
+    };
+    let turns = mate.abs();
+    format!("**詰み={}:{turns}手", winner)
 }
 
 fn format_pv_text(pos: &Position, pv: Option<&Vec<String>>) -> Option<String> {

@@ -47,22 +47,27 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**NNUE 教師データ生成**](tools/nnue-training-data-guide.md) - generate_nnue_training_data の運用ガイド（構造化ログ/manifest v2）
 - [**曖昧掘りオーケストレーション**](tools/ambiguous-mining-orchestrator.md) - 抽出→再注釈→マージを1コマンドで実行（系譜/整合性を記録）
 - [**PSV→JSONL 直変換（psv2jsonl）**](tools/psv2jsonl.md) - YaneuraOu PSV(yo_v1) を学習用 JSONL にストリーム変換
-- **Selfplay ログ/KIF**: `cargo run --release -p tools --bin selfplay_basic -- --games 1 --max-moves 180 --think-ms 5000 --threads 8 --basic-depth 2` で自動対局ログ (`JSONL + KIF`) を収集可能。
+
+## 🧪 Selfplay / ログ取得コマンド
+
+本エンジンと ShogiHome 基本エンジンの自己対局ログを取得する標準コマンド（release ビルド）:
+
+```bash
+cargo run --release -p tools --bin selfplay_basic -- \
+  --games 1 \
+  --max-moves 180 \
+  --think-ms 5000 \
+  --threads 8 \
+  --basic-depth 2
+```
+
+- Black 側は `engine-usi` サブプロセスを固定 5 秒読み・8 スレッドで思考します。`engine-usi` を未ビルドの場合は先に `cargo build --release -p engine-usi` を実行してください。
+- 実行すると `runs/selfplay-basic/` 以下に JSONL ログ・KIF・USI `info` 行を収めた `.info.jsonl` が同名で生成され、コマンドやエンジンパスは JSONL メタデータに記録されます。
+- `--engine-path` や `--engine-args` を指定すれば任意の `engine-usi` バイナリを利用できます。デフォルトでは `CARGO_BIN_EXE_engine-usi` → 同ディレクトリ → PATH の順で解決します。
 
 ### 📖 Reference
 - [**YaneuraOu SFEN形式**](reference/yaneuraou-sfen-format.md) - SFEN形式の仕様
 - [**Manifest v2（NNUE教師生成）**](reference/manifest_v2.md) - 親/partの責務、summaryのrunスコープ、K=3メトリクス
-
-## 📈 ドキュメント状態
-
-| カテゴリ | ドキュメント | 状態 | 最終更新 | 備考 |
-|---------|------------|------|----------|------|
-| **Architecture** | engine-search-redesign.md | ✅ Active | 2025-10 | ClassicBackend 再設計メモ |
-| **Architecture** | game-phase-module-guide.md | ✅ Active | 2025-08 | Phase 4実装完了 |
-| **Performance** | parallel-benchmark-guide.md | ✅ Active | 2025-08-09 | 新機能反映済み |
-| **Performance** | parallel-search-improvement.md | ✅ Completed | 2025-08-09 | Phase 6まで完了 |
-| **Tools** | debug-position-tool.md | ✅ Active | 2025-08 | CLAUDE.mdに記載 |
-| **Tools** | opening-book-tools-guide.md | ✅ Active | 2025-07 | 実装完了 |
 
 ## 🔧 主要ツール
 
@@ -90,26 +95,12 @@ cargo run --release --bin debug_position -- \
   --engine enhanced_nnue
 ```
 
-### プロファイリング
-```bash
-# Flamegraph生成
-cargo flamegraph --bin see_flamegraph -o flamegraph.svg
-```
-
 ## 📋 開発ガイドライン
 
 開発時は以下のドキュメントも参照してください：
 
 - [**CLAUDE.md**](../CLAUDE.md) - Claude Code向けの開発ガイドライン
 - [**Cargo.toml**](../Cargo.toml) - プロジェクト設定
-
-## 🔄 更新履歴
-
-| 日付 | 内容 |
-|------|------|
-| 2025-08-09 | ドキュメント全体を再構成、カテゴリ別に整理 |
-| 2025-08-08 | parallel_benchmarkツールに統計機能・JSON出力追加 |
-| 2025-07 | Opening Book関連ドキュメント統合 |
 
 ## 📌 メンテナンス方針
 
