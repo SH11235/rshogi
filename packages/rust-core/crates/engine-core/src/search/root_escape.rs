@@ -6,7 +6,8 @@ use crate::shogi::{Move, Position};
 #[derive(Clone, Debug, Default)]
 pub struct RootEscapeSummary {
     pub safe: Vec<Move>,
-    pub risky: Vec<(Move, Move)>, // (our_move, enemy_mate_mv)
+    pub risky: Vec<(Move, Move)>,    // (our_move, enemy_mate_mv)
+    pub see_risky: Vec<(Move, i32)>, // (our_move, loss_cp)
 }
 
 impl RootEscapeSummary {
@@ -22,6 +23,26 @@ impl RootEscapeSummary {
         self.risky
             .iter()
             .find_map(|&(candidate, mate)| (candidate == mv).then_some(mate))
+    }
+
+    /// Returns SEE loss if `mv` is classified as static risky.
+    #[inline]
+    pub fn see_loss(&self, mv: Move) -> Option<i32> {
+        self.see_risky
+            .iter()
+            .find_map(|&(candidate, loss)| (candidate == mv).then_some(loss))
+    }
+
+    #[inline]
+    pub fn remove_safe(&mut self, mv: Move) {
+        if let Some(idx) = self.safe.iter().position(|&m| m == mv) {
+            self.safe.swap_remove(idx);
+        }
+    }
+
+    #[inline]
+    pub fn push_see_risky(&mut self, mv: Move, loss: i32) {
+        self.see_risky.push((mv, loss));
     }
 }
 
@@ -50,4 +71,34 @@ pub fn root_escape_scan(pos: &Position, max_moves: Option<usize>) -> RootEscapeS
         }
     }
     summary
+}
+
+pub fn apply_static_risks(pos: &Position, summary: &mut RootEscapeSummary, threshold_cp: i32) {
+    if threshold_cp <= 0 {
+        return;
+    }
+    let mut promote: Vec<(Move, i32)> = Vec::new();
+    for &mv in summary.safe.clone().iter() {
+        if let Some(loss) = see_loss_for_move(pos, mv) {
+            if loss <= -threshold_cp {
+                promote.push((mv, loss));
+            }
+        }
+    }
+    for (mv, loss) in promote {
+        summary.remove_safe(mv);
+        summary.push_see_risky(mv, loss);
+    }
+}
+
+pub fn see_loss_for_move(pos: &Position, mv: Move) -> Option<i32> {
+    if mv.is_drop() {
+        return None;
+    }
+    let see = if mv.is_capture_hint() {
+        pos.see(mv)
+    } else {
+        pos.see_landing_after_move(mv, 0)
+    };
+    (see < 0).then_some(see)
 }
