@@ -94,6 +94,17 @@ quit
 - `PostVerify.RequirePass=On` のとき、post‑verify が不合格なら短時間（`PostVerify.ExtendMs` 既定 200ms、残soft内）だけ探索を延長して再判定します。合格時のみ早期確定します。
 - 劣勢帯では軽い追い探索でTTを温めてから最善を再取得（内部連動、既定有効）。
 
+### Root Post‑Verify / Win‑Protect（探索内ガード）
+
+- `RootVerify.*` オプションは、bestmove 確定直前に **drop 対応 SEE/XSEE + 軽探索 (depth=2〜3, 8ms/150k nodes)** を実行し、移動直後の大駒露出や単純な駒損を探索内で弾きます。
+  - `RootVerify.Enabled`（既定 ON）
+  - `RootVerify.MaxMs` / `MaxNodes`（軽探索の壁、既定 8ms / 150k nodes）
+  - `RootVerify.CheckDepth`（既定 3）
+  - `RootVerify.OppSEE_MinCp`（主要駒の XSEE 閾値、既定 0cp）
+  - `RootVerify.MajorLossPenaltyCp`（評価悪化許容量、既定 1200cp）
+- `WinProtect.*` は **勝勢（既定 +1200cp 以上、stable_depth<13）** で Root Verify を必須化し、上位 2 手を強制ダブルチェックします。root 側の最小思考時間もしきい値（20ms）まで自動引き上げ、浅深度での早指し blunder を防ぎます。
+
+
 ## Finalize 層の軽ガード（要点）
 
 - near-draw 帯でも「玉手の軽ガード」は常時有効（PV1=玉手/代替=玉手）。
@@ -216,6 +227,15 @@ go byoyomi 30000 periods 5  # 30秒×5回
   - まず安全に止める: `setoption name InstantMateMove.Enabled value false`
 - 代替として誤検知を減らす: `InstantMateMove.CheckAllPV value true`（既定でtrue）
   - 既定は「Stable限定＋軽検証（CheckOnly）＋最小思考時間8ms尊重」で、Partial・浅深度での誤発火を抑止します。
+
+`LogProfile=Dev/QA` では発火時に
+
+```
+info string instant_mate_move fired=1 move=<...> dist=1 snapshot=Stable depth=…
+info string self_mate_in_one move=<...> dist=1 depth=… snapshot=Stable
+```
+
+が必ず出力されるため、GUIやCLIログで即詰み検出の成否を追跡できます。
 
 例: 既定強化（明示）
 

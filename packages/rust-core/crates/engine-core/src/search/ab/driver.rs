@@ -2597,6 +2597,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
 
         if result.stop_info.is_none() {
+            let stats_elapsed_ms = result.stats.elapsed.as_millis() as u64;
             if let Some(tm) = limits.time_manager.as_ref() {
                 let elapsed = tm.elapsed_ms();
                 let hard_ms = tm.hard_limit_ms();
@@ -2628,7 +2629,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 });
                 result.end_reason = reason;
             } else if let Some(dl) = limits.fallback_deadlines {
-                let elapsed = t0.elapsed().as_millis() as u64;
+                let elapsed = stats_elapsed_ms;
                 let hard_timeout = elapsed >= dl.hard_limit_ms;
                 let soft_hit = dl.soft_limit_ms > 0 && elapsed >= dl.soft_limit_ms;
                 let time_limited = hard_timeout
@@ -2657,7 +2658,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 result.end_reason = reason;
             } else if let Some(limit) = limits.time_limit() {
                 let cap_ms = limit.as_millis() as u64;
-                let elapsed = t0.elapsed().as_millis() as u64;
+                let elapsed = stats_elapsed_ms;
                 let mut hard_timeout = match last_deadline_hit {
                     Some(DeadlineHit::Hard) => true,
                     Some(DeadlineHit::Soft) => false,

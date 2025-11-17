@@ -4,17 +4,21 @@ use engine_core::search::constants::mate_distance as md;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
-    types::{NodeType, StopInfo},
+    mate1ply, root_escape, root_threat,
+    types::{NodeType, RootLine, RootVerifyFailKind, StopInfo},
     SearchResult,
 };
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
 use smallvec::SmallVec;
 use std::cmp::Reverse;
 // use engine_core::util::search_helpers::quick_search_move; // not used in current impl
-use engine_core::{movegen::MoveGenerator, shogi::PieceType};
+use engine_core::{
+    movegen::MoveGenerator,
+    shogi::{Move, PieceType, Position},
+};
 
 use crate::io::{diag_info_string, info_string, usi_println};
-use crate::state::EngineState;
+use crate::state::{EngineState, InstantMateVerifyMode, RootEscapeLogDetail, RootEscapePickPolicy};
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -22,6 +26,8 @@ use std::time::{Duration, Instant};
 
 // near-draw の判定しきい値（cp換算）。README にも注記あり。
 const NEAR_DRAW_CP: i32 = 10;
+const ROOT_ESCAPE_LOG_LIMIT: usize = 8;
+const ROOT_ESCAPE_THREAT_ORDER_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MateSkipInfo {
@@ -86,6 +92,83 @@ fn has_immediate_mate_after(
         }
     }
     true
+}
+
+#[derive(Clone, Copy)]
+struct InstantMateTrigger {
+    mv: Move,
+    snapshot: SnapshotSource,
+    depth: u8,
+    elapsed_ms: u64,
+    distance: i32,
+}
+
+fn snapshot_label(src: SnapshotSource) -> &'static str {
+    match src {
+        SnapshotSource::Stable => "Stable",
+        SnapshotSource::Partial => "Partial",
+    }
+}
+
+fn multipv_all_mate_in_one(res: &SearchResult, max_distance: u32, multipv: u8) -> bool {
+    let Some(lines) = res.lines.as_ref() else {
+        return false;
+    };
+    let required = multipv.min(lines.len() as u8) as usize;
+    if required == 0 {
+        return false;
+    }
+    lines.iter().take(required).all(|line| match line.mate_distance {
+        Some(d) if d > 0 => (d as u32) <= max_distance,
+        _ => false,
+    })
+}
+
+fn try_instant_mate_trigger(
+    state: &mut EngineState,
+    res: &SearchResult,
+) -> Option<InstantMateTrigger> {
+    let opts = &state.opts;
+    if !opts.instant_mate_move_enabled {
+        return None;
+    }
+    if opts.instant_mate_verify_mode != InstantMateVerifyMode::CheckOnly {
+        return None;
+    }
+    let dist = match md(res.score) {
+        Some(d) if d > 0 => d,
+        _ => return None,
+    };
+    if (dist as u32) > opts.instant_mate_move_max_distance {
+        return None;
+    }
+    let depth = res.stats.stable_depth.unwrap_or(res.stats.depth);
+    if depth < opts.instant_mate_min_depth {
+        return None;
+    }
+    let snapshot = res.stats.root_report_source.unwrap_or(SnapshotSource::Partial);
+    if opts.instant_mate_require_stable && snapshot != SnapshotSource::Stable {
+        return None;
+    }
+    if opts.instant_mate_check_all_pv
+        && opts.multipv > 1
+        && !multipv_all_mate_in_one(res, opts.instant_mate_move_max_distance, opts.multipv)
+    {
+        return None;
+    }
+    let elapsed_ms = res.stats.elapsed.as_millis() as u64;
+    if opts.instant_mate_respect_min_think_ms && elapsed_ms < opts.instant_mate_min_respect_ms {
+        return None;
+    }
+    let side = state.position.side_to_move;
+    let mv = mate1ply::mate_in_one_for_side(&mut state.position, side)?;
+    Some(InstantMateTrigger {
+        mv,
+        snapshot,
+        depth,
+        elapsed_ms,
+        distance: dist,
+    })
 }
 
 #[cfg(test)]
@@ -1583,38 +1666,61 @@ pub fn finalize_and_send(
         label,
     );
 
+    let mut instant_mate_forced = false;
+    if let Some(res) = result.as_ref() {
+        if let Some(trigger) = try_instant_mate_trigger(state, res) {
+            final_best.best_move = Some(trigger.mv);
+            final_best.pv.clear();
+            final_best.pv.push(trigger.mv);
+            final_best.source = FinalBestSource::Committed;
+            instant_mate_forced = true;
+            let mv_usi = move_to_usi(&trigger.mv);
+            let snap = snapshot_label(trigger.snapshot);
+            info_string(format!(
+                "instant_mate_move fired=1 move={} dist={} snapshot={} depth={} elapsed_ms={}",
+                mv_usi, trigger.distance, snap, trigger.depth, trigger.elapsed_ms
+            ));
+            info_string(format!(
+                "self_mate_in_one move={} dist={} depth={} snapshot={}",
+                mv_usi, trigger.distance, trigger.depth, snap
+            ));
+        }
+    }
+
     // Mate gating (YO流): Lower/Upper の mate距離では確定扱いしない。安定条件不足も抑止。
     let mut mate_gate_blocked = false;
     let mut mate_post_reject = false;
-    if let Some(res) = result.as_ref() {
-        if is_mate_score(res.score) {
-            let cfg = MateGateCfg {
-                min_stable_depth: state.opts.mate_gate_min_stable_depth,
-                fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
-                fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
-            };
-            let block = mate_gate_should_block(
-                res.node_type,
-                res.stats.stable_depth,
-                res.stats.depth,
-                res.stats.elapsed.as_millis() as u64,
-                &cfg,
-            );
-            if block {
-                let dist = md(res.score).unwrap_or(0);
-                info_string(format!(
-                    "mate_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
-                    match res.node_type {
-                        engine_core::search::types::NodeType::LowerBound => "lb",
-                        engine_core::search::types::NodeType::UpperBound => "ub",
-                        _ => "pv",
-                    },
+    if !instant_mate_forced {
+        if let Some(res) = result.as_ref() {
+            if is_mate_score(res.score) {
+                let cfg = MateGateCfg {
+                    min_stable_depth: state.opts.mate_gate_min_stable_depth,
+                    fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
+                    fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
+                };
+                let block = mate_gate_should_block(
+                    res.node_type,
+                    res.stats.stable_depth,
                     res.stats.depth,
-                    res.stats.elapsed.as_millis(),
-                    dist
-                ));
-                // 距離1はゲート免除（必ずCheckOnlyのpost-verifyを実施）
-                mate_gate_blocked = dist > 1;
+                    res.stats.elapsed.as_millis() as u64,
+                    &cfg,
+                );
+                if block {
+                    let dist = md(res.score).unwrap_or(0);
+                    info_string(format!(
+                        "mate_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
+                        match res.node_type {
+                            engine_core::search::types::NodeType::LowerBound => "lb",
+                            engine_core::search::types::NodeType::UpperBound => "ub",
+                            _ => "pv",
+                        },
+                        res.stats.depth,
+                        res.stats.elapsed.as_millis(),
+                        dist
+                    ));
+                    // 距離1はゲート免除（必ずCheckOnlyのpost-verifyを実施）
+                    mate_gate_blocked = dist > 1;
+                }
             }
         }
     }
@@ -1817,6 +1923,15 @@ pub fn finalize_and_send(
             info_string(format!(
                 "root_verify summary checked={} fail={} total_ms={}",
                 checked, fail, total_ms
+            ));
+        }
+        if let (Some(rejected), Some(mate_mv)) =
+            (res.stats.root_verify_rejected_move, res.stats.root_verify_mate_move)
+        {
+            info_string(format!(
+                "root_verify fail after={} reason=opp_mate_in_one delta=-32000 mate_move={}",
+                move_to_usi(&rejected),
+                move_to_usi(&mate_mv)
             ));
         }
         if let Some(heur) = res.stats.heuristics.as_ref() {
@@ -2073,11 +2188,16 @@ pub fn finalize_and_send(
     // Optional finalize sanity check (may switch PV1)
     // joined 経路でも near_draw 可視化を揃えるため、score_hint を渡す
     let score_hint_joined = result.map(|r| r.score);
-    let mut maybe_switch =
-        finalize_sanity_check(state, &stop_meta, &final_best, result, score_hint_joined, "joined");
+    let mut maybe_switch = if instant_mate_forced {
+        None
+    } else {
+        finalize_sanity_check(state, &stop_meta, &final_best, result, score_hint_joined, "joined")
+    };
 
     // If mate was rejected, force an alternative: try PV2 head from snapshot, else SEE-best alt
-    if mate_gate_blocked || (mate_post_reject && state.opts.post_verify_require_pass) {
+    if !instant_mate_forced
+        && (mate_gate_blocked || (mate_post_reject && state.opts.post_verify_require_pass))
+    {
         let pv1 = final_best.best_move;
         let mut forced_alt: Option<engine_core::shogi::Move> = None;
         if let Some(snap) = snapshot_valid.as_ref() {
@@ -2113,11 +2233,18 @@ pub fn finalize_and_send(
             // no-op for test probe: PV2優先の有無は現状検査対象外
         }
     }
-    let (chosen_mv, chosen_src) = if let Some(m) = maybe_switch {
+    let snapshot_lines = snapshot_valid.as_ref().map(|snap| snap.lines.as_slice());
+    let (mut chosen_mv, mut chosen_src) = if let Some(m) = maybe_switch {
         (Some(m), FinalBestSource::Committed)
     } else {
         (final_best.best_move, final_best.source)
     };
+    if let Some((_, replacement)) =
+        enforce_root_escape_guard(state, chosen_mv, result, snapshot_lines, &final_best)
+    {
+        chosen_mv = Some(replacement);
+        chosen_src = FinalBestSource::Committed;
+    }
 
     let final_usi = chosen_mv.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
     let ponder_mv = if state.opts.ponder {
@@ -3084,6 +3211,343 @@ fn choose_safe_nonking_fallback(
         }
     }
     None
+}
+
+fn root_escape_should_log(detail: RootEscapeLogDetail, best_is_risky: bool) -> bool {
+    match detail {
+        RootEscapeLogDetail::Off => false,
+        RootEscapeLogDetail::FailOnly => best_is_risky,
+        RootEscapeLogDetail::Full => true,
+    }
+}
+
+fn root_escape_should_log_risky(detail: RootEscapeLogDetail, best_is_risky: bool) -> bool {
+    match detail {
+        RootEscapeLogDetail::Off => false,
+        RootEscapeLogDetail::FailOnly => best_is_risky,
+        RootEscapeLogDetail::Full => true,
+    }
+}
+
+fn log_root_escape_summary(
+    state: &mut EngineState,
+    summary: &root_escape::RootEscapeSummary,
+    best_is_risky: bool,
+    best_mate: Option<Move>,
+    best_see_loss: Option<i32>,
+) {
+    if !state.opts.log_profile.at_least_qa() {
+        return;
+    }
+    if !root_escape_should_log(state.opts.root_escape_log_detail, best_is_risky) {
+        return;
+    }
+    info_string(format!(
+        "root_escape summary safe={} risky={} see_risky={}",
+        summary.safe.len(),
+        summary.risky.len(),
+        summary.see_risky.len()
+    ));
+    if root_escape_should_log_risky(state.opts.root_escape_log_detail, best_is_risky) {
+        for &(mv, mate) in summary.risky.iter() {
+            info_string(format!(
+                "root_escape risky after={} mate_move={}",
+                move_to_usi(&mv),
+                move_to_usi(&mate)
+            ));
+        }
+        for &(mv, loss) in summary.see_risky.iter() {
+            info_string(format!("root_escape risky after={} see_loss={}", move_to_usi(&mv), loss));
+        }
+    }
+    if best_is_risky {
+        if let Some(mate_mv) = best_mate {
+            info_string(format!("root_escape best_risky=1 mate_move={}", move_to_usi(&mate_mv)));
+        } else if let Some(loss) = best_see_loss {
+            info_string(format!("root_escape best_risky=1 see_loss={}", loss));
+        }
+    }
+}
+
+fn log_root_escape_candidate_threats(
+    pos: &Position,
+    candidates: &[Move],
+    best_mv: Move,
+    threshold_cp: i32,
+) {
+    if threshold_cp <= 0 {
+        return;
+    }
+    let mut child = pos.clone();
+    for &mv in candidates.iter().take(ROOT_ESCAPE_LOG_LIMIT) {
+        if mv == best_mv {
+            continue;
+        }
+        let undo = child.do_move(mv);
+        if let Some(threat) =
+            root_threat::detect_major_threat(&child, pos.side_to_move, threshold_cp)
+        {
+            let loss = match threat {
+                root_threat::RootThreat::OppXsee { loss, .. } => loss,
+                root_threat::RootThreat::PawnDropHead { .. } => -threshold_cp.max(1),
+            };
+            info_string(format!("root_escape risky after={} see_loss={}", move_to_usi(&mv), loss));
+        }
+        child.undo_move(mv, undo);
+    }
+}
+
+fn push_safe_unique(order: &mut Vec<Move>, summary: &root_escape::RootEscapeSummary, mv: Move) {
+    if summary.is_safe(mv) && !order.contains(&mv) {
+        order.push(mv);
+    }
+}
+
+fn promote_same_destination_risks(
+    summary: &mut root_escape::RootEscapeSummary,
+    target_mv: Move,
+    loss: i32,
+) {
+    let mut affected: Vec<Move> = Vec::new();
+    for &mv in summary.safe.iter() {
+        if mv != target_mv && mv.to() == target_mv.to() {
+            affected.push(mv);
+        }
+    }
+    for mv in affected {
+        summary.remove_safe(mv);
+        summary.push_see_risky(mv, loss);
+    }
+}
+
+fn collect_root_escape_safe_candidates(
+    summary: &root_escape::RootEscapeSummary,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+    current_best: Option<Move>,
+) -> Vec<Move> {
+    let mut ordered: Vec<Move> = Vec::new();
+    if let Some(bm) = current_best {
+        push_safe_unique(&mut ordered, summary, bm);
+    }
+    if let Some(res) = result {
+        if let Some(lines) = res.lines.as_ref() {
+            for line in lines.iter() {
+                push_safe_unique(&mut ordered, summary, line.root_move);
+            }
+        }
+    }
+    if let Some(lines) = snapshot_lines {
+        for line in lines.iter() {
+            push_safe_unique(&mut ordered, summary, line.root_move);
+        }
+    }
+    if let Some(bm) = final_best.best_move {
+        push_safe_unique(&mut ordered, summary, bm);
+    }
+    let mut drop_moves: Vec<Move> = Vec::new();
+    let mut quiet_moves: Vec<Move> = Vec::new();
+    for &mv in summary.safe.iter() {
+        if mv.is_drop() {
+            drop_moves.push(mv);
+        } else {
+            quiet_moves.push(mv);
+        }
+    }
+    for mv in drop_moves.into_iter().chain(quiet_moves.into_iter()) {
+        push_safe_unique(&mut ordered, summary, mv);
+    }
+    ordered
+}
+
+fn pick_root_escape_safe_pv_order(
+    summary: &root_escape::RootEscapeSummary,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+    current_best: Option<Move>,
+) -> Option<Move> {
+    collect_root_escape_safe_candidates(summary, result, snapshot_lines, final_best, current_best)
+        .into_iter()
+        .next()
+}
+
+fn pick_root_escape_safe_move(
+    policy: RootEscapePickPolicy,
+    summary: &root_escape::RootEscapeSummary,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+    current_best: Option<Move>,
+) -> Option<Move> {
+    match policy {
+        RootEscapePickPolicy::PvOrder | RootEscapePickPolicy::MiniQSearch => {
+            pick_root_escape_safe_pv_order(
+                summary,
+                result,
+                snapshot_lines,
+                final_best,
+                current_best,
+            )
+        }
+        RootEscapePickPolicy::Static => summary.safe.first().copied(),
+    }
+}
+
+fn enforce_root_escape_guard(
+    state: &mut EngineState,
+    current_best: Option<Move>,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+) -> Option<(Move, Move)> {
+    if !state.opts.root_escape_enabled {
+        return None;
+    }
+    let best_mv = current_best?;
+    let max_moves = state.opts.root_escape_max_moves;
+    if max_moves == 0 {
+        return None;
+    }
+    let mut summary = root_escape::root_escape_scan(&state.position, Some(max_moves));
+    let candidate_order = collect_root_escape_safe_candidates(
+        &summary,
+        result,
+        snapshot_lines,
+        final_best,
+        Some(best_mv),
+    );
+    let score_for_threshold = result.map(|res| res.score.max(0)).unwrap_or(0);
+    let see_threshold = state.opts.root_escape_see_threshold_cp + score_for_threshold / 4;
+    if see_threshold > 0 {
+        root_escape::apply_static_risks(&state.position, &mut summary, see_threshold);
+        root_escape::apply_threat_risks(
+            &state.position,
+            &mut summary,
+            &candidate_order,
+            ROOT_ESCAPE_THREAT_ORDER_LIMIT,
+            see_threshold,
+        );
+    }
+    if state.opts.log_profile.at_least_qa()
+        && matches!(state.opts.root_escape_log_detail, RootEscapeLogDetail::Full)
+    {
+        log_root_escape_candidate_threats(
+            &state.position,
+            &candidate_order,
+            best_mv,
+            see_threshold,
+        );
+    }
+    if let Some(res) = result {
+        if res.stats.root_verify_last_fail_move == Some(best_mv) {
+            if let Some(kind) = res.stats.root_verify_last_fail_kind {
+                if kind != RootVerifyFailKind::MateInOne && summary.see_loss(best_mv).is_none() {
+                    let loss = res
+                        .stats
+                        .root_verify_last_fail_detail
+                        .unwrap_or(-state.opts.root_escape_see_threshold_cp.max(1));
+                    summary.remove_safe(best_mv);
+                    summary.push_see_risky(best_mv, loss);
+                }
+            }
+        }
+    }
+    let mut best_mate = summary.risky_mate_move(best_mv);
+    let mut best_is_risky = best_mate.is_some() || summary.see_loss(best_mv).is_some();
+    if !best_is_risky {
+        if let Some(res) = result {
+            if res.stats.root_verify_rejected_move == Some(best_mv) {
+                if let Some(mate_mv) = res.stats.root_verify_mate_move {
+                    summary.risky.push((best_mv, mate_mv));
+                    best_mate = Some(mate_mv);
+                }
+            }
+        }
+    }
+    if !best_is_risky {
+        best_is_risky = summary.see_loss(best_mv).is_some();
+    }
+    let best_see_loss = summary.see_loss(best_mv);
+    if best_is_risky {
+        if let Some(loss) = best_see_loss {
+            promote_same_destination_risks(&mut summary, best_mv, loss);
+        }
+        summary.safe.retain(|&mv| mv != best_mv);
+    }
+    let guard_allows = should_replace_bestmove(
+        state,
+        result,
+        summary.see_loss(best_mv),
+        summary.risky_mate_move(best_mv).is_some(),
+    );
+    if best_is_risky && !guard_allows && state.opts.log_profile.at_least_qa() {
+        let (score, node_label) = if let Some(res) = result {
+            (res.score, format!("{:?}", res.node_type))
+        } else {
+            (0, String::from("-"))
+        };
+        info_string(format!(
+            "root_escape guard skip score={} loss={} node={} threshold={}",
+            score,
+            summary.see_loss(best_mv).unwrap_or(0),
+            node_label,
+            state.opts.root_escape_safe_guard_cp
+        ));
+    }
+    let replacement = if best_is_risky && guard_allows && !summary.safe.is_empty() {
+        pick_root_escape_safe_move(
+            state.opts.root_escape_pick_policy,
+            &summary,
+            result,
+            snapshot_lines,
+            final_best,
+            Some(best_mv),
+        )
+    } else {
+        None
+    };
+    log_root_escape_summary(state, &summary, best_is_risky, best_mate, best_see_loss);
+    if let Some(new_mv) = replacement {
+        if new_mv != best_mv {
+            info_string(format!(
+                "root_escape switch from={} to={} policy={}",
+                move_to_usi(&best_mv),
+                move_to_usi(&new_mv),
+                state.opts.root_escape_pick_policy.as_str()
+            ));
+            return Some((best_mv, new_mv));
+        }
+    }
+    None
+}
+
+fn should_replace_bestmove(
+    state: &EngineState,
+    result: Option<&SearchResult>,
+    see_loss: Option<i32>,
+    has_mate: bool,
+) -> bool {
+    if has_mate {
+        return true;
+    }
+    let Some(res) = result else {
+        return true;
+    };
+    if res.node_type != NodeType::Exact {
+        return true;
+    }
+    if res.score >= state.opts.root_escape_min_score_for_switch_cp {
+        if let Some(loss) = see_loss {
+            if loss.abs() <= state.opts.root_escape_safe_guard_cp {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 #[inline]
