@@ -99,6 +99,32 @@ impl RootEscapeLogDetail {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootSafeScanLogDetail {
+    Off,
+    FailOnly,
+    Full,
+}
+
+impl RootSafeScanLogDetail {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "failonly" | "fail" => Some(Self::FailOnly),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::FailOnly => "FailOnly",
+            Self::Full => "Full",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
     // Core engine settings
@@ -210,6 +236,9 @@ pub struct UsiOptions {
     pub root_escape_see_threshold_cp: i32,
     pub root_escape_safe_guard_cp: i32,
     pub root_escape_min_score_for_switch_cp: i32,
+    pub root_safe_scan_enabled: bool,
+    pub root_safe_scan_max_ms: u64,
+    pub root_safe_scan_log_detail: RootSafeScanLogDetail,
     // MateGate configuration (YO流ゲートの閾値)
     pub mate_gate_min_stable_depth: u8,
     pub mate_gate_fast_ok_min_depth: u8,
@@ -231,6 +260,11 @@ pub struct UsiOptions {
     pub root_verify_check_depth: u32,
     pub root_verify_opp_see_min_cp: i32,
     pub root_verify_major_loss_penalty_cp: i32,
+    pub root_verify_require_pass: bool,
+    pub root_verify_max_candidates: u32,
+    pub root_verify_max_candidates_threat: u32,
+    pub root_verify_max_defense_seeds: u32,
+    pub root_verify_max_defense_seeds_threat: u32,
     pub win_protect_enabled: bool,
     pub win_protect_threshold_cp: i32,
     // Post-bestmove verify: apply opponent max capture + qsearch, gate by Y (drop threshold)
@@ -253,6 +287,90 @@ pub struct UsiOptions {
     // Forced move info emit (only-one-legal-move)
     pub forced_move_emit_eval: bool,
     pub forced_move_min_search_ms: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SessionMetrics {
+    pub root_escape_switch_count: u64,
+    pub root_escape_guard_skip_count: u64,
+    pub root_escape_safe_zero_count: u64,
+    pub root_verify_candidates: u64,
+    pub root_verify_fail_count: u64,
+    pub root_verify_opp_mate_hits: u64,
+    pub finalize_rescue_invocations: u64,
+    pub pv_stability_iterations: u64,
+    emitted: bool,
+}
+
+impl SessionMetrics {
+    #[inline]
+    pub fn reset_for_new_session(&mut self) {
+        *self = Self::default();
+    }
+
+    #[inline]
+    pub fn bump_root_escape_switch(&mut self) {
+        self.root_escape_switch_count = self.root_escape_switch_count.saturating_add(1);
+    }
+
+    #[inline]
+    pub fn bump_root_escape_guard_skip(&mut self) {
+        self.root_escape_guard_skip_count = self.root_escape_guard_skip_count.saturating_add(1);
+    }
+
+    #[inline]
+    pub fn bump_root_escape_safe_zero(&mut self) {
+        self.root_escape_safe_zero_count = self.root_escape_safe_zero_count.saturating_add(1);
+    }
+
+    #[inline]
+    pub fn add_root_verify_candidates(&mut self, count: u64) {
+        self.root_verify_candidates = self.root_verify_candidates.saturating_add(count);
+    }
+
+    #[inline]
+    pub fn add_root_verify_failures(&mut self, count: u64) {
+        self.root_verify_fail_count = self.root_verify_fail_count.saturating_add(count);
+    }
+
+    #[inline]
+    pub fn add_root_verify_mate_hits(&mut self, count: u64) {
+        self.root_verify_opp_mate_hits = self.root_verify_opp_mate_hits.saturating_add(count);
+    }
+
+    #[inline]
+    pub fn bump_finalize_rescue(&mut self) {
+        self.finalize_rescue_invocations = self.finalize_rescue_invocations.saturating_add(1);
+    }
+
+    #[inline]
+    pub fn add_pv_stability_iterations(&mut self, iterations: u64) {
+        self.pv_stability_iterations = self.pv_stability_iterations.saturating_add(iterations);
+    }
+
+    pub fn emit_if_needed(&mut self, profile: LogProfile) {
+        if self.emitted || !profile.at_least_qa() {
+            return;
+        }
+        crate::io::info_string(format!(
+            "root_escape.switch_count={} guard_skip_count={} safe_zero_count={}",
+            self.root_escape_switch_count,
+            self.root_escape_guard_skip_count,
+            self.root_escape_safe_zero_count
+        ));
+        crate::io::info_string(format!(
+            "root_verify.candidates={} fail_count={} opp_mate_in_one_hits={}",
+            self.root_verify_candidates,
+            self.root_verify_fail_count,
+            self.root_verify_opp_mate_hits
+        ));
+        crate::io::info_string(format!(
+            "finalize_rescue.invocations={}",
+            self.finalize_rescue_invocations
+        ));
+        crate::io::info_string(format!("pv_stability.iterations={}", self.pv_stability_iterations));
+        self.emitted = true;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,6 +457,9 @@ impl Default for UsiOptions {
             root_escape_see_threshold_cp: 200,
             root_escape_safe_guard_cp: 400,
             root_escape_min_score_for_switch_cp: 300,
+            root_safe_scan_enabled: true,
+            root_safe_scan_max_ms: 4,
+            root_safe_scan_log_detail: RootSafeScanLogDetail::FailOnly,
             // MateGate defaults
             mate_gate_min_stable_depth: 5,
             mate_gate_fast_ok_min_depth: 5,
@@ -357,10 +478,15 @@ impl Default for UsiOptions {
             root_verify_check_depth: 3,
             root_verify_opp_see_min_cp: 0,
             root_verify_major_loss_penalty_cp: 1_200,
+            root_verify_require_pass: true,
+            root_verify_max_candidates: 4,
+            root_verify_max_candidates_threat: 12,
+            root_verify_max_defense_seeds: 4,
+            root_verify_max_defense_seeds_threat: 12,
             win_protect_enabled: true,
             win_protect_threshold_cp: 1_200,
             post_verify: true,
-            post_verify_require_pass: false,
+            post_verify_require_pass: true,
             post_verify_extend_ms: 300,
             post_verify_disadvantage_cp: -300,
             y_drop_cp: 225,
@@ -456,6 +582,7 @@ pub struct EngineState {
     /// Names of USI options explicitly overridden by the user via `setoption`.
     /// Auto defaults (Threads連動) はここに含まれないキーに対してのみ適用される。
     pub user_overrides: HashSet<String>,
+    pub session_metrics: SessionMetrics,
 }
 
 impl EngineState {
@@ -521,6 +648,7 @@ impl EngineState {
             active_time_manager: None,
             pending_ponder_result: None,
             user_overrides: HashSet::new(),
+            session_metrics: SessionMetrics::default(),
         }
     }
 
@@ -628,5 +756,28 @@ mod tests {
             TimeState::Byoyomi { main_left_ms } => assert_eq!(main_left_ms, 0),
             other => panic!("unexpected time state: {:?}", other),
         }
+    }
+
+    #[test]
+    fn session_metrics_reset_clears_counters() {
+        let mut metrics = SessionMetrics::default();
+        metrics.bump_root_escape_switch();
+        metrics.bump_root_escape_guard_skip();
+        metrics.add_root_verify_candidates(3);
+        metrics.add_root_verify_failures(2);
+        metrics.add_root_verify_mate_hits(1);
+        metrics.bump_finalize_rescue();
+        metrics.add_pv_stability_iterations(5);
+        assert_eq!(metrics.root_escape_switch_count, 1);
+        assert_eq!(metrics.root_escape_guard_skip_count, 1);
+        assert_eq!(metrics.root_verify_candidates, 3);
+        metrics.reset_for_new_session();
+        assert_eq!(metrics.root_escape_switch_count, 0);
+        assert_eq!(metrics.root_escape_guard_skip_count, 0);
+        assert_eq!(metrics.root_verify_candidates, 0);
+        assert_eq!(metrics.root_verify_fail_count, 0);
+        assert_eq!(metrics.root_verify_opp_mate_hits, 0);
+        assert_eq!(metrics.finalize_rescue_invocations, 0);
+        assert_eq!(metrics.pv_stability_iterations, 0);
     }
 }

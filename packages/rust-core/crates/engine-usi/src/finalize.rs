@@ -18,7 +18,10 @@ use engine_core::{
 };
 
 use crate::io::{diag_info_string, info_string, usi_println};
-use crate::state::{EngineState, InstantMateVerifyMode, RootEscapeLogDetail, RootEscapePickPolicy};
+use crate::state::{
+    EngineState, InstantMateVerifyMode, RootEscapeLogDetail, RootEscapePickPolicy,
+    RootSafeScanLogDetail,
+};
 use crate::util::{emit_bestmove, score_view_with_clamp};
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -210,6 +213,126 @@ thread_local! {
 #[cfg(test)]
 fn test_probe_record(outcome: FinalizeOutcome) {
     TEST_FINALIZE_OUTCOME.with(|s| *s.borrow_mut() = Some(outcome));
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct InstantSummaryCapture {
+    pub checked: bool,
+    pub forced: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct MateGateSummaryCapture {
+    pub checked: bool,
+    pub blocked: bool,
+    pub reason: String,
+    pub source: Option<NodeType>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct PostVerifySummaryCapture {
+    pub checked: bool,
+    pub reject: bool,
+    pub skip_reason: Option<String>,
+    pub require_pass: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct GuardSummaryCapture {
+    pub instant: Option<InstantSummaryCapture>,
+    pub mate_gate: Option<MateGateSummaryCapture>,
+    pub post_verify: Option<PostVerifySummaryCapture>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GUARD_SUMMARIES: std::cell::RefCell<GuardSummaryCapture> =
+        std::cell::RefCell::new(GuardSummaryCapture::default());
+}
+
+#[cfg(test)]
+pub fn test_guard_logs_reset() {
+    TEST_GUARD_SUMMARIES.with(|slot| *slot.borrow_mut() = GuardSummaryCapture::default());
+}
+
+#[cfg(test)]
+pub fn test_guard_logs_take() -> GuardSummaryCapture {
+    TEST_GUARD_SUMMARIES.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+fn test_record_instant_summary(summary: InstantSummaryCapture) {
+    TEST_GUARD_SUMMARIES.with(|slot| slot.borrow_mut().instant = Some(summary));
+}
+
+#[cfg(test)]
+fn test_record_mate_gate_summary(summary: MateGateSummaryCapture) {
+    TEST_GUARD_SUMMARIES.with(|slot| slot.borrow_mut().mate_gate = Some(summary));
+}
+
+#[cfg(test)]
+fn test_record_post_verify_summary(summary: PostVerifySummaryCapture) {
+    TEST_GUARD_SUMMARIES.with(|slot| slot.borrow_mut().post_verify = Some(summary));
+}
+
+#[derive(Clone, Copy)]
+struct FastGuardSummary {
+    mate_gate_checked: bool,
+    mate_gate_blocked: bool,
+    mate_gate_reason: &'static str,
+    mate_gate_dist: Option<i32>,
+    mate_gate_source: Option<NodeType>,
+    post_verify_checked: bool,
+    post_verify_skip_reason: Option<&'static str>,
+    post_verify_reject: bool,
+    post_verify_extend_ms: u64,
+    post_verify_strengthen_ms: u64,
+}
+
+impl FastGuardSummary {
+    fn new(skip_reason: Option<&'static str>) -> Self {
+        Self {
+            mate_gate_checked: false,
+            mate_gate_blocked: false,
+            mate_gate_reason: "none",
+            mate_gate_dist: None,
+            mate_gate_source: None,
+            post_verify_checked: false,
+            post_verify_skip_reason: skip_reason,
+            post_verify_reject: false,
+            post_verify_extend_ms: 0,
+            post_verify_strengthen_ms: 0,
+        }
+    }
+
+    fn emit(&self, state: &EngineState, logged: &mut bool) {
+        if *logged {
+            return;
+        }
+        *logged = true;
+        log_instant_mate_summary(state, false, false, None);
+        log_mate_gate_summary(
+            state,
+            self.mate_gate_checked,
+            self.mate_gate_blocked,
+            false,
+            self.mate_gate_reason,
+            self.mate_gate_dist,
+            self.mate_gate_source,
+        );
+        log_post_verify_summary(
+            state,
+            self.post_verify_checked,
+            self.post_verify_skip_reason,
+            self.post_verify_reject,
+            self.post_verify_extend_ms,
+            self.post_verify_strengthen_ms,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +549,7 @@ fn run_rescue_search(state: &mut EngineState, budget_ms: u64, min_len: usize) ->
     if budget_ms == 0 {
         return None;
     }
+    state.session_metrics.bump_finalize_rescue();
     let lock_budget = budget_ms.min(100);
     let Some((mut eng, _, _)) = try_lock_engine_with_budget(&state.engine, lock_budget) else {
         diag_info_string("finalize_rescue_skip=lock_unavailable");
@@ -1444,6 +1568,7 @@ pub fn emit_bestmove_once<S: Into<String>>(
     emit_bestmove(&final_usi, ponder);
 
     state.bestmove_emitted = true;
+    state.session_metrics.emit_if_needed(state.opts.log_profile);
     state.current_root_hash = None;
     state.deadline_hard = None;
     state.deadline_near = None;
@@ -1666,6 +1791,7 @@ pub fn finalize_and_send(
         label,
     );
 
+    let instant_mate_checked = state.opts.instant_mate_move_enabled && result.is_some();
     let mut instant_mate_forced = false;
     if let Some(res) = result.as_ref() {
         if let Some(trigger) = try_instant_mate_trigger(state, res) {
@@ -1687,26 +1813,36 @@ pub fn finalize_and_send(
         }
     }
 
+    log_instant_mate_summary(state, instant_mate_checked, instant_mate_forced, result);
+
     // Mate gating (YO流): Lower/Upper の mate距離では確定扱いしない。安定条件不足も抑止。
     let mut mate_gate_blocked = false;
+    let mut mate_gate_checked = false;
+    let mut mate_gate_summary_reason = "none";
+    let mut mate_gate_block_cause: Option<&'static str> = None;
     let mut mate_post_reject = false;
-    if !instant_mate_forced {
-        if let Some(res) = result.as_ref() {
-            if is_mate_score(res.score) {
-                let cfg = MateGateCfg {
-                    min_stable_depth: state.opts.mate_gate_min_stable_depth,
-                    fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
-                    fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
-                };
-                let block = mate_gate_should_block(
-                    res.node_type,
-                    res.stats.stable_depth,
-                    res.stats.depth,
-                    res.stats.elapsed.as_millis() as u64,
-                    &cfg,
-                );
-                if block {
-                    let dist = md(res.score).unwrap_or(0);
+    let mut post_verify_checked = false;
+    let mut post_verify_skip_reason: Option<String> = None;
+    let mut post_verify_extend_ms: u64 = 0;
+    let mut post_verify_strengthen_ms: u64 = 0;
+    if let Some(res) = result.as_ref() {
+        if is_mate_score(res.score) {
+            mate_gate_checked = true;
+            let cfg = MateGateCfg {
+                min_stable_depth: state.opts.mate_gate_min_stable_depth,
+                fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
+                fast_ok_min_elapsed_ms: state.opts.mate_gate_fast_ok_min_elapsed_ms,
+            };
+            let decision = evaluate_mate_gate(
+                res.node_type,
+                res.stats.stable_depth,
+                res.stats.depth,
+                res.stats.elapsed.as_millis() as u64,
+                &cfg,
+            );
+            let dist = md(res.score).unwrap_or(0);
+            if decision.blocked {
+                if !instant_mate_forced {
                     info_string(format!(
                         "mate_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
                         match res.node_type {
@@ -1718,12 +1854,35 @@ pub fn finalize_and_send(
                         res.stats.elapsed.as_millis(),
                         dist
                     ));
-                    // 距離1はゲート免除（必ずCheckOnlyのpost-verifyを実施）
-                    mate_gate_blocked = dist > 1;
+                    if dist > 1 {
+                        mate_gate_blocked = true;
+                        mate_gate_block_cause = Some("mate_gate");
+                        mate_gate_summary_reason = "blocked";
+                    } else {
+                        mate_gate_summary_reason = "mate_distance_le_1";
+                    }
+                } else {
+                    mate_gate_summary_reason = "instant_override";
                 }
+            } else {
+                mate_gate_summary_reason = decision.reason;
             }
         }
     }
+
+    let mate_gate_result_dist = result
+        .filter(|res| is_mate_score(res.score))
+        .map(|res| md(res.score).unwrap_or(0));
+    let mate_gate_source = result.map(|res| res.node_type);
+    log_mate_gate_summary(
+        state,
+        mate_gate_checked,
+        mate_gate_blocked,
+        instant_mate_forced,
+        mate_gate_summary_reason,
+        mate_gate_result_dist,
+        mate_gate_source,
+    );
 
     let controller_stop_info = state.stop_controller.try_read_stop_info();
 
@@ -1796,6 +1955,7 @@ pub fn finalize_and_send(
 
         // PostVerify for mate距離: bestを1手進めて即詰であるかを確認。距離が短くExactな場合はスキップ。
         if state.opts.post_verify && is_mate_score(res.score) {
+            post_verify_checked = true;
             if let Some(skip) = postverify_skip_info(res, &state.opts) {
                 info_string(format!(
                     "mate_postverify_skip=1 reason=exact_small_dist dist={} stable_depth={} elapsed_ms={}",
@@ -1805,6 +1965,7 @@ pub fn finalize_and_send(
                         .unwrap_or_else(|| "none".to_string()),
                     skip.elapsed_ms
                 ));
+                post_verify_skip_reason.get_or_insert_with(|| "exact_small_dist".to_string());
             } else if let Some(bm) = res.best_move {
                 if !has_immediate_mate_after(&state.position, bm) {
                     let dist = md(res.score).unwrap_or(0);
@@ -1813,6 +1974,7 @@ pub fn finalize_and_send(
                         dist
                     ));
                     mate_post_reject = true;
+                    post_verify_skip_reason.get_or_insert_with(|| "evasion_exists".to_string());
                 }
             }
         }
@@ -1826,6 +1988,7 @@ pub fn finalize_and_send(
                 .unwrap_or(0);
             let ext_ms = remain_soft.min(state.opts.post_verify_extend_ms);
             if ext_ms >= 10 {
+                post_verify_extend_ms = ext_ms;
                 info_string(format!(
                     "early_finalize_blocked=1 reason=postverify_reject extend_ms={} remain_soft_ms={}",
                     ext_ms, remain_soft
@@ -1888,6 +2051,8 @@ pub fn finalize_and_send(
                     .unwrap_or(0);
                 let ext_ms = (state.opts.post_verify_extend_ms / 2).max(10).min(remain_soft);
                 if ext_ms >= 10 {
+                    post_verify_strengthen_ms = ext_ms;
+                    post_verify_checked = true;
                     diag_info_string(format!(
                         "postverify_strengthen=1 ext_ms={} remain_soft_ms={}",
                         ext_ms, remain_soft
@@ -1924,6 +2089,8 @@ pub fn finalize_and_send(
                 "root_verify summary checked={} fail={} total_ms={}",
                 checked, fail, total_ms
             ));
+            state.session_metrics.add_root_verify_candidates(checked);
+            state.session_metrics.add_root_verify_failures(fail);
         }
         if let (Some(rejected), Some(mate_mv)) =
             (res.stats.root_verify_rejected_move, res.stats.root_verify_mate_move)
@@ -1933,6 +2100,11 @@ pub fn finalize_and_send(
                 move_to_usi(&rejected),
                 move_to_usi(&mate_mv)
             ));
+        }
+        if let Some(hits) = res.stats.root_verify_opp_mate_hits {
+            if hits > 0 {
+                state.session_metrics.add_root_verify_mate_hits(hits);
+            }
         }
         if let Some(heur) = res.stats.heuristics.as_ref() {
             let summary = heur.summary();
@@ -1961,6 +2133,12 @@ pub fn finalize_and_send(
                 "tt_summary nodes={} hits={} hit_pct={:.2}",
                 nodes, tt_hits, hit_pct
             ));
+        }
+
+        if let Some(pv_changes) = res.stats.pv_changed {
+            if pv_changes > 0 {
+                state.session_metrics.add_pv_stability_iterations(pv_changes as u64);
+            }
         }
 
         #[cfg(feature = "diagnostics")]
@@ -2060,6 +2238,15 @@ pub fn finalize_and_send(
             ));
         }
     }
+
+    log_post_verify_summary(
+        state,
+        post_verify_checked,
+        post_verify_skip_reason.as_deref(),
+        mate_post_reject,
+        post_verify_extend_ms,
+        post_verify_strengthen_ms,
+    );
 
     if let Some(res) = result {
         if !stale {
@@ -2245,6 +2432,21 @@ pub fn finalize_and_send(
         chosen_mv = Some(replacement);
         chosen_src = FinalBestSource::Committed;
     }
+    let force_safe_scan =
+        result.and_then(|res| res.stats.root_verify_require_pass_failed).unwrap_or(0) != 0;
+    let safe_scan_cause = force_safe_scan.then_some("require_pass");
+    if let Some((_, replacement)) = enforce_root_safe_scan(
+        state,
+        chosen_mv,
+        result,
+        snapshot_lines,
+        &final_best,
+        force_safe_scan,
+        safe_scan_cause.or(mate_gate_block_cause),
+    ) {
+        chosen_mv = Some(replacement);
+        chosen_src = FinalBestSource::Committed;
+    }
 
     let final_usi = chosen_mv.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
     let ponder_mv = if state.opts.ponder {
@@ -2385,6 +2587,9 @@ pub fn finalize_and_send_fast(
     }
     diag_info_string(format!("{label}_fast_claim_success=1"));
 
+    let mut guard_logs_emitted = false;
+    let mut fast_guard = FastGuardSummary::new(state.opts.post_verify.then_some("fast_mode"));
+
     // Prioritize pending_ponder_result if available (ponderhit-instant-finalize)
     if let Some(pr) = state.pending_ponder_result.take() {
         // Verify session and position match to prevent stale buffer usage
@@ -2464,6 +2669,7 @@ pub fn finalize_and_send_fast(
                 );
                 // Clear buffer after successful emission
                 state.pending_ponder_result = None;
+                fast_guard.emit(state, &mut guard_logs_emitted);
                 return;
             }
         } else {
@@ -2535,7 +2741,9 @@ pub fn finalize_and_send_fast(
                 // Mate fast gating: ignore shallow/inexact mate lines
                 let mut blocked_by_mate_gate = false;
                 if let Some(line0) = snap.lines.first() {
-                    if engine_core::search::common::is_mate_score(line0.score_internal) && {
+                    if engine_core::search::common::is_mate_score(line0.score_internal) {
+                        fast_guard.mate_gate_checked = true;
+                        fast_guard.mate_gate_source = Some(line0.bound);
                         let cfg = MateGateCfg {
                             min_stable_depth: state.opts.mate_gate_min_stable_depth,
                             fast_ok_min_depth: state.opts.mate_gate_fast_ok_min_depth,
@@ -2543,27 +2751,36 @@ pub fn finalize_and_send_fast(
                         };
                         let stable_opt =
                             (snap.source == SnapshotSource::Stable).then_some(snap.depth);
-                        mate_gate_should_block(
+                        let decision = evaluate_mate_gate(
                             line0.bound,
                             stable_opt,
                             snap.depth,
                             snap.elapsed_ms,
                             &cfg,
-                        )
-                    } {
-                        let dist = md(line0.score_internal).unwrap_or(0);
-                        info_string(format!(
-                            "mate_fast_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
-                            match line0.bound {
-                                engine_core::search::types::NodeType::LowerBound => "lb",
-                                engine_core::search::types::NodeType::UpperBound => "ub",
-                                _ => "pv",
-                            },
-                            snap.depth,
-                            snap.elapsed_ms,
-                            dist
-                        ));
-                        blocked_by_mate_gate = dist > 1; // 距離1は免除
+                        );
+                        fast_guard.mate_gate_reason = decision.reason;
+                        fast_guard.mate_gate_dist = Some(md(line0.score_internal).unwrap_or(0));
+                        if decision.blocked {
+                            let dist = fast_guard.mate_gate_dist.unwrap_or(0);
+                            info_string(format!(
+                                "mate_fast_gate_blocked=1 bound={} depth={} elapsed_ms={} mate_dist={}",
+                                match line0.bound {
+                                    engine_core::search::types::NodeType::LowerBound => "lb",
+                                    engine_core::search::types::NodeType::UpperBound => "ub",
+                                    _ => "pv",
+                                },
+                                snap.depth,
+                                snap.elapsed_ms,
+                                dist
+                            ));
+                            if dist > 1 {
+                                blocked_by_mate_gate = true; // 距離1は免除
+                                fast_guard.mate_gate_blocked = true;
+                                fast_guard.mate_gate_reason = "blocked";
+                            } else {
+                                fast_guard.mate_gate_reason = "mate_distance_le_1";
+                            }
+                        }
                     }
                 }
 
@@ -2691,6 +2908,7 @@ pub fn finalize_and_send_fast(
                             ponder_mv,
                             &stop_meta,
                         );
+                        fast_guard.emit(state, &mut guard_logs_emitted);
                         return;
                     }
                     // ロック獲得に失敗：mateゲートでブロックされているなら snapshot を使わず合法フォールバックへ
@@ -2763,6 +2981,7 @@ pub fn finalize_and_send_fast(
                             None,
                             &stop_meta,
                         );
+                        fast_guard.emit(state, &mut guard_logs_emitted);
                         return;
                     }
                 }
@@ -2840,6 +3059,7 @@ pub fn finalize_and_send_fast(
                             alt_ponder,
                             &stop_meta,
                         );
+                        fast_guard.emit(state, &mut guard_logs_emitted);
                         return;
                     }
                 }
@@ -2851,6 +3071,7 @@ pub fn finalize_and_send_fast(
                     ponder_mv,
                     &stop_meta,
                 );
+                fast_guard.emit(state, &mut guard_logs_emitted);
                 return;
             }
         }
@@ -2946,6 +3167,7 @@ pub fn finalize_and_send_fast(
             });
         }
         log_and_emit_final_selection(state, label, final_source, &final_usi, ponder_mv, &stop_meta);
+        fast_guard.emit(state, &mut guard_logs_emitted);
         return;
     }
 
@@ -3045,6 +3267,7 @@ pub fn finalize_and_send_fast(
             );
         }
     }
+    fast_guard.emit(state, &mut guard_logs_emitted);
 }
 struct MateGateCfg {
     min_stable_depth: u8,
@@ -3052,21 +3275,48 @@ struct MateGateCfg {
     fast_ok_min_elapsed_ms: u64,
 }
 
+struct MateGateDecision {
+    blocked: bool,
+    reason: &'static str,
+}
+
 /// YO流のmateゲート判定。
-/// 非Exactは常にブロック。Exactでも (stable_ok || fast_ok) を満たさなければブロック。
-/// - stable_ok: stable_depth >= cfg.min_stable_depth（Stableスナップショット時のみ評価）
-/// - fast_ok  : depth >= cfg.fast_ok_min_depth || elapsed_ms >= cfg.fast_ok_min_elapsed_ms
-fn mate_gate_should_block(
+/// 非Exactは常にブロック。Exactでも (stable_ok || fast_ok_depth || fast_ok_elapsed) を満たさなければブロック。
+fn evaluate_mate_gate(
     bound: NodeType,
     stable_depth: Option<u8>,
     depth: u8,
     elapsed_ms: u64,
     cfg: &MateGateCfg,
-) -> bool {
-    let exact = matches!(bound, NodeType::Exact);
-    let stable_ok = stable_depth.map(|d| d >= cfg.min_stable_depth).unwrap_or(false);
-    let fast_ok = depth >= cfg.fast_ok_min_depth || elapsed_ms >= cfg.fast_ok_min_elapsed_ms;
-    !exact || !(stable_ok || fast_ok)
+) -> MateGateDecision {
+    if !matches!(bound, NodeType::Exact) {
+        return MateGateDecision {
+            blocked: true,
+            reason: "non_exact",
+        };
+    }
+    if stable_depth.map(|d| d >= cfg.min_stable_depth).unwrap_or(false) {
+        return MateGateDecision {
+            blocked: false,
+            reason: "stable_depth",
+        };
+    }
+    if depth >= cfg.fast_ok_min_depth {
+        return MateGateDecision {
+            blocked: false,
+            reason: "fast_depth",
+        };
+    }
+    if elapsed_ms >= cfg.fast_ok_min_elapsed_ms {
+        return MateGateDecision {
+            blocked: false,
+            reason: "fast_elapsed",
+        };
+    }
+    MateGateDecision {
+        blocked: true,
+        reason: "insufficient",
+    }
 }
 
 #[inline]
@@ -3229,6 +3479,304 @@ fn root_escape_should_log_risky(detail: RootEscapeLogDetail, best_is_risky: bool
     }
 }
 
+fn log_instant_mate_summary(
+    state: &EngineState,
+    checked: bool,
+    forced: bool,
+    result: Option<&SearchResult>,
+) {
+    if !state.opts.log_profile.at_least_qa() {
+        return;
+    }
+    let verify_mode = match state.opts.instant_mate_verify_mode {
+        InstantMateVerifyMode::Off => "Off",
+        InstantMateVerifyMode::CheckOnly => "CheckOnly",
+        InstantMateVerifyMode::QSearch => "QSearch",
+    };
+    let mate_dist = result
+        .filter(|res| is_mate_score(res.score))
+        .map(|res| md(res.score).unwrap_or(0))
+        .unwrap_or(0);
+    info_string(format!(
+        "instant_mate summary enabled={} checked={} forced={} verify_mode={} require_stable={} min_depth={} check_all_pv={} respect_min_ms={} min_respect_ms={} mate_dist={}",
+        state.opts.instant_mate_move_enabled as u8,
+        checked as u8,
+        forced as u8,
+        verify_mode,
+        state.opts.instant_mate_require_stable as u8,
+        state.opts.instant_mate_min_depth,
+        state.opts.instant_mate_check_all_pv as u8,
+        state.opts.instant_mate_respect_min_think_ms as u8,
+        state.opts.instant_mate_min_respect_ms,
+        mate_dist
+    ));
+    #[cfg(test)]
+    test_record_instant_summary(InstantSummaryCapture { checked, forced });
+}
+
+fn log_mate_gate_summary(
+    state: &EngineState,
+    checked: bool,
+    blocked: bool,
+    instant_override: bool,
+    reason: &str,
+    mate_dist: Option<i32>,
+    source: Option<NodeType>,
+) {
+    if !state.opts.log_profile.at_least_qa() {
+        return;
+    }
+    let mate_dist = mate_dist.unwrap_or(0);
+    let node_type = source
+        .map(|nt| match nt {
+            NodeType::Exact => "pv",
+            NodeType::LowerBound => "lb",
+            NodeType::UpperBound => "ub",
+        })
+        .unwrap_or("-");
+    info_string(format!(
+        "mate_gate summary checked={} blocked={} instant_override={} reason={} min_stable_depth={} fast_ok_min_depth={} fast_ok_min_elapsed_ms={} mate_dist={} source={}",
+        checked as u8,
+        blocked as u8,
+        instant_override as u8,
+        reason,
+        state.opts.mate_gate_min_stable_depth,
+        state.opts.mate_gate_fast_ok_min_depth,
+        state.opts.mate_gate_fast_ok_min_elapsed_ms,
+        mate_dist,
+        node_type
+    ));
+    #[cfg(test)]
+    test_record_mate_gate_summary(MateGateSummaryCapture {
+        checked,
+        blocked,
+        reason: reason.to_string(),
+        source,
+    });
+}
+
+fn log_post_verify_summary(
+    state: &EngineState,
+    checked: bool,
+    skip_reason: Option<&str>,
+    rejected: bool,
+    extend_ms: u64,
+    strengthen_ms: u64,
+) {
+    if !state.opts.log_profile.at_least_qa() {
+        return;
+    }
+    let reason = skip_reason.unwrap_or("none");
+    info_string(format!(
+        "post_verify summary enabled={} checked={} reject={} skip_reason={} require_pass={} extend_ms={} strengthen_ms={}",
+        state.opts.post_verify as u8,
+        checked as u8,
+        rejected as u8,
+        reason,
+        state.opts.post_verify_require_pass as u8,
+        extend_ms,
+        strengthen_ms
+    ));
+    #[cfg(test)]
+    test_record_post_verify_summary(PostVerifySummaryCapture {
+        checked,
+        reject: rejected,
+        skip_reason: skip_reason.map(|s| s.to_string()),
+        require_pass: state.opts.post_verify_require_pass,
+    });
+}
+
+struct RootSafeScanResult {
+    summary: root_escape::RootEscapeSummary,
+    checked: usize,
+    elapsed_ms: u64,
+    timed_out: bool,
+}
+
+fn perform_root_safe_scan(
+    pos: &Position,
+    best_mv: Option<Move>,
+    max_ms: u64,
+) -> RootSafeScanResult {
+    let mut summary = root_escape::RootEscapeSummary::default();
+    let start = Instant::now();
+    let deadline = if max_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(max_ms))
+    };
+    let mut checked = 0usize;
+    let mut timed_out = false;
+    let generator = MoveGenerator::new();
+    let Ok(moves) = generator.generate_all(pos) else {
+        return RootSafeScanResult {
+            summary,
+            checked,
+            elapsed_ms: 0,
+            timed_out,
+        };
+    };
+    let mut order: Vec<Move> = Vec::with_capacity(moves.len());
+    if let Some(best) = best_mv {
+        order.push(best);
+    }
+    for &mv in moves.as_slice() {
+        if Some(mv) != best_mv {
+            order.push(mv);
+        }
+    }
+    let mut scratch = pos.clone();
+    let mut best_evaluated = best_mv.is_none();
+    for mv in order {
+        if let Some(deadline) = deadline {
+            if start.elapsed() >= deadline && best_evaluated && !summary.safe.is_empty() {
+                timed_out = true;
+                break;
+            }
+        }
+        if !pos.is_legal_move(mv) {
+            continue;
+        }
+        checked += 1;
+        if let Some(mate_mv) = mate1ply::enemy_mate_in_one_after(&mut scratch, mv) {
+            summary.risky.push((mv, mate_mv));
+        } else {
+            summary.safe.push(mv);
+        }
+        if Some(mv) == best_mv {
+            best_evaluated = true;
+        }
+        if let Some(deadline) = deadline {
+            if start.elapsed() >= deadline && best_evaluated && !summary.safe.is_empty() {
+                timed_out = true;
+                break;
+            }
+        }
+    }
+    RootSafeScanResult {
+        summary,
+        checked,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        timed_out,
+    }
+}
+
+fn root_safe_scan_should_log(detail: RootSafeScanLogDetail, best_is_risky: bool) -> bool {
+    match detail {
+        RootSafeScanLogDetail::Off => false,
+        RootSafeScanLogDetail::FailOnly => best_is_risky,
+        RootSafeScanLogDetail::Full => true,
+    }
+}
+
+fn log_root_safe_scan(
+    state: &mut EngineState,
+    scan: &RootSafeScanResult,
+    best_mv: Move,
+    chosen_mv: Move,
+    best_is_risky: bool,
+    forced_cause: Option<&str>,
+) {
+    let forced_full = state.opts.log_profile.at_least_qa();
+    let detail = if forced_full {
+        RootSafeScanLogDetail::Full
+    } else {
+        state.opts.root_safe_scan_log_detail
+    };
+    if scan.summary.safe.is_empty() {
+        state.session_metrics.bump_root_escape_safe_zero();
+        info_string(format!(
+            "safe_scan safe_zero=1 checked={} budget_ms={} timed_out={}",
+            scan.checked, state.opts.root_safe_scan_max_ms, scan.timed_out as u8
+        ));
+        if !forced_full && !best_is_risky {
+            return;
+        }
+    }
+    if !forced_full && !root_safe_scan_should_log(detail, best_is_risky) {
+        return;
+    }
+    let cause_fragment = forced_cause.map(|c| format!(" cause={}", c)).unwrap_or_default();
+    info_string(format!(
+        "safe_scan budget_ms={} elapsed_ms={} checked={} safe={} risky={} timed_out={} chosen={}{}",
+        state.opts.root_safe_scan_max_ms,
+        scan.elapsed_ms,
+        scan.checked,
+        scan.summary.safe.len(),
+        scan.summary.risky.len(),
+        scan.timed_out as u8,
+        move_to_usi(&chosen_mv),
+        cause_fragment
+    ));
+    if best_is_risky {
+        if let Some(mate_mv) = scan.summary.risky_mate_move(best_mv) {
+            info_string(format!("safe_scan best_risky=1 mate_move={}", move_to_usi(&mate_mv)));
+        } else if let Some(cause) = forced_cause {
+            info_string(format!("safe_scan best_risky=1 cause={}", cause));
+        }
+    }
+}
+
+fn enforce_root_safe_scan(
+    state: &mut EngineState,
+    current_best: Option<Move>,
+    result: Option<&SearchResult>,
+    snapshot_lines: Option<&[RootLine]>,
+    final_best: &FinalBest,
+    force_best_risky: bool,
+    forced_cause: Option<&str>,
+) -> Option<(Move, Move)> {
+    if !state.opts.root_safe_scan_enabled {
+        return None;
+    }
+    let best_mv = current_best?;
+    let mut scan =
+        perform_root_safe_scan(&state.position, Some(best_mv), state.opts.root_safe_scan_max_ms);
+    if force_best_risky && scan.summary.is_safe(best_mv) {
+        scan.summary.remove_safe(best_mv);
+    }
+    let best_is_risky = scan.summary.risky_mate_move(best_mv).is_some() || force_best_risky;
+    let replacement = if best_is_risky && !scan.summary.safe.is_empty() {
+        pick_root_escape_safe_move(
+            state.opts.root_escape_pick_policy,
+            &scan.summary,
+            result,
+            snapshot_lines,
+            final_best,
+            Some(best_mv),
+        )
+        .or_else(|| scan.summary.safe.first().copied())
+    } else {
+        None
+    };
+    let chosen_mv = replacement.unwrap_or(best_mv);
+    log_root_safe_scan(state, &scan, best_mv, chosen_mv, best_is_risky, forced_cause);
+    if best_is_risky {
+        if let Some(new_mv) = replacement {
+            if new_mv != best_mv {
+                state.session_metrics.bump_root_escape_switch();
+                let cause = if let Some(cause) = forced_cause {
+                    cause
+                } else if scan.summary.risky_mate_move(best_mv).is_some() {
+                    "opp_mate_in_one"
+                } else if scan.timed_out {
+                    "timeout"
+                } else {
+                    "unknown"
+                };
+                info_string(format!(
+                    "anti_mate replaced old={} new={} cause={}",
+                    move_to_usi(&best_mv),
+                    move_to_usi(&new_mv),
+                    cause
+                ));
+                return Some((best_mv, new_mv));
+            }
+        }
+    }
+    None
+}
+
 fn log_root_escape_summary(
     state: &mut EngineState,
     summary: &root_escape::RootEscapeSummary,
@@ -3236,10 +3784,13 @@ fn log_root_escape_summary(
     best_mate: Option<Move>,
     best_see_loss: Option<i32>,
 ) {
-    if !state.opts.log_profile.at_least_qa() {
-        return;
-    }
-    if !root_escape_should_log(state.opts.root_escape_log_detail, best_is_risky) {
+    let forced_full = state.opts.log_profile.at_least_qa();
+    let detail = if forced_full {
+        RootEscapeLogDetail::Full
+    } else {
+        state.opts.root_escape_log_detail
+    };
+    if !forced_full && !root_escape_should_log(detail, best_is_risky) {
         return;
     }
     info_string(format!(
@@ -3248,7 +3799,7 @@ fn log_root_escape_summary(
         summary.risky.len(),
         summary.see_risky.len()
     ));
-    if root_escape_should_log_risky(state.opts.root_escape_log_detail, best_is_risky) {
+    if forced_full || root_escape_should_log_risky(detail, best_is_risky) {
         for &(mv, mate) in summary.risky.iter() {
             info_string(format!(
                 "root_escape risky after={} mate_move={}",
@@ -3482,19 +4033,22 @@ fn enforce_root_escape_guard(
         summary.see_loss(best_mv),
         summary.risky_mate_move(best_mv).is_some(),
     );
-    if best_is_risky && !guard_allows && state.opts.log_profile.at_least_qa() {
-        let (score, node_label) = if let Some(res) = result {
-            (res.score, format!("{:?}", res.node_type))
-        } else {
-            (0, String::from("-"))
-        };
-        info_string(format!(
-            "root_escape guard skip score={} loss={} node={} threshold={}",
-            score,
-            summary.see_loss(best_mv).unwrap_or(0),
-            node_label,
-            state.opts.root_escape_safe_guard_cp
-        ));
+    if best_is_risky && !guard_allows {
+        state.session_metrics.bump_root_escape_guard_skip();
+        if state.opts.log_profile.at_least_qa() {
+            let (score, node_label) = if let Some(res) = result {
+                (res.score, format!("{:?}", res.node_type))
+            } else {
+                (0, String::from("-"))
+            };
+            info_string(format!(
+                "root_escape guard skip score={} loss={} node={} threshold={}",
+                score,
+                summary.see_loss(best_mv).unwrap_or(0),
+                node_label,
+                state.opts.root_escape_safe_guard_cp
+            ));
+        }
     }
     let replacement = if best_is_risky && guard_allows && !summary.safe.is_empty() {
         pick_root_escape_safe_move(
@@ -3508,9 +4062,13 @@ fn enforce_root_escape_guard(
     } else {
         None
     };
+    if summary.safe.is_empty() {
+        state.session_metrics.bump_root_escape_safe_zero();
+    }
     log_root_escape_summary(state, &summary, best_is_risky, best_mate, best_see_loss);
     if let Some(new_mv) = replacement {
         if new_mv != best_mv {
+            state.session_metrics.bump_root_escape_switch();
             info_string(format!(
                 "root_escape switch from={} to={} policy={}",
                 move_to_usi(&best_mv),
@@ -3569,12 +4127,13 @@ fn info_verbose(state: &EngineState, msg: impl Into<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{EngineState, UsiOptions};
+    use crate::state::{EngineState, LogProfile, UsiOptions};
     use engine_core::engine::controller::{Engine, EngineType};
     use engine_core::movegen::MoveGenerator;
     use engine_core::search::common::mate_score;
     use engine_core::search::parallel::FinalizeReason;
     use engine_core::search::types::{NodeType, RootLine, SearchResult, SearchStats};
+    use engine_core::shogi::Position;
     use engine_core::usi::parse_usi_move;
     use smallvec::SmallVec;
     use std::time::Duration;
@@ -3690,6 +4249,7 @@ mod tests {
         use std::time::Instant;
 
         let mut state = EngineState::new();
+        state.opts.log_profile = LogProfile::QA;
         state.current_root_hash = Some(0x1234);
         state.deadline_hard = Some(Instant::now());
         state.deadline_near = Some(Instant::now());
@@ -3712,6 +4272,44 @@ mod tests {
         let kept = sanitize_ponder_for_bestmove("7g7f", Some("7g7f".to_string()));
         assert_eq!(kept.as_deref(), Some("7g7f"));
         assert!(sanitize_ponder_for_bestmove("win", Some("7g7f".to_string())).is_none());
+    }
+
+    const SAFE_SCAN_TRAP_MOVES: &str = "2g2f 3c3d 2f2e 4a3b 2e2d 2c2d 2h2d P*2c 2d3d 8c8d 3d3f 8d8e 3f5f 3a4b 5f3f 4b3c 3f6f 7a7b 6f2f 7b8c 2f5f 6a5b 5f2f 5a4b 5i5h 4b3a 6g6f 4c4d 6i5i 5b4c 2f2e 8c9d 5h6i 7c7d 2e6e 8b6b 6e5e 1c1d 5e2e 1d1e 6i6h 4c3d 2e5e 3b4b 5e5f 4b4c 7g7f 5c5d 9g9f 3d2e P*2g 6c6d 8h9g 3c3d 6f6e 7d7e 9g7e 8e8f 6e6d 8f8g+ 6d6c 6b4b 7e4b+ 3a4b R*8b 4b3c 8b8a+ B*8f N*7g 8g7g 8i7g P*6g 6h6g N*5e 6g6h 2b3a 6c6b+ 8f6d 6b6c 6d4b 8a9a 5e4g+ 6h7h P*8f L*4h 8f8g+ 7h8g 4g4h 4i4h L*8f 8g7h 1e1f 6c5b 4b6d 9a9c 1f1g+ 9c9d P*8g 9d6d 3a6d 1i1g R*1h S*2h 1a1g+ 2i1g 2e1e B*5a L*4b P*1b 8g8h+ 7h6i 8h7i 6i6h 8f8i+ L*1i 7i6i 6h6i 1h2h+ 3i2h 8i9i 5b4b 6d4b 5a4b+ 3c4b R*8b 4b3a B*2b 3a4a 1b1a+ L*6g N*6h 6g6h+ 6i6h P*6g 6h6g N*5e 6g6f B*9c L*7e 9c8b";
+
+    fn trap_position() -> Position {
+        let mut pos = Position::startpos();
+        for mv in SAFE_SCAN_TRAP_MOVES.split_whitespace() {
+            let mv = parse_usi_move(mv).expect("valid move in trap sequence");
+            pos.do_move(mv);
+        }
+        pos
+    }
+
+    #[test]
+    fn safe_scan_replaces_risky_move_in_trap() {
+        let mut state = EngineState::new();
+        state.opts.root_safe_scan_enabled = true;
+        state.opts.root_safe_scan_max_ms = 10;
+        state.opts.root_safe_scan_log_detail = RootSafeScanLogDetail::Full;
+        state.position = trap_position();
+
+        let risky = parse_usi_move("7g6e").unwrap();
+        let final_best = FinalBest {
+            best_move: Some(risky),
+            pv: vec![risky],
+            source: FinalBestSource::Committed,
+        };
+        let outcome = enforce_root_safe_scan(
+            &mut state,
+            final_best.best_move,
+            None,
+            None,
+            &final_best,
+            false,
+            None,
+        );
+        let (_, replacement) = outcome.expect("safe scan should replace risky move");
+        assert_ne!(move_to_usi(&risky), move_to_usi(&replacement));
     }
 
     #[test]
@@ -3792,8 +4390,10 @@ mod tests {
     fn probe_fast_partial_snapshot_mate_gate_blocked() {
         use engine_core::search::constants::MATE_SCORE;
         super::test_probe_reset();
+        super::test_guard_logs_reset();
 
         let mut state = EngineState::new();
+        state.opts.log_profile = LogProfile::QA;
         let session_id = 7;
         state.current_session_core_id = Some(session_id);
         state.stop_controller.publish_session(None, session_id);
@@ -3830,6 +4430,12 @@ mod tests {
         assert_eq!(out.mode, "fast");
         assert!(out.mate_gate_blocked, "mate gate should be blocked");
         assert!(out.reason_tags.contains(&"mate_gate"));
+        let logs = super::test_guard_logs_take();
+        let mate = logs.mate_gate.expect("mate gate summary recorded");
+        assert!(mate.checked);
+        assert!(mate.blocked);
+        assert_eq!(mate.reason, "blocked");
+        assert_eq!(mate.source, Some(NodeType::LowerBound));
     }
 
     #[test]
@@ -3838,9 +4444,11 @@ mod tests {
         use engine_core::search::SearchStats;
         use std::time::Duration;
         super::test_probe_reset();
+        super::test_guard_logs_reset();
 
         let mut state = EngineState::new();
         state.opts.post_verify_require_pass = true;
+        state.opts.log_profile = LogProfile::QA;
         // Fabricate a SearchResult with a mate score that passes gate but fails CheckOnly verify
         let stats = SearchStats {
             elapsed: Duration::from_millis(100),
@@ -3862,6 +4470,70 @@ mod tests {
         assert!(out.postverify_reject, "postverify should reject non-mate-in-1");
         assert!(out.reason_tags.contains(&"postverify"));
         assert!(!out.chosen_source.is_empty());
+        let logs = super::test_guard_logs_take();
+        let pv = logs.post_verify.expect("post verify summary recorded");
+        assert!(pv.checked);
+        assert!(pv.reject);
+        assert_eq!(pv.skip_reason.as_deref(), Some("evasion_exists"));
+        assert!(pv.require_pass);
+    }
+
+    #[test]
+    fn instant_mate_prevents_mate_gate_conflict() {
+        use engine_core::search::constants::MATE_SCORE;
+        use engine_core::search::SearchStats;
+        use std::time::Duration;
+
+        super::test_probe_reset();
+        super::test_guard_logs_reset();
+
+        let mut state = EngineState::new();
+        state.opts.log_profile = LogProfile::QA;
+        state.opts.instant_mate_move_enabled = true;
+        state.opts.instant_mate_move_max_distance = 5;
+        state.opts.instant_mate_check_all_pv = false;
+        state.opts.instant_mate_require_stable = false;
+        state.opts.instant_mate_respect_min_think_ms = false;
+        state.opts.mate_gate_min_stable_depth = 8;
+        state.opts.mate_gate_fast_ok_min_depth = 8;
+        state.opts.mate_gate_fast_ok_min_elapsed_ms = 200;
+        state.position = Position::from_sfen("8k/9/6NS1/9/9/9/9/9/4K4 b G 1").expect("valid SFEN");
+
+        let mate_mv = {
+            let mut pos = state.position.clone();
+            mate1ply::mate_in_one_for_side(&mut pos, state.position.side_to_move)
+                .expect("mate move available")
+        };
+
+        let mut stats = SearchStats {
+            elapsed: Duration::from_millis(50),
+            depth: 4,
+            seldepth: Some(4),
+            stable_depth: Some(2),
+            root_report_source: Some(SnapshotSource::Stable),
+            ..Default::default()
+        };
+        stats.pv = vec![mate_mv];
+
+        let res = SearchResult::with_node_type(
+            Some(mate_mv),
+            MATE_SCORE - 3,
+            stats,
+            NodeType::LowerBound,
+        );
+
+        finalize_and_send(&mut state, "instant_override", Some(&res), false, None);
+        assert!(state.bestmove_emitted);
+
+        let logs = super::test_guard_logs_take();
+        let instant = logs.instant.expect("instant summary recorded");
+        assert!(instant.checked);
+        assert!(instant.forced);
+        let mate_gate = logs.mate_gate.expect("mate gate summary recorded");
+        assert!(mate_gate.checked);
+        assert_eq!(mate_gate.reason, "instant_override");
+        assert!(!mate_gate.blocked);
+        assert_eq!(mate_gate.source, Some(NodeType::LowerBound));
     }
 
     #[test]

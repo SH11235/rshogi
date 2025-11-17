@@ -201,6 +201,10 @@ pub struct SearchStats {
     pub root_verify_fail_count: Option<u64>,
     pub root_verify_checked_moves: Option<u64>,
     pub root_verify_total_ms: Option<u64>,
+    /// Count of mate-in-one hits detected by RootVerify
+    pub root_verify_opp_mate_hits: Option<u64>,
+    /// Whether RootVerify failed require-pass and deferred to safe-scan
+    pub root_verify_require_pass_failed: Option<u64>,
     /// Root verify diagnostics for mate-in-one rejection
     pub root_verify_rejected_move: Option<Move>,
     pub root_verify_mate_move: Option<Move>,

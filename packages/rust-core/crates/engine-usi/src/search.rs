@@ -323,6 +323,7 @@ pub fn handle_go(cmd: &str, state: &mut EngineState) -> Result<()> {
     // emit_bestmove_once() を用いるため、前回探索のフラグが残っていると
     // bestmove が送信されない退行が起きる。
     state.bestmove_emitted = false;
+    state.session_metrics.reset_for_new_session();
     // Clear pending_ponder_result to avoid stale buffer from previous session
     state.pending_ponder_result = None;
 
