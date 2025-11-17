@@ -48,23 +48,6 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**曖昧掘りオーケストレーション**](tools/ambiguous-mining-orchestrator.md) - 抽出→再注釈→マージを1コマンドで実行（系譜/整合性を記録）
 - [**PSV→JSONL 直変換（psv2jsonl）**](tools/psv2jsonl.md) - YaneuraOu PSV(yo_v1) を学習用 JSONL にストリーム変換
 
-## 🧪 Selfplay / ログ取得コマンド
-
-本エンジンと ShogiHome 基本エンジンの自己対局ログを取得する標準コマンド（release ビルド）:
-
-```bash
-cargo run --release -p tools --bin selfplay_basic -- \
-  --games 1 \
-  --max-moves 180 \
-  --think-ms 5000 \
-  --threads 8 \
-  --basic-depth 2
-```
-
-- Black 側は `engine-usi` サブプロセスを固定 5 秒読み・8 スレッドで思考します。`engine-usi` を未ビルドの場合は先に `cargo build --release -p engine-usi` を実行してください。
-- 実行すると `runs/selfplay-basic/` 以下に JSONL ログ・KIF・USI `info` 行を収めた `.info.jsonl` が同名で生成され、コマンドやエンジンパスは JSONL メタデータに記録されます。
-- `--engine-path` や `--engine-args` を指定すれば任意の `engine-usi` バイナリを利用できます。デフォルトでは `CARGO_BIN_EXE_engine-usi` → 同ディレクトリ → PATH の順で解決します。
-
 ### 📖 Reference
 - [**YaneuraOu SFEN形式**](reference/yaneuraou-sfen-format.md) - SFEN形式の仕様
 - [**Manifest v2（NNUE教師生成）**](reference/manifest_v2.md) - 親/partの責務、summaryのrunスコープ、K=3メトリクス
@@ -95,12 +78,11 @@ cargo run --release --bin debug_position -- \
   --engine enhanced_nnue
 ```
 
-## 📋 開発ガイドライン
-
-開発時は以下のドキュメントも参照してください：
+## 📋 開発ガイドライン / その他リンク
 
 - [**CLAUDE.md**](../CLAUDE.md) - Claude Code向けの開発ガイドライン
 - [**Cargo.toml**](../Cargo.toml) - プロジェクト設定
+- Selfplay ログ診断ワークフロー: [`docs/tuning-guide.md`](./tuning-guide.md#%E8%87%AA%E5%B7%B1%E5%AF%BE%E5%B1%80%E3%83%AD%E3%82%B0selfplay_basic%E3%81%8B%E3%82%89%E3%81%AE%E3%82%AF%E3%82%A4%E3%83%83%E3%82%AF%E8%A8%BA%E6%96%AD) を参照。
 
 ## 📌 メンテナンス方針
 
