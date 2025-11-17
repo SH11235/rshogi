@@ -912,6 +912,20 @@ fn collect_finalize_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
         ),
     );
     builder.finalize(
+        "RootEscape.SafeGuardCp",
+        format!(
+            "option name RootEscape.SafeGuardCp type spin default {} min 0 max 2000",
+            opts.root_escape_safe_guard_cp
+        ),
+    );
+    builder.finalize(
+        "RootEscape.MinScoreForSwitchCp",
+        format!(
+            "option name RootEscape.MinScoreForSwitchCp type spin default {} min 0 max 4000",
+            opts.root_escape_min_score_for_switch_cp
+        ),
+    );
+    builder.finalize(
         "MateEarlyStop",
         format!(
             "option name MateEarlyStop type check default {}",
@@ -2152,6 +2166,28 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     info_string(format!(
                         "root_escape_see_threshold_cp={}",
                         state.opts.root_escape_see_threshold_cp
+                    ));
+                }
+            }
+        }
+        "RootEscape.SafeGuardCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(cp) = v.parse::<i32>() {
+                    state.opts.root_escape_safe_guard_cp = cp.clamp(0, 2000);
+                    info_string(format!(
+                        "root_escape_safe_guard_cp={}",
+                        state.opts.root_escape_safe_guard_cp
+                    ));
+                }
+            }
+        }
+        "RootEscape.MinScoreForSwitchCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(cp) = v.parse::<i32>() {
+                    state.opts.root_escape_min_score_for_switch_cp = cp.clamp(0, 4000);
+                    info_string(format!(
+                        "root_escape_min_score_for_switch_cp={}",
+                        state.opts.root_escape_min_score_for_switch_cp
                     ));
                 }
             }

@@ -208,6 +208,8 @@ pub struct UsiOptions {
     pub root_escape_max_moves: usize,
     pub root_escape_log_detail: RootEscapeLogDetail,
     pub root_escape_see_threshold_cp: i32,
+    pub root_escape_safe_guard_cp: i32,
+    pub root_escape_min_score_for_switch_cp: i32,
     // MateGate configuration (YO流ゲートの閾値)
     pub mate_gate_min_stable_depth: u8,
     pub mate_gate_fast_ok_min_depth: u8,
@@ -335,6 +337,8 @@ impl Default for UsiOptions {
             root_escape_max_moves: 512,
             root_escape_log_detail: RootEscapeLogDetail::FailOnly,
             root_escape_see_threshold_cp: 200,
+            root_escape_safe_guard_cp: 400,
+            root_escape_min_score_for_switch_cp: 300,
             // MateGate defaults
             mate_gate_min_stable_depth: 5,
             mate_gate_fast_ok_min_depth: 5,
