@@ -3,6 +3,9 @@ use super::profile::{PruneToggles, SearchProfile};
 use super::pvs::{self, SearchContext};
 #[cfg(feature = "diagnostics")]
 use super::qsearch::{publish_qsearch_diagnostics, reset_qsearch_diagnostics};
+use super::root_verify::{
+    apply_root_post_verify, WinProtectConfig, WIN_PROTECT_DEPTH_LIMIT, WIN_PROTECT_MIN_THINK_MS,
+};
 use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
@@ -18,7 +21,6 @@ use crate::search::types::{
     normalize_root_pv, NodeType, RootLine, SearchStack, StopInfo, TerminationReason,
 };
 use crate::search::{SearchLimits, SearchResult, SearchStats, TranspositionTable};
-use crate::shogi::Square;
 use crate::time_management::TimeControl;
 use crate::Position;
 use log::warn;
@@ -36,6 +38,9 @@ const STICKY_PV_WINDOW_MS: u64 = 400;
 /// Sticky-PV を適用する際に許容する評価値の改善幅（cp）。
 /// 新しいPV1のスコアがこれを大きく超えて改善している場合は、near-deadline でも切り替えを優先する。
 const STICKY_PV_MAX_IMPROVE_CP: i32 = 200;
+/// Root での捕獲手に対する SEE ゲートの閾値（cp）。
+/// see(mv) がこの値よりも大きくマイナスの場合、その捕獲手は「明確に損」とみなす。
+const ROOT_CAPTURE_SEE_MARGIN_CP: i32 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeadlineHit {
@@ -67,25 +72,28 @@ pub(crate) fn root_see_gate_should_skip(
     if xsee_cp <= 0 {
         return false;
     }
-    // Captures and checking moves are always kept; gate is only for quiet non-check moves.
-    if mv.is_capture_hint() || root.gives_check(mv) {
+    // Captures are always kept; gate is only for quiet moves (drops included).
+    if mv.is_capture_hint() {
         return false;
     }
-    // For quiet non-captures, use landing SEE (XSEE) so that
-    // moves that walk into a tactically lost square are rejected.
+    // For quiet non-captures, use dedicated quiet XSEE so that
+    // moves that walk into a tactically lost square are rejected. Quiet checks
+    // remain eligible for gating but require a stronger negative SEE to drop.
+    let is_check = root.gives_check(mv);
     let xsee = if mv.is_drop() {
         root.see(mv)
     } else {
-        root.see_landing_after_move(mv, 0)
+        root.xsee_quiet_after_make(mv)
     };
-    xsee < -xsee_cp
-}
-
-#[inline]
-fn chebyshev_distance(a: Square, b: Square) -> u8 {
-    let dx = u8::abs_diff(a.file(), b.file());
-    let dy = u8::abs_diff(a.rank(), b.rank());
-    dx.max(dy)
+    let mut threshold = xsee_cp;
+    if is_check {
+        // Allow mildly speculative checks, but still reject obviously losing ones.
+        threshold = threshold.saturating_mul(3) / 2;
+        if threshold == 0 {
+            threshold = 1;
+        }
+    }
+    xsee < -threshold
 }
 
 #[inline]
@@ -166,9 +174,6 @@ struct RootSearchEnv<'a> {
     seldepth: &'a mut u32,
     qnodes: &'a mut u64,
     qnodes_limit: u64,
-    root_beam_skip_tracker: &'a mut HashMap<u32, u8>,
-    root_beam_skip_streak: &'a mut usize,
-    root_beam_skip_force_full: &'a mut bool,
     #[cfg(feature = "diagnostics")]
     abdada_busy_detected: &'a mut u64,
     #[cfg(feature = "diagnostics")]
@@ -199,7 +204,6 @@ struct RootMoveKeyArgs<'a> {
     alpha: i32,
     beta: i32,
     idx: usize,
-    force_full_budget: usize,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
@@ -217,259 +221,48 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             alpha,
             beta,
             idx,
-            force_full_budget,
         } = key;
         let mut child = root.clone();
-        let score = {
-            let _guard = ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
-            child.do_move(mv);
-            if idx == 0 {
-                let mut search_ctx = SearchContext {
-                    limits: env.limits,
-                    start_time: env.t0,
-                    nodes: env.nodes,
-                    seldepth: env.seldepth,
-                    qnodes: env.qnodes,
-                    qnodes_limit: env.qnodes_limit,
-                    #[cfg(feature = "diagnostics")]
-                    abdada_busy_detected: env.abdada_busy_detected,
-                    #[cfg(feature = "diagnostics")]
-                    abdada_busy_set: env.abdada_busy_set,
-                };
-                let (sc, _) = self.alphabeta(
-                    pvs::ABArgs {
-                        pos: &child,
-                        depth: d - 1,
-                        alpha: -beta,
-                        beta: -alpha,
-                        ply: 1,
-                        is_pv: true,
-                        stack: state.stack,
-                        heur: state.heur,
-                        tt_hits: state.tt_hits,
-                        beta_cuts: state.beta_cuts,
-                        lmr_counter: state.lmr_counter,
-                        lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                        lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                        evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                    },
-                    &mut search_ctx,
-                );
-                -sc
-            } else {
-                let mut need_full = true;
-                let mut s = i32::MIN;
-                let root_gives_check = root.gives_check(mv);
-                let root_see = root.see(mv);
-                let root_own_king_near = root
-                    .board
-                    .king_square(root.side_to_move)
-                    .map(|k| chebyshev_distance(k, mv.to()))
-                    .is_some_and(|d| d <= 2);
-                let root_enemy_king_adjacent = root
-                    .board
-                    .king_square(root.side_to_move.opposite())
-                    .map(|k| chebyshev_distance(k, mv.to()))
-                    .is_some_and(|d| d <= 1);
-                let root_quiet_move = !root_gives_check && !mv.is_capture_hint();
-                let drop_near_enemy_king = mv.is_drop() && root_enemy_king_adjacent;
-                let quiet_touching_any_king =
-                    root_quiet_move && (root_own_king_near || root_enemy_king_adjacent);
-                let mut forcing = root_gives_check || root_see >= 0 || root_own_king_near;
-                if drop_near_enemy_king || quiet_touching_any_king {
-                    forcing = true;
-                }
-                if idx >= force_full_budget
-                    && d > dynp::root_beam_min_depth()
-                    && !drop_near_enemy_king
-                    && !quiet_touching_any_king
-                    && !*env.root_beam_skip_force_full
-                {
-                    let shallow_depth = (d - 1).saturating_sub(dynp::root_beam_reduction());
-                    if shallow_depth >= 1 {
-                        let mut search_ctx_shallow = SearchContext {
-                            limits: env.limits,
-                            start_time: env.t0,
-                            nodes: env.nodes,
-                            seldepth: env.seldepth,
-                            qnodes: env.qnodes,
-                            qnodes_limit: env.qnodes_limit,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_detected: env.abdada_busy_detected,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_set: env.abdada_busy_set,
-                        };
-                        let (sc_shallow, _) = self.alphabeta(
-                            pvs::ABArgs {
-                                pos: &child,
-                                depth: shallow_depth,
-                                alpha: -(alpha + 1),
-                                beta: -alpha,
-                                ply: 1,
-                                is_pv: false,
-                                stack: state.stack,
-                                heur: state.heur,
-                                tt_hits: state.tt_hits,
-                                beta_cuts: state.beta_cuts,
-                                lmr_counter: state.lmr_counter,
-                                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                            },
-                            &mut search_ctx_shallow,
-                        );
-                        s = -sc_shallow;
-                        need_full = forcing || s > alpha - dynp::root_beam_margin_cp();
-                        if need_full && !forcing {
-                            let delta = dynp::root_beam_narrow_delta_cp();
-                            let narrow_low = alpha.saturating_sub(delta);
-                            let narrow_high = alpha.saturating_add(delta);
-                            let mut search_ctx_narrow = SearchContext {
-                                limits: env.limits,
-                                start_time: env.t0,
-                                nodes: env.nodes,
-                                seldepth: env.seldepth,
-                                qnodes: env.qnodes,
-                                qnodes_limit: env.qnodes_limit,
-                                #[cfg(feature = "diagnostics")]
-                                abdada_busy_detected: env.abdada_busy_detected,
-                                #[cfg(feature = "diagnostics")]
-                                abdada_busy_set: env.abdada_busy_set,
-                            };
-                            let (sc_narrow, _) = self.alphabeta(
-                                pvs::ABArgs {
-                                    pos: &child,
-                                    depth: d - 1,
-                                    alpha: -narrow_high,
-                                    beta: -narrow_low,
-                                    ply: 1,
-                                    is_pv: false,
-                                    stack: state.stack,
-                                    heur: state.heur,
-                                    tt_hits: state.tt_hits,
-                                    beta_cuts: state.beta_cuts,
-                                    lmr_counter: state.lmr_counter,
-                                    lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                                    lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                                    evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                                },
-                                &mut search_ctx_narrow,
-                            );
-                            s = -sc_narrow;
-                            need_full = s > alpha - dynp::root_beam_narrow_promote_cp();
-                        }
-                        if !need_full {
-                            if let Some(cb) = env.limits.info_string_callback.as_ref() {
-                                cb("root_beam_skip_full=1");
-                            }
-                            let retry_limit = dynp::root_beam_skip_retry_limit().max(1);
-                            let entry = env.root_beam_skip_tracker.entry(mv.to_u32()).or_insert(0);
-                            *entry = entry.saturating_add(1);
-                            if (*entry as usize) >= retry_limit {
-                                *entry = 0;
-                                *env.root_beam_skip_force_full = true;
-                                need_full = true;
-                            }
-                            *env.root_beam_skip_streak =
-                                env.root_beam_skip_streak.saturating_add(1);
-                            if *env.root_beam_skip_streak >= retry_limit {
-                                *env.root_beam_skip_force_full = true;
-                                need_full = true;
-                            }
-                        }
-                    }
-                }
-                if need_full {
-                    *env.root_beam_skip_streak = 0;
-                    env.root_beam_skip_tracker.insert(mv.to_u32(), 0);
-                    let mut search_ctx_nw = SearchContext {
-                        limits: env.limits,
-                        start_time: env.t0,
-                        nodes: env.nodes,
-                        seldepth: env.seldepth,
-                        qnodes: env.qnodes,
-                        qnodes_limit: env.qnodes_limit,
-                        #[cfg(feature = "diagnostics")]
-                        abdada_busy_detected: env.abdada_busy_detected,
-                        #[cfg(feature = "diagnostics")]
-                        abdada_busy_set: env.abdada_busy_set,
-                    };
-                    let (sc_nw, _) = self.alphabeta(
-                        pvs::ABArgs {
-                            pos: &child,
-                            depth: d - 1,
-                            alpha: -(alpha + 1),
-                            beta: -alpha,
-                            ply: 1,
-                            is_pv: false,
-                            stack: state.stack,
-                            heur: state.heur,
-                            tt_hits: state.tt_hits,
-                            beta_cuts: state.beta_cuts,
-                            lmr_counter: state.lmr_counter,
-                            lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                            lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                            evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                        },
-                        &mut search_ctx_nw,
-                    );
-                    s = -sc_nw;
-                    if s > alpha && s < beta {
-                        let mut search_ctx_fw = SearchContext {
-                            limits: env.limits,
-                            start_time: env.t0,
-                            nodes: env.nodes,
-                            seldepth: env.seldepth,
-                            qnodes: env.qnodes,
-                            qnodes_limit: env.qnodes_limit,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_detected: env.abdada_busy_detected,
-                            #[cfg(feature = "diagnostics")]
-                            abdada_busy_set: env.abdada_busy_set,
-                        };
-                        let (sc_fw, _) = self.alphabeta(
-                            pvs::ABArgs {
-                                pos: &child,
-                                depth: d - 1,
-                                alpha: -beta,
-                                beta: -alpha,
-                                ply: 1,
-                                is_pv: true,
-                                stack: state.stack,
-                                heur: state.heur,
-                                tt_hits: state.tt_hits,
-                                beta_cuts: state.beta_cuts,
-                                lmr_counter: state.lmr_counter,
-                                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
-                                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
-                                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
-                            },
-                            &mut search_ctx_fw,
-                        );
-                        s = -sc_fw;
-                    }
-                }
-                s
-            }
+        let _guard = ordering::EvalMoveGuard::new(self.evaluator.as_ref(), root, mv);
+        child.do_move(mv);
+        let is_pv = idx == 0;
+        let mut search_ctx = SearchContext {
+            limits: env.limits,
+            start_time: env.t0,
+            nodes: env.nodes,
+            seldepth: env.seldepth,
+            qnodes: env.qnodes,
+            qnodes_limit: env.qnodes_limit,
+            #[cfg(feature = "diagnostics")]
+            abdada_busy_detected: env.abdada_busy_detected,
+            #[cfg(feature = "diagnostics")]
+            abdada_busy_set: env.abdada_busy_set,
         };
-        score
-    }
-    fn effective_root_force_full_count(limits: &SearchLimits) -> usize {
-        let mut force = dynp::root_beam_force_full_count();
-        if force == 0 {
-            return 0;
-        }
-        if limits.multipv > 1 {
-            force = force.min(1);
-        }
-        if let TimeControl::FixedTime { ms_per_move } = &limits.time_control {
-            if *ms_per_move <= 500 {
-                force = force.min(1);
-            } else if *ms_per_move <= 800 {
-                force = force.min(2);
-            }
-        }
-        force
+        let (alpha_for_search, beta_for_search) = if is_pv {
+            (-beta, -alpha)
+        } else {
+            (-(alpha + 1), -alpha)
+        };
+        let (sc, _) = self.alphabeta(
+            pvs::ABArgs {
+                pos: &child,
+                depth: d - 1,
+                alpha: alpha_for_search,
+                beta: beta_for_search,
+                ply: 1,
+                is_pv,
+                stack: state.stack,
+                heur: state.heur,
+                tt_hits: state.tt_hits,
+                beta_cuts: state.beta_cuts,
+                lmr_counter: state.lmr_counter,
+                lmr_blocked_in_check: Some(counters.lmr_blocked_in_check),
+                lmr_blocked_recapture: Some(counters.lmr_blocked_recapture),
+                evasion_sparsity_ext: Some(counters.evasion_sparsity_ext),
+            },
+            &mut search_ctx,
+        );
+        -sc
     }
     #[inline]
     /// Global kill-switch for stabilization gates (near-deadline policy, aspiration safeguards, near-final verify).
@@ -1055,12 +848,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         } else {
             (None, None)
         };
-        let min_think_ms = if limits.is_ponder {
+        let mut min_think_ms_effective = if limits.is_ponder {
             0
         } else {
             limits.time_parameters.as_ref().map(|tp| tp.min_think_ms).unwrap_or(0)
         };
         let mut prev_score: i32 = 0;
+        let win_protect_cfg = WinProtectConfig::load();
+        let mut win_protect_guard_active = false;
         use crate::search::constants::{
             ASPIRATION_DELTA_INITIAL, ASPIRATION_DELTA_MAX, ASPIRATION_DELTA_THREADS_K,
         };
@@ -1108,6 +903,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut final_depth_reached: u8 = 0;
         let mut final_seldepth_reached: Option<u8> = None;
         let mut final_seldepth_raw: Option<u32> = None;
+        let mut last_root_order: Vec<crate::shogi::Move> = Vec::new();
         let mut incomplete_depth: Option<u8> = None;
         let mut cumulative_pv_changed: u32 = 0;
         let mut cumulative_asp_failures: u32 = 0;
@@ -1272,9 +1068,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     ));
                 }
             }
-            if let Some(hit) =
-                Self::deadline_hit(t0, soft_deadline, hard_deadline, limits, min_think_ms, nodes)
-            {
+            if let Some(hit) = Self::deadline_hit(
+                t0,
+                soft_deadline,
+                hard_deadline,
+                limits,
+                min_think_ms_effective,
+                nodes,
+            ) {
                 if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
                     // ignore Soft after NearHard
                 } else {
@@ -1385,17 +1186,63 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            // Root SEE Gate: 非王手の静かな手（quiet non-check）に対してだけ xSEE を適用し、
-            // see(mv) < -xsee_cp の手を除外する。捕獲手と王手は温存（強制力の高い手の見落とし抑止）。
-            let root_rank: Vec<crate::shogi::Move> = root_moves.clone();
-            let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_rank.len());
-            for (idx, mv) in root_rank.iter().enumerate() {
-                rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
-            }
+            last_root_order = root_moves.clone();
 
+            // Root SEE Gate: 静かな手（ドロップ含む）に対して xSEE を適用し、
+            // see(mv) < -xsee_cp の手を除外する。捕獲手のみ常に許可。
             let root_static_eval = self.evaluator.evaluate(root);
             let root_static_eval_i16 =
                 root_static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+            // Root Capture SEE Gate:
+            // - Root での捕獲手のうち、SEE が ROOT_CAPTURE_SEE_MARGIN_CP よりも悪いものを除外する。
+            // - 探索構造側で取りきれなかった「明らかな大駒損（飛車 vs 歩 など）」を入口で抑止する目的。
+            // - pruning_safe_mode() 有効時のみ適用し、USIオプションで無効化可能とする。
+            if crate::search::params::pruning_safe_mode() {
+                let mut gated: Vec<crate::shogi::Move> = Vec::with_capacity(root_moves.len());
+                let mut skipped = 0usize;
+                for mv in root_moves.iter().copied() {
+                    if mv.is_capture_hint() {
+                        let see = root.see(mv);
+                        if see < -ROOT_CAPTURE_SEE_MARGIN_CP {
+                            skipped += 1;
+                            #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                            super::diagnostics::record_tag(
+                                root,
+                                "root_cap_see_skip",
+                                Some(format!(
+                                    "mv={mv_usi} see={see} margin={margin} eval={eval}",
+                                    mv_usi = crate::usi::move_to_usi(&mv),
+                                    see = see,
+                                    margin = ROOT_CAPTURE_SEE_MARGIN_CP,
+                                    eval = root_static_eval,
+                                )),
+                            );
+                            continue;
+                        }
+                    }
+                    gated.push(mv);
+                }
+                if !gated.is_empty() {
+                    root_moves = gated;
+                } else if skipped > 0 {
+                    // すべての候補が SEE 的に悪い場合は、gate を無効化して元のリストを残す。
+                    #[cfg(any(debug_assertions, feature = "diagnostics"))]
+                    super::diagnostics::record_tag(
+                        root,
+                        "root_cap_see_skip_fallback",
+                        Some(format!(
+                            "skipped={skipped} margin={margin}",
+                            margin = ROOT_CAPTURE_SEE_MARGIN_CP
+                        )),
+                    );
+                }
+            }
+
+            let mut rank_map: HashMap<u32, u32> = HashMap::with_capacity(root_moves.len());
+            for (idx, mv) in root_moves.iter().enumerate() {
+                rank_map.entry(mv.to_u32()).or_insert(idx as u32 + 1);
+            }
 
             // MultiPV（逐次選抜）— near‑deadline では PV1 仕上げを優先（縮退）
             let mut k = limits.multipv.max(1) as usize;
@@ -1485,7 +1332,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     soft_deadline,
                     hard_deadline,
                     limits,
-                    min_think_ms,
+                    min_think_ms_effective,
                     nodes,
                 ) {
                     if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
@@ -1594,11 +1441,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         !excluded_keys.contains(&key)
                     })
                     .collect();
-                let force_full_budget = Self::effective_root_force_full_count(limits);
-                let mut root_beam_skip_tracker: HashMap<u32, u8> = HashMap::new();
-                let mut root_beam_skip_streak: usize = 0;
-                let mut root_beam_skip_force_full = false;
-
                 // 探索ループ（Aspiration）
                 let mut local_best_mv = None;
                 let mut local_best = i32::MIN / 2;
@@ -1609,7 +1451,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         soft_deadline,
                         hard_deadline,
                         limits,
-                        min_think_ms,
+                        min_think_ms_effective,
                         nodes,
                     ) {
                         if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
@@ -1655,7 +1497,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             soft_deadline,
                             hard_deadline,
                             limits,
-                            min_think_ms,
+                            min_think_ms_effective,
                             nodes,
                         ) {
                             if matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent {
@@ -1700,9 +1542,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             seldepth: &mut seldepth,
                             qnodes: &mut qnodes,
                             qnodes_limit,
-                            root_beam_skip_tracker: &mut root_beam_skip_tracker,
-                            root_beam_skip_streak: &mut root_beam_skip_streak,
-                            root_beam_skip_force_full: &mut root_beam_skip_force_full,
                             #[cfg(feature = "diagnostics")]
                             abdada_busy_detected: &mut cum_abdada_busy_detected,
                             #[cfg(feature = "diagnostics")]
@@ -1728,7 +1567,6 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 alpha,
                                 beta,
                                 idx,
-                                force_full_budget,
                             },
                             &mut env,
                             &mut state,
@@ -1757,7 +1595,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         soft_deadline,
                         hard_deadline,
                         limits,
-                        min_think_ms,
+                        min_think_ms_effective,
                         nodes,
                     ) {
                         if !(matches!(hit, DeadlineHit::Soft) && finalize_nearhard_sent) {
@@ -1977,6 +1815,22 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             prev_score
                         };
                         prev_score = best_score;
+                        if !win_protect_guard_active
+                            && win_protect_cfg.enabled
+                            && best_score >= win_protect_cfg.threshold_cp
+                            && d < WIN_PROTECT_DEPTH_LIMIT as i32
+                        {
+                            win_protect_guard_active = true;
+                            if min_think_ms_effective < WIN_PROTECT_MIN_THINK_MS {
+                                min_think_ms_effective = WIN_PROTECT_MIN_THINK_MS;
+                            }
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb(&format!(
+                                    "win_protect_trigger depth={} score={}",
+                                    d, best_score
+                                ));
+                            }
+                        }
                         // Capture best move and score for use as hint in next iteration
                         local_best_for_next_iter = Some((adopt_mv, best_score));
                         if let Some(hint) = hint_for_picker {
@@ -2736,6 +2590,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             // call-site以降で best_move/score/node_type/stats.pv を個別に変更しないこと。
             result.sync_from_primary_line();
         }
+        apply_root_post_verify(self, root, limits, info, &mut result, score_out, &last_root_order);
 
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;

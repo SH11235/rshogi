@@ -5,6 +5,7 @@ mod pruning;
 mod pv_extract;
 mod pvs;
 mod qsearch;
+mod root_verify;
 
 // 診断モジュールは debugビルドとdiagnostics機能、さらにテストビルドでも有効化
 #[cfg(any(test, debug_assertions, feature = "diagnostics"))]
