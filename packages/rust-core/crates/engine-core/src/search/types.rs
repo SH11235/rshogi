@@ -204,6 +204,10 @@ pub struct SearchStats {
     /// Root verify diagnostics for mate-in-one rejection
     pub root_verify_rejected_move: Option<Move>,
     pub root_verify_mate_move: Option<Move>,
+    /// Extended root verify failure metadata
+    pub root_verify_last_fail_move: Option<Move>,
+    pub root_verify_last_fail_kind: Option<RootVerifyFailKind>,
+    pub root_verify_last_fail_detail: Option<i32>,
     /// LMR gating: times LMR was disabled/blocked due to in_check/evasion at current node
     pub lmr_blocked_in_check: Option<u64>,
     /// LMR gating: times LMR was disabled/blocked due to recapture heuristic
@@ -228,6 +232,15 @@ impl SearchStats {
 
 /// Bound kind for root lines (alias to NodeType for clarity)
 pub type Bound = NodeType;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootVerifyFailKind {
+    MateInOne,
+    SelfSee,
+    OppXsee,
+    PawnDrop,
+    EvalDrop,
+}
 
 /// Teacher profile for conservative/aggressive pruning policy during data labeling
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

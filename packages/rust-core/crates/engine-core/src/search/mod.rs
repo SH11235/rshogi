@@ -11,6 +11,7 @@ pub mod parallel;
 pub mod params;
 pub mod policy;
 pub mod root_escape;
+pub mod root_threat;
 pub mod snapshot;
 pub mod tt;
 pub mod types;
@@ -23,6 +24,6 @@ pub use constants::*;
 pub use limits::{SearchLimits, SearchLimitsBuilder};
 pub use tt::TranspositionTable;
 pub use types::{
-    CommittedIteration, IterationCallback, NodeType, SearchResult, SearchStack, SearchState,
-    SearchStats,
+    CommittedIteration, IterationCallback, NodeType, RootVerifyFailKind, SearchResult, SearchStack,
+    SearchState, SearchStats,
 };

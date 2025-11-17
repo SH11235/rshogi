@@ -4,8 +4,8 @@ use engine_core::search::constants::mate_distance as md;
 use engine_core::search::parallel::FinalizeReason;
 use engine_core::search::snapshot::SnapshotSource;
 use engine_core::search::{
-    mate1ply, root_escape,
-    types::{NodeType, RootLine, StopInfo},
+    mate1ply, root_escape, root_threat,
+    types::{NodeType, RootLine, RootVerifyFailKind, StopInfo},
     SearchResult,
 };
 use engine_core::usi::{append_usi_score_and_bound, move_to_usi, parse_usi_move};
@@ -3217,7 +3217,7 @@ fn root_escape_should_log(
 ) -> bool {
     match detail {
         RootEscapeLogDetail::Off => false,
-        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty(),
+        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty() || !summary.see_risky.is_empty(),
         RootEscapeLogDetail::Full => true,
     }
 }
@@ -3228,7 +3228,7 @@ fn root_escape_should_log_risky(
 ) -> bool {
     match detail {
         RootEscapeLogDetail::Off => false,
-        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty(),
+        RootEscapeLogDetail::FailOnly => !summary.risky.is_empty() || !summary.see_risky.is_empty(),
         RootEscapeLogDetail::Full => true,
     }
 }
@@ -3238,6 +3238,7 @@ fn log_root_escape_summary(
     summary: &root_escape::RootEscapeSummary,
     best_is_risky: bool,
     best_mate: Option<Move>,
+    best_see_loss: Option<i32>,
 ) {
     if !state.opts.log_profile.at_least_qa() {
         return;
@@ -3246,9 +3247,10 @@ fn log_root_escape_summary(
         return;
     }
     info_string(format!(
-        "root_escape summary safe={} risky={}",
+        "root_escape summary safe={} risky={} see_risky={}",
         summary.safe.len(),
-        summary.risky.len()
+        summary.risky.len(),
+        summary.see_risky.len()
     ));
     if root_escape_should_log_risky(state.opts.root_escape_log_detail, summary) {
         for &(mv, mate) in summary.risky.iter() {
@@ -3258,10 +3260,15 @@ fn log_root_escape_summary(
                 move_to_usi(&mate)
             ));
         }
+        for &(mv, loss) in summary.see_risky.iter() {
+            info_string(format!("root_escape risky after={} see_loss={}", move_to_usi(&mv), loss));
+        }
     }
     if best_is_risky {
         if let Some(mate_mv) = best_mate {
             info_string(format!("root_escape best_risky=1 mate_move={}", move_to_usi(&mate_mv)));
+        } else if let Some(loss) = best_see_loss {
+            info_string(format!("root_escape best_risky=1 see_loss={}", loss));
         }
     }
 }
@@ -3335,18 +3342,66 @@ fn enforce_root_escape_guard(
         return None;
     }
     let mut summary = root_escape::root_escape_scan(&state.position, Some(max_moves));
+    if state.opts.root_escape_see_threshold_cp > 0 {
+        root_escape::apply_static_risks(
+            &state.position,
+            &mut summary,
+            state.opts.root_escape_see_threshold_cp,
+        );
+        if summary.see_loss(best_mv).is_none() {
+            if let Some(loss) = root_escape::see_loss_for_move(&state.position, best_mv) {
+                if loss <= -state.opts.root_escape_see_threshold_cp {
+                    summary.remove_safe(best_mv);
+                    summary.push_see_risky(best_mv, loss);
+                }
+            }
+        }
+        let mut child = state.position.clone();
+        let undo = child.do_move(best_mv);
+        if let Some(threat) = root_threat::detect_major_threat(
+            &child,
+            state.position.side_to_move,
+            state.opts.root_escape_see_threshold_cp,
+        ) {
+            let loss = match threat {
+                root_threat::RootThreat::OppXsee { loss, .. } => loss,
+                root_threat::RootThreat::PawnDropHead { .. } => {
+                    -state.opts.root_escape_see_threshold_cp.max(1)
+                }
+            };
+            summary.remove_safe(best_mv);
+            summary.push_see_risky(best_mv, loss);
+        }
+        child.undo_move(best_mv, undo);
+    }
+    if let Some(res) = result {
+        if res.stats.root_verify_last_fail_move == Some(best_mv) {
+            if let Some(kind) = res.stats.root_verify_last_fail_kind {
+                if kind != RootVerifyFailKind::MateInOne && summary.see_loss(best_mv).is_none() {
+                    let loss = res
+                        .stats
+                        .root_verify_last_fail_detail
+                        .unwrap_or(-state.opts.root_escape_see_threshold_cp.max(1));
+                    summary.remove_safe(best_mv);
+                    summary.push_see_risky(best_mv, loss);
+                }
+            }
+        }
+    }
     let mut best_mate = summary.risky_mate_move(best_mv);
-    let mut best_is_risky = best_mate.is_some();
+    let mut best_is_risky = best_mate.is_some() || summary.see_loss(best_mv).is_some();
     if !best_is_risky {
         if let Some(res) = result {
             if res.stats.root_verify_rejected_move == Some(best_mv) {
                 if let Some(mate_mv) = res.stats.root_verify_mate_move {
                     summary.risky.push((best_mv, mate_mv));
                     best_mate = Some(mate_mv);
-                    best_is_risky = true;
                 }
             }
         }
+    }
+    if !best_is_risky {
+        best_is_risky = summary.see_loss(best_mv).is_some();
     }
     if best_is_risky {
         summary.safe.retain(|&mv| mv != best_mv);
@@ -3362,7 +3417,8 @@ fn enforce_root_escape_guard(
     } else {
         None
     };
-    log_root_escape_summary(state, &summary, best_is_risky, best_mate);
+    let best_see_loss = summary.see_loss(best_mv);
+    log_root_escape_summary(state, &summary, best_is_risky, best_mate, best_see_loss);
     if let Some(new_mv) = replacement {
         if new_mv != best_mv {
             info_string(format!(

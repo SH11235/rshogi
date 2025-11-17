@@ -905,6 +905,13 @@ fn collect_finalize_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
         ),
     );
     builder.finalize(
+        "RootEscape.SeeThresholdCp",
+        format!(
+            "option name RootEscape.SeeThresholdCp type spin default {} min 0 max 2000",
+            opts.root_escape_see_threshold_cp
+        ),
+    );
+    builder.finalize(
         "MateEarlyStop",
         format!(
             "option name MateEarlyStop type check default {}",
@@ -2138,6 +2145,17 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "RootEscape.SeeThresholdCp" => {
+            if let Some(v) = value_ref {
+                if let Ok(cp) = v.parse::<i32>() {
+                    state.opts.root_escape_see_threshold_cp = cp.clamp(0, 2000);
+                    info_string(format!(
+                        "root_escape_see_threshold_cp={}",
+                        state.opts.root_escape_see_threshold_cp
+                    ));
+                }
+            }
+        }
         // --- Root guard rails & warmup knobs
         // RootSeeGate 系は廃止
         "PostVerify" => {
@@ -2692,7 +2710,7 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_escape={} root_escape_policy={} root_escape_max={} root_escape_log={} root_see_gate={} xsee={} root_verify={} rv_ms={} rv_nodes={} rv_depth={} rv_oppsee={} rv_major={} win_protect={} win_cp={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} root_escape={} root_escape_policy={} root_escape_max={} root_escape_log={} root_escape_see={} root_see_gate={} xsee={} root_verify={} rv_ms={} rv_nodes={} rv_depth={} rv_oppsee={} rv_major={} win_protect={} win_cp={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
@@ -2701,6 +2719,7 @@ pub fn log_effective_profile(state: &EngineState) {
         state.opts.root_escape_pick_policy.as_str(),
         state.opts.root_escape_max_moves,
         state.opts.root_escape_log_detail.as_str(),
+        state.opts.root_escape_see_threshold_cp,
         state.opts.root_see_gate as u8,
         state.opts.root_see_gate_xsee_cp,
         state.opts.root_verify_enabled as u8,
