@@ -26,7 +26,6 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 
 ### 🏗️ Architecture & Design
 - [**ClassicBackend モジュール構成**](engine-search-redesign.md) - 探索リデザインの設計メモ
-- [**ABDADA実装**](abdada-implementation.md) - 並列探索の重複作業削減技術
 - [**座標系の説明**](coordinate-system.md) - 将棋盤の座標表現
 - [**SIMD アーキテクチャ**](simd-architecture.md) - SIMD最適化の設計
 - [**ゲームフェーズモジュール**](../crates/engine-core/docs/game-phase-module-guide.md) - 統一されたゲームフェーズ検出システム
@@ -49,32 +48,18 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**曖昧掘りオーケストレーション**](tools/ambiguous-mining-orchestrator.md) - 抽出→再注釈→マージを1コマンドで実行（系譜/整合性を記録）
 - [**PSV→JSONL 直変換（psv2jsonl）**](tools/psv2jsonl.md) - YaneuraOu PSV(yo_v1) を学習用 JSONL にストリーム変換
 
-### 📝 Implementation Notes
-- [**Rustプリプロセッシング計画**](implementation/rust-preprocessing-scripts-plan.md) - Rust実装の計画文書
-
 ### 📖 Reference
 - [**YaneuraOu SFEN形式**](reference/yaneuraou-sfen-format.md) - SFEN形式の仕様
 - [**Manifest v2（NNUE教師生成）**](reference/manifest_v2.md) - 親/partの責務、summaryのrunスコープ、K=3メトリクス
-
-### 🔬 Performance Analysis
-- [**NNUE性能分析**](performance/analysis/nnue-performance.md) - NNUE評価関数の性能分析
-- [**PVテーブル性能**](performance/analysis/pv-table-performance.md) - 主要変化テーブルの性能
-- [**SEE性能分析**](performance/analysis/see-performance.md) - 静的交換評価の性能
-- [**SEE統合テスト**](performance/integration/see-integration.md) - SEE統合テストフレームワーク
-
-### 💾 Transposition Table
-- [**TT最適化サマリー**](performance/tt-optimization-summary.md) - CAS最適化、Prefetch分析、性能改善の統合記録
 
 ## 📈 ドキュメント状態
 
 | カテゴリ | ドキュメント | 状態 | 最終更新 | 備考 |
 |---------|------------|------|----------|------|
 | **Architecture** | engine-search-redesign.md | ✅ Active | 2025-10 | ClassicBackend 再設計メモ |
-| **Architecture** | abdada-implementation.md | ✅ Active | 2025-08 | 実装済み |
 | **Architecture** | game-phase-module-guide.md | ✅ Active | 2025-08 | Phase 4実装完了 |
 | **Performance** | parallel-benchmark-guide.md | ✅ Active | 2025-08-09 | 新機能反映済み |
 | **Performance** | parallel-search-improvement.md | ✅ Completed | 2025-08-09 | Phase 6まで完了 |
-| **Performance** | tt-optimization-summary.md | ✅ Active | 2025-08-09 | 3文書を統合 |
 | **Tools** | debug-position-tool.md | ✅ Active | 2025-08 | CLAUDE.mdに記載 |
 | **Tools** | opening-book-tools-guide.md | ✅ Active | 2025-07 | 実装完了 |
 
