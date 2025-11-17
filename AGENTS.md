@@ -14,3 +14,32 @@ Vitest with a `happy-dom` environment powers unit tests across packages. Write d
 
 ## Commit & Pull Request Guidelines
 Follow Conventional Commit prefixes (`feat:`, `fix:`, `chore:`, `refactor:`); short Japanese summaries are acceptable when they remain under 72 characters. Group related changes per commit; re-run `npm test`, `npm run lint`, and `npm run typecheck` prior to pushing. Pull requests should explain the feature, list affected packages, and link issues or TODOs. Attach screenshots or GIFs for UI changes under `packages/web`. Flag any required Rust/WASM rebuild steps in the PR description so reviewers can reproduce the build.
+
+## Selfplay Log Diagnostics (Rust Core)
+`packages/rust-core` ships Rust CLIs for analyzing selfplay logs against the ShogiHome basic engine. Use them instead of the legacy Python scripts:
+
+1. 生成した `runs/selfplay-basic/<timestamp>.jsonl`（+ `.info.jsonl`）に対してブランダー検出を実行します。
+
+   ```bash
+   cd packages/rust-core
+   cargo run -p tools --bin selfplay_blunder_report -- \
+     runs/selfplay-basic/<log>.jsonl \
+     --threshold 400 \
+     --back-min 0 \
+     --back-max 3
+   ```
+
+   - 出力先: `runs/analysis/<log>-blunders/`（`blunders.json`, `targets.json`, `summary.txt`）。  
+   - `blunders.json` は SFEN・指し手・info 行抜粋を記録するため、Coding Agent がそのまま原因を追いやすいです。
+
+2. `targets.json` を `engine-usi` に再投入して Multi Profile で再評価します。
+
+   ```bash
+   cargo run -p tools --bin selfplay_eval_targets -- \
+     runs/analysis/<log>-blunders/targets.json \
+     --threads 8 --byoyomi 2000
+   ```
+
+   - `base`/`rootfull`/`gates` での評価結果を `summary.json` にまとめ、各ターゲットごとのログ（`__base.log` 等）も自動生成します。
+
+この 2 ステップで自己対局 → ブランダー抽出 → 遡り局面再解析まで Rust ツールのみで完結します。補足的な注意事項や Python ベースのログ解析手順については `packages/rust-core/AGENTS.md` と `packages/rust-core/docs/tuning-guide.md` を参照してください。

@@ -137,18 +137,10 @@ println!("Note: {final_errors} positions had errors and were skipped");
 
 ## 4. ログ分析ワークフロー（USIログ→落下局面→再現→再評価）
 
-> 詳細な探索パラメータ調整フローと構造化ログ（`moves.jsonl`）→`targets.json`→`run_eval_targets.py` の配管は  
-> `docs/tuning-guide.md` に集約してあります。ここでは実行スクリプトと典型コマンドのみを列挙します。
+詳細な手順とコマンド例は下記ドキュメントに集約しています。
 
-新規セッションで USI 対局ログから“評価落下（スパイク）”を見つけ、問題局面を短時間で再現・再評価するための標準手順です。各ステップは単独でも利用可能です。
-
-### 4.1 事前準備
-- 推奨カレント: `packages/rust-core`（本ディレクトリ）。
-- 環境整備: エンジンは `target/release/engine-usi` を前提。未ビルド時は `cargo build -p engine-usi --release`。
-- `rg`（ripgrep）を使うスクリプトが多いので、空振りで止まらないラッパを用意:
-  ```bash
-  rg(){ command rg "$@" || true; }; export -f rg
-  ```
+- 外部 USI ログ／gauntlet `moves.jsonl` の解析フロー → [`docs/log-analysis-guide.md`](./docs/log-analysis-guide.md)
+- Selfplay ログ（`runs/selfplay-basic/*.jsonl`）でのブランダー抽出＋再評価 → [`docs/tuning-guide.md`](./docs/tuning-guide.md#%E8%87%AA%E5%B7%B1%E5%AF%BE%E5%B1%80%E3%83%AD%E3%82%B0selfplay_basic%E3%81%8B%E3%82%89%E3%81%AE%E3%82%AF%E3%82%A4%E3%83%83%E3%82%AF%E8%A8%BA%E6%96%AD)
 
 ### 4.2 概況サマリの取得（CSV）
 - スクリプト: `scripts/analysis/analyze_usi_logs.sh`
@@ -213,11 +205,19 @@ println!("Note: {final_errors} positions had errors and were skipped");
   - `--min <plies>` / `--max <plies>`: 何手遡るかの範囲。
   - 実行例:
     ```bash
-    python3 scripts/analysis/expand_targets_back.py \
-      --in runs/diag-YYYYMMDD/targets.json \
-      --out runs/diag-YYYYMMDD/targets_back.json \
-      --min 2 --max 5
-    cp runs/diag-YYYYMMDD/targets_back.json runs/diag-YYYYMMDD/targets.json
+  python3 scripts/analysis/expand_targets_back.py \
+    --in runs/diag-YYYYMMDD/targets.json \
+    --out runs/diag-YYYYMMDD/targets_back.json \
+    --min 2 --max 5
+  cp runs/diag-YYYYMMDD/targets_back.json runs/diag-YYYYMMDD/targets.json
+
+#### 自己対局ログ（selfplay_basic）を扱う場合
+- Python スクリプトではなく、`cargo` で動く Rust CLI を優先して使用する。
+  1. `cargo run -p tools --bin selfplay_blunder_report -- runs/selfplay-basic/<log>.jsonl --threshold 400 --back-min 0 --back-max 3`
+     - `runs/analysis/<log>-blunders/` 以下に `blunders.json`（info 行突合済み）と `targets.json` を生成。
+  2. `cargo run -p tools --bin selfplay_eval_targets -- runs/analysis/<log>-blunders/targets.json --threads 8 --byoyomi 2000`
+     - `engine-usi` を base/rootfull/gates の 3 プロファイルで再評価し、`summary.json` と `__<profile>.log` を出力。
+- 詳細な運用ノート（閾値や `back_min/max` の調整など）は `docs/tuning-guide.md` の「自己対局ログからのクイック診断」を参照。
     ```
 
 ### 4.6 3プロファイル再評価（base / rootfull / gates）
