@@ -173,7 +173,8 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
     }
     let mut accepted: Option<(Candidate, ProbeReport)> = None;
     let mut fallback: Option<(Candidate, ProbeReport)> = None;
-    for cand in candidates.iter().take(max_candidates.max(1)) {
+    let verify_cap = max_candidates.max(required).max(1);
+    for cand in candidates.iter().take(verify_cap) {
         summary.checked += 1;
         let res = verify_candidate(backend, root, best_score, cand.mv, &settings);
         summary.total_elapsed_ms = summary.total_elapsed_ms.saturating_add(res.report.elapsed_ms);
