@@ -21,6 +21,11 @@ static ROOT_VERIFY_MAX_NODES: AtomicU64 = AtomicU64::new(150_000);
 static ROOT_VERIFY_CHECK_DEPTH: AtomicU32 = AtomicU32::new(3);
 static ROOT_VERIFY_OPP_SEE_MIN_CP: AtomicI32 = AtomicI32::new(0);
 static ROOT_VERIFY_MAJOR_LOSS_PENALTY_CP: AtomicI32 = AtomicI32::new(1_200);
+static ROOT_VERIFY_REQUIRE_PASS: AtomicBool = AtomicBool::new(true);
+static ROOT_VERIFY_MAX_CANDIDATES: AtomicU32 = AtomicU32::new(4);
+static ROOT_VERIFY_MAX_CANDIDATES_THREAT: AtomicU32 = AtomicU32::new(12);
+static ROOT_VERIFY_MAX_DEFENSE_SEEDS: AtomicU32 = AtomicU32::new(4);
+static ROOT_VERIFY_MAX_DEFENSE_SEEDS_THREAT: AtomicU32 = AtomicU32::new(12);
 
 // Win-Protect (victory-state guard rails)
 static WIN_PROTECT_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -153,6 +158,41 @@ pub fn set_root_verify_major_loss_penalty_cp(cp: i32) {
 #[inline]
 pub fn root_verify_major_loss_penalty_cp() -> i32 {
     ROOT_VERIFY_MAJOR_LOSS_PENALTY_CP.load(Ordering::Acquire)
+}
+pub fn set_root_verify_require_pass(on: bool) {
+    ROOT_VERIFY_REQUIRE_PASS.store(on, Ordering::Release);
+}
+#[inline]
+pub fn root_verify_require_pass() -> bool {
+    ROOT_VERIFY_REQUIRE_PASS.load(Ordering::Acquire)
+}
+pub fn set_root_verify_max_candidates(count: u32) {
+    ROOT_VERIFY_MAX_CANDIDATES.store(count.clamp(1, 32), Ordering::Release);
+}
+#[inline]
+pub fn root_verify_max_candidates() -> u32 {
+    ROOT_VERIFY_MAX_CANDIDATES.load(Ordering::Acquire)
+}
+pub fn set_root_verify_max_candidates_threat(count: u32) {
+    ROOT_VERIFY_MAX_CANDIDATES_THREAT.store(count.clamp(1, 32), Ordering::Release);
+}
+#[inline]
+pub fn root_verify_max_candidates_threat() -> u32 {
+    ROOT_VERIFY_MAX_CANDIDATES_THREAT.load(Ordering::Acquire)
+}
+pub fn set_root_verify_max_defense_seeds(count: u32) {
+    ROOT_VERIFY_MAX_DEFENSE_SEEDS.store(count.clamp(0, 32), Ordering::Release);
+}
+#[inline]
+pub fn root_verify_max_defense_seeds() -> u32 {
+    ROOT_VERIFY_MAX_DEFENSE_SEEDS.load(Ordering::Acquire)
+}
+pub fn set_root_verify_max_defense_seeds_threat(count: u32) {
+    ROOT_VERIFY_MAX_DEFENSE_SEEDS_THREAT.store(count.clamp(0, 32), Ordering::Release);
+}
+#[inline]
+pub fn root_verify_max_defense_seeds_threat() -> u32 {
+    ROOT_VERIFY_MAX_DEFENSE_SEEDS_THREAT.load(Ordering::Acquire)
 }
 
 // ---- Win-Protect guard

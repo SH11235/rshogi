@@ -7,11 +7,17 @@ use engine_core::search::ab::SearchProfile;
 
 use crate::io::{info_string, usi_println};
 use crate::state::{
-    EngineState, LogProfile, ProfileMode, RootEscapeLogDetail, RootEscapePickPolicy, UsiOptions,
+    EngineState, LogProfile, ProfileMode, RootEscapeLogDetail, RootEscapePickPolicy,
+    RootSafeScanLogDetail, UsiOptions,
 };
 use std::sync::OnceLock;
 fn mark_override(state: &mut EngineState, key: &str) {
     state.user_overrides.insert(key.to_string());
+}
+
+fn sync_guard_require_pass(state: &mut EngineState, on: bool) {
+    state.opts.root_verify_require_pass = on;
+    state.opts.post_verify_require_pass = on;
 }
 
 fn profile_for_engine_type(engine_type: EngineType) -> SearchProfile {
@@ -923,6 +929,62 @@ fn collect_finalize_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
         format!(
             "option name RootEscape.MinScoreForSwitchCp type spin default {} min 0 max 4000",
             opts.root_escape_min_score_for_switch_cp
+        ),
+    );
+    builder.finalize(
+        "RootVerify.RequirePass",
+        format!(
+            "option name RootVerify.RequirePass type check default {}",
+            bool_to_usi(opts.root_verify_require_pass)
+        ),
+    );
+    builder.finalize(
+        "RootVerify.MaxCandidates",
+        format!(
+            "option name RootVerify.MaxCandidates type spin default {} min 1 max 32",
+            opts.root_verify_max_candidates
+        ),
+    );
+    builder.finalize(
+        "RootVerify.MaxCandidatesThreat",
+        format!(
+            "option name RootVerify.MaxCandidatesThreat type spin default {} min 1 max 32",
+            opts.root_verify_max_candidates_threat
+        ),
+    );
+    builder.finalize(
+        "RootVerify.MaxDefenseSeeds",
+        format!(
+            "option name RootVerify.MaxDefenseSeeds type spin default {} min 0 max 32",
+            opts.root_verify_max_defense_seeds
+        ),
+    );
+    builder.finalize(
+        "RootVerify.MaxDefenseSeedsThreat",
+        format!(
+            "option name RootVerify.MaxDefenseSeedsThreat type spin default {} min 0 max 32",
+            opts.root_verify_max_defense_seeds_threat
+        ),
+    );
+    builder.finalize(
+        "RootSafeScan.Enabled",
+        format!(
+            "option name RootSafeScan.Enabled type check default {}",
+            bool_to_usi(opts.root_safe_scan_enabled)
+        ),
+    );
+    builder.finalize(
+        "RootSafeScan.MaxMs",
+        format!(
+            "option name RootSafeScan.MaxMs type spin default {} min 0 max 50",
+            opts.root_safe_scan_max_ms
+        ),
+    );
+    builder.finalize(
+        "RootSafeScan.LogDetail",
+        format!(
+            "option name RootSafeScan.LogDetail type combo default {} var Off var FailOnly var Full",
+            opts.root_safe_scan_log_detail.as_str()
         ),
     );
     builder.finalize(
@@ -2192,6 +2254,86 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                 }
             }
         }
+        "RootVerify.RequirePass" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                sync_guard_require_pass(state, on);
+                info_string(format!("root_verify_require_pass={}", on as u8));
+                info_string(format!("post_verify_require_pass={}", on as u8));
+            }
+        }
+        "RootVerify.MaxCandidates" => {
+            if let Some(v) = value_ref {
+                if let Ok(n) = v.parse::<u32>() {
+                    state.opts.root_verify_max_candidates = n.clamp(1, 32);
+                    info_string(format!(
+                        "root_verify_max_candidates={}",
+                        state.opts.root_verify_max_candidates
+                    ));
+                }
+            }
+        }
+        "RootVerify.MaxCandidatesThreat" => {
+            if let Some(v) = value_ref {
+                if let Ok(n) = v.parse::<u32>() {
+                    state.opts.root_verify_max_candidates_threat = n.clamp(1, 32);
+                    info_string(format!(
+                        "root_verify_max_candidates_threat={}",
+                        state.opts.root_verify_max_candidates_threat
+                    ));
+                }
+            }
+        }
+        "RootVerify.MaxDefenseSeeds" => {
+            if let Some(v) = value_ref {
+                if let Ok(n) = v.parse::<u32>() {
+                    state.opts.root_verify_max_defense_seeds = n.clamp(0, 32);
+                    info_string(format!(
+                        "root_verify_max_defense_seeds={}",
+                        state.opts.root_verify_max_defense_seeds
+                    ));
+                }
+            }
+        }
+        "RootVerify.MaxDefenseSeedsThreat" => {
+            if let Some(v) = value_ref {
+                if let Ok(n) = v.parse::<u32>() {
+                    state.opts.root_verify_max_defense_seeds_threat = n.clamp(0, 32);
+                    info_string(format!(
+                        "root_verify_max_defense_seeds_threat={}",
+                        state.opts.root_verify_max_defense_seeds_threat
+                    ));
+                }
+            }
+        }
+        "RootSafeScan.Enabled" => {
+            if let Some(v) = value_ref {
+                let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
+                state.opts.root_safe_scan_enabled = on;
+                info_string(format!("root_safe_scan_enabled={}", on as u8));
+            }
+        }
+        "RootSafeScan.MaxMs" => {
+            if let Some(v) = value_ref {
+                if let Ok(ms) = v.parse::<u64>() {
+                    state.opts.root_safe_scan_max_ms = ms.min(50);
+                    info_string(format!(
+                        "root_safe_scan_max_ms={}",
+                        state.opts.root_safe_scan_max_ms
+                    ));
+                }
+            }
+        }
+        "RootSafeScan.LogDetail" => {
+            if let Some(v) = value_ref {
+                if let Some(detail) = RootSafeScanLogDetail::from_str(v) {
+                    state.opts.root_safe_scan_log_detail = detail;
+                    info_string(format!("root_safe_scan_log_detail={}", detail.as_str()));
+                } else {
+                    info_string(format!("root_safe_scan_log_detail_invalid value={}", v));
+                }
+            }
+        }
         // --- Root guard rails & warmup knobs
         // RootSeeGate 系は廃止
         "PostVerify" => {
@@ -2213,7 +2355,9 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
         "PostVerify.RequirePass" => {
             if let Some(v) = value_ref {
                 let on = matches!(v.to_lowercase().as_str(), "true" | "1" | "on");
-                state.opts.post_verify_require_pass = on;
+                sync_guard_require_pass(state, on);
+                info_string(format!("post_verify_require_pass={}", on as u8));
+                info_string(format!("root_verify_require_pass={}", on as u8));
             }
             // 明示上書きの印を付ける（Threads連動の自動既定で巻き戻さない／ログに可視化）
             mark_override(state, "PostVerify.RequirePass");
@@ -2597,6 +2741,19 @@ pub fn apply_options_to_engine(state: &mut EngineState) {
     engine_core::search::config::set_root_verify_major_loss_penalty_cp(
         state.opts.root_verify_major_loss_penalty_cp,
     );
+    engine_core::search::config::set_root_verify_require_pass(state.opts.root_verify_require_pass);
+    engine_core::search::config::set_root_verify_max_candidates(
+        state.opts.root_verify_max_candidates,
+    );
+    engine_core::search::config::set_root_verify_max_candidates_threat(
+        state.opts.root_verify_max_candidates_threat,
+    );
+    engine_core::search::config::set_root_verify_max_defense_seeds(
+        state.opts.root_verify_max_defense_seeds,
+    );
+    engine_core::search::config::set_root_verify_max_defense_seeds_threat(
+        state.opts.root_verify_max_defense_seeds_threat,
+    );
     engine_core::search::config::set_win_protect_enabled(state.opts.win_protect_enabled);
     engine_core::search::config::set_win_protect_threshold_cp(state.opts.win_protect_threshold_cp);
     // Root retry (one-shot) は廃止（YO準拠）。
@@ -2622,9 +2779,6 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
     if is_t8 {
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
-        set_if_absent("PostVerify.RequirePass", &mut || {
-            state.opts.post_verify_require_pass = false
-        });
         set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 300);
         set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
             state.opts.finalize_sanity_switch_margin_cp = 40
@@ -2655,9 +2809,6 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
 
         set_if_absent("PostVerify", &mut || state.opts.post_verify = true);
         set_if_absent("PostVerify.YDrop", &mut || state.opts.y_drop_cp = 225);
-        set_if_absent("PostVerify.RequirePass", &mut || {
-            state.opts.post_verify_require_pass = false
-        });
         set_if_absent("PostVerify.ExtendMs", &mut || state.opts.post_verify_extend_ms = 300);
         set_if_absent("FinalizeSanity.SwitchMarginCp", &mut || {
             state.opts.finalize_sanity_switch_margin_cp = 40
@@ -2685,14 +2836,12 @@ pub fn maybe_apply_thread_based_defaults(state: &mut EngineState) {
         engine_core::search::params::set_shallow_gate_depth(3);
     }
 
-    if !state.opts.finalize_sanity_enabled
-        && !state.user_overrides.contains("PostVerify.RequirePass")
-    {
-        state.opts.post_verify_require_pass = false;
+    if !state.user_overrides.contains("PostVerify.RequirePass") {
+        state.opts.post_verify_require_pass = state.opts.root_verify_require_pass;
         static REQUIRE_PASS_NOTICE: OnceLock<()> = OnceLock::new();
         if REQUIRE_PASS_NOTICE.set(()).is_ok() {
             crate::io::info_string(
-                "post_verify_require_pass_default=0 (post_verify_require_pass disabled by default)",
+                "post_verify_require_pass_linked=1 (mirrors RootVerify.RequirePass)",
             );
         }
     }
@@ -2746,7 +2895,7 @@ pub fn log_effective_profile(state: &EngineState) {
         }
     }
     info_string(format!(
-        "effective_profile mode={} resolved={} threads={} multipv={} root_escape={} root_escape_policy={} root_escape_max={} root_escape_log={} root_escape_see={} root_see_gate={} xsee={} root_verify={} rv_ms={} rv_nodes={} rv_depth={} rv_oppsee={} rv_major={} win_protect={} win_cp={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
+        "effective_profile mode={} resolved={} threads={} multipv={} root_escape={} root_escape_policy={} root_escape_max={} root_escape_log={} root_escape_see={} root_safe_scan={} root_safe_scan_max={} root_safe_scan_log={} root_see_gate={} xsee={} root_verify={} rv_ms={} rv_nodes={} rv_depth={} rv_oppsee={} rv_major={} rv_require_pass={} rv_maxcand={} rv_maxcand_threat={} rv_maxseeds={} rv_maxseeds_threat={} win_protect={} win_cp={} post_verify={} ydrop={} finalize_enabled={} finalize_switch={} finalize_oppsee={} finalize_budget={} t2_min={} t2_beam_k={} see_lt0_alt={} king_alt_min={} king_alt_pen={} mate_gate_cfg=stable>={}||depth>={}||elapsed>={}ms overrides={} threads_overridden={}",
         mode_str,
         resolved.unwrap_or("-"),
         state.opts.threads,
@@ -2756,6 +2905,9 @@ pub fn log_effective_profile(state: &EngineState) {
         state.opts.root_escape_max_moves,
         state.opts.root_escape_log_detail.as_str(),
         state.opts.root_escape_see_threshold_cp,
+        state.opts.root_safe_scan_enabled as u8,
+        state.opts.root_safe_scan_max_ms,
+        state.opts.root_safe_scan_log_detail.as_str(),
         state.opts.root_see_gate as u8,
         state.opts.root_see_gate_xsee_cp,
         state.opts.root_verify_enabled as u8,
@@ -2764,6 +2916,11 @@ pub fn log_effective_profile(state: &EngineState) {
         state.opts.root_verify_check_depth,
         state.opts.root_verify_opp_see_min_cp,
         state.opts.root_verify_major_loss_penalty_cp,
+        state.opts.root_verify_require_pass as u8,
+        state.opts.root_verify_max_candidates,
+        state.opts.root_verify_max_candidates_threat,
+        state.opts.root_verify_max_defense_seeds,
+        state.opts.root_verify_max_defense_seeds_threat,
         state.opts.win_protect_enabled as u8,
         state.opts.win_protect_threshold_cp,
         state.opts.post_verify as u8,
@@ -2859,6 +3016,7 @@ mod tests {
             .expect("setoption RequirePass false");
         assert!(state.user_overrides.contains("PostVerify.RequirePass"));
         assert!(!state.opts.post_verify_require_pass);
+        assert!(!state.opts.root_verify_require_pass);
 
         handle_setoption("setoption name PostVerify.ExtendMs value 1234", &mut state)
             .expect("setoption ExtendMs 1234");
@@ -2875,6 +3033,41 @@ mod tests {
         assert!(state.user_overrides.contains("PostVerify.RequirePass"));
         assert!(state.user_overrides.contains("PostVerify.ExtendMs"));
         assert!(!state.opts.post_verify_require_pass);
+        assert!(!state.opts.root_verify_require_pass);
         assert_eq!(state.opts.post_verify_extend_ms, 1234);
+    }
+
+    #[test]
+    fn root_verify_require_pass_syncs_postverify_flag() {
+        let mut state = EngineState::new();
+        assert!(state.opts.root_verify_require_pass);
+        assert!(state.opts.post_verify_require_pass);
+
+        handle_setoption("setoption name RootVerify.RequirePass value false", &mut state)
+            .expect("setoption root require_pass false");
+        assert!(!state.opts.root_verify_require_pass);
+        assert!(!state.opts.post_verify_require_pass);
+
+        handle_setoption("setoption name RootVerify.RequirePass value true", &mut state)
+            .expect("setoption root require_pass true");
+        assert!(state.opts.root_verify_require_pass);
+        assert!(state.opts.post_verify_require_pass);
+    }
+
+    #[test]
+    fn postverify_require_pass_syncs_root_flag() {
+        let mut state = EngineState::new();
+        assert!(state.opts.root_verify_require_pass);
+        assert!(state.opts.post_verify_require_pass);
+
+        handle_setoption("setoption name PostVerify.RequirePass value false", &mut state)
+            .expect("setoption post verify require_pass false");
+        assert!(!state.opts.root_verify_require_pass);
+        assert!(!state.opts.post_verify_require_pass);
+
+        handle_setoption("setoption name PostVerify.RequirePass value true", &mut state)
+            .expect("setoption post verify require_pass true");
+        assert!(state.opts.root_verify_require_pass);
+        assert!(state.opts.post_verify_require_pass);
     }
 }
