@@ -10,6 +10,7 @@ pub mod mate1ply;
 pub mod parallel;
 pub mod params;
 pub mod policy;
+pub mod root_escape;
 pub mod snapshot;
 pub mod tt;
 pub mod types;
