@@ -3393,13 +3393,15 @@ fn enforce_root_escape_guard(
             &mut summary,
             state.opts.root_escape_see_threshold_cp,
         );
-        root_escape::apply_threat_risks(
-            &state.position,
-            &mut summary,
-            &[best_mv],
-            1,
-            state.opts.root_escape_see_threshold_cp,
-        );
+        if !best_mv.is_drop() {
+            root_escape::apply_threat_risks(
+                &state.position,
+                &mut summary,
+                &[best_mv],
+                1,
+                state.opts.root_escape_see_threshold_cp,
+            );
+        }
     }
     if let Some(res) = result {
         if res.stats.root_verify_last_fail_move == Some(best_mv) {
@@ -3437,7 +3439,15 @@ fn enforce_root_escape_guard(
         }
         summary.safe.retain(|&mv| mv != best_mv);
     }
-    let replacement = if best_is_risky && !summary.safe.is_empty() {
+    let should_replace = best_is_risky
+        && !summary.safe.is_empty()
+        && should_replace_bestmove(
+            state,
+            result,
+            summary.see_loss(best_mv),
+            summary.risky_mate_move(best_mv).is_some(),
+        );
+    let replacement = if should_replace {
         pick_root_escape_safe_move(
             state.opts.root_escape_pick_policy,
             &summary,
@@ -3462,6 +3472,28 @@ fn enforce_root_escape_guard(
         }
     }
     None
+}
+
+fn should_replace_bestmove(
+    state: &EngineState,
+    result: Option<&SearchResult>,
+    see_loss: Option<i32>,
+    has_mate: bool,
+) -> bool {
+    if has_mate {
+        return true;
+    }
+    let summary_score = result.and_then(|res| res.score.checked_sub(0)).unwrap_or(0);
+    if summary_score >= state.opts.root_escape_min_score_for_switch_cp {
+        if let Some(loss) = see_loss {
+            if loss.abs() <= state.opts.root_escape_safe_guard_cp {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 #[inline]
