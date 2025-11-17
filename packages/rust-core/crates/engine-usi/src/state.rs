@@ -47,6 +47,58 @@ impl LogProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootEscapePickPolicy {
+    PvOrder,
+    MiniQSearch,
+    Static,
+}
+
+impl RootEscapePickPolicy {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "pvorder" => Some(Self::PvOrder),
+            "miniqsearch" | "miniq" => Some(Self::MiniQSearch),
+            "static" => Some(Self::Static),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PvOrder => "PvOrder",
+            Self::MiniQSearch => "MiniQSearch",
+            Self::Static => "Static",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootEscapeLogDetail {
+    Off,
+    FailOnly,
+    Full,
+}
+
+impl RootEscapeLogDetail {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "failonly" | "fail" => Some(Self::FailOnly),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::FailOnly => "FailOnly",
+            Self::Full => "Full",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UsiOptions {
     // Core engine settings
@@ -150,6 +202,14 @@ pub struct UsiOptions {
     pub finalize_mate_probe_enabled: bool,
     pub finalize_mate_probe_depth: u8,
     pub finalize_mate_probe_time_ms: u64,
+    // Root escape filter (REF)
+    pub root_escape_enabled: bool,
+    pub root_escape_pick_policy: RootEscapePickPolicy,
+    pub root_escape_max_moves: usize,
+    pub root_escape_log_detail: RootEscapeLogDetail,
+    pub root_escape_see_threshold_cp: i32,
+    pub root_escape_safe_guard_cp: i32,
+    pub root_escape_min_score_for_switch_cp: i32,
     // MateGate configuration (YO流ゲートの閾値)
     pub mate_gate_min_stable_depth: u8,
     pub mate_gate_fast_ok_min_depth: u8,
@@ -258,7 +318,7 @@ impl Default for UsiOptions {
             finalize_non_promote_major_penalty_cp: 120,
             finalize_min_pv_len: 2,
             finalize_rescue_max_ms: 20,
-            instant_mate_move_enabled: true,
+            instant_mate_move_enabled: false,
             instant_mate_move_max_distance: 1,
             // より安全側に倒す（PV全体を確認）
             instant_mate_check_all_pv: true,
@@ -272,6 +332,13 @@ impl Default for UsiOptions {
             finalize_mate_probe_enabled: false,
             finalize_mate_probe_depth: 5,
             finalize_mate_probe_time_ms: 5,
+            root_escape_enabled: true,
+            root_escape_pick_policy: RootEscapePickPolicy::PvOrder,
+            root_escape_max_moves: 512,
+            root_escape_log_detail: RootEscapeLogDetail::FailOnly,
+            root_escape_see_threshold_cp: 200,
+            root_escape_safe_guard_cp: 400,
+            root_escape_min_score_for_switch_cp: 300,
             // MateGate defaults
             mate_gate_min_stable_depth: 5,
             mate_gate_fast_ok_min_depth: 5,

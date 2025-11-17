@@ -7,8 +7,12 @@ use crate::movegen::MoveGenerator;
 use crate::search::api::{InfoEvent, InfoEventCallback};
 use crate::search::config;
 use crate::search::constants::{mate_distance, MIN_QNODES_LIMIT, SEARCH_INF};
+use crate::search::mate1ply;
+use crate::search::root_threat::{self, RootThreat};
 use crate::search::tt::TTProbe;
-use crate::search::types::{normalize_root_pv, InfoStringCallback, RootLine, SearchResult};
+use crate::search::types::{
+    normalize_root_pv, InfoStringCallback, RootLine, RootVerifyFailKind, SearchResult,
+};
 use crate::search::SearchLimits;
 use crate::shogi::{Color, Move, Piece, PieceType, Position, Square};
 use smallvec::SmallVec;
@@ -141,6 +145,11 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
         summary.total_elapsed_ms = summary.total_elapsed_ms.saturating_add(res.report.elapsed_ms);
         if let Some(reason) = res.fail_reason {
             summary.fail_count = summary.fail_count.saturating_add(1);
+            record_root_verify_fail(result, cand.mv, &reason);
+            if let VerifyFailReason::MateInOne { mv: mate_mv } = &reason {
+                result.stats.root_verify_rejected_move = Some(cand.mv);
+                result.stats.root_verify_mate_move = Some(*mate_mv);
+            }
             emit_fail_log(info, limits.info_string_callback.as_ref(), cand.mv, &reason);
             if fallback.as_ref().map(|(_, rep)| rep.eval < res.report.eval).unwrap_or(true) {
                 fallback = Some((*cand, res.report));
@@ -187,6 +196,16 @@ fn verify_candidate<E: Evaluator + Send + Sync + 'static>(
     mv: Move,
     settings: &RootVerifySettings,
 ) -> VerifyResult {
+    let mut child = root.clone();
+    if let Some(mate_mv) = mate1ply::enemy_mate_in_one_after(&mut child, mv) {
+        return VerifyResult {
+            report: ProbeReport {
+                eval: original_score,
+                elapsed_ms: 0,
+            },
+            fail_reason: Some(VerifyFailReason::MateInOne { mv: mate_mv }),
+        };
+    }
     if !mv.is_drop() {
         let xsee = if mv.is_capture_hint() {
             root.see(mv)
@@ -203,10 +222,15 @@ fn verify_candidate<E: Evaluator + Send + Sync + 'static>(
             };
         }
     }
-    let mut child = root.clone();
     let eval_guard = EvalMoveGuard::new(backend.evaluator.as_ref(), root, mv);
     child.do_move(mv);
-    if let Some(reason) = detect_major_threat(&child, root.side_to_move, settings.opp_see_min_cp) {
+    if let Some(threat) =
+        root_threat::detect_major_threat(&child, root.side_to_move, settings.opp_see_min_cp)
+    {
+        let reason = match threat {
+            RootThreat::OppXsee { piece, loss } => VerifyFailReason::OppXsee { piece, score: loss },
+            RootThreat::PawnDropHead { piece } => VerifyFailReason::PawnDropHead { piece },
+        };
         drop(eval_guard);
         return VerifyResult {
             report: ProbeReport {
@@ -229,6 +253,19 @@ fn verify_candidate<E: Evaluator + Send + Sync + 'static>(
         report: probe,
         fail_reason: None,
     }
+}
+
+fn record_root_verify_fail(result: &mut SearchResult, mv: Move, reason: &VerifyFailReason) {
+    result.stats.root_verify_last_fail_move = Some(mv);
+    let (kind, detail) = match reason {
+        VerifyFailReason::MateInOne { .. } => (RootVerifyFailKind::MateInOne, None),
+        VerifyFailReason::SelfSee(see) => (RootVerifyFailKind::SelfSee, Some(*see)),
+        VerifyFailReason::OppXsee { score, .. } => (RootVerifyFailKind::OppXsee, Some(*score)),
+        VerifyFailReason::PawnDropHead { .. } => (RootVerifyFailKind::PawnDrop, None),
+        VerifyFailReason::EvalDrop(delta) => (RootVerifyFailKind::EvalDrop, Some(*delta)),
+    };
+    result.stats.root_verify_last_fail_kind = Some(kind);
+    result.stats.root_verify_last_fail_detail = detail;
 }
 
 fn run_probe<E: Evaluator + Send + Sync + 'static>(
@@ -304,180 +341,7 @@ fn run_probe<E: Evaluator + Send + Sync + 'static>(
     }
 }
 
-fn detect_major_threat(pos: &Position, us: Color, threshold: i32) -> Option<VerifyFailReason> {
-    let mut major_targets: Vec<(Square, PieceType)> = Vec::new();
-    let mut friendly = pos.board.occupied_bb[us as usize];
-    while let Some(sq) = friendly.pop_lsb() {
-        let Some(piece) = pos.board.piece_on(sq) else {
-            continue;
-        };
-        if !is_major(piece) {
-            continue;
-        }
-        if let Some(loss) = worst_capture_loss(pos, sq, us) {
-            if loss <= -threshold {
-                return Some(VerifyFailReason::OppXsee {
-                    piece: piece.piece_type,
-                    score: loss,
-                });
-            }
-        }
-        if pawn_drop_head_threat(pos, sq, us) {
-            return Some(VerifyFailReason::PawnDropHead {
-                piece: piece.piece_type,
-            });
-        }
-        major_targets.push((sq, piece.piece_type));
-    }
-    if let Some((piece, loss)) =
-        detect_shortest_attack_after_enemy_move(pos, us, threshold, &major_targets)
-    {
-        return Some(VerifyFailReason::OppXsee { piece, score: loss });
-    }
-    if let Some(mv) = detect_enemy_mate_in_one(pos) {
-        return Some(VerifyFailReason::MateInOne { mv });
-    }
-    None
-}
-
-fn is_major(piece: Piece) -> bool {
-    matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop | PieceType::Gold)
-        || (piece.piece_type == PieceType::Pawn && piece.promoted)
-}
-
-fn worst_capture_loss(pos: &Position, target: Square, us: Color) -> Option<i32> {
-    let enemy = us.opposite();
-    let mut attackers = pos.get_attackers_to(target, enemy);
-    if attackers.is_empty() {
-        return None;
-    }
-    let mut worst: Option<i32> = None;
-    while let Some(from) = attackers.pop_lsb() {
-        if let Some(piece) = pos.board.piece_on(from) {
-            let mut consider = Vec::with_capacity(2);
-            consider.push(Move::normal(from, target, false));
-            if piece.piece_type.can_promote() && can_promote(piece.color, from, target) {
-                consider.push(Move::normal(from, target, true));
-            }
-            for mv in consider {
-                if !pos.is_legal_move(mv) {
-                    continue;
-                }
-                let gain = pos.see(mv);
-                let loss = -gain;
-                if loss < worst.unwrap_or(0) {
-                    worst = Some(loss);
-                }
-            }
-        }
-    }
-    worst
-}
-
-fn pawn_drop_head_threat(pos: &Position, target: Square, us: Color) -> bool {
-    let enemy = us.opposite();
-    let Some(head) = head_square(target, us) else {
-        return false;
-    };
-    if pos.board.piece_on(head).is_some() {
-        return false;
-    }
-    let Some(hand_idx) = PieceType::Pawn.hand_index() else {
-        return false;
-    };
-    if pos.hands[enemy as usize][hand_idx] == 0 {
-        return false;
-    }
-    let mv = Move::drop(PieceType::Pawn, head);
-    pos.is_legal_move(mv)
-}
-
-fn detect_enemy_mate_in_one(pos: &Position) -> Option<Move> {
-    let mg = MoveGenerator::new();
-    let Ok(enemy_moves) = mg.generate_all(pos) else {
-        return None;
-    };
-    for mv in enemy_moves.as_slice() {
-        let mut reply = pos.clone();
-        reply.do_move(*mv);
-        let checker = MoveGenerator::new();
-        if let Ok(has_moves) = checker.has_legal_moves(&reply) {
-            if !has_moves {
-                return Some(*mv);
-            }
-        }
-    }
-    None
-}
-
-fn detect_shortest_attack_after_enemy_move(
-    pos: &Position,
-    us: Color,
-    threshold: i32,
-    majors: &[(Square, PieceType)],
-) -> Option<(PieceType, i32)> {
-    if majors.is_empty() {
-        return None;
-    }
-    let enemy = us.opposite();
-    let mg = MoveGenerator::new();
-    let Ok(move_list) = mg.generate_all(pos) else {
-        return None;
-    };
-    for mv in move_list.as_slice() {
-        if !pos.is_legal_move(*mv) {
-            continue;
-        }
-        let mut child = pos.clone();
-        child.do_move(*mv);
-        for &(sq, piece_type) in majors {
-            let Some(piece) = child.board.piece_on(sq) else {
-                continue;
-            };
-            if piece.color != us {
-                continue;
-            }
-            if !child.is_attacked(sq, enemy) {
-                continue;
-            }
-            if let Some(loss) = evaluate_attackers_loss(&mut child, sq, enemy, threshold) {
-                return Some((piece_type, loss));
-            }
-        }
-    }
-    None
-}
-
-fn evaluate_attackers_loss(
-    child: &mut Position,
-    target: Square,
-    enemy: Color,
-    threshold: i32,
-) -> Option<i32> {
-    let prev_side = child.side_to_move;
-    child.side_to_move = enemy;
-    let mut attackers = child.get_attackers_to(target, enemy);
-    while let Some(from) = attackers.pop_lsb() {
-        let Some(piece) = child.board.piece_on(from) else {
-            continue;
-        };
-        for promote in promotion_options(piece, enemy, from, target) {
-            let mv = Move::normal(from, target, promote);
-            if !child.is_legal_move(mv) {
-                continue;
-            }
-            let gain = child.see(mv);
-            let loss = -gain;
-            if loss <= -threshold {
-                child.side_to_move = prev_side;
-                return Some(loss);
-            }
-        }
-    }
-    child.side_to_move = prev_side;
-    None
-}
-
+#[allow(dead_code)]
 fn promotion_options(piece: Piece, color: Color, from: Square, to: Square) -> SmallVec<[bool; 2]> {
     let mut opts = SmallVec::<[bool; 2]>::new();
     if piece.promoted || !piece.piece_type.can_promote() {
@@ -495,6 +359,7 @@ fn promotion_options(piece: Piece, color: Color, from: Square, to: Square) -> Sm
     opts
 }
 
+#[allow(dead_code)]
 fn must_promote(color: Color, piece_type: PieceType, to: Square) -> bool {
     match (color, piece_type) {
         (Color::Black, PieceType::Pawn | PieceType::Lance) => to.rank() == 0,
@@ -505,6 +370,7 @@ fn must_promote(color: Color, piece_type: PieceType, to: Square) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn head_square(sq: Square, owner: Color) -> Option<Square> {
     match owner {
         Color::Black => {
@@ -521,32 +387,6 @@ fn head_square(sq: Square, owner: Color) -> Option<Square> {
                 Some(Square::new(sq.file(), sq.rank() + 1))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::usi::{move_to_usi, parse_usi_move};
-
-    #[test]
-    fn detects_enemy_mate_in_one_after_bad_bishop_drop() {
-        let mut pos = Position::from_sfen(
-            "+R5bnl/5b3/pl1+P1gkp1/s3pps2/7gp/P1P1R4/1KN1P1PPP/5S3/L1S1GG1NL b N6P 46",
-        )
-        .expect("valid sfen");
-        let mv = parse_usi_move("8g9h").expect("valid move");
-        pos.do_move(mv);
-        let mate_mv = parse_usi_move("4b9g+").expect("valid mate move");
-        let mut after = pos.clone();
-        after.do_move(mate_mv);
-        let checker = MoveGenerator::new();
-        assert!(
-            !checker.has_legal_moves(&after).expect("movegen ok"),
-            "should be a terminal position"
-        );
-        let threat = detect_enemy_mate_in_one(&pos).expect("mate threat expected");
-        assert_eq!(move_to_usi(&threat), "4b9g+");
     }
 }
 
@@ -744,4 +584,32 @@ fn emit_pass_log(
 struct VerifyResult {
     report: ProbeReport,
     fail_reason: Option<VerifyFailReason>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usi::{move_to_usi, parse_usi_move};
+
+    #[test]
+    fn detects_enemy_mate_in_one_after_bad_bishop_drop() {
+        let mut root = Position::from_sfen(
+            "+R5bnl/5b3/pl1+P1gkp1/s3pps2/7gp/P1P1R4/1KN1P1PPP/5S3/L1S1GG1NL b N6P 46",
+        )
+        .expect("valid sfen");
+        let mv = parse_usi_move("8g9h").expect("valid move");
+        let mut pos = root.clone();
+        pos.do_move(mv);
+        let mate_mv = parse_usi_move("4b9g+").expect("valid mate move");
+        let mut after = pos.clone();
+        after.do_move(mate_mv);
+        let checker = MoveGenerator::new();
+        assert!(
+            !checker.has_legal_moves(&after).expect("movegen ok"),
+            "should be a terminal position"
+        );
+        let threat =
+            mate1ply::enemy_mate_in_one_after(&mut root, mv).expect("mate threat expected");
+        assert_eq!(move_to_usi(&threat), "4b9g+");
+    }
 }
