@@ -2459,6 +2459,11 @@ pub fn finalize_and_send(
     ) {
         chosen_mv = Some(replacement);
         chosen_src = FinalBestSource::Committed;
+        // Safe-Scan による差し替えも「スイッチ」として扱い、
+        // ponder 計算および最終ログ（final_select_*）の経路を揃える。
+        if maybe_switch.is_none() {
+            maybe_switch = Some(replacement);
+        }
     }
 
     let final_usi = chosen_mv.map(|m| move_to_usi(&m)).unwrap_or_else(|| "resign".to_string());
