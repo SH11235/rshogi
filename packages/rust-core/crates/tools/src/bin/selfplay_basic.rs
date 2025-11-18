@@ -522,11 +522,13 @@ fn parse_option_name(line: &str) -> Option<String> {
     while let Some(tok) = tokens.next() {
         if tok == "name" {
             let mut parts = Vec::new();
-            while let Some(&next) = tokens.peek() {
-                if next == "type" {
+            while let Some(next) = tokens.peek() {
+                if *next == "type" {
                     break;
                 }
-                parts.push(tokens.next().unwrap().to_string());
+                if let Some(tok) = tokens.next() {
+                    parts.push(tok.to_string());
+                }
             }
             if !parts.is_empty() {
                 return Some(parts.join(" "));
@@ -786,7 +788,9 @@ fn parse_position_line(line: &str) -> Result<(bool, Option<String>, Vec<String>)
                 if *token == "moves" {
                     break;
                 }
-                sfen_tokens.push(tokens.next().unwrap().to_string());
+                if let Some(tok) = tokens.next() {
+                    sfen_tokens.push(tok.to_string());
+                }
             }
             if sfen_tokens.is_empty() {
                 return Err(anyhow!("missing SFEN payload"));
