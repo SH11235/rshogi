@@ -80,7 +80,7 @@
 ## 参考リンク
 - A/B当日レポート: `docs/reports/nnue-ab-20251029.md`
 - generator FAQ: `docs/nnue-generator-faq.md`
-- ランタイムトグル一覧/解説: `docs/tuning-guide.md`
+- ランタイムトグル一覧/解説: `docs/runtime-env-vars.md`
 - 近締切ログ（例）
   - 実行: `near_final_zero_window=1 budget_ms=.. budget_qnodes=.. qnodes_limit_pre=.. qnodes_limit_post=.. t_rem=.. qnodes_used=.. confirmed_exact=0|1`
   - スキップ: `near_final_zero_window_skip=1 reason=already_exact|min_depth|trem_short|min_multipv|mate_near`

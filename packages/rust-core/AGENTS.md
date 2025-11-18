@@ -137,166 +137,29 @@ println!("Note: {final_errors} positions had errors and were skipped");
 
 ## 4. ログ分析ワークフロー（USIログ→落下局面→再現→再評価）
 
-> 詳細な探索パラメータ調整フローと構造化ログ（`moves.jsonl`）→`targets.json`→`run_eval_targets.py` の配管は  
-> `docs/tuning-guide.md` に集約してあります。ここでは実行スクリプトと典型コマンドのみを列挙します。
+USI ログや外部 GUI の対局ログ、gauntlet の `moves.jsonl`、および Selfplay（`selfplay_basic`）のログをどう扱うかについては、
+詳細な手順とコマンド例をすべてドキュメント側に集約しています。
 
-新規セッションで USI 対局ログから“評価落下（スパイク）”を見つけ、問題局面を短時間で再現・再評価するための標準手順です。各ステップは単独でも利用可能です。
+- 外部 GUI / サーバ由来の USI ログや gauntlet ログを解析したい場合  
+  → [`docs/log-analysis-guide.md`](./docs/log-analysis-guide.md) を参照してください。  
+  Python スクリプト群（`scripts/analysis/*.py` / `*.sh`）を使った  
+  「評価スパイク抽出 → 事前手数リプレイ → ターゲット生成 → 再評価」のパイプラインがまとまっています。
 
-### 4.1 事前準備
-- 推奨カレント: `packages/rust-core`（本ディレクトリ）。
-- 環境整備: エンジンは `target/release/engine-usi` を前提。未ビルド時は `cargo build -p engine-usi --release`。
-- `rg`（ripgrep）を使うスクリプトが多いので、空振りで止まらないラッパを用意:
-  ```bash
-  rg(){ command rg "$@" || true; }; export -f rg
-  ```
+- `selfplay_basic` が出力する Selfplay ログ（`runs/selfplay-basic/*.jsonl` + `.info.jsonl`）を使って  
+  ブランダー抽出や再評価を行いたい場合  
+  → [`docs/selfplay-basic-analysis.md`](./docs/selfplay-basic-analysis.md) を参照してください。  
+  Rust 製 CLI（`selfplay_basic` / `selfplay_blunder_report` / `selfplay_eval_targets`）を中心にした自己対局フローを説明しています。
 
-### 4.2 概況サマリの取得（CSV）
-- スクリプト: `scripts/analysis/analyze_usi_logs.sh`
-- 目的: 最大深さ・seldepth・PV切替・near_final 等の概況を1行CSV化。
-- 実行例:
-  ```bash
-  bash scripts/analysis/analyze_usi_logs.sh taikyoku-log/taikyoku_log_YYYYMMDDHHMM.md \
-    | tee runs/diag-$(date +%Y%m%d)/summary.csv
-  ```
+AGENT としてはここでは「どの種類のログに対してどのガイドを見るべきか」だけを意識し、  
+具体的なコマンドやオプションは上記ドキュメントを開いて確認してください。
 
-### 4.3 評価スパイクの抽出（落下セグメント候補）
-- スクリプト: `scripts/analysis/extract_eval_spikes.py`
-- 目的: 指定閾値以上の評価変動点を抽出し、replay 用プレフィクスを列挙。
-- 主なオプション:
-  - `--threshold <cp>`: 変動絶対値の下限（既定 300）。
-  - `--back <plies>` / `--forward <plies>`: 前後に含める文脈手数（既定 3/2）。
-  - `--topk <k>`: 上位K件に絞る（0で無制限）。
-  - `--out <dir>`: 出力先（未指定時は `runs/analysis/spikes-<basename>`）。
-- 実行例:
-  ```bash
-  python3 scripts/analysis/extract_eval_spikes.py \
-    --threshold 200 --back 4 --forward 2 --topk 6 \
-    --out runs/diag-$(date +%Y%m%d)-spikes \
-    taikyoku-log/taikyoku_log_YYYYMMDDHHMM.md
-  # 生成物: summary.txt / evals.csv / spikes.csv / prefixes.txt
-  ```
+### 5. 計測指標（first_bad/avoidance）と A/B 運用
 
-### 4.4 事前手数リプレイ（MultiPV/Threads/秒読み指定）
-- スクリプト: `scripts/analysis/replay_multipv.sh`
-- 目的: ログ終盤の「position startpos moves …」から、指定プレフィクス長で直前局面を多数再現し、bestmove と最終 info を収集。
-- 主なオプション:
-  - `-p "<num ...>"`: 再現する手数プレフィクス（例: `"24 26 28 30"`）。
-  - `-e <path>`: エンジン（既定 `target/release/engine-usi`）。
-  - `-o <dir>`: 出力先（既定 `runs/game-postmortem/<date>-10s`）。
-  - `-m <n>`: MultiPV（既定 1）。
-  - `-t <n>`: Threads（既定 8）。
-  - `-b <ms>`: byoyomi ミリ秒（既定 10000）。
-  - `--profile match|postmortem`: 追加 setoption（`postmortem` はデバッグ寄り）。
-  - `--inherit-setoptions|--no-inherit-setoptions`: ログ内 setoption の継承有無（既定 継承）。
-- 実行例（5秒・8スレッド、スパイク上位）:
-  ```bash
-  PREF=$(cat runs/diag-20251110-1854_spikes/prefixes.txt)
-  bash scripts/analysis/replay_multipv.sh taikyoku-log/taikyoku_log_YYYYMMDDHHMM.md \
-    -p "$PREF" -o runs/game-postmortem/$(date +%Y%m%d)-5s \
-    -t 8 -m 1 -b 5000 --profile match
-  # 出力: summary.txt（bestmove/last_info を集約）
-  ```
+探索パラメータの A/B 比較や first_bad / avoidance 指標の定義・運用フローは、ドキュメント側に整理しています。
+詳細な説明やコマンド例が必要な場合は次を参照してください。
 
-### 4.5 ターゲット生成（“真の悪手”精度向上のための遡り）
-- 目的: 落下点の2〜5手前から同条件で再評価し、符号反転の起点（真の悪手）を見つける。
-- スクリプト1: `scripts/analysis/extract_positions_from_log.py`
-  - `--log <path>`: USIログ。
-  - `--out <path>`: 出力 JSON（`targets.json` 推奨）。
-  - 実行例:
-    ```bash
-    python3 scripts/analysis/extract_positions_from_log.py \
-      --log taikyoku-log/taikyoku_log_YYYYMMDDHHMM.md \
-      --out runs/diag-YYYYMMDD/targets.json
-    ```
-- スクリプト2: `scripts/analysis/expand_targets_back.py`
-  - `--in <targets.json>` / `--out <targets_back.json>`
-  - `--min <plies>` / `--max <plies>`: 何手遡るかの範囲。
-  - 実行例:
-    ```bash
-    python3 scripts/analysis/expand_targets_back.py \
-      --in runs/diag-YYYYMMDD/targets.json \
-      --out runs/diag-YYYYMMDD/targets_back.json \
-      --min 2 --max 5
-    cp runs/diag-YYYYMMDD/targets_back.json runs/diag-YYYYMMDD/targets.json
-    ```
+- 外部 USI ログからのデータセット作成（`pipeline_60_ab.sh` など）と、`run_eval_targets.py` / `run_ab_metrics.sh` を使った first_bad / avoidance 指標の計測手順  
+  → [`docs/log-analysis-guide.md`](./docs/log-analysis-guide.md) の「指標と A/B 評価（first_bad / avoidance）」セクション
 
-### 4.6 3プロファイル再評価（base / rootfull / gates）
-- スクリプト: `scripts/analysis/run_eval_targets.py`
-- 目的: 同一局面を3つの探索プロファイルで再評価し、落下の再現性や軽減度合いを可視化。
-- 既定プロファイル（スクリプト内定義）
-  - `base`: 既定設定
-  - `gates`: `RootSeeGate.XSEE=0`, `SHOGI_QUIET_SEE_GUARD=0`
-- 主なオプション/環境変数:
-  - `--threads <n>`（既定 1）, `--byoyomi <ms>`（既定 2000）, `--minthink <ms>`, `--warmupms <ms>`
-  - `ENGINE_BIN=<path>` を設定すると別バイナリを使用可。
-- 実行例（1秒, 8T, MultiPV=3 内蔵）:
-  ```bash
-  ENGINE_BIN=target/release/engine-usi \
-  python3 scripts/analysis/run_eval_targets.py runs/diag-YYYYMMDD \
-    --threads 8 --byoyomi 1000 --minthink 100 --warmupms 200
-  # 出力: runs/diag-YYYYMMDD/summary.json（tag/ profile / eval_cp / depth）
-  ```
-
-### 4.7 A/B ガントレット（任意）
-- ツール: `./target/release/usi_gauntlet`
-- 目的: base と candidate の勝率比較（短TCは `concurrency=1` 推奨）。
-- 実行例:
-  ```bash
-  ./target/release/usi_gauntlet --engine target/release/engine-usi \
-    --base-init runs/gauntlet_usi/init/base_init.usi \
-    --cand-init runs/gauntlet_usi/init/cand_init.usi \
-    --book runs/gauntlet_usi/short20.sfen \
-    --games 20 --byoyomi-ms 500 \
-    --engine-threads 8 --hash-mb 1024 \
-    --concurrency 1 --adj-enable \
-    --out runs/gauntlet_usi/quick20_byoyomi500
-  ```
-
-### 4.8 時間見積りと時短のコツ（FAQ）
-- `run_eval_targets.py` は「ターゲット数 × 3プロファイル × (byoyomi+約6秒)」相当で延びます。
-- まず `extract_eval_spikes.py --topk` で対象を少数に絞り、`--byoyomi 500~1000`＋`--warmupms 0~200` で粗く傾向を掴む。
-- スレッドは対局再現と合わせる（例: 8）。ガントレットは `concurrency=1` が安定。
-
-### 4.9 Dropガード回帰セット（pre-50〜54 + drop_21/drop_28 ターゲット）
-- スクリプト: `scripts/analysis/run_dropguard_regression.sh`
-  - 役割: 9筋押し合いセグメント（プレフィクス43–54）を `replay_multipv.sh`（byoyomi=10s, MultiPV=3, Threads=8）で再抽出し、同時に `drop_21_line1179` / `drop_28_line1484` 系の back2〜5 を `run_eval_targets.py` で再評価。
-  - ターゲット定義は `scripts/analysis/regression_targets/drop_guard_targets.json` に集約（`runs/diag-20251111_statscore` と同一内容）。
-  - 主要オプション（長時間なので `timeout` せず実行推奨）:
-    ```bash
-    # デフォルト: log=taikyoku_log_enhanced-parallel-202511101854.md, prefix=50..54
-    scripts/analysis/run_dropguard_regression.sh \
-      --log taikyoku-log/taikyoku_log_enhanced-parallel-202511101854.md \
-      --out runs/regressions/dropguard-$(date +%Y%m%d-%H%M)
-    ```
-    - `--mp-byoyomi`, `--mp-multipv`, `--eval-byoyomi` などで短TC版も可。
-    - 出力: `…/multipv/summary.txt`（pre-50..54 の MultiPV 情報）、`…/diag/summary.json`（run_eval_targets の結果）。
-  - 使い所: 探索改修後に drop guard セグメントの劣化をクイック確認する回帰セットとして活用。
-
-### 5. 計測指標（first_bad/avoidance）と A/B 運用（重要）
-
-> 指標の定義や評価フロー全体（`pipeline_60_ab.sh` → `run_eval_targets.py` → `run_ab_metrics.sh` など）は  
-> `docs/tuning-guide.md` の「NNUE 前探索パラメータ調整フロー（概要）」に整理してあります。  
-> ここでは AGENTS 向けに優先度と代表的なスクリプトだけを抜粋します。
-- 目的: 「真の悪手を避けられるか」を中心に、対局品質に直結する指標で A/B を評価する。
-- 指標の優先度（高→低）:
-  - 悪手回避率（avoidance_rate）: first_bad タグにおいて“原ログの悪手”と異なる手を選べた割合。高いほど良い（最重要）。
-  - first_bad 限定スパイク率: 比較採否に使わない。first_bad は“既に悪手後の局面”で深いマイナスは妥当なため、ゼロ化を目的にしない（診断の参考表示に留める）。
-  - overall スパイク率: 症状の平均。採否の主指標にはしない（大幅悪化のみ警戒）。
-  - avg_depth/NPS: 副作用監視（浅くなり過ぎないか）。
-- first_bad の定義: 落下点ログから back 2..6 手を生成し、「その origin で最初に cp≤-600 を満たす back」を first_bad とする（スクリプトが自動導出。A/B 実行時は“そのプロファイルの再評価結果”で判定）。
-- 推奨しきい値: 悪手回避後の“非大幅悪化”は `eval_cp > -200` で判定（任意）。
-- ディレクトリ規約: `runs/<YYYYMMDD>[-HHMM]-<tag>` を厳守（例: `runs/20251112-1530-ab-foo`）。
-- 主要スクリプト:
-  - `scripts/analysis/pipeline_60_ab.sh`: ログ→スパイク抽出→back生成→60件選別→10秒評価→CSV/メトリクス出力（ワンコマンド）。
-  - `scripts/analysis/run_ab_metrics.sh`: 既存データセット（`targets.json`）に対し、複数プリセットを直列評価し、overall/first_bad（参考）/avoidance（最重要）をまとめて出力。
-  - `scripts/analysis/summarize_first_bad_metrics.py`: first_bad 限定スパイク率を算出（CSV不在時は summary/targets から導出）。
-  - `scripts/analysis/summarize_avoidance.py`: first_bad について原ログから“悪手”を復元し、評価 bestmove と比較して回避率を算出。
-- コマンド例:
-  - データセット作成（60件, 10秒）:
-    - ``ENGINE_BIN=target/release/engine-usi scripts/analysis/pipeline_60_ab.sh --logs 'taikyoku-log/taikyoku_log_enhanced-parallel-202511*.md' --out runs/$(date +%Y%m%d-%H%M)-tuning --threads 8 --byoyomi 10000``
-  - A/B（first_bad/avoidance 含む一括評価）:
-    - ``scripts/analysis/run_ab_metrics.sh --dataset runs/20251112-2014-tuning --out-root runs/$(date +%Y%m%d-%H%M)-ab scripts/analysis/param_presets/f1e47_lmp_mid.json scripts/analysis/param_presets/f1e47_lmp_mid_lmr200.json``
-  - 出力物（各プリセット配下）: `metrics.json`（overall）, `metrics_first_bad.json`（first_bad 限定, 参考）, `avoidance.json`（回避率）
-- 所要時間目安: 60件×10秒は 1プリセット ≈ 16分（±数分）。直列3案で ≈ 50分。
-- 並行実行の注意: 同一データセット配下で `run_eval_targets.py` を多重実行しない（`summary.json` 競合を避ける）。
-- Finalize/MateGate/InstantMate は“安全弁”。採用策ではなく診断に限定（方針 3 を再確認）。
+- 探索パラメータや安定化ゲート、MultiPV スケジューラなどのランタイム環境変数トグル一覧  
+  → [`docs/runtime-env-vars.md`](./docs/runtime-env-vars.md)
