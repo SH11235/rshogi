@@ -31,44 +31,13 @@
 
 この経路は「外部で既にたくさん対局してしまったログを後から使いたい」場合に有効です。
 
-### 自己対局ログ（selfplay_basic）からのクイック診断
+### 自己対局ログ（selfplay_basic）の扱い
 
-`selfplay_basic` で生成される `runs/selfplay-basic/*.jsonl` と同名 `.info.jsonl` は、Rust 製ツールでそのまま解析できます。典型的な運用は次のとおりです。
+Selfplay ログの取得〜ブランダー抽出〜再解析のワークフローは、専用ドキュメントに切り出しました。詳細は:
 
-0. **自己対局の実行（例）**
-   ```bash
-   cargo run --release -p tools --bin selfplay_basic -- \
-     --games 1 \
-     --max-moves 180 \
-     --think-ms 5000 \
-     --threads 8 \
-     --basic-depth 2
-   ```
-   Black=本エンジン、White=ShogiHome簡易エンジンで対局し、`runs/selfplay-basic/` に JSONL / `.info.jsonl` / `.kif` を生成します。
+- [`docs/selfplay-basic-analysis.md`](./selfplay-basic-analysis.md)
 
-1. **悪手抽出 + ターゲット生成**  
-   ```bash
-   cargo run -p tools --bin selfplay_blunder_report -- \
-     runs/selfplay-basic/<log>.jsonl \
-     --threshold 400 \
-     --back-min 0 \
-     --back-max 3
-   ```
-   - `threshold`: 隣接する `main_eval` の評価差がこの値以下になった手をブランダー候補とみなす（負の差のみカウント）。
-   - `back-min/back-max`: spike から遡る手数の範囲。バック値ごとに `pre_position` を生成し、`targets.json` にまとめます。
-   - 出力: `runs/analysis/<log>-blunders/{blunders.json,targets.json,summary.txt}`。`blunders.json` には SFEN・指し手・info 行抜粋が含まれるので、そのまま調査に利用できます。
-
-2. **ターゲットの再解析（Multi Profile）**  
-   ```bash
-   cargo run -p tools --bin selfplay_eval_targets -- \
-     runs/analysis/<log>-blunders/targets.json \
-     --threads 8 \
-     --byoyomi 2000
-   ```
-   - `engine-usi` を `base/rootfull/gates` の 3 プロファイルで再実行し、`summary.json` と `*__<profile>.log` を生成。
-   - `summary.json` には `origin_log` / `origin_ply` / `back_plies` が記録され、どの局面を再評価したのか一目で分かります。
-
-これにより「自己対局 → ブランダー抽出 → 遡り局面での再解析」というループを Rust CLI だけで回せます。従来の Python スクリプト（`extract_eval_spikes.py` 等）を使う必要はありません。
+を参照してください。
 
 ### usi_gauntlet + moves.jsonl からのターゲット生成
 
