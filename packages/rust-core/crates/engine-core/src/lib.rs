@@ -6,6 +6,7 @@ pub mod movegen;
 pub mod opening_book;
 pub mod search;
 pub mod shogi;
+pub mod shogihome_basic;
 pub mod simd;
 pub mod time_management;
 pub mod usi;

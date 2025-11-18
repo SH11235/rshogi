@@ -14,3 +14,10 @@ Vitest with a `happy-dom` environment powers unit tests across packages. Write d
 
 ## Commit & Pull Request Guidelines
 Follow Conventional Commit prefixes (`feat:`, `fix:`, `chore:`, `refactor:`); short Japanese summaries are acceptable when they remain under 72 characters. Group related changes per commit; re-run `npm test`, `npm run lint`, and `npm run typecheck` prior to pushing. Pull requests should explain the feature, list affected packages, and link issues or TODOs. Attach screenshots or GIFs for UI changes under `packages/web`. Flag any required Rust/WASM rebuild steps in the PR description so reviewers can reproduce the build.
+
+## Selfplay Log Diagnostics (Rust Core)
+`packages/rust-core` には Selfplay ログ（`selfplay_basic`）用の Rust 製ツール群が用意されています。
+詳細なコマンドやワークフローは Rust Core 側のドキュメントに集約しているため、自己対局やブランダー分析を行う際は次を参照してください。
+
+- `packages/rust-core/AGENTS.md` の「4. ログ分析ワークフロー」
+- `packages/rust-core/docs/selfplay-basic-analysis.md`
