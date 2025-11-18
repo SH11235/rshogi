@@ -5,7 +5,7 @@ use engine_core::usi::{parse_sfen, parse_usi_move};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct EngineNames {
@@ -65,7 +65,7 @@ struct MoveEntry {
     result: Option<String>,
 }
 
-pub fn convert_jsonl_to_kif(input: &Path, output: &Path) -> Result<()> {
+pub fn convert_jsonl_to_kif(input: &Path, output: &Path) -> Result<Vec<PathBuf>> {
     let reader = BufReader::new(
         File::open(input).with_context(|| format!("failed to open input {}", input.display()))?,
     );
@@ -114,18 +114,35 @@ pub fn convert_jsonl_to_kif(input: &Path, output: &Path) -> Result<()> {
         bail!("no move entries found in {}", input.display());
     }
 
-    let mut writer = BufWriter::new(
-        File::create(output).with_context(|| format!("failed to create {}", output.display()))?,
-    );
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    let ext = output.extension().and_then(|s| s.to_str()).unwrap_or("kif");
 
-    for (idx, (_, moves)) in games.iter().enumerate() {
-        if idx > 0 {
-            writeln!(writer)?;
-        }
+    let mut written_paths = Vec::new();
+
+    if games.len() == 1 {
+        let mut writer = BufWriter::new(
+            File::create(output)
+                .with_context(|| format!("failed to create {}", output.display()))?,
+        );
+        let (_, moves) = &games[0];
         export_game(&mut writer, meta.as_ref(), moves)?;
+        writer.flush()?;
+        written_paths.push(output.to_path_buf());
+    } else {
+        for (game_id, moves) in &games {
+            // 1対局1ファイル: すべて `<stem>_gNN.<ext>` という名前で分割出力する（NN は game_id, 2桁ゼロ埋め）。
+            let path = parent.join(format!("{stem}_g{game_id:02}.{ext}"));
+            let mut writer = BufWriter::new(
+                File::create(&path)
+                    .with_context(|| format!("failed to create {}", path.display()))?,
+            );
+            export_game(&mut writer, meta.as_ref(), moves)?;
+            writer.flush()?;
+            written_paths.push(path);
+        }
     }
-    writer.flush()?;
-    Ok(())
+    Ok(written_paths)
 }
 
 fn export_game<W: Write>(

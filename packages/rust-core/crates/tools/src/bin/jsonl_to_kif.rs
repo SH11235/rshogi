@@ -17,8 +17,15 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let output_path = cli.output.clone().unwrap_or_else(|| default_output_path(&cli.input));
-    convert_jsonl_to_kif(&cli.input, &output_path)?;
-    println!("kif written to {}", output_path.display());
+    let written = convert_jsonl_to_kif(&cli.input, &output_path)?;
+    if written.len() == 1 {
+        println!("kif written to {}", written[0].display());
+    } else {
+        println!("kif written to:");
+        for path in &written {
+            println!("  {}", path.display());
+        }
+    }
     Ok(())
 }
 
