@@ -51,6 +51,18 @@ pub(crate) fn quiet_see_guard_should_skip(
     if is_pv || !is_quiet || gives_check || !quiet_see_guard_enabled() {
         return false;
     }
+    // 玉周辺（チェビシェフ距離2以内）に利きを足す静かな手は、受けや囲い強化として重要なことが多い。
+    // これらを Quiet SEE Guard で枝刈りしてしまうと、短TCでの玉頭受け・囲い直しが落ちやすくなるため、
+    // king-zone 内への静かな手はスキップ対象としない。
+    if let Some(king_sq) = pos.board.king_square(pos.side_to_move) {
+        let to = mv.to();
+        let df = (king_sq.file() as i32 - to.file() as i32).abs();
+        let dr = (king_sq.rank() as i32 - to.rank() as i32).abs();
+        let dist = df.max(dr);
+        if dist <= 2 {
+            return false;
+        }
+    }
     let d = lmr_depth.max(0);
     if d == 0 {
         return false;

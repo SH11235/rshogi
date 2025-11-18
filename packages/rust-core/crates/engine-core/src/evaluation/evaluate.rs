@@ -200,9 +200,11 @@ pub fn evaluate(pos: &Position) -> i32 {
         score += king_pen * (their_king_moved - our_king_moved);
     }
 
-    // 4) King safety (distance × effect counts)
+    // 4) King safety (distance × effect counts + king position bonus + shell)
     let effects = compute_effect_counts(pos);
     score += king_safety_term(pos, &effects);
+    score += king_shell_term(pos, &effects);
+    score += king_position_term(pos);
     score += piece_safety_term(pos, &effects);
 
     // 4) Tempo bonus
@@ -333,6 +335,403 @@ fn king_start_squares() -> (Square, Square) {
         let wk = Square::from_usi_chars('5', 'a').expect("valid square 5a");
         (bk, wk)
     })
+}
+
+fn king_pos_bonus_table() -> &'static [i32; SHOGI_BOARD_SIZE] {
+    use crate::shogi::board_constants::{BOARD_FILES, BOARD_RANKS};
+
+    static CELL: OnceLock<[i32; SHOGI_BOARD_SIZE]> = OnceLock::new();
+    CELL.get_or_init(|| {
+        // YaneuraOu の king_pos_bonus を盤面の 1 段目 9 筋から 9 段目 1 筋の順で並べたテーブル。
+        // ここでは [rank(0=a)..8=i][file(0=9筋)..8=1筋] の順で 9x9 に展開し、Square の内部 index
+        // (file,rank) = (0..8,0..8) に対応するようにマッピングする。
+        let raw: [i32; 81] = [
+            875, 655, 830, 680, 770, 815, 720, 945, 755, 605, 455, 610, 595, 730, 610, 600, 590,
+            615, 565, 640, 555, 525, 635, 565, 440, 600, 575, 520, 515, 580, 420, 640, 535, 565,
+            500, 510, 220, 355, 240, 375, 340, 335, 305, 275, 320, 500, 530, 560, 445, 510, 395,
+            455, 490, 410, 345, 275, 250, 355, 295, 280, 420, 235, 135, 335, 370, 385, 255, 295,
+            200, 265, 305, 305, 255, 225, 245, 295, 200, 320, 275, 70, 200,
+        ];
+
+        let mut table = [0i32; SHOGI_BOARD_SIZE];
+        let files = BOARD_FILES as u8;
+        let ranks = BOARD_RANKS as u8;
+
+        for rank in 0..ranks {
+            for file in 0..files {
+                let sq = Square::new(file, rank);
+                let internal_idx = sq.index();
+                let raw_idx = (rank as usize) * (files as usize) + (file as usize);
+                let base = raw[raw_idx];
+
+                // cp スケールに合わせて少し弱めるため、約 1/20 に縮小する。
+                table[internal_idx] = base / 20;
+            }
+        }
+
+        table
+    })
+}
+
+fn king_position_term(pos: &Position) -> i32 {
+    let table = king_pos_bonus_table();
+    let (Some(bk), Some(wk)) =
+        (pos.board.king_square(Color::Black), pos.board.king_square(Color::White))
+    else {
+        return 0;
+    };
+
+    // 先手玉の位置ボーナス - 後手玉の位置ボーナスを先手視点スコアとして使う。
+    // evaluate() は手番側視点に変換しているので、ここでは先手視点の差分だけを返す。
+    let black_bonus = table[bk.index()];
+    let white_bonus = table[wk.flip().index()];
+    black_bonus - white_bonus
+}
+fn king_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
+    let (Some(black_king), Some(white_king)) =
+        (pos.board.king_square(Color::Black), pos.board.king_square(Color::White))
+    else {
+        return 0;
+    };
+
+    let black_score = king_safety_score_for(
+        black_king,
+        &effects[Color::Black as usize],
+        &effects[Color::White as usize],
+    );
+    let white_score = king_safety_score_for(
+        white_king,
+        &effects[Color::White as usize],
+        &effects[Color::Black as usize],
+    );
+
+    match pos.side_to_move {
+        Color::Black => black_score - white_score,
+        Color::White => white_score - black_score,
+    }
+}
+
+fn king_safety_score_for(
+    king_sq: Square,
+    own_effects: &[u8; SHOGI_BOARD_SIZE],
+    opp_effects: &[u8; SHOGI_BOARD_SIZE],
+) -> i32 {
+    let our_weights = king_safety_our_weights();
+    let their_weights = king_safety_their_weights();
+    let our_dir_rates = king_safety_our_dir_rates();
+    let their_dir_rates = king_safety_their_dir_rates();
+    let mut total = 0i32;
+
+    for idx in 0..SHOGI_BOARD_SIZE {
+        let sq = Square(idx as u8);
+        let dist = chebyshev_distance(king_sq, sq).min(8) as usize;
+        let dir = king_direction_bucket(king_sq, sq);
+        let own = multi_effect_value(own_effects[idx]);
+        let opp = multi_effect_value(opp_effects[idx]);
+        // 距離に基づく重みと方角レートを掛け合わせる。
+        let w_our = (our_weights[dist] as i64 * our_dir_rates[dir] as i64) / 1024;
+        let mut w_their = (their_weights[dist] as i64 * their_dir_rates[dir] as i64) / 1024;
+
+        // 玉頭方向（前方〜前方斜め）1〜2マスに対する敵利きの重みをわずかに強める。
+        // YaneuraOu の our_effect_rate/their_effect_rate に沿いつつ、危険帯だけ 10〜15% 程度ブーストする。
+        let is_forward_dir = matches!(dir, 0..=2);
+        if dist <= 2 && is_forward_dir {
+            const HEAD_THEIR_SCALE_X1024: i64 = 1150; // ≒ +12%
+            w_their = (w_their * HEAD_THEIR_SCALE_X1024) / 1024;
+        }
+
+        total += ((own as i64 * w_our) / (1024 * 1024)) as i32;
+        total -= ((opp as i64 * w_their) / (1024 * 1024)) as i32;
+    }
+
+    total
+}
+
+fn king_shell_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
+    // 玉の8近傍のカバー状況を軽く見る項。
+    // - 自玉周りで利きが薄い＋空き/敵駒のマスがあると減点
+    // - そこに味方駒が立っていれば小さく加点
+    const EMPTY_OR_ENEMY_PEN: i32 = 8;
+    const OWN_PIECE_BONUS_WEAK: i32 = 5;
+    const OWN_PIECE_BONUS_STRONG: i32 = 3;
+
+    let mut shell = [0i32; 2];
+
+    for color in [Color::Black, Color::White] {
+        let Some(king_sq) = pos.board.king_square(color) else {
+            continue;
+        };
+        let color_idx = color as usize;
+        let opp_idx = color.opposite() as usize;
+
+        for rank in 0..9u8 {
+            for file in 0..9u8 {
+                let sq = Square::new(file, rank);
+                if chebyshev_distance(king_sq, sq) != 1 {
+                    continue;
+                }
+                let idx = sq.index();
+                let effect_us = effects[color_idx][idx].min(2) as i32;
+                let effect_them = effects[opp_idx][idx].min(2) as i32;
+                let piece = pos.board.piece_on(sq);
+                let own_piece = matches!(piece, Some(p) if p.color == color);
+
+                if effect_us <= 1 {
+                    if own_piece {
+                        shell[color_idx] += OWN_PIECE_BONUS_WEAK;
+                    } else {
+                        shell[color_idx] -= EMPTY_OR_ENEMY_PEN;
+                    }
+                } else if own_piece {
+                    shell[color_idx] += OWN_PIECE_BONUS_STRONG + effect_them;
+                }
+            }
+        }
+    }
+
+    match pos.side_to_move {
+        Color::Black => shell[Color::Black as usize] - shell[Color::White as usize],
+        Color::White => shell[Color::White as usize] - shell[Color::Black as usize],
+    }
+}
+
+fn king_safety_our_dir_rates() -> &'static [i32; 10] {
+    static CELL: OnceLock<[i32; 10]> = OnceLock::new();
+    CELL.get_or_init(|| {
+        // YaneuraOu MATERIAL_LEVEL 8 の our_effect_rate と同じテーブル。
+        //   0 : 真上, 1 : 右上上, 2 : 右上, 3 : 右右上, 4 : 右,
+        //   5 : 右右下, 6 : 右下, 7 : 右下下, 8 : 真下, 9 : 同一升
+        [1120, 1872, 112, 760, 744, 880, 1320, 600, 904, 1024]
+    })
+}
+
+fn king_safety_their_dir_rates() -> &'static [i32; 10] {
+    static CELL: OnceLock<[i32; 10]> = OnceLock::new();
+    CELL.get_or_init(|| {
+        // YaneuraOu MATERIAL_LEVEL 8 の their_effect_rate と同じテーブル。
+        [1056, 1714, 1688, 1208, 248, 240, 496, 816, 928, 1024]
+    })
+}
+
+fn king_direction_bucket(king: Square, sq: Square) -> usize {
+    // 先手玉から見た方角バケット。YaneuraOu の direction_of() と同じ定義。
+    // file: 0=9筋..8=1筋, rank: 0=a..8=i。
+    let df0 = sq.file() as i32 - king.file() as i32;
+    let dr0 = sq.rank() as i32 - king.rank() as i32;
+    let mut df = df0;
+    let dr = dr0;
+    // sq が玉から見て右側にあればミラー（df > 0 なら符号反転）
+    if df > 0 {
+        df = -df;
+    }
+
+    if df == 0 && dr == 0 {
+        return 9;
+    }
+    if df == 0 && dr < 0 {
+        return 0;
+    }
+    if df > dr && dr < 0 {
+        return 1;
+    }
+    if df == dr && dr < 0 {
+        return 2;
+    }
+    if df < dr && dr < 0 {
+        return 3;
+    }
+    if df < 0 && dr == 0 {
+        return 4;
+    }
+    if df < -dr && dr > 0 {
+        return 5;
+    }
+    if df == -dr && dr > 0 {
+        return 6;
+    }
+    if df == 0 && dr > 0 {
+        return 8;
+    }
+    if df > -dr && dr > 0 {
+        return 7;
+    }
+    // 想定外のケースだが、安全側にフォールバック。
+    9
+}
+
+fn compute_effect_counts(pos: &Position) -> [[u8; SHOGI_BOARD_SIZE]; 2] {
+    let mut effects = [[0u8; SHOGI_BOARD_SIZE]; 2];
+    let occupied = pos.board.all_bb;
+
+    for color in [Color::Black, Color::White] {
+        accumulate_effects_for_color(pos, color, occupied, &mut effects[color as usize]);
+    }
+
+    effects
+}
+
+fn piece_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
+    const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 33, 43];
+    const THEIR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 113, 122];
+    const SCALE: i32 = 4096;
+    let mut raw = [0i32; 2];
+
+    for color in [Color::Black, Color::White] {
+        let mut bb = pos.board.occupied_bb[color as usize];
+        while let Some(sq) = bb.pop_lsb() {
+            let Some(piece) = pos.board.piece_on(sq) else {
+                continue;
+            };
+            if piece.color != color {
+                continue;
+            }
+            if piece.piece_type == PieceType::King {
+                continue;
+            }
+            let defenders = effects[color as usize][sq.index()].min(2) as usize;
+            let attackers = effects[color.opposite() as usize][sq.index()].min(2) as usize;
+            let piece_value = piece.value();
+            raw[color as usize] += piece_value * OUR_EFFECT_TO_OUR_PIECE[defenders] / SCALE;
+            raw[color as usize] -= piece_value * THEIR_EFFECT_TO_OUR_PIECE[attackers] / SCALE;
+        }
+    }
+
+    match pos.side_to_move {
+        Color::Black => raw[Color::Black as usize] - raw[Color::White as usize],
+        Color::White => raw[Color::White as usize] - raw[Color::Black as usize],
+    }
+}
+
+fn multi_effect_value(count: u8) -> i32 {
+    const TABLE: [i32; 11] = [
+        0, 1024, 1800, 2300, 2900, 3500, 3900, 4300, 4650, 5000, 5300,
+    ];
+    TABLE[usize::from(count.min(10))]
+}
+
+fn accumulate_effects_for_color(
+    pos: &Position,
+    color: Color,
+    occupied: Bitboard,
+    effects: &mut [u8; SHOGI_BOARD_SIZE],
+) {
+    for &piece_type in &ALL_PIECE_TYPES {
+        let mut bb = pos.board.piece_bb[color as usize][piece_type as usize];
+        while let Some(sq) = bb.pop_lsb() {
+            let Some(piece) = pos.board.piece_on(sq) else {
+                continue;
+            };
+            let mut attacks = piece_attack_bitboard(pos, sq, piece, occupied);
+            while let Some(target) = attacks.pop_lsb() {
+                let idx = target.index();
+                effects[idx] = effects[idx].saturating_add(1);
+            }
+        }
+    }
+}
+
+fn piece_attack_bitboard(pos: &Position, sq: Square, piece: Piece, occupied: Bitboard) -> Bitboard {
+    match piece.piece_type {
+        PieceType::Pawn => {
+            if piece.promoted {
+                attacks::gold_attacks(sq, piece.color)
+            } else {
+                attacks::pawn_attacks(sq, piece.color)
+            }
+        }
+        PieceType::Lance => {
+            if piece.promoted {
+                attacks::gold_attacks(sq, piece.color)
+            } else {
+                lance_attacks_blocked(pos, sq, piece.color)
+            }
+        }
+        PieceType::Knight => {
+            if piece.promoted {
+                attacks::gold_attacks(sq, piece.color)
+            } else {
+                attacks::knight_attacks(sq, piece.color)
+            }
+        }
+        PieceType::Silver => {
+            if piece.promoted {
+                attacks::gold_attacks(sq, piece.color)
+            } else {
+                attacks::silver_attacks(sq, piece.color)
+            }
+        }
+        PieceType::Gold => attacks::gold_attacks(sq, piece.color),
+        PieceType::King => attacks::king_attacks(sq),
+        PieceType::Bishop => {
+            let mut result = attacks::sliding_attacks(sq, occupied, PieceType::Bishop);
+            if piece.promoted {
+                result |= king_orthogonal_attacks(sq);
+            }
+            result
+        }
+        PieceType::Rook => {
+            let mut result = attacks::sliding_attacks(sq, occupied, PieceType::Rook);
+            if piece.promoted {
+                result |= king_diagonal_attacks(sq);
+            }
+            result
+        }
+    }
+}
+
+fn lance_attacks_blocked(pos: &Position, sq: Square, color: Color) -> Bitboard {
+    let mut attacks = Bitboard::EMPTY;
+    let file = sq.file();
+    let mut rank = sq.rank() as i8;
+    let step = if color == Color::Black { -1 } else { 1 };
+
+    loop {
+        rank += step;
+        if !(0..9).contains(&rank) {
+            break;
+        }
+        let target = Square::new(file, rank as u8);
+        attacks.set(target);
+        if pos.board.piece_on(target).is_some() {
+            break;
+        }
+    }
+
+    attacks
+}
+
+fn king_orthogonal_attacks(sq: Square) -> Bitboard {
+    let mut attacks = Bitboard::EMPTY;
+    let file = sq.file() as i8;
+    let rank = sq.rank() as i8;
+    for (df, dr) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+        let nf = file + df;
+        let nr = rank + dr;
+        if (0..9).contains(&nf) && (0..9).contains(&nr) {
+            attacks.set(Square::new(nf as u8, nr as u8));
+        }
+    }
+    attacks
+}
+
+fn king_diagonal_attacks(sq: Square) -> Bitboard {
+    let mut attacks = Bitboard::EMPTY;
+    let file = sq.file() as i8;
+    let rank = sq.rank() as i8;
+    for (df, dr) in [(-1, -1), (-1, 1), (1, -1), (1, 1)] {
+        let nf = file + df;
+        let nr = rank + dr;
+        if (0..9).contains(&nf) && (0..9).contains(&nr) {
+            attacks.set(Square::new(nf as u8, nr as u8));
+        }
+    }
+    attacks
+}
+
+fn chebyshev_distance(a: Square, b: Square) -> u8 {
+    let df = (a.file() as i32 - b.file() as i32).abs();
+    let dr = (a.rank() as i32 - b.rank() as i32).abs();
+    df.max(dr) as u8
 }
 
 #[cfg(test)]
@@ -528,223 +927,4 @@ mod tests {
         // Side to move = Black, penalty should be negative (our gold hanging)
         assert!(piece_safety_term(&pos, &effects) < 0);
     }
-}
-fn king_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
-    let (Some(black_king), Some(white_king)) =
-        (pos.board.king_square(Color::Black), pos.board.king_square(Color::White))
-    else {
-        return 0;
-    };
-
-    let black_score = king_safety_score_for(
-        black_king,
-        &effects[Color::Black as usize],
-        &effects[Color::White as usize],
-    );
-    let white_score = king_safety_score_for(
-        white_king,
-        &effects[Color::White as usize],
-        &effects[Color::Black as usize],
-    );
-
-    match pos.side_to_move {
-        Color::Black => black_score - white_score,
-        Color::White => white_score - black_score,
-    }
-}
-
-fn king_safety_score_for(
-    king_sq: Square,
-    own_effects: &[u8; SHOGI_BOARD_SIZE],
-    opp_effects: &[u8; SHOGI_BOARD_SIZE],
-) -> i32 {
-    let our_weights = king_safety_our_weights();
-    let their_weights = king_safety_their_weights();
-    let mut total = 0i32;
-
-    for idx in 0..SHOGI_BOARD_SIZE {
-        let sq = Square(idx as u8);
-        let dist = chebyshev_distance(king_sq, sq).min(8) as usize;
-        let own = multi_effect_value(own_effects[idx]);
-        let opp = multi_effect_value(opp_effects[idx]);
-        total += own * our_weights[dist] / (1024 * 1024);
-        total -= opp * their_weights[dist] / (1024 * 1024);
-    }
-
-    total
-}
-
-fn compute_effect_counts(pos: &Position) -> [[u8; SHOGI_BOARD_SIZE]; 2] {
-    let mut effects = [[0u8; SHOGI_BOARD_SIZE]; 2];
-    let occupied = pos.board.all_bb;
-
-    for color in [Color::Black, Color::White] {
-        accumulate_effects_for_color(pos, color, occupied, &mut effects[color as usize]);
-    }
-
-    effects
-}
-
-fn piece_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
-    const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 33, 43];
-    const THEIR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 113, 122];
-    const SCALE: i32 = 4096;
-    let mut raw = [0i32; 2];
-
-    for color in [Color::Black, Color::White] {
-        let mut bb = pos.board.occupied_bb[color as usize];
-        while let Some(sq) = bb.pop_lsb() {
-            let Some(piece) = pos.board.piece_on(sq) else {
-                continue;
-            };
-            if piece.color != color {
-                continue;
-            }
-            if piece.piece_type == PieceType::King {
-                continue;
-            }
-            let defenders = effects[color as usize][sq.index()].min(2) as usize;
-            let attackers = effects[color.opposite() as usize][sq.index()].min(2) as usize;
-            let piece_value = piece.value();
-            raw[color as usize] += piece_value * OUR_EFFECT_TO_OUR_PIECE[defenders] / SCALE;
-            raw[color as usize] -= piece_value * THEIR_EFFECT_TO_OUR_PIECE[attackers] / SCALE;
-        }
-    }
-
-    match pos.side_to_move {
-        Color::Black => raw[Color::Black as usize] - raw[Color::White as usize],
-        Color::White => raw[Color::White as usize] - raw[Color::Black as usize],
-    }
-}
-
-fn multi_effect_value(count: u8) -> i32 {
-    const TABLE: [i32; 11] = [
-        0, 1024, 1800, 2300, 2900, 3500, 3900, 4300, 4650, 5000, 5300,
-    ];
-    TABLE[usize::from(count.min(10))]
-}
-
-fn accumulate_effects_for_color(
-    pos: &Position,
-    color: Color,
-    occupied: Bitboard,
-    effects: &mut [u8; SHOGI_BOARD_SIZE],
-) {
-    for &piece_type in &ALL_PIECE_TYPES {
-        let mut bb = pos.board.piece_bb[color as usize][piece_type as usize];
-        while let Some(sq) = bb.pop_lsb() {
-            let Some(piece) = pos.board.piece_on(sq) else {
-                continue;
-            };
-            let mut attacks = piece_attack_bitboard(pos, sq, piece, occupied);
-            while let Some(target) = attacks.pop_lsb() {
-                let idx = target.index();
-                effects[idx] = effects[idx].saturating_add(1);
-            }
-        }
-    }
-}
-
-fn piece_attack_bitboard(pos: &Position, sq: Square, piece: Piece, occupied: Bitboard) -> Bitboard {
-    match piece.piece_type {
-        PieceType::Pawn => {
-            if piece.promoted {
-                attacks::gold_attacks(sq, piece.color)
-            } else {
-                attacks::pawn_attacks(sq, piece.color)
-            }
-        }
-        PieceType::Lance => {
-            if piece.promoted {
-                attacks::gold_attacks(sq, piece.color)
-            } else {
-                lance_attacks_blocked(pos, sq, piece.color)
-            }
-        }
-        PieceType::Knight => {
-            if piece.promoted {
-                attacks::gold_attacks(sq, piece.color)
-            } else {
-                attacks::knight_attacks(sq, piece.color)
-            }
-        }
-        PieceType::Silver => {
-            if piece.promoted {
-                attacks::gold_attacks(sq, piece.color)
-            } else {
-                attacks::silver_attacks(sq, piece.color)
-            }
-        }
-        PieceType::Gold => attacks::gold_attacks(sq, piece.color),
-        PieceType::King => attacks::king_attacks(sq),
-        PieceType::Bishop => {
-            let mut result = attacks::sliding_attacks(sq, occupied, PieceType::Bishop);
-            if piece.promoted {
-                result |= king_orthogonal_attacks(sq);
-            }
-            result
-        }
-        PieceType::Rook => {
-            let mut result = attacks::sliding_attacks(sq, occupied, PieceType::Rook);
-            if piece.promoted {
-                result |= king_diagonal_attacks(sq);
-            }
-            result
-        }
-    }
-}
-
-fn lance_attacks_blocked(pos: &Position, sq: Square, color: Color) -> Bitboard {
-    let mut attacks = Bitboard::EMPTY;
-    let file = sq.file();
-    let mut rank = sq.rank() as i8;
-    let step = if color == Color::Black { -1 } else { 1 };
-
-    loop {
-        rank += step;
-        if !(0..9).contains(&rank) {
-            break;
-        }
-        let target = Square::new(file, rank as u8);
-        attacks.set(target);
-        if pos.board.piece_on(target).is_some() {
-            break;
-        }
-    }
-
-    attacks
-}
-
-fn king_orthogonal_attacks(sq: Square) -> Bitboard {
-    let mut attacks = Bitboard::EMPTY;
-    let file = sq.file() as i8;
-    let rank = sq.rank() as i8;
-    for (df, dr) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
-        let nf = file + df;
-        let nr = rank + dr;
-        if (0..9).contains(&nf) && (0..9).contains(&nr) {
-            attacks.set(Square::new(nf as u8, nr as u8));
-        }
-    }
-    attacks
-}
-
-fn king_diagonal_attacks(sq: Square) -> Bitboard {
-    let mut attacks = Bitboard::EMPTY;
-    let file = sq.file() as i8;
-    let rank = sq.rank() as i8;
-    for (df, dr) in [(-1, -1), (-1, 1), (1, -1), (1, 1)] {
-        let nf = file + df;
-        let nr = rank + dr;
-        if (0..9).contains(&nf) && (0..9).contains(&nr) {
-            attacks.set(Square::new(nf as u8, nr as u8));
-        }
-    }
-    attacks
-}
-
-fn chebyshev_distance(a: Square, b: Square) -> u8 {
-    let df = (a.file() as i32 - b.file() as i32).abs();
-    let dr = (a.rank() as i32 - b.rank() as i32).abs();
-    df.max(dr) as u8
 }

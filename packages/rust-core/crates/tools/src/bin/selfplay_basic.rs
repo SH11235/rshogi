@@ -84,6 +84,12 @@ struct Cli {
     #[arg(long)]
     out: Option<PathBuf>,
 
+    /// Finalize 層（FinalizeSanity / RootEscape / RootSafeScan）をほぼ無効化するプロファイルを使う。
+    ///
+    /// 探索本体の挙動を観察したい計測用オプションであり、対局用の既定値変更は行わない。
+    #[arg(long, default_value_t = false)]
+    finalize_off_profile: bool,
+
     /// If set, stop a game early when Black's evaluation drops by at least this many centipawns
     /// between two consecutive Black moves (negative delta).
     ///
@@ -604,6 +610,13 @@ fn main() -> Result<()> {
         threads: cli.threads,
         hash_mb: cli.hash_mb,
     })?;
+
+    if cli.finalize_off_profile {
+        usi_engine.set_option_if_available("FinalizeSanity.Enabled", "false")?;
+        usi_engine.set_option_if_available("RootEscape.Enabled", "false")?;
+        usi_engine.set_option_if_available("RootSafeScan.Enabled", "false")?;
+        usi_engine.sync_ready()?;
+    }
 
     let mut basic = BasicOpponent::new(cli.basic_style);
     basic.enable_noise(cli.basic_noise);

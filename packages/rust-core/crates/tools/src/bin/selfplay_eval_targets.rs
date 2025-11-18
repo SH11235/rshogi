@@ -19,6 +19,18 @@ const DEFAULT_PROFILES: &[ProfileDef] = &[
         root_options: &[],
         env: &[],
     },
+    // 短TC（例: 1000ms）を想定したプロファイル。
+    // - RootSeeGate を有効化し、静かな手のうち XSEE が大きく悪いものをルートで間引く。
+    // - Quiet SEE Guard / capture futility は少し強め寄りの設定を想定（環境変数で制御）。
+    ProfileDef {
+        name: "short",
+        search_params: &[("RootBeamForceFullCount", "0")],
+        root_options: &[("RootSeeGate", "true"), ("RootSeeGate.XSEE", "150")],
+        env: &[
+            ("SHOGI_QUIET_SEE_GUARD", "1"),
+            ("SHOGI_CAPTURE_FUT_SCALE", "120"),
+        ],
+    },
     ProfileDef {
         name: "rootfull",
         search_params: &[("RootBeamForceFullCount", "4")],
