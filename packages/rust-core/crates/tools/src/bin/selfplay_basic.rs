@@ -685,10 +685,22 @@ fn main() -> Result<()> {
 
     // generate KIF automatically
     let kif_path = default_kif_path(&final_out);
-    if let Err(err) = convert_jsonl_to_kif(&final_out, &kif_path) {
-        eprintln!("failed to create KIF: {}", err);
-    } else {
-        println!("kif written to {}", kif_path.display());
+    match convert_jsonl_to_kif(&final_out, &kif_path) {
+        Ok(paths) if paths.is_empty() => {
+            eprintln!("failed to create KIF: no games found");
+        }
+        Ok(paths) if paths.len() == 1 => {
+            println!("kif written to {}", paths[0].display());
+        }
+        Ok(paths) => {
+            println!("kif written (per game):");
+            for p in paths {
+                println!("  {}", p.display());
+            }
+        }
+        Err(err) => {
+            eprintln!("failed to create KIF: {}", err);
+        }
     }
 
     Ok(())
