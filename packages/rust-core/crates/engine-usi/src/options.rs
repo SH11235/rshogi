@@ -346,7 +346,7 @@ fn collect_search_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
     );
     builder.search(
         "Eval.Material.KingEarlyMovePenaltyCp",
-        "option name Eval.Material.KingEarlyMovePenaltyCp type spin default 12 min 0 max 200"
+        "option name Eval.Material.KingEarlyMovePenaltyCp type spin default 20 min 0 max 200"
             .to_string(),
     );
     builder.search(

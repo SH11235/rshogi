@@ -2432,9 +2432,22 @@ pub fn finalize_and_send(
         chosen_mv = Some(replacement);
         chosen_src = FinalBestSource::Committed;
     }
-    let force_safe_scan =
-        result.and_then(|res| res.stats.root_verify_require_pass_failed).unwrap_or(0) != 0;
-    let safe_scan_cause = force_safe_scan.then_some("require_pass");
+    let (force_safe_scan, safe_scan_cause) = if let Some(res) = result {
+        let require_failed = res.stats.root_verify_require_pass_failed.unwrap_or(0) != 0;
+        if !require_failed {
+            (false, None)
+        } else {
+            match res.stats.root_verify_last_fail_kind {
+                // RootVerify が「相手の一手詰み」を検出した場合のみ Safe-Scan を強制する。
+                // SelfSee / OppXsee / EvalDrop など他の理由での require_pass 失敗は、
+                // RootEscape や探索側の静的ゲートに任せ、ここでは差し替えを強制しない。
+                Some(RootVerifyFailKind::MateInOne) => (true, Some("require_pass")),
+                _ => (false, None),
+            }
+        }
+    } else {
+        (false, None)
+    };
     if let Some((_, replacement)) = enforce_root_safe_scan(
         state,
         chosen_mv,
