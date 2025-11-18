@@ -232,7 +232,7 @@ fn rook_trapped_penalty_cp_atomic() -> &'static AtomicI32 {
 
 fn king_early_move_penalty_cp_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
-    CELL.get_or_init(|| AtomicI32::new(12))
+    CELL.get_or_init(|| AtomicI32::new(20))
 }
 
 fn king_early_move_max_ply_atomic() -> &'static AtomicI32 {
