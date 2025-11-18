@@ -1,7 +1,6 @@
 {
     "name": "rootfull_gates",
     "params": {
-        "RootBeamForceFullCount": 4,
         "RootSeeGate.XSEE": 0
     },
     "env": {

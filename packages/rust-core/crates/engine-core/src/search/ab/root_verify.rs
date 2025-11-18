@@ -19,7 +19,6 @@ use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::time::Instant;
 
-const MAX_VERIFY_CANDIDATES: usize = 4;
 pub(crate) const WIN_PROTECT_MIN_THINK_MS: u64 = 20;
 pub(crate) const WIN_PROTECT_DEPTH_LIMIT: u8 = 13;
 
@@ -46,6 +45,11 @@ struct RootVerifySettings {
     check_depth: i32,
     opp_see_min_cp: i32,
     major_loss_penalty_cp: i32,
+    require_pass: bool,
+    max_candidates: usize,
+    max_candidates_threat: usize,
+    max_defense_seeds: usize,
+    max_defense_seeds_threat: usize,
 }
 
 impl RootVerifySettings {
@@ -57,6 +61,27 @@ impl RootVerifySettings {
             check_depth: config::root_verify_check_depth() as i32,
             opp_see_min_cp: config::root_verify_opp_see_min_cp(),
             major_loss_penalty_cp: config::root_verify_major_loss_penalty_cp(),
+            require_pass: config::root_verify_require_pass(),
+            max_candidates: config::root_verify_max_candidates() as usize,
+            max_candidates_threat: config::root_verify_max_candidates_threat() as usize,
+            max_defense_seeds: config::root_verify_max_defense_seeds() as usize,
+            max_defense_seeds_threat: config::root_verify_max_defense_seeds_threat() as usize,
+        }
+    }
+
+    fn max_candidates(&self, threat: bool) -> usize {
+        if threat {
+            self.max_candidates_threat.max(1)
+        } else {
+            self.max_candidates.max(1)
+        }
+    }
+
+    fn max_defense_seeds(&self, threat: bool) -> usize {
+        if threat {
+            self.max_defense_seeds_threat
+        } else {
+            self.max_defense_seeds
         }
     }
 }
@@ -125,12 +150,21 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
         && stable_depth < WIN_PROTECT_DEPTH_LIMIT;
     let required = if win_protect_active { 2 } else { 1 };
 
+    let threat_mode = mate_distance(best_score).map(|dist| dist < 0).unwrap_or(false);
     let fallback_moves = if root_move_order.is_empty() {
         generate_move_order(backend, root)
     } else {
         root_move_order.to_vec()
     };
-    let mut candidates = collect_candidates(result, &fallback_moves, required);
+    let defense_seed_cap = settings.max_defense_seeds(threat_mode);
+    let defense_seeds = if defense_seed_cap > 0 {
+        defense_seed_moves(root, defense_seed_cap)
+    } else {
+        Vec::new()
+    };
+    let max_candidates = settings.max_candidates(threat_mode);
+    let mut candidates =
+        collect_candidates(result, &fallback_moves, &defense_seeds, required, max_candidates);
     if candidates.is_empty() {
         candidates.push(Candidate {
             mv: result.best_move.unwrap(),
@@ -139,7 +173,8 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
     }
     let mut accepted: Option<(Candidate, ProbeReport)> = None;
     let mut fallback: Option<(Candidate, ProbeReport)> = None;
-    for cand in candidates.iter().take(MAX_VERIFY_CANDIDATES) {
+    let verify_cap = max_candidates.max(required).max(1);
+    for cand in candidates.iter().take(verify_cap) {
         summary.checked += 1;
         let res = verify_candidate(backend, root, best_score, cand.mv, &settings);
         summary.total_elapsed_ms = summary.total_elapsed_ms.saturating_add(res.report.elapsed_ms);
@@ -149,6 +184,10 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
             if let VerifyFailReason::MateInOne { mv: mate_mv } = &reason {
                 result.stats.root_verify_rejected_move = Some(cand.mv);
                 result.stats.root_verify_mate_move = Some(*mate_mv);
+                crate::search::types::SearchStats::bump(
+                    &mut result.stats.root_verify_opp_mate_hits,
+                    1,
+                );
             }
             emit_fail_log(info, limits.info_string_callback.as_ref(), cand.mv, &reason);
             if fallback.as_ref().map(|(_, rep)| rep.eval < res.report.eval).unwrap_or(true) {
@@ -168,6 +207,17 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
         }
     }
 
+    let mut require_pass_failed = false;
+    if accepted.is_none() && settings.require_pass {
+        require_pass_failed = true;
+        if let Some(cb) = info {
+            cb(InfoEvent::String(String::from("root_verify require_pass fallback=safe")));
+        }
+        if let Some(cb) = limits.info_string_callback.as_ref() {
+            cb("root_verify require_pass fallback=safe");
+        }
+    }
+
     if let Some((cand, report)) = accepted.or(fallback) {
         if result.best_move != Some(cand.mv) {
             apply_move_selection(backend, root, result, limits, cand, report.eval);
@@ -177,6 +227,11 @@ pub(super) fn apply_root_post_verify<E: Evaluator + Send + Sync + 'static>(
             }
         }
         result.sync_from_primary_line();
+    }
+    if require_pass_failed {
+        result.stats.root_verify_require_pass_failed = Some(1);
+    } else {
+        result.stats.root_verify_require_pass_failed = None;
     }
     if let Some(cb) = info {
         cb(InfoEvent::String(format!(
@@ -397,9 +452,16 @@ fn can_promote(color: Color, from: Square, to: Square) -> bool {
     }
 }
 
-fn collect_candidates(result: &SearchResult, fallback: &[Move], required: usize) -> Vec<Candidate> {
+fn collect_candidates(
+    result: &SearchResult,
+    fallback: &[Move],
+    defense_seeds: &[Move],
+    required: usize,
+    max_candidates: usize,
+) -> Vec<Candidate> {
     let mut seen: HashSet<u32> = HashSet::new();
     let mut list: Vec<Candidate> = Vec::new();
+    let limit = max_candidates.max(required).max(1);
     if let Some(lines) = result.lines.as_ref() {
         for (idx, line) in lines.iter().enumerate() {
             let mv = line.root_move;
@@ -417,8 +479,8 @@ fn collect_candidates(result: &SearchResult, fallback: &[Move], required: usize)
         });
         seen.insert(mv.to_u32());
     }
-    for mv in fallback {
-        if list.len() >= MAX_VERIFY_CANDIDATES {
+    for mv in defense_seeds {
+        if list.len() >= limit {
             break;
         }
         if seen.insert(mv.to_u32()) {
@@ -427,6 +489,20 @@ fn collect_candidates(result: &SearchResult, fallback: &[Move], required: usize)
                 line_index: None,
             });
         }
+    }
+    for mv in fallback {
+        if list.len() >= limit {
+            break;
+        }
+        if seen.insert(mv.to_u32()) {
+            list.push(Candidate {
+                mv: *mv,
+                line_index: None,
+            });
+        }
+    }
+    if list.len() > limit {
+        list.truncate(limit);
     }
     if list.len() < required {
         list.resize_with(required, || Candidate {
@@ -464,6 +540,83 @@ fn generate_move_order<E: Evaluator + Send + Sync + 'static>(
         }
     }
     moves
+}
+
+fn chebyshev_distance(a: Square, b: Square) -> i32 {
+    let df = a.file() as i32 - b.file() as i32;
+    let dr = a.rank() as i32 - b.rank() as i32;
+    df.abs().max(dr.abs())
+}
+
+fn defense_seed_score(king_sq: Square, mv: Move) -> Option<i32> {
+    let to = mv.to();
+    let dist = chebyshev_distance(king_sq, to);
+    let mut score = 0i32;
+    if mv.is_drop() {
+        let pt = mv.drop_piece_type();
+        if dist <= 1 {
+            score += 100 - dist * 10;
+        } else if dist == 2 {
+            score += 40;
+        }
+        score += match pt {
+            PieceType::Pawn => 25,
+            PieceType::Gold => 45,
+            PieceType::Silver => 35,
+            PieceType::Knight => 30,
+            PieceType::Lance => 15,
+            PieceType::Rook | PieceType::Bishop => 20,
+            PieceType::King => 0,
+        };
+    } else {
+        if let Some(pt) = mv.piece_type() {
+            if pt == PieceType::King {
+                score += 80;
+            } else if matches!(pt, PieceType::Gold | PieceType::Silver) {
+                score += 20;
+            }
+        }
+        if let Some(from) = mv.from() {
+            let from_dist = chebyshev_distance(king_sq, from);
+            if from_dist <= 1 && dist > from_dist {
+                score += 35;
+            }
+        }
+        if dist <= 1 {
+            score += 30;
+        } else if dist == 2 {
+            score += 15;
+        }
+    }
+    if score > 0 {
+        Some(score - dist * 5)
+    } else {
+        None
+    }
+}
+
+fn defense_seed_moves(root: &Position, limit: usize) -> Vec<Move> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Some(king_sq) = root.king_square(root.side_to_move) else {
+        return Vec::new();
+    };
+    let mg = MoveGenerator::new();
+    let Ok(moves) = mg.generate_all(root) else {
+        return Vec::new();
+    };
+    let mut scored: Vec<(i32, Move)> = Vec::new();
+    for &mv in moves.as_slice() {
+        if !root.is_legal_move(mv) {
+            continue;
+        }
+        if let Some(score) = defense_seed_score(king_sq, mv) {
+            scored.push((score, mv));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_u32().cmp(&b.1.to_u32())));
+    scored.into_iter().take(limit).map(|(_, mv)| mv).collect()
 }
 
 fn apply_move_selection<E: Evaluator + Send + Sync + 'static>(
@@ -611,5 +764,15 @@ mod tests {
         let threat =
             mate1ply::enemy_mate_in_one_after(&mut root, mv).expect("mate threat expected");
         assert_eq!(move_to_usi(&threat), "4b9g+");
+    }
+
+    #[test]
+    fn defense_seed_picker_generates_adjacent_drop() {
+        let pos = Position::from_sfen(
+            "lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b P2p 1",
+        )
+        .expect("valid sfen");
+        let seeds = defense_seed_moves(&pos, 4);
+        assert!(!seeds.is_empty(), "expected defense seeds to generate moves for king shelter");
     }
 }
