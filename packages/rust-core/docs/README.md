@@ -52,17 +52,6 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**YaneuraOu SFEN形式**](reference/yaneuraou-sfen-format.md) - SFEN形式の仕様
 - [**Manifest v2（NNUE教師生成）**](reference/manifest_v2.md) - 親/partの責務、summaryのrunスコープ、K=3メトリクス
 
-## 📈 ドキュメント状態
-
-| カテゴリ | ドキュメント | 状態 | 最終更新 | 備考 |
-|---------|------------|------|----------|------|
-| **Architecture** | engine-search-redesign.md | ✅ Active | 2025-10 | ClassicBackend 再設計メモ |
-| **Architecture** | game-phase-module-guide.md | ✅ Active | 2025-08 | Phase 4実装完了 |
-| **Performance** | parallel-benchmark-guide.md | ✅ Active | 2025-08-09 | 新機能反映済み |
-| **Performance** | parallel-search-improvement.md | ✅ Completed | 2025-08-09 | Phase 6まで完了 |
-| **Tools** | debug-position-tool.md | ✅ Active | 2025-08 | CLAUDE.mdに記載 |
-| **Tools** | opening-book-tools-guide.md | ✅ Active | 2025-07 | 実装完了 |
-
 ## 🔧 主要ツール
 
 ### ベンチマークツール
@@ -89,26 +78,11 @@ cargo run --release --bin debug_position -- \
   --engine enhanced_nnue
 ```
 
-### プロファイリング
-```bash
-# Flamegraph生成
-cargo flamegraph --bin see_flamegraph -o flamegraph.svg
-```
-
-## 📋 開発ガイドライン
-
-開発時は以下のドキュメントも参照してください：
+## 📋 開発ガイドライン / その他リンク
 
 - [**CLAUDE.md**](../CLAUDE.md) - Claude Code向けの開発ガイドライン
 - [**Cargo.toml**](../Cargo.toml) - プロジェクト設定
-
-## 🔄 更新履歴
-
-| 日付 | 内容 |
-|------|------|
-| 2025-08-09 | ドキュメント全体を再構成、カテゴリ別に整理 |
-| 2025-08-08 | parallel_benchmarkツールに統計機能・JSON出力追加 |
-| 2025-07 | Opening Book関連ドキュメント統合 |
+- Selfplay ログ診断ワークフロー: [`docs/tuning-guide.md`](./tuning-guide.md#%E8%87%AA%E5%B7%B1%E5%AF%BE%E5%B1%80%E3%83%AD%E3%82%B0selfplay_basic%E3%81%8B%E3%82%89%E3%81%AE%E3%82%AF%E3%82%A4%E3%83%83%E3%82%AF%E8%A8%BA%E6%96%AD) を参照。
 
 ## 📌 メンテナンス方針
 
