@@ -11,6 +11,7 @@ use std::collections::HashMap;
 const REPETITION_PENALTY: i32 = 1000;
 const NOISE_BOUND: i32 = 10;
 
+/// ShogiHome の BasicPlayer に相当する簡易エンジンの戦型スタイル。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShogihomeBasicStyle {
     StaticRookV1,
@@ -112,6 +113,9 @@ fn promotion_gain(piece_type: PieceType) -> i32 {
     basic_piece_value(piece_type, true) - basic_piece_value(piece_type, false)
 }
 
+/// ShogiHome 互換の 1 手ヒューリスティック評価器。
+///
+/// `evaluate_move` は「手番側から見たスコア（歩=100 スケール）」を返します。
 pub struct BasicMoveEvaluator {
     style: ShogihomeBasicStyle,
 }
@@ -125,6 +129,9 @@ impl BasicMoveEvaluator {
         self.style
     }
 
+    /// 指定した局面と手を評価します。
+    ///
+    /// 手番側から見たスコアを返し、値が大きいほど良い手とみなします。
     pub fn evaluate_move(&self, pos: &Position, mv: Move) -> i32 {
         if self.style == ShogihomeBasicStyle::Random {
             return 0;
@@ -507,6 +514,11 @@ pub struct BasicSearchResult {
     pub score: i32,
 }
 
+/// ShogiHome BasicPlayer 互換の簡易探索エンジン。
+///
+/// - 評価には `BasicMoveEvaluator` を使用
+/// - 探索は浅いミニマックス + SEE + 千日手ペナルティ
+/// - ランダムノイズをオプションで付与可能
 pub struct BasicEngine {
     evaluator: BasicMoveEvaluator,
     movegen: MoveGenerator,
@@ -524,6 +536,7 @@ impl BasicEngine {
         }
     }
 
+    /// シードを指定して新しいエンジンを作成します（決定性テスト向け）。
     pub fn with_seed(style: ShogihomeBasicStyle, seed: u64) -> Self {
         Self {
             rng: Xoshiro256PlusPlus::seed_from_u64(seed),
@@ -535,6 +548,7 @@ impl BasicEngine {
         self.rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     }
 
+    /// 評価ノイズの ON/OFF を切り替えます。
     pub fn enable_noise(&mut self, enabled: bool) {
         self.noise = enabled;
     }
@@ -543,6 +557,10 @@ impl BasicEngine {
         self.evaluator.style()
     }
 
+    /// 指定局面から 1 手探索を行い、最善手とスコアを返します。
+    ///
+    /// `depth` は再帰深さ（1=1手読み、2=相手の応手まで）、
+    /// `repetition` は千日手候補判定に使用します。
     pub fn search(
         &mut self,
         root: &Position,
@@ -633,6 +651,9 @@ pub struct RepetitionTable {
 }
 
 impl RepetitionTable {
+    /// 局面履歴を集約して千日手候補テーブルを構築します。
+    ///
+    /// `pos.history` に含まれるハッシュと現在局面のハッシュをカウントします。
     pub fn from_position(pos: &Position) -> Self {
         let mut counts = HashMap::new();
         for &hash in &pos.history {
