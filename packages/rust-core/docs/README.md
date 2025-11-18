@@ -82,7 +82,7 @@ cargo run --release --bin debug_position -- \
 
 - [**CLAUDE.md**](../CLAUDE.md) - Claude Code向けの開発ガイドライン
 - [**Cargo.toml**](../Cargo.toml) - プロジェクト設定
-- Selfplay ログ診断ワークフロー: [`docs/tuning-guide.md`](./tuning-guide.md#%E8%87%AA%E5%B7%B1%E5%AF%BE%E5%B1%80%E3%83%AD%E3%82%B0selfplay_basic%E3%81%8B%E3%82%89%E3%81%AE%E3%82%AF%E3%82%A4%E3%83%83%E3%82%AF%E8%A8%BA%E6%96%AD) を参照。
+- Selfplay ログ診断ワークフロー: [`docs/selfplay-basic-analysis.md`](./selfplay-basic-analysis.md) を参照。
 
 ## 📌 メンテナンス方針
 
