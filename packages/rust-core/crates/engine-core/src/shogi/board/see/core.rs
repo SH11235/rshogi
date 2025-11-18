@@ -310,6 +310,7 @@ impl Position {
 
         // Get all attackers
         let mut attackers = self.get_all_attackers_to(to, occupied);
+        attackers.clear(from); // original square is empty in this hypothetical board
 
         let mut stm = self.side_to_move.opposite();
         // The first piece to be potentially recaptured is the initial attacker
@@ -445,8 +446,12 @@ impl Position {
             return 0;
         };
         let to = mv.to();
-        let Some(moved_pt) = mv.piece_type() else {
-            return 0;
+        let moved_pt = match mv.piece_type() {
+            Some(pt) => pt,
+            None => match self.piece_at(from) {
+                Some(piece) => piece.piece_type,
+                None => return 0,
+            },
         };
 
         #[cfg(debug_assertions)]
@@ -464,12 +469,25 @@ impl Position {
         occupied.clear(from);
         occupied.set(to);
 
+        let mut black_occupied = self.board.occupied_bb[Color::Black as usize];
+        let mut white_occupied = self.board.occupied_bb[Color::White as usize];
+        // Mirror the drop branch: per-color occupancy must reflect the hypothetical quiet move
+        // so `calculate_pins_for_see` can spot newly exposed or blocked sliders.
+        match self.side_to_move {
+            Color::Black => {
+                black_occupied.clear(from);
+                black_occupied.set(to);
+            }
+            Color::White => {
+                white_occupied.clear(from);
+                white_occupied.set(to);
+            }
+        }
+
         // Pin info and attackers in the hypothetical position
-        let (black_pins, white_pins) = self.calculate_pins_for_see(
-            occupied,
-            self.board.occupied_bb[Color::Black as usize],
-            self.board.occupied_bb[Color::White as usize],
-        );
+        let (black_pins, white_pins) =
+            self.calculate_pins_for_see(occupied, black_occupied, white_occupied);
+
         let mut attackers = self.get_all_attackers_to(to, occupied);
 
         // Gain-array exchange starting with opponent capture

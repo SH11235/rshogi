@@ -14,9 +14,8 @@ def build_common(threads:int, minthink:int):
     }
 
 PROFILES = [
-  ('base',  {'RootBeamForceFullCount':'0'},            {}),
-  ('rootfull', {'RootBeamForceFullCount':'4'},         {}),
-  ('gates', {'RootBeamForceFullCount':'0','RootSeeGate.XSEE':'0'}, {'SHOGI_QUIET_SEE_GUARD':'0'}),
+  ('base',  {},            {}),
+  ('gates', {'RootSeeGate.XSEE':'0'}, {'SHOGI_QUIET_SEE_GUARD':'0'}),
 ]
 
 def _read_until(fd, patterns, timeout_sec, out_lines):
