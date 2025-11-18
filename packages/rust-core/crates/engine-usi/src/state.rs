@@ -468,11 +468,11 @@ impl Default for UsiOptions {
             mate_postverify_exact_min_depth: 8,
             mate_postverify_exact_min_elapsed_ms: 400,
             // Guard rails
-            // デフォルトで Root SEE Gate を有効化し、XSEE=74cp（歩損相当）を初期値にする。
-            // YO系の運用に合わせ、危険な静手（着地でタダ取りされる手）を初期状態で抑制する。
+            // デフォルトでは RootVerify / WinProtect は無効化し、探索・評価本体の挙動を優先する。
+            // Root SEE Gate は危険な静手の初期フィルタとしてのみ残す。
             root_see_gate: true,
             root_see_gate_xsee_cp: 74,
-            root_verify_enabled: true,
+            root_verify_enabled: false,
             root_verify_max_ms: 8,
             root_verify_max_nodes: 150_000,
             root_verify_check_depth: 3,
@@ -483,7 +483,7 @@ impl Default for UsiOptions {
             root_verify_max_candidates_threat: 12,
             root_verify_max_defense_seeds: 4,
             root_verify_max_defense_seeds_threat: 12,
-            win_protect_enabled: true,
+            win_protect_enabled: false,
             win_protect_threshold_cp: 1_200,
             post_verify: true,
             post_verify_require_pass: true,

@@ -97,12 +97,12 @@ quit
 ### Root Post‑Verify / Win‑Protect（探索内ガード）
 
 - `RootVerify.*` オプションは、bestmove 確定直前に **drop 対応 SEE/XSEE + 軽探索 (depth=2〜3, 8ms/150k nodes)** を実行し、移動直後の大駒露出や単純な駒損を探索内で弾きます。
-  - `RootVerify.Enabled`（既定 ON）
+  - `RootVerify.Enabled`（既定 OFF、学習や selfplay では無効運用を推奨）
   - `RootVerify.MaxMs` / `MaxNodes`（軽探索の壁、既定 8ms / 150k nodes）
   - `RootVerify.CheckDepth`（既定 3）
   - `RootVerify.OppSEE_MinCp`（主要駒の XSEE 閾値、既定 0cp）
   - `RootVerify.MajorLossPenaltyCp`（評価悪化許容量、既定 1200cp）
-- `WinProtect.*` は **勝勢（既定 +1200cp 以上、stable_depth<13）** で Root Verify を必須化し、上位 2 手を強制ダブルチェックします。root 側の最小思考時間もしきい値（20ms）まで自動引き上げ、浅深度での早指し blunder を防ぎます。
+- `WinProtect.*` は **勝勢（既定 +1200cp 以上、stable_depth<13）** で Root Verify 連動の勝勢ガードを有効化し、上位手のダブルチェックと最低思考時間の底上げを行います（既定 OFF）。
 
 
 ## Finalize 層の軽ガード（要点）
