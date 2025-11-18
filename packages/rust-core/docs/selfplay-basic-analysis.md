@@ -24,6 +24,39 @@ cargo run --release -p tools --bin selfplay_basic -- \
   - 同名 `.info.jsonl` — `engine-usi` の `info` 行を JSON 化した診断ログ
   - 同名 `*.kif` / `*_gNN.kif` — 1 対局ごとの KIF（ゲーム数が複数なら `_g01`/`_g02`... と分割）
 
+### 1.1 早期終了オプション（評価値ドロップ検出）
+
+終局まで指し切る前に「本エンジン側の評価値が大きく落ちた対局だけを途中で止めて分析に回したい」場合は、  
+次の 2 つのオプションを併用します。
+
+```bash
+cargo run --release -p tools --bin selfplay_basic -- \
+  --games 1 \
+  --max-moves 512 \
+  --think-ms 5000 \
+  --threads 8 \
+  --basic-depth 2 \
+  --early-stop-delta-cp 400 \
+  --early-stop-follow-plies 4
+```
+
+- `--early-stop-delta-cp <N>`  
+  - 先手（本エンジン）の連続する 2 回の手番間で、`score_cp` の差分が **`-N`cp 以下** になったときに早期終了モードを起動します。  
+    - 例: `--early-stop-delta-cp 400` のとき、前回先手手番から -400cp 以上悪化した手を検出。
+  - 判定は `main_eval.score_cp` を使います（mate 評価のみの場合は対象外）。
+
+- `--early-stop-follow-plies <M>`（既定 `0`）  
+  - ドロップ検出後、さらに **M 手（plies）だけ局面を進めてから**その対局を終了します。  
+  - `0` の場合は、ドロップ検出後の手をログに記録した時点で即座に対局を打ち切り、結果は `draw` としてマークされます。
+
+この機能により、
+
+- `--max-moves` は十分大きく設定しておきつつ、
+- 本エンジンの評価が大きく崩れた対局だけを短く切り上げて、
+- その局面とログを `selfplay_blunder_report` / `selfplay_eval_targets` で重点的に調べる
+
+といった運用が可能になります。
+
 ## 2. ブランダー抽出 + ターゲット生成（selfplay_blunder_report）
 
 自己対局ログ（JSONL + info）から「評価が大きく落ちた手」と、その数手前の局面をターゲットとして抽出します。
@@ -111,4 +144,3 @@ cargo run -p tools --bin selfplay_eval_targets -- \
 
 Selfplay ログの解析に関しては、可能な限りこの Rust ツールチェーン（`selfplay_basic` / `selfplay_blunder_report` / `selfplay_eval_targets`）を正規ルートとして使用し、  
 Python の `scripts/analysis/*.py` は外部 USI ログの後処理に限って利用することを推奨します。
-
