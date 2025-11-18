@@ -90,7 +90,7 @@ struct Cli {
     /// 例: --early-stop-delta-cp 400 なら、前回の本エンジン評価から -400cp 以上悪化したタイミングを検出し、
     /// 後続の数手だけ指してから対局を打ち切る用途を想定。
     #[arg(long)]
-    early_stop_delta_cp: Option<i32>,
+    early_stop_delta_cp: Option<u32>,
 
     /// Number of additional plies to play after an early-stop drop has been detected.
     ///
@@ -351,6 +351,46 @@ struct InfoContext {
     side: Color,
 }
 
+#[derive(Default)]
+struct EarlyStopController {
+    threshold_cp: Option<i32>,
+    follow_plies: u32,
+    last_cp: Option<i32>,
+    remaining: Option<u32>,
+}
+
+impl EarlyStopController {
+    fn new(threshold_cp: Option<i32>, follow_plies: u32) -> Self {
+        Self {
+            threshold_cp,
+            follow_plies,
+            ..Self::default()
+        }
+    }
+
+    fn record_black_eval(&mut self, eval_cp: Option<i32>) {
+        if let Some(cp) = eval_cp {
+            if let (Some(prev), Some(threshold)) = (self.last_cp, self.threshold_cp) {
+                if self.remaining.is_none() && cp - prev <= -threshold {
+                    self.remaining = Some(self.follow_plies);
+                }
+            }
+            self.last_cp = Some(cp);
+        }
+    }
+
+    fn should_stop_now(&mut self) -> bool {
+        if let Some(rem) = self.remaining.as_mut() {
+            if *rem == 0 {
+                self.remaining = None;
+                return true;
+            }
+            *rem = rem.saturating_sub(1);
+        }
+        false
+    }
+}
+
 struct UsiEngineProcess {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -596,8 +636,10 @@ fn main() -> Result<()> {
         usi_engine.new_game()?;
         let mut pos = starts[(game_idx as usize) % starts.len()].clone();
         let mut outcome = GameOutcome::InProgress;
-        let mut last_main_cp: Option<i32> = None;
-        let mut early_stop_remaining: Option<u32> = None;
+        let mut early_stop = EarlyStopController::new(
+            cli.early_stop_delta_cp.map(|v| v as i32),
+            cli.early_stop_follow_plies,
+        );
 
         for ply_idx in 0..cli.max_moves {
             let side = pos.side_to_move;
@@ -648,47 +690,18 @@ fn main() -> Result<()> {
                     }
                 };
 
-                // 早期終了トリガの判定（本エンジン評価の差分が閾値以上の悪化かどうか）
-                if let Some(threshold) = cli.early_stop_delta_cp {
-                    if early_stop_remaining.is_none() {
-                        if let Some(ref eval_log) = move_record.main_eval {
-                            if let Some(cur_cp) = eval_log.score_cp {
-                                if let Some(prev_cp) = last_main_cp {
-                                    let delta = cur_cp - prev_cp;
-                                    if delta <= -threshold {
-                                        early_stop_remaining = Some(cli.early_stop_follow_plies);
-                                    }
-                                }
-                                last_main_cp = Some(cur_cp);
-                            }
-                        }
-                    }
-                } else if let Some(ref eval_log) = move_record.main_eval {
-                    // 閾値未指定時も last_main_cp は更新しておく（将来の拡張に備えつつ挙動は変えない）
-                    if let Some(cur_cp) = eval_log.score_cp {
-                        last_main_cp = Some(cur_cp);
-                    }
-                }
+                let eval_cp = move_record.main_eval.as_ref().and_then(|log| log.score_cp);
+                early_stop.record_black_eval(eval_cp);
 
                 let mut should_stop_after_this_move = false;
 
-                // 自然終局（投了/勝ち/手数上限）または早期終了カウンタの判定
                 if outcome != GameOutcome::InProgress {
-                    if outcome == GameOutcome::InProgress {
-                        outcome = GameOutcome::Draw;
-                    }
                     move_record.result = Some(outcome.label().to_string());
                     should_stop_after_this_move = true;
-                } else if let Some(rem) = early_stop_remaining.as_mut() {
-                    if *rem == 0 {
-                        if outcome == GameOutcome::InProgress {
-                            outcome = GameOutcome::Draw;
-                        }
-                        move_record.result = Some(outcome.label().to_string());
-                        should_stop_after_this_move = true;
-                    } else {
-                        *rem = rem.saturating_sub(1);
-                    }
+                } else if early_stop.should_stop_now() {
+                    outcome = GameOutcome::Draw;
+                    move_record.result = Some(outcome.label().to_string());
+                    should_stop_after_this_move = true;
                 } else if ply_idx + 1 == cli.max_moves {
                     if outcome == GameOutcome::InProgress {
                         outcome = GameOutcome::Draw;
@@ -699,7 +712,6 @@ fn main() -> Result<()> {
 
                 serde_json::to_writer(&mut writer, &move_record)?;
                 writer.write_all(b"\n")?;
-                writer.flush()?;
                 if should_stop_after_this_move {
                     break;
                 }
@@ -736,21 +748,12 @@ fn main() -> Result<()> {
                 let mut should_stop_after_this_move = false;
 
                 if outcome != GameOutcome::InProgress {
-                    if outcome == GameOutcome::InProgress {
-                        outcome = GameOutcome::Draw;
-                    }
                     move_record.result = Some(outcome.label().to_string());
                     should_stop_after_this_move = true;
-                } else if let Some(rem) = early_stop_remaining.as_mut() {
-                    if *rem == 0 {
-                        if outcome == GameOutcome::InProgress {
-                            outcome = GameOutcome::Draw;
-                        }
-                        move_record.result = Some(outcome.label().to_string());
-                        should_stop_after_this_move = true;
-                    } else {
-                        *rem = rem.saturating_sub(1);
-                    }
+                } else if early_stop.should_stop_now() {
+                    outcome = GameOutcome::Draw;
+                    move_record.result = Some(outcome.label().to_string());
+                    should_stop_after_this_move = true;
                 } else if ply_idx + 1 == cli.max_moves {
                     if outcome == GameOutcome::InProgress {
                         outcome = GameOutcome::Draw;
@@ -761,7 +764,6 @@ fn main() -> Result<()> {
 
                 serde_json::to_writer(&mut writer, &move_record)?;
                 writer.write_all(b"\n")?;
-                writer.flush()?;
                 if should_stop_after_this_move {
                     break;
                 }
@@ -1151,4 +1153,48 @@ fn write_metadata(
     serde_json::to_writer(&mut *writer, &meta)?;
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EarlyStopController;
+
+    #[test]
+    fn early_stop_not_triggered_without_threshold() {
+        let mut ctrl = EarlyStopController::new(None, 0);
+        ctrl.record_black_eval(Some(100));
+        ctrl.record_black_eval(Some(-400));
+        assert!(!ctrl.should_stop_now());
+    }
+
+    #[test]
+    fn early_stop_immediate_follow_zero() {
+        let mut ctrl = EarlyStopController::new(Some(200), 0);
+        ctrl.record_black_eval(Some(100));
+        ctrl.record_black_eval(Some(-150));
+        assert!(ctrl.should_stop_now());
+        assert!(!ctrl.should_stop_now());
+    }
+
+    #[test]
+    fn early_stop_delays_by_follow_plies() {
+        let mut ctrl = EarlyStopController::new(Some(200), 2);
+        ctrl.record_black_eval(Some(120));
+        ctrl.record_black_eval(Some(-200));
+        assert!(!ctrl.should_stop_now());
+        assert!(!ctrl.should_stop_now());
+        assert!(ctrl.should_stop_now());
+    }
+
+    #[test]
+    fn early_stop_does_not_retrigger_while_active() {
+        let mut ctrl = EarlyStopController::new(Some(200), 1);
+        ctrl.record_black_eval(Some(80));
+        ctrl.record_black_eval(Some(-150));
+        // Triggered, now remaining=1
+        ctrl.record_black_eval(Some(-400)); // drop while already tracking should be ignored
+        assert!(!ctrl.should_stop_now()); // consume remaining ply
+        assert!(ctrl.should_stop_now()); // stop and reset
+        assert!(!ctrl.should_stop_now());
+    }
 }
