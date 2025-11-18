@@ -119,8 +119,19 @@ struct GameEvalState {
 }
 
 impl GameEvalState {
-    fn record_position(&mut self, sfen: &str) {
-        self.history.push(sfen.to_string());
+    /// 記録済みの局面履歴に「ply 番目の手を指す前の局面」を保存する。
+    ///
+    /// - `ply` は 1 始まり（selfplay_basic の `ply` と一致）
+    /// - main エンジン手番のみ呼ばれるため、history 内には空文字のスロットも存在しうる
+    fn record_position(&mut self, ply: u32, sfen: &str) {
+        if ply == 0 {
+            return;
+        }
+        let idx = (ply - 1) as usize;
+        if self.history.len() <= idx {
+            self.history.resize(idx + 1, String::new());
+        }
+        self.history[idx] = sfen.to_string();
     }
 
     fn position_for_back(&self, ply: u32, back: u32) -> Option<String> {
@@ -131,7 +142,13 @@ impl GameEvalState {
             return None;
         }
         let idx = (ply - back - 1) as usize;
-        self.history.get(idx).map(|s| format!("sfen {}", s))
+        self.history.get(idx).and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(format!("sfen {}", s))
+            }
+        })
     }
 }
 
@@ -459,7 +476,7 @@ impl LogState {
             let eval_snapshot = record.main_eval.clone();
             let eval_cp = eval_snapshot.as_ref().and_then(|e| eval_to_cp(e, cfg.mate_cp));
             let state = self.game_states.entry(record.game_id).or_default();
-            state.record_position(&record.sfen_before);
+            state.record_position(record.ply, &record.sfen_before);
             if let (Some(prev_cp), Some(cur_cp)) = (state.last_cp, eval_cp) {
                 let delta = cur_cp - prev_cp;
                 if delta <= -cfg.threshold {
@@ -518,5 +535,67 @@ fn eval_to_cp(eval: &MainEvalLog, mate_cp: i32) -> Option<i32> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[test]
+    fn detects_drop_with_ply_based_history() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("selfplay_blunder_report_test.jsonl");
+        let mut f = File::create(&path).expect("create temp log");
+
+        // meta
+        writeln!(
+            f,
+            r#"{{"type":"meta","timestamp":"2025-11-18T00:00:00Z","engine_names":{{"black":"main","white":"basic"}}}}"#
+        )
+        .unwrap();
+        // ply 1: main eval = 0
+        writeln!(
+            f,
+            r#"{{"game_id":1,"ply":1,"sfen_before":"sfen0","move_usi":"7g7f","engine":"main","main_eval":{{"score_cp":0}}}}"#
+        )
+        .unwrap();
+        // ply 2: basic move (ignored)
+        writeln!(
+            f,
+            r#"{{"game_id":1,"ply":2,"sfen_before":"sfen1","move_usi":"3c3d","engine":"basic"}}"#
+        )
+        .unwrap();
+        // ply 3: main eval = -805 (delta = -805)
+        writeln!(
+            f,
+            r#"{{"game_id":1,"ply":3,"sfen_before":"sfen2","move_usi":"2g2f","engine":"main","main_eval":{{"score_cp":-805}}}}"#
+        )
+        .unwrap();
+
+        let mut state = LogState {
+            meta: None,
+            game_states: HashMap::new(),
+            blunders: Vec::new(),
+        };
+        let cfg = DetectionConfig {
+            threshold: 400,
+            mate_cp: 100_000,
+            max_info_lines: 10,
+            back_min: 0,
+            back_max: 0,
+        };
+        let info_map: HashMap<(u32, u32), Vec<String>> = HashMap::new();
+        state.process_log(&path, &info_map, &cfg).expect("process_log");
+
+        assert_eq!(state.blunders.len(), 1);
+        let b = &state.blunders[0];
+        assert_eq!(b.game_id, 1);
+        assert_eq!(b.ply, 3);
+        assert_eq!(b.delta_cp, -805);
+        assert_eq!(b.pre_position, "sfen sfen2");
     }
 }
