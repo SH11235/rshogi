@@ -398,6 +398,7 @@ cargo run --release -p tools --bin train_nnue -- \
   - `search_opening_book`: バイナリ定跡のハッシュ/局面検索
   - `sfen_hasher`: SFEN → ハッシュ値
   - `debug_position`: 局面デバッグ/パーフト/ムーブ適用
+  - `debug_position_multipv`: engine-usi を用いた MultiPV ベースの局面解析・候補手比較
   - `create_mock_nnue`: テスト用 NNUE 重み生成
 
 - ベンチマーク

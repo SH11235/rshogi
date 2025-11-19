@@ -5,3 +5,4 @@ pub mod kif_export;
 pub mod nnfc_v1;
 pub mod plot;
 pub mod stats;
+pub mod usi_multipv;

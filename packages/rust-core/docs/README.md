@@ -71,11 +71,20 @@ cargo run --release --bin lazy_smp_benchmark
 
 ### デバッグツール
 ```bash
-# 特定局面の調査
+# 特定局面の調査（エンジン内部デバッグ/手生成検証）
 cargo run --release --bin debug_position -- \
   --sfen "SFEN文字列" \
   --depth 10 \
   --engine enhanced_nnue
+
+# MultiPV 情報を用いた候補手比較（engine-usi 経由）
+cargo run --release -p tools --bin debug_position_multipv -- \
+  --sfen "SFEN文字列" \
+  --time-ms 1000 --multipv 4 \
+  --engine-path target/release/engine-usi \
+  --threads 8 \
+  --engine-type enhanced \
+  --profile short
 ```
 
 ## 📋 開発ガイドライン / その他リンク
