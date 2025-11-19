@@ -396,11 +396,13 @@ fn king_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i3
     };
 
     let black_score = king_safety_score_for(
+        Color::Black,
         black_king,
         &effects[Color::Black as usize],
         &effects[Color::White as usize],
     );
     let white_score = king_safety_score_for(
+        Color::White,
         white_king,
         &effects[Color::White as usize],
         &effects[Color::Black as usize],
@@ -413,6 +415,7 @@ fn king_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i3
 }
 
 fn king_safety_score_for(
+    color: Color,
     king_sq: Square,
     own_effects: &[u8; SHOGI_BOARD_SIZE],
     opp_effects: &[u8; SHOGI_BOARD_SIZE],
@@ -426,7 +429,14 @@ fn king_safety_score_for(
     for idx in 0..SHOGI_BOARD_SIZE {
         let sq = Square(idx as u8);
         let dist = chebyshev_distance(king_sq, sq).min(8) as usize;
-        let dir = king_direction_bucket(king_sq, sq);
+        // 方角バケットは常に「先手から見た」定義になっているため、
+        // 後手玉については盤面を 180 度回転させた座標系（YaneuraOu の Inv 相当）
+        // で direction を計算する。
+        let (king_for_dir, sq_for_dir) = match color {
+            Color::Black => (king_sq, sq),
+            Color::White => (king_sq.flip(), sq.flip()),
+        };
+        let dir = king_direction_bucket(king_for_dir, sq_for_dir);
         let own = multi_effect_value(own_effects[idx]);
         let opp = multi_effect_value(opp_effects[idx]);
         // 距離に基づく重みと方角レートを掛け合わせる。

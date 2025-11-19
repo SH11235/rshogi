@@ -335,10 +335,17 @@ fn capture_futility_skips_hopeless_capture() {
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+    // 攻め駒: 5g の銀。
     pos.board
         .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+    // ターゲット: 5f の金（これを取る手を考える）。
     pos.board
         .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    // 5e に金を置き、5g-5f のあと 5e-5f で銀を取り返せるようにしておく。
+    // SEE 的には「歩得どころか銀損」になる不利な取りにする。
+    pos.board
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    // 盤全体としても大きく不利な局面にしておく（評価値の赤字が十分大きいことを確認）。
     pos.board
         .put_piece(parse_usi_square("8a").unwrap(), Piece::new(PieceType::Rook, Color::White));
     pos.board

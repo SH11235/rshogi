@@ -139,6 +139,7 @@ pub(crate) fn capture_futility_should_skip(
     {
         return false;
     }
+
     use crate::search::constants::MATE_SCORE;
     if args.alpha.abs() >= MATE_SCORE - 100 {
         return false;
