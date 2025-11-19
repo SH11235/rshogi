@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use once_cell::sync::Lazy;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -127,19 +129,55 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| cli.targets.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
     std::fs::create_dir_all(&out_dir)?;
-    let mut all_results = Vec::new();
+    // 利用可能な論理CPU数とエンジンスレッド数から、同時に走らせるエンジンプロセス数を決定する。
+    let logical_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let reserved_for_os = 1usize;
+    let usable_cpus = logical_cpus.saturating_sub(reserved_for_os).max(1);
+    let engine_threads = cli.threads.max(1);
+    let max_parallel_engines = (usable_cpus / engine_threads).max(1);
 
-    for target in targets {
-        for profile in DEFAULT_PROFILES {
-            let result = run_profile(&cli, &engine_bin, &out_dir, &target, profile)
-                .with_context(|| format!("failed to evaluate {} ({})", target.tag, profile.name))?;
-            println!(
-                "{} {}: cp={:?} depth={:?}",
-                target.tag, profile.name, result.eval_cp, result.depth
-            );
-            all_results.push(result);
-        }
-    }
+    eprintln!(
+        "[selfplay_eval_targets] logical_cpus={} threads_per_engine={} max_parallel_engines={}",
+        logical_cpus, engine_threads, max_parallel_engines
+    );
+
+    // (target, profile) の組をジョブとして列挙し、元の順序を index で保持したまま並列実行する。
+    let jobs: Vec<(usize, &TargetSpec, &ProfileDef)> = targets
+        .iter()
+        .enumerate()
+        .flat_map(|(ti, target)| {
+            DEFAULT_PROFILES.iter().enumerate().map(move |(pi, profile)| {
+                let index = ti * DEFAULT_PROFILES.len() + pi;
+                (index, target, profile)
+            })
+        })
+        .collect();
+
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(max_parallel_engines)
+        .build()
+        .context("failed to build rayon thread pool")?;
+
+    let mut indexed_results: Vec<(usize, EvalResult)> =
+        pool.install(|| -> Result<Vec<(usize, EvalResult)>> {
+            jobs.par_iter()
+                .map(|(index, target, profile)| {
+                    let result = run_profile(&cli, &engine_bin, &out_dir, target, profile)
+                        .with_context(|| {
+                            format!("failed to evaluate {} ({})", target.tag, profile.name)
+                        })?;
+                    println!(
+                        "{} {}: cp={:?} depth={:?}",
+                        target.tag, profile.name, result.eval_cp, result.depth
+                    );
+                    Ok((*index, result))
+                })
+                .collect()
+        })?;
+
+    indexed_results.sort_by_key(|(index, _)| *index);
+    let all_results: Vec<EvalResult> =
+        indexed_results.into_iter().map(|(_, result)| result).collect();
 
     let summary_path = out_dir.join("summary.json");
     let mut writer = BufWriter::new(File::create(&summary_path)?);
@@ -351,4 +389,55 @@ fn resolve_engine_path(choice: &Option<PathBuf>) -> PathBuf {
         }
     }
     PathBuf::from("engine-usi")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_last_eval_picks_max_depth_and_value() {
+        let lines = vec![
+            "info depth 5 score cp 10 pv ...".to_string(),
+            "info depth 7 score cp -20 pv ...".to_string(),
+            "info depth 6 score cp 30 pv ...".to_string(),
+        ];
+        let (cp, depth) = parse_last_eval(&lines);
+        assert_eq!(cp, Some(-20));
+        assert_eq!(depth, Some(7));
+    }
+
+    #[test]
+    fn parse_last_eval_ignores_invalid_lines() {
+        let lines = vec![
+            "info depth X score cp 10 pv ...".to_string(),
+            "info depth 3 score cp notanint pv ...".to_string(),
+            "some unrelated line".to_string(),
+        ];
+        let (cp, depth) = parse_last_eval(&lines);
+        assert_eq!(cp, None);
+        assert_eq!(depth, None);
+    }
+
+    #[test]
+    fn extract_bestmove_returns_last_bestmove() {
+        let lines = vec![
+            "info depth 5 score cp 10 pv ...".to_string(),
+            "bestmove 7g7f ponder 3c3d".to_string(),
+            "info depth 6 score cp 20 pv ...".to_string(),
+            "bestmove 2g2f".to_string(),
+        ];
+        let bm = extract_bestmove(&lines);
+        assert_eq!(bm.as_deref(), Some("2g2f"));
+    }
+
+    #[test]
+    fn extract_bestmove_none_when_absent() {
+        let lines = vec![
+            "info depth 5 score cp 10 pv ...".to_string(),
+            "info depth 6 score cp 20 pv ...".to_string(),
+        ];
+        let bm = extract_bestmove(&lines);
+        assert!(bm.is_none());
+    }
 }

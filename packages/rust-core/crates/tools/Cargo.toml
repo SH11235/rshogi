@@ -19,7 +19,7 @@ chrono = { workspace = true }
 rand = { workspace = true }
 rand_xoshiro = { workspace = true }
 rand_chacha = "0.3"
-rayon = "1.10"
+rayon = "1.11"
 zstd = { version = "0.13", optional = true }
 bytemuck = "1.15"
 ctrlc = "3.4"

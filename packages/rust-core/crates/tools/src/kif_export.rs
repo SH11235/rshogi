@@ -223,8 +223,14 @@ fn format_move(ply: u32, pos: &Position, mv: engine_core::shogi::Move) -> String
     } else {
         let from = mv.from().expect("normal move must have source");
         let piece = pos.piece_at(from).expect("source must have piece");
-        let promoted = mv.is_promote() || piece.promoted;
-        piece_label(piece.piece_type, promoted).to_string()
+        if !piece.promoted && mv.is_promote() {
+            // 成りの初回だけは GUI 互換性のため「桂成」「香成」「銀成」「角成」「飛成」「歩成」など
+            // 元の駒 + 「成」となる表記を用いる。
+            promotion_move_label(piece.piece_type).to_string()
+        } else {
+            let promoted = mv.is_promote() || piece.promoted;
+            piece_label(piece.piece_type, promoted).to_string()
+        }
     };
     let from_suffix = if let Some(from) = mv.from() {
         format!("({}{})", square_file_digit(from), square_rank_digit(from))
@@ -332,8 +338,12 @@ fn move_to_text(pos: &Position, mv: engine_core::shogi::Move) -> String {
     } else {
         let from = mv.from().expect("normal move must have source");
         let piece = pos.piece_at(from).expect("source must have piece");
-        let promoted = mv.is_promote() || piece.promoted;
-        piece_label(piece.piece_type, promoted).to_string()
+        if !piece.promoted && mv.is_promote() {
+            promotion_move_label(piece.piece_type).to_string()
+        } else {
+            let promoted = mv.is_promote() || piece.promoted;
+            piece_label(piece.piece_type, promoted).to_string()
+        }
     };
     format!("{}{}{}", prefix, dest, label)
 }
@@ -354,5 +364,40 @@ fn piece_label(piece_type: PieceType, promoted: bool) -> &'static str {
         (PieceType::Rook, false) => "飛",
         (PieceType::Rook, true) => "龍",
         (PieceType::King, _) => "玉",
+    }
+}
+
+fn promotion_move_label(piece_type: PieceType) -> &'static str {
+    match piece_type {
+        PieceType::Pawn => "歩成",
+        PieceType::Lance => "香成",
+        PieceType::Knight => "桂成",
+        PieceType::Silver => "銀成",
+        PieceType::Bishop => "角成",
+        PieceType::Rook => "飛成",
+        PieceType::Gold | PieceType::King => piece_label(piece_type, true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pawn_promotion_uses_fu_nari_not_tokin_on_first_move() {
+        let pos = Position::startpos();
+        // 成りの初手（盤上の歩からの成り）は「と」ではなく「歩成」と表記されることを確認する。
+        let mv = parse_usi_move("7g7f+").expect("usi move");
+        let text = move_to_text(&pos, mv);
+        assert!(text.contains("歩成"), "expected promotion move to contain 歩成, got: {text}");
+    }
+
+    #[test]
+    fn knight_promotion_uses_keima_nari_on_first_move() {
+        let pos = Position::startpos();
+        // 桂の成り初手は「成桂」ではなく「桂成」と表記されることを確認する。
+        let mv = parse_usi_move("2i3g+").expect("usi move");
+        let text = move_to_text(&pos, mv);
+        assert!(text.contains("桂成"), "expected promotion move to contain 桂成, got: {text}");
     }
 }

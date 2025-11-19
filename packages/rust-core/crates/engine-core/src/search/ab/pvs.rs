@@ -724,6 +724,19 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             let same_to = prev_move.is_some_and(|pm| pm.to() == mv.to());
             let recap = is_capture
                 && prev_move.is_some_and(|pm| pm.is_capture_hint() && pm.to() == mv.to());
+            // 自玉からチェビシェフ距離2以内に着地する静止手は、受けや囲い直しとして重要なことが多い。
+            let mut is_king_zone_move = false;
+            if is_quiet {
+                if let Some(king_sq) = pos.board.king_square(pos.side_to_move) {
+                    let to = mv.to();
+                    let df = (king_sq.file() as i32 - to.file() as i32).abs();
+                    let dr = (king_sq.rank() as i32 - to.rank() as i32).abs();
+                    let dist = df.max(dr);
+                    if dist <= 2 {
+                        is_king_zone_move = true;
+                    }
+                }
+            }
             let mut stat_score =
                 ordering::stat_score(heur, pos, mv, prev_move, prev_prev_move, is_capture);
             if drop_bad {
@@ -761,7 +774,12 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 }
             }
 
-            if depth <= 3 && is_quiet && !stack[ply as usize].prev_risky && !threat_head_pawn {
+            if depth <= 3
+                && is_quiet
+                && !stack[ply as usize].prev_risky
+                && !threat_head_pawn
+                && !is_king_zone_move
+            {
                 let limit = dynp::lmp_limit_for_depth(depth);
                 if moveno > limit {
                     continue;
@@ -775,6 +793,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 && !pos.is_in_check()
                 && !stack[ply as usize].prev_risky
                 && !threat_head_pawn
+                && !is_king_zone_move
             {
                 use crate::search::constants::MATE_SCORE;
                 if alpha.abs() >= MATE_SCORE - 100 { /* mate帯近傍では futility 無効 */ }
@@ -848,6 +867,9 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         reduction = (reduction - 1).max(0);
                     } else if is_quiet && threat_head_pawn {
                         // 4) 頭に歩の脅威下: 静止手の減深を1段弱める
+                        reduction = (reduction - 1).max(0);
+                    } else if is_quiet && is_king_zone_move {
+                        // 5) 自玉近傍（距離2以内）への静止手: 受け・囲い直しとして重要なので減深を1段だけ弱める
                         reduction = (reduction - 1).max(0);
                     }
                 }
