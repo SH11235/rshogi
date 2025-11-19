@@ -13,39 +13,7 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
-
-const DEFAULT_PROFILES: &[ProfileDef] = &[
-    ProfileDef {
-        name: "base",
-        search_params: &[("RootBeamForceFullCount", "0")],
-        root_options: &[],
-        env: &[],
-    },
-    // 短TC（例: 1000ms）を想定したプロファイル。
-    // - RootSeeGate を有効化し、静かな手のうち XSEE が大きく悪いものをルートで間引く。
-    // - Quiet SEE Guard / capture futility は少し強め寄りの設定を想定（環境変数で制御）。
-    ProfileDef {
-        name: "short",
-        search_params: &[("RootBeamForceFullCount", "0")],
-        root_options: &[("RootSeeGate", "true"), ("RootSeeGate.XSEE", "150")],
-        env: &[
-            ("SHOGI_QUIET_SEE_GUARD", "1"),
-            ("SHOGI_CAPTURE_FUT_SCALE", "120"),
-        ],
-    },
-    ProfileDef {
-        name: "rootfull",
-        search_params: &[("RootBeamForceFullCount", "4")],
-        root_options: &[],
-        env: &[],
-    },
-    ProfileDef {
-        name: "gates",
-        search_params: &[("RootBeamForceFullCount", "0")],
-        root_options: &[("RootSeeGate.XSEE", "0")],
-        env: &[("SHOGI_QUIET_SEE_GUARD", "0")],
-    },
-];
+use tools::engine_profiles::{EngineProfilePreset, ENGINE_PROFILE_PRESETS};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -99,14 +67,6 @@ struct TargetSpec {
     back_plies: Option<u32>,
 }
 
-#[derive(Clone)]
-struct ProfileDef {
-    name: &'static str,
-    search_params: &'static [(&'static str, &'static str)],
-    root_options: &'static [(&'static str, &'static str)],
-    env: &'static [(&'static str, &'static str)],
-}
-
 #[derive(Serialize)]
 struct EvalResult {
     tag: String,
@@ -142,12 +102,12 @@ fn main() -> Result<()> {
     );
 
     // (target, profile) の組をジョブとして列挙し、元の順序を index で保持したまま並列実行する。
-    let jobs: Vec<(usize, &TargetSpec, &ProfileDef)> = targets
+    let jobs: Vec<(usize, &TargetSpec, &EngineProfilePreset)> = targets
         .iter()
         .enumerate()
         .flat_map(|(ti, target)| {
-            DEFAULT_PROFILES.iter().enumerate().map(move |(pi, profile)| {
-                let index = ti * DEFAULT_PROFILES.len() + pi;
+            ENGINE_PROFILE_PRESETS.iter().enumerate().map(move |(pi, profile)| {
+                let index = ti * ENGINE_PROFILE_PRESETS.len() + pi;
                 (index, target, profile)
             })
         })
@@ -203,7 +163,7 @@ fn run_profile(
     engine_bin: &Path,
     out_dir: &Path,
     target: &TargetSpec,
-    profile: &ProfileDef,
+    profile: &EngineProfilePreset,
 ) -> Result<EvalResult> {
     let mut cmd = Command::new(engine_bin);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -280,7 +240,7 @@ fn apply_base_options(stdin: &mut ChildStdin, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn apply_profile_options(stdin: &mut ChildStdin, profile: &ProfileDef) -> Result<()> {
+fn apply_profile_options(stdin: &mut ChildStdin, profile: &EngineProfilePreset) -> Result<()> {
     for (k, v) in profile.search_params {
         send_cmd(stdin, &format!("setoption name SearchParams.{k} value {v}"))?;
     }

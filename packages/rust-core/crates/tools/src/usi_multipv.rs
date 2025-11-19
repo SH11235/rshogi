@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::engine_profiles;
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 
@@ -271,35 +272,15 @@ fn apply_base_and_profile_options(
     engine.write_line(&format!("setoption name Threads value {}", engine_cfg.threads))?;
     engine.write_line(&format!("setoption name USI_Hash value {}", engine_cfg.hash_mb))?;
 
-    // selfplay_eval_targets の DEFAULT_PROFILES と同等のプリセット
-    if let Some(profile) = engine_cfg.profile.as_deref() {
-        match profile {
-            // base: RootBeamForceFullCount = 0
-            "base" => {
-                engine.write_line("setoption name SearchParams.RootBeamForceFullCount value 0")?;
+    // selfplay_eval_targets と共通のプリセットから SearchParams / Root オプションを適用
+    if let Some(profile_name) = engine_cfg.profile.as_deref() {
+        if let Some(preset) = engine_profiles::find_profile(profile_name) {
+            for (k, v) in preset.search_params {
+                engine.write_line(&format!("setoption name SearchParams.{k} value {v}"))?;
             }
-            // short:
-            // - RootBeamForceFullCount = 0
-            // - RootSeeGate = true
-            // - RootSeeGate.XSEE = 150
-            "short" => {
-                engine.write_line("setoption name SearchParams.RootBeamForceFullCount value 0")?;
-                engine.write_line("setoption name RootSeeGate value true")?;
-                engine.write_line("setoption name RootSeeGate.XSEE value 150")?;
+            for (k, v) in preset.root_options {
+                engine.write_line(&format!("setoption name {k} value {v}"))?;
             }
-            // rootfull: RootBeamForceFullCount = 4
-            "rootfull" => {
-                engine.write_line("setoption name SearchParams.RootBeamForceFullCount value 4")?;
-            }
-            // gates:
-            // - RootBeamForceFullCount = 0
-            // - RootSeeGate.XSEE = 0
-            "gates" => {
-                engine.write_line("setoption name SearchParams.RootBeamForceFullCount value 0")?;
-                engine.write_line("setoption name RootSeeGate.XSEE value 0")?;
-            }
-            // custom / その他: プロファイル由来の setoption は送らない
-            _ => {}
         }
     }
 

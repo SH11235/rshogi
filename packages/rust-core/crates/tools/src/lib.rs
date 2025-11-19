@@ -1,5 +1,6 @@
 pub mod classic_roundtrip;
 pub mod common;
+pub mod engine_profiles;
 pub mod io_detect;
 pub mod kif_export;
 pub mod nnfc_v1;

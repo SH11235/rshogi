@@ -6,7 +6,10 @@ use serde_json::to_writer_pretty;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
-use tools::usi_multipv::{run_multipv_analysis, AnalysisOutput, EngineConfig, PositionSpec, Score, SearchConfig};
+use tools::engine_profiles;
+use tools::usi_multipv::{
+    run_multipv_analysis, AnalysisOutput, EngineConfig, PositionSpec, Score, SearchConfig,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -68,9 +71,8 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let position = if args.sfen.trim_start().starts_with("position ") {
-        PositionSpec::FullCommand(args.sfen.clone())
-    } else if args.sfen.trim_start().starts_with("sfen ") {
+    let trimmed = args.sfen.trim_start();
+    let position = if trimmed.starts_with("position ") || trimmed.starts_with("sfen ") {
         PositionSpec::FullCommand(args.sfen.clone())
     } else {
         PositionSpec::BareSfen(args.sfen.clone())
@@ -82,25 +84,12 @@ fn main() -> Result<()> {
         threads: args.threads,
         hash_mb: args.hash_mb,
         profile: args.profile.clone(),
-        extra_env: {
-            let mut envs = Vec::new();
-            if let Some(ref profile) = args.profile {
-                match profile.as_str() {
-                    // short: Quiet SEE Guard ON, capture futility scale 強め
-                    "short" => {
-                        envs.push(("SHOGI_QUIET_SEE_GUARD".to_string(), "1".to_string()));
-                        envs.push(("SHOGI_CAPTURE_FUT_SCALE".to_string(), "120".to_string()));
-                    }
-                    // gates: Quiet SEE Guard OFF
-                    "gates" => {
-                        envs.push(("SHOGI_QUIET_SEE_GUARD".to_string(), "0".to_string()));
-                    }
-                    // base/rootfull/custom/その他: env 変更なし
-                    _ => {}
-                }
-            }
-            envs
-        },
+        extra_env: args
+            .profile
+            .as_deref()
+            .and_then(engine_profiles::find_profile)
+            .map(|preset| preset.env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+            .unwrap_or_default(),
     };
 
     // ベースとなる SearchConfig（time_ms / tag / raw_log_path は後でジョブごとに差し替え）
@@ -133,9 +122,7 @@ fn main() -> Result<()> {
 
     // 複数 time-ms をまとめて並列実行
     let times = args.time_ms.clone();
-    let logical_cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let logical_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let reserved_for_os = 1usize;
     let usable_cpus = logical_cpus.saturating_sub(reserved_for_os).max(1);
     let engine_threads = args.threads.max(1) as usize;
@@ -149,32 +136,24 @@ fn main() -> Result<()> {
         .build()
         .context("failed to build rayon thread pool")?;
 
-    let mut indexed_results =
-        pool.install(|| -> Result<Vec<(usize, AnalysisOutput)>> {
-            jobs.par_iter()
-                .map(|(idx, time_ms)| {
-                    let mut cfg = base_search_cfg.clone();
-                    cfg.time_ms = *time_ms;
-                    // バッチ時は tag / raw-log に time_ms を付けて区別しやすくする
-                    cfg.tag = args
-                        .tag
-                        .as_ref()
-                        .map(|t| format!("{t}-t{time_ms}ms"));
-                    cfg.raw_log_path = args
-                        .raw_log
-                        .as_ref()
-                        .map(|base| format!("{base}.t{time_ms}ms"));
+    let mut indexed_results = pool.install(|| -> Result<Vec<(usize, AnalysisOutput)>> {
+        jobs.par_iter()
+            .map(|(idx, time_ms)| {
+                let mut cfg = base_search_cfg.clone();
+                cfg.time_ms = *time_ms;
+                // バッチ時は tag / raw-log に time_ms を付けて区別しやすくする
+                cfg.tag = args.tag.as_ref().map(|t| format!("{t}-t{time_ms}ms"));
+                cfg.raw_log_path = args.raw_log.as_ref().map(|base| format!("{base}.t{time_ms}ms"));
 
-                    let result = run_multipv_analysis(&engine_cfg, &cfg)
-                        .with_context(|| format!("failed analysis for time-ms={time_ms}"))?;
-                    Ok((*idx, result))
-                })
-                .collect()
-        })?;
+                let result = run_multipv_analysis(&engine_cfg, &cfg)
+                    .with_context(|| format!("failed analysis for time-ms={time_ms}"))?;
+                Ok((*idx, result))
+            })
+            .collect()
+    })?;
 
     indexed_results.sort_by_key(|(idx, _)| *idx);
-    let results: Vec<AnalysisOutput> =
-        indexed_results.into_iter().map(|(_, r)| r).collect();
+    let results: Vec<AnalysisOutput> = indexed_results.into_iter().map(|(_, r)| r).collect();
 
     for (i, result) in results.iter().enumerate() {
         if i > 0 {
@@ -224,9 +203,6 @@ fn print_result(result: &AnalysisOutput) {
             Score::Mate(v) => format!("mate{}", v),
         };
         let pv_str = line.pv.join(" ");
-        println!(
-            "#{}: score={} depth={} pv={}",
-            line.rank, score_str, line.depth, pv_str
-        );
+        println!("#{}: score={} depth={} pv={}", line.rank, score_str, line.depth, pv_str);
     }
 }

@@ -3,7 +3,6 @@
 //! Simple material-based evaluation
 
 use crate::shogi::attacks;
-use crate::shogi::attacks::sliding_attacks;
 use crate::shogi::board::{Bitboard, Piece, Square};
 use crate::shogi::board_constants::SHOGI_BOARD_SIZE;
 use crate::shogi::piece_constants::{APERY_PIECE_VALUES, APERY_PROMOTED_PIECE_VALUES};
@@ -118,98 +117,59 @@ fn evaluate_material_apery_only(pos: &Position) -> i32 {
         score += value * (our_hand - their_hand);
     }
 
+    // Board piece 1/10 reduction (YaneuraOu MATERIAL 相当の補正)。
+    // 盤上の駒は持ち駒よりわずかに価値が低いとみなし、
+    // その差分（先手番側視点）を 1/10 程度だけ減算する。
+    //
+    // - YO の compute_eval では PieceValueM を用いて
+    //   board 上の駒ごとに piece_value * 104/1024 を引いている。
+    // - ここでは side_to_move 視点の差分として、
+    //   「盤上駒の駒得分」に対して同じ係数を掛けて減算する。
+    let board_scale_num: i32 = 104;
+    let board_scale_den: i32 = 1024;
+    let mut board_delta = 0;
+    for &pt in &ALL_PIECE_TYPES {
+        // 王は除外（YO 側では実質 0 扱いになっている）。
+        if pt == PieceType::King {
+            continue;
+        }
+        let piece_type = pt as usize;
+        let base_value = APERY_PIECE_VALUES[piece_type];
+
+        let our_pieces = pos.board.piece_bb[us as usize][piece_type];
+        let their_pieces = pos.board.piece_bb[them as usize][piece_type];
+        let our_count = our_pieces.count_ones() as i32;
+        let their_count = their_pieces.count_ones() as i32;
+
+        let diff = our_count - their_count;
+        if diff != 0 {
+            board_delta += (base_value * diff * board_scale_num) / board_scale_den;
+        }
+    }
+    score -= board_delta;
+
     score
+}
+
+/// デバッグ・分析用途向けの公開ラッパー。
+///
+/// - 「MATERIAL 部分だけ」の評価値を取得したいときに使用する。
+/// - 対局用ロジックからは `MaterialEvaluator` 経由の評価を利用し、この関数はあくまで
+///   評価分解やログ分析ツールから参照することを想定している。
+#[inline]
+pub fn evaluate_material_only_debug(pos: &Position) -> i32 {
+    evaluate_material_apery_only(pos)
 }
 
 /// Evaluate position from side to move perspective
 pub fn evaluate(pos: &Position) -> i32 {
-    // まず純粋な物質評価（Apery 駒価値＋持ち駒）を計算し、その上に軽量ヒューリスティックを積む。
+    // まず純粋な物質評価（Apery 駒価値＋持ち駒）を計算し、その上に king safety / king position を積む。
     let mut score = evaluate_material_apery_only(pos);
 
-    let us = pos.side_to_move;
-    let them = us.opposite();
-
-    // --- Lightweight material-side heuristics (enabled for Material evaluator)
-    // 1) Rook mobility (difference)
-    let rook_mob_cp = material_rook_mobility_cp();
-    if rook_mob_cp != 0 {
-        let occupied = pos.board.all_bb;
-        let our_rooks = pos.board.piece_bb[us as usize][PieceType::Rook as usize];
-        let their_rooks = pos.board.piece_bb[them as usize][PieceType::Rook as usize];
-        let our_occ = pos.board.occupied_bb[us as usize];
-        let their_occ = pos.board.occupied_bb[them as usize];
-
-        let mut mob_our = 0i32;
-        let mut bb = our_rooks;
-        while let Some(sq) = bb.pop_lsb() {
-            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !our_occ;
-            mob_our += moves.count_ones() as i32;
-        }
-        let mut mob_their = 0i32;
-        let mut bb2 = their_rooks;
-        while let Some(sq) = bb2.pop_lsb() {
-            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !their_occ;
-            mob_their += moves.count_ones() as i32;
-        }
-        score += rook_mob_cp * (mob_our - mob_their);
-    }
-
-    // 2) Rook trap (0-mobility) penalty (difference)
-    let rook_trap_pen = material_rook_trapped_penalty_cp();
-    if rook_trap_pen != 0 {
-        let occupied = pos.board.all_bb;
-        let our_rooks = pos.board.piece_bb[us as usize][PieceType::Rook as usize];
-        let their_rooks = pos.board.piece_bb[them as usize][PieceType::Rook as usize];
-        let our_occ = pos.board.occupied_bb[us as usize];
-        let their_occ = pos.board.occupied_bb[them as usize];
-
-        let mut trapped_our = 0i32;
-        let mut bb = our_rooks;
-        while let Some(sq) = bb.pop_lsb() {
-            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !our_occ;
-            if moves.count_ones() == 0 {
-                trapped_our += 1;
-            }
-        }
-        let mut trapped_their = 0i32;
-        let mut bb2 = their_rooks;
-        while let Some(sq) = bb2.pop_lsb() {
-            let moves = sliding_attacks(sq, occupied, PieceType::Rook) & !their_occ;
-            if moves.count_ones() == 0 {
-                trapped_their += 1;
-            }
-        }
-        // 相手側が閉じ込められていればプラス、自分側が閉じ込められていればマイナス
-        score += rook_trap_pen * (trapped_their - trapped_our);
-    }
-
-    // 3) Early king move penalty (difference)
-    let king_pen = material_king_early_move_penalty_cp();
-    let max_ply = material_king_early_move_max_ply();
-    if king_pen != 0 && (pos.ply as i32) <= max_ply {
-        let (bk_start, wk_start) = king_start_squares();
-        let our_king_moved = match us {
-            Color::Black => pos.board.king_square(us) != Some(bk_start),
-            Color::White => pos.board.king_square(us) != Some(wk_start),
-        } as i32;
-        let their_king_moved = match them {
-            Color::Black => pos.board.king_square(them) != Some(bk_start),
-            Color::White => pos.board.king_square(them) != Some(wk_start),
-        } as i32;
-        // 自分の早期王移動はペナルティ、相手の早期王移動はボーナス
-        score += king_pen * (their_king_moved - our_king_moved);
-    }
-
-    // 4) King safety (distance × effect counts + king position bonus + shell)
+    // --- King safety (distance × effect counts + king position bonus)
     let effects = compute_effect_counts(pos);
     score += king_safety_term(pos, &effects);
-    score += king_shell_term(pos, &effects);
     score += king_position_term(pos);
-    score += king_attacker_safety_term(pos, &effects);
-    score += piece_safety_term(pos, &effects);
-
-    // 4) Tempo bonus
-    score += material_tempo_cp();
 
     score
 }
@@ -227,22 +187,22 @@ impl Evaluator for MaterialEvaluator {
 // --- Runtime knobs for MaterialEvaluator lightweight terms
 fn tempo_cp_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
-    CELL.get_or_init(|| AtomicI32::new(10))
+    CELL.get_or_init(|| AtomicI32::new(0))
 }
 
 fn rook_mobility_cp_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
-    CELL.get_or_init(|| AtomicI32::new(2))
+    CELL.get_or_init(|| AtomicI32::new(0))
 }
 
 fn rook_trapped_penalty_cp_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
-    CELL.get_or_init(|| AtomicI32::new(30))
+    CELL.get_or_init(|| AtomicI32::new(0))
 }
 
 fn king_early_move_penalty_cp_atomic() -> &'static AtomicI32 {
     static CELL: OnceLock<AtomicI32> = OnceLock::new();
-    CELL.get_or_init(|| AtomicI32::new(20))
+    CELL.get_or_init(|| AtomicI32::new(0))
 }
 
 fn king_early_move_max_ply_atomic() -> &'static AtomicI32 {
@@ -306,7 +266,9 @@ fn king_safety_our_weights() -> &'static [i32; 9] {
     CELL.get_or_init(|| {
         let mut weights = [0; 9];
         for (dist, slot) in weights.iter_mut().enumerate() {
-            let base = 68 * 1024;
+            // YaneuraOu MATERIAL 相当の係数よりやや控えめに設定しつつ、
+            // 敵利き側の重み（king_safety_their_weights）とのバランスを安全寄りに取る。
+            let base = 60 * 1024;
             *slot = base / ((dist + 1) as i32);
         }
         weights
@@ -319,7 +281,8 @@ fn king_safety_their_weights() -> &'static [i32; 9] {
     CELL.get_or_init(|| {
         let mut weights = [0; 9];
         for (dist, slot) in weights.iter_mut().enumerate() {
-            let base = 96 * 1024;
+            // 敵利き側は自玉への脅威としてやや強めに評価する。
+            let base = 105 * 1024;
             *slot = base / ((dist + 1) as i32);
         }
         weights
@@ -327,17 +290,6 @@ fn king_safety_their_weights() -> &'static [i32; 9] {
 }
 
 #[inline]
-fn king_start_squares() -> (Square, Square) {
-    // Cache computed squares
-    static CELL: OnceLock<(Square, Square)> = OnceLock::new();
-    *CELL.get_or_init(|| {
-        // Black king start: 5i, White king start: 5a
-        let bk = Square::from_usi_chars('5', 'i').expect("valid square 5i");
-        let wk = Square::from_usi_chars('5', 'a').expect("valid square 5a");
-        (bk, wk)
-    })
-}
-
 fn king_pos_bonus_table() -> &'static [i32; SHOGI_BOARD_SIZE] {
     use crate::shogi::board_constants::{BOARD_FILES, BOARD_RANKS};
 
@@ -408,10 +360,15 @@ fn king_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i3
         &effects[Color::Black as usize],
     );
 
-    match pos.side_to_move {
+    // King safety 項全体のスケールを少し抑え、安全側寄りに調整する。
+    const KING_SAFETY_SCALE_X100: i32 = 60;
+
+    let diff = match pos.side_to_move {
         Color::Black => black_score - white_score,
         Color::White => white_score - black_score,
-    }
+    };
+
+    diff * KING_SAFETY_SCALE_X100 / 100
 }
 
 fn king_safety_score_for(
@@ -458,6 +415,7 @@ fn king_safety_score_for(
     total
 }
 
+#[cfg(test)]
 fn king_shell_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
     // 玉の8近傍のカバー状況を軽く見る項。
     // - 自玉周りで利きが薄い＋空き/敵駒のマスがあると減点
@@ -515,6 +473,7 @@ fn king_shell_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32
 /// NOTE: この項は YaneuraOu MATERIAL には存在しない「実験的な追加ペナルティ」です。
 ///       特徴量（利き本数・距離・駒種）は本家と揃えつつ、局所的に危険形を強調する目的で導入しており、
 ///       チューニングの結果次第では係数調整や撤廃を含めて見直す可能性があります。
+#[cfg(test)]
 fn king_attacker_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
     let mut danger = [0i32; 2];
 
@@ -643,8 +602,10 @@ fn compute_effect_counts(pos: &Position) -> [[u8; SHOGI_BOARD_SIZE]; 2] {
     effects
 }
 
+#[cfg(test)]
 fn piece_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
-    const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 33, 43];
+    // 自駒への利きによるボーナスはやや控えめにし、敵利きによるペナルティを相対的に重視する。
+    const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 20, 26];
     const THEIR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 113, 122];
     const SCALE: i32 = 4096;
     let mut raw = [0i32; 2];
@@ -1036,6 +997,9 @@ mod tests {
         let same_bucket = king_direction_bucket(king, king);
         assert_ne!(up_bucket, same_bucket, "up bucket should differ from same-square bucket");
         assert_ne!(down_bucket, same_bucket, "down bucket should differ from same-square bucket");
+        // 左右方向も「同一升」とは異なるバケットになっていることだけ確認する。
+        assert_ne!(right_bucket, same_bucket, "right bucket should differ from same-square bucket");
+        assert_ne!(left_bucket, same_bucket, "left bucket should differ from same-square bucket");
     }
 
     #[test]
