@@ -99,7 +99,8 @@ jobs:
           LOG_PATH="${RUNNER_TEMP}/sccache-error.log"
           echo "SCCACHE_ERROR_LOG=$LOG_PATH" >> $GITHUB_ENV
           echo "macOS sccache error log: $LOG_PATH"
-      - name: Enable sccache
+      - name: Enable sccache (skip on macOS)
+        if: runner.os != 'macOS'
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
@@ -171,6 +172,18 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Ignored tests that were run:" >> $GITHUB_STEP_SUMMARY
           cargo test -- --list --ignored 2>/dev/null | grep "test::" | sed 's/test::/- /' | sed 's/:.*$//' >> $GITHUB_STEP_SUMMARY || echo "Unable to list ignored tests" >> $GITHUB_STEP_SUMMARY
+      - name: Dump sccache error log (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          LOG="${RUNNER_TEMP}/sccache-error.log"
+          echo "sccache log path: $LOG"
+          if [ -f "$LOG" ]; then
+            echo "---- begin sccache-error.log ----"
+            sed -n '1,200p' "$LOG" || true
+            echo "---- end sccache-error.log ----"
+          else
+            echo "No sccache error log found at $LOG"
+          fi
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
