@@ -1125,7 +1125,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     tt.prefetch_l2(root_key, root.side_to_move);
                 }
                 if let Some(entry) = tt.probe(root_key, root.side_to_move) {
-                    hint_for_picker = entry.get_move();
+                    hint_for_picker = entry.get_move().and_then(|mv| root.reconstruct_tt_move(mv));
                 }
             }
             if let Some(cb) = limits.info_string_callback.as_ref() {
@@ -1364,18 +1364,47 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         if prev_score.abs() >= MATE_SCORE - 100
                             || hint_score.abs() >= MATE_SCORE - 100
                         {
+                            #[cfg(feature = "diagnostics")]
+                            if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                                eprintln!(
+                                    "[ASP_CENTER] depth={} prev_score={} hint_score={} near_mate=true center={}",
+                                    d, prev_score, hint_score, prev_score
+                                );
+                            }
                             prev_score
                         } else {
                             // Weighted average with i64 intermediate calculation to prevent overflow
                             // in case SEARCH_INF or coefficients are changed in the future
                             let c =
                                 (7_i64 * prev_score as i64 + 3_i64 * hint_score as i64) / 10_i64;
-                            c.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                            let center = c.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                            #[cfg(feature = "diagnostics")]
+                            if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                                eprintln!(
+                                    "[ASP_CENTER] depth={} prev_score={} hint_score={} smoothed=true center={}",
+                                    d, prev_score, hint_score, center
+                                );
+                            }
+                            center
                         }
                     } else {
+                        #[cfg(feature = "diagnostics")]
+                        if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                            eprintln!(
+                                "[ASP_CENTER] depth={} prev_score={} no_hint=true center={}",
+                                d, prev_score, prev_score
+                            );
+                        }
                         prev_score
                     }
                 } else {
+                    #[cfg(feature = "diagnostics")]
+                    if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                        eprintln!(
+                            "[ASP_CENTER] depth={} prev_score={} early_depth=true center={}",
+                            d, prev_score, prev_score
+                        );
+                    }
                     prev_score
                 };
 
@@ -1415,6 +1444,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     .min(ASPIRATION_DELTA_MAX);
                     alpha = aspiration_center - delta;
                     beta = aspiration_center + delta;
+                }
+                #[cfg(feature = "diagnostics")]
+                if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                    eprintln!(
+                        "[ASP_WINDOW] depth={} center={} delta={} alpha={} beta={}",
+                        d, aspiration_center, delta, alpha, beta
+                    );
                 }
                 let mut window_alpha = alpha;
                 let mut window_beta = beta;
@@ -1559,6 +1595,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             lmr_blocked_recapture: &depth_lmr_blocked_recapture,
                             evasion_sparsity_ext: &depth_evasion_sparsity_ext,
                         };
+                        #[cfg(feature = "diagnostics")]
+                        if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                            eprintln!(
+                                "[SEARCH_ROOT_MOVE_START] depth={} idx={} mv={} promote={} alpha={} beta={}",
+                                d,
+                                idx,
+                                crate::usi::move_to_usi(&mv),
+                                mv.is_promote(),
+                                alpha,
+                                beta
+                            );
+                        }
                         let score = self.search_root_move(
                             RootMoveKeyArgs {
                                 root,
@@ -1572,9 +1620,31 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                             &mut state,
                             &counters,
                         );
+                        #[cfg(feature = "diagnostics")]
+                        if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                            eprintln!(
+                                "[SEARCH_ROOT_MOVE_END] depth={} idx={} mv={} promote={} score={} local_best={}",
+                                d,
+                                idx,
+                                crate::usi::move_to_usi(&mv),
+                                mv.is_promote(),
+                                score,
+                                local_best
+                            );
+                        }
                         if score > local_best {
                             local_best = score;
                             local_best_mv = Some(mv);
+                            #[cfg(feature = "diagnostics")]
+                            if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                                eprintln!(
+                                    "[NEW_LOCAL_BEST] depth={} mv={} promote={} score={}",
+                                    d,
+                                    crate::usi::move_to_usi(&mv),
+                                    mv.is_promote(),
+                                    score
+                                );
+                            }
                         }
                         if score > alpha {
                             alpha = score;
@@ -1616,8 +1686,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         }
                     }
                     if local_best <= old_alpha {
-                        let new_alpha = old_alpha.saturating_sub(2 * delta).max(i32::MIN / 2);
+                        // Fixed: old_alpha - 2*delta was too aggressive, causing excessive narrowing
+                        // Changed to old_alpha - delta for more balanced aspiration window adjustment
+                        let new_alpha = old_alpha.saturating_sub(delta).max(i32::MIN / 2);
                         let new_beta = old_beta;
+                        #[cfg(feature = "diagnostics")]
+                        if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                            eprintln!(
+                                "[ASP_FAIL_LOW] depth={} local_best={} old_alpha={} old_beta={} delta={} new_alpha={} new_beta={}",
+                                d, local_best, old_alpha, old_beta, delta, new_alpha, new_beta
+                            );
+                        }
                         if let Some(cb) = info {
                             cb(InfoEvent::Aspiration {
                                 outcome: crate::search::api::AspirationOutcome::FailLow,
@@ -1807,6 +1886,21 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 }
                             }
                         }
+                        #[cfg(feature = "diagnostics")]
+                        if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                            eprintln!(
+                                "[BEST_MOVE_DECISION] depth={} m={} m.promote={} local_best={} adopt_prev={} adopt_mv={} adopt_mv.promote={} changed={} improve_cp={}",
+                                d,
+                                crate::usi::move_to_usi(&m),
+                                m.is_promote(),
+                                local_best,
+                                adopt_prev,
+                                crate::usi::move_to_usi(&adopt_mv),
+                                adopt_mv.is_promote(),
+                                changed,
+                                local_best.saturating_sub(prev_score)
+                            );
+                        }
                         best = Some(adopt_mv);
                         best_score = if adopt_mv.to_u32() == m.to_u32() {
                             local_best
@@ -1871,6 +1965,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     if pv_idx == 1 {
                         verify_window_alpha = orig_alpha;
                         verify_window_beta = orig_beta;
+                    }
+                    #[cfg(feature = "diagnostics")]
+                    if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                        eprintln!(
+                            "[ROOT_LINE_CREATED] depth={} root_move={} root_move.promote={} score_internal={} pv_idx={}",
+                            d,
+                            crate::usi::move_to_usi(&m),
+                            m.is_promote(),
+                            local_best,
+                            pv_idx
+                        );
                     }
                     let line = RootLine {
                         multipv_index: pv_idx as u8,
@@ -1960,6 +2065,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                 root.side_to_move,
                             );
                             args.is_pv = true;
+
+                            #[cfg(feature = "diagnostics")]
+                            if std::env::var("SHOGI_DEBUG_TT_STORE").is_ok() {
+                                let mv_str = crate::usi::move_to_usi(&best_mv_root);
+                                eprintln!(
+                                    "[TT_STORE_ROOT_VERIFY] depth={} hash={:016x} score={} node_type={:?} mv={} pv_idx={}",
+                                    d, root_key, store_score, node_type_for_store, mv_str, pv_idx
+                                );
+                            }
+
                             tt.store(args);
                         }
                     }
@@ -2255,6 +2370,16 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                                             root.side_to_move,
                                         );
                                         args.is_pv = true;
+
+                                        #[cfg(feature = "diagnostics")]
+                                        if std::env::var("SHOGI_DEBUG_TT_STORE").is_ok() {
+                                            let mv_str = crate::usi::move_to_usi(&mv0);
+                                            eprintln!(
+                                                "[TT_STORE_ROOT_ZERO_WIN] depth={} hash={:016x} score={} node_type=Exact mv={} confirmed={}",
+                                                d, root_key, store_score, mv_str, confirmed
+                                            );
+                                        }
+
                                         tt.store(args);
                                     }
                                 }
@@ -2520,6 +2645,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 best_move_out = Some(first.root_move);
                 score_out = first.score_internal;
                 node_type_out = first.bound;
+                #[cfg(feature = "diagnostics")]
+                if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                    eprintln!(
+                        "[BEST_MOVE_OUTPUT_STABLE] root_move={} promote={} score={}",
+                        crate::usi::move_to_usi(&first.root_move),
+                        first.root_move.is_promote(),
+                        first.score_internal
+                    );
+                }
             } else {
                 best_move_out = snap.best;
                 score_out = snap.score_cp;
@@ -2540,6 +2674,15 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 best_move_out = Some(first.root_move);
                 score_out = first.score_internal;
                 node_type_out = first.bound;
+                #[cfg(feature = "diagnostics")]
+                if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                    eprintln!(
+                        "[BEST_MOVE_OUTPUT_ANY] root_move={} promote={} score={}",
+                        crate::usi::move_to_usi(&first.root_move),
+                        first.root_move.is_promote(),
+                        first.score_internal
+                    );
+                }
             } else {
                 best_move_out = snap.best;
                 score_out = snap.score_cp;
@@ -2550,6 +2693,14 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         if best_move_out.is_none() {
             if let Some(first) = stats.pv.first() {
                 best_move_out = Some(*first);
+                #[cfg(feature = "diagnostics")]
+                if std::env::var("SHOGI_DEBUG_BEST_MOVE").is_ok() {
+                    eprintln!(
+                        "[BEST_MOVE_OUTPUT_PV] first={} promote={}",
+                        crate::usi::move_to_usi(first),
+                        first.is_promote()
+                    );
+                }
             }
         }
         if best_move_out.is_none() {

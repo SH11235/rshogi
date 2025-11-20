@@ -4,6 +4,7 @@
 //! for creating and querying positions.
 
 use crate::shogi::board::{Bitboard, Board, Color, Piece, PieceType, Square};
+use crate::shogi::Move;
 use crate::shogi::NUM_HAND_PIECE_TYPES;
 
 /// Information needed to undo a move
@@ -259,6 +260,85 @@ impl Position {
     /// Get piece at square
     pub fn piece_at(&self, sq: Square) -> Option<Piece> {
         self.board.piece_on(sq)
+    }
+
+    /// Reconstruct complete Move from TT's incomplete 16-bit Move
+    ///
+    /// TT stores only 16 bits of Move (dst, src, promote, drop flags),
+    /// losing piece_type and captured_type information (bits 16-31).
+    /// This function uses current Position to reconstruct the complete 32-bit Move.
+    ///
+    /// Returns None if the incomplete move is invalid for the current position.
+    pub fn reconstruct_tt_move(&self, incomplete_move: Move) -> Option<Move> {
+        if incomplete_move.is_null() {
+            return None;
+        }
+
+        // Drop moves are fully represented in 16 bits, return as-is
+        if incomplete_move.is_drop() {
+            return Some(incomplete_move);
+        }
+
+        // Normal move: reconstruct with piece_type and captured_type
+        let from = incomplete_move.from()?;
+        let to = incomplete_move.to();
+        let promote = incomplete_move.is_promote();
+
+        // Get moving piece from source square
+        let piece = self.piece_at(from)?;
+
+        // Verify that the piece belongs to the current side to move
+        // (similar to YaneuraOu's to_move() validation)
+        if piece.color != self.side_to_move {
+            #[cfg(feature = "diagnostics")]
+            eprintln!(
+                "[TT_RECONSTRUCT] Color mismatch: piece.color={:?} side_to_move={:?} move={}",
+                piece.color, self.side_to_move, incomplete_move
+            );
+            return None;
+        }
+
+        let piece_type = piece.piece_type;
+
+        // If promoting, verify that the piece can promote
+        // (similar to YaneuraOu's is_non_promotable_piece check)
+        if promote {
+            use crate::shogi::PieceType::*;
+            match piece_type {
+                King | Gold => {
+                    #[cfg(feature = "diagnostics")]
+                    eprintln!(
+                        "[TT_RECONSTRUCT] Cannot promote King/Gold: move={}",
+                        incomplete_move
+                    );
+                    return None;
+                }
+                _ if piece.promoted => {
+                    #[cfg(feature = "diagnostics")]
+                    eprintln!("[TT_RECONSTRUCT] Already promoted: move={}", incomplete_move);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
+        // Get captured piece from destination square (if any)
+        let captured_type = self.piece_at(to).map(|p| p.piece_type);
+
+        let reconstructed = Move::normal_with_piece(from, to, promote, piece_type, captured_type);
+
+        #[cfg(feature = "diagnostics")]
+        if std::env::var("SHOGI_DEBUG_TT_RECONSTRUCT").is_ok() {
+            eprintln!(
+                "[TT_RECONSTRUCT] Success: incomplete={} promote={} -> reconstructed={} promote={}",
+                incomplete_move,
+                incomplete_move.is_promote(),
+                reconstructed,
+                reconstructed.is_promote()
+            );
+        }
+
+        Some(reconstructed)
     }
 
     /// Count pieces of given type on board for both colors
