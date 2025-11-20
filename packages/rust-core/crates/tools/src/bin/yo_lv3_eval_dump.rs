@@ -41,22 +41,23 @@ impl UsiEngine {
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let stdout = BufReader::new(stdout);
 
-        Ok(Self { child, stdin, stdout })
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+        })
     }
 
     fn write_line(&mut self, line: &str) -> Result<()> {
         self.stdin
             .write_all(line.as_bytes())
             .context("failed to write to engine stdin")?;
-        self.stdin
-            .write_all(b"\n")
-            .context("failed to write newline to engine stdin")?;
+        self.stdin.write_all(b"\n").context("failed to write newline to engine stdin")?;
         self.stdin.flush().ok();
         Ok(())
     }
 
     fn read_line_with_timeout(&mut self, timeout: Duration) -> Result<Option<String>> {
-        use std::io::Read;
         use std::time::Instant;
 
         let start = Instant::now();
@@ -139,11 +140,9 @@ fn main() -> Result<()> {
     engine.write_line("setoption name Threads value 1")?;
     engine.write_line("setoption name USI_Hash value 16")?;
     engine.write_line("isready")?;
-    loop {
-        if let Some(line) = engine.read_line_with_timeout(Duration::from_millis(1000))? {
-            if line.contains("readyok") {
-                break;
-            }
+    while let Some(line) = engine.read_line_with_timeout(Duration::from_millis(1000))? {
+        if line.contains("readyok") {
+            break;
         }
     }
 
@@ -153,8 +152,8 @@ fn main() -> Result<()> {
             .strip_prefix("sfen ")
             .unwrap_or_else(|| sfen.strip_prefix("position sfen ").unwrap_or(sfen));
 
-        let pos =
-            Position::from_sfen(sfen_core).map_err(|e| anyhow!("invalid SFEN: {sfen_core}: {e}"))?;
+        let pos = Position::from_sfen(sfen_core)
+            .map_err(|e| anyhow!("invalid SFEN: {sfen_core}: {e}"))?;
         let rust_lv3 = evaluate_yo_material_lv3(&pos);
 
         // position + go depth 0
@@ -162,15 +161,11 @@ fn main() -> Result<()> {
         engine.write_line("go depth 0")?;
 
         let mut yo_cp: Option<i32> = None;
-        loop {
-            if let Some(line) = engine.read_line_with_timeout(Duration::from_millis(1000))? {
-                if let Some(cp) = parse_cp_from_info(&line) {
-                    yo_cp = Some(cp);
-                }
-                if line.starts_with("bestmove") {
-                    break;
-                }
-            } else {
+        while let Some(line) = engine.read_line_with_timeout(Duration::from_millis(1000))? {
+            if let Some(cp) = parse_cp_from_info(&line) {
+                yo_cp = Some(cp);
+            }
+            if line.starts_with("bestmove") {
                 break;
             }
         }
@@ -186,4 +181,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-

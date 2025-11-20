@@ -1919,7 +1919,9 @@ fn null_move_respects_runtime_toggle() {
     let mut lmr_counter = 0;
 
     crate::search::params::set_nmp_enabled(true);
-    let nmp_depth = crate::search::params::NMP_MIN_DEPTH + 1;
+    // YO互換の適用条件（static_eval >= beta - 19*depth + 403）を満たすよう、
+    // 十分な深さで null move を試す。
+    let nmp_depth = crate::search::params::NMP_MIN_DEPTH + 21;
     let limits = SearchLimitsBuilder::default().depth(nmp_depth as u8).build();
     let start_time = Instant::now();
     let mut nodes = 0_u64;

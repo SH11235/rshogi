@@ -1,3 +1,3 @@
 pub mod evaluate;
-pub mod yo_material;
 pub mod nnue;
+pub mod yo_material;

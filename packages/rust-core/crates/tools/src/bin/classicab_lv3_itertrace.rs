@@ -193,4 +193,3 @@ fn apply_moves(base: &Position, moves: &[String]) -> Result<Position> {
     }
     Ok(pos)
 }
-

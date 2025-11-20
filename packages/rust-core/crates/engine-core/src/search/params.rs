@@ -33,7 +33,9 @@ pub const PROBCUT_MARGIN_D6P: i32 = 300;
 
 // Null Move Pruning (NMP)
 pub const NMP_MIN_DEPTH: i32 = 3;
-pub const NMP_BASE_R: i32 = 2; // R = BASE + depth/4 + bonus
+// YO互換のNull Move動的減深:
+// R = 7 + depth/3 + bonus（bonusはstatic_evalがbetaから十分離れている場合に+1）
+pub const NMP_BASE_R: i32 = 7;
 pub const NMP_BONUS_DELTA_BETA: i32 = 150; // if static_eval - beta > this, R += 1
 pub const NMP_HAND_SUM_DISABLE: i32 = 6; // disable when hand pieces sum >= this
 
