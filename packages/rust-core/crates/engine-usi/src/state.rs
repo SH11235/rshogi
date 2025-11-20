@@ -450,14 +450,18 @@ impl Default for UsiOptions {
             finalize_mate_probe_enabled: false,
             finalize_mate_probe_depth: 5,
             finalize_mate_probe_time_ms: 5,
-            root_escape_enabled: true,
+            // Root Escape Guard disabled by default - was causing incorrect move selection
+            // (replacing search PV with "safer" alternatives that were actually worse)
+            // Can be re-enabled via USI option if needed after fixing the logic
+            root_escape_enabled: false,
             root_escape_pick_policy: RootEscapePickPolicy::PvOrder,
             root_escape_max_moves: 512,
             root_escape_log_detail: RootEscapeLogDetail::FailOnly,
             root_escape_see_threshold_cp: 200,
             root_escape_safe_guard_cp: 400,
             root_escape_min_score_for_switch_cp: 300,
-            root_safe_scan_enabled: true,
+            // Root Safe Scan also disabled by default for same reason
+            root_safe_scan_enabled: false,
             root_safe_scan_max_ms: 4,
             root_safe_scan_log_detail: RootSafeScanLogDetail::FailOnly,
             // MateGate defaults
