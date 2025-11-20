@@ -125,9 +125,11 @@ pub(crate) fn evaluate_material_apery_only(pos: &Position) -> i32 {
     //   board 上の駒ごとに piece_value * 104/1024 を引いている。
     // - ここでは side_to_move 視点の差分として、
     //   「盤上駒の駒得分」に対して同じ係数を掛けて減算する。
+    // - 成駒の場合は、成駒の価値（APERY_PROMOTED_PIECE_VALUES）を使用する。
     let board_scale_num: i32 = 104;
     let board_scale_den: i32 = 1024;
     let mut board_delta = 0;
+
     for &pt in &ALL_PIECE_TYPES {
         // 王は除外（YO 側では実質 0 扱いになっている）。
         if pt == PieceType::King {
@@ -135,17 +137,35 @@ pub(crate) fn evaluate_material_apery_only(pos: &Position) -> i32 {
         }
         let piece_type = pt as usize;
         let base_value = APERY_PIECE_VALUES[piece_type];
+        let promoted_value = APERY_PROMOTED_PIECE_VALUES[piece_type];
 
         let our_pieces = pos.board.piece_bb[us as usize][piece_type];
         let their_pieces = pos.board.piece_bb[them as usize][piece_type];
-        let our_count = our_pieces.count_ones() as i32;
-        let their_count = their_pieces.count_ones() as i32;
 
-        let diff = our_count - their_count;
-        if diff != 0 {
-            board_delta += (base_value * diff * board_scale_num) / board_scale_den;
+        // 未成駒と成駒を分けてカウント
+        let our_promoted = our_pieces & pos.board.promoted_bb;
+        let their_promoted = their_pieces & pos.board.promoted_bb;
+        let our_unpromoted = our_pieces & !pos.board.promoted_bb;
+        let their_unpromoted = their_pieces & !pos.board.promoted_bb;
+
+        let our_unpromoted_count = our_unpromoted.count_ones() as i32;
+        let their_unpromoted_count = their_unpromoted.count_ones() as i32;
+        let our_promoted_count = our_promoted.count_ones() as i32;
+        let their_promoted_count = their_promoted.count_ones() as i32;
+
+        // 未成駒の差分
+        let unpromoted_diff = our_unpromoted_count - their_unpromoted_count;
+        if unpromoted_diff != 0 {
+            board_delta += (base_value * unpromoted_diff * board_scale_num) / board_scale_den;
+        }
+
+        // 成駒の差分（成駒の実際の価値を使用）
+        let promoted_diff = our_promoted_count - their_promoted_count;
+        if promoted_diff != 0 {
+            board_delta += (promoted_value * promoted_diff * board_scale_num) / board_scale_den;
         }
     }
+
     score -= board_delta;
 
     score
