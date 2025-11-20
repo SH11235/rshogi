@@ -524,7 +524,7 @@ fn generate_move_order<E: Evaluator + Send + Sync + 'static>(
     let mut hint = None;
     if let Some(tt) = &backend.tt {
         if let Some(entry) = tt.probe(root.zobrist_hash(), root.side_to_move) {
-            hint = entry.get_move();
+            hint = entry.get_move().and_then(|mv| root.reconstruct_tt_move(mv));
         }
     }
     let mut mp = MovePicker::new_normal(root, hint, None, [None, None], None, None);

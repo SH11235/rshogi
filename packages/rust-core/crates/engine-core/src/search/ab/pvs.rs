@@ -602,24 +602,40 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 let score = crate::search::common::adjust_mate_score_from_tt(stored, ply as u8);
                 let sufficient = entry.depth() as i32 >= depth;
                 tt_depth_ok = entry.depth() as i32 >= depth - 2;
+
+                #[cfg(feature = "diagnostics")]
+                if std::env::var("SHOGI_DEBUG_TT_PROBE").is_ok() && ply <= 1 {
+                    let tt_move_raw = entry.get_move();
+                    let tt_move_reconstructed =
+                        tt_move_raw.and_then(|mv| pos.reconstruct_tt_move(mv));
+                    eprintln!(
+                        "[TT_PROBE] ply={} depth={} hash={:016x} tt_depth={} tt_score={} stored={} sufficient={} node_type={:?} alpha={} beta={} tt_move={} reconstructed={}",
+                        ply, depth, pos.zobrist_hash, entry.depth(), score, stored, sufficient, entry.node_type(), alpha, beta,
+                        tt_move_raw.map(|m| crate::usi::move_to_usi(&m)).unwrap_or_else(|| "none".to_string()),
+                        tt_move_reconstructed.map(|m| crate::usi::move_to_usi(&m)).unwrap_or_else(|| "none".to_string())
+                    );
+                }
                 match entry.node_type() {
                     NodeType::LowerBound if sufficient && score >= beta => {
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
                         diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-                        return (score, entry.get_move());
+                        let tt_move = entry.get_move().and_then(|mv| pos.reconstruct_tt_move(mv));
+                        return (score, tt_move);
                     }
                     NodeType::UpperBound if sufficient && score <= alpha => {
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
                         diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-                        return (score, entry.get_move());
+                        let tt_move = entry.get_move().and_then(|mv| pos.reconstruct_tt_move(mv));
+                        return (score, tt_move);
                     }
                     NodeType::Exact if sufficient => {
                         #[cfg(any(debug_assertions, feature = "diagnostics"))]
                         diagnostics::record_stack_state(pos, &stack[ply as usize], "stack_exit");
-                        return (score, entry.get_move());
+                        let tt_move = entry.get_move().and_then(|mv| pos.reconstruct_tt_move(mv));
+                        return (score, tt_move);
                     }
                     _ => {
-                        tt_hint = entry.get_move();
+                        tt_hint = entry.get_move().and_then(|mv| pos.reconstruct_tt_move(mv));
                         tt_value_for_singular = Some(score);
                     }
                 }
@@ -1309,13 +1325,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                     && !matches!(node_type, NodeType::Exact)
                     && ((ply <= 2) || (extra_suppr_depth >= 0 && depth < extra_suppr_depth));
                 if !suppress_helper_near_root {
-                    // YaneuraOu-style TT depth degradation: reduce depth by 1 for non-Exact entries
-                    // to prevent overvalued bounds from dominating move ordering in subsequent iterations
-                    let depth_to_store = if matches!(node_type, NodeType::Exact) {
-                        depth as u8
-                    } else {
-                        (depth - 1).max(1) as u8
-                    };
+                    // Store with actual depth to ensure bounds are properly respected
+                    // Previous depth degradation (depth-1 for bounds) caused issues where
+                    // shallow bounds would fail to replace older deeper entries, leading to
+                    // stale TT data being used (20251120-tt-move-reconstruction-bug.md)
+                    let depth_to_store = depth as u8;
                     let mut args = crate::search::tt::TTStoreArgs::new(
                         pos_hash,
                         best_mv,
@@ -1326,6 +1340,18 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         pos.side_to_move,
                     );
                     args.is_pv = is_pv;
+
+                    #[cfg(feature = "diagnostics")]
+                    if std::env::var("SHOGI_DEBUG_TT_STORE").is_ok() && ply <= 1 {
+                        let mv_str = best_mv
+                            .map(|m| crate::usi::move_to_usi(&m))
+                            .unwrap_or_else(|| "none".to_string());
+                        eprintln!(
+                            "[TT_STORE] ply={} depth={} hash={:016x} best={} alpha={} beta={} node_type={:?} store_score={} store_depth={} mv={} is_pv={}",
+                            ply, depth, pos_hash, best, used_alpha, used_beta, node_type, store_score, depth_to_store, mv_str, is_pv
+                        );
+                    }
+
                     tt.store(args);
                 } else {
                     // Diagnostics via info_string_callback (root-scope): suppress helper near root

@@ -74,11 +74,10 @@ pub fn boost_tt_depth(base_depth: u8, node_type: NodeType) -> u8 {
 
 /// Additional boost for PV nodes
 #[inline(always)]
-pub fn boost_pv_depth(base_depth: u8, is_pv: bool) -> u8 {
-    // PV nodes get additional depth boost to ensure they stay in TT
-    if is_pv {
-        return base_depth.saturating_add(2);
-    }
+pub fn boost_pv_depth(base_depth: u8, _is_pv: bool) -> u8 {
+    // PV boost disabled - was causing bounds to overshadow exact nodes
+    // Exact nodes already get +1 from boost_tt_depth, which is sufficient
+    // (See 20251120-tt-move-reconstruction-bug.md Session 5)
     base_depth
 }
 

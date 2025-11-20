@@ -515,7 +515,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         diagnostics::record_iid_event(pos, depth, alpha, beta, false, "iid_exit");
         if let Some(tt) = &self.tt {
             if let Some(entry) = tt.probe(pos.zobrist_hash(), pos.side_to_move) {
-                *tt_hint = entry.get_move();
+                *tt_hint = entry.get_move().and_then(|mv| pos.reconstruct_tt_move(mv));
             }
         }
     }

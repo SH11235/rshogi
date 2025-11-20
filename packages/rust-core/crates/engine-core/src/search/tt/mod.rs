@@ -1215,7 +1215,9 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
         if entry.depth() < MIN_DEPTH_FOR_PV_TRUST && !pv.is_empty() {
             break;
         }
-        let Some(best) = entry.get_move() else { break };
+        let Some(best) = entry.get_move().and_then(|mv| pos.reconstruct_tt_move(mv)) else {
+            break;
+        };
         let mg = MoveGenerator::new();
         let Ok(legals) = mg.generate_all(pos) else {
             break;
