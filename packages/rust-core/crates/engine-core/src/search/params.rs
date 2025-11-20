@@ -5,7 +5,9 @@
 //! （未変更時は既定値）を返す。
 
 // LMR
-pub const LMR_K_COEFF: f32 = 1.7; // 既定: r = floor(ln(depth)*ln(moveno)/LMR_K_COEFF)
+// 💡 より保守的な設定に変更（1.7 → 2.2）
+// 理由：過度なreductionで重要な手を見逃すのを防ぐ
+pub const LMR_K_COEFF: f32 = 2.2; // 既定: r = floor(ln(depth)*ln(moveno)/LMR_K_COEFF)
 
 // LMP (late quiet skip) thresholds per depth (depth<=3 only)
 pub const LMP_LIMIT_D1: usize = 8;
@@ -19,10 +21,13 @@ pub const HP_THRESHOLD: i32 = -2000;
 pub const SBP_MARGIN_D1: i32 = 200;
 pub const SBP_MARGIN_D2: i32 = 300;
 // Dynamic SBP/Futility margins (Phase3) — base/slope (safeモードで使用)
-pub const SBP_MARGIN_BASE: i32 = 120;
-pub const SBP_MARGIN_SLOPE: i32 = 60; // per depth (clamped <=12)
-pub const FUT_MARGIN_BASE: i32 = 100;
-pub const FUT_MARGIN_SLOPE: i32 = 80; // per depth (clamped <=8)
+// 💡 より保守的な設定に変更（120→150, 60→80）
+pub const SBP_MARGIN_BASE: i32 = 150;
+pub const SBP_MARGIN_SLOPE: i32 = 80; // per depth (clamped <=12)
+                                      // 💡 より保守的な設定に変更（100→150, 80→100）
+                                      // 理由：駒損（200-300cp）を見逃す可能性を減らす
+pub const FUT_MARGIN_BASE: i32 = 150;
+pub const FUT_MARGIN_SLOPE: i32 = 100; // per depth (clamped <=8)
 
 // Razor: enabled depth==1 (no explicit margin here; we use qsearch(alpha, alpha+1))
 pub const RAZOR_ENABLED: bool = true;
@@ -33,9 +38,11 @@ pub const PROBCUT_MARGIN_D6P: i32 = 300;
 
 // Null Move Pruning (NMP)
 pub const NMP_MIN_DEPTH: i32 = 3;
-// YO互換のNull Move動的減深:
-// R = 7 + depth/3 + bonus（bonusはstatic_evalがbetaから十分離れている場合に+1）
-pub const NMP_BASE_R: i32 = 7;
+// 💡 より保守的な設定に変更（7→4）
+// 理由：過度な減深で飛車打ちなどの強手を見逃すのを防ぐ
+// YO互換は R = 7 + depth/3 だが、実戦で大量の悪手が発生したため減らす
+// R = 4 + depth/3 + bonus（bonusはstatic_evalがbetaから十分離れている場合に+1）
+pub const NMP_BASE_R: i32 = 4;
 pub const NMP_BONUS_DELTA_BETA: i32 = 150; // if static_eval - beta > this, R += 1
 pub const NMP_HAND_SUM_DISABLE: i32 = 6; // disable when hand pieces sum >= this
 
@@ -63,7 +70,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering}
 use std::sync::OnceLock;
 
 // ランタイム値（USI setoptionで変更可能）
-static RUNTIME_LMR_K_X100: AtomicU32 = AtomicU32::new((LMR_K_COEFF * 100.0) as u32);
+// 💡 LMR_K_COEFF を 2.2 に変更したため、初期化も更新
+static RUNTIME_LMR_K_X100: AtomicU32 = AtomicU32::new(220); // 2.2 * 100
 static RUNTIME_LMP_D1: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D1);
 static RUNTIME_LMP_D2: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D2);
 static RUNTIME_LMP_D3: AtomicUsize = AtomicUsize::new(LMP_LIMIT_D3);
