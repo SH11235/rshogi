@@ -93,10 +93,12 @@ pub fn evaluate_yo_material_lv3(pos: &Position) -> i32 {
     };
 
     // 全マスについて king-safety を加算。
-    for idx in 0..SHOGI_BOARD_SIZE {
+    for (idx, (&effect_black, &effect_white)) in
+        effects[0].iter().zip(effects[1].iter()).enumerate()
+    {
         let sq = Square(idx as u8);
-        let effects_black = effects[Color::Black as usize][idx] as i32;
-        let effects_white = effects[Color::White as usize][idx] as i32;
+        let effects_black = effect_black as i32;
+        let effects_white = effect_white as i32;
 
         // color=BLACK/WHITE に対して YO と同じ符号付けで加算する。
         for &color in &[Color::Black, Color::White] {
