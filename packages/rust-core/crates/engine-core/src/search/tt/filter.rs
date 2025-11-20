@@ -5,25 +5,16 @@
 
 use crate::search::NodeType;
 
-/// Simple optimization: Skip TT storage for very shallow nodes
-/// PV nodes are always stored regardless of depth
-#[inline(always)]
-pub fn should_skip_tt_store(depth: u8, is_pv: bool) -> bool {
-    // Always store PV nodes - they are critical for move ordering
-    if is_pv {
-        return false;
-    }
-
-    // Skip only depth 0 entries for non-PV nodes（d=1 も保存許可して再利用性を上げる）
-    // These are unlikely to be reused and add overhead
-    if depth < 1 {
-        return true;
-    }
-
-    false
-}
-
 /// Dynamic TT store filter that adapts to table occupancy (hashfull)
+///
+/// Skips storing entries to reduce TT overhead when:
+/// - depth=0 (qsearch): High volatility, low reuse rate
+/// - hashfull>=90% AND depth<=2 AND non-Exact bounds: Preserve TT space
+///
+/// Always stores:
+/// - PV nodes (critical for move ordering)
+/// - Exact nodes (highest value)
+/// - depth>=3 (sufficient search depth for reuse)
 #[inline(always)]
 pub fn should_skip_tt_store_dyn(
     depth: u8,
@@ -34,8 +25,8 @@ pub fn should_skip_tt_store_dyn(
     if is_pv {
         return false;
     }
-    // Keep legacy shallow filter
-    if depth < 1 {
+    // Skip qsearch (depth=0) - high volatility, low reuse rate
+    if depth == 0 {
         return true;
     }
     // When table is very full, skip storing shallow non-Exact bounds for non-PV nodes
@@ -45,75 +36,126 @@ pub fn should_skip_tt_store_dyn(
     false
 }
 
-/// Simple optimization: Only prefetch at reasonable depths
-#[inline(always)]
-pub fn should_skip_prefetch(depth: u8, move_index: usize) -> bool {
-    // Skip prefetch at shallow depths (not worth the overhead)
-    if depth < 3 {
-        return true;
-    }
-
-    // Skip prefetch for late moves at deep depths
-    if depth > 6 && move_index > 2 {
-        return true;
-    }
-
-    false
-}
-
-/// Boost depth for important nodes to keep them in TT longer
-#[inline(always)]
-pub fn boost_tt_depth(base_depth: u8, node_type: NodeType) -> u8 {
-    // Small boost for exact nodes (they're more valuable)
-    if node_type == NodeType::Exact {
-        return base_depth.saturating_add(1);
-    }
-
-    base_depth
-}
-
-/// Additional boost for PV nodes
-#[inline(always)]
-pub fn boost_pv_depth(base_depth: u8, _is_pv: bool) -> u8 {
-    // PV boost disabled - was causing bounds to overshadow exact nodes
-    // Exact nodes already get +1 from boost_tt_depth, which is sufficient
-    // (See 20251120-tt-move-reconstruction-bug.md Session 5)
-    base_depth
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn tt_store_keeps_pv_even_at_shallow_depth() {
-        // PV nodes should always be stored, regardless of depth
-        assert!(!should_skip_tt_store(0, true));
-        assert!(!should_skip_tt_store(1, true));
-
-        // Non-PV very shallow nodes should be skipped
-        assert!(should_skip_tt_store(0, false));
-        // depth=1 is now stored to improve early-iteration TT reuse
-        assert!(!should_skip_tt_store(1, false));
-
-        // Non-PV deeper nodes should be stored
-        assert!(!should_skip_tt_store(2, false));
-        assert!(!should_skip_tt_store(3, false));
+    fn test_pv_nodes_always_stored() {
+        // PV nodes should never be skipped, regardless of depth or hashfull
+        assert!(!should_skip_tt_store_dyn(0, true, NodeType::Exact, 0));
+        assert!(!should_skip_tt_store_dyn(0, true, NodeType::LowerBound, 0));
+        assert!(!should_skip_tt_store_dyn(1, true, NodeType::UpperBound, 0));
+        assert!(!should_skip_tt_store_dyn(5, true, NodeType::LowerBound, 1000));
+        assert!(!should_skip_tt_store_dyn(0, true, NodeType::Exact, 1000));
     }
 
     #[test]
-    fn test_depth_boosting() {
-        // Test TT depth boost for exact nodes
-        assert_eq!(boost_tt_depth(5, NodeType::Exact), 6);
-        assert_eq!(boost_tt_depth(5, NodeType::LowerBound), 5);
-        assert_eq!(boost_tt_depth(5, NodeType::UpperBound), 5);
+    fn test_qsearch_depth_skipped() {
+        // depth=0 (qsearch) should be skipped for non-PV nodes
+        assert!(should_skip_tt_store_dyn(0, false, NodeType::Exact, 0));
+        assert!(should_skip_tt_store_dyn(0, false, NodeType::LowerBound, 0));
+        assert!(should_skip_tt_store_dyn(0, false, NodeType::UpperBound, 0));
 
-        // Test PV depth boost
-        assert_eq!(boost_pv_depth(5, true), 7);
-        assert_eq!(boost_pv_depth(5, false), 5);
+        // But depth >= 1 should not be skipped at low hashfull
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::Exact, 0));
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::LowerBound, 0));
+    }
 
-        // Test saturation
-        assert_eq!(boost_tt_depth(255, NodeType::Exact), 255);
-        assert_eq!(boost_pv_depth(254, true), 255);
+    #[test]
+    fn test_hashfull_filter_shallow_bounds() {
+        // At high hashfull (>=90%), shallow non-Exact bounds should be skipped
+        assert!(should_skip_tt_store_dyn(1, false, NodeType::LowerBound, 900));
+        assert!(should_skip_tt_store_dyn(2, false, NodeType::UpperBound, 900));
+        assert!(should_skip_tt_store_dyn(1, false, NodeType::LowerBound, 1000));
+
+        // But Exact nodes should NOT be skipped, even at high hashfull
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::Exact, 900));
+        assert!(!should_skip_tt_store_dyn(2, false, NodeType::Exact, 1000));
+    }
+
+    #[test]
+    fn test_hashfull_filter_not_applied_at_low_occupancy() {
+        // At low hashfull (<90%), even shallow bounds should be stored
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::LowerBound, 0));
+        assert!(!should_skip_tt_store_dyn(2, false, NodeType::UpperBound, 500));
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::LowerBound, 899));
+    }
+
+    #[test]
+    fn test_depth_3_always_stored() {
+        // depth >= 3 should always be stored (sufficient search depth)
+        assert!(!should_skip_tt_store_dyn(3, false, NodeType::LowerBound, 1000));
+        assert!(!should_skip_tt_store_dyn(4, false, NodeType::UpperBound, 1000));
+        assert!(!should_skip_tt_store_dyn(10, false, NodeType::LowerBound, 1000));
+    }
+
+    #[test]
+    fn test_exact_nodes_protected() {
+        // Exact nodes should be stored at all depths (except qsearch) and hashfull levels
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::Exact, 0));
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::Exact, 500));
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::Exact, 900));
+        assert!(!should_skip_tt_store_dyn(2, false, NodeType::Exact, 1000));
+        assert!(!should_skip_tt_store_dyn(5, false, NodeType::Exact, 1000));
+    }
+
+    #[test]
+    fn test_boundary_conditions() {
+        // Test exact boundary values
+
+        // Hashfull boundary: 899 vs 900
+        assert!(!should_skip_tt_store_dyn(2, false, NodeType::LowerBound, 899));
+        assert!(should_skip_tt_store_dyn(2, false, NodeType::LowerBound, 900));
+
+        // Depth boundary: 2 vs 3
+        assert!(should_skip_tt_store_dyn(2, false, NodeType::LowerBound, 900));
+        assert!(!should_skip_tt_store_dyn(3, false, NodeType::LowerBound, 900));
+
+        // Qsearch boundary: 0 vs 1
+        assert!(should_skip_tt_store_dyn(0, false, NodeType::Exact, 0));
+        assert!(!should_skip_tt_store_dyn(1, false, NodeType::Exact, 0));
+    }
+
+    #[test]
+    fn test_comprehensive_matrix() {
+        // Comprehensive test matrix covering all combinations
+
+        // Low hashfull (0-500): Only qsearch skipped
+        for depth in 0..10 {
+            for hashfull in [0, 250, 500] {
+                for node_type in [NodeType::Exact, NodeType::LowerBound, NodeType::UpperBound] {
+                    let skip = should_skip_tt_store_dyn(depth, false, node_type, hashfull);
+                    if depth == 0 {
+                        assert!(skip, "depth={depth} hashfull={hashfull} node_type={node_type:?}");
+                    } else {
+                        assert!(!skip, "depth={depth} hashfull={hashfull} node_type={node_type:?}");
+                    }
+                }
+            }
+        }
+
+        // High hashfull (900+): Qsearch + shallow bounds skipped
+        for depth in 0..10 {
+            for hashfull in [900, 950, 1000] {
+                // Exact nodes
+                let skip_exact = should_skip_tt_store_dyn(depth, false, NodeType::Exact, hashfull);
+                if depth == 0 {
+                    assert!(skip_exact, "depth={depth} hashfull={hashfull} Exact");
+                } else {
+                    assert!(!skip_exact, "depth={depth} hashfull={hashfull} Exact");
+                }
+
+                // Bound nodes
+                for node_type in [NodeType::LowerBound, NodeType::UpperBound] {
+                    let skip = should_skip_tt_store_dyn(depth, false, node_type, hashfull);
+                    if depth == 0 || (depth <= 2) {
+                        assert!(skip, "depth={depth} hashfull={hashfull} node_type={node_type:?}");
+                    } else {
+                        assert!(!skip, "depth={depth} hashfull={hashfull} node_type={node_type:?}");
+                    }
+                }
+            }
+        }
     }
 }

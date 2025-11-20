@@ -32,7 +32,7 @@ pub mod metrics;
 pub mod prefetch;
 // pub mod pv_reconstruction; // merged into this module
 pub mod utils;
-use crate::search::tt::filter::{boost_pv_depth, boost_tt_depth, should_skip_tt_store_dyn};
+use crate::search::tt::filter::should_skip_tt_store_dyn;
 
 #[cfg(any(debug_assertions, feature = "diagnostics"))]
 use crate::search::ab::diagnostics;
@@ -885,7 +885,7 @@ impl TranspositionTable {
     }
 
     /// Store entry using parameters
-    fn store_entry(&self, mut params: TTEntryParams) {
+    fn store_entry(&self, params: TTEntryParams) {
         // Lightweight diagnostics: count store attempts even if filtered
         self.store_attempts.fetch_add(1, Ordering::Relaxed);
         if params.key == 0 {
@@ -923,14 +923,6 @@ impl TranspositionTable {
                 metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             return;
-        }
-
-        // Depth boosting for important nodes (EXACT / PV)
-        let mut eff_depth = params.depth;
-        eff_depth = boost_tt_depth(eff_depth, params.node_type);
-        eff_depth = boost_pv_depth(eff_depth, params.is_pv);
-        if eff_depth != params.depth {
-            params.depth = eff_depth.min(127);
         }
 
         let idx = self.bucket_index(params.key, params.side_to_move);
