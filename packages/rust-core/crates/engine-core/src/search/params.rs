@@ -108,7 +108,9 @@ static RUNTIME_QS_MARGIN_CAPTURE: AtomicI32 = AtomicI32::new(QS_MARGIN_CAPTURE);
 static RUNTIME_QS_BAD_CAPTURE_MIN: AtomicI32 = AtomicI32::new(QS_BAD_CAPTURE_MIN);
 static RUNTIME_QS_CHECK_PRUNE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_PRUNE_MARGIN);
 static RUNTIME_QS_CHECK_SEE_MARGIN: AtomicI32 = AtomicI32::new(QS_CHECK_SEE_MARGIN);
-static RUNTIME_SAME_TO_EXTENSION: AtomicBool = AtomicBool::new(false);
+// YO 互換側の same-to 拡張は既定で有効。
+// 静止の同地点応手を浅い減衰から守る目的で on にする。
+static RUNTIME_SAME_TO_EXTENSION: AtomicBool = AtomicBool::new(true);
 
 // Getter API（探索側からはこちらを使用）
 #[inline]
@@ -503,7 +505,8 @@ fn default_shallow_gate_enabled() -> bool {
             let v = v.trim().to_ascii_lowercase();
             matches!(v.as_str(), "1" | "true" | "on" | "yes")
         }
-        None => false,
+        // YO 系の shallow depth safety を既定 ON にする
+        None => true,
     }
 }
 

@@ -867,11 +867,11 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                         // 3) same-to（同一地点応手）: 静止の即応は1段だけ減衰を緩める
                         reduction = (reduction - 1).max(0);
                     } else if is_quiet && threat_head_pawn {
-                        // 4) 頭に歩の脅威下: 静止手の減深を1段弱める
-                        reduction = (reduction - 1).max(0);
+                        // 4) 頭に歩の脅威下: YO 系の安全寄り挙動に合わせ、静止手の減深を止める
+                        reduction = 0;
                     } else if is_quiet && is_king_zone_move {
-                        // 5) 自玉近傍（距離2以内）への静止手: 受け・囲い直しとして重要なので減深を1段だけ弱める
-                        reduction = (reduction - 1).max(0);
+                        // 5) 自玉近傍（距離2以内）への静止手: 受け・囲い直しとして重要なので減深を行わない
+                        reduction = 0;
                     }
                 }
             }

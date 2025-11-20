@@ -403,10 +403,8 @@ fn king_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i3
         &effects[Color::Black as usize],
     );
 
-    // King safety 項全体のスケールを抑えつつ、安全側寄りに調整する。
-    // 係数は 1.0 (=100) を基準とした百分率スケール。
-    // YO MATERIAL に対してやや控えめになるよう 0.40 倍程度に設定する。
-    const KING_SAFETY_SCALE_X100: i32 = 40;
+    // King safety 項全体のスケール（YO MATERIAL 相当と同等の 1.0 = 100 に戻す）。
+    const KING_SAFETY_SCALE_X100: i32 = 100;
 
     let diff = match pos.side_to_move {
         Color::Black => black_score - white_score,
@@ -443,15 +441,7 @@ fn king_safety_score_for(
         let opp = multi_effect_value(opp_effects[idx]);
         // 距離に基づく重みと方角レートを掛け合わせる。
         let w_our = (our_weights[dist] as i64 * our_dir_rates[dir] as i64) / 1024;
-        let mut w_their = (their_weights[dist] as i64 * their_dir_rates[dir] as i64) / 1024;
-
-        // 玉頭方向（前方〜前方斜め）1〜2マスに対する敵利きの重みをわずかに強める。
-        // YaneuraOu の our_effect_rate/their_effect_rate に沿いつつ、危険帯だけ 10〜15% 程度ブーストする。
-        let is_forward_dir = matches!(dir, 0..=2);
-        if dist <= 2 && is_forward_dir {
-            const HEAD_THEIR_SCALE_X1024: i64 = 1150; // ≒ +12%
-            w_their = (w_their * HEAD_THEIR_SCALE_X1024) / 1024;
-        }
+        let w_their = (their_weights[dist] as i64 * their_dir_rates[dir] as i64) / 1024;
 
         total += ((own as i64 * w_our) / (1024 * 1024)) as i32;
         total -= ((opp as i64 * w_their) / (1024 * 1024)) as i32;
