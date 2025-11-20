@@ -10,6 +10,7 @@ use crate::{
     shogi::{ALL_PIECE_TYPES, NUM_HAND_PIECE_TYPES},
     Color, PieceType, Position,
 };
+use crate::evaluation::yo_material::evaluate_yo_material_lv3;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 
@@ -74,7 +75,7 @@ impl<T: Evaluator + ?Sized> Evaluator for std::sync::Arc<T> {
 ///
 /// - 手番側視点のスコアを返す（正なら手番有利）。
 /// - 盤上の駒＋持ち駒のみを APERY_PIECE_VALUES/APERY_PROMOTED_PIECE_VALUES で集計する。
-fn evaluate_material_apery_only(pos: &Position) -> i32 {
+pub(crate) fn evaluate_material_apery_only(pos: &Position) -> i32 {
     let us = pos.side_to_move;
     let them = us.opposite();
 
@@ -161,15 +162,57 @@ pub fn evaluate_material_only_debug(pos: &Position) -> i32 {
     evaluate_material_apery_only(pos)
 }
 
+/// MaterialEvaluator の主要項目ごとの評価値を取得するためのデバッグ用構造体。
+///
+/// いずれの値も「手番側視点」のスコア（cp）であり、
+/// `total_cp` は `MaterialEvaluator::evaluate` の返り値と概ね一致することを意図している。
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialEvalTerms {
+    pub material_cp: i32,
+    pub king_safety_cp: i32,
+    pub king_position_cp: i32,
+    pub piece_safety_cp: i32,
+    pub king_attacker_safety_cp: i32,
+    pub total_cp: i32,
+}
+
+/// MaterialEvaluator の各項目（material / king_safety / king_position / piece_safety）の
+/// 生値と合計値を取得するデバッグ用ヘルパー。
+///
+/// - 契約: すべて手番側視点のスコアを返す。
+/// - `total_cp` は `material_cp + king_safety_cp + king_position_cp + piece_safety_cp + king_attacker_safety_cp`。
+#[inline]
+pub fn evaluate_material_terms_debug(pos: &Position) -> MaterialEvalTerms {
+    let material = evaluate_material_apery_only(pos);
+    let effects = compute_effect_counts(pos);
+    let king_safety = king_safety_term(pos, &effects);
+    let king_position = king_position_term(pos);
+    let piece_safety = piece_safety_term(pos, &effects);
+    let king_attacker = king_attacker_safety_term(pos, &effects);
+    let total = material + king_safety + king_position + piece_safety + king_attacker;
+
+    MaterialEvalTerms {
+        material_cp: material,
+        king_safety_cp: king_safety,
+        king_position_cp: king_position,
+        piece_safety_cp: piece_safety,
+        king_attacker_safety_cp: king_attacker,
+        total_cp: total,
+    }
+}
+
 /// Evaluate position from side to move perspective
 pub fn evaluate(pos: &Position) -> i32 {
-    // まず純粋な物質評価（Apery 駒価値＋持ち駒）を計算し、その上に king safety / king position を積む。
+    // まず純粋な物質評価（Apery 駒価値＋持ち駒）を計算し、その上に
+    // king safety / king position / piece safety / attacker safety を積む。
     let mut score = evaluate_material_apery_only(pos);
 
     // --- King safety (distance × effect counts + king position bonus)
     let effects = compute_effect_counts(pos);
     score += king_safety_term(pos, &effects);
     score += king_position_term(pos);
+    score += piece_safety_term(pos, &effects);
+    score += king_attacker_safety_term(pos, &effects);
 
     score
 }
@@ -268,7 +311,8 @@ fn king_safety_our_weights() -> &'static [i32; 9] {
         for (dist, slot) in weights.iter_mut().enumerate() {
             // YaneuraOu MATERIAL 相当の係数よりやや控えめに設定しつつ、
             // 敵利き側の重み（king_safety_their_weights）とのバランスを安全寄りに取る。
-            let base = 60 * 1024;
+            // 自利き側のベース値はやや下げ、敵利き側（king_safety_their_weights）との比率を高める。
+            let base = 50 * 1024;
             *slot = base / ((dist + 1) as i32);
         }
         weights
@@ -360,8 +404,10 @@ fn king_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i3
         &effects[Color::Black as usize],
     );
 
-    // King safety 項全体のスケールを少し抑え、安全側寄りに調整する。
-    const KING_SAFETY_SCALE_X100: i32 = 60;
+    // King safety 項全体のスケールを抑えつつ、安全側寄りに調整する。
+    // 係数は 1.0 (=100) を基準とした百分率スケール。
+    // YO MATERIAL に対してやや控えめになるよう 0.40 倍程度に設定する。
+    const KING_SAFETY_SCALE_X100: i32 = 40;
 
     let diff = match pos.side_to_move {
         Color::Black => black_score - white_score,
@@ -473,7 +519,6 @@ fn king_shell_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32
 /// NOTE: この項は YaneuraOu MATERIAL には存在しない「実験的な追加ペナルティ」です。
 ///       特徴量（利き本数・距離・駒種）は本家と揃えつつ、局所的に危険形を強調する目的で導入しており、
 ///       チューニングの結果次第では係数調整や撤廃を含めて見直す可能性があります。
-#[cfg(test)]
 fn king_attacker_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
     let mut danger = [0i32; 2];
 
@@ -602,10 +647,11 @@ fn compute_effect_counts(pos: &Position) -> [[u8; SHOGI_BOARD_SIZE]; 2] {
     effects
 }
 
-#[cfg(test)]
 fn piece_safety_term(pos: &Position, effects: &[[u8; SHOGI_BOARD_SIZE]; 2]) -> i32 {
-    // 自駒への利きによるボーナスはやや控えめにし、敵利きによるペナルティを相対的に重視する。
-    const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 20, 26];
+    // YaneuraOu MATERIAL Lv.7 相当の紐付き/質駒係数をベースにする。
+    // - 味方の利き: 0, 33, 43
+    // - 敵の利き:   0,113,122
+    const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 33, 43];
     const THEIR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 113, 122];
     const SCALE: i32 = 4096;
     let mut raw = [0i32; 2];
@@ -664,7 +710,12 @@ fn accumulate_effects_for_color(
     }
 }
 
-fn piece_attack_bitboard(pos: &Position, sq: Square, piece: Piece, occupied: Bitboard) -> Bitboard {
+pub(crate) fn piece_attack_bitboard(
+    pos: &Position,
+    sq: Square,
+    piece: Piece,
+    occupied: Bitboard,
+) -> Bitboard {
     match piece.piece_type {
         PieceType::Pawn => {
             if piece.promoted {
@@ -790,6 +841,19 @@ mod tests {
     }
 
     #[test]
+    fn yo_material_lv3_matches_material_only_on_empty_features() {
+        // 玉と駒割りしか影響していない単純局面では、
+        // Lv.3 評価と純粋な material+盤上ペナルティの差分がごく小さく収まることを確認する。
+        let pos = Position::startpos();
+        let mat_only = evaluate_material_apery_only(&pos);
+        let yo_lv3 = evaluate_yo_material_lv3(&pos);
+        assert!(
+            (yo_lv3 - mat_only).abs() < 50,
+            "YO Lv3 should not drift far from material-only in startpos (yo_lv3={yo_lv3}, mat={mat_only})"
+        );
+    }
+
+    #[test]
     fn test_evaluate_material_apery_values() {
         let mut pos = Position::empty();
         place_kings(&mut pos);
@@ -800,10 +864,11 @@ mod tests {
             Piece::new(PieceType::Bishop, Color::White),
         );
 
-        // APERY 駒価値のみを検証（R=990, B=855）。
+        // APERY 駒価値＋盤上駒 1/10 減点を検証（R=990, B=855）。
         let score = evaluate_material_apery_only(&pos);
-        // 990 (R) - 855 (B) = 135
-        assert_eq!(score, 135);
+        // 基本の駒得は 990 (R) - 855 (B) = 135。
+        // ここから盤上駒 1/10 相当の減点が入るため、最終スコアは 121 付近になる。
+        assert_eq!(score, 121);
     }
 
     #[test]

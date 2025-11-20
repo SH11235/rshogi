@@ -46,6 +46,15 @@ pub const ENGINE_PROFILE_PRESETS: &[EngineProfilePreset] = &[
         root_options: &[("RootSeeGate.XSEE", "0")],
         env: &[("SHOGI_QUIET_SEE_GUARD", "0")],
     },
+    // YaneuraOu NNUE（外部教師エンジン）向けの簡易プロファイル。
+    // - EvalDir / FV_SCALE だけを指定し、SearchParams.* は一切触らない。
+    // - debug_position_multipv から `--profile yaneuraou-nnue` として利用する想定。
+    EngineProfilePreset {
+        name: "yaneuraou-nnue",
+        search_params: &[],
+        root_options: &[("EvalDir", "eval"), ("FV_SCALE", "24")],
+        env: &[],
+    },
 ];
 
 /// プロファイル名からプリセット定義を取得する。
