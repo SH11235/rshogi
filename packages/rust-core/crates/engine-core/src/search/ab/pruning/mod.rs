@@ -321,12 +321,17 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         if hand_sum >= NMP_HAND_SUM_DISABLE {
             return None;
         }
+        // YO compatible NMP application condition: static_eval >= beta - 19*depth + 403
+        let nmp_threshold = beta - 19 * depth + 403;
+        if static_eval < nmp_threshold {
+            return None;
+        }
         let bonus = if static_eval - beta > NMP_BONUS_DELTA_BETA {
             1
         } else {
             0
         };
-        let mut r = NMP_BASE_R + (depth / 4) + bonus;
+        let mut r = NMP_BASE_R + (depth / 3) + bonus;
         r = r.min(depth - 1);
         let score = {
             let _guard = EvalNullGuard::new(self.evaluator.as_ref(), pos);

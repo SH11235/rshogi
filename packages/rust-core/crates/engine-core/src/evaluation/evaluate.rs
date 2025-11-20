@@ -10,7 +10,6 @@ use crate::{
     shogi::{ALL_PIECE_TYPES, NUM_HAND_PIECE_TYPES},
     Color, PieceType, Position,
 };
-use crate::evaluation::yo_material::evaluate_yo_material_lv3;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 
@@ -821,6 +820,7 @@ fn chebyshev_distance(a: Square, b: Square) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use crate::evaluation::yo_material::evaluate_yo_material_lv3;
     use crate::{usi::parse_usi_square, Color, Piece};
 
     use super::*;

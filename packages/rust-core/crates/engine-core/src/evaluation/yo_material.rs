@@ -68,9 +68,8 @@ pub fn evaluate_yo_material_lv3(pos: &Position) -> i32 {
             let mut bb = pos.board.piece_bb[color_idx][piece_type as usize];
             while let Some(sq) = bb.pop_lsb() {
                 let piece = pos.board.piece_on(sq).expect("piece must exist");
-                let attacks = crate::evaluation::evaluate::piece_attack_bitboard(
-                    pos, sq, piece, occupied,
-                );
+                let attacks =
+                    crate::evaluation::evaluate::piece_attack_bitboard(pos, sq, piece, occupied);
                 let mut atk = attacks;
                 while let Some(t) = atk.pop_lsb() {
                     let idx = t.index();
@@ -101,15 +100,29 @@ pub fn evaluate_yo_material_lv3(pos: &Position) -> i32 {
 
         // color=BLACK/WHITE に対して YO と同じ符号付けで加算する。
         for &color in &[Color::Black, Color::White] {
-            let king_sq = if color == Color::Black { black_king } else { white_king };
+            let king_sq = if color == Color::Black {
+                black_king
+            } else {
+                white_king
+            };
             let d = chebyshev_distance(sq, king_sq).min(8);
-            let s1 = if color == Color::Black { effects_black } else { effects_white }
-                * our_ev[d]
+            let s1 = if color == Color::Black {
+                effects_black
+            } else {
+                effects_white
+            } * our_ev[d]
                 / 1024;
-            let s2 = if color == Color::Black { effects_white } else { effects_black }
-                * their_ev[d]
+            let s2 = if color == Color::Black {
+                effects_white
+            } else {
+                effects_black
+            } * their_ev[d]
                 / 1024;
-            score += if color == Color::Black { s1 - s2 } else { s2 - s1 };
+            score += if color == Color::Black {
+                s1 - s2
+            } else {
+                s2 - s1
+            };
         }
     }
 
