@@ -323,7 +323,7 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         }
         // YO MATERIAL に合わせた厳しめの適用条件:
         //   static_eval >= beta - 19 * depth + 403
-        // g3-C 系のような危険形では static_eval が十分に beta を上回らないため、
+        // 危険形では static_eval が十分に beta を上回らないため、
         // そもそも NMP を試さない。
         let nmp_threshold = beta - 19 * depth + 403;
         if static_eval < nmp_threshold {
