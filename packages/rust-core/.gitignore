@@ -40,7 +40,7 @@ complete-result.json
 memo/
 
 # Ignore tool-generated manifests under run outputs
-runs/*
+runs
 
 # Avoid re-introducing accidentally generated manifest in tools crate root
 crates/tools/manifest.json
@@ -48,5 +48,5 @@ crates/tools/manifest.json
 sample_data/train.jsonl
 sample_data/val.jsonl
 taikyoku-log/
-docs/reports/
+docs/reports
 scripts/analysis/__pycache__/
