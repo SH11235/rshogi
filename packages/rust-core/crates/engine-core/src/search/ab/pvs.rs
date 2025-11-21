@@ -864,47 +864,57 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 ply,
                 stack: &*stack,
             });
-            // LMR gating: disable reductions in tactical/sensitive contexts
+            // LMR gating: 戦術的状況での減深調整
             if reduction > 0 && Self::gating_enabled() {
-                // 1) Current node is in check (evasion node)
+                // 1) Evasion node (in_check): 王手回避手は重要なのでLMR完全無効
                 if stack[ply as usize].in_check {
                     if let Some(cell) = lmr_blocked_in_check {
                         cell.set(cell.get().saturating_add(1));
                     }
                     reduction = 0;
                 } else {
-                    // 2) Recapture: previous move was a capture and we capture back on the same square
+                    // 他のgating条件は累積せず、最大1段減
+                    let orig_reduction = reduction;
+                    let mut gating_triggered = false;
+                    // 2) Recapture
                     if recap {
                         if let Some(cell) = lmr_blocked_recapture {
                             cell.set(cell.get().saturating_add(1));
                         }
-                        reduction = 0;
-                    } else if same_to && is_quiet {
-                        // 3) same-to（同一地点応手）: 静止の即応は1段だけ減衰を緩める
-                        reduction = (reduction - 1).max(0);
-                    } else if is_quiet && threat_head_pawn {
-                        // 4) 頭に歩の脅威下: YO 系の安全寄り挙動に合わせ、静止手の減深を止める
-                        reduction = 0;
-                    } else if is_quiet && is_king_zone_move {
-                        // 5) 自玉近傍（距離2以内）への静止手: 受け・囲い直しとして重要なので減深を行わない
-                        reduction = 0;
+                        gating_triggered = true;
+                    }
+                    // 3) same-to（同一地点応手）
+                    if same_to && is_quiet {
+                        gating_triggered = true;
+                    }
+                    // 4) 頭に歩の脅威下
+                    if is_quiet && threat_head_pawn {
+                        gating_triggered = true;
+                    }
+                    // 5) 自玉近傍への静止手
+                    if is_quiet && is_king_zone_move {
+                        gating_triggered = true;
+                    }
+                    // gating条件が該当したら、減深を1段緩める（ただし完全無効にはしない）
+                    if gating_triggered && orig_reduction >= 2 {
+                        reduction = orig_reduction - 1;
                     }
                 }
             }
-            // 特例ガード: 直前が回避直後の静止 or TT強ヒント → 減深を1段弱める
-            if reduction > 0 && is_quiet {
+            // 特例ガード: 直前が回避直後の静止 or TT強ヒント → 減深を1段弱める（最低1は維持）
+            if reduction >= 2 && is_quiet {
                 let prev_in_check = if ply > 0 {
                     stack[(ply - 1) as usize].in_check
                 } else {
                     false
                 };
                 if prev_in_check || tt_depth_ok {
-                    reduction = (reduction - 1).max(0);
+                    reduction -= 1;
                 }
-                // 直前手が drop / quiet xSEE<0 のときはさらに1段弱める
-                if stack[ply as usize].prev_risky {
-                    reduction = (reduction - 1).max(0);
-                }
+            }
+            // 直前手が drop / quiet xSEE<0 のときはさらに1段弱める（最低1は維持）
+            if reduction >= 2 && is_quiet && stack[ply as usize].prev_risky {
+                reduction -= 1;
             }
             // ABDADA軽減: busy中は追加で1段だけ減深（静止手のみ）
             if reduction > 0 && is_quiet {

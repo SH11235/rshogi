@@ -173,7 +173,14 @@ pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_>) -> i32 {
     if !dynp::lmr_enabled() {
         return 0;
     }
-    if params.depth < 3 || params.moveno < 3 || !params.is_quiet || params.is_good_capture {
+    // YaneuraOu準拠: depth >= 2 && moveCount > 1
+    // 旧条件: depth < 3 || moveno < 3 || !is_quiet || is_good_capture
+    // → captureにもLMRを適用し、条件を緩和
+    if params.depth < 2 || params.moveno <= 1 {
+        return 0;
+    }
+    // 王手を与える手はLMR対象外（YaneuraOuでも同様）
+    if params.gives_check {
         return 0;
     }
     *params.lmr_trials = params.lmr_trials.saturating_add(1);
@@ -185,8 +192,13 @@ pub(crate) fn late_move_reduction(params: LateMoveReductionParams<'_>) -> i32 {
     if params.is_pv {
         r -= 1;
     }
-    if params.gives_check {
-        r = 0;
+    // captureの場合はreductionを減らす（YaneuraOu準拠: captureにも適用するが慎重に）
+    if !params.is_quiet {
+        r = (r - 1).max(0);
+    }
+    // good_captureの場合はさらにreductionを減らす
+    if params.is_good_capture {
+        r = (r - 1).max(0);
     }
     let improving = if params.ply >= 2 {
         let idx = (params.ply - 2) as usize;

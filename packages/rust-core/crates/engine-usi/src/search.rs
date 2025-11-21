@@ -217,6 +217,18 @@ pub fn limits_from_go(
         builder.infinite()
     };
 
+    // depth だけが指定され、時間系パラメータが空の場合は、固定 qnodes 制限を外す。
+    // デバッグ/テストで深さが伸びないケースを避けるための安全側設定。
+    let depth_only = gp.depth.is_some()
+        && gp.nodes.is_none()
+        && gp.movetime.is_none()
+        && gp.byoyomi.is_none()
+        && gp.btime.is_none()
+        && gp.wtime.is_none();
+    if depth_only {
+        builder = builder.qnodes_limit(0);
+    }
+
     if let Some(rtime_ms) = gp.rtime {
         builder = builder.random_time_ms(rtime_ms);
     }

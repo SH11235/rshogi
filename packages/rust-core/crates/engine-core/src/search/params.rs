@@ -37,12 +37,11 @@ pub const PROBCUT_MARGIN_D5: i32 = 250;
 pub const PROBCUT_MARGIN_D6P: i32 = 300;
 
 // Null Move Pruning (NMP)
-pub const NMP_MIN_DEPTH: i32 = 3;
-// 💡 より保守的な設定に変更（7→4）
-// 理由：過度な減深で飛車打ちなどの強手を見逃すのを防ぐ
-// YO互換は R = 7 + depth/3 だが、実戦で大量の悪手が発生したため減らす
-// R = 4 + depth/3 + bonus（bonusはstatic_evalがbetaから十分離れている場合に+1）
-pub const NMP_BASE_R: i32 = 4;
+// 💡 序盤の浅い深さでの暴発を抑えるため、適用開始深さを 4ply へ引き上げ。
+//    R も YO 寄りに戻し、null 探索で安易に beta cut しないようにする。
+pub const NMP_MIN_DEPTH: i32 = 4;
+// YO互換: R = 7 + depth/3。実戦ではやや浅めに抑えて 6 + depth/3 に設定する。
+pub const NMP_BASE_R: i32 = 6;
 pub const NMP_BONUS_DELTA_BETA: i32 = 150; // if static_eval - beta > this, R += 1
 pub const NMP_HAND_SUM_DISABLE: i32 = 6; // disable when hand pieces sum >= this
 

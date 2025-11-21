@@ -328,10 +328,8 @@ fn king_safety_our_weights() -> &'static [i32; 9] {
     CELL.get_or_init(|| {
         let mut weights = [0; 9];
         for (dist, slot) in weights.iter_mut().enumerate() {
-            // YaneuraOu MATERIAL 相当の係数よりやや控えめに設定しつつ、
-            // 敵利き側の重み（king_safety_their_weights）とのバランスを安全寄りに取る。
-            // 自利き側のベース値はやや下げ、敵利き側（king_safety_their_weights）との比率を高める。
-            let base = 50 * 1024;
+            // 自利き側の寄与はさらに控えめに抑え、敵利き側とのトレードオフを安全寄りに振る。
+            let base = 40 * 1024;
             *slot = base / ((dist + 1) as i32);
         }
         weights
@@ -344,8 +342,8 @@ fn king_safety_their_weights() -> &'static [i32; 9] {
     CELL.get_or_init(|| {
         let mut weights = [0; 9];
         for (dist, slot) in weights.iter_mut().enumerate() {
-            // 敵利き側は自玉への脅威としてやや強めに評価する。
-            let base = 105 * 1024;
+            // 敵利き側は自玉への脅威として強めに評価する。
+            let base = 140 * 1024;
             *slot = base / ((dist + 1) as i32);
         }
         weights

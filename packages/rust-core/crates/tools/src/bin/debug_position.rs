@@ -43,6 +43,10 @@ struct Args {
     /// Show all legal moves for the position
     #[arg(short, long)]
     moves: bool,
+
+    /// Show evaluation breakdown (material, king_safety, etc.)
+    #[arg(long)]
+    show_eval: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +57,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.depth < 1 {
         return Err("--depth must be >= 1".into());
     }
-    if args.time < 1 {
+    if args.time == 0 {
+        // 特別値: 時間制限なし（SearchLimits 側では Infinite 指定）
+    } else if args.time < 1 {
         return Err("--time must be >= 1".into());
     }
 
@@ -108,10 +114,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        let mut quiet_count = 0;
+        let mut capture_count = 0;
+        let mut check_count = 0;
         for (i, mv) in legal_moves.iter().enumerate() {
-            println!("  {}: {}", i + 1, move_to_usi(mv));
+            let is_capture = mv.is_capture_hint();
+            let gives_check = position.gives_check(*mv);
+            let tag = if is_capture && gives_check {
+                capture_count += 1;
+                check_count += 1;
+                "cap+chk"
+            } else if is_capture {
+                capture_count += 1;
+                "capture"
+            } else if gives_check {
+                check_count += 1;
+                "check"
+            } else {
+                quiet_count += 1;
+                "quiet"
+            };
+            println!("  {}: {} [{}]", i + 1, move_to_usi(mv), tag);
         }
-        println!("Total: {} moves", legal_moves.len());
+        println!(
+            "Total: {} moves (quiet={}, capture={}, check={})",
+            legal_moves.len(),
+            quiet_count,
+            capture_count,
+            check_count
+        );
+        if args.perft.is_none() && !args.show_eval {
+            return Ok(());
+        }
+    }
+
+    // Show evaluation breakdown if requested
+    if args.show_eval {
+        use engine_core::evaluation::evaluate::evaluate_material_terms_debug;
+        let terms = evaluate_material_terms_debug(&position);
+        println!("\n=== Evaluation Breakdown ===");
+        println!("Material:             {} cp", terms.material_cp);
+        println!("King Safety:          {} cp", terms.king_safety_cp);
+        println!("King Position:        {} cp", terms.king_position_cp);
+        println!("Piece Safety:         {} cp", terms.piece_safety_cp);
+        println!("King Attacker Safety: {} cp", terms.king_attacker_safety_cp);
+        println!("------------------------");
+        println!("Total:                {} cp", terms.total_cp);
         if args.perft.is_none() {
             return Ok(());
         }
@@ -149,12 +197,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = Engine::new(engine_type);
 
     // Create search limits
+    // time=0 を特別扱いして "時間制限なし"（Infinite）とみなすことで、
+    // depth 指定のみでの調査が可能になる。停止系の不具合切り分け用途。
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let limits = SearchLimits::builder()
-        .depth(args.depth)
-        .fixed_time_ms(args.time)
-        .stop_flag(stop_flag.clone())
-        .build();
+    let mut builder = SearchLimits::builder().depth(args.depth).stop_flag(stop_flag.clone());
+    if args.time > 0 {
+        builder = builder.fixed_time_ms(args.time);
+    }
+    let limits = builder.build();
 
     println!("\nStarting search...");
     let start = Instant::now();
