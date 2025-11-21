@@ -489,7 +489,6 @@ impl Engine {
             base_stop_info.soft_limit_ms = ms;
             base_stop_info.hard_limit_ms = ms;
         }
-        self.stop_controller.prime_stop_info(base_stop_info.clone());
 
         limits.session_id = session_id;
         self.apply_pending_thread_count();
@@ -512,7 +511,10 @@ impl Engine {
         if let Some(cb) = &info_string_cb {
             cb(&format!("session_publish stop_ctrl sid={}", session_id));
         }
+        // publish_session() must be called before prime_stop_info() because
+        // publish_session() clears the stop_info via take(). See stop_ctrl.rs comments.
         self.stop_controller.publish_session(stop_flag_ref, session_id);
+        self.stop_controller.prime_stop_info(base_stop_info.clone());
 
         let backend =
             Arc::clone(self.backend.as_ref().expect("backend must be initialized after rebuild"));

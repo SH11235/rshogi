@@ -187,12 +187,19 @@ pub fn limits_from_go(
     } else if let Some(ms) = gp.movetime {
         builder.fixed_time_ms(ms)
     } else if let Some(byo) = gp.byoyomi {
-        let main_time = match side {
-            Color::Black => gp.btime.unwrap_or_default(),
-            Color::White => gp.wtime.unwrap_or_default(),
-        };
-        let periods = gp.periods.unwrap_or(opts.byoyomi_periods).clamp(1, 10);
-        builder.byoyomi(main_time, byo, periods)
+        // btime/wtimeが指定されている場合のみByoyomiとして扱う
+        // 指定されていない場合は、FixedTimeとして扱う（各手にbyoyomi_ms使う）
+        if gp.btime.is_some() || gp.wtime.is_some() {
+            let main_time = match side {
+                Color::Black => gp.btime.unwrap_or_default(),
+                Color::White => gp.wtime.unwrap_or_default(),
+            };
+            let periods = gp.periods.unwrap_or(opts.byoyomi_periods).clamp(1, 10);
+            builder.byoyomi(main_time, byo, periods)
+        } else {
+            // btime/wtimeが未指定の場合は、FixedTimeとして扱う
+            builder.fixed_time_ms(byo)
+        }
     } else if let (Some(b), Some(w)) = (gp.btime, gp.wtime) {
         let white_inc = gp.winc.unwrap_or_default();
         let black_inc = gp.binc.unwrap_or_default();
