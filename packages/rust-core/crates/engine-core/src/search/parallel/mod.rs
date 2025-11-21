@@ -19,6 +19,7 @@ use crate::Position;
 use log::debug;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -518,12 +519,8 @@ fn combine_results(
         return fallback;
     }
 
-    let mut best_idx = 0usize;
-    for idx in 1..results.len() {
-        if prefers(&results[idx], &results[best_idx]) {
-            best_idx = idx;
-        }
-    }
+    // ヘルパーが見つけた詰みや深い読みを正しく採用する
+    let best_idx = select_best_by_vote(&results);
 
     let total_nodes: u64 = results.iter().map(|(_, r)| r.nodes).sum();
     // qnodes aggregation: workers report their own local qnodes; aggregate by sum.
@@ -766,6 +763,142 @@ fn prefers(candidate: &(usize, SearchResult), current: &(usize, SearchResult)) -
 
     // Fully equal: prefer smaller worker id (primary=0 wins).
     candidate.0 < current.0
+}
+
+/// YaneuraOu準拠の投票システムでベストスレッドを選択する
+///
+/// 各スレッドの best_move に対して `(score - min_score + 14) * depth` の投票値を加算し、
+/// 投票数が最も多い手を選んだスレッドを採用する。
+///
+/// 判定ロジック:
+/// 1. 現在のbestがproven win → より高いスコア（短い詰み）で更新
+/// 2. 現在のbestがproven loss → より低いスコア（長い詰まされ）で更新
+/// 3. 通常局面:
+///    a. 新スレッドがproven win/loss → 即座に更新
+///    b. 投票数が多い → 更新
+///    c. 投票数が同じ & PV長考慮の投票値が良い → 更新
+fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
+    if results.is_empty() {
+        return 0;
+    }
+    if results.len() == 1 {
+        return 0;
+    }
+
+    // proven win/loss の判定閾値 (YaneuraOu: VALUE_TB_WIN_IN_MAX_PLY = 32000 - 246)
+    const PROVEN_WIN_THRESHOLD: i32 = 30000;
+    const PROVEN_LOSS_THRESHOLD: i32 = -30000;
+
+    let is_proven_win = |score: i32| score >= PROVEN_WIN_THRESHOLD;
+    let is_proven_loss = |score: i32| score <= PROVEN_LOSS_THRESHOLD && score > i32::MIN + 1000;
+
+    // primary (worker_id=0) のインデックスを特定
+    let primary_idx = results.iter().position(|(wid, _)| *wid == 0).unwrap_or(0);
+
+    // 最小スコアを取得
+    let min_score = results
+        .iter()
+        .filter_map(|(_, r)| r.best_move.map(|_| r.score))
+        .min()
+        .unwrap_or(0);
+
+    // 投票値計算関数: (score - min_score + 14) × depth
+    let voting_value =
+        |r: &SearchResult| -> i64 { (r.score as i64 - min_score as i64 + 14) * r.depth as i64 };
+
+    // 各手に対する投票値を集計
+    let mut votes: HashMap<Move, i64> = HashMap::new();
+    for (_, result) in results.iter() {
+        if let Some(mv) = result.best_move {
+            *votes.entry(mv).or_insert(0) += voting_value(result);
+        }
+    }
+
+    // デフォルトはprimary
+    let mut best_idx = primary_idx;
+
+    // 各スレッドと比較
+    for (idx, (_, result)) in results.iter().enumerate() {
+        let (_, best_result) = &results[best_idx];
+
+        let best_score = best_result.score;
+        let new_score = result.score;
+
+        let best_in_proven_win = is_proven_win(best_score);
+        let new_in_proven_win = is_proven_win(new_score);
+
+        let best_in_proven_loss = is_proven_loss(best_score);
+        let new_in_proven_loss = is_proven_loss(new_score);
+
+        // ケース1: 現在のbestがproven win (詰み確定)
+        if best_in_proven_win {
+            // より高いスコア（手数が少ない詰み）を選択
+            if new_in_proven_win && new_score > best_score {
+                best_idx = idx;
+            }
+            continue;
+        }
+
+        // ケース2: 現在のbestがproven loss (詰まされ確定)
+        if best_in_proven_loss {
+            // より低いスコア（手数が多い詰まされ）を選択
+            if new_in_proven_loss && new_score < best_score {
+                best_idx = idx;
+            }
+            continue;
+        }
+
+        // ケース3: 通常局面
+        // 3a: 新スレッドがproven win → 即座に更新
+        if new_in_proven_win {
+            best_idx = idx;
+            continue;
+        }
+
+        // 3b: 新スレッドがproven loss → 即座に更新（他に選択肢がない場合）
+        if new_in_proven_loss {
+            best_idx = idx;
+            continue;
+        }
+
+        // 3c: 通常の投票比較
+        let best_mv = match best_result.best_move {
+            Some(mv) => mv,
+            None => {
+                // bestに手がない場合は新スレッドを採用
+                if result.best_move.is_some() {
+                    best_idx = idx;
+                }
+                continue;
+            }
+        };
+
+        let new_mv = match result.best_move {
+            Some(mv) => mv,
+            None => continue,
+        };
+
+        let best_vote = *votes.get(&best_mv).unwrap_or(&0);
+        let new_vote = *votes.get(&new_mv).unwrap_or(&0);
+
+        let best_vv = voting_value(best_result);
+        let new_vv = voting_value(result);
+
+        let best_pv_len = best_result.stats.pv.len();
+        let new_pv_len = result.stats.pv.len();
+
+        // YaneuraOu: 投票数が多いか、同票なら voting_value * (PV長>2) が高い方
+        // "We make sure not to pick a thread with truncated principal variation"
+        let better = new_vote > best_vote
+            || (new_vote == best_vote
+                && new_vv * (new_pv_len > 2) as i64 > best_vv * (best_pv_len > 2) as i64);
+
+        if better {
+            best_idx = idx;
+        }
+    }
+
+    best_idx
 }
 
 /// Create a shallow copy of `SearchLimits` for helper workers.
