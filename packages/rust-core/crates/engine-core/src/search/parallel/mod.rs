@@ -194,6 +194,10 @@ where
         let start = Instant::now();
 
         if threads == 1 {
+            // シングルスレッドの場合もstop_flagをクリアする
+            // (前回マルチスレッドで実行した場合、stop_flagがtrueのまま残っている可能性がある)
+            // inserted_stop_flagの値に関わらず、常にクリアする（再利用される場合も対応）
+            stop_flag.store(false, AtomicOrdering::Release);
             let mut result =
                 self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
             finish_single_result(&self.tt, &mut result, start);
@@ -202,6 +206,11 @@ where
 
         let helper_count = threads.saturating_sub(1);
         self.thread_pool.resize(helper_count);
+
+        // マルチスレッド探索開始前に stop_flag をクリア
+        // (前回の探索で true のまま残っている場合がある)
+        stop_flag.store(false, AtomicOrdering::Release);
+
         // 純粋 LazySMP: RootWorkQueue/stride は使用しない
 
         let mut jobs = Vec::with_capacity(helper_count);
@@ -279,9 +288,9 @@ where
                     .unwrap_or(false)
         };
 
-        // stop_flagは後でセット（Helper結果受取後）
+        // YaneuraOu準拠: stop_flagは即座にセットせず、Helper待機後にセット
+        // ただし、we_set_stop_flagは後でクリーンアップに使うため、条件を記録
         let should_stop_helpers_now = !bench_allrun || (bench_stop_on_mate && primary_is_mate);
-        let we_set_stop_flag = false; // 変更: 即座にセットしない
 
         drop(result_tx);
         // Helpers の停止/待機ポリシー（YaneuraOu準拠に変更）:
@@ -427,33 +436,24 @@ where
                 results.push((worker_id, res));
             }
 
-            // YaneuraOu準拠: Helperが現在の反復を終えるまで待機
-            // (最大500ms、必要に応じて調整可能)
-            const YANEURAOU_HELPER_WAIT_MS: u64 = 500;
-            let drain_start = Instant::now();
-            loop {
-                let spent = drain_start.elapsed().as_millis() as u64;
-                if spent >= YANEURAOU_HELPER_WAIT_MS {
-                    break;
-                }
-                let slice_ms = (YANEURAOU_HELPER_WAIT_MS - spent).min(50);
-                match result_rx.recv_timeout(std::time::Duration::from_millis(slice_ms)) {
-                    Ok((worker_id, res)) => {
-                        publish_helper_snapshot(
-                            &self.stop_controller,
-                            session_id,
-                            root_key,
-                            worker_id,
-                            &res,
-                            limits.info_string_callback.as_ref(),
-                        );
-                        results.push((worker_id, res));
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // タイムアウト継続（stop_flagは既にセット済み）
-                    }
-                    Err(_) => break,
-                }
+            // YaneuraOu準拠: Helperが現在の反復を終えるまで無期限に待機
+            //
+            // YaneuraOuの動作:
+            // threads.stop = true をセット後、threads.wait_for_search_finished() で
+            // 全Helperの完了を無期限に待つ。これにより completedDepth >= 1 が保証される。
+            //
+            // Rust実装: recv() で全Helper完了まで待機（タイムアウトなし）
+            // 時間切れはStopController側で管理されるため、ここでは待機のみ行う。
+            while let Ok((worker_id, res)) = result_rx.recv() {
+                publish_helper_snapshot(
+                    &self.stop_controller,
+                    session_id,
+                    root_key,
+                    worker_id,
+                    &res,
+                    limits.info_string_callback.as_ref(),
+                );
+                results.push((worker_id, res));
             }
             if bench_allrun {
                 // bench_allrun=On かつ メイトで打ち切ったケースでは観測用にログする
@@ -467,7 +467,9 @@ where
             }
         }
 
-        if we_set_stop_flag && inserted_stop_flag {
+        // YaneuraOu準拠: 探索終了時にstop_flagをクリア
+        // inserted_stop_flagがtrueの場合のみ（自分で作成したstop_flag）
+        if inserted_stop_flag && should_stop_helpers_now {
             let _ = stop_flag.compare_exchange(
                 true,
                 false,
@@ -915,26 +917,18 @@ fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
         let best_vote = *votes.get(&best_mv).unwrap_or(&0);
         let new_vote = *votes.get(&new_mv).unwrap_or(&0);
 
-        let best_vv = voting_value(best_result);
-        let new_vv = voting_value(result);
-
         let best_pv_len = best_result.stats.pv.len();
         let new_pv_len = result.stats.pv.len();
 
-        // YaneuraOu: 投票数が多いか、同票なら voting_value * (PV長>2) が高い方
+        // YaneuraOu準拠: 投票数が多いか、同票なら voting_value * (PV長>2) が高い方
         // "We make sure not to pick a thread with truncated principal variation"
         //
-        // [独自拡張: 問題解決後に削除検討]
-        // YaneuraOuの仕様では両方PV長<=2の場合タイブレークが効かないため、
-        // その場合は投票値（=深度とスコアの積）で比較するように拡張
-        let better = new_vote > best_vote
-            || (new_vote == best_vote && {
-                match (new_pv_len > 2, best_pv_len > 2) {
-                    (true, false) => true,  // 新スレッドのPVが長い→優先
-                    (false, true) => false, // 既存スレッドのPVが長い→維持
-                    _ => new_vv > best_vv,  // 両方同条件→投票値で比較
-                }
-            });
+        // YaneuraOuの仕様:
+        // - 投票数が多い方を優先
+        // - 同票の場合、PV長>2のスレッドがあればそちらを優先
+        // - 両方PV長<=2、または両方PV長>2の場合はタイブレークなし（既存を維持）
+        let better =
+            new_vote > best_vote || (new_vote == best_vote && new_pv_len > 2 && best_pv_len <= 2);
 
         if better {
             best_idx = idx;
