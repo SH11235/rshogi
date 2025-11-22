@@ -555,7 +555,7 @@ mod tests {
     use crate::time_management::{
         detect_game_phase_for_time, TimeControl as TMTimeControl, TimeLimits, TimeManager,
     };
-    use crate::Color;
+    use crate::{Color, MoveGenerator};
     use std::sync::mpsc;
 
     /// Verify that resident start_thinking/start_searching completes all jobs.
@@ -739,5 +739,42 @@ mod tests {
         }
 
         assert_eq!(received, 2);
+    }
+
+    #[test]
+    fn start_thinking_shares_root_moves_between_main_and_helpers() {
+        let backend = Arc::new(ClassicBackend::with_tt(
+            Arc::new(MaterialEvaluator),
+            Arc::new(TranspositionTable::new(2)),
+        ));
+        let mut pool = ThreadPool::new(backend, 1);
+
+        let pos = crate::shogi::Position::startpos();
+        // searchmoves: 7g7f, 2g2f
+        let legal = MoveGenerator::new().generate_all(&pos).expect("legal");
+        let pick = |usi: &str| -> crate::shogi::Move {
+            legal
+                .as_slice()
+                .iter()
+                .copied()
+                .find(|m| crate::usi::move_to_usi(m) == usi)
+                .unwrap_or_else(|| panic!("legal move not found for {usi}"))
+        };
+        let mv1 = pick("7g7f");
+        let mv2 = pick("2g2f");
+        let limits = SearchLimitsBuilder::default().depth(1).searchmoves(vec![mv1, mv2]).build();
+
+        let prepared = pool.start_thinking(&pos, &limits, 1).expect("start_thinking");
+
+        // main_limits root_moves should match filtered searchmoves
+        let main_root = prepared.main_limits.root_moves.as_ref().expect("main root_moves");
+        assert_eq!(main_root.as_slice(), &[mv1, mv2]);
+
+        // SessionContext stored in pool should exist and share the same Arc
+        let session = pool.session.as_ref().expect("session stored");
+        assert!(Arc::ptr_eq(&session.root_moves, main_root));
+        let helper_job = session.jobs.first().expect("helper job");
+        let helper_root = helper_job.limits.root_moves.as_ref().expect("helper root_moves");
+        assert!(Arc::ptr_eq(helper_root, &session.root_moves));
     }
 }
