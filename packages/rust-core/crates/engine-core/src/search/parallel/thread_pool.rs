@@ -288,7 +288,15 @@ where
     ) -> Result<PreparedSession, MoveGenError> {
         self.nodes_counter.store(0, AtomicOrdering::Relaxed);
 
-        let root_moves = Arc::new(build_root_moves(pos, base_limits)?);
+        // start_thinking は main/helper 共有の rootMoves を決定する唯一の入口。
+        // searchmoves 指定などで空になるケース（宣言勝ち/詰み 等）でも後段がアクセス違反しないよう
+        // placeholder を埋めておく（YaneuraOu の Move::none 相当）。
+        let mut root_moves_vec = build_root_moves(pos, base_limits)?;
+        if root_moves_vec.is_empty() {
+            log::warn!("start_thinking: root_moves empty; injecting null move placeholder");
+            root_moves_vec.push(Move::null());
+        }
+        let root_moves = Arc::new(root_moves_vec);
         let root_key = pos.zobrist_hash();
         // publish_session をここで必ず実行（Engine 側で済んでいれば冪等）。
         let stop_flag = base_limits
