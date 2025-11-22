@@ -123,6 +123,18 @@ impl WorkerLocal {
             self.scratch.shrink_to(MAX_SCRATCH_SIZE);
         }
     }
+
+    fn clear_all(&mut self) {
+        self.heur.clear_all();
+        self.last_session_id = 0;
+        self.scratch.clear();
+        if self.stack.len() != MAX_PLY + 1 {
+            self.stack.resize(MAX_PLY + 1, SearchStack::default());
+        }
+        for s in self.stack.iter_mut() {
+            s.reset_for_iteration();
+        }
+    }
 }
 
 pub struct ThreadPool<E>
@@ -131,6 +143,8 @@ where
 {
     backend: Arc<ClassicBackend<E>>,
     workers: Vec<Worker>,
+    pending_jobs: Vec<SearchJob>,
+    nodes_counter: Arc<AtomicU64>,
     // Shared task queue (pull model). Envelope carries job + result channel.
     task_tx: crossbeam::channel::Sender<TaskEnvelope>,
     task_rx: crossbeam::channel::Receiver<TaskEnvelope>,
@@ -166,6 +180,7 @@ where
         let (task_tx, task_rx) = crossbeam::channel::unbounded();
         let (task_hi_tx, task_hi_rx) = crossbeam::channel::unbounded();
         let (reaper_tx, reaper_rx) = std_mpsc::channel::<std::thread::JoinHandle<()>>();
+        let nodes_counter = Arc::new(AtomicU64::new(0));
         let reaper_handle = std::thread::spawn(move || {
             // Join any joiner threads handed over after timeout
             while let Ok(h) = reaper_rx.recv() {
@@ -175,6 +190,8 @@ where
         let mut pool = Self {
             backend,
             workers: Vec::new(),
+            pending_jobs: Vec::new(),
+            nodes_counter,
             task_tx,
             task_rx,
             task_hi_tx,
@@ -207,6 +224,7 @@ where
             let task_rx = self.task_rx.clone();
             let task_hi_rx = self.task_hi_rx.clone();
             let (ctrl_tx, ctrl_rx) = crossbeam::channel::unbounded();
+            let nodes_counter = Arc::clone(&self.nodes_counter);
             let mut builder = thread::Builder::new().name(format!("lazy-smp-worker-{id}"));
 
             // Stack size override for deep recursion (diagnostic/debug builds).
@@ -223,7 +241,9 @@ where
             }
 
             let handle = builder
-                .spawn(move || worker_loop(backend, task_hi_rx, task_rx, ctrl_rx, id))
+                .spawn(move || {
+                    worker_loop(backend, task_hi_rx, task_rx, ctrl_rx, id, nodes_counter)
+                })
                 .expect("spawn lazy smp worker");
             self.workers.push(Worker {
                 ctrl: ctrl_tx,
@@ -254,6 +274,81 @@ where
                 log::warn!("thread_pool: failed to enqueue job: {err}");
             }
         }
+    }
+
+    // Resident-style helpers -------------------------------------------------
+    pub fn set_resident(&mut self, threads: usize) {
+        self.clear_workers();
+        self.resize(threads);
+        self.ensure_network_replicated();
+    }
+
+    pub fn clear_workers(&mut self) {
+        self.nodes_counter.store(0, AtomicOrdering::Relaxed);
+        self.pending_jobs.clear();
+        for worker in self.workers.iter_mut() {
+            let _ = worker.ctrl.send(WorkerCommand::Clear);
+        }
+    }
+
+    pub fn start_thinking(&mut self, jobs: Vec<SearchJob>) {
+        self.nodes_counter.store(0, AtomicOrdering::Relaxed);
+        self.pending_jobs = jobs;
+    }
+
+    pub fn start_searching(&mut self, result_tx: &Sender<(usize, SearchResult)>) {
+        let jobs = std::mem::take(&mut self.pending_jobs);
+        self.dispatch(jobs, result_tx);
+    }
+
+    pub fn wait_for_search_finished(
+        &mut self,
+        expected_helpers: usize,
+        result_rx: &std_mpsc::Receiver<(usize, SearchResult)>,
+        timeout: Option<std::time::Duration>,
+    ) -> (Vec<(usize, SearchResult)>, bool) {
+        let mut results = Vec::with_capacity(expected_helpers);
+        let mut timed_out = false;
+        if expected_helpers == 0 {
+            return (results, timed_out);
+        }
+        let start = Instant::now();
+        while results.len() < expected_helpers {
+            if let Some(limit) = timeout {
+                let elapsed = start.elapsed();
+                if elapsed >= limit {
+                    timed_out = true;
+                    break;
+                }
+                let slice = limit.saturating_sub(elapsed);
+                match result_rx.recv_timeout(slice.min(std::time::Duration::from_millis(200))) {
+                    Ok(res) => results.push(res),
+                    Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                        timed_out = true;
+                        break;
+                    }
+                }
+            } else {
+                match result_rx.recv() {
+                    Ok(res) => results.push(res),
+                    Err(_) => {
+                        timed_out = true;
+                        break;
+                    }
+                }
+            }
+        }
+        (results, timed_out)
+    }
+
+    pub fn nodes_searched(&self) -> u64 {
+        self.nodes_counter.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn ensure_network_replicated(&self) {
+        // Placeholder for YaneuraOu 互換 API。NNUE は共有 Arc を利用するため no-op。
+        // 呼び出し側の明示的呼出で dead_code を避け、将来の NUMA 配置に備える。
     }
 
     #[allow(dead_code)]
@@ -396,6 +491,7 @@ struct Worker {
 
 enum WorkerCommand {
     Shutdown,
+    Clear,
 }
 
 fn worker_loop<E>(
@@ -404,6 +500,7 @@ fn worker_loop<E>(
     task_rx: crossbeam::channel::Receiver<TaskEnvelope>,
     ctrl_rx: crossbeam::channel::Receiver<WorkerCommand>,
     worker_id: usize,
+    nodes_counter: Arc<AtomicU64>,
 ) where
     E: Evaluator + Send + Sync + 'static,
 {
@@ -419,13 +516,20 @@ fn worker_loop<E>(
         // crossbeam select! に制御チャネルを組み込んで、終了要求に即時反応する。
         let tick = crossbeam::channel::after(timeout);
         // 先に高優先度キューを非ブロッキングで吸い切る（優先処理の安定化）
+        let mut shutdown = false;
         let envelope = if biased {
             if let Ok(env) = task_hi_rx.try_recv() {
                 METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
                 Some(env)
             } else {
                 crossbeam::select! {
-                    recv(ctrl_rx) -> _ => { break; }
+                    recv(ctrl_rx) -> msg => {
+                        match msg {
+                            Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
+                            Ok(WorkerCommand::Clear) => local.clear_all(),
+                        }
+                        None
+                    },
                     recv(task_hi_rx) -> msg => msg.ok().inspect(|_| { METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed); }),
                     recv(task_rx)    -> msg => msg.ok().inspect(|_| { METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed); }),
                     recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); None }
@@ -433,12 +537,21 @@ fn worker_loop<E>(
             }
         } else {
             crossbeam::select! {
-                recv(ctrl_rx) -> _ => { break; }
+                recv(ctrl_rx) -> msg => {
+                    match msg {
+                        Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
+                        Ok(WorkerCommand::Clear) => local.clear_all(),
+                    }
+                    None
+                },
                 recv(task_hi_rx) -> msg => msg.ok().inspect(|_| { METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed); }),
                 recv(task_rx)    -> msg => msg.ok().inspect(|_| { METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed); }),
                 recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); None }
             }
         };
+        if shutdown {
+            break;
+        }
 
         let Some(TaskEnvelope {
             job: SearchJob { position, limits },
@@ -458,6 +571,7 @@ fn worker_loop<E>(
             result.stats.elapsed = start.elapsed();
             result.refresh_summary();
         }
+        nodes_counter.fetch_add(result.nodes, AtomicOrdering::Relaxed);
         let _ = result_tx.send((worker_id, result));
         drop(result_tx);
     }

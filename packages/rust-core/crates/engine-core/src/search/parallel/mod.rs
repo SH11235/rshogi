@@ -9,7 +9,7 @@ use self::thread_pool::{SearchJob, ThreadPool};
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
-use crate::search::common::{get_mate_distance, is_mate_score};
+use crate::search::common::get_mate_distance;
 use crate::search::constants::HELPER_SNAPSHOT_MIN_DEPTH;
 use crate::search::types::{clamp_score_cp, normalize_root_pv, RootLine};
 use crate::search::types::{InfoStringCallback, NodeType};
@@ -205,7 +205,7 @@ where
         }
 
         let helper_count = threads.saturating_sub(1);
-        self.thread_pool.resize(helper_count);
+        self.thread_pool.set_resident(helper_count);
 
         // マルチスレッド探索開始前に stop_flag をクリア
         // (前回の探索で true のまま残っている場合がある)
@@ -243,7 +243,8 @@ where
         }
 
         let (result_tx, result_rx) = mpsc::channel();
-        self.thread_pool.dispatch(jobs, &result_tx);
+        self.thread_pool.start_thinking(jobs);
+        self.thread_pool.start_searching(&result_tx);
 
         let mut results = Vec::with_capacity(threads);
         let primary_limits = clone_limits_for_worker(&limits);
@@ -264,212 +265,64 @@ where
             self.backend.think_blocking(pos, &primary_limits, limits.info_callback.clone());
         results.push((0usize, main_result));
 
-        // YaneuraOu準拠: Primary完了後も即座にstop_flagをセットせず、
-        // Helperの結果を待ってから停止する。
-        //
-        // YaneuraOuでは、Primaryが反復深化ループを抜けた後に`threads.stop = true`をセットし、
-        // その後`threads.wait_for_search_finished()`で全Helperの結果を待つ。
-        // Helperは`threads.stop`をチェックするまで探索を続けるため、
-        // completedDepth >= 1の結果が得られることが保証される。
-        //
-        // 従来の実装では即座にstop_flagをセットしていたため、Helperがdepth=0で
-        // 停止してしまい、投票値が0になる問題があった。
-        let bench_allrun = crate::search::policy::bench_allrun_enabled();
-        let bench_stop_on_mate = crate::search::policy::bench_stop_on_mate_enabled();
-
-        let primary_is_mate = {
-            let pr = &results[0].1;
-            is_mate_score(pr.score)
-                || pr
-                    .lines
-                    .as_ref()
-                    .and_then(|ls| ls.first())
-                    .map(|l| is_mate_score(l.score_internal))
-                    .unwrap_or(false)
-        };
-
-        // YaneuraOu準拠: stop_flagは即座にセットせず、Helper待機後にセット
-        // ただし、we_set_stop_flagは後でクリーンアップに使うため、条件を記録
-        let should_stop_helpers_now = !bench_allrun || (bench_stop_on_mate && primary_is_mate);
-
+        // Primary完了後にstop_flagを立て、全Helper完了を待機（無制限が既定）。
+        stop_flag.store(true, AtomicOrdering::Release);
         drop(result_tx);
-        // Helpers の停止/待機ポリシー（YaneuraOu準拠に変更）:
-        // - BenchAllRun=On かつ 非メイト: helpers をキャンセルせず、全件ブロッキングで待機
-        // - それ以外: 一定時間（200-500ms）Helperの結果を待機し、その後stop_flagをセット
-        //
-        // YaneuraOuでは、Primaryが完了してもHelperは探索を続け、`threads.stop`がtrueに
-        // なるまで反復深化を進める。これにより、completedDepth >= 1の結果が保証される。
-        let canceled = false; // YaneuraOu準拠では強制キャンセルは行わない
-        if bench_allrun && !primary_is_mate {
-            // 全件待機：ハング防止のため recv_timeout + 期限超過時にフォールバック
-            let wait_start = Instant::now();
-            let expected = helper_count;
-            let mut received = 0usize;
-            let mut canceled = false;
 
-            // 期限（ms）を導出：明示指定 > TimeManager/FixedTime 由来 > 既定 3000ms
-            let derive_budget_ms = || -> u64 {
-                if let Some(ms) = crate::search::policy::bench_join_timeout_ms() {
-                    return ms;
-                }
-                if let Some(tm) = limits.time_manager.as_ref() {
-                    let hard = tm.hard_limit_ms();
-                    let soft = tm.soft_limit_ms();
-                    if hard != u64::MAX && hard > 0 {
-                        return hard;
-                    }
-                    if soft > 0 {
-                        // 余裕+1000ms を付与
-                        return soft.saturating_add(1000);
-                    }
-                } else if let Some(limit) = limits.time_limit() {
-                    let base = (limit.as_millis() as u64).saturating_add(1000);
-                    return base;
-                }
-                3000
-            }();
-            // 残余時間 = 期限 - 経過
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let mut remaining_ms = derive_budget_ms.saturating_sub(elapsed_ms);
+        let join_timeout_ms = crate::util::env_var("SHOGI_HELPER_JOIN_TIMEOUT_MS")
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|v| *v > 0);
+        let join_timeout = join_timeout_ms.map(std::time::Duration::from_millis);
 
-            // まず即時ドレイン
-            while let Ok((worker_id, res)) = result_rx.try_recv() {
-                publish_helper_snapshot(
-                    &self.stop_controller,
-                    session_id,
-                    root_key,
-                    worker_id,
-                    &res,
-                    limits.info_string_callback.as_ref(),
-                );
-                results.push((worker_id, res));
-                received += 1;
-                if received >= expected {
-                    break;
-                }
-            }
-
-            while received < expected && remaining_ms > 0 {
-                let slice = std::time::Duration::from_millis(remaining_ms.min(250));
-                match result_rx.recv_timeout(slice) {
-                    Ok((worker_id, res)) => {
-                        publish_helper_snapshot(
-                            &self.stop_controller,
-                            session_id,
-                            root_key,
-                            worker_id,
-                            &res,
-                            limits.info_string_callback.as_ref(),
-                        );
-                        results.push((worker_id, res));
-                        received += 1;
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // 期限へ向けて残余を縮める
-                        let now_ms = wait_start.elapsed().as_millis() as u64;
-                        let spent_ms = now_ms;
-                        remaining_ms =
-                            derive_budget_ms.saturating_sub(elapsed_ms.saturating_add(spent_ms));
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-
-            if received < expected {
-                // 期限超過・欠落時はキャンセルにフォールバック（安全側）
-                let _ = self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
-                canceled = true;
-                // 最後に即時ドレイン
-                while let Ok((worker_id, res)) = result_rx.try_recv() {
-                    publish_helper_snapshot(
-                        &self.stop_controller,
-                        session_id,
-                        root_key,
-                        worker_id,
-                        &res,
-                        limits.info_string_callback.as_ref(),
-                    );
-                    results.push((worker_id, res));
-                    received += 1;
-                }
-            }
-
-            if let Some(cb) = limits.info_string_callback.as_ref() {
-                let ms = wait_start.elapsed().as_millis();
-                cb(&format!(
-                    "helpers_join_ms={} received={}/{} canceled={}",
-                    ms,
-                    received,
-                    expected,
-                    if canceled { 1 } else { 0 }
-                ));
-            }
-        } else {
-            // 通常対局/メイト時: YaneuraOu準拠でHelperの結果を待機
-            //
-            // YaneuraOuの動作:
-            // 1. Primaryが完了
-            // 2. `threads.stop = true`をセット
-            // 3. `threads.wait_for_search_finished()`でHelperが現在の反復を終えるのを待つ
-            //
-            // これにより、Helperは現在の深度を完了してから停止するため、
-            // completedDepth >= 1が保証される。
-
-            // まず、stop_flagをセットしてHelperに停止を通知
-            // (Helperは現在の反復を終えてから停止する)
-            if should_stop_helpers_now {
-                stop_flag.store(true, AtomicOrdering::Release);
-            }
-
-            // 即時ドレイン
-            while let Ok((worker_id, res)) = result_rx.try_recv() {
-                publish_helper_snapshot(
-                    &self.stop_controller,
-                    session_id,
-                    root_key,
-                    worker_id,
-                    &res,
-                    limits.info_string_callback.as_ref(),
-                );
-                results.push((worker_id, res));
-            }
-
-            // YaneuraOu準拠: Helperが現在の反復を終えるまで無期限に待機
-            //
-            // YaneuraOuの動作:
-            // threads.stop = true をセット後、threads.wait_for_search_finished() で
-            // 全Helperの完了を無期限に待つ。これにより completedDepth >= 1 が保証される。
-            //
-            // Rust実装: recv() で全Helper完了まで待機（タイムアウトなし）
-            // 時間切れはStopController側で管理されるため、ここでは待機のみ行う。
-            while let Ok((worker_id, res)) = result_rx.recv() {
-                publish_helper_snapshot(
-                    &self.stop_controller,
-                    session_id,
-                    root_key,
-                    worker_id,
-                    &res,
-                    limits.info_string_callback.as_ref(),
-                );
-                results.push((worker_id, res));
-            }
-            if bench_allrun {
-                // bench_allrun=On かつ メイトで打ち切ったケースでは観測用にログする
-                if let Some(cb) = limits.info_string_callback.as_ref() {
-                    cb(&format!(
-                        "helpers_join_ms=0 received={} canceled={}",
-                        results.len().saturating_sub(1), // primaryを除いた概数
-                        if canceled { 1 } else { 0 }
-                    ));
-                }
-            }
+        while let Ok((worker_id, res)) = result_rx.try_recv() {
+            publish_helper_snapshot(
+                &self.stop_controller,
+                session_id,
+                root_key,
+                worker_id,
+                &res,
+                limits.info_string_callback.as_ref(),
+            );
+            results.push((worker_id, res));
         }
 
-        // YaneuraOu準拠: 探索終了時にstop_flagをクリア
-        // inserted_stop_flagがtrueの場合のみ（自分で作成したstop_flag）
-        if inserted_stop_flag && should_stop_helpers_now {
+        let helper_received = results.len().saturating_sub(1);
+        let remaining_helpers = helper_count.saturating_sub(helper_received);
+        let (mut helper_results, timed_out) =
+            self.thread_pool
+                .wait_for_search_finished(remaining_helpers, &result_rx, join_timeout);
+        if !helper_results.is_empty() {
+            for (worker_id, res) in helper_results.drain(..) {
+                publish_helper_snapshot(
+                    &self.stop_controller,
+                    session_id,
+                    root_key,
+                    worker_id,
+                    &res,
+                    limits.info_string_callback.as_ref(),
+                );
+                results.push((worker_id, res));
+            }
+        }
+        if timed_out {
+            let _ = self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
+            while let Ok((worker_id, res)) = result_rx.try_recv() {
+                publish_helper_snapshot(
+                    &self.stop_controller,
+                    session_id,
+                    root_key,
+                    worker_id,
+                    &res,
+                    limits.info_string_callback.as_ref(),
+                );
+                results.push((worker_id, res));
+            }
+            if let Some(cb) = limits.info_string_callback.as_ref() {
+                cb("helpers_join_timed_out=1");
+            }
+        }
+        let helper_nodes = self.thread_pool.nodes_searched();
+        if inserted_stop_flag {
             let _ = stop_flag.compare_exchange(
                 true,
                 false,
@@ -479,6 +332,7 @@ where
         }
         // --- Info: best source（primary/helper）を info string 化 ---
         if let Some(cb) = limits.info_string_callback.as_ref() {
+            cb(&format!("helpers_nodes={helper_nodes}"));
             if !results.is_empty() {
                 let mut best_idx = 0usize;
                 for idx in 1..results.len() {
