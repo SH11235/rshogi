@@ -143,6 +143,8 @@ where
     workers: Vec<Worker>,
     // 常駐セッション情報（root 配布済みの Position/Limits を保持）
     session: Option<SessionContext>,
+    // publish/snapshot 用のメタデータ（session take 後も参照する）
+    session_meta: Option<SessionMeta>,
     nodes_counter: Arc<AtomicU64>,
     // Reaper thread to join helper joiner threads on timeout to avoid leaking OS threads
     reaper_tx: std_mpsc::Sender<std::thread::JoinHandle<()>>,
@@ -186,6 +188,12 @@ pub struct PreparedSession {
     pub stop_flag: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Copy)]
+pub struct SessionMeta {
+    pub session_id: u64,
+    pub root_key: u64,
+}
+
 impl<E> ThreadPool<E>
 where
     E: Evaluator + Send + Sync + 'static,
@@ -203,6 +211,7 @@ where
             backend,
             workers: Vec::new(),
             session: None,
+            session_meta: None,
             nodes_counter,
             reaper_tx,
             reaper_handle: Some(reaper_handle),
@@ -274,6 +283,7 @@ where
     pub fn clear_workers(&mut self) {
         self.nodes_counter.store(0, AtomicOrdering::Relaxed);
         self.session = None;
+        self.session_meta = None;
         for worker in self.workers.iter_mut() {
             let _ = worker.ctrl.send(WorkerCommand::Clear);
         }
@@ -340,6 +350,10 @@ where
             root_moves: Arc::clone(&root_moves),
             session_id: base_limits.session_id,
             stop_flag: Arc::clone(&stop_flag),
+        });
+        self.session_meta = Some(SessionMeta {
+            session_id: base_limits.session_id,
+            root_key,
         });
 
         let mut main_limits = clone_limits_for_worker(base_limits);
@@ -418,6 +432,11 @@ where
         self.nodes_counter.load(AtomicOrdering::Relaxed)
     }
 
+    /// 現在のセッションのメタ情報（root_key, session_id）を返す。
+    pub fn current_session_meta(&self) -> Option<SessionMeta> {
+        self.session_meta
+    }
+
     pub fn ensure_network_replicated(&self) {
         // Placeholder for YaneuraOu 互換 API。NNUE は共有 Arc を利用するため no-op。
         // 呼び出し側の明示的呼出で dead_code を避け、将来の NUMA 配置に備える。
@@ -482,6 +501,7 @@ where
         // Remove any workers whose handles have been taken (dead or timing-out workers).
         // This ensures resize() will correctly spawn replacements next time.
         self.workers.retain(|w| w.handle.is_some());
+        self.session_meta = None;
         joined
     }
 
@@ -833,5 +853,31 @@ mod tests {
         assert!(new_flag.load(std::sync::atomic::Ordering::Acquire));
         assert!(!old_flag.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(prepared.session_id, sid);
+    }
+
+    #[test]
+    fn start_thinking_injects_placeholder_when_root_moves_empty() {
+        // 合法手 0 の局面を渡した場合に placeholder (Move::null) が入ることを確認する。
+        // SFEN: 先手番で合法手が存在しない詰み局面。
+        let sfen = "ln4knl/3+S2g2/p3p1spp/3pgpp2/6g2/4PPP1P/4GK1+s1/2+r3s2/1+p+p5+r b 2b2n2l5p 103";
+        let pos = Position::from_sfen(sfen).expect("valid sfen");
+
+        let backend = Arc::new(ClassicBackend::with_tt(
+            Arc::new(MaterialEvaluator),
+            Arc::new(TranspositionTable::new(2)),
+        ));
+        let mut pool = ThreadPool::new(backend, 0);
+        let stop_ctrl = StopController::new();
+
+        let mut limits = SearchLimitsBuilder::default().session_id(2025).depth(1).build();
+        limits.root_moves = Some(Arc::new(vec![])); // 明示的に空を渡す
+
+        let prepared = pool.start_thinking(&pos, &limits, 0, &stop_ctrl).expect("start_thinking");
+
+        assert_eq!(prepared.root_moves.len(), 1);
+        assert_eq!(prepared.root_moves[0], Move::null());
+        let session = pool.session.as_ref().expect("session stored");
+        assert_eq!(session.root_moves.len(), 1);
+        assert_eq!(session.root_moves[0], Move::null());
     }
 }

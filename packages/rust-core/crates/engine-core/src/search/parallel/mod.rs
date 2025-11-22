@@ -228,6 +228,13 @@ where
             self.thread_pool.start_searching(&result_tx);
         }
 
+        // SessionContext が保持するメタを取得（publish_helper_snapshot 用）
+        let (meta_session_id, meta_root_key) = self
+            .thread_pool
+            .current_session_meta()
+            .map(|m| (m.session_id, m.root_key))
+            .unwrap_or((session_id, root_key));
+
         let mut results = Vec::with_capacity(threads);
         let primary_limits = prepared_session
             .as_ref()
@@ -262,8 +269,8 @@ where
         while let Ok((worker_id, res)) = result_rx.try_recv() {
             publish_helper_snapshot(
                 &self.stop_controller,
-                session_id,
-                root_key,
+                meta_session_id,
+                meta_root_key,
                 worker_id,
                 &res,
                 limits.info_string_callback.as_ref(),
@@ -280,8 +287,8 @@ where
             for (worker_id, res) in helper_results.drain(..) {
                 publish_helper_snapshot(
                     &self.stop_controller,
-                    session_id,
-                    root_key,
+                    meta_session_id,
+                    meta_root_key,
                     worker_id,
                     &res,
                     limits.info_string_callback.as_ref(),
@@ -294,8 +301,8 @@ where
             while let Ok((worker_id, res)) = result_rx.try_recv() {
                 publish_helper_snapshot(
                     &self.stop_controller,
-                    session_id,
-                    root_key,
+                    meta_session_id,
+                    meta_root_key,
                     worker_id,
                     &res,
                     limits.info_string_callback.as_ref(),
