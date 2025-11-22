@@ -115,6 +115,7 @@ impl WorkerLocal {
         );
     }
 
+    #[allow(dead_code)]
     fn on_idle(&mut self) {
         // Light maintenance during idle periods (called from after(...) branch).
         // Prevent unbounded memory growth in scratch buffer.
@@ -143,16 +144,9 @@ where
 {
     backend: Arc<ClassicBackend<E>>,
     workers: Vec<Worker>,
-    pending_jobs: Vec<SearchJob>,
+    // 常駐セッション情報（root 配布済みの Position/Limits を保持）
+    session: Option<SessionContext>,
     nodes_counter: Arc<AtomicU64>,
-    // Shared task queue (pull model). Envelope carries job + result channel.
-    #[allow(dead_code)]
-    task_tx: crossbeam::channel::Sender<TaskEnvelope>,
-    task_rx: crossbeam::channel::Receiver<TaskEnvelope>,
-
-    #[allow(dead_code)]
-    task_hi_tx: crossbeam::channel::Sender<TaskEnvelope>,
-    task_hi_rx: crossbeam::channel::Receiver<TaskEnvelope>,
     // Reaper thread to join helper joiner threads on timeout to avoid leaking OS threads
     reaper_tx: std_mpsc::Sender<std::thread::JoinHandle<()>>,
     reaper_handle: Option<std::thread::JoinHandle<()>>,
@@ -163,14 +157,22 @@ pub struct SearchJob {
     pub limits: SearchLimits,
 }
 
+impl SearchJob {
+    fn clone_for_worker(&self) -> Self {
+        Self {
+            position: self.position.clone(),
+            limits: self.limits.clone(),
+        }
+    }
+}
+
 struct TaskEnvelope {
     job: SearchJob,
     result_tx: Sender<(usize, SearchResult)>,
-    // Future YBWC hooks (unused for now):
-    #[allow(dead_code)]
-    priority: u8,
-    #[allow(dead_code)]
-    split: Option<u64>,
+}
+
+pub struct SessionContext {
+    pub jobs: Vec<SearchJob>,
 }
 
 impl<E> ThreadPool<E>
@@ -178,8 +180,6 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     pub fn new(backend: Arc<ClassicBackend<E>>, size: usize) -> Self {
-        let (task_tx, task_rx) = crossbeam::channel::unbounded();
-        let (task_hi_tx, task_hi_rx) = crossbeam::channel::unbounded();
         let (reaper_tx, reaper_rx) = std_mpsc::channel::<std::thread::JoinHandle<()>>();
         let nodes_counter = Arc::new(AtomicU64::new(0));
         let reaper_handle = std::thread::spawn(move || {
@@ -191,12 +191,8 @@ where
         let mut pool = Self {
             backend,
             workers: Vec::new(),
-            pending_jobs: Vec::new(),
+            session: None,
             nodes_counter,
-            task_tx,
-            task_rx,
-            task_hi_tx,
-            task_hi_rx,
             reaper_tx,
             reaper_handle: Some(reaper_handle),
         };
@@ -222,8 +218,6 @@ where
         while self.workers.len() < desired {
             let id = self.workers.len() + 1; // helper ids start at 1 (0 is main thread)
             let backend = Arc::clone(&self.backend);
-            let task_rx = self.task_rx.clone();
-            let task_hi_rx = self.task_hi_rx.clone();
             let (ctrl_tx, ctrl_rx) = crossbeam::channel::unbounded();
             let nodes_counter = Arc::clone(&self.nodes_counter);
             let mut builder = thread::Builder::new().name(format!("lazy-smp-worker-{id}"));
@@ -242,9 +236,7 @@ where
             }
 
             let handle = builder
-                .spawn(move || {
-                    worker_loop(backend, task_hi_rx, task_rx, ctrl_rx, id, nodes_counter)
-                })
+                .spawn(move || worker_loop(backend, ctrl_rx, id, nodes_counter))
                 .expect("spawn lazy smp worker");
             self.workers.push(Worker {
                 ctrl: ctrl_tx,
@@ -262,23 +254,6 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    pub fn dispatch(&self, jobs: Vec<SearchJob>, result_tx: &Sender<(usize, SearchResult)>) {
-        for job in jobs.into_iter() {
-            // Push into shared queue; any worker will pick it up.
-            let env = TaskEnvelope {
-                job,
-                result_tx: result_tx.clone(),
-                priority: 0,
-                split: None,
-            };
-            if let Err(err) = self.task_tx.send(env) {
-                log::warn!("thread_pool: failed to enqueue job: {err}");
-            }
-        }
-    }
-
-    // Resident-style helpers -------------------------------------------------
     pub fn set_resident(&mut self, threads: usize) {
         self.clear_workers();
         self.resize(threads);
@@ -287,30 +262,40 @@ where
 
     pub fn clear_workers(&mut self) {
         self.nodes_counter.store(0, AtomicOrdering::Relaxed);
-        self.pending_jobs.clear();
+        self.session = None;
         for worker in self.workers.iter_mut() {
             let _ = worker.ctrl.send(WorkerCommand::Clear);
         }
     }
 
-    pub fn start_thinking(&mut self, jobs: Vec<SearchJob>) {
+    pub fn start_thinking(&mut self, ctx: SessionContext) {
         self.nodes_counter.store(0, AtomicOrdering::Relaxed);
-        self.pending_jobs = jobs;
+        self.session = Some(ctx);
+    }
+
+    pub fn start_thinking_with_limits(&mut self, pos: &Position, helper_limits: Vec<SearchLimits>) {
+        let mut jobs = Vec::with_capacity(helper_limits.len());
+        for limits in helper_limits {
+            jobs.push(SearchJob {
+                position: pos.clone(),
+                limits,
+            });
+        }
+        self.start_thinking(SessionContext { jobs });
     }
 
     pub fn start_searching(&mut self, result_tx: &Sender<(usize, SearchResult)>) {
-        let jobs = std::mem::take(&mut self.pending_jobs);
-        for (idx, job) in jobs.into_iter().enumerate() {
-            if let Some(worker) = self.workers.get(idx) {
+        let Some(ctx) = self.session.take() else {
+            log::warn!("thread_pool: start_searching called without session");
+            return;
+        };
+        for (idx, worker) in self.workers.iter().enumerate() {
+            if let Some(job) = ctx.jobs.get(idx) {
                 let env = TaskEnvelope {
-                    job,
+                    job: job.clone_for_worker(),
                     result_tx: result_tx.clone(),
-                    priority: 0,
-                    split: None,
                 };
                 let _ = worker.ctrl.send(WorkerCommand::Start(Box::new(env)));
-            } else {
-                log::warn!("thread_pool: missing worker for job {}", idx + 1);
             }
         }
     }
@@ -365,44 +350,12 @@ where
         // 呼び出し側の明示的呼出で dead_code を避け、将来の NUMA 配置に備える。
     }
 
-    #[allow(dead_code)]
-    pub fn dispatch_high_priority(
-        &self,
-        jobs: Vec<SearchJob>,
-        result_tx: &Sender<(usize, SearchResult)>,
-    ) {
-        for job in jobs.into_iter() {
-            // Push into high-priority queue for PV-first processing (YBWC preparation).
-            let env = TaskEnvelope {
-                job,
-                result_tx: result_tx.clone(),
-                priority: 1,
-                split: None,
-            };
-            if let Err(err) = self.task_hi_tx.send(env) {
-                log::warn!("thread_pool: failed to enqueue high-priority job: {err}");
-            }
-        }
-    }
-
     pub fn shutdown(&mut self) {
         for worker in self.workers.iter_mut() {
             let _ = worker.ctrl.send(WorkerCommand::Shutdown);
             if let Some(handle) = worker.handle.take() {
                 let _ = handle.join();
             }
-        }
-        // Optional metrics logging (env opt-in)
-        if crate::util::env_var("SHOGI_THREADPOOL_METRICS").as_deref() == Some("1") {
-            let hi = METRICS_HI.load(std::sync::atomic::Ordering::Relaxed);
-            let lo = METRICS_NORMAL.load(std::sync::atomic::Ordering::Relaxed);
-            let idle = METRICS_IDLE.load(std::sync::atomic::Ordering::Relaxed);
-            log::info!(
-                "thread_pool metrics: hi_jobs={} normal_jobs={} idle_ticks={}",
-                hi,
-                lo,
-                idle
-            );
         }
         self.workers.clear();
     }
@@ -463,20 +416,7 @@ where
     pub fn cancel_all_join(&mut self, timeout: std::time::Duration) -> usize {
         self.cancel_all();
         let joined = self.join_with_timeout(timeout);
-        // Double-guard: in case of future changes, ensure no dead entries remain.
         self.workers.retain(|w| w.handle.is_some());
-        // Best-effort: lightly drain both queues to avoid holding onto stale Sender clones
-        // from the canceled session. Keep bounded to avoid long blocking.
-        for _ in 0..1024 {
-            if self.task_hi_rx.try_recv().is_err() {
-                break;
-            }
-        }
-        for _ in 0..1024 {
-            if self.task_rx.try_recv().is_err() {
-                break;
-            }
-        }
         joined
     }
 }
@@ -511,8 +451,6 @@ enum WorkerCommand {
 
 fn worker_loop<E>(
     backend: Arc<ClassicBackend<E>>,
-    task_hi_rx: crossbeam::channel::Receiver<TaskEnvelope>,
-    task_rx: crossbeam::channel::Receiver<TaskEnvelope>,
     ctrl_rx: crossbeam::channel::Receiver<WorkerCommand>,
     worker_id: usize,
     nodes_counter: Arc<AtomicU64>,
@@ -520,69 +458,16 @@ fn worker_loop<E>(
     E: Evaluator + Send + Sync + 'static,
 {
     let mut local = WorkerLocal::new();
-    let biased = matches!(
-        crate::util::env_var("SHOGI_THREADPOOL_BIASED")
-            .map(|s| s.to_ascii_lowercase())
-            .as_deref(),
-        Some("1" | "true" | "on")
-    );
-    let timeout = std::time::Duration::from_millis(20);
     loop {
-        // crossbeam select! に制御チャネルを組み込んで、終了要求に即時反応する。
-        let tick = crossbeam::channel::after(timeout);
-        // 先に高優先度キューを非ブロッキングで吸い切る（優先処理の安定化）
         let mut shutdown = false;
         let mut envelope: Option<TaskEnvelope> = None;
-        if biased {
-            if let Ok(env) = task_hi_rx.try_recv() {
-                METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
-                envelope = Some(env);
-            } else {
-                crossbeam::select! {
-                    recv(ctrl_rx) -> msg => {
-                        match msg {
-                            Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
-                            Ok(WorkerCommand::Clear) => local.clear_all(),
-                            Ok(WorkerCommand::Start(env)) => envelope = Some(*env),
-                        }
-                    },
-                    recv(task_hi_rx) -> msg => {
-                        if let Ok(env) = msg {
-                            METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
-                            envelope = Some(env);
-                        }
-                    },
-                    recv(task_rx)    -> msg => {
-                        if let Ok(env) = msg {
-                            METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed);
-                            envelope = Some(env);
-                        }
-                    },
-                    recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); }
-                }
+        match ctrl_rx.recv() {
+            Ok(WorkerCommand::Shutdown) | Err(_) => {
+                shutdown = true;
             }
-        } else {
-            crossbeam::select! {
-                recv(ctrl_rx) -> msg => {
-                    match msg {
-                        Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
-                        Ok(WorkerCommand::Clear) => local.clear_all(),
-                        Ok(WorkerCommand::Start(env)) => envelope = Some(*env),
-                    }
-                },
-                recv(task_hi_rx) -> msg => {
-                    if let Ok(env) = msg {
-                        METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
-                        envelope = Some(env);
-                    }
-                },
-                recv(task_rx)    -> msg => {
-                    if let Ok(env) = msg {
-                        METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed);
-                        envelope = Some(env);
-                    }
-                },
-                recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); }
+            Ok(WorkerCommand::Clear) => local.clear_all(),
+            Ok(WorkerCommand::Start(env)) => {
+                envelope = Some(*env);
             }
         }
         if shutdown {
@@ -613,11 +498,6 @@ fn worker_loop<E>(
     }
 }
 
-// Phase 4 metrics (opt-in via SHOGI_THREADPOOL_METRICS=1)
-static METRICS_IDLE: AtomicU64 = AtomicU64::new(0);
-static METRICS_HI: AtomicU64 = AtomicU64::new(0);
-static METRICS_NORMAL: AtomicU64 = AtomicU64::new(0);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,22 +509,17 @@ mod tests {
     use crate::Color;
     use std::sync::mpsc;
 
-    /// Verify that ThreadPool's shared queue correctly processes jobs exceeding worker count.
-    ///
-    /// This test dispatches 5 jobs to a pool with 2 workers, confirming that:
-    /// - All jobs complete successfully via the pull-based shared queue
-    /// - Workers process jobs sequentially from the shared crossbeam channel
-    /// - Worker IDs are correctly reported (expecting IDs 1 and 2)
+    /// Verify that resident start_thinking/start_searching completes all jobs.
     #[test]
-    fn shared_queue_completes_all_jobs() {
+    fn resident_start_completes_all_jobs() {
         let backend = Arc::new(ClassicBackend::with_tt(
             Arc::new(MaterialEvaluator),
             Arc::new(TranspositionTable::new(2)),
         ));
-        let pool = ThreadPool::new(backend, 2);
+        let mut pool = ThreadPool::new(backend, 5);
 
         let mut jobs: Vec<SearchJob> = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..5usize {
             let pos = crate::shogi::Position::startpos();
             // TimeManager を同伴して FixedNodes を厳密適用
             let tl = TimeLimits {
@@ -660,7 +535,8 @@ mod tests {
             });
         }
         let (tx, rx) = mpsc::channel();
-        pool.dispatch(jobs, &tx);
+        pool.start_thinking(SessionContext { jobs });
+        pool.start_searching(&tx);
 
         let mut got = 0usize;
         let mut seen_ids = std::collections::HashSet::new();
@@ -671,8 +547,8 @@ mod tests {
             got += 1;
         }
         assert_eq!(got, 5);
-        // 2 workers process 5 jobs, so we should see both worker IDs (1 and 2).
-        assert!(seen_ids.len() <= 2, "should see at most 2 worker IDs");
+        // 5 workers process 5 jobs, so最大で5種類の worker ID が観測される。
+        assert!(seen_ids.len() <= 5, "should see at most 5 worker IDs");
         assert!(!seen_ids.is_empty(), "should see at least 1 worker ID");
     }
 
@@ -725,7 +601,7 @@ mod tests {
             Arc::new(MaterialEvaluator),
             Arc::new(TranspositionTable::new(2)),
         ));
-        let pool = ThreadPool::new(backend, 1); // Single worker for deterministic job sequencing
+        let mut pool = ThreadPool::new(backend, 2); // 2 workersで同時実行
 
         let (tx, rx) = mpsc::channel();
         let pos = crate::shogi::Position::startpos();
@@ -754,7 +630,10 @@ mod tests {
             limits: limits2,
         };
 
-        pool.dispatch(vec![job1, job2], &tx);
+        pool.start_thinking(SessionContext {
+            jobs: vec![job1, job2],
+        });
+        pool.start_searching(&tx);
 
         // Receive both results
         let (_, res1) = rx.recv().expect("job1 result");
@@ -766,81 +645,6 @@ mod tests {
     }
 
     #[test]
-    fn priority_queue_favor() {
-        // Verify that high-priority jobs actually complete before normal-priority jobs.
-        // Strategy: dispatch normal jobs (heavy: 2048 nodes) first, then high-priority jobs (light: 64 nodes).
-        // High-priority jobs should complete first despite being dispatched later.
-        let backend = Arc::new(ClassicBackend::with_tt(
-            Arc::new(MaterialEvaluator),
-            Arc::new(TranspositionTable::new(2)),
-        ));
-        let pool = ThreadPool::new(backend, 2);
-
-        let (tx, rx) = mpsc::channel();
-        let pos = crate::shogi::Position::startpos();
-
-        // Dispatch normal-priority jobs with heavier workload first
-        let normal_jobs: Vec<_> = (0..4)
-            .map(|_| {
-                let tl = TimeLimits {
-                    time_control: TMTimeControl::FixedNodes { nodes: 2048 },
-                    ..Default::default()
-                };
-                let tm =
-                    TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
-                let mut limits = SearchLimitsBuilder::default().fixed_nodes(2048).depth(3).build();
-                limits.time_manager = Some(Arc::new(tm));
-                SearchJob {
-                    position: pos.clone(),
-                    limits,
-                }
-            })
-            .collect();
-        pool.dispatch(normal_jobs, &tx);
-
-        // Then dispatch high-priority jobs with lighter workload
-        let high_jobs: Vec<_> = (0..4)
-            .map(|_| {
-                let tl = TimeLimits {
-                    time_control: TMTimeControl::FixedNodes { nodes: 64 },
-                    ..Default::default()
-                };
-                let tm =
-                    TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
-                let mut limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
-                limits.time_manager = Some(Arc::new(tm));
-                SearchJob {
-                    position: pos.clone(),
-                    limits,
-                }
-            })
-            .collect();
-        pool.dispatch_high_priority(high_jobs, &tx);
-
-        // Collect first 4 results and count how many are high-priority (light workload)
-        let mut high_priority_count = 0;
-        for _ in 0..4 {
-            let (_, res) = rx.recv().expect("result");
-            // High-priority jobs have much fewer nodes (64 vs 2048)
-            if res.stats.nodes < 500 {
-                high_priority_count += 1;
-            }
-        }
-
-        // Drain remaining results
-        for _ in 0..4 {
-            let _ = rx.recv().expect("result");
-        }
-
-        // Expect at least 2 out of first 4 to be high-priority (conservative threshold).
-        // This isn't deterministic but shows HI queue bias.
-        assert!(
-            high_priority_count >= 2,
-            "Expected at least 2 high-priority jobs in first 4 completions, got {high_priority_count}"
-        );
-    }
-
-    #[test]
     fn worker_refreshes_nps_when_elapsed_is_zero() {
         // Confirm that if backend returns result with elapsed=0, worker_loop compensates
         // elapsed and refreshes nps.
@@ -848,7 +652,7 @@ mod tests {
             Arc::new(MaterialEvaluator),
             Arc::new(TranspositionTable::new(2)),
         ));
-        let pool = ThreadPool::new(backend, 1);
+        let mut pool = ThreadPool::new(backend, 1);
 
         let pos = crate::shogi::Position::startpos();
         let tl = TimeLimits {
@@ -864,7 +668,8 @@ mod tests {
         };
 
         let (tx, rx) = mpsc::channel();
-        pool.dispatch(vec![job], &tx);
+        pool.start_thinking(SessionContext { jobs: vec![job] });
+        pool.start_searching(&tx);
 
         let (_worker_id, result) = rx.recv().expect("worker result");
         // Worker should have compensated elapsed and refreshed nps.
@@ -907,7 +712,10 @@ mod tests {
             }
         };
 
-        pool.dispatch(vec![mk_job(), mk_job()], &tx);
+        pool.start_thinking(SessionContext {
+            jobs: vec![mk_job(), mk_job()],
+        });
+        pool.start_searching(&tx);
 
         let mut received = 0usize;
         while received < 2 {

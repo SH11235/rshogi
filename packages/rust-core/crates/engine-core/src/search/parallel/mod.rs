@@ -213,7 +213,7 @@ where
 
         // 純粋 LazySMP: RootWorkQueue/stride は使用しない
 
-        let mut jobs = Vec::with_capacity(helper_count);
+        let mut helper_limits_vec = Vec::with_capacity(helper_count);
         for worker_index in 0..helper_count {
             let mut worker_limits = clone_limits_for_worker(&limits);
             worker_limits.store_heuristics = false;
@@ -236,14 +236,11 @@ where
             } else {
                 worker_limits.root_jitter_seed = None;
             }
-            jobs.push(SearchJob {
-                position: pos.clone(),
-                limits: worker_limits,
-            });
+            helper_limits_vec.push(worker_limits);
         }
 
         let (result_tx, result_rx) = mpsc::channel();
-        self.thread_pool.start_thinking(jobs);
+        self.thread_pool.start_thinking_with_limits(pos, helper_limits_vec);
         self.thread_pool.start_searching(&result_tx);
 
         let mut results = Vec::with_capacity(threads);
@@ -831,7 +828,7 @@ fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
 ///
 /// 呼び出し側で stop_controller やコールバック類を `None` に差し替える前提のため、
 /// 共有ハンドルの複製のみを行う。必要に応じて後段でフィールドを無効化すること。
-fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
+pub(crate) fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
     SearchLimits {
         time_control: base.time_control.clone(),
         moves_to_go: base.moves_to_go,

@@ -11,6 +11,7 @@ use super::constants::DEFAULT_SEARCH_DEPTH;
 use super::types::{InfoStringCallback, IterationCallback};
 
 /// Unified search limits combining time control with other constraints
+#[derive(Clone)]
 pub struct SearchLimits {
     pub time_control: TimeControl,
     pub moves_to_go: Option<u32>,
