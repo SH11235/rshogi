@@ -779,10 +779,12 @@ fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
         //
         // YaneuraOuの仕様:
         // - 投票数が多い方を優先
-        // - 同票の場合、PV長>2のスレッドがあればそちらを優先
-        // - 両方PV長<=2、または両方PV長>2の場合はタイブレークなし（既存を維持）
-        let better =
-            new_vote > best_vote || (new_vote == best_vote && new_pv_len > 2 && best_pv_len <= 2);
+        // - 同票の場合、PV長>2 の voting_value を比較（PV長<=2同士なら現状維持）
+        let best_vv = voting_value(best_result);
+        let new_vv = voting_value(result);
+        let best_gate = if best_pv_len > 2 { best_vv } else { 0 };
+        let new_gate = if new_pv_len > 2 { new_vv } else { 0 };
+        let better = new_vote > best_vote || (new_vote == best_vote && new_gate > best_gate);
 
         if better {
             best_idx = idx;

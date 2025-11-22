@@ -146,6 +146,7 @@ where
     pending_jobs: Vec<SearchJob>,
     nodes_counter: Arc<AtomicU64>,
     // Shared task queue (pull model). Envelope carries job + result channel.
+    #[allow(dead_code)]
     task_tx: crossbeam::channel::Sender<TaskEnvelope>,
     task_rx: crossbeam::channel::Receiver<TaskEnvelope>,
 
@@ -298,7 +299,19 @@ where
 
     pub fn start_searching(&mut self, result_tx: &Sender<(usize, SearchResult)>) {
         let jobs = std::mem::take(&mut self.pending_jobs);
-        self.dispatch(jobs, result_tx);
+        for (idx, job) in jobs.into_iter().enumerate() {
+            if let Some(worker) = self.workers.get(idx) {
+                let env = TaskEnvelope {
+                    job,
+                    result_tx: result_tx.clone(),
+                    priority: 0,
+                    split: None,
+                };
+                let _ = worker.ctrl.send(WorkerCommand::Start(env));
+            } else {
+                log::warn!("thread_pool: missing worker for job {}", idx + 1);
+            }
+        }
     }
 
     pub fn wait_for_search_finished(
@@ -492,6 +505,7 @@ struct Worker {
 enum WorkerCommand {
     Shutdown,
     Clear,
+    Start(TaskEnvelope),
 }
 
 fn worker_loop<E>(
@@ -517,22 +531,33 @@ fn worker_loop<E>(
         let tick = crossbeam::channel::after(timeout);
         // 先に高優先度キューを非ブロッキングで吸い切る（優先処理の安定化）
         let mut shutdown = false;
-        let envelope = if biased {
+        let mut envelope: Option<TaskEnvelope> = None;
+        if biased {
             if let Ok(env) = task_hi_rx.try_recv() {
                 METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
-                Some(env)
+                envelope = Some(env);
             } else {
                 crossbeam::select! {
                     recv(ctrl_rx) -> msg => {
                         match msg {
                             Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
                             Ok(WorkerCommand::Clear) => local.clear_all(),
+                            Ok(WorkerCommand::Start(env)) => envelope = Some(env),
                         }
-                        None
                     },
-                    recv(task_hi_rx) -> msg => msg.ok().inspect(|_| { METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed); }),
-                    recv(task_rx)    -> msg => msg.ok().inspect(|_| { METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed); }),
-                    recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); None }
+                    recv(task_hi_rx) -> msg => {
+                        if let Ok(env) = msg {
+                            METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
+                            envelope = Some(env);
+                        }
+                    },
+                    recv(task_rx)    -> msg => {
+                        if let Ok(env) = msg {
+                            METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed);
+                            envelope = Some(env);
+                        }
+                    },
+                    recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); }
                 }
             }
         } else {
@@ -541,14 +566,24 @@ fn worker_loop<E>(
                     match msg {
                         Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
                         Ok(WorkerCommand::Clear) => local.clear_all(),
+                        Ok(WorkerCommand::Start(env)) => envelope = Some(env),
                     }
-                    None
                 },
-                recv(task_hi_rx) -> msg => msg.ok().inspect(|_| { METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed); }),
-                recv(task_rx)    -> msg => msg.ok().inspect(|_| { METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed); }),
-                recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); None }
+                recv(task_hi_rx) -> msg => {
+                    if let Ok(env) = msg {
+                        METRICS_HI.fetch_add(1, AtomicOrdering::Relaxed);
+                        envelope = Some(env);
+                    }
+                },
+                recv(task_rx)    -> msg => {
+                    if let Ok(env) = msg {
+                        METRICS_NORMAL.fetch_add(1, AtomicOrdering::Relaxed);
+                        envelope = Some(env);
+                    }
+                },
+                recv(tick) -> _ => { local.on_idle(); METRICS_IDLE.fetch_add(1, AtomicOrdering::Relaxed); }
             }
-        };
+        }
         if shutdown {
             break;
         }
