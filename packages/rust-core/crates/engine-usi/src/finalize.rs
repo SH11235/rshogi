@@ -2649,16 +2649,16 @@ pub fn finalize_and_send_fast(
                 let prev_usi = best.clone();
                 let mut final_usi = best.clone();
                 let mut ponder_mv: Option<String> = pr.pv_second;
-                // Run FinalizeSanity (MinMs) before emitting; if switched, compute ponder from TT
+                // FinalizeSanity を流してから確定する。差し替え時の ponder 再計算も行う。
+                // キャッシュしたスコアを渡し、near-draw/Threat2 判定を通常 finalize と揃える。
                 if let Ok(mv) = parse_usi_move(&prev_usi) {
                     let fb = FinalBest {
                         best_move: Some(mv),
                         pv: Vec::new(),
                         source: FinalBestSource::Committed,
                     };
-                    // ponderhitのcached経路でも near-draw 判定の一貫化のため score_hint=0 を与える
                     if let Some(alt) =
-                        finalize_sanity_check(state, &stop_meta, &fb, None, Some(0), "fast")
+                        finalize_sanity_check(state, &stop_meta, &fb, None, Some(pr.score), "fast")
                     {
                         let new_usi = move_to_usi(&alt);
                         info_string("final_select_tags tags=sanity");

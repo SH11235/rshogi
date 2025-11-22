@@ -528,7 +528,6 @@ pub struct GoParams {
 
 /// Lightweight snapshot of ponder search result for instant finalize on ponderhit.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PonderResult {
     pub best_move: Option<String>,
     pub score: i32,

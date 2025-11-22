@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use super::{k_fastpath, k_int_fastpath};
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use core::arch::wasm32::*;
