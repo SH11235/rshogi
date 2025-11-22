@@ -5,7 +5,7 @@ mod thread_pool;
 pub use backend::ParallelSearcherBackend;
 pub use stop_ctrl::{FinalizeReason, FinalizerMsg, StopController, StopSnapshot};
 
-use self::thread_pool::{SearchJob, ThreadPool};
+use self::thread_pool::ThreadPool;
 use crate::evaluation::evaluate::Evaluator;
 use crate::search::ab::{ClassicBackend, SearchProfile};
 use crate::search::api::SearcherBackend;
@@ -1182,6 +1182,36 @@ mod tests {
         limits.time_manager = Some(Arc::new(tm));
 
         let _ = searcher.search(&mut pos, limits);
+        assert!(external_flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn search_respects_external_stop_flag_true_resident_flow() {
+        // stop_flag=true のまま常駐フローでも即終了することを確認するスモーク。
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(8));
+        let stop_ctrl = Arc::new(StopController::new());
+        let mut searcher = ParallelSearcher::<MaterialEvaluator>::new(
+            evaluator,
+            Arc::clone(&tt),
+            2,
+            Arc::clone(&stop_ctrl),
+        );
+        let mut pos = Position::startpos();
+        let external_flag = Arc::new(AtomicBool::new(true));
+        let tm_limits = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 128 },
+            ..Default::default()
+        };
+        let tm = TimeManager::new(&tm_limits, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits = SearchLimitsBuilder::default()
+            .fixed_nodes(128)
+            .depth(2)
+            .stop_flag(Arc::clone(&external_flag))
+            .build();
+        limits.time_manager = Some(Arc::new(tm));
+
+        let result = searcher.search(&mut pos, limits);
         assert!(external_flag.load(Ordering::Acquire));
     }
 
