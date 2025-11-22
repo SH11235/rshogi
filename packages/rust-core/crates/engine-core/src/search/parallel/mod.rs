@@ -400,13 +400,21 @@ where
         } else {
             // 通常対局/メイト時: YaneuraOu準拠でHelperの結果を待機
             //
-            // 従来は即座にキャンセルまたは短時間ドレインしていたが、
-            // YaneuraOuでは`threads.wait_for_search_finished()`で全Helperの
-            // 結果を待つため、ここでも一定時間（300ms）待機する。
+            // YaneuraOuの動作:
+            // 1. Primaryが完了
+            // 2. `threads.stop = true`をセット
+            // 3. `threads.wait_for_search_finished()`でHelperが現在の反復を終えるのを待つ
             //
-            // これにより、Helperがdepth >= 1の結果を返す可能性が高まる。
+            // これにより、Helperは現在の深度を完了してから停止するため、
+            // completedDepth >= 1が保証される。
 
-            // まず即時ドレイン
+            // まず、stop_flagをセットしてHelperに停止を通知
+            // (Helperは現在の反復を終えてから停止する)
+            if should_stop_helpers_now {
+                stop_flag.store(true, AtomicOrdering::Release);
+            }
+
+            // 即時ドレイン
             while let Ok((worker_id, res)) = result_rx.try_recv() {
                 publish_helper_snapshot(
                     &self.stop_controller,
@@ -419,8 +427,9 @@ where
                 results.push((worker_id, res));
             }
 
-            // YaneuraOu準拠: 300ms待機してHelperの結果を受け取る
-            const YANEURAOU_HELPER_WAIT_MS: u64 = 300;
+            // YaneuraOu準拠: Helperが現在の反復を終えるまで待機
+            // (最大500ms、必要に応じて調整可能)
+            const YANEURAOU_HELPER_WAIT_MS: u64 = 500;
             let drain_start = Instant::now();
             loop {
                 let spent = drain_start.elapsed().as_millis() as u64;
@@ -441,18 +450,10 @@ where
                         results.push((worker_id, res));
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // タイムアウト時にstop_flagをセットして強制停止を促す
-                        if should_stop_helpers_now {
-                            stop_flag.store(true, AtomicOrdering::Release);
-                        }
+                        // タイムアウト継続（stop_flagは既にセット済み）
                     }
                     Err(_) => break,
                 }
-            }
-
-            // 待機後に最終的にstop_flagをセット（まだセットされていない場合）
-            if should_stop_helpers_now {
-                stop_flag.store(true, AtomicOrdering::Release);
             }
             if bench_allrun {
                 // bench_allrun=On かつ メイトで打ち切ったケースでは観測用にログする
