@@ -1,4 +1,5 @@
 mod backend;
+mod root_moves;
 pub mod stop_ctrl;
 mod thread_pool;
 
@@ -83,7 +84,7 @@ fn synthesize_primary_line_from_result(result: &mut SearchResult) {
     result.lines = Some(out);
 }
 
-fn jitter_enabled() -> bool {
+pub(crate) fn jitter_enabled() -> bool {
     // ベンチ安定化（bench_allrun）中は helper の RootJitter を常に無効化して
     // 測定の再現性を確保する（テストもこの前提）。
     if crate::search::policy::bench_allrun_enabled() {
@@ -186,65 +187,46 @@ where
 
         // qnodes はローカル集計（sum）に一本化。共有カウンタ配線は行わない。
         let session_id = limits.session_id;
-        let root_key = pos.zobrist_hash();
+        let mut root_key = pos.zobrist_hash();
         limits.store_heuristics = true;
         limits.root_jitter_seed = None;
         limits.helper_role = false;
 
         let start = Instant::now();
 
-        if threads == 1 {
-            // シングルスレッドの場合もstop_flagをクリアする
-            // (前回マルチスレッドで実行した場合、stop_flagがtrueのまま残っている可能性がある)
-            // inserted_stop_flagの値に関わらず、常にクリアする（再利用される場合も対応）
-            stop_flag.store(false, AtomicOrdering::Release);
-            let mut result =
-                self.backend.think_blocking(pos, &limits, limits.info_callback.clone());
-            finish_single_result(&self.tt, &mut result, start);
-            return result;
-        }
-
         let helper_count = threads.saturating_sub(1);
         self.thread_pool.set_resident(helper_count);
 
-        // マルチスレッド探索開始前に stop_flag をクリア
-        // (前回の探索で true のまま残っている場合がある)
+        // 探索開始前に stop_flag をクリア（前回探索の残りに影響されないようにする）
         stop_flag.store(false, AtomicOrdering::Release);
 
-        // 純粋 LazySMP: RootWorkQueue/stride は使用しない
-
-        let mut helper_limits_vec = Vec::with_capacity(helper_count);
-        for worker_index in 0..helper_count {
-            let mut worker_limits = clone_limits_for_worker(&limits);
-            worker_limits.store_heuristics = false;
-            worker_limits.info_callback = None;
-            worker_limits.info_string_callback = None;
-            worker_limits.iteration_callback = None;
-            // qnodes_counter は使用しない
-            worker_limits.stop_controller = None;
-            worker_limits.helper_role = true;
-            // 純粋 LazySMP では root 分割も使用しない
-
-            // helpers は MultiPV=1 固定
-            worker_limits.multipv = 1;
-            let jitter_on = limits.jitter_override.unwrap_or_else(jitter_enabled);
-            // BenchAllRun（テスト/ベンチ専用）では helper の jitter を抑止して測定の安定性を優先
-            let bench_allrun = crate::search::policy::bench_allrun_enabled();
-            if jitter_on && !bench_allrun {
-                worker_limits.root_jitter_seed =
-                    Some(compute_jitter_seed(session_id, worker_index + 1, root_key));
-            } else {
-                worker_limits.root_jitter_seed = None;
+        // rootMoves 生成・helper limits 準備
+        let prepared_session = match self.thread_pool.start_thinking(pos, &limits, helper_count) {
+            Ok(prep) => {
+                root_key = prep.root_key;
+                Some(prep)
             }
-            helper_limits_vec.push(worker_limits);
-        }
+            Err(err) => {
+                log::error!("thread_pool.start_thinking failed: {err}");
+                None
+            }
+        };
+        let active_helpers = if prepared_session.is_some() {
+            helper_count
+        } else {
+            0
+        };
 
         let (result_tx, result_rx) = mpsc::channel();
-        self.thread_pool.start_thinking_with_limits(pos, helper_limits_vec);
-        self.thread_pool.start_searching(&result_tx);
+        if active_helpers > 0 {
+            self.thread_pool.start_searching(&result_tx);
+        }
 
         let mut results = Vec::with_capacity(threads);
-        let primary_limits = clone_limits_for_worker(&limits);
+        let primary_limits = prepared_session
+            .as_ref()
+            .map(|p| p.main_limits.clone())
+            .unwrap_or_else(|| clone_limits_for_worker(&limits));
         // Primary も queue/split を使わない
 
         // 検索ポリシーの概要を一度だけ出力
@@ -284,7 +266,7 @@ where
         }
 
         let helper_received = results.len().saturating_sub(1);
-        let remaining_helpers = helper_count.saturating_sub(helper_received);
+        let remaining_helpers = active_helpers.saturating_sub(helper_received);
         let (mut helper_results, timed_out) =
             self.thread_pool
                 .wait_for_search_finished(remaining_helpers, &result_rx, join_timeout);
@@ -859,10 +841,13 @@ pub(crate) fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         time_manager: base.time_manager.clone(),
         stop_controller: base.stop_controller.clone(),
         threads_hint: base.threads_hint,
+        searchmoves: base.searchmoves.clone(),
+        root_moves: base.root_moves.clone(),
+        generate_all_legal_moves: base.generate_all_legal_moves,
     }
 }
 
-fn compute_jitter_seed(session_id: u64, worker_id: usize, root_key: u64) -> u64 {
+pub(crate) fn compute_jitter_seed(session_id: u64, worker_id: usize, root_key: u64) -> u64 {
     #[inline]
     fn mix64(x: u64) -> u64 {
         // SplitMix64 由来の軽量ミキサ。入力ビットを高速に拡散させる。

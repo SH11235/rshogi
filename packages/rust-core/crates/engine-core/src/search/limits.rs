@@ -1,6 +1,7 @@
 //! Unified search limits for both basic and enhanced search
 
 use crate::search::parallel::StopController;
+use crate::shogi::Move;
 use crate::time_management::{TimeControl, TimeManager, TimeParameters};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -70,6 +71,12 @@ pub struct SearchLimits {
     pub stop_controller: Option<Arc<StopController>>,
     /// Hint for threads used in this search (to avoid global env dependency)
     pub threads_hint: Option<u32>,
+    /// Root限定の探索対象手集合（searchmoves 相当）。None のときは全合法手を使用。
+    pub searchmoves: Option<Vec<Move>>,
+    /// start_thinking で確定した root 指し手集合（main/helper 共有用）。指定がなければ従来の root 生成にフォールバック。
+    pub root_moves: Option<Arc<Vec<Move>>>,
+    /// LEGAL_ALL 相当を使うかどうかのフラグ。false の場合は通常の合法手生成を用いる。
+    pub generate_all_legal_moves: bool,
 }
 
 impl Default for SearchLimits {
@@ -104,6 +111,9 @@ impl Default for SearchLimits {
             time_manager: None,
             stop_controller: None,
             threads_hint: None,
+            searchmoves: None,
+            root_moves: None,
+            generate_all_legal_moves: false,
         }
     }
 }
@@ -185,6 +195,9 @@ pub struct SearchLimitsBuilder {
 
     helper_role: bool,
     store_heuristics: bool,
+    searchmoves: Option<Vec<Move>>,
+    root_moves: Option<Arc<Vec<Move>>>,
+    generate_all_legal_moves: bool,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -216,6 +229,9 @@ impl Default for SearchLimitsBuilder {
 
             helper_role: false,
             store_heuristics: false,
+            searchmoves: None,
+            root_moves: None,
+            generate_all_legal_moves: false,
         }
     }
 }
@@ -363,6 +379,27 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set root searchmoves (root only). None なら全合法手を使用する。
+    pub fn searchmoves(mut self, moves: Vec<Move>) -> Self {
+        self.searchmoves = Some(moves);
+        self
+    }
+
+    /// Set precomputed root moves shared across workers (tests/内部用)。
+    pub fn root_moves<I>(mut self, moves: I) -> Self
+    where
+        I: Into<Arc<Vec<Move>>>,
+    {
+        self.root_moves = Some(moves.into());
+        self
+    }
+
+    /// Use LEGAL_ALL (pseudo-legal網羅) for root move generation instead of通常合法。
+    pub fn generate_all_legal_moves(mut self, enable: bool) -> Self {
+        self.generate_all_legal_moves = enable;
+        self
+    }
+
     /// Set stop flag
     pub fn stop_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.stop_flag = Some(flag);
@@ -501,6 +538,9 @@ impl SearchLimitsBuilder {
             time_manager: None,
             stop_controller: None,
             threads_hint: None,
+            searchmoves: self.searchmoves,
+            root_moves: self.root_moves,
+            generate_all_legal_moves: self.generate_all_legal_moves,
         }
     }
 }
@@ -547,6 +587,9 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             time_manager: None,
             stop_controller: None,
             threads_hint: None,
+            searchmoves: None,
+            root_moves: None,
+            generate_all_legal_moves: false,
         }
     }
 }

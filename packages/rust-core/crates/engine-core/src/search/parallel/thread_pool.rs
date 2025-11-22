@@ -2,13 +2,18 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+use super::{
+    clone_limits_for_worker, compute_jitter_seed, jitter_enabled, root_moves::build_root_moves,
+};
 use crate::evaluation::evaluate::Evaluator;
+use crate::movegen::error::MoveGenError;
 use crate::search::ab::ordering::Heuristics;
 use crate::search::ab::ClassicBackend;
 use crate::search::constants::MAX_PLY;
 use crate::search::types::SearchStack;
 // SearcherBackend is not directly used here; ClassicBackend is invoked through its public APIs.
 use crate::search::{SearchLimits, SearchResult};
+use crate::shogi::Move;
 use crate::shogi::Position;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro128PlusPlus;
@@ -115,16 +120,6 @@ impl WorkerLocal {
         );
     }
 
-    #[allow(dead_code)]
-    fn on_idle(&mut self) {
-        // Light maintenance during idle periods (called from after(...) branch).
-        // Prevent unbounded memory growth in scratch buffer.
-        const MAX_SCRATCH_SIZE: usize = 4096;
-        if self.scratch.capacity() > MAX_SCRATCH_SIZE {
-            self.scratch.shrink_to(MAX_SCRATCH_SIZE);
-        }
-    }
-
     fn clear_all(&mut self) {
         self.heur.clear_all();
         self.last_session_id = 0;
@@ -173,6 +168,16 @@ struct TaskEnvelope {
 
 pub struct SessionContext {
     pub jobs: Vec<SearchJob>,
+    pub root_key: u64,
+    pub root_moves: Arc<Vec<Move>>,
+    pub session_id: u64,
+}
+
+pub struct PreparedSession {
+    pub main_limits: SearchLimits,
+    pub root_moves: Arc<Vec<Move>>,
+    pub root_key: u64,
+    pub session_id: u64,
 }
 
 impl<E> ThreadPool<E>
@@ -268,20 +273,64 @@ where
         }
     }
 
-    pub fn start_thinking(&mut self, ctx: SessionContext) {
+    pub fn start_thinking(
+        &mut self,
+        pos: &Position,
+        base_limits: &SearchLimits,
+        helper_count: usize,
+    ) -> Result<PreparedSession, MoveGenError> {
         self.nodes_counter.store(0, AtomicOrdering::Relaxed);
-        self.session = Some(ctx);
-    }
 
-    pub fn start_thinking_with_limits(&mut self, pos: &Position, helper_limits: Vec<SearchLimits>) {
-        let mut jobs = Vec::with_capacity(helper_limits.len());
-        for limits in helper_limits {
+        let root_moves = Arc::new(build_root_moves(pos, base_limits)?);
+        let root_key = pos.zobrist_hash();
+
+        let mut jobs = Vec::with_capacity(helper_count);
+        for worker_idx in 0..helper_count {
+            let mut limits = clone_limits_for_worker(base_limits);
+            limits.store_heuristics = false;
+            limits.info_callback = None;
+            limits.info_string_callback = None;
+            limits.iteration_callback = None;
+            // qnodes_counter は使用しない
+            limits.stop_controller = None;
+            limits.helper_role = true;
+            // helpers は MultiPV=1 固定
+            limits.multipv = 1;
+            let jitter_on = base_limits.jitter_override.unwrap_or_else(jitter_enabled);
+            let bench_allrun = crate::search::policy::bench_allrun_enabled();
+            if jitter_on && !bench_allrun {
+                limits.root_jitter_seed =
+                    Some(compute_jitter_seed(base_limits.session_id, worker_idx + 1, root_key));
+            } else {
+                limits.root_jitter_seed = None;
+            }
+            limits.root_moves = Some(Arc::clone(&root_moves));
+
             jobs.push(SearchJob {
                 position: pos.clone(),
                 limits,
             });
         }
-        self.start_thinking(SessionContext { jobs });
+
+        self.session = Some(SessionContext {
+            jobs,
+            root_key,
+            root_moves: Arc::clone(&root_moves),
+            session_id: base_limits.session_id,
+        });
+
+        let mut main_limits = clone_limits_for_worker(base_limits);
+        main_limits.root_moves = Some(Arc::clone(&root_moves));
+        main_limits.helper_role = false;
+        main_limits.store_heuristics = true;
+        main_limits.root_jitter_seed = None;
+
+        Ok(PreparedSession {
+            main_limits,
+            root_moves,
+            root_key,
+            session_id: base_limits.session_id,
+        })
     }
 
     pub fn start_searching(&mut self, result_tx: &Sender<(usize, SearchResult)>) {
@@ -518,24 +567,18 @@ mod tests {
         ));
         let mut pool = ThreadPool::new(backend, 5);
 
-        let mut jobs: Vec<SearchJob> = Vec::new();
-        for _ in 0..5usize {
-            let pos = crate::shogi::Position::startpos();
-            // TimeManager を同伴して FixedNodes を厳密適用
-            let tl = TimeLimits {
-                time_control: TMTimeControl::FixedNodes { nodes: 64 },
-                ..Default::default()
-            };
-            let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
-            let mut limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
-            limits.time_manager = Some(Arc::new(tm));
-            jobs.push(SearchJob {
-                position: pos,
-                limits,
-            });
-        }
+        // TimeManager を同伴して FixedNodes を厳密適用
+        let pos = crate::shogi::Position::startpos();
+        let tl = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 64 },
+            ..Default::default()
+        };
+        let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+        limits.time_manager = Some(Arc::new(tm));
+
         let (tx, rx) = mpsc::channel();
-        pool.start_thinking(SessionContext { jobs });
+        pool.start_thinking(&pos, &limits, 5).expect("start_thinking");
         pool.start_searching(&tx);
 
         let mut got = 0usize;
@@ -611,28 +654,11 @@ mod tests {
             ..Default::default()
         };
         let tm1 = TimeManager::new(&tl1, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
-        let mut limits1 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
-        limits1.time_manager = Some(Arc::new(tm1));
-        let tl2 = TimeLimits {
-            time_control: TMTimeControl::FixedNodes { nodes: 64 },
-            ..Default::default()
-        };
-        let tm2 = TimeManager::new(&tl2, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
-        let mut limits2 = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
-        limits2.time_manager = Some(Arc::new(tm2));
+        let mut base_limits = SearchLimitsBuilder::default().fixed_nodes(64).depth(1).build();
+        base_limits.time_manager = Some(Arc::new(tm1));
 
-        let job1 = SearchJob {
-            position: pos.clone(),
-            limits: limits1,
-        };
-        let job2 = SearchJob {
-            position: pos,
-            limits: limits2,
-        };
-
-        pool.start_thinking(SessionContext {
-            jobs: vec![job1, job2],
-        });
+        // helper_count=2 で 2 ジョブを生成
+        pool.start_thinking(&pos, &base_limits, 2).expect("start_thinking");
         pool.start_searching(&tx);
 
         // Receive both results
@@ -662,13 +688,9 @@ mod tests {
         let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
         let mut limits = SearchLimitsBuilder::default().fixed_nodes(128).depth(2).build();
         limits.time_manager = Some(Arc::new(tm));
-        let job = SearchJob {
-            position: pos,
-            limits,
-        };
 
         let (tx, rx) = mpsc::channel();
-        pool.start_thinking(SessionContext { jobs: vec![job] });
+        pool.start_thinking(&pos, &limits, 1).expect("start_thinking");
         pool.start_searching(&tx);
 
         let (_worker_id, result) = rx.recv().expect("worker result");
@@ -698,23 +720,15 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let pos = crate::shogi::Position::startpos();
 
-        let mk_job = || {
-            let tl = TimeLimits {
-                time_control: TMTimeControl::FixedNodes { nodes: 128 },
-                ..Default::default()
-            };
-            let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
-            let mut limits = SearchLimitsBuilder::default().fixed_nodes(128).depth(2).build();
-            limits.time_manager = Some(Arc::new(tm));
-            SearchJob {
-                position: pos.clone(),
-                limits,
-            }
+        let tl = TimeLimits {
+            time_control: TMTimeControl::FixedNodes { nodes: 128 },
+            ..Default::default()
         };
+        let tm = TimeManager::new(&tl, Color::Black, 0, detect_game_phase_for_time(&pos, 0));
+        let mut limits = SearchLimitsBuilder::default().fixed_nodes(128).depth(2).build();
+        limits.time_manager = Some(Arc::new(tm));
 
-        pool.start_thinking(SessionContext {
-            jobs: vec![mk_job(), mk_job()],
-        });
+        pool.start_thinking(&pos, &limits, 2).expect("start_thinking");
         pool.start_searching(&tx);
 
         let mut received = 0usize;

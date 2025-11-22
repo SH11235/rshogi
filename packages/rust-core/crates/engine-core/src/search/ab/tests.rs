@@ -2460,6 +2460,36 @@ fn lmr_disabled_in_evasion_node() {
     );
 }
 
+#[test]
+fn root_moves_filter_limits_root_search() {
+    let _guard = TEST_SEARCH_PARAMS_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+    let backend =
+        ClassicBackend::with_tt(Arc::new(MaterialEvaluator), Arc::new(TranspositionTable::new(8)));
+    let pos = Position::startpos();
+    let legal = MoveGenerator::new().generate_all(&pos).expect("legal moves");
+    let allowed = legal
+        .as_slice()
+        .iter()
+        .copied()
+        .find(|m| crate::usi::move_to_usi(m) == "7g7f")
+        .expect("legal 7g7f");
+    assert_eq!(crate::usi::move_to_usi(&allowed), "7g7f");
+
+    let mut limits = SearchLimitsBuilder::default().depth(1).build();
+    limits.root_moves = Some(Arc::new(vec![allowed]));
+
+    let result = backend.think_blocking(&pos, &limits, None);
+
+    let best_usi = result.best_move.as_ref().map(|m| crate::usi::move_to_usi(m));
+    assert_eq!(best_usi.as_deref(), Some("7g7f"));
+    let head_usi = result
+        .lines
+        .as_ref()
+        .and_then(|ls| ls.first())
+        .map(|l| crate::usi::move_to_usi(&l.root_move));
+    assert_eq!(head_usi.as_deref(), Some("7g7f"));
+}
+
 /// 探索が異常に遅くならないことを確認するリグレッションテスト。
 /// 以前はLMR無効化により9.2秒（depth 5）だったのが、修正後は5.7秒（depth 6）に改善。
 #[test]

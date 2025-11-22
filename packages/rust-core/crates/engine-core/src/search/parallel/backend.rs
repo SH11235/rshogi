@@ -107,6 +107,9 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ParallelSearcherB
             multipv: limits.multipv,
             enable_fail_safe: limits.enable_fail_safe,
             immediate_eval_at_depth_zero: limits.immediate_eval_at_depth_zero,
+            searchmoves: limits.searchmoves.clone(),
+            root_moves: limits.root_moves.clone(),
+            generate_all_legal_moves: limits.generate_all_legal_moves,
         };
 
         let mut searcher = self.inner.write();

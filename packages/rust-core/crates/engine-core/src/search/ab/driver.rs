@@ -26,7 +26,7 @@ use crate::Position;
 use log::warn;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
@@ -1139,9 +1139,31 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 None,
                 None,
             );
-            let mut root_moves: Vec<crate::shogi::Move> = Vec::new();
-            while let Some(mv) = mp.next(heur_state) {
-                root_moves.push(mv);
+            let allowed_root: Option<std::collections::HashSet<String>> = limits
+                .root_moves
+                .as_ref()
+                .map(|moves| moves.iter().map(crate::usi::move_to_usi).collect());
+
+            let mut root_moves: Vec<crate::shogi::Move> =
+                if let Some(prebuilt) = limits.root_moves.as_ref() {
+                    prebuilt.as_ref().clone()
+                } else {
+                    let mut acc: Vec<crate::shogi::Move> = Vec::new();
+                    while let Some(mv) = mp.next(heur_state) {
+                        if let Some(ref allowed) = allowed_root {
+                            let usi = crate::usi::move_to_usi(&mv);
+                            if !allowed.contains(&usi) {
+                                continue;
+                            }
+                        }
+                        acc.push(mv);
+                    }
+                    acc
+                };
+            if root_moves.is_empty() {
+                if let Some(prebuilt) = limits.root_moves.as_ref() {
+                    root_moves.extend(prebuilt.iter().copied());
+                }
             }
             if root_moves.is_empty() {
                 if incomplete_depth.is_none() {
@@ -2704,9 +2726,13 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             }
         }
         if best_move_out.is_none() {
-            let mg = MoveGenerator::new();
-            if let Ok(list) = mg.generate_all(root) {
-                best_move_out = list.as_slice().first().copied();
+            if let Some(prebuilt) = limits.root_moves.as_ref() {
+                best_move_out = prebuilt.as_slice().first().copied();
+            } else {
+                let mg = MoveGenerator::new();
+                if let Ok(list) = mg.generate_all(root) {
+                    best_move_out = list.as_slice().first().copied();
+                }
             }
         }
 
@@ -2722,6 +2748,10 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
                 stats.pv = lines.pv.iter().copied().collect();
             } else if let Some(mv) = best_move_out {
                 stats.pv.push(mv);
+            } else if let Some(prebuilt) = limits.root_moves.as_ref() {
+                if let Some(mv) = prebuilt.as_slice().first() {
+                    stats.pv.push(*mv);
+                }
             }
         }
 
@@ -2742,6 +2772,29 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
             result.sync_from_primary_line();
         }
         apply_root_post_verify(self, root, limits, info, &mut result, score_out, &last_root_order);
+
+        // searchmoves/root_moves を尊重して出力を制限する（YaneuraOu互換）
+        if let Some(allowed) = limits.root_moves.as_ref() {
+            let allowed_set: HashSet<u32> = allowed.iter().map(|m| m.to_u32()).collect();
+            let fallback = allowed.as_slice().first().copied();
+            if let Some(bm) = result.best_move {
+                if !allowed_set.contains(&bm.to_u32()) {
+                    if let Some(fb) = fallback {
+                        result.best_move = Some(fb);
+                        if let Some(lines) = result.lines.as_mut().and_then(|ls| ls.first_mut()) {
+                            lines.root_move = fb;
+                            normalize_root_pv(&mut lines.pv, fb);
+                        }
+                        if result.stats.pv.is_empty() {
+                            result.stats.pv.push(fb);
+                        } else {
+                            result.stats.pv[0] = fb;
+                            normalize_root_pv(&mut result.stats.pv, fb);
+                        }
+                    }
+                }
+            }
+        }
 
         if let Some(tt) = &self.tt {
             result.hashfull = tt.hashfull_permille() as u32;
