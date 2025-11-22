@@ -513,7 +513,7 @@ impl Engine {
         }
         // publish_session() must be called before prime_stop_info() because
         // publish_session() clears the stop_info via take(). See stop_ctrl.rs comments.
-        self.stop_controller.publish_session(stop_flag_ref, session_id);
+        self.stop_controller.publish_session_if_needed(stop_flag_ref, session_id);
         self.stop_controller.prime_stop_info(base_stop_info.clone());
 
         let backend =

@@ -1293,7 +1293,7 @@ mod tests {
 
         // Publish session to initialize StopController
         let stop_flag = Arc::new(AtomicBool::new(false));
-        stop_ctrl.publish_session(Some(&stop_flag), session_id);
+        stop_ctrl.publish_session_if_needed(Some(&stop_flag), session_id);
 
         // Create distinct moves for testing
         let line_move = Move::normal(Square::new(7, 6), Square::new(7, 5), false); // 2g2f
@@ -1376,7 +1376,7 @@ mod tests {
         let worker_id = 2;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        stop_ctrl.publish_session(Some(&stop_flag), session_id);
+        stop_ctrl.publish_session_if_needed(Some(&stop_flag), session_id);
 
         // Create distinct moves
         let line_move = Move::normal(Square::new(7, 6), Square::new(7, 5), false); // 2g2f (fail-high)
@@ -1466,7 +1466,7 @@ mod tests {
         let worker_id = 3;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        stop_ctrl.publish_session(Some(&stop_flag), session_id);
+        stop_ctrl.publish_session_if_needed(Some(&stop_flag), session_id);
 
         let best_move = Move::normal(Square::new(7, 6), Square::new(7, 5), false); // 2g2f
         let tail_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false); // 7g7f

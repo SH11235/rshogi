@@ -95,6 +95,21 @@ impl StopController {
         }
     }
 
+    /// publish_session の冪等版。session_id が既に同じなら何もしない。
+    pub fn publish_session_if_needed(
+        &self,
+        external_stop: Option<&Arc<AtomicBool>>,
+        session_id: u64,
+    ) {
+        let current = self.inner.session_id.load(std::sync::atomic::Ordering::Acquire);
+        if current == session_id {
+            // 外部 stop の参照だけは最新にしておく
+            self.update_external_stop_flag(external_stop);
+            return;
+        }
+        self.publish_session(external_stop, session_id);
+    }
+
     /// Initialize StopInfo snapshot for the upcoming session.
     ///
     /// # Order
@@ -642,6 +657,24 @@ mod tests {
         assert!(ctrl.try_read_stop_info().is_some());
         ctrl.publish_session(None, 1);
         assert!(ctrl.try_read_stop_info().is_none());
+    }
+
+    #[test]
+    fn publish_session_if_needed_skips_same_session() {
+        let ctrl = StopController::new();
+        let ext = Arc::new(AtomicBool::new(false));
+        ctrl.publish_session(Some(&ext), 10);
+        ctrl.prime_stop_info(StopInfo::default());
+
+        // Same session id: should not clear stop_info
+        ctrl.publish_session_if_needed(Some(&ext), 10);
+        assert!(ctrl.try_read_stop_info().is_some());
+        assert_eq!(ctrl.inner.session_id.load(Ordering::Relaxed), 10);
+
+        // New session id: should clear stop_info and update id
+        ctrl.publish_session_if_needed(Some(&ext), 11);
+        assert!(ctrl.try_read_stop_info().is_none());
+        assert_eq!(ctrl.inner.session_id.load(Ordering::Relaxed), 11);
     }
 
     #[test]
