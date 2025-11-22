@@ -343,15 +343,6 @@ where
     }
 }
 
-fn finish_single_result(tt: &TranspositionTable, result: &mut SearchResult, start: Instant) {
-    result.stats.elapsed = start.elapsed();
-    result.hashfull = tt.hashfull_permille() as u32;
-    // Ensure at least one PV line exists for downstream consumers (generatorなど)
-    synthesize_primary_line_from_result(result);
-    // Refresh once at the end
-    result.refresh_summary();
-}
-
 fn combine_results(
     tt: &TranspositionTable,
     mut results: Vec<(usize, SearchResult)>,
