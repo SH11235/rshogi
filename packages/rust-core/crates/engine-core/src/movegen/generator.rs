@@ -32,6 +32,23 @@ impl MoveGenerator {
         Ok(gen.generate_all())
     }
 
+    /// Generate moves with an option to allow pseudo-legal enumeration (LEGAL_ALL 相当)。
+    ///
+    /// 現時点の実装は合法手生成と同一の経路を通る。pseudo-legal 生成を導入したら
+    /// `allow_pseudo_legal` が true のときに網羅的な列挙へ切り替える。
+    pub fn generate_all_with_mode(
+        &self,
+        pos: &Position,
+        allow_pseudo_legal: bool,
+    ) -> Result<MoveList, MoveGenError> {
+        if allow_pseudo_legal {
+            // MoveGenImpl は合法性判定込みのため現状は共有経路を使用する。
+            // Pseudo-legal 生成を実装した場合はここで分岐する。
+            return self.generate_all(pos);
+        }
+        self.generate_all(pos)
+    }
+
     /// Check if any legal move exists (early exit optimization)
     pub fn has_legal_moves(&self, pos: &Position) -> Result<bool, MoveGenError> {
         let mut gen = MoveGenImpl::new(pos)?;

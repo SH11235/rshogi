@@ -201,16 +201,22 @@ where
         stop_flag.store(false, AtomicOrdering::Release);
 
         // rootMoves 生成・helper limits 準備
-        let prepared_session = match self.thread_pool.start_thinking(pos, &limits, helper_count) {
-            Ok(prep) => {
-                root_key = prep.root_key;
-                Some(prep)
-            }
-            Err(err) => {
-                log::error!("thread_pool.start_thinking failed: {err}");
-                None
-            }
-        };
+        let prepared_session =
+            match self
+                .thread_pool
+                .start_thinking(pos, &limits, helper_count, &self.stop_controller)
+            {
+                Ok(prep) => {
+                    root_key = prep.root_key;
+                    // start_thinking 側で publish_session 済みの stop_flag を共有
+                    limits.stop_flag = Some(prep.stop_flag.clone());
+                    Some(prep)
+                }
+                Err(err) => {
+                    log::error!("thread_pool.start_thinking failed: {err}");
+                    None
+                }
+            };
         let active_helpers = if prepared_session.is_some() {
             helper_count
         } else {
@@ -1187,7 +1193,7 @@ mod tests {
             .build();
         limits.time_manager = Some(Arc::new(tm));
 
-        let result = searcher.search(&mut pos, limits);
+        let _result = searcher.search(&mut pos, limits);
         assert!(external_flag.load(Ordering::Acquire));
     }
 
@@ -1248,9 +1254,11 @@ mod tests {
 
         // After search, snapshot should exist with depth >= HELPER_SNAPSHOT_MIN_DEPTH.
         if let Some(snapshot) = stop_ctrl.try_read_snapshot() {
+            let min_depth = helper_snapshot_min_depth() as u8;
             assert!(
-                snapshot.depth >= HELPER_SNAPSHOT_MIN_DEPTH as u8,
-                "snapshot depth should be >= min publish depth"
+                snapshot.depth >= min_depth,
+                "snapshot depth should be >= min publish depth (expected >= {min_depth}, got {})",
+                snapshot.depth
             );
             assert_eq!(snapshot.search_id, session_id, "snapshot should have correct session_id");
         }

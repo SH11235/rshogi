@@ -12,11 +12,13 @@ use crate::search::ab::ClassicBackend;
 use crate::search::constants::MAX_PLY;
 use crate::search::types::SearchStack;
 // SearcherBackend is not directly used here; ClassicBackend is invoked through its public APIs.
+use crate::search::parallel::stop_ctrl::StopController;
 use crate::search::{SearchLimits, SearchResult};
 use crate::shogi::Move;
 use crate::shogi::Position;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro128PlusPlus;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc as std_mpsc;
 use std::time::Instant;
@@ -166,18 +168,22 @@ struct TaskEnvelope {
     result_tx: Sender<(usize, SearchResult)>,
 }
 
+#[allow(dead_code)]
 pub struct SessionContext {
     pub jobs: Vec<SearchJob>,
     pub root_key: u64,
     pub root_moves: Arc<Vec<Move>>,
     pub session_id: u64,
+    pub stop_flag: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 pub struct PreparedSession {
     pub main_limits: SearchLimits,
     pub root_moves: Arc<Vec<Move>>,
     pub root_key: u64,
     pub session_id: u64,
+    pub stop_flag: Arc<AtomicBool>,
 }
 
 impl<E> ThreadPool<E>
@@ -278,11 +284,19 @@ where
         pos: &Position,
         base_limits: &SearchLimits,
         helper_count: usize,
+        stop_ctrl: &StopController,
     ) -> Result<PreparedSession, MoveGenError> {
         self.nodes_counter.store(0, AtomicOrdering::Relaxed);
 
         let root_moves = Arc::new(build_root_moves(pos, base_limits)?);
         let root_key = pos.zobrist_hash();
+        // publish_session をここで必ず実行（Engine 側で済んでいれば冪等）。
+        let stop_flag = base_limits
+            .stop_flag
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        stop_ctrl.publish_session_if_needed(Some(&stop_flag), base_limits.session_id);
 
         let mut jobs = Vec::with_capacity(helper_count);
         for worker_idx in 0..helper_count {
@@ -317,6 +331,7 @@ where
             root_key,
             root_moves: Arc::clone(&root_moves),
             session_id: base_limits.session_id,
+            stop_flag: Arc::clone(&stop_flag),
         });
 
         let mut main_limits = clone_limits_for_worker(base_limits);
@@ -330,6 +345,7 @@ where
             root_moves,
             root_key,
             session_id: base_limits.session_id,
+            stop_flag,
         })
     }
 
@@ -578,7 +594,8 @@ mod tests {
         limits.time_manager = Some(Arc::new(tm));
 
         let (tx, rx) = mpsc::channel();
-        pool.start_thinking(&pos, &limits, 5).expect("start_thinking");
+        pool.start_thinking(&pos, &limits, 5, &StopController::new())
+            .expect("start_thinking");
         pool.start_searching(&tx);
 
         let mut got = 0usize;
@@ -658,7 +675,8 @@ mod tests {
         base_limits.time_manager = Some(Arc::new(tm1));
 
         // helper_count=2 で 2 ジョブを生成
-        pool.start_thinking(&pos, &base_limits, 2).expect("start_thinking");
+        pool.start_thinking(&pos, &base_limits, 2, &StopController::new())
+            .expect("start_thinking");
         pool.start_searching(&tx);
 
         // Receive both results
@@ -690,7 +708,8 @@ mod tests {
         limits.time_manager = Some(Arc::new(tm));
 
         let (tx, rx) = mpsc::channel();
-        pool.start_thinking(&pos, &limits, 1).expect("start_thinking");
+        pool.start_thinking(&pos, &limits, 1, &StopController::new())
+            .expect("start_thinking");
         pool.start_searching(&tx);
 
         let (_worker_id, result) = rx.recv().expect("worker result");
@@ -728,7 +747,8 @@ mod tests {
         let mut limits = SearchLimitsBuilder::default().fixed_nodes(128).depth(2).build();
         limits.time_manager = Some(Arc::new(tm));
 
-        pool.start_thinking(&pos, &limits, 2).expect("start_thinking");
+        pool.start_thinking(&pos, &limits, 2, &StopController::new())
+            .expect("start_thinking");
         pool.start_searching(&tx);
 
         let mut received = 0usize;
@@ -764,7 +784,9 @@ mod tests {
         let mv2 = pick("2g2f");
         let limits = SearchLimitsBuilder::default().depth(1).searchmoves(vec![mv1, mv2]).build();
 
-        let prepared = pool.start_thinking(&pos, &limits, 1).expect("start_thinking");
+        let prepared = pool
+            .start_thinking(&pos, &limits, 1, &StopController::new())
+            .expect("start_thinking");
 
         // main_limits root_moves should match filtered searchmoves
         let main_root = prepared.main_limits.root_moves.as_ref().expect("main root_moves");
@@ -776,5 +798,32 @@ mod tests {
         let helper_job = session.jobs.first().expect("helper job");
         let helper_root = helper_job.limits.root_moves.as_ref().expect("helper root_moves");
         assert!(Arc::ptr_eq(helper_root, &session.root_moves));
+    }
+
+    #[test]
+    fn start_thinking_updates_stop_controller_session_and_flag() {
+        // publish_session_if_needed が既存セッション ID でも stop_flag を最新に更新することを確認。
+        let backend = Arc::new(ClassicBackend::with_tt(
+            Arc::new(MaterialEvaluator),
+            Arc::new(TranspositionTable::new(2)),
+        ));
+        let mut pool = ThreadPool::new(backend, 1);
+        let stop_ctrl = StopController::new();
+
+        let old_flag = Arc::new(AtomicBool::new(false));
+        let sid = 7u64;
+        stop_ctrl.publish_session_if_needed(Some(&old_flag), sid);
+
+        let pos = crate::shogi::Position::startpos();
+        let mut limits = SearchLimitsBuilder::default().session_id(sid).depth(1).build();
+        let new_flag = Arc::new(AtomicBool::new(false));
+        limits.stop_flag = Some(Arc::clone(&new_flag));
+
+        let prepared = pool.start_thinking(&pos, &limits, 1, &stop_ctrl).expect("start_thinking");
+        // publish_session_if_needed should have updated the external stop flag to new_flag
+        stop_ctrl.request_stop_flag_only();
+        assert!(new_flag.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!old_flag.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(prepared.session_id, sid);
     }
 }

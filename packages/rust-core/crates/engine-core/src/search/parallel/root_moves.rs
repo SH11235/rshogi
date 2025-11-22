@@ -11,13 +11,16 @@ use std::collections::HashSet;
 /// - `searchmoves` 未指定の場合は全合法手を返す。
 pub fn build_root_moves(pos: &Position, limits: &SearchLimits) -> Result<Vec<Move>, MoveGenError> {
     if let Some(prebuilt) = limits.root_moves.as_ref() {
-        return Ok((**prebuilt).clone());
+        if !prebuilt.is_empty() {
+            return Ok((**prebuilt).clone());
+        }
+        // 明示的に空が渡された場合はフォールバックとして合法手を再生成する
     }
 
     let generator = MoveGenerator::new();
 
     // LEGAL_ALL 相当の分岐は現状同一の実装。将来的に pseudo-legal 網羅が必要ならここで分ける。
-    let all_moves = generator.generate_all(pos)?;
+    let all_moves = generator.generate_all_with_mode(pos, limits.generate_all_legal_moves)?;
     let legal = all_moves.as_slice();
 
     if let Some(searchmoves) = limits.searchmoves.as_ref() {
@@ -90,5 +93,17 @@ mod tests {
 
         let root_moves = build_root_moves(&pos, &limits).expect("build root moves");
         assert_eq!(root_moves, vec![mv]);
+    }
+
+    #[test]
+    fn generate_all_legal_moves_flag_routes_through_builder() {
+        // フラグを true にしても合法手列挙が取得できることを確認（擬似合法未実装だが経路確認用）。
+        let pos = Position::startpos();
+        let limits = SearchLimitsBuilder::default().generate_all_legal_moves(true).build();
+
+        let via_flag = build_root_moves(&pos, &limits).expect("build with flag");
+        let via_default = MoveGenerator::new().generate_all(&pos).expect("legal moves");
+
+        assert_eq!(via_flag, via_default.as_slice());
     }
 }
