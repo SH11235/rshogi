@@ -254,8 +254,17 @@ where
         let main_result =
             self.backend.think_blocking(pos, &primary_limits, limits.info_callback.clone());
         results.push((0usize, main_result));
-        // BenchAllRun が有効でない場合は primary 完了時に helpers を停止させる。
-        // ただしベンチでもメイト検出時は例外的に停止する。
+
+        // YaneuraOu準拠: Primary完了後も即座にstop_flagをセットせず、
+        // Helperの結果を待ってから停止する。
+        //
+        // YaneuraOuでは、Primaryが反復深化ループを抜けた後に`threads.stop = true`をセットし、
+        // その後`threads.wait_for_search_finished()`で全Helperの結果を待つ。
+        // Helperは`threads.stop`をチェックするまで探索を続けるため、
+        // completedDepth >= 1の結果が得られることが保証される。
+        //
+        // 従来の実装では即座にstop_flagをセットしていたため、Helperがdepth=0で
+        // 停止してしまい、投票値が0になる問題があった。
         let bench_allrun = crate::search::policy::bench_allrun_enabled();
         let bench_stop_on_mate = crate::search::policy::bench_stop_on_mate_enabled();
 
@@ -270,21 +279,18 @@ where
                     .unwrap_or(false)
         };
 
+        // stop_flagは後でセット（Helper結果受取後）
         let should_stop_helpers_now = !bench_allrun || (bench_stop_on_mate && primary_is_mate);
-
-        let we_set_stop_flag = if should_stop_helpers_now {
-            stop_flag
-                .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
-                .is_ok()
-        } else {
-            false
-        };
+        let we_set_stop_flag = false; // 変更: 即座にセットしない
 
         drop(result_tx);
-        // Helpers の停止/待機ポリシー:
-        // - BenchAllRun=On かつ 非メイト: helpers をキャンセルせず、全件ブロッキングで待機（253da0cc 相当）。
-        // - それ以外: stop_flag を立てた上で、必要に応じてキャンセル/短時間ドレイン。
-        let mut canceled = false;
+        // Helpers の停止/待機ポリシー（YaneuraOu準拠に変更）:
+        // - BenchAllRun=On かつ 非メイト: helpers をキャンセルせず、全件ブロッキングで待機
+        // - それ以外: 一定時間（200-500ms）Helperの結果を待機し、その後stop_flagをセット
+        //
+        // YaneuraOuでは、Primaryが完了してもHelperは探索を続け、`threads.stop`がtrueに
+        // なるまで反復深化を進める。これにより、completedDepth >= 1の結果が保証される。
+        let canceled = false; // YaneuraOu準拠では強制キャンセルは行わない
         if bench_allrun && !primary_is_mate {
             // 全件待機：ハング防止のため recv_timeout + 期限超過時にフォールバック
             let wait_start = Instant::now();
@@ -392,15 +398,15 @@ where
                 ));
             }
         } else {
-            // 通常対局/メイト時: 既存動作を踏襲しつつ、キャンセルはポリシーで切替可能にする
-            let cancel_on_primary = crate::search::policy::cancel_on_primary_enabled();
-            if cancel_on_primary {
-                let _joined =
-                    self.thread_pool.cancel_all_join(std::time::Duration::from_millis(500));
-                canceled = true;
-            }
+            // 通常対局/メイト時: YaneuraOu準拠でHelperの結果を待機
+            //
+            // 従来は即座にキャンセルまたは短時間ドレインしていたが、
+            // YaneuraOuでは`threads.wait_for_search_finished()`で全Helperの
+            // 結果を待つため、ここでも一定時間（300ms）待機する。
+            //
+            // これにより、Helperがdepth >= 1の結果を返す可能性が高まる。
 
-            // 非ブロッキングの即時ドレイン → 予算時間内での recv_timeout
+            // まず即時ドレイン
             while let Ok((worker_id, res)) = result_rx.try_recv() {
                 publish_helper_snapshot(
                     &self.stop_controller,
@@ -413,31 +419,40 @@ where
                 results.push((worker_id, res));
             }
 
-            let budget_ms = crate::search::policy::stop_drain_budget_ms();
-            if budget_ms > 0 {
-                let drain_start = Instant::now();
-                loop {
-                    let spent = drain_start.elapsed().as_millis() as u64;
-                    if spent >= budget_ms {
-                        break;
-                    }
-                    let slice_ms = (budget_ms - spent).min(15);
-                    match result_rx.recv_timeout(std::time::Duration::from_millis(slice_ms)) {
-                        Ok((worker_id, res)) => {
-                            publish_helper_snapshot(
-                                &self.stop_controller,
-                                session_id,
-                                root_key,
-                                worker_id,
-                                &res,
-                                limits.info_string_callback.as_ref(),
-                            );
-                            results.push((worker_id, res));
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(_) => break,
-                    }
+            // YaneuraOu準拠: 300ms待機してHelperの結果を受け取る
+            const YANEURAOU_HELPER_WAIT_MS: u64 = 300;
+            let drain_start = Instant::now();
+            loop {
+                let spent = drain_start.elapsed().as_millis() as u64;
+                if spent >= YANEURAOU_HELPER_WAIT_MS {
+                    break;
                 }
+                let slice_ms = (YANEURAOU_HELPER_WAIT_MS - spent).min(50);
+                match result_rx.recv_timeout(std::time::Duration::from_millis(slice_ms)) {
+                    Ok((worker_id, res)) => {
+                        publish_helper_snapshot(
+                            &self.stop_controller,
+                            session_id,
+                            root_key,
+                            worker_id,
+                            &res,
+                            limits.info_string_callback.as_ref(),
+                        );
+                        results.push((worker_id, res));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // タイムアウト時にstop_flagをセットして強制停止を促す
+                        if should_stop_helpers_now {
+                            stop_flag.store(true, AtomicOrdering::Release);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // 待機後に最終的にstop_flagをセット（まだセットされていない場合）
+            if should_stop_helpers_now {
+                stop_flag.store(true, AtomicOrdering::Release);
             }
             if bench_allrun {
                 // bench_allrun=On かつ メイトで打ち切ったケースでは観測用にログする
@@ -814,6 +829,24 @@ fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
         }
     }
 
+    // [DEBUG: 実験的ログ - 問題解決後に削除]
+    // 各スレッドの投票内容をログ出力
+    for (idx, (worker_id, result)) in results.iter().enumerate() {
+        if let Some(mv) = result.best_move {
+            let vv = voting_value(result);
+            let pv_len = result.stats.pv.len();
+            eprintln!(
+                "[VOTE] idx={idx} worker={worker_id} move={mv:?} score={} depth={} pv_len={pv_len} vote={vv}",
+                result.score,
+                result.depth
+            );
+        }
+    }
+    // 集計結果
+    for (mv, total_vote) in votes.iter() {
+        eprintln!("[VOTE] TOTAL: move={mv:?} votes={total_vote}");
+    }
+
     // デフォルトはprimary
     let mut best_idx = primary_idx;
 
@@ -889,13 +922,32 @@ fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
 
         // YaneuraOu: 投票数が多いか、同票なら voting_value * (PV長>2) が高い方
         // "We make sure not to pick a thread with truncated principal variation"
+        //
+        // [独自拡張: 問題解決後に削除検討]
+        // YaneuraOuの仕様では両方PV長<=2の場合タイブレークが効かないため、
+        // その場合は投票値（=深度とスコアの積）で比較するように拡張
         let better = new_vote > best_vote
-            || (new_vote == best_vote
-                && new_vv * (new_pv_len > 2) as i64 > best_vv * (best_pv_len > 2) as i64);
+            || (new_vote == best_vote && {
+                match (new_pv_len > 2, best_pv_len > 2) {
+                    (true, false) => true,  // 新スレッドのPVが長い→優先
+                    (false, true) => false, // 既存スレッドのPVが長い→維持
+                    _ => new_vv > best_vv,  // 両方同条件→投票値で比較
+                }
+            });
 
         if better {
             best_idx = idx;
         }
+    }
+
+    // [DEBUG: 実験的ログ - 問題解決後に削除]
+    // 最終選択結果
+    let (best_worker_id, best_result) = &results[best_idx];
+    if let Some(mv) = best_result.best_move {
+        eprintln!(
+            "[VOTE] SELECTED: worker={best_worker_id} move={mv:?} score={} depth={}",
+            best_result.score, best_result.depth
+        );
     }
 
     best_idx
