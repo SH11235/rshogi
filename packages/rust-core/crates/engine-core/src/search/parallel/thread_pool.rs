@@ -170,21 +170,13 @@ struct TaskEnvelope {
     result_tx: Sender<(usize, SearchResult)>,
 }
 
-#[allow(dead_code)]
 pub struct SessionContext {
     pub jobs: Vec<SearchJob>,
-    pub root_key: u64,
-    pub root_moves: Arc<Vec<Move>>,
-    pub session_id: u64,
-    pub stop_flag: Arc<AtomicBool>,
 }
 
-#[allow(dead_code)]
 pub struct PreparedSession {
     pub main_limits: SearchLimits,
-    pub root_moves: Arc<Vec<Move>>,
     pub root_key: u64,
-    pub session_id: u64,
     pub stop_flag: Arc<AtomicBool>,
 }
 
@@ -344,13 +336,7 @@ where
             });
         }
 
-        self.session = Some(SessionContext {
-            jobs,
-            root_key,
-            root_moves: Arc::clone(&root_moves),
-            session_id: base_limits.session_id,
-            stop_flag: Arc::clone(&stop_flag),
-        });
+        self.session = Some(SessionContext { jobs });
         self.session_meta = Some(SessionMeta {
             session_id: base_limits.session_id,
             root_key,
@@ -364,9 +350,7 @@ where
 
         Ok(PreparedSession {
             main_limits,
-            root_moves,
             root_key,
-            session_id: base_limits.session_id,
             stop_flag,
         })
     }
@@ -822,10 +806,9 @@ mod tests {
 
         // SessionContext stored in pool should exist and share the same Arc
         let session = pool.session.as_ref().expect("session stored");
-        assert!(Arc::ptr_eq(&session.root_moves, main_root));
         let helper_job = session.jobs.first().expect("helper job");
         let helper_root = helper_job.limits.root_moves.as_ref().expect("helper root_moves");
-        assert!(Arc::ptr_eq(helper_root, &session.root_moves));
+        assert!(Arc::ptr_eq(helper_root, main_root));
     }
 
     #[test]
@@ -852,7 +835,7 @@ mod tests {
         stop_ctrl.request_stop_flag_only();
         assert!(new_flag.load(std::sync::atomic::Ordering::Acquire));
         assert!(!old_flag.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(prepared.session_id, sid);
+        assert_eq!(prepared.main_limits.session_id, sid);
     }
 
     #[test]
@@ -874,10 +857,16 @@ mod tests {
 
         let prepared = pool.start_thinking(&pos, &limits, 0, &stop_ctrl).expect("start_thinking");
 
-        assert_eq!(prepared.root_moves.len(), 1);
-        assert_eq!(prepared.root_moves[0], Move::null());
+        let root_moves = prepared.main_limits.root_moves.as_ref().expect("root_moves present");
+        assert_eq!(root_moves.len(), 1);
+        assert_eq!(root_moves[0], Move::null());
         let session = pool.session.as_ref().expect("session stored");
-        assert_eq!(session.root_moves.len(), 1);
-        assert_eq!(session.root_moves[0], Move::null());
+        let session_root = session
+            .jobs
+            .first()
+            .and_then(|j| j.limits.root_moves.as_ref())
+            .expect("session root moves");
+        assert_eq!(session_root.len(), 1);
+        assert_eq!(session_root[0], Move::null());
     }
 }

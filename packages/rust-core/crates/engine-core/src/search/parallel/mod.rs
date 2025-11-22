@@ -692,24 +692,6 @@ fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
         }
     }
 
-    // [DEBUG: 実験的ログ - 問題解決後に削除]
-    // 各スレッドの投票内容をログ出力
-    for (idx, (worker_id, result)) in results.iter().enumerate() {
-        if let Some(mv) = result.best_move {
-            let vv = voting_value(result);
-            let pv_len = result.stats.pv.len();
-            eprintln!(
-                "[VOTE] idx={idx} worker={worker_id} move={mv:?} score={} depth={} pv_len={pv_len} vote={vv}",
-                result.score,
-                result.depth
-            );
-        }
-    }
-    // 集計結果
-    for (mv, total_vote) in votes.iter() {
-        eprintln!("[VOTE] TOTAL: move={mv:?} votes={total_vote}");
-    }
-
     // デフォルトはprimary
     let mut best_idx = primary_idx;
 
@@ -795,16 +777,6 @@ fn select_best_by_vote(results: &[(usize, SearchResult)]) -> usize {
         if better {
             best_idx = idx;
         }
-    }
-
-    // [DEBUG: 実験的ログ - 問題解決後に削除]
-    // 最終選択結果
-    let (best_worker_id, best_result) = &results[best_idx];
-    if let Some(mv) = best_result.best_move {
-        eprintln!(
-            "[VOTE] SELECTED: worker={best_worker_id} move={mv:?} score={} depth={}",
-            best_result.score, best_result.depth
-        );
     }
 
     best_idx
@@ -1256,8 +1228,11 @@ mod tests {
             .session_id(session_id)
             .build();
         limits.time_manager = Some(Arc::new(tm));
+        // helper snapshot を確実に拾うため publish 閾値を下げる
+        std::env::set_var("SHOGI_HELPER_SNAPSHOT_MIN_DEPTH", "1");
 
         let _ = searcher.search(&mut pos, limits);
+        std::env::remove_var("SHOGI_HELPER_SNAPSHOT_MIN_DEPTH");
 
         // After search, snapshot should exist with depth >= HELPER_SNAPSHOT_MIN_DEPTH.
         if let Some(snapshot) = stop_ctrl.try_read_snapshot() {

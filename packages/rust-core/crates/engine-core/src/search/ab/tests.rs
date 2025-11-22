@@ -2480,7 +2480,7 @@ fn root_moves_filter_limits_root_search() {
 
     let result = backend.think_blocking(&pos, &limits, None);
 
-    let best_usi = result.best_move.as_ref().map(|m| crate::usi::move_to_usi(m));
+    let best_usi = result.best_move.as_ref().map(crate::usi::move_to_usi);
     assert_eq!(best_usi.as_deref(), Some("7g7f"));
     let head_usi = result
         .lines
