@@ -262,6 +262,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub fn dispatch(&self, jobs: Vec<SearchJob>, result_tx: &Sender<(usize, SearchResult)>) {
         for job in jobs.into_iter() {
             // Push into shared queue; any worker will pick it up.
@@ -307,7 +308,7 @@ where
                     priority: 0,
                     split: None,
                 };
-                let _ = worker.ctrl.send(WorkerCommand::Start(env));
+                let _ = worker.ctrl.send(WorkerCommand::Start(Box::new(env)));
             } else {
                 log::warn!("thread_pool: missing worker for job {}", idx + 1);
             }
@@ -505,7 +506,7 @@ struct Worker {
 enum WorkerCommand {
     Shutdown,
     Clear,
-    Start(TaskEnvelope),
+    Start(Box<TaskEnvelope>),
 }
 
 fn worker_loop<E>(
@@ -542,7 +543,7 @@ fn worker_loop<E>(
                         match msg {
                             Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
                             Ok(WorkerCommand::Clear) => local.clear_all(),
-                            Ok(WorkerCommand::Start(env)) => envelope = Some(env),
+                            Ok(WorkerCommand::Start(env)) => envelope = Some(*env),
                         }
                     },
                     recv(task_hi_rx) -> msg => {
@@ -566,7 +567,7 @@ fn worker_loop<E>(
                     match msg {
                         Ok(WorkerCommand::Shutdown) | Err(_) => { shutdown = true; }
                         Ok(WorkerCommand::Clear) => local.clear_all(),
-                        Ok(WorkerCommand::Start(env)) => envelope = Some(env),
+                        Ok(WorkerCommand::Start(env)) => envelope = Some(*env),
                     }
                 },
                 recv(task_hi_rx) -> msg => {

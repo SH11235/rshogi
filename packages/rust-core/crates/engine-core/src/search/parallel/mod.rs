@@ -467,7 +467,11 @@ fn combine_results(
     // --- MultiPV 統合: primary の行を起点に、不足分のみ helpers で補完する ---
     let mut multipv_primary_added: u8 = 0;
     let mut multipv_helper_added: u8 = 0;
-    if desired_multipv > 1 {
+    let merge_helpers = crate::util::env_var("SHOGI_MULTIPV_MERGE")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("on"))
+        .unwrap_or(false);
+
+    if desired_multipv > 1 && merge_helpers {
         let k = desired_multipv as usize;
         let mut merged: SmallVec<[RootLine; 16]> = SmallVec::new();
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -592,6 +596,25 @@ fn combine_results(
             final_result.stats.multipv_helper_lines = Some(multipv_helper_added);
             // MultiPV 統合後に派生フィールド（depth/seldepth/nps/ponder 等）を再集計
             // Derive fields will be refreshed at the end
+        }
+    } else if desired_multipv > 1 {
+        // merge_helpers が無効な場合は primary の MultiPV (あれば) だけを使用し、
+        // helper 由来の行は統合しない。
+        if let Some(primary_lines) =
+            results.iter().find(|(id, _)| *id == 0).and_then(|(_, r)| r.lines.as_ref())
+        {
+            let mut out: SmallVec<[RootLine; 4]> = SmallVec::new();
+            for (i, ln) in primary_lines.iter().take(desired_multipv as usize).enumerate() {
+                let mut ln = ln.clone();
+                ln.multipv_index = (i + 1) as u8;
+                out.push(ln);
+            }
+            if !out.is_empty() {
+                final_result.lines = Some(out);
+                final_result.stats.multipv_primary_lines =
+                    Some(final_result.lines.as_ref().map(|ls| ls.len() as u8).unwrap_or(0));
+                final_result.stats.multipv_helper_lines = Some(0);
+            }
         }
     }
 
