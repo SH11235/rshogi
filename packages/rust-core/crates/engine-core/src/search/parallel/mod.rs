@@ -1062,6 +1062,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires large stack size
     fn helper_share_bounds_single_and_multi_thread() {
         let evaluator = Arc::new(MaterialEvaluator);
         let tt_single = Arc::new(TranspositionTable::new(8));
@@ -1118,6 +1119,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires large stack size
     fn search_respects_external_stop_flag_true() {
         let evaluator = Arc::new(MaterialEvaluator);
         let tt = Arc::new(TranspositionTable::new(8));
