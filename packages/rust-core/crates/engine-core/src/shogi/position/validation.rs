@@ -4,6 +4,7 @@
 //! the position state (check, repetition, draw, etc).
 
 use crate::shogi::board::{Color, Piece, PieceType, Square};
+use crate::shogi::entering_king::EnteringKingRule;
 use crate::shogi::moves::Move;
 use crate::shogi::piece_constants::piece_type_to_hand_index;
 
@@ -396,6 +397,180 @@ impl Position {
     /// Check if position is draw (currently delegated to repetition)
     pub fn is_draw(&self) -> bool {
         self.is_repetition()
+    }
+
+    /// 入玉宣言勝ちが可能であれば、その「宣言勝ち手」を返す。
+    ///
+    /// - 現状は EKR_27 (CSA 27点法) のみ対応し、条件を満たす場合に `Some(Move::null())` を返す。
+    ///   - Move::null はあくまでプレースホルダであり、USI 層での "win" 出力とはまだ接続していない。
+    /// - 他のルール (24点法/駒落ち対応/トライルール) は今後段階的に対応する。
+    ///
+    /// 判定条件（やねうら王 `Position::DeclarationWin()` 相当, 時間条件を除く）:
+    /// (a) 宣言側の手番である（= side_to_move）。
+    /// (b) 宣言側の玉が敵陣三段目以内に入っている。
+    /// (c) 宣言側の持点（敵陣内自駒＋手駒, 大駒5点 / 小駒1点）がルールごとの閾値以上。
+    ///     - 27点法: 先手は 28 点以上, 後手は 27 点以上。
+    /// (d) 敵陣三段目以内の自駒数（玉を含む）が 11 枚以上（玉を除く 10 枚以上）。
+    /// (e) 宣言側の玉に王手がかかっていない。
+    /// (f) （切れ負けの場合）宣言側の持ち時間が残っている（時間管理側で扱うためここでは未判定）。
+    pub fn declaration_win_move(&self, rule: EnteringKingRule) -> Option<Move> {
+        match rule {
+            EnteringKingRule::None => std::option::Option::<Move>::None,
+            EnteringKingRule::TryRule => {
+                // TRy ルール:
+                // - 自玉が敵玉の初期位置（5一/5九 相当）の升に合法的に移動できれば、
+                //   TRy 成立として宣言勝ちになる。
+                // - ここでは 24/27 点法と同様に `Move::win()` を返し、
+                //   「宣言勝ちが可能かどうか」のブール判定に専念する。
+                let us = self.side_to_move;
+                let king_sq = self.board.king_square(us)?;
+                // USI 上の初期玉位置: 先手玉 = 5i, 後手玉 = 5a
+                let try_sq = match us {
+                    Color::Black => Square::from_usi_chars('5', 'a').expect("valid square"),
+                    Color::White => Square::from_usi_chars('5', 'i').expect("valid square"),
+                };
+                let mv = Move::normal(king_sq, try_sq, false);
+                if self.is_legal_move(mv) { Some(Move::win()) } else { None }
+            }
+            EnteringKingRule::Csa24
+            | EnteringKingRule::Csa24Handicap
+            | EnteringKingRule::Csa27
+            | EnteringKingRule::Csa27Handicap => {
+                // --- (a) 手番側で呼ぶ前提なので、side_to_move を宣言側とする ---
+                let us = self.side_to_move;
+
+                // --- (b) 自玉が敵陣三段目以内に入っているか ---
+                let king_sq = self.board.king_square(us)?;
+
+                // 敵陣（三段目以内）の rank 範囲を決定:
+                // - 先手から見て上側 3 段 (a,b,c) が「敵陣」
+                // - 後手から見て下側 3 段 (g,h,i) が「敵陣」
+                let (enemy_rank_start, enemy_rank_end) = match us {
+                    Color::Black => (0u8, 2u8),
+                    Color::White => (6u8, 8u8),
+                };
+
+                let king_rank = king_sq.rank();
+                if king_rank < enemy_rank_start || king_rank > enemy_rank_end {
+                    return std::option::Option::<Move>::None;
+                }
+
+                // --- (e) 自玉に王手がかかっていないこと ---
+                if self.is_in_check() {
+                    return std::option::Option::<Move>::None;
+                }
+
+                // --- (d) 敵陣三段目以内の自駒数（玉含む）が 11 枚以上 ---
+                // ついでに大駒（角/飛車）の枚数もカウントしておく。
+                let mut pieces_in_enemy_field = 0i32;
+                let mut big_pieces_in_enemy_field = 0i32;
+
+                for rank in enemy_rank_start..=enemy_rank_end {
+                    for file in 0u8..9 {
+                        let sq = Square::new(file, rank);
+                        if let Some(piece) = self.board.piece_on(sq) {
+                            if piece.color == us {
+                                pieces_in_enemy_field += 1;
+                                if matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop) {
+                                    big_pieces_in_enemy_field += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if pieces_in_enemy_field < 11 {
+                    return std::option::Option::<Move>::None;
+                }
+
+                // --- (c) 持点計算 ---
+                //
+                // score =
+                //   敵陣内自駒数（玉含む） +
+                //   敵陣内大駒枚数×4 - 1 (玉を除外) +
+                //   手駒点（小駒1点, 大駒5点）
+                let mut score = pieces_in_enemy_field + big_pieces_in_enemy_field * 4 - 1;
+
+                // 手駒点（宣言側のみを対象）
+                let hand_color = us;
+                let pawn = self.count_piece_in_hand(hand_color, PieceType::Pawn) as i32;
+                let lance = self.count_piece_in_hand(hand_color, PieceType::Lance) as i32;
+                let knight = self.count_piece_in_hand(hand_color, PieceType::Knight) as i32;
+                let silver = self.count_piece_in_hand(hand_color, PieceType::Silver) as i32;
+                let gold = self.count_piece_in_hand(hand_color, PieceType::Gold) as i32;
+                let bishop = self.count_piece_in_hand(hand_color, PieceType::Bishop) as i32;
+                let rook = self.count_piece_in_hand(hand_color, PieceType::Rook) as i32;
+
+                score += pawn + lance + knight + silver + gold + (bishop + rook) * 5;
+
+                // ルールに応じて必要点数を決定（駒落ち対応も含む）。
+                // やねうら王の update_entering_point() と同様に、盤上+手駒の合計点 p を用いて
+                // *_H ルールでは上手側（WHITE）の必要点数から (56 - p) を減算する。
+                let points_black: i32;
+                let mut points_white: i32;
+                use EnteringKingRule::*;
+                match rule {
+                    Csa24 | Csa24Handicap => {
+                        points_black = 31;
+                        points_white = 31;
+                    }
+                    Csa27 | Csa27Handicap => {
+                        points_black = 28;
+                        points_white = 27;
+                    }
+                    _ => unreachable!(),
+                }
+
+                if matches!(rule, Csa24Handicap | Csa27Handicap) {
+                    // 盤上+両手駒の合計点 p を計算（小駒1点, 大駒5点）。
+                    let mut total_p = 0i32;
+                    // 盤上
+                    for rank in 0u8..9 {
+                        for file in 0u8..9 {
+                            let sq = Square::new(file, rank);
+                            if let Some(piece) = self.board.piece_on(sq) {
+                                total_p += 1;
+                                if matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop) {
+                                    total_p += 4;
+                                }
+                            }
+                        }
+                    }
+                    // 手駒（先後両方）
+                    for color in [Color::Black, Color::White] {
+                        let pawn = self.count_piece_in_hand(color, PieceType::Pawn) as i32;
+                        let lance = self.count_piece_in_hand(color, PieceType::Lance) as i32;
+                        let knight = self.count_piece_in_hand(color, PieceType::Knight) as i32;
+                        let silver = self.count_piece_in_hand(color, PieceType::Silver) as i32;
+                        let gold = self.count_piece_in_hand(color, PieceType::Gold) as i32;
+                        let bishop = self.count_piece_in_hand(color, PieceType::Bishop) as i32;
+                        let rook = self.count_piece_in_hand(color, PieceType::Rook) as i32;
+
+                        total_p += pawn + lance + knight + silver + gold + (bishop + rook) * 5;
+                    }
+
+                    // すべての駒があるなら total_p == 56。
+                    // 不足分だけ上手（WHITE）の必要点数を減算する。
+                    if total_p != 56 {
+                        points_white -= 56 - total_p;
+                    }
+                }
+
+                let required = match us {
+                    Color::Black => points_black,
+                    Color::White => points_white,
+                };
+
+                if score < required {
+                    return std::option::Option::<Move>::None;
+                }
+
+                // 現段階では「宣言勝ちが可能である」という事実のみを示す。
+                // 実際の USI 出力は "win" として表現されるため、内部的には
+                // 特殊手 Move::win() を返す。
+                Some(Move::win())
+            }
+        }
     }
 
     /// Check if a move gives check to the opponent

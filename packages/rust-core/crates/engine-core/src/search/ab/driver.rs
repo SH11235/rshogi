@@ -10,7 +10,7 @@ use crate::evaluation::evaluate::Evaluator;
 use crate::movegen::MoveGenerator;
 use crate::search::api::{BackendSearchTask, InfoEvent, InfoEventCallback, SearcherBackend};
 use crate::search::config;
-use crate::search::constants::MAX_PLY;
+use crate::search::constants::{MATE_SCORE, MAX_PLY};
 use crate::search::parallel::FinalizeReason;
 use crate::search::params as dynp;
 use crate::search::policy::bench_stop_on_mate_enabled;
@@ -886,6 +886,40 @@ impl<E: Evaluator + Send + Sync + 'static> ClassicBackend<E> {
         let mut near_final_confirmed: u64 = 0;
 
         self.evaluator.on_set_position(root);
+
+        // 24/27 点法および TRy ルールによる入玉宣言勝ち（USI "win"）は、
+        // 探索ループに入る前に判定してしまう。
+        //
+        // - やねうら王では rootMoves へ Move::win() を注入して探索側で扱う実装だが、
+        //   Rust 側では検索木に特殊手を混ぜないよう、ここで早期リターンする方針とする。
+        // - TRy ルール（EnteringKingRule::TryRule）も 24/27 点法と同様に、
+        //   成立していれば `Move::win()` を返し、ここで自動的に勝ちと扱う。
+        if let Some(rule) = limits.entering_king_rule {
+            use crate::shogi::EnteringKingRule;
+            match rule {
+                EnteringKingRule::Csa24
+                | EnteringKingRule::Csa24Handicap
+                | EnteringKingRule::Csa27
+                | EnteringKingRule::Csa27Handicap
+                | EnteringKingRule::TryRule => {
+                    if let Some(mv) = root.declaration_win_move(rule) {
+                        if mv.is_win() {
+                            if let Some(cb) = limits.info_string_callback.as_ref() {
+                                cb(&format!("declaration_win_shortcut=1 rule={:?}", rule));
+                            }
+                            let stats = SearchStats {
+                                depth: 0,
+                                elapsed: t0.elapsed(),
+                                pv: vec![mv],
+                                ..Default::default()
+                            };
+                            return SearchResult::new(Some(mv), MATE_SCORE, stats);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
 
         #[cfg(feature = "diagnostics")]
         reset_qsearch_diagnostics();

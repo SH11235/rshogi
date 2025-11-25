@@ -1,6 +1,7 @@
 pub mod attacks;
 pub mod board;
 pub mod board_constants;
+pub mod entering_king;
 pub mod moves;
 pub mod piece_constants;
 pub mod position;
@@ -10,6 +11,7 @@ mod tests;
 
 pub use board::{Bitboard, Board, Color, Piece, PieceType, Square};
 pub use board_constants::*;
+pub use entering_king::EnteringKingRule;
 pub use moves::{CaptureBuf, Move, MoveList, MoveVec, TriedMoves};
 pub use piece_constants::*;
 pub use position::{Position, UndoInfo};

@@ -817,6 +817,7 @@ pub(crate) fn clone_limits_for_worker(base: &SearchLimits) -> SearchLimits {
         time_manager: base.time_manager.clone(),
         stop_controller: base.stop_controller.clone(),
         threads_hint: base.threads_hint,
+        entering_king_rule: base.entering_king_rule,
         searchmoves: base.searchmoves.clone(),
         root_moves: base.root_moves.clone(),
         generate_all_legal_moves: base.generate_all_legal_moves,

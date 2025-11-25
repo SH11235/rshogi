@@ -1690,6 +1690,25 @@ pub fn finalize_and_send(
         return;
     }
 
+    // 宣言勝ち（Move::win）については、探索側で既にルール判定済みなので、
+    // ここでは MateGate/PostVerify/RootEscape などの最終化ロジックを一切通さず、
+    // そのまま `bestmove win` を出力する。
+    if let Some(res) = result {
+        if let Some(bm) = res.best_move {
+            if bm.is_win() {
+                let final_usi = move_to_usi(&bm); // "win"
+                emit_bestmove(&final_usi, None);
+                state.bestmove_emitted = true;
+                diag_info_string(format!("{label}_declaration_win_emit=1"));
+                #[cfg(test)]
+                {
+                    test_record_bestmove(&final_usi, None);
+                }
+                return;
+            }
+        }
+    }
+
     if state.bestmove_emitted {
         diag_info_string(format!("{label}_skip already_emitted=1"));
         return;

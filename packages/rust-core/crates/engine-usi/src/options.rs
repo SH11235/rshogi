@@ -330,6 +330,13 @@ fn collect_search_options(opts: &UsiOptions, builder: &mut OptionBuilder) {
         "QSearchChecks",
         "option name QSearchChecks type combo default On var On var Off".to_string(),
     );
+    builder.search(
+        "EnteringKingRule",
+        format!(
+            "option name EnteringKingRule type combo default {} var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H var TryRule",
+            opts.entering_king_rule_str()
+        ),
+    );
     // Material evaluator (lightweight) evaluation knobs
     builder.search(
         "Eval.Material.TempoCp",
@@ -1191,6 +1198,25 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
             if let Some(v) = value_ref {
                 let v = v.to_lowercase();
                 state.opts.ponder = matches!(v.as_str(), "true" | "1" | "on");
+            }
+        }
+        "EnteringKingRule" => {
+            if let Some(v) = value_ref {
+                use engine_core::shogi::EnteringKingRule;
+                let trimmed = v.trim();
+                let rule = match trimmed {
+                    "NoEnteringKing" => None,
+                    "CSARule24" => Some(EnteringKingRule::Csa24),
+                    "CSARule24H" => Some(EnteringKingRule::Csa24Handicap),
+                    "CSARule27" => Some(EnteringKingRule::Csa27),
+                    "CSARule27H" => Some(EnteringKingRule::Csa27Handicap),
+                    "TryRule" => Some(EnteringKingRule::TryRule),
+                    _ => {
+                        info_string(format!("entering_king_rule_invalid value={}", trimmed));
+                        state.opts.entering_king_rule
+                    }
+                };
+                state.opts.entering_king_rule = rule;
             }
         }
         "LogProfile" => {

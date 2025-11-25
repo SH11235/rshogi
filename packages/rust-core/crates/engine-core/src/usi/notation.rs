@@ -72,6 +72,11 @@ fn parse_usi_piece_type(c: char) -> Result<PieceType, UsiParseError> {
 
 /// Parse a USI move notation (e.g., "7g7f", "7g7f+", "P*5e")
 pub fn parse_usi_move(s: &str) -> Result<Move, UsiParseError> {
+    if s == "win" {
+        // 宣言勝ちはUSI上は特殊な指し手文字列 "win" で表現される。
+        return Ok(Move::win());
+    }
+
     if s.len() < 4 {
         return Err(UsiParseError::InvalidMoveFormat(s.to_string()));
     }
@@ -113,7 +118,10 @@ pub fn parse_usi_move(s: &str) -> Result<Move, UsiParseError> {
 
 /// Convert a Move to USI notation
 pub fn move_to_usi(mv: &Move) -> String {
-    if mv.is_drop() {
+    if mv.is_win() {
+        // Special sentinel for declaration win
+        "win".to_string()
+    } else if mv.is_drop() {
         let piece_char = match mv.drop_piece_type() {
             PieceType::Pawn => 'P',
             PieceType::Lance => 'L',

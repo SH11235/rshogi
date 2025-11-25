@@ -60,10 +60,30 @@ impl Move {
     /// - Placeholder when no valid move exists
     pub const NULL: Self = Move { data: 0 };
 
+    /// Special move constant representing a declaration win.
+    ///
+    /// - This is *not* a normal board move and must never be passed to
+    ///   move execution / legality routines.
+    /// - USI では `bestmove win` として出力される想定のプレースホルダ。
+    /// - エンコーディングは通常の from/to と重ならないよう、YaneuraOu の
+    ///   `MOVE_WIN` と同じ `(3 << 7) + 3` を採用する。
+    const WIN_DATA: u32 = (3 << 7) + 3;
+
+    /// Declaration win move (special sentinel).
+    pub const WIN: Self = Move {
+        data: Self::WIN_DATA,
+    };
+
     /// Create null move (for compatibility)
     #[inline]
     pub const fn null() -> Self {
         Self::NULL
+    }
+
+    /// Create declaration win move (special sentinel).
+    #[inline]
+    pub const fn win() -> Self {
+        Self::WIN
     }
 
     /// Create normal move (convenience method)
@@ -134,6 +154,12 @@ impl Move {
     #[inline]
     pub fn is_null(self) -> bool {
         self.data == 0
+    }
+
+    /// Check if this is a declaration win sentinel.
+    #[inline]
+    pub fn is_win(self) -> bool {
+        self.data == Self::WIN_DATA
     }
 
     /// Get source square (None for drops)

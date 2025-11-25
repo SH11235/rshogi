@@ -291,9 +291,27 @@ where
         self.nodes_counter.store(0, AtomicOrdering::Relaxed);
 
         // start_thinking は main/helper 共有の rootMoves を決定する唯一の入口。
-        // searchmoves 指定などで空になるケース（宣言勝ち/詰み 等）でも後段がアクセス違反しないよう
+        // searchmoves 指定などで空になるケース（詰み 等）でも後段がアクセス違反しないよう
         // placeholder を埋めておく（YaneuraOu の Move::none 相当）。
         let mut root_moves_vec = build_root_moves(pos, base_limits)?;
+
+        // 入玉宣言勝ちルール有効時の rootMoves 拡張。
+        //
+        // - 24/27 点法および TRy ルール:
+        //     Position::declaration_win_move(rule) が `Move::win()` を返す場合、
+        //     rootMoves に `Move::win()` を注入しておく（YaneuraOu の rootMoves 注入方式に合わせる）。
+        //     実際の探索自体は ClassicBackend 側でショートカットして `bestmove win` を返す設計だが、
+        //     rootMoves にも宣言勝ち手が存在する状態を維持する。
+        if let Some(rule) = base_limits.entering_king_rule {
+            if !matches!(rule, crate::shogi::EnteringKingRule::None) {
+                if let Some(mv) = pos.declaration_win_move(rule) {
+                    if mv.is_win() && !root_moves_vec.iter().any(|m| m.is_win()) {
+                        root_moves_vec.push(Move::win());
+                    }
+                }
+            }
+        }
+
         if root_moves_vec.is_empty() {
             log::warn!("start_thinking: root_moves empty; injecting null move placeholder");
             root_moves_vec.push(Move::null());
@@ -849,13 +867,13 @@ mod tests {
             Arc::new(MaterialEvaluator),
             Arc::new(TranspositionTable::new(2)),
         ));
-        let mut pool = ThreadPool::new(backend, 0);
+        let mut pool = ThreadPool::new(backend, 1);
         let stop_ctrl = StopController::new();
 
         let mut limits = SearchLimitsBuilder::default().session_id(2025).depth(1).build();
         limits.root_moves = Some(Arc::new(vec![])); // 明示的に空を渡す
 
-        let prepared = pool.start_thinking(&pos, &limits, 0, &stop_ctrl).expect("start_thinking");
+        let prepared = pool.start_thinking(&pos, &limits, 1, &stop_ctrl).expect("start_thinking");
 
         let root_moves = prepared.main_limits.root_moves.as_ref().expect("root_moves present");
         assert_eq!(root_moves.len(), 1);

@@ -100,6 +100,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearcherBackend for ParallelSearcherB
             jitter_override: limits.jitter_override,
             helper_role: limits.helper_role,
             store_heuristics: limits.store_heuristics,
+            entering_king_rule: limits.entering_king_rule,
             threads_hint: limits.threads_hint,
             stop_controller: limits.stop_controller.clone(),
             time_manager: limits.time_manager.clone(),

@@ -282,6 +282,7 @@ pub fn limits_from_go(
     builder
         .multipv(opts.multipv)
         .enable_fail_safe(opts.fail_safe_guard)
+        .entering_king_rule(opts.entering_king_rule)
         .info_callback(info_callback)
         .info_string_callback(info_string_callback)
         .build()

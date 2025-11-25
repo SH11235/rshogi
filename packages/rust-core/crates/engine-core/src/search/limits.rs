@@ -1,7 +1,7 @@
 //! Unified search limits for both basic and enhanced search
 
 use crate::search::parallel::StopController;
-use crate::shogi::Move;
+use crate::shogi::{EnteringKingRule, Move};
 use crate::time_management::{TimeControl, TimeManager, TimeParameters};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -71,6 +71,8 @@ pub struct SearchLimits {
     pub stop_controller: Option<Arc<StopController>>,
     /// Hint for threads used in this search (to avoid global env dependency)
     pub threads_hint: Option<u32>,
+    /// 入玉宣言ルール（None の場合は宣言勝ち判定を行わない）。
+    pub entering_king_rule: Option<EnteringKingRule>,
     /// Root限定の探索対象手集合（searchmoves 相当）。None のときは全合法手を使用。
     pub searchmoves: Option<Vec<Move>>,
     /// start_thinking で確定した root 指し手集合（main/helper 共有用）。指定がなければ従来の root 生成にフォールバック。
@@ -111,6 +113,7 @@ impl Default for SearchLimits {
             time_manager: None,
             stop_controller: None,
             threads_hint: None,
+            entering_king_rule: None,
             searchmoves: None,
             root_moves: None,
             generate_all_legal_moves: false,
@@ -195,6 +198,7 @@ pub struct SearchLimitsBuilder {
 
     helper_role: bool,
     store_heuristics: bool,
+    entering_king_rule: Option<EnteringKingRule>,
     searchmoves: Option<Vec<Move>>,
     root_moves: Option<Arc<Vec<Move>>>,
     generate_all_legal_moves: bool,
@@ -229,6 +233,7 @@ impl Default for SearchLimitsBuilder {
 
             helper_role: false,
             store_heuristics: false,
+            entering_king_rule: None,
             searchmoves: None,
             root_moves: None,
             generate_all_legal_moves: false,
@@ -376,6 +381,14 @@ impl SearchLimitsBuilder {
     /// Mark this search limits as helper role
     pub fn helper_role(mut self, helper: bool) -> Self {
         self.helper_role = helper;
+        self
+    }
+
+    /// 入玉宣言ルールを設定する（宣言勝ち判定用）。
+    ///
+    /// None を指定した場合は宣言勝ち判定を行わない。
+    pub fn entering_king_rule(mut self, rule: Option<EnteringKingRule>) -> Self {
+        self.entering_king_rule = rule;
         self
     }
 
@@ -538,6 +551,7 @@ impl SearchLimitsBuilder {
             time_manager: None,
             stop_controller: None,
             threads_hint: None,
+            entering_king_rule: self.entering_king_rule,
             searchmoves: self.searchmoves,
             root_moves: self.root_moves,
             generate_all_legal_moves: self.generate_all_legal_moves,
@@ -587,6 +601,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             time_manager: None,
             stop_controller: None,
             threads_hint: None,
+            entering_king_rule: None,
             searchmoves: None,
             root_moves: None,
             generate_all_legal_moves: false,

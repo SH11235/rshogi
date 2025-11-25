@@ -1,7 +1,7 @@
 //! Tests for Position struct and move handling
 
 use crate::shogi::position::ZobristHashing;
-use crate::shogi::{Color, Move, Piece, PieceType, Position, Square};
+use crate::shogi::{Color, EnteringKingRule, Move, Piece, PieceType, Position, Square};
 use crate::usi::{move_to_usi, parse_usi_move, parse_usi_square};
 
 #[test]
@@ -1214,4 +1214,106 @@ fn test_mixed_promoted_unpromoted_attacks() {
     // The pawn drop legality depends on the specific position
     let is_legal = pos.is_legal_move(pawn_drop);
     assert!(is_legal, "Move legality depends on specific position");
+}
+
+#[test]
+fn test_declaration_win_csa27_positive_black_simple() {
+    // 先手の簡易な入玉宣言勝ちケース（27点法）を構成する。
+    // 条件:
+    // - 先手玉が敵陣三段目以内
+    // - 敵陣三段目以内に自駒 11 枚（玉含む）
+    // - 手駒込みの持点が閾値以上
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+
+    // 白玉は自陣側に配置（王手がかからないよう十分離す）
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+
+    // 先手玉を敵陣 5c に置く（rank 'c' は敵陣三段目以内）
+    pos.board
+        .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::King, Color::Black));
+
+    // 敵陣 a,b 段に先手の歩を 10 枚配置して、自駒 11 枚（玉含む）を満たす。
+    let black_pawn_squares = ["1a", "2a", "3a", "4a", "6a", "7a", "8a", "9a", "1b", "2b"];
+    for s in black_pawn_squares {
+        pos.board
+            .put_piece(parse_usi_square(s).unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+    }
+
+    // 手駒: 先手の飛車 2 枚 + 角 2 枚を持たせて持点を十分に稼ぐ。
+    pos.hands[Color::Black as usize][PieceType::Rook.hand_index().unwrap()] = 2;
+    pos.hands[Color::Black as usize][PieceType::Bishop.hand_index().unwrap()] = 2;
+
+    pos.board.rebuild_occupancy_bitboards();
+
+    let mv = pos.declaration_win_move(EnteringKingRule::Csa27);
+    assert!(
+        mv.is_some(),
+        "Black should have a declaration win under Csa27 in this constructed position"
+    );
+}
+
+#[test]
+fn test_declaration_win_csa27_negative_insufficient_score() {
+    // 上記とほぼ同じ局面だが、手駒を取り除いて持点が足りないケース。
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::King, Color::Black));
+
+    let black_pawn_squares = ["1a", "2a", "3a", "4a", "6a", "7a", "8a", "9a", "1b", "2b"];
+    for s in black_pawn_squares {
+        pos.board
+            .put_piece(parse_usi_square(s).unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+    }
+
+    // 手駒なし: 敵陣内の駒点だけでは 28 点に届かないはずなので宣言勝ち不可。
+    pos.board.rebuild_occupancy_bitboards();
+
+    let mv = pos.declaration_win_move(EnteringKingRule::Csa27);
+    assert!(
+        mv.is_none(),
+        "Without extra hand pieces, declaration win should not be available under Csa27"
+    );
+}
+
+#[test]
+fn test_declaration_try_rule_returns_win() {
+    // TRy ルール:
+    // - 先手: 自玉が 5a に合法的に移動できれば、その時点で宣言勝ち扱いになる。
+    // ここでは、自玉が 5b にいて 5a へ通常移動できる単純な局面を構成する。
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+
+    // 敵玉を 5c、自玉を 5b に配置（5a は空き升とする）。
+    pos.board
+        .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board
+        .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board.rebuild_occupancy_bitboards();
+
+    let mv = pos
+        .declaration_win_move(EnteringKingRule::TryRule)
+        .expect("Try rule should be available");
+
+    // TRy は 24/27 点法と同様に宣言勝ち専用の Move::win() を返す。
+    assert!(mv.is_win(), "TRy rule should return Move::win()");
+}
+
+#[test]
+fn test_declaration_win_csa27_sfen_round_trip() {
+    // 手動構築した test_declaration_win_csa27_positive_black_simple と同等の局面を
+    // SFEN 経由で生成したときにも宣言勝ちが検出されることを確認する。
+    let sfen = "PPPP1PPPP/7PP/4K4/9/9/9/9/9/4k4 b 2R2B 1";
+    let pos = Position::from_sfen(sfen).expect("valid sfen");
+
+    let mv = pos.declaration_win_move(EnteringKingRule::Csa27);
+    assert!(
+        mv.is_some() && mv.unwrap().is_win(),
+        "CSA27 declaration win should be detected from SFEN as well"
+    );
 }

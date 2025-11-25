@@ -287,6 +287,8 @@ pub struct UsiOptions {
     // Forced move info emit (only-one-legal-move)
     pub forced_move_emit_eval: bool,
     pub forced_move_min_search_ms: u64,
+    /// 入玉宣言ルール（None の場合は宣言勝ち判定を行わない）。
+    pub entering_king_rule: Option<engine_core::shogi::EnteringKingRule>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -378,6 +380,21 @@ pub enum InstantMateVerifyMode {
     Off,
     CheckOnly,
     QSearch,
+}
+
+impl UsiOptions {
+    /// USI option 表示用に現在の入玉ルールを文字列化する。
+    pub fn entering_king_rule_str(&self) -> &'static str {
+        use engine_core::shogi::EnteringKingRule;
+        match self.entering_king_rule {
+            None | Some(EnteringKingRule::None) => "NoEnteringKing",
+            Some(EnteringKingRule::Csa24) => "CSARule24",
+            Some(EnteringKingRule::Csa24Handicap) => "CSARule24H",
+            Some(EnteringKingRule::Csa27) => "CSARule27",
+            Some(EnteringKingRule::Csa27Handicap) => "CSARule27H",
+            Some(EnteringKingRule::TryRule) => "TryRule",
+        }
+    }
 }
 
 impl Default for UsiOptions {
@@ -501,6 +518,7 @@ impl Default for UsiOptions {
             profile_mode: ProfileMode::Auto,
             forced_move_emit_eval: true,
             forced_move_min_search_ms: 1,
+            entering_king_rule: Some(engine_core::shogi::EnteringKingRule::Csa27),
         }
     }
 }
