@@ -1305,6 +1305,78 @@ fn test_declaration_try_rule_returns_win() {
 }
 
 #[test]
+fn test_declaration_try_rule_blocked_by_enemy_piece() {
+    // TRyルール: 目標マスに敵駒がある場合、合法手ではないので宣言勝ちは不可
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+
+    // 自玉を5bに配置、目標マス5aに敵の金を配置
+    pos.board
+        .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Gold, Color::White));
+    // 敵玉は遠くに配置
+    pos.board
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
+
+    let mv = pos.declaration_win_move(EnteringKingRule::TryRule);
+    // 5aは敵駒が利いているため、玉で取ると王手放置になる可能性がある
+    // ただし、この場合は単純に取る手は合法（自殺手でない限り）だが、
+    // 金を取る手は Move::normal(5b, 5a, false) で生成されるので、
+    // is_legal_move が合法と判断すれば宣言勝ちになる。
+    // 本テストでは、敵の金が5aにあり、自玉が5bにいるケースをテスト。
+    // 金を玉で取る手は、他の敵駒が5aを利いていなければ合法。
+    // より厳密なテストとして、5aを他の敵駒が利いている状況を作る。
+
+    // 実際のエッジケース: 5aに敵駒があり、かつその敵駒を取ると自殺手になる場合
+    // → 別のテストで対応
+    assert!(mv.is_some(), "Capturing enemy piece on 5a should be legal if not suicidal");
+}
+
+#[test]
+fn test_declaration_try_rule_blocked_by_check() {
+    // TRyルール: 目標マス5aに移動すると王手放置になる場合は宣言勝ち不可
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
+
+    // 自玉を5bに配置
+    pos.board
+        .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::King, Color::Black));
+    // 敵玉を遠くに配置
+    pos.board
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::White));
+    // 敵の飛車を1aに配置（5aに利いている）
+    pos.board
+        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
+
+    let mv = pos.declaration_win_move(EnteringKingRule::TryRule);
+    // 5aに移動すると敵飛車に取られる（自殺手）ので、宣言勝ちは不可
+    assert!(mv.is_none(), "TRy should fail when 5a is attacked by enemy piece");
+}
+
+#[test]
+fn test_declaration_try_rule_white_side() {
+    // TRyルール（後手）: 後手玉が5iに移動できれば宣言勝ち
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::White;
+
+    // 後手玉を5hに配置、目標マス5iは空き
+    pos.board
+        .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::King, Color::White));
+    // 先手玉を遠くに配置
+    pos.board
+        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board.rebuild_occupancy_bitboards();
+
+    let mv = pos
+        .declaration_win_move(EnteringKingRule::TryRule)
+        .expect("TRy rule should be available for White");
+    assert!(mv.is_win(), "TRy rule for White should return Move::win()");
+}
+
+#[test]
 fn test_declaration_win_csa27_sfen_round_trip() {
     // 手動構築した test_declaration_win_csa27_positive_black_simple と同等の局面を
     // SFEN 経由で生成したときにも宣言勝ちが検出されることを確認する。

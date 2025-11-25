@@ -10,6 +10,24 @@ use crate::shogi::piece_constants::piece_type_to_hand_index;
 
 use super::Position;
 
+/// TRyルール用定数: 先手の目標マス (5a)
+/// file=4 (9-5筋), rank=0 (a段)
+const TRY_SQUARE_BLACK: Square = {
+    match Square::new_safe(4, 0) {
+        Some(sq) => sq,
+        None => panic!("Invalid TRy square for Black"),
+    }
+};
+
+/// TRyルール用定数: 後手の目標マス (5i)
+/// file=4 (9-5筋), rank=8 (i段)
+const TRY_SQUARE_WHITE: Square = {
+    match Square::new_safe(4, 8) {
+        Some(sq) => sq,
+        None => panic!("Invalid TRy square for White"),
+    }
+};
+
 impl Position {
     /// Reference implementation: Check if square is attacked by any piece of given color
     /// This is slow but correct - doesn't rely on move generator
@@ -424,10 +442,10 @@ impl Position {
                 //   「宣言勝ちが可能かどうか」のブール判定に専念する。
                 let us = self.side_to_move;
                 let king_sq = self.board.king_square(us)?;
-                // USI 上の初期玉位置: 先手玉 = 5i, 後手玉 = 5a
+                // 目標マス: 先手は5a（後手玉の初期位置）、後手は5i（先手玉の初期位置）
                 let try_sq = match us {
-                    Color::Black => Square::from_usi_chars('5', 'a').expect("valid square"),
-                    Color::White => Square::from_usi_chars('5', 'i').expect("valid square"),
+                    Color::Black => TRY_SQUARE_BLACK,
+                    Color::White => TRY_SQUARE_WHITE,
                 };
                 let mv = Move::normal(king_sq, try_sq, false);
                 if self.is_legal_move(mv) {

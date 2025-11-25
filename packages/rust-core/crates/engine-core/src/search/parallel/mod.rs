@@ -1204,6 +1204,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires large stack size
     fn helper_snapshot_allows_equal_depth_forward() {
         // Verify that helper results at the same depth as existing snapshot are forwarded
         // to StopController (which then decides whether to update metrics).

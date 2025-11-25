@@ -67,7 +67,14 @@ impl Move {
     /// - USI では `bestmove win` として出力される想定のプレースホルダ。
     /// - エンコーディングは通常の from/to と重ならないよう、YaneuraOu の
     ///   `MOVE_WIN` と同じ `(3 << 7) + 3` を採用する。
-    const WIN_DATA: u32 = (3 << 7) + 3;
+    /// - from=3, to=3 と同じビットパターンだが、同一マスへの移動は
+    ///   合法手生成で絶対に生成されないため衝突しない。
+    const WIN_DATA: u32 = {
+        const DATA: u32 = (3 << 7) + 3;
+        // コンパイル時検証: WIN は NULL と異なる値でなければならない
+        assert!(DATA != 0, "WIN must not equal NULL");
+        DATA
+    };
 
     /// Declaration win move (special sentinel).
     pub const WIN: Self = Move {
@@ -612,6 +619,23 @@ mod tests {
         let normal_move =
             Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false);
         assert!(!normal_move.is_null());
+    }
+
+    #[test]
+    fn test_move_win_and_null_mutual_exclusivity() {
+        // WIN と NULL は相互排他的でなければならない
+        assert!(!Move::WIN.is_null(), "WIN must not be null");
+        assert!(Move::WIN.is_win(), "WIN.is_win() must be true");
+        assert!(!Move::NULL.is_win(), "NULL must not be win");
+        assert!(Move::NULL.is_null(), "NULL.is_null() must be true");
+
+        // WIN と NULL は異なる値
+        assert_ne!(Move::WIN, Move::NULL, "WIN and NULL must be different");
+
+        // win() と WIN 定数は同じ
+        assert_eq!(Move::win(), Move::WIN);
+        // null() と NULL 定数は同じ
+        assert_eq!(Move::null(), Move::NULL);
     }
 
     #[test]

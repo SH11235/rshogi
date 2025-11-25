@@ -1212,7 +1212,9 @@ pub fn handle_setoption(cmd: &str, state: &mut EngineState) -> Result<()> {
                     "CSARule27H" => Some(EnteringKingRule::Csa27Handicap),
                     "TryRule" => Some(EnteringKingRule::TryRule),
                     _ => {
-                        info_string(format!("entering_king_rule_invalid value={}", trimmed));
+                        info_string(format!(
+                            "entering_king_rule_invalid value={trimmed}. Valid: NoEnteringKing, CSARule24, CSARule24H, CSARule27, CSARule27H, TryRule"
+                        ));
                         state.opts.entering_king_rule
                     }
                 };
