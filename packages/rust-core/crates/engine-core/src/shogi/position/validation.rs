@@ -430,7 +430,11 @@ impl Position {
                     Color::White => Square::from_usi_chars('5', 'i').expect("valid square"),
                 };
                 let mv = Move::normal(king_sq, try_sq, false);
-                if self.is_legal_move(mv) { Some(Move::win()) } else { None }
+                if self.is_legal_move(mv) {
+                    Some(Move::win())
+                } else {
+                    None
+                }
             }
             EnteringKingRule::Csa24
             | EnteringKingRule::Csa24Handicap
