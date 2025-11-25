@@ -533,6 +533,8 @@ impl Position {
                 use EnteringKingRule::*;
                 match rule {
                     Csa24 | Csa24Handicap => {
+                        // 「24点法」は命名の由来であり、実際の閾値は31点。
+                        // やねうら王の実装に準拠（entering_king.rs 参照）。
                         points_black = 31;
                         points_white = 31;
                     }
