@@ -93,13 +93,9 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
           version: "v0.10.0"
-      - name: Configure sccache error log (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          LOG_PATH="${RUNNER_TEMP}/sccache-error.log"
-          echo "SCCACHE_ERROR_LOG=$LOG_PATH" >> $GITHUB_ENV
-          echo "macOS sccache error log: $LOG_PATH"
-      - name: Enable sccache (skip on macOS)
+      # macOSではsccacheを無効化
+      # sccache経由だとコンパイルエラーの詳細が表示されず、デバッグが困難なため
+      - name: Enable sccache (non-macOS only)
         if: runner.os != 'macOS'
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
