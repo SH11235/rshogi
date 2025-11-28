@@ -1,15 +1,29 @@
 //! 基本型モジュール
 //!
 //! 将棋エンジンで使用する基本的な型を定義する。
-//!
-//! - `Color`: 手番（先手/後手）
-//! - `File`, `Rank`: 筋と段
-//! - `Square`: 升目
-//! - `PieceType`, `Piece`: 駒種と駒
-//! - `Move`: 指し手
-//! - `Value`: 評価値
-//! - `Depth`: 探索深さ
-//! - `Bound`: 境界値種別
-//! - `Hand`: 手駒
 
-// TODO: Phase 1で実装
+mod bound;
+mod color;
+mod depth;
+mod file;
+mod hand;
+mod moves;
+mod piece;
+mod piece_type;
+mod rank;
+mod repetition;
+mod square;
+mod value;
+
+pub use bound::Bound;
+pub use color::Color;
+pub use depth::*;
+pub use file::File;
+pub use hand::Hand;
+pub use moves::Move;
+pub use piece::Piece;
+pub use piece_type::PieceType;
+pub use rank::Rank;
+pub use repetition::RepetitionState;
+pub use square::Square;
+pub use value::Value;
