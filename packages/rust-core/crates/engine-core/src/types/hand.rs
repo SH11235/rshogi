@@ -1,4 +1,6 @@
 //! 手駒（Hand）
+//!
+//! 先後の区別は `Color` 側で管理し、この型では「ある一方の手番が持っている手駒枚数」のみを表現する。
 
 use super::PieceType;
 
@@ -12,6 +14,9 @@ use super::PieceType;
 /// - bit 14-16: 金 (3bit, 最大4枚)
 /// - bit 17-18: 角 (2bit, 最大2枚)
 /// - bit 19-20: 飛 (2bit, 最大2枚)
+///
+/// 玉および成駒は手駒にならない前提であり、この型では管理しない。
+/// `count` / `add` / `sub` / `set` に渡す駒種は、手駒になりうるもの（歩〜飛）のみとする。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
 pub struct Hand(u32);
@@ -101,6 +106,10 @@ impl Hand {
         Hand(raw)
     }
 
+    /// 駒種ごとのビット位置とマスクを返す（内部用）。
+    ///
+    /// 玉および成駒に対しては (0, 0) を返す（手駒としては扱わない）ため、
+    /// 公開メソッドからそれらを渡さないことが前提となる。
     const fn shift_mask(pt: PieceType) -> (u32, u32) {
         match pt {
             PieceType::Pawn => (Self::PAWN_SHIFT, Self::PAWN_MASK),

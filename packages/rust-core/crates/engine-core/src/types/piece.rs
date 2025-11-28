@@ -1,11 +1,15 @@
 //! 駒（Piece）
+//!
+//! 内部表現は YaneuraOu の `Piece` に準拠した 5bit ラッパー。
+//! - bit 0-3: `PieceType`（1..=14）。0 は `Piece::NONE` のみで使用される。
+//! - bit 4: `Color`（0 = Black, 1 = White）。
+//!
+//! `Piece::NONE` 以外の値は常に有効な `PieceType` / `Color` の組み合わせであることを前提とする。
+//! `piece_type()` を呼び出す前に `is_none()` を避けるのが契約。
 
 use super::{Color, PieceType};
 
 /// 駒（先後の区別あり）
-///
-/// bit 0-3: PieceType
-/// bit 4: Color (0=Black, 1=White)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Piece(u8);
