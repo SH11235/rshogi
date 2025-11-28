@@ -9,14 +9,17 @@
   将棋エンジンで使用する基本型（`Color`, `Square`, `Move`, `Value` など）。  
   ここで定義された型を前提に、以降のモジュールが組み立てられます。
 
-- `bitboard`（未実装）  
-  81 マスの盤面を 128bit で表現するビットボードと、利き計算のための前計算テーブルを提供します。
+- `bitboard`  
+  81 マスの盤面を 128bit（`Bitboard`）で表現し、筋・段・升ごとのマスクと各種利きテーブルを提供します。  
+  近接駒（歩・桂・銀・金・玉）はテーブル参照、遠方駒（香・角・飛・馬・龍）は `between_bb` / `line_bb` などを用いたスライディング計算で扱います。
 
-- `position`（未実装）  
-  局面 (`Position`) と状態 (`StateInfo`) を管理し、`do_move` / `undo_move`、SFEN との相互変換などを担当します。
+- `position`  
+  局面 (`Position`) と状態 (`StateInfo`) を管理し、`do_move` / `undo_move` / `do_null_move` によるインクリメンタル更新を行います。  
+  盤面配列・Bitboard・手駒・手番・手数・玉位置に加え、Zobrist ハッシュ (`ZOBRIST`) や王手情報・pin 情報・直前の手などを `StateInfo` に保持します。
 
-- `movegen`（未実装）  
-  与えられた局面から合法手を生成します。王手回避手や静止探索用のキャプチャ生成などもここに集約します。
+- `movegen`  
+  与えられた局面から pseudo-legal 手と合法手を生成します。  
+  `generate_non_evasions` / `generate_evasions` / `generate_all` が王手の有無に応じた手生成を行い、`generate_legal` が `Position::is_legal` でフィルタして完全合法手を `MoveList` に格納します。
 
 - `nnue`（未実装）  
   NNUE 評価関数の読み込み・特徴量計算・差分更新を担当します。  
@@ -98,4 +101,3 @@ Value, Depth, Bound, RepetitionState は独立
 - YaneuraOu の型設計に準拠しつつ、Rust の型システムで安全性と可読性を高める。
 - ビットレベルのレイアウト（`Piece`, `Hand`, `Move` など）は、型定義ファイルの先頭コメントに必ず明記する。
 - 将来的に NNUE や探索ロジックを差し替えやすいよう、`types` を境界としてモジュール間の責務を分離する。
-
