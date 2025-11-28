@@ -4,6 +4,13 @@
 //!
 //! - `Bitboard`: 128bit盤面表現
 //! - 利き計算テーブル
-//! - 飛び駒の利き計算（Magic Bitboard相当）
+//! - 飛び駒の利き計算
 
-// TODO: Phase 2で実装
+mod core;
+mod sliders;
+mod tables;
+
+pub use core::Bitboard;
+pub use core::BitboardIter;
+pub use sliders::*;
+pub use tables::*;
