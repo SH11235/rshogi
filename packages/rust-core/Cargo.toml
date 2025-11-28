@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tools",
-    "crates/engine-core",
-    "crates/engine-usi",
 ]
 
 [workspace.dependencies]
