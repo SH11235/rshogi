@@ -61,3 +61,6 @@ packages/web/public/data/*.binz
 packages/web/public/data/*.bin.binz
 
 packages/rust-core/data/floodgate/raw/
+_shared/*
+
+runs_local/
