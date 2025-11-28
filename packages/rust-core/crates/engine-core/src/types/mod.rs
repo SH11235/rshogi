@@ -1,6 +1,24 @@
 //! 基本型モジュール
 //!
 //! 将棋エンジンで使用する基本的な型を定義する。
+//!
+//! # 型の依存関係
+//!
+//! ```text
+//! Color
+//!   ↓
+//! File, Rank
+//!   ↓
+//! Square
+//!   ↓
+//! PieceType
+//!   ↓
+//! Piece ← Move
+//!   ↓
+//! Hand
+//!
+//! Value, Depth, Bound, RepetitionState は独立
+//! ```
 
 mod bound;
 mod color;
