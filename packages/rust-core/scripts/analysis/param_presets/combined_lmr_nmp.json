@@ -1,9 +1,0 @@
-{
-    "name": "combined_lmr_nmp",
-    "params": {
-        "LMR_K_x100": 140,
-        "EnableNMP": 0,
-        "EnableProbCut": 0,
-        "IID_MinDepth": 8
-    }
-}

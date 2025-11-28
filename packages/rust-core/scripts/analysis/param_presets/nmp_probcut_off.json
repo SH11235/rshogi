@@ -1,8 +1,0 @@
-{
-    "name": "nmp_probcut_off",
-    "params": {
-        "EnableNMP": 0,
-        "EnableProbCut": 0,
-        "IID_MinDepth": 8
-    }
-}
