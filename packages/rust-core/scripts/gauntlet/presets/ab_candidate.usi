@@ -1,6 +1,0 @@
-; Candidate preset (defaults)
-setoption name EngineType value Enhanced
-setoption name MultiPV value 1
-setoption name Threads value 8
-setoption name USI_Hash value 1024
-; All other options use engine defaults.
