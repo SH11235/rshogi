@@ -12,6 +12,7 @@
 //! （`put_piece` / `remove_piece` / `do_move` 系）を通じて更新されることを前提とし、
 //! 常に互いに整合しているように保つ。
 
+mod movepicker_support;
 mod pos;
 mod sfen;
 mod state;

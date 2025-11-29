@@ -49,6 +49,12 @@ impl Bitboard {
         (self.p[0] | self.p[1]) == 0
     }
 
+    /// u128として取得（ハッシュ計算用）
+    #[inline]
+    pub const fn as_u128(self) -> u128 {
+        (self.p[1] as u128) << 64 | self.p[0] as u128
+    }
+
     /// 空でないかどうか
     #[inline]
     pub const fn is_not_empty(self) -> bool {
@@ -91,14 +97,29 @@ impl Bitboard {
     }
 
     /// 最下位ビットのSquareを取得（消さない）
+    ///
+    /// 空の場合は不正な値を返す可能性があるため、
+    /// 空でないことが保証されている場合のみ使用すること。
     #[inline]
-    pub const fn lsb(self) -> Square {
+    pub const fn lsb_unchecked(self) -> Square {
         if self.p[0] != 0 {
             // SAFETY: trailing_zeros() < 64、かつp[0]の有効ビットは0-62
             unsafe { Square::from_u8_unchecked(self.p[0].trailing_zeros() as u8) }
         } else {
             // SAFETY: 63 + trailing_zeros() < 81
             unsafe { Square::from_u8_unchecked(63 + self.p[1].trailing_zeros() as u8) }
+        }
+    }
+
+    /// 最下位ビットのSquareを取得（消さない）
+    ///
+    /// 空の場合はNoneを返す。
+    #[inline]
+    pub fn lsb(self) -> Option<Square> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.lsb_unchecked())
         }
     }
 
@@ -368,7 +389,7 @@ mod tests {
 
         // sq1の方がインデックスが小さいはず
         let lsb = bb.lsb();
-        assert_eq!(lsb, sq1);
+        assert_eq!(lsb, Some(sq1));
 
         let popped = bb.pop();
         assert_eq!(popped, sq1);
