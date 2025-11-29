@@ -5,7 +5,7 @@
 //!
 //! - ネットワーク構造の読み込み（`Network::load` / `init_nnue`）
 //! - 入力特徴量（HalfKP: 自玉×駒配置）の計算と変換（`BonaPiece` / `FeatureTransformer`）
-//! - Accumulator による差分更新可能な中間表現の保持（現状は全計算のみ実装）
+//! - Accumulator による差分更新可能な中間表現の保持（`diff::get_changed_features` を用いた増分更新 + フォールバック全計算）
 //! - AffineTransform + ClippedReLU による 512→32→32→1 の多層パーセプトロン
 //! - NNUE 未初期化時のフォールバック駒得評価
 

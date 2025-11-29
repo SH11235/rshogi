@@ -2,7 +2,8 @@
 //!
 //! HalfKP 特徴量を FeatureTransformer で変換した結果を視点ごとに保持し、
 //! 差分更新対応の評価値計算を行うための中間バッファ。
-//! 現状の実装では全計算パスのみを提供し、差分更新は今後拡張予定。
+//! 実際の差分更新ロジックは FeatureTransformer / `nnue::diff` 側にあり、
+//! この型は `[perspective][dimension]` の累積ベクトルと計算済みフラグを管理する。
 
 use super::constants::TRANSFORMED_FEATURE_DIMENSIONS;
 use crate::types::Value;
