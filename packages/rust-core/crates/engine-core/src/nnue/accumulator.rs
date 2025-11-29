@@ -1,6 +1,8 @@
 //! Accumulator - 入力特徴量の累積値を保持
 //!
-//! 差分更新に対応し、効率的な評価値計算を実現
+//! HalfKP 特徴量を FeatureTransformer で変換した結果を視点ごとに保持し、
+//! 差分更新対応の評価値計算を行うための中間バッファ。
+//! 現状の実装では全計算パスのみを提供し、差分更新は今後拡張予定。
 
 use super::constants::TRANSFORMED_FEATURE_DIMENSIONS;
 use crate::types::Value;

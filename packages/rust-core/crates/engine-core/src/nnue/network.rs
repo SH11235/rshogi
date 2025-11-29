@@ -1,4 +1,10 @@
 //! NNUEネットワーク全体の構造と評価関数
+//!
+//! HalfKP 256x2-32-32 アーキテクチャを想定した NNUE ネットワークを表現する。
+//! - `FeatureTransformer` で HalfKP 特徴量を 512 次元に変換
+//! - `AffineTransform` + `ClippedReLU` を 2 層適用して 32→32 と圧縮
+//! - 出力層（32→1）で整数スコアを得て `FV_SCALE` でスケーリングし `Value` に変換
+//! - グローバルな `NETWORK` にロードし、`evaluate` から利用する
 
 use super::accumulator::Accumulator;
 use super::constants::{
@@ -11,6 +17,7 @@ use crate::position::Position;
 use crate::types::Value;
 use std::fs::File;
 use std::io::{self, Read};
+use std::mem;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -119,13 +126,47 @@ pub fn is_nnue_initialized() -> bool {
 
 /// 局面を評価
 ///
-/// NNUEが初期化されていない場合は駒得評価にフォールバック
-pub fn evaluate(pos: &Position) -> Value {
+/// NNUEが初期化されていない場合は駒得評価にフォールバック。
+/// StateInfo に保持した Accumulator を差分更新し、計算済みなら再利用する。
+pub fn evaluate(pos: &mut Position) -> Value {
     if let Some(network) = NETWORK.get() {
-        // Accumulatorを取得・更新
-        let mut acc = Accumulator::new();
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-        network.evaluate(pos, &acc)
+        // Accumulator を一時的に取り出して更新し、計算済みのものを StateInfo に書き戻す。
+        let (mut acc, prev_acc_ptr) = {
+            let state = pos.state_mut();
+            let acc = mem::replace(&mut state.accumulator, Box::new(Accumulator::new()));
+            // 生ポインタで保持し、pos の可変借用を解放した後に参照する
+            let prev_acc = state.previous.as_ref().map(|s| &*s.accumulator as *const Accumulator);
+            (acc, prev_acc)
+        };
+
+        if !acc.computed_accumulation {
+            let mut updated = false;
+            if let Some(prev_acc_ptr) = prev_acc_ptr {
+                // SAFETY: prev_acc_ptr は state.previous の生存期間内にのみ使用する。
+                let prev_acc = unsafe { &*prev_acc_ptr };
+                if prev_acc.computed_accumulation {
+                    updated =
+                        network.feature_transformer.update_accumulator(pos, &mut acc, prev_acc);
+                }
+            }
+
+            if !updated {
+                network.feature_transformer.refresh_accumulator(pos, &mut acc);
+            }
+        }
+
+        // 計算済みの Accumulator を StateInfo に書き戻す
+        {
+            let state = pos.state_mut();
+            state.accumulator = acc;
+        }
+
+        // 不変借用で評価
+        let acc_ref = {
+            let state = pos.state();
+            &state.accumulator
+        };
+        network.evaluate(pos, acc_ref)
     } else {
         // フォールバック: 簡易駒得評価
         evaluate_material(pos)
@@ -217,7 +258,7 @@ mod tests {
         pos.set_sfen(SFEN_HIRATE).unwrap();
 
         // NNUEが初期化されていない場合はフォールバック
-        let value = evaluate(&pos);
+        let value = evaluate(&mut pos);
 
         // フォールバック評価が動作することを確認
         assert!(value.raw().abs() < 1000);
