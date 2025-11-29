@@ -27,11 +27,12 @@
 //! 3. QCapture - 捕獲手
 
 use super::{
-    ButterflyHistory, CapturePieceToHistory, LowPlyHistory, PawnHistory, LOW_PLY_HISTORY_SIZE,
+    ButterflyHistory, CapturePieceToHistory, LowPlyHistory, PawnHistory, PieceToHistory,
+    LOW_PLY_HISTORY_SIZE,
 };
 use crate::movegen::{ExtMove, MAX_MOVES};
 use crate::position::Position;
-use crate::types::{Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS};
+use crate::types::{Depth, Move, Piece, PieceType, Value, DEPTH_QS};
 
 // =============================================================================
 // Stage（指し手生成の段階）
@@ -114,7 +115,7 @@ pub struct MovePicker<'a> {
     main_history: &'a ButterflyHistory,
     low_ply_history: &'a LowPlyHistory,
     capture_history: &'a CapturePieceToHistory,
-    continuation_history: [Option<&'a [[i16; Square::NUM]; Piece::NUM]>; 6],
+    continuation_history: [Option<&'a PieceToHistory>; 6],
     pawn_history: &'a PawnHistory,
 
     // 状態
@@ -143,7 +144,7 @@ impl<'a> MovePicker<'a> {
         main_history: &'a ButterflyHistory,
         low_ply_history: &'a LowPlyHistory,
         capture_history: &'a CapturePieceToHistory,
-        continuation_history: [Option<&'a [[i16; Square::NUM]; Piece::NUM]>; 6],
+        continuation_history: [Option<&'a PieceToHistory>; 6],
         pawn_history: &'a PawnHistory,
         ply: i32,
     ) -> Self {
@@ -198,7 +199,7 @@ impl<'a> MovePicker<'a> {
         main_history: &'a ButterflyHistory,
         low_ply_history: &'a LowPlyHistory,
         capture_history: &'a CapturePieceToHistory,
-        continuation_history: [Option<&'a [[i16; Square::NUM]; Piece::NUM]>; 6],
+        continuation_history: [Option<&'a PieceToHistory>; 6],
         pawn_history: &'a PawnHistory,
         ply: i32,
     ) -> Self {
@@ -421,7 +422,7 @@ impl<'a> MovePicker<'a> {
             // ContinuationHistory (6個)
             for (idx, weight) in [(0, 1), (1, 1), (2, 1), (3, 1), (5, 1)] {
                 if let Some(ch) = self.continuation_history[idx] {
-                    value += weight * ch[pc.index()][to.index()] as i32;
+                    value += weight * ch.get(pc, to) as i32;
                 }
             }
 
@@ -458,7 +459,7 @@ impl<'a> MovePicker<'a> {
                 let mut value = self.main_history.get(us, m) as i32;
 
                 if let Some(ch) = self.continuation_history[0] {
-                    value += ch[pc.index()][to.index()] as i32;
+                    value += ch.get(pc, to) as i32;
                 }
 
                 if self.ply < LOW_PLY_HISTORY_SIZE as i32 {

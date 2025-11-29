@@ -5,18 +5,23 @@
 //! - 静止探索 (Quiescence Search)
 //! - 各種枝刈り: NMP, LMR, Futility, Razoring, SEE, Singular Extension
 
-use crate::movegen::{generate_legal, MoveList};
 use crate::nnue::evaluate;
 use crate::position::Position;
+use crate::search::PieceToHistory;
 use crate::tt::TranspositionTable;
-use crate::types::{Bound, Depth, Move, Value, DEPTH_QS, MAX_PLY};
+use crate::types::{Bound, Depth, Move, Piece, Value, DEPTH_QS, MAX_PLY};
 
 use super::history::{
-    ButterflyHistory, CapturePieceToHistory, ContinuationHistory, LowPlyHistory, PawnHistory,
-    LOW_PLY_HISTORY_SIZE,
+    capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
+    pawn_history_bonus, quiet_malus, stat_bonus, ButterflyHistory, CapturePieceToHistory,
+    ContinuationHistory, LowPlyHistory, PawnHistory, CONTINUATION_HISTORY_WEIGHTS,
+    LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
-use super::types::{init_stack_array, value_from_tt, value_to_tt, NodeType, RootMoves, StackArray};
-use super::{LimitsType, TimeManagement};
+use super::tt_history::TTMoveHistory;
+use super::types::{
+    init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves, StackArray,
+};
+use super::{LimitsType, MovePicker, TimeManagement};
 
 // =============================================================================
 // 定数
@@ -85,7 +90,7 @@ pub struct SearchWorker<'a> {
     pub limits: &'a LimitsType,
 
     /// 時間管理
-    pub time_manager: &'a TimeManagement,
+    pub time_manager: &'a mut TimeManagement,
 
     /// ルート手
     pub root_moves: RootMoves,
@@ -99,6 +104,7 @@ pub struct SearchWorker<'a> {
     pub capture_history: CapturePieceToHistory,
     pub continuation_history: [[ContinuationHistory; 2]; 2],
     pub low_ply_history: LowPlyHistory,
+    pub tt_move_history: TTMoveHistory,
 
     /// 探索ノード数
     pub nodes: u64,
@@ -117,6 +123,12 @@ pub struct SearchWorker<'a> {
 
     /// 中断フラグ
     pub abort: bool,
+
+    /// 最善手変更カウンター（PV安定性判断用）
+    ///
+    /// YaneuraOu準拠: move_count > 1 && !pvIdx の時にインクリメント
+    /// 反復深化の各世代で /= 2 して減衰させる
+    pub best_move_changes: f64,
 }
 
 impl<'a> SearchWorker<'a> {
@@ -126,7 +138,7 @@ impl<'a> SearchWorker<'a> {
     pub fn new(
         tt: &'a TranspositionTable,
         limits: &'a LimitsType,
-        time_manager: &'a TimeManagement,
+        time_manager: &'a mut TimeManagement,
     ) -> Self {
         assert!(
             is_reductions_initialized(),
@@ -143,13 +155,23 @@ impl<'a> SearchWorker<'a> {
             capture_history: CapturePieceToHistory::new(),
             continuation_history: Default::default(),
             low_ply_history: LowPlyHistory::new(),
+            tt_move_history: TTMoveHistory::new(),
             nodes: 0,
             sel_depth: 0,
             root_depth: 0,
             completed_depth: 0,
             best_move: Move::NONE,
             abort: false,
+            best_move_changes: 0.0,
         }
+    }
+
+    /// best_move_changes を半減（世代減衰）
+    ///
+    /// YaneuraOu準拠: 反復深化の各世代終了時に呼び出して、
+    /// 古い情報の重みを低くする
+    pub fn decay_best_move_changes(&mut self) {
+        self.best_move_changes /= 2.0;
     }
 
     /// 中断チェック
@@ -166,13 +188,37 @@ impl<'a> SearchWorker<'a> {
         }
 
         // 時間制限チェック（1024ノードごと）
-        // TODO: 時間管理の引数を適切に設定
-        if self.nodes & 1023 == 0 && self.time_manager.should_stop(self.completed_depth, false) {
+        // YaneuraOu準拠: ノード単位のチェックでは best_move_changes は使わない
+        // best_move_changes は反復深化の境目での時間計算にのみ影響
+        if self.nodes & 1023 == 0 && self.time_manager.should_stop_immediately() {
             self.abort = true;
             return true;
         }
 
         false
+    }
+
+    /// ContHistKeyからContinuationHistoryテーブルへの参照を構築（YaneuraOu方式）
+    ///
+    /// 過去1,2,3,4,5,6手分のContinuationHistoryテーブルへの参照を配列で返す。
+    /// plyが足りない場合やContHistKeyがない場合はNoneになる。
+    #[inline]
+    fn build_cont_tables(&self, ply: i32) -> [Option<&PieceToHistory>; 6] {
+        let mut tables: [Option<&PieceToHistory>; 6] = [None; 6];
+        for (idx, ply_back) in [1, 2, 3, 4, 5, 6].iter().enumerate() {
+            if ply >= *ply_back {
+                let prev_ply = (ply - *ply_back) as usize;
+                if let Some(key) = self.stack[prev_ply].cont_hist_key {
+                    let in_check_idx = key.in_check as usize;
+                    let capture_idx = key.capture as usize;
+                    tables[idx] = Some(
+                        self.continuation_history[in_check_idx][capture_idx]
+                            .get_table(key.piece, key.to),
+                    );
+                }
+            }
+        }
+        tables
     }
 
     /// 探索のメインエントリーポイント
@@ -244,7 +290,7 @@ impl<'a> SearchWorker<'a> {
     }
 
     /// ルート探索
-    fn search_root(
+    pub(crate) fn search_root(
         &mut self,
         pos: &mut Position,
         depth: Depth,
@@ -311,6 +357,13 @@ impl<'a> SearchWorker<'a> {
                 best_value = value;
 
                 if value > alpha {
+                    // YaneuraOu準拠: 2番目以降の手がalphaを更新した場合にカウント
+                    // moveCount > 1 && !pvIdx の条件
+                    // (Multi-PV未実装なので pvIdx は常に0)
+                    if rm_idx > 0 {
+                        self.best_move_changes += 1.0;
+                    }
+
                     alpha = value;
                     pv_idx = rm_idx;
 
@@ -377,6 +430,9 @@ impl<'a> SearchWorker<'a> {
         let tt_result = self.tt.probe(key, pos);
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
+
+        // YaneuraOu準拠: tt_hitをスタックに記録
+        self.stack[ply as usize].tt_hit = tt_hit;
         let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(tt_data.value, ply)
@@ -474,22 +530,42 @@ impl<'a> SearchWorker<'a> {
         let mut best_move = Move::NONE;
         let mut move_count = 0;
         let mut quiets_tried: Vec<Move> = Vec::new();
+        let mut captures_tried: Vec<Move> = Vec::new();
 
         // 合法手を生成（簡易実装）
-        // TODO: MovePickerを使った順序付けを実装
-        let mut legal_moves = MoveList::new();
-        generate_legal(pos, &mut legal_moves);
+        let mut ordered_moves = Vec::new();
 
-        // TT手を先頭に移動
-        let mut moves: Vec<Move> = legal_moves.as_slice().to_vec();
-        if tt_move.is_some() {
-            if let Some(idx) = moves.iter().position(|&m| m == tt_move) {
-                moves.remove(idx);
-                moves.insert(0, tt_move);
+        // YaneuraOu方式: 過去6手分のContinuationHistoryテーブルを構築
+        let cont_tables = self.build_cont_tables(ply);
+        {
+            let mut mp = MovePicker::new(
+                pos,
+                tt_move,
+                depth,
+                &self.main_history,
+                &self.low_ply_history,
+                &self.capture_history,
+                cont_tables,
+                &self.pawn_history,
+                ply,
+            );
+
+            while let Some(mv) = {
+                let m = mp.next_move();
+                if m.is_none() {
+                    None
+                } else {
+                    Some(m)
+                }
+            } {
+                ordered_moves.push(mv);
             }
         }
 
-        for mv in moves {
+        for mv in ordered_moves {
+            if !pos.pseudo_legal(mv) {
+                continue;
+            }
             if self.check_abort() {
                 return Value::ZERO;
             }
@@ -523,11 +599,28 @@ impl<'a> SearchWorker<'a> {
 
             // 指し手を実行
             self.stack[ply as usize].current_move = mv;
+
+            // ContHistKey用の情報をdo_move前に取得
+            let moved_piece = pos.moved_piece(mv);
+            let cont_hist_piece = if mv.is_promotion() {
+                moved_piece.promote().unwrap_or(moved_piece)
+            } else {
+                moved_piece
+            };
+            let cont_hist_to = mv.to();
+
             pos.do_move(mv, gives_check);
             self.nodes += 1;
 
-            // 手の記録
-            if !is_capture {
+            // YaneuraOu方式: ContHistKeyを設定
+            // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
+            self.stack[ply as usize].cont_hist_key =
+                Some(ContHistKey::new(in_check, is_capture, cont_hist_piece, cont_hist_to));
+
+            // 手の記録（YaneuraOu準拠: quietsSearched, capturesSearched）
+            if is_capture {
+                captures_tried.push(mv);
+            } else {
                 quiets_tried.push(mv);
             }
 
@@ -655,25 +748,206 @@ impl<'a> SearchWorker<'a> {
         }
 
         // =================================================================
-        // History更新
+        // History更新（YaneuraOu準拠: update_all_stats）
         // =================================================================
-        if best_value >= beta && !pos.is_capture(best_move) {
-            // Quiet手でβカットした場合にHistory更新
-            let bonus = depth * depth;
-
+        // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
+        if best_move.is_some() {
+            let is_best_capture = pos.is_capture(best_move);
+            let is_tt_move = best_move == tt_move;
+            // YaneuraOu準拠: bonus = min(170*depth-87, 1598) + 332*(bestMove==ttMove)
+            let bonus = stat_bonus(depth, is_tt_move);
+            // YaneuraOu準拠: quietMalus = min(743*depth-180, 2287) - 33*quietsSearched.size()
+            let malus = quiet_malus(depth, quiets_tried.len());
             let us = pos.side_to_move();
-            self.main_history.update(us, best_move, bonus);
+            let pawn_key_idx = pos.pawn_history_index();
 
-            // LowPlyHistory
-            if ply < LOW_PLY_HISTORY_SIZE as i32 {
-                self.low_ply_history.update(ply as usize, best_move, bonus);
+            // best_moveの駒情報を取得
+            let best_moved_pc = pos.moved_piece(best_move);
+            let best_cont_pc = if best_move.is_promotion() {
+                best_moved_pc.promote().unwrap_or(best_moved_pc)
+            } else {
+                best_moved_pc
+            };
+            let best_to = best_move.to();
+
+            // 王手中は1,2手前のみ
+            let max_ply_back = if in_check { 2 } else { 6 };
+
+            if !is_best_capture {
+                // Quiet手がbest: update_quiet_histories(bestMove, bonus * 978 / 1024)相当
+                // YaneuraOu準拠: bonus * 978 / 1024をベースに各historyを更新
+                let scaled_bonus = bonus * 978 / 1024;
+
+                // MainHistory: そのまま渡す
+                self.main_history.update(us, best_move, scaled_bonus);
+
+                // LowPlyHistory: bonus * 771 / 1024 + 40
+                if ply < LOW_PLY_HISTORY_SIZE as i32 {
+                    let low_ply_bonus = low_ply_history_bonus(scaled_bonus);
+                    self.low_ply_history.update(ply as usize, best_move, low_ply_bonus);
+                }
+
+                // ContinuationHistory: bonus * (bonus > 0 ? 979 : 842) / 1024 + weight + 80*(i<2)
+                for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                    if ply_back > max_ply_back {
+                        continue;
+                    }
+                    if ply >= ply_back as i32 {
+                        let prev_ply = (ply - ply_back as i32) as usize;
+                        if let Some(key) = self.stack[prev_ply].cont_hist_key {
+                            let in_check_idx = key.in_check as usize;
+                            let capture_idx = key.capture as usize;
+                            let weighted_bonus = continuation_history_bonus_with_offset(
+                                scaled_bonus * weight / 1024,
+                                ply_back,
+                            );
+                            self.continuation_history[in_check_idx][capture_idx].update(
+                                key.piece,
+                                key.to,
+                                best_cont_pc,
+                                best_to,
+                                weighted_bonus,
+                            );
+                        }
+                    }
+                }
+
+                // PawnHistory: bonus * 704 / 1024 + 70
+                let pawn_bonus = pawn_history_bonus(scaled_bonus);
+                self.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
+
+                // 他のquiet手にはペナルティ
+                // YaneuraOu: update_quiet_histories(move, -quietMalus * 1115 / 1024)
+                let scaled_malus = malus * 1115 / 1024;
+                for &m in &quiets_tried {
+                    if m != best_move {
+                        // MainHistory
+                        self.main_history.update(us, m, -scaled_malus);
+
+                        // LowPlyHistory（現行欠落していたので追加）
+                        if ply < LOW_PLY_HISTORY_SIZE as i32 {
+                            let low_ply_malus = low_ply_history_bonus(-scaled_malus);
+                            self.low_ply_history.update(ply as usize, m, low_ply_malus);
+                        }
+
+                        // ContinuationHistoryへのペナルティ
+                        let moved_pc = pos.moved_piece(m);
+                        let cont_pc = if m.is_promotion() {
+                            moved_pc.promote().unwrap_or(moved_pc)
+                        } else {
+                            moved_pc
+                        };
+                        let to = m.to();
+
+                        for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                            if ply_back > max_ply_back {
+                                continue;
+                            }
+                            if ply >= ply_back as i32 {
+                                let prev_ply = (ply - ply_back as i32) as usize;
+                                if let Some(key) = self.stack[prev_ply].cont_hist_key {
+                                    let in_check_idx = key.in_check as usize;
+                                    let capture_idx = key.capture as usize;
+                                    let weighted_malus = continuation_history_bonus_with_offset(
+                                        -scaled_malus * weight / 1024,
+                                        ply_back,
+                                    );
+                                    self.continuation_history[in_check_idx][capture_idx].update(
+                                        key.piece,
+                                        key.to,
+                                        cont_pc,
+                                        to,
+                                        weighted_malus,
+                                    );
+                                }
+                            }
+                        }
+
+                        // PawnHistoryへのペナルティ
+                        let pawn_malus = pawn_history_bonus(-scaled_malus);
+                        self.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
+                    }
+                }
+            } else {
+                // 捕獲手がbest: captureHistoryを更新
+                let captured_pt = pos.piece_on(best_to).piece_type();
+                self.capture_history.update(best_cont_pc, best_to, captured_pt, bonus);
             }
 
-            // 他のquiet手にはペナルティ
-            let penalty = -bonus;
-            for &m in &quiets_tried {
+            // YaneuraOu: 他の捕獲手へのペナルティ（capture best以外の全捕獲手）
+            // captureMalus = min(708*depth-148, 2287) - 29*capturesSearched.size()
+            let cap_malus = capture_malus(depth, captures_tried.len());
+            for &m in &captures_tried {
                 if m != best_move {
-                    self.main_history.update(us, m, penalty);
+                    let moved_pc = pos.moved_piece(m);
+                    let cont_pc = if m.is_promotion() {
+                        moved_pc.promote().unwrap_or(moved_pc)
+                    } else {
+                        moved_pc
+                    };
+                    let to = m.to();
+                    let captured_pt = pos.piece_on(to).piece_type();
+                    // YaneuraOu: captureHistory << -captureMalus * 1431 / 1024
+                    self.capture_history.update(cont_pc, to, captured_pt, -cap_malus * 1431 / 1024);
+                }
+            }
+
+            // YaneuraOu: quiet early refutationペナルティ
+            // 条件: prevSq != SQ_NONE && (ss-1)->moveCount == 1 + (ss-1)->ttHit && !pos.captured_piece()
+            // 処理: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -captureMalus * 622 / 1024)
+            if ply >= 1 {
+                let prev_ply = (ply - 1) as usize;
+                let prev_move_count = self.stack[prev_ply].move_count;
+                let prev_tt_hit = self.stack[prev_ply].tt_hit;
+                // YaneuraOu: !pos.captured_piece() = 現在の局面で駒が取られていない
+                if prev_move_count == 1 + (prev_tt_hit as i32)
+                    && pos.captured_piece() == Piece::NONE
+                {
+                    if let Some(key) = self.stack[prev_ply].cont_hist_key {
+                        let prev_sq = key.to;
+                        let prev_piece = pos.piece_on(prev_sq);
+                        // YaneuraOu: update_continuation_histories(ss - 1, ...)を呼ぶ
+                        // = 過去1-6手分全てに weight と +80 オフセット付きで更新
+                        let penalty_base = -cap_malus * 622 / 1024;
+                        // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
+                        let prev_in_check = self.stack[prev_ply].in_check;
+                        let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
+
+                        for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                            if ply_back > prev_max_ply_back {
+                                continue;
+                            }
+                            // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
+                            let target_ply = ply - 1 - ply_back as i32;
+                            if target_ply >= 0 {
+                                if let Some(target_key) =
+                                    self.stack[target_ply as usize].cont_hist_key
+                                {
+                                    let in_check_idx = target_key.in_check as usize;
+                                    let capture_idx = target_key.capture as usize;
+                                    // YaneuraOu: (bonus * weight / 1024) + 80 * (i < 2)
+                                    let weighted_penalty = penalty_base * weight / 1024
+                                        + if ply_back <= 2 { 80 } else { 0 };
+                                    self.continuation_history[in_check_idx][capture_idx].update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_penalty,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // TTMoveHistory更新（非PVノードのみ）
+            if !pv_node && tt_move.is_some() {
+                if best_move == tt_move {
+                    self.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_BONUS);
+                } else {
+                    self.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_MALUS);
                 }
             }
         }
@@ -751,18 +1025,50 @@ impl<'a> SearchWorker<'a> {
 
         // 指し手生成
         let mut move_count = 0;
-        let mut legal_moves = MoveList::new();
 
-        if in_check {
-            // 王手回避手を生成
-            generate_legal(pos, &mut legal_moves);
-        } else {
-            // 捕獲手のみを生成
-            // TODO: MovePicker経由で生成するのが望ましい
-            generate_legal(pos, &mut legal_moves);
+        // YaneuraOu方式: 過去6手分のContinuationHistoryテーブルを構築
+        let cont_tables = self.build_cont_tables(ply);
+
+        let mut ordered_moves = Vec::new();
+        {
+            let mut mp = if in_check {
+                MovePicker::new_evasions(
+                    pos,
+                    Move::NONE,
+                    &self.main_history,
+                    &self.low_ply_history,
+                    &self.capture_history,
+                    cont_tables,
+                    &self.pawn_history,
+                    ply,
+                )
+            } else {
+                MovePicker::new(
+                    pos,
+                    Move::NONE,
+                    DEPTH_QS,
+                    &self.main_history,
+                    &self.low_ply_history,
+                    &self.capture_history,
+                    cont_tables,
+                    &self.pawn_history,
+                    ply,
+                )
+            };
+
+            while let Some(mv) = {
+                let m = mp.next_move();
+                if m.is_none() {
+                    None
+                } else {
+                    Some(m)
+                }
+            } {
+                ordered_moves.push(mv);
+            }
         }
 
-        for &mv in legal_moves.as_slice() {
+        for mv in ordered_moves {
             // 王手中でなければ捕獲手のみ
             if !in_check && !pos.is_capture(mv) {
                 continue;
@@ -775,9 +1081,25 @@ impl<'a> SearchWorker<'a> {
 
             move_count += 1;
             let gives_check = pos.gives_check(mv);
+            let is_capture = pos.is_capture(mv);
 
             pos.do_move(mv, gives_check);
             self.nodes += 1;
+
+            // YaneuraOu方式: do_move後にContHistKeyを設定（静止探索でも必要）
+            // これにより次のqsearch呼び出しでbuild_cont_tablesが直前手を参照できる
+            {
+                let cont_hist_piece = pos.moved_piece(mv);
+                let cont_hist_to = mv.to();
+                let cont_hist_pc = if mv.is_promotion() {
+                    cont_hist_piece.promote().unwrap_or(cont_hist_piece)
+                } else {
+                    cont_hist_piece
+                };
+                // in_checkは親ノード（現在のノード）の王手状態を使用
+                self.stack[ply as usize].cont_hist_key =
+                    Some(ContHistKey::new(in_check, is_capture, cont_hist_pc, cont_hist_to));
+            }
 
             let value = -self.qsearch::<NT>(pos, -beta, -alpha, ply + 1);
 

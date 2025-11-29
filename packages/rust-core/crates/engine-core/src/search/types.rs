@@ -7,7 +7,7 @@
 
 use crate::movegen::{generate_legal, MoveList};
 use crate::position::Position;
-use crate::types::{Move, Value, MAX_PLY};
+use crate::types::{Move, Piece, Square, Value, MAX_PLY};
 
 // =============================================================================
 // 定数
@@ -40,6 +40,38 @@ impl NodeType {
 }
 
 // =============================================================================
+// ContHistKey（ContinuationHistoryキー）
+// =============================================================================
+
+/// ContinuationHistoryを参照するためのキー情報
+///
+/// YaneuraOu方式: 各ノードで指し手実行後に設定し、
+/// 後続のノードでContinuationHistoryテーブルを参照する際に使用する。
+#[derive(Clone, Copy, Debug)]
+pub struct ContHistKey {
+    /// 王手がかかっているか
+    pub in_check: bool,
+    /// 駒取りの手か
+    pub capture: bool,
+    /// 移動した駒（成り後の駒）
+    pub piece: Piece,
+    /// 移動先のマス
+    pub to: Square,
+}
+
+impl ContHistKey {
+    /// 新しいContHistKeyを作成
+    pub fn new(in_check: bool, capture: bool, piece: Piece, to: Square) -> Self {
+        Self {
+            in_check,
+            capture,
+            piece,
+            to,
+        }
+    }
+}
+
+// =============================================================================
 // Stack（探索スタック）
 // =============================================================================
 
@@ -49,8 +81,12 @@ pub struct Stack {
     /// PV（Principal Variation）
     pub pv: Vec<Move>,
 
-    /// ContinuationHistoryへの参照インデックス
+    /// ContinuationHistoryへの参照インデックス（旧方式、互換性のため残す）
     pub cont_history_idx: usize,
+
+    /// ContinuationHistoryキー（YaneuraOu方式）
+    /// do_move後に設定し、後続ノードでContinuationHistory参照に使用
+    pub cont_hist_key: Option<ContHistKey>,
 
     /// ルートからの手数
     pub ply: i32,
@@ -94,6 +130,7 @@ impl Default for Stack {
         Self {
             pv: Vec::new(),
             cont_history_idx: 0,
+            cont_hist_key: None,
             ply: 0,
             current_move: Move::NONE,
             excluded_move: Move::NONE,

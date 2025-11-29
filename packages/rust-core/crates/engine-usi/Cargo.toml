@@ -19,3 +19,6 @@ engine-core = { path = "../engine-core" }
 [[bin]]
 name = "engine-usi"
 path = "src/main.rs"
+
+[dev-dependencies]
+assert_cmd = "2.0"

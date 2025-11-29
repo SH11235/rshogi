@@ -59,6 +59,14 @@ impl Position {
         self.board[sq.index()]
     }
 
+    /// 直前の手で取られた駒を返す
+    ///
+    /// YaneuraOu: pos.captured_piece()
+    #[inline]
+    pub fn captured_piece(&self) -> Piece {
+        self.state.captured_piece
+    }
+
     /// 全駒のBitboard（占有）
     #[inline]
     pub fn occupied(&self) -> Bitboard {

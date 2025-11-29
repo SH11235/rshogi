@@ -3,7 +3,7 @@
 //! 使用可能な最大時間、対局の手数、その他のパラメータに応じて、
 //! 思考に費やす最適な時間を計算する。
 
-use super::{LimitsType, TimePoint};
+use super::{LimitsType, TimeOptions, TimePoint};
 use crate::types::Color;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,14 +13,68 @@ use std::time::Instant;
 // 定数
 // =============================================================================
 
-/// デフォルトの最小思考時間（ミリ秒）
-const DEFAULT_MINIMUM_THINKING_TIME: TimePoint = 20;
+/// デフォルトの最小思考時間（ミリ秒） - YaneuraOu準拠
+const DEFAULT_MINIMUM_THINKING_TIME: TimePoint = 2000;
 
 /// デフォルトのネットワーク遅延（ミリ秒）
 const DEFAULT_NETWORK_DELAY: TimePoint = 120;
 
+/// デフォルトのネットワーク遅延2（ミリ秒）
+const DEFAULT_NETWORK_DELAY2: TimePoint = 1120;
+
+/// デフォルトのSlowMover（百分率）
+const DEFAULT_SLOW_MOVER: i32 = 100;
+
 /// 引き分けまでの最大手数のデフォルト値
 const DEFAULT_MAX_MOVES_TO_DRAW: i32 = 512;
+
+/// 合法手1つの場合の時間上限（ミリ秒）- YaneuraOu準拠
+const SINGLE_MOVE_TIME_LIMIT: TimePoint = 500;
+
+/// 最善手不安定性係数の定数 - YaneuraOu準拠
+/// bestMoveInstability = BASE + FACTOR * totBestMoveChanges / threads.size()
+/// 注: クランプなし（YaneuraOu準拠）
+const BEST_MOVE_INSTABILITY_BASE: f64 = 0.9929;
+const BEST_MOVE_INSTABILITY_FACTOR: f64 = 1.8519;
+
+// =============================================================================
+// 公開関数
+// =============================================================================
+
+/// 最善手不安定性係数を計算（YaneuraOu準拠、クランプなし）
+///
+/// YaneuraOu: bestMoveInstability = 0.9929 + 1.8519 * totBestMoveChanges / threads.size()
+///
+/// # Arguments
+/// * `tot_best_move_changes` - 最善手変更の累積カウント
+/// * `thread_count` - スレッド数（現在は1固定、マルチスレッド対応時に拡張）
+pub fn calculate_best_move_instability(tot_best_move_changes: f64, thread_count: usize) -> f64 {
+    BEST_MOVE_INSTABILITY_BASE
+        + BEST_MOVE_INSTABILITY_FACTOR * tot_best_move_changes / thread_count as f64
+}
+
+/// fallingEvalを計算（YaneuraOu準拠）
+///
+/// fallingEval = (11.396 + 2.035 * (best_prev_avg - best) + 0.968 * (iter_value - best)) / 100
+/// を [0.5786, 1.6752] にクランプする。
+#[inline]
+pub fn calculate_falling_eval(best_prev_avg: i32, iter_value: i32, best_value: i32) -> f64 {
+    let delta_avg = (best_prev_avg - best_value) as f64;
+    let delta_iter = (iter_value - best_value) as f64;
+    let eval = (11.396 + 2.035 * delta_avg + 0.968 * delta_iter) / 100.0;
+    eval.clamp(0.5786, 1.6752)
+}
+
+/// timeReductionを計算（YaneuraOu準拠）
+///
+/// timeReduction = 0.8 + 0.84 / (1.077 + exp(-0.527 * (depth - (last_best_move_depth + 11))))
+/// を返す。
+#[inline]
+pub fn calculate_time_reduction(completed_depth: i32, last_best_move_depth: i32) -> f64 {
+    let k = 0.527;
+    let center = last_best_move_depth as f64 + 11.0;
+    0.8 + 0.84 / (1.077 + (-k * (completed_depth as f64 - center)).exp())
+}
 
 // =============================================================================
 // TimeManagement
@@ -57,14 +111,28 @@ pub struct TimeManagement {
 
     /// ネットワーク遅延設定
     network_delay: TimePoint,
+    /// ネットワーク遅延2（切れ負け対策）
+    network_delay2: TimePoint,
+
+    /// SlowMover（百分率）
+    slow_mover: i32,
 
     /// 探索停止フラグ（外部から設定される）
     stop: Arc<AtomicBool>,
+
+    /// ponderhit通知フラグ（外部から設定される）
+    ponderhit: Arc<AtomicBool>,
+
+    /// 合法手が1つだった場合に500ms上限を再適用するためのフラグ
+    single_move_limit: bool,
+
+    /// 前回のtime_reductionを保持（YaneuraOu準拠のreduction計算に使用）
+    previous_time_reduction: f64,
 }
 
 impl TimeManagement {
     /// 新しいTimeManagementを作成
-    pub fn new(stop: Arc<AtomicBool>) -> Self {
+    pub fn new(stop: Arc<AtomicBool>, ponderhit: Arc<AtomicBool>) -> Self {
         let now = Instant::now();
         Self {
             start_time: now,
@@ -76,8 +144,21 @@ impl TimeManagement {
             is_final_push: false,
             minimum_thinking_time: DEFAULT_MINIMUM_THINKING_TIME,
             network_delay: DEFAULT_NETWORK_DELAY,
+            network_delay2: DEFAULT_NETWORK_DELAY2,
+            slow_mover: DEFAULT_SLOW_MOVER,
             stop,
+            ponderhit,
+            single_move_limit: false,
+            previous_time_reduction: 1.0,
         }
+    }
+
+    /// オプションを適用（USI setoption 相当）
+    pub fn set_options(&mut self, opts: &TimeOptions) {
+        self.network_delay = opts.network_delay.max(0);
+        self.network_delay2 = opts.network_delay2.max(0);
+        self.minimum_thinking_time = opts.minimum_thinking_time.max(0);
+        self.slow_mover = opts.slow_mover.clamp(1, 1000);
     }
 
     /// 今回の思考時間を決定する
@@ -92,8 +173,21 @@ impl TimeManagement {
         self.ponderhit_time = self.start_time;
         self.search_end = 0;
         self.is_final_push = false;
+        self.ponderhit.store(false, Ordering::Relaxed);
+        self.single_move_limit = false;
+        self.previous_time_reduction = 1.0;
+        self.previous_time_reduction = 1.0;
 
-        // 時間制御を使わない場合
+        // movetime指定の場合
+        if limits.has_movetime() {
+            let movetime = limits.movetime;
+            self.optimum_time = (movetime - self.network_delay).max(self.minimum_thinking_time);
+            self.maximum_time = self.optimum_time;
+            self.minimum_time = self.optimum_time;
+            return;
+        }
+
+        // 時間制御を使わない場合（depth, nodes, infinite等）
         if !limits.use_time_management() {
             self.optimum_time = TimePoint::MAX / 2;
             self.maximum_time = TimePoint::MAX / 2;
@@ -114,7 +208,8 @@ impl TimeManagement {
 
         // 持ち時間がある場合
         if time_left > 0 {
-            self.calculate_time_with_time_left(time_left, increment, byoyomi, moves_to_go);
+            let remain_time = (time_left + increment + byoyomi - self.network_delay2).max(100);
+            self.calculate_time_with_time_left(remain_time, increment, byoyomi, moves_to_go);
         }
         // 秒読みのみの場合
         else if byoyomi > 0 {
@@ -127,10 +222,91 @@ impl TimeManagement {
             self.minimum_time = 100;
         }
 
+        // SlowMover（百分率）でスケール
+        self.optimum_time = self.optimum_time * self.slow_mover as i64 / 100;
+        self.maximum_time = self.maximum_time * self.slow_mover as i64 / 100;
+
         // ネットワーク遅延を考慮
         self.optimum_time = (self.optimum_time - self.network_delay).max(1);
         self.maximum_time = (self.maximum_time - self.network_delay).max(1);
         self.minimum_time = self.minimum_time.min(self.optimum_time);
+    }
+
+    /// 今回の思考時間を決定する（合法手数を考慮）
+    ///
+    /// # Arguments
+    /// * `limits` - 探索制限
+    /// * `us` - 自分の手番
+    /// * `ply` - 現在の手数
+    /// * `max_moves_to_draw` - 引き分けまでの最大手数
+    /// * `root_moves_count` - ルートでの合法手の数
+    pub fn init_with_root_moves_count(
+        &mut self,
+        limits: &LimitsType,
+        us: Color,
+        ply: i32,
+        max_moves_to_draw: i32,
+        root_moves_count: usize,
+    ) {
+        // 通常の初期化
+        self.init(limits, us, ply, max_moves_to_draw);
+
+        // 合法手が1つの場合は500ms上限
+        if root_moves_count == 1 {
+            self.apply_single_move_limit();
+            self.single_move_limit = true;
+        } else {
+            self.single_move_limit = false;
+        }
+    }
+
+    /// 合法手1つの場合の時間制限適用
+    ///
+    /// YaneuraOu準拠: 視聴者体験を向上させるため、合法手が1つだけの場合に
+    /// 使用時間を500ms以下に制限する
+    pub fn apply_single_move_limit(&mut self) {
+        self.optimum_time = self.optimum_time.min(SINGLE_MOVE_TIME_LIMIT);
+        self.maximum_time = self.maximum_time.min(SINGLE_MOVE_TIME_LIMIT);
+        self.single_move_limit = true;
+    }
+
+    /// 最善手不安定性係数を適用して optimum_time を調整
+    ///
+    /// YaneuraOu準拠: bestMoveInstability = 0.9929 + 1.8519 * totBestMoveChanges / threads.size()
+    ///
+    /// # Arguments
+    /// * `tot_best_move_changes` - 最善手変更の累積カウント
+    /// * `thread_count` - スレッド数（現在は1固定、マルチスレッド対応時に拡張）
+    pub fn apply_best_move_instability(&mut self, tot_best_move_changes: f64, thread_count: usize) {
+        self.apply_time_multipliers(1.0, 1.0, tot_best_move_changes, thread_count);
+    }
+
+    /// fallingEval / timeReduction / bestMoveInstability をまとめて適用
+    ///
+    /// - `falling_eval`      : 評価値の変動度合い（未実装なら1.0を渡す）
+    /// - `time_reduction`    : 深さに応じた時間短縮係数（未実装なら1.0を渡す）
+    /// - `tot_best_move_changes` : 最善手変更回数の合計（将来は全スレッド合算を thread_count で割る）
+    /// - `thread_count`      : スレッド数（並列探索時に利用予定）
+    pub fn apply_time_multipliers(
+        &mut self,
+        falling_eval: f64,
+        time_reduction: f64,
+        tot_best_move_changes: f64,
+        thread_count: usize,
+    ) {
+        let instability = calculate_best_move_instability(tot_best_move_changes, thread_count);
+        let reduction =
+            (1.4540 + self.previous_time_reduction) / (2.1593 * time_reduction.max(0.0001));
+        self.previous_time_reduction = reduction;
+
+        let factor = falling_eval * reduction * instability;
+
+        self.optimum_time = (self.optimum_time as f64 * factor) as TimePoint;
+        self.maximum_time = (self.maximum_time as f64 * factor) as TimePoint;
+
+        if self.single_move_limit {
+            self.apply_single_move_limit();
+        }
     }
 
     /// 持ち時間がある場合の思考時間計算
@@ -157,7 +333,6 @@ impl TimeManagement {
             self.optimum_time = optimum.min(time_left - self.minimum_thinking_time);
             self.maximum_time = maximum.min(time_left - self.minimum_thinking_time / 2);
         }
-
         self.minimum_time = self.minimum_thinking_time;
 
         // 時間が少ない場合の調整
@@ -208,12 +383,19 @@ impl TimeManagement {
         self.ponderhit_time.elapsed().as_millis() as TimePoint
     }
 
-    /// 探索を停止すべきか判定
+    /// ponderhitが通知されているか
+    pub fn take_ponderhit(&self) -> bool {
+        self.ponderhit.swap(false, Ordering::Relaxed)
+    }
+
+    /// 探索を停止すべきか判定（反復深化の境目で呼び出す）
+    ///
+    /// YaneuraOu準拠: ノード単位のチェックでは best_move_stable は使わない。
+    /// best_move_changes は反復深化の境目での時間計算（apply_best_move_instability）にのみ影響する。
     ///
     /// # Arguments
     /// * `depth` - 現在の探索深さ
-    /// * `best_move_stable` - 最善手が安定しているか
-    pub fn should_stop(&self, depth: i32, best_move_stable: bool) -> bool {
+    pub fn should_stop(&self, depth: i32) -> bool {
         // 外部からの停止要求
         if self.stop.load(Ordering::Relaxed) {
             return true;
@@ -231,13 +413,13 @@ impl TimeManagement {
             return true;
         }
 
-        // 最適時間を超えていて、最善手が安定している
-        if elapsed >= self.optimum_time && best_move_stable && depth > 4 {
+        // 最適時間を超えていれば停止
+        if elapsed >= self.optimum_time && depth > 4 {
             return true;
         }
 
         // 最適時間の80%を超えていて、深さが十分
-        if elapsed >= self.optimum_time * 8 / 10 && depth > 10 {
+        if elapsed >= self.optimum_time.saturating_mul(8) / 10 && depth > 10 {
             return true;
         }
 
@@ -260,9 +442,33 @@ impl TimeManagement {
         elapsed >= self.maximum_time
     }
 
-    /// ponderhit時の処理
+    /// ponderhit時の処理（時刻を記録）
     pub fn set_ponderhit(&mut self) {
         self.ponderhit_time = Instant::now();
+    }
+
+    /// ponderhitを検出した際に、現在時刻からminimum分を確保するよう終了時刻を再設定
+    ///
+    /// YaneuraOuの `TimeManagement::set_search_end()` を簡略化したもの。
+    /// e : go開始からの経過時間（現在のelapsed）
+    /// t1: ponder開始→ponderhitまでの消費時間を差し引いた思考時間
+    /// t2: 秒読み中なら minimum、それ以外なら minimum から ponderhit までを差し引いたもの
+    /// search_end: round_up(max(t1, t2)) + ponderhitまでの経過時間
+    pub fn on_ponderhit(&mut self) {
+        self.set_ponderhit();
+        let elapsed = self.elapsed();
+        let from_ponderhit = self.elapsed_from_ponderhit();
+
+        let t1 = elapsed.saturating_sub(from_ponderhit);
+        let t2 = if self.is_final_push {
+            self.minimum_time
+        } else {
+            self.minimum_time.saturating_sub(from_ponderhit)
+        };
+
+        let candidate = t1.max(t2);
+        self.search_end = self.round_up(candidate).saturating_add(from_ponderhit);
+        self.ponderhit.store(false, Ordering::Relaxed);
     }
 
     /// 探索終了時刻を設定
@@ -290,7 +496,7 @@ impl TimeManagement {
 
 impl Default for TimeManagement {
     fn default() -> Self {
-        Self::new(Arc::new(AtomicBool::new(false)))
+        Self::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
     }
 }
 
@@ -303,7 +509,7 @@ mod tests {
     use super::*;
 
     fn create_time_manager() -> TimeManagement {
-        TimeManagement::new(Arc::new(AtomicBool::new(false)))
+        TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
     }
 
     #[test]
@@ -373,7 +579,7 @@ mod tests {
     #[test]
     fn test_time_manager_should_stop() {
         let stop = Arc::new(AtomicBool::new(false));
-        let mut tm = TimeManagement::new(Arc::clone(&stop));
+        let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
 
         let mut limits = LimitsType::new();
         limits.time[Color::Black.index()] = 100; // 非常に短い時間
@@ -386,7 +592,7 @@ mod tests {
 
         // 外部から停止を要求
         stop.store(true, Ordering::Relaxed);
-        assert!(tm.should_stop(5, false));
+        assert!(tm.should_stop(5));
     }
 
     #[test]
@@ -404,5 +610,87 @@ mod tests {
         // 1001ms -> 2秒
         let result = tm.round_up(1001);
         assert_eq!(result, 2000);
+    }
+
+    #[test]
+    fn test_time_manager_on_ponderhit_sets_search_end() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 5000; // 5秒
+        limits.set_start_time();
+
+        tm.init(&limits, Color::Black, 0, 256);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tm.on_ponderhit();
+
+        // round_up(minimum) は network_delay を考慮して切り上げるので、search_end はその値以上になる
+        assert!(
+            tm.search_end >= tm.round_up(tm.minimum()),
+            "search_end {} should be >= rounded minimum {}",
+            tm.search_end,
+            tm.round_up(tm.minimum())
+        );
+    }
+
+    #[test]
+    fn test_network_delay2_reduces_time_budget() {
+        let mut tm_base = create_time_manager();
+        tm_base.set_options(&TimeOptions {
+            network_delay: 0,
+            network_delay2: 0,
+            minimum_thinking_time: 2000,
+            slow_mover: 100,
+        });
+
+        let mut tm_delay = create_time_manager();
+        tm_delay.set_options(&TimeOptions {
+            network_delay: 0,
+            network_delay2: 2000,
+            minimum_thinking_time: 2000,
+            slow_mover: 100,
+        });
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 10_000;
+        limits.set_start_time();
+
+        tm_base.init(&limits, Color::Black, 0, 256);
+        tm_delay.init(&limits, Color::Black, 0, 256);
+
+        assert!(
+            tm_delay.optimum() <= tm_base.optimum(),
+            "network_delay2 should not increase optimum: base={}, delay={}",
+            tm_base.optimum(),
+            tm_delay.optimum()
+        );
+    }
+
+    #[test]
+    fn test_slow_mover_scales_time() {
+        let mut tm_base = create_time_manager();
+        let mut tm_slow = create_time_manager();
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60_000;
+        limits.set_start_time();
+
+        tm_base.init(&limits, Color::Black, 0, 256);
+
+        tm_slow.set_options(&TimeOptions {
+            network_delay: 120,
+            network_delay2: 1120,
+            minimum_thinking_time: 2000,
+            slow_mover: 200, // 2倍
+        });
+        tm_slow.init(&limits, Color::Black, 0, 256);
+
+        assert!(
+            tm_slow.optimum() > tm_base.optimum(),
+            "slow mover should increase optimum: base={}, slow={}",
+            tm_base.optimum(),
+            tm_slow.optimum()
+        );
     }
 }
