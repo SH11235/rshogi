@@ -104,6 +104,12 @@ impl Move {
         }
     }
 
+    /// 成りかどうか（is_promote のエイリアス）
+    #[inline]
+    pub const fn is_promotion(self) -> bool {
+        self.is_promote()
+    }
+
     /// 内部値を取得
     #[inline]
     pub const fn raw(self) -> u16 {
