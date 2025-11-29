@@ -8,7 +8,9 @@ cognitive-complexity-threshold = 30
 too-many-lines-threshold = 100
 
 # Maximum number of arguments in a function (default is 7)
-too-many-arguments-threshold = 7
+# TT（置換表）のホットパス関数（TTEntry::save, TranspositionTable::write）は
+# パフォーマンス上の理由から多くの引数を持つ（YaneuraOu/Stockfish準拠）
+too-many-arguments-threshold = 10
 
 # Allow certain lints in tests
 allow-dbg-in-tests = true
