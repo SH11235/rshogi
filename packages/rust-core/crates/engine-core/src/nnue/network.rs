@@ -132,10 +132,7 @@ pub fn evaluate(pos: &mut Position) -> Value {
         // 前局面の Accumulator を生ポインタで保持（借用競合を避けるため）
         let prev_acc_ptr = {
             let state = pos.state();
-            state
-                .previous
-                .as_ref()
-                .map(|s| &*s.accumulator as *const Accumulator)
+            state.previous.as_ref().map(|s| &*s.accumulator as *const Accumulator)
         };
 
         // StateInfo 上の Accumulator をインプレースで更新
