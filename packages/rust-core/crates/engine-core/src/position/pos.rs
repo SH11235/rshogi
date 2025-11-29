@@ -6,7 +6,7 @@ use crate::bitboard::{
 };
 use crate::types::{Color, Hand, Move, Piece, PieceType, Square};
 
-use super::state::StateInfo;
+use super::state::{ChangedPiece, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 
 /// 将棋の局面
@@ -111,6 +111,12 @@ impl Position {
     #[inline]
     pub fn state(&self) -> &StateInfo {
         &self.state
+    }
+
+    /// 現在の状態を可変で取得（NNUE差分更新など内部状態の更新用）
+    #[inline]
+    pub fn state_mut(&mut self) -> &mut StateInfo {
+        &mut self.state
     }
 
     /// 局面のハッシュキー
@@ -314,6 +320,9 @@ impl Position {
 
         // 1. 新しいStateInfoを作成
         let mut new_state = Box::new(self.state.partial_clone());
+        // NNUE 関連は毎手リセットし、DirtyPiece はここで構築する。
+        new_state.accumulator.reset();
+        new_state.dirty_piece.clear();
 
         // 2. 局面情報の更新
         self.game_ply += 1;
@@ -328,6 +337,17 @@ impl Position {
             let to = m.to();
             let pc = Piece::new(us, pt);
 
+            // DirtyPiece: 手駒の変化（us の pt が 1 減る）
+            let old_hand = self.hand[us.index()];
+            let old_count = old_hand.count(pt) as u8;
+            let new_count = old_count.saturating_sub(1);
+            new_state.dirty_piece.hand_changes.push(super::state::HandChange {
+                owner: us,
+                piece_type: pt,
+                old_count,
+                new_count,
+            });
+
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
             new_state.hand_key ^= zobrist_hand(us, pt);
@@ -337,6 +357,15 @@ impl Position {
             new_state.board_key ^= zobrist_psq(pc, to);
 
             new_state.captured_piece = Piece::NONE;
+
+            // DirtyPiece: 打ち駒（盤上に新しく現れる）
+            new_state.dirty_piece.pieces.push(ChangedPiece {
+                color: us,
+                old_piece: Piece::NONE,
+                old_sq: None,
+                new_piece: pc,
+                new_sq: Some(to),
+            });
         } else {
             let from = m.from();
             let to = m.to();
@@ -345,13 +374,24 @@ impl Position {
 
             // 駒を取る場合
             if captured.is_some() {
+                let captured_pt = captured.piece_type().unpromote();
+                // DirtyPiece: 手駒の変化（us の captured_pt が 1 増える）
+                let old_hand = self.hand[us.index()];
+                let old_count = old_hand.count(captured_pt) as u8;
+                let new_count = old_count.saturating_add(1);
+                new_state.dirty_piece.hand_changes.push(super::state::HandChange {
+                    owner: us,
+                    piece_type: captured_pt,
+                    old_count,
+                    new_count,
+                });
+
                 self.remove_piece(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
 
                 // 手駒に追加（成駒は生駒に戻す）
-                let cap_pt = captured.piece_type().unpromote();
-                self.hand[us.index()] = self.hand[us.index()].add(cap_pt);
-                new_state.hand_key ^= zobrist_hand(us, cap_pt);
+                self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
+                new_state.hand_key ^= zobrist_hand(us, captured_pt);
 
                 // 駒割評価値の更新
                 // TODO: material_value の更新
@@ -373,6 +413,27 @@ impl Position {
             // 玉の移動
             if pc.piece_type() == PieceType::King {
                 self.king_square[us.index()] = to;
+                new_state.dirty_piece.king_moved[us.index()] = true;
+            }
+
+            // DirtyPiece: 移動した駒
+            new_state.dirty_piece.pieces.push(ChangedPiece {
+                color: us,
+                old_piece: pc,
+                old_sq: Some(from),
+                new_piece: moved_pc,
+                new_sq: Some(to),
+            });
+
+            // DirtyPiece: 取った駒（盤上から消える）
+            if captured.is_some() {
+                new_state.dirty_piece.pieces.push(ChangedPiece {
+                    color: them,
+                    old_piece: captured,
+                    old_sq: Some(to),
+                    new_piece: Piece::NONE,
+                    new_sq: None,
+                });
             }
         }
 
@@ -448,6 +509,8 @@ impl Position {
     /// null moveを実行
     pub fn do_null_move(&mut self) {
         let mut new_state = Box::new(self.state.partial_clone());
+        new_state.accumulator.reset();
+        new_state.dirty_piece.clear();
 
         new_state.board_key ^= zobrist_side();
         new_state.plies_from_null = 0;

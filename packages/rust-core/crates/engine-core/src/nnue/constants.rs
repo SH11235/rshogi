@@ -1,4 +1,7 @@
 //! NNUE定数定義
+//!
+//! YaneuraOu の HalfKP 256x2-32-32 アーキテクチャに基づき、
+//! ネットワーク構造とスケーリングに関する定数をまとめる。
 
 /// 評価関数ファイルのバージョン（YaneuraOu互換）
 pub const NNUE_VERSION: u32 = 0x7AF32F16;

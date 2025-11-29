@@ -1,7 +1,7 @@
 //! ネットワーク層の実装
 //!
-//! - AffineTransform: アフィン変換層
-//! - ClippedReLU: クリップ付きReLU層
+//! - `AffineTransform`: 全結合アフィン変換層（入力×重み + バイアス）
+//! - `ClippedReLU`: 整数スケーリング付きのクリップ付き ReLU 層
 
 use super::constants::WEIGHT_SCALE_BITS;
 use std::io::{self, Read};

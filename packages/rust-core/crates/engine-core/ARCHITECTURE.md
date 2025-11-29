@@ -21,9 +21,14 @@
   与えられた局面から pseudo-legal 手と合法手を生成します。  
   `generate_non_evasions` / `generate_evasions` / `generate_all` が王手の有無に応じた手生成を行い、`generate_legal` が `Position::is_legal` でフィルタして完全合法手を `MoveList` に格納します。
 
-- `nnue`（未実装）  
+- `nnue`  
   NNUE 評価関数の読み込み・特徴量計算・差分更新を担当します。  
-  SIMD やレイアウトの詳細はこのモジュールに閉じ込め、`Value` を返す API を中心に据えます。
+  HalfKP 特徴量（自玉×BonaPiece）を `FeatureTransformer` で 512 次元に変換し、  
+  256x2-32-32-1 のネットワーク（`AffineTransform` + `ClippedReLU`）で `Value` を出力します。  
+  特徴量には盤上駒と手駒の両方を含め、`StateInfo` に保持した `Accumulator` と `DirtyPiece`（盤上・手駒の差分情報）を使って  
+  「前局面の Accumulator からの差分更新 → 必要に応じて全計算にフォールバック」という流れで評価を行います。  
+  評価関数は `Position` の内部状態（Accumulator）を更新するため、`evaluate` は `&mut Position` を取ります。  
+  NNUE が未初期化の場合は、簡易な駒得評価（盤上 + 手駒）にフォールバックします。
 
 - `tt`（未実装）  
   置換表（Transposition Table）の実装。エントリのレイアウト、世代管理、prefetch など探索の高速化に関わる部分を担います。

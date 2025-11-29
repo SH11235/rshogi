@@ -1,12 +1,16 @@
 //! BonaPiece - 駒の種類と位置を一意に表現するインデックス
 //!
-//! YaneuraOuの定義に準拠
+//! YaneuraOu の NNUE 実装で用いられる BonaPiece に概ね準拠した定義。
+//! - `PieceType` / 升 / 手番（視点）により一意なインデックスに写像する。
+//! - 玉は特徴量に含めないため、BonaPiece としては常に `ZERO` を返す。
+//! - 手駒は種類と枚数に応じて盤上特徴の末尾に割り当てる。
 
 use crate::types::{Color, Piece, PieceType, Square};
 
 /// fe_end: BonaPieceの最大値
 ///
-/// YaneuraOuの定義に基づく。合計約1548（実装により異なる）。
+/// YaneuraOu の HalfKP 用定義に基づく概算値。
+/// 盤上駒 + 手駒の全パターン数で、おおよそ 1548 程度になる。
 pub const FE_END: usize = 1548;
 
 /// BonaPieceの定義

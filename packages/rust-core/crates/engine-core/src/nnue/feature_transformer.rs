@@ -1,10 +1,12 @@
 //! FeatureTransformer - 入力特徴量を変換する最初の層
 //!
-//! HalfKP特徴量を256次元の中間表現に変換
+//! HalfKP 特徴量（自玉×BonaPiece）の活性なインデックス集合から、
+//! 片側 256 次元×両視点 = 512 次元の中間表現を生成する。
+//! 盤上駒および手駒を特徴量として扱い、`DirtyPiece` に基づく差分更新にも対応する。
 
 use super::accumulator::{Accumulator, Aligned};
-use super::bona_piece::{halfkp_index, BonaPiece};
 use super::constants::{HALFKP_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS};
+use super::get_changed_features;
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
@@ -67,30 +69,47 @@ impl FeatureTransformer {
 
     /// 差分計算でAccumulatorを更新
     ///
-    /// 戻り値: 差分更新が成功したらtrue、全計算が必要ならfalse
+    /// 戻り値: 差分更新が成功したらtrue、全計算が必要ならfalse。
     pub fn update_accumulator(
         &self,
-        _pos: &Position,
+        pos: &Position,
         acc: &mut Accumulator,
         prev_acc: &Accumulator,
     ) -> bool {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
 
+            let (removed, added) = get_changed_features(pos, perspective);
+
+            // 差分が取れない場合は全計算が必要
+            if removed.is_empty() && added.is_empty() {
+                return false;
+            }
+
             // 前の値をコピー
             let prev = prev_acc.get(p);
             let curr = acc.get_mut(p);
             curr.copy_from_slice(prev);
 
-            // TODO: 差分更新のロジック
-            // 現時点では全計算にフォールバック
+            // 削除された特徴量の重みを減算
+            for index in removed {
+                self.sub_weights(curr, index);
+            }
+
+            // 追加された特徴量の重みを加算
+            for index in added {
+                self.add_weights(curr, index);
+            }
         }
 
-        // 差分更新が実装されるまでは全計算にフォールバック
-        false
+        acc.computed_accumulation = true;
+        acc.computed_score = false;
+        true
     }
 
     /// アクティブな特徴量のインデックスリストを取得
+    ///
+    /// 盤上駒および手駒を HalfKP 特徴量に写像する。
     fn get_active_features(&self, pos: &Position, perspective: Color) -> Vec<usize> {
         let king_sq = pos.king_square(perspective);
         let mut features = Vec::with_capacity(38); // 最大38駒（玉2つ以外）
@@ -106,13 +125,36 @@ impl FeatureTransformer {
                 continue;
             }
 
-            let bp = BonaPiece::from_piece_square(pc, sq, perspective);
-            if bp != BonaPiece::ZERO {
-                features.push(halfkp_index(king_sq, bp));
+            let bp = super::bona_piece::BonaPiece::from_piece_square(pc, sq, perspective);
+            if bp != super::bona_piece::BonaPiece::ZERO {
+                let index = super::bona_piece::halfkp_index(king_sq, bp);
+                features.push(index);
             }
         }
 
-        // TODO: 手駒の特徴量
+        // 手駒の特徴量
+        for owner in [Color::Black, Color::White] {
+            for pt in [
+                crate::types::PieceType::Pawn,
+                crate::types::PieceType::Lance,
+                crate::types::PieceType::Knight,
+                crate::types::PieceType::Silver,
+                crate::types::PieceType::Gold,
+                crate::types::PieceType::Bishop,
+                crate::types::PieceType::Rook,
+            ] {
+                let count = pos.hand(owner).count(pt) as u8;
+                if count == 0 {
+                    continue;
+                }
+                let bp =
+                    super::bona_piece::BonaPiece::from_hand_piece(perspective, owner, pt, count);
+                if bp != super::bona_piece::BonaPiece::ZERO {
+                    let index = super::bona_piece::halfkp_index(king_sq, bp);
+                    features.push(index);
+                }
+            }
+        }
 
         features
     }
@@ -135,7 +177,6 @@ impl FeatureTransformer {
 
     /// 重みを累積値から減算
     #[inline]
-    #[allow(dead_code)]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
         if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
