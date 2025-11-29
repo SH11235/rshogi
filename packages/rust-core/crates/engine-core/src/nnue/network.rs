@@ -133,7 +133,7 @@ pub fn evaluate(pos: &mut Position) -> Value {
         // Accumulator を一時的に取り出して更新し、計算済みのものを StateInfo に書き戻す。
         let (mut acc, prev_acc_ptr) = {
             let state = pos.state_mut();
-            let acc = mem::replace(&mut state.accumulator, Box::new(Accumulator::new()));
+            let acc = mem::take(&mut state.accumulator);
             // 生ポインタで保持し、pos の可変借用を解放した後に参照する
             let prev_acc = state.previous.as_ref().map(|s| &*s.accumulator as *const Accumulator);
             (acc, prev_acc)
