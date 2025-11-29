@@ -85,10 +85,37 @@ impl TranspositionTable {
     /// クリア
     pub fn clear(&mut self) {
         self.generation8.store(0, Ordering::Relaxed);
+        let len = self.table.len();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
-        for cluster in self.table.iter_mut() {
-            *cluster = Cluster::new();
+        // サイズが小さい場合やスレッド数が1の場合は逐次クリア
+        if threads <= 1 || len < threads * 1024 {
+            for cluster in self.table.iter_mut() {
+                *cluster = Cluster::new();
+            }
+            return;
         }
+
+        let chunk = len.div_ceil(threads);
+        let ptr = self.table.as_mut_ptr();
+
+        // スレッドを分割してゼロクリア（やねうら王の Tools::memclear 相当）
+        std::thread::scope(|scope| {
+            for i in 0..threads {
+                let start = i * chunk;
+                if start >= len {
+                    break;
+                }
+                let end = (start + chunk).min(len);
+                let count = end - start;
+                let ptr_addr = unsafe { ptr.add(start) } as usize;
+
+                scope.spawn(move || unsafe {
+                    let ptr = ptr_addr as *mut Cluster;
+                    std::ptr::write_bytes(ptr, 0, count);
+                });
+            }
+        });
     }
 
     /// 新しい探索を開始（世代を進める）
