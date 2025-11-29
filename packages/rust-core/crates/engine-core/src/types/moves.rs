@@ -110,6 +110,39 @@ impl Move {
         self.0
     }
 
+    /// u16からMoveを生成
+    #[inline]
+    pub const fn from_u16(value: u16) -> Move {
+        Move(value)
+    }
+
+    /// u16からMoveを生成（範囲チェック付き）
+    #[inline]
+    pub const fn from_u16_checked(value: u16) -> Option<Move> {
+        let to = value & Self::TO_MASK;
+        let from = (value & Self::FROM_MASK) >> Self::FROM_SHIFT;
+        if to >= Square::NUM as u16 {
+            return None;
+        }
+
+        if (value & Self::DROP_FLAG) != 0 {
+            let piece = (value & Self::FROM_MASK) >> Self::FROM_SHIFT;
+            if piece == 0 || piece > PieceType::Gold as u16 {
+                return None;
+            }
+        } else if from >= Square::NUM as u16 {
+            return None;
+        }
+
+        Some(Move(value))
+    }
+
+    /// u16に変換
+    #[inline]
+    pub const fn to_u16(self) -> u16 {
+        self.0
+    }
+
     /// USI形式の文字列に変換
     pub fn to_usi(self) -> String {
         if self.is_none() {
@@ -222,6 +255,39 @@ mod tests {
         assert!(!m.is_promote());
         assert_eq!(m.drop_piece_type(), PieceType::Pawn);
         assert_eq!(m.to(), to);
+    }
+
+    #[test]
+    fn test_move_encoding_matches_yaneuraou_spec() {
+        // MOVE_NULL は (1 << 7) + 1
+        assert_eq!(Move::NULL.raw(), 0x0081);
+
+        // 通常手: to(60) | from(60 << 7)
+        let m = Move::new_move(
+            Square::new(File::File7, Rank::Rank7),
+            Square::new(File::File7, Rank::Rank7),
+            false,
+        );
+        assert_eq!(m.raw(), 0x1E3C);
+
+        // 打ち: to(40) | piece_type(Pawn=1 << 7) | DROP_FLAG
+        let drop = Move::new_drop(PieceType::Pawn, Square::SQ_55);
+        assert_eq!(drop.raw(), 0x40A8);
+    }
+
+    #[test]
+    fn test_move_from_u16_checked() {
+        // valid move
+        let m = Move::new_move(Square::SQ_11, Square::SQ_55, false);
+        assert_eq!(Move::from_u16_checked(m.raw()), Some(m));
+
+        // invalid square
+        let invalid_square = (Square::NUM as u16) | ((Square::NUM as u16) << 7);
+        assert_eq!(Move::from_u16_checked(invalid_square), None);
+
+        // invalid drop piece type
+        let raw = 0x4000 | (8 << 7) | Square::SQ_55.raw() as u16;
+        assert_eq!(Move::from_u16_checked(raw), None);
     }
 
     #[test]

@@ -101,6 +101,32 @@ impl Position {
         self.side_to_move
     }
 
+    /// TT等に保存された16bit指し手を安全に取り出す
+    /// - 無効な符号化や手番不一致の手はNone
+    /// - 合法性までは保証しないが、明らかに不整合な手を弾く
+    pub fn to_move(&self, mv: Move) -> Option<Move> {
+        if mv.is_none() {
+            return Some(Move::NONE);
+        }
+
+        if mv.is_drop() {
+            let pt = mv.drop_piece_type();
+            if self.hand(self.side_to_move).has(pt) {
+                Some(mv)
+            } else {
+                None
+            }
+        } else {
+            let from = mv.from();
+            let pc = self.piece_on(from);
+            if pc.is_some() && pc.color() == self.side_to_move {
+                Some(mv)
+            } else {
+                None
+            }
+        }
+    }
+
     /// 手数を取得
     #[inline]
     pub fn game_ply(&self) -> i32 {
