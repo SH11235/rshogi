@@ -180,19 +180,21 @@ mod tests {
             ..Default::default()
         });
 
-        let root_moves = RootMoves::from_vec(vec![
-            (300, "7g7f"),
-            (50, "2g2f"), // これを選んでほしい
-            (0, "3g3f"),
-            (-50, "8h7g"),
-        ]
-        .into_iter()
-        .map(|(score, mv)| {
-            let mut rm = RootMove::new(Move::from_usi(mv).unwrap());
-            rm.score = Value::new(score);
-            rm
-        })
-        .collect());
+        let root_moves = RootMoves::from_vec(
+            vec![
+                (300, "7g7f"),
+                (50, "2g2f"), // これを選んでほしい
+                (0, "3g3f"),
+                (-50, "8h7g"),
+            ]
+            .into_iter()
+            .map(|(score, mv)| {
+                let mut rm = RootMove::new(Move::from_usi(mv).unwrap());
+                rm.score = Value::new(score);
+                rm
+            })
+            .collect(),
+        );
 
         let best = skill.pick_best(&root_moves, 4, &mut rng);
         assert_eq!(best, Move::from_usi("2g2f").unwrap());
