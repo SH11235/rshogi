@@ -251,7 +251,7 @@ impl PartialEq for RootMove {
 
 impl Eq for RootMove {}
 
-/// スコアの降順でソート（同スコアなら previous_score で比較）
+/// スコアの降順でソート（YaneuraOu準拠: scoreのみで比較）
 impl PartialOrd for RootMove {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -261,10 +261,8 @@ impl PartialOrd for RootMove {
 impl Ord for RootMove {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // 降順ソート: スコアが高い方が先
-        match other.score.raw().cmp(&self.score.raw()) {
-            std::cmp::Ordering::Equal => other.previous_score.raw().cmp(&self.previous_score.raw()),
-            ord => ord,
-        }
+        // YaneuraOu準拠: スコアのみで比較、previousScore/averageScoreは比較に使わない
+        other.score.raw().cmp(&self.score.raw())
     }
 }
 
@@ -541,14 +539,14 @@ mod tests {
         // rm1(100) vs rm2(50): rm1 が先に来るので rm1 < rm2
         assert!(rm1 < rm2, "高スコアが先（小さい）になるべき");
 
-        // スコアを同じにして previous_score でテスト
+        // YaneuraOu準拠: 同点時はEqualを返す
         rm1.score = Value::new(100);
         rm2.score = Value::new(100);
         rm1.previous_score = Value::new(80);
         rm2.previous_score = Value::new(90);
 
-        // 降順ソート: 高previous_score（rm2）が先 = rm2 < rm1
-        assert!(rm2 < rm1, "同スコア時は高previous_scoreが先（小さい）");
+        // 同点の場合、cmp()はEqualを返す（previousScore不使用）
+        assert_eq!(rm1.cmp(&rm2), std::cmp::Ordering::Equal, "同スコア時はEqual（YaneuraOu準拠）");
     }
 
     #[test]
