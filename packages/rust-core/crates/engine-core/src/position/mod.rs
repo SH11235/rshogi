@@ -2,10 +2,15 @@
 //!
 //! 将棋の局面を表現し、手の実行・巻き戻しを行う。
 //!
-//! - `Position`: 局面
-//! - `StateInfo`: 局面状態（ハッシュ、王手情報等）
-//! - `do_move` / `undo_move`: 手の実行と巻き戻し
+//! - `Position`: 局面本体（盤面配列・Bitboard・手駒・手番・手数）
+//! - `StateInfo`: 局面状態（Zobristハッシュ、王手情報、pin情報、直前の手など）
+//! - `Zobrist`: Zobristハッシュ乱数テーブル（手番・駒×升・手駒）
+//! - `do_move` / `undo_move` / `do_null_move`: 手の実行と巻き戻し（`StateInfo` をスタックとして管理）
 //! - SFEN形式の解析・出力
+//!
+//! 盤面配列・Bitboard・手駒・Zobristキーは `Position` のメソッド
+//! （`put_piece` / `remove_piece` / `do_move` 系）を通じて更新されることを前提とし、
+//! 常に互いに整合しているように保つ。
 
 mod pos;
 mod sfen;
