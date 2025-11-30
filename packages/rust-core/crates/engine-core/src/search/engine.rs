@@ -40,15 +40,18 @@ pub struct SearchInfo {
     pub hashfull: u32,
     /// Principal Variation
     pub pv: Vec<Move>,
+    /// MultiPV番号（1-indexed）
+    pub multi_pv: usize,
 }
 
 impl SearchInfo {
     /// USI形式のinfo文字列を生成
     pub fn to_usi_string(&self) -> String {
         let mut s = format!(
-            "info depth {} seldepth {} score cp {} nodes {} time {} nps {} hashfull {}",
+            "info depth {} seldepth {} multipv {} score cp {} nodes {} time {} nps {} hashfull {}",
             self.depth,
             self.sel_depth,
+            self.multi_pv,
             self.score.raw(),
             self.nodes,
             self.time_ms,
@@ -443,50 +446,64 @@ impl Search {
             worker.root_depth = depth;
             worker.sel_depth = 0;
 
-            // Aspiration Window
-            let prev_score = if depth > 1 {
-                worker.root_moves[0].score
-            } else {
-                Value::new(-32001)
-            };
+            // MultiPVループ（YaneuraOu準拠）
+            let effective_multi_pv = worker.limits.multi_pv.min(worker.root_moves.len());
 
-            let mut delta = Value::new(10);
-            let mut alpha = if depth >= 4 {
-                Value::new(prev_score.raw().saturating_sub(delta.raw()).max(-32001))
-            } else {
-                Value::new(-32001)
-            };
-            let mut beta = if depth >= 4 {
-                Value::new(prev_score.raw().saturating_add(delta.raw()).min(32001))
-            } else {
-                Value::new(32001)
-            };
-
-            loop {
-                let score = worker.search_root(pos, depth, alpha, beta);
-
+            for pv_idx in 0..effective_multi_pv {
                 if worker.abort {
                     break;
                 }
 
-                // Window調整
-                if score <= alpha {
-                    beta = Value::new((alpha.raw() + beta.raw()) / 2);
-                    alpha = Value::new(score.raw().saturating_sub(delta.raw()).max(-32001));
-                } else if score >= beta {
-                    beta = Value::new(score.raw().saturating_add(delta.raw()).min(32001));
+                // Aspiration Window
+                let prev_score = if depth > 1 && pv_idx < worker.root_moves.len() {
+                    worker.root_moves[pv_idx].previous_score
                 } else {
-                    break;
+                    Value::new(0)
+                };
+
+                let mut delta = Value::new(10);
+                let mut alpha = if depth >= 4 {
+                    Value::new(prev_score.raw().saturating_sub(delta.raw()).max(-32001))
+                } else {
+                    Value::new(-32001)
+                };
+                let mut beta = if depth >= 4 {
+                    Value::new(prev_score.raw().saturating_add(delta.raw()).min(32001))
+                } else {
+                    Value::new(32001)
+                };
+
+                // Aspiration Windowループ
+                loop {
+                    // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
+                    // pv_idx>0の場合のみsearch_root_for_pvを使用
+                    let score = if pv_idx == 0 {
+                        worker.search_root(pos, depth, alpha, beta)
+                    } else {
+                        worker.search_root_for_pv(pos, depth, alpha, beta, pv_idx)
+                    };
+
+                    if worker.abort {
+                        break;
+                    }
+
+                    // Window調整
+                    if score <= alpha {
+                        beta = Value::new((alpha.raw() + beta.raw()) / 2);
+                        alpha = Value::new(score.raw().saturating_sub(delta.raw()).max(-32001));
+                    } else if score >= beta {
+                        beta = Value::new(score.raw().saturating_add(delta.raw()).min(32001));
+                    } else {
+                        break;
+                    }
+
+                    delta = Value::new(delta.raw() + delta.raw() / 3);
                 }
 
-                delta = Value::new(delta.raw() + delta.raw() / 3);
-            }
+                // 安定ソート [pv_idx..]
+                worker.root_moves.stable_sort_range(pv_idx, worker.root_moves.len());
 
-            if !worker.abort {
-                worker.completed_depth = depth;
-                worker.best_move = worker.root_moves[0].mv();
-
-                // info出力
+                // 各PVごとにinfo出力
                 let elapsed = start.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
                 let nps = if time_ms > 0 {
@@ -497,17 +514,28 @@ impl Search {
 
                 let info = SearchInfo {
                     depth,
-                    sel_depth: worker.root_moves[0].sel_depth,
-                    score: worker.root_moves[0].score,
+                    sel_depth: worker.root_moves[pv_idx].sel_depth,
+                    score: worker.root_moves[pv_idx].score,
                     nodes: worker.nodes,
                     time_ms,
                     nps,
-                    // hashfullはmax_age=3（YaneuraOu準拠）で取得し、u32に変換
                     hashfull: self.tt.hashfull(3) as u32,
-                    pv: worker.root_moves[0].pv.clone(),
+                    pv: worker.root_moves[pv_idx].pv.clone(),
+                    multi_pv: pv_idx + 1, // 1-indexed
                 };
 
                 on_info(&info);
+
+                // 時間チェック
+                if worker.abort {
+                    break;
+                }
+            }
+
+            // Depth完了後の処理
+            if !worker.abort {
+                worker.completed_depth = depth;
+                worker.best_move = worker.root_moves[0].mv();
 
                 // 評価変動・timeReduction・最善手不安定性をまとめて適用（YaneuraOu準拠）
                 let summary = WorkerSummary::from(&*worker);
@@ -708,11 +736,13 @@ mod tests {
             nps: 20000,
             hashfull: 100,
             pv: vec![],
+            multi_pv: 1,
         };
 
         let usi = info.to_usi_string();
         assert!(usi.contains("depth 5"));
         assert!(usi.contains("seldepth 7"));
+        assert!(usi.contains("multipv 1"));
         assert!(usi.contains("score cp 123"));
         assert!(usi.contains("nodes 10000"));
     }

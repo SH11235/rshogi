@@ -409,6 +409,117 @@ impl<'a> SearchWorker<'a> {
         best_value
     }
 
+    /// 特定のPVライン（pv_idx）のみを探索
+    ///
+    /// YaneuraOuのMultiPVループに相当。
+    /// pv_idx以降の手のみを探索対象とし、0..pv_idxの手は固定とみなす。
+    ///
+    /// # Arguments
+    /// * `pos` - 現在の局面
+    /// * `depth` - 探索深さ
+    /// * `alpha` - アルファ値
+    /// * `beta` - ベータ値
+    /// * `pv_idx` - 探索対象のPVインデックス（0-indexed）
+    pub(crate) fn search_root_for_pv(
+        &mut self,
+        pos: &mut Position,
+        depth: Depth,
+        alpha: Value,
+        beta: Value,
+        pv_idx: usize,
+    ) -> Value {
+        let mut alpha = alpha;
+        let mut best_value = Value::new(-32001);
+        let mut best_rm_idx = pv_idx;
+
+        // pv_idx以降の手のみを探索
+        for rm_idx in pv_idx..self.root_moves.len() {
+            if self.check_abort() {
+                return Value::ZERO;
+            }
+
+            // 各手ごとにsel_depthをリセット
+            self.sel_depth = 0;
+
+            let mv = self.root_moves[rm_idx].mv();
+            let gives_check = pos.gives_check(mv);
+
+            let nodes_before = self.nodes;
+
+            // 探索
+            pos.do_move(mv, gives_check);
+            self.nodes += 1;
+
+            // PVS: 最初の手（このPVラインの候補）はPV探索
+            let value = if rm_idx == pv_idx {
+                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1)
+            } else {
+                // それ以降はZero Window Search
+                let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    depth - 1,
+                    -alpha - Value::new(1),
+                    -alpha,
+                    1,
+                );
+
+                // Re-search if needed
+                if value > alpha && value < beta {
+                    value = -self.search_node::<{ NodeType::PV as u8 }>(
+                        pos,
+                        depth - 1,
+                        -beta,
+                        -alpha,
+                        1,
+                    );
+                }
+
+                value
+            };
+
+            pos.undo_move(mv);
+
+            // この手に費やしたノード数をeffortに積算
+            let nodes_delta = self.nodes.saturating_sub(nodes_before);
+            self.root_moves[rm_idx].effort += nodes_delta as f64;
+
+            if self.abort {
+                return Value::ZERO;
+            }
+
+            // スコア更新
+            self.root_moves[rm_idx].score = value;
+            self.root_moves[rm_idx].sel_depth = self.sel_depth;
+
+            if value > best_value {
+                best_value = value;
+
+                if value > alpha {
+                    // best_move_changesのカウント（2番目以降の手で更新された場合）
+                    if rm_idx > pv_idx {
+                        self.best_move_changes += 1.0;
+                    }
+
+                    alpha = value;
+                    best_rm_idx = rm_idx;
+
+                    // PVを更新
+                    self.root_moves[rm_idx].pv.truncate(1);
+                    self.root_moves[rm_idx].pv.extend_from_slice(&self.stack[1].pv);
+
+                    if value >= beta {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 最善手をpv_idxの位置に移動
+        self.root_moves.move_to_index(best_rm_idx, pv_idx);
+
+        best_value
+    }
+
     /// 通常探索ノード
     ///
     /// NTは NodeType を const genericで受け取る（コンパイル時最適化）

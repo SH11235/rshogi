@@ -283,6 +283,12 @@ impl RootMoves {
         Self { moves: Vec::new() }
     }
 
+    /// テスト用: 指定されたRootMoveで初期化
+    #[cfg(test)]
+    pub(crate) fn from_vec(moves: Vec<RootMove>) -> Self {
+        Self { moves }
+    }
+
     /// 合法手からRootMovesを初期化
     ///
     /// # Arguments
@@ -345,9 +351,58 @@ impl RootMoves {
         }
     }
 
+    /// 指定インデックスの要素を別のインデックスに移動
+    ///
+    /// from_idxの要素をremoveして、to_idxにinsertする。
+    /// MultiPVループで使用。
+    ///
+    /// # Arguments
+    /// * `from_idx` - 移動元インデックス
+    /// * `to_idx` - 移動先インデックス
+    pub fn move_to_index(&mut self, from_idx: usize, to_idx: usize) {
+        if from_idx != to_idx && from_idx < self.moves.len() {
+            let rm = self.moves.remove(from_idx);
+            let insert_idx = to_idx.min(self.moves.len());
+            self.moves.insert(insert_idx, rm);
+        }
+    }
+
     /// スコアでソート（降順）
     pub fn sort(&mut self) {
         self.moves.sort();
+    }
+
+    /// 指定範囲をスコア降順で安定ソート
+    ///
+    /// YaneuraOuの std::stable_sort に相当。
+    /// 同じスコアの場合、元の順序を保持する。
+    ///
+    /// # Arguments
+    /// * `start` - ソート開始インデックス
+    /// * `end` - ソート終了インデックス（この要素は含まない）
+    pub fn stable_sort_range(&mut self, start: usize, end: usize) {
+        if start >= end || end > self.moves.len() {
+            return;
+        }
+
+        // インデックス付きソート: (元のindex, スコア)でソート
+        let mut indexed: Vec<(usize, Value)> = self.moves[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, rm)| (start + i, rm.score))
+            .collect();
+
+        // スコア降順、同点なら元のインデックス昇順（安定性）
+        indexed.sort_by(|a, b| match b.1.cmp(&a.1) {
+            std::cmp::Ordering::Equal => a.0.cmp(&b.0), // 安定性
+            ord => ord,
+        });
+
+        // ソート結果を適用
+        let sorted_moves: Vec<RootMove> =
+            indexed.iter().map(|(idx, _)| self.moves[*idx].clone()).collect();
+
+        self.moves[start..end].clone_from_slice(&sorted_moves);
     }
 
     /// 指定した手を含むか
