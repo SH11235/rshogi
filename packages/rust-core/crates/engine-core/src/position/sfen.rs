@@ -215,16 +215,32 @@ impl Position {
         let mut count = 0u32;
         for c in hand_str.chars() {
             if let Some(digit) = c.to_digit(10) {
-                count = count * 10 + digit;
+                count =
+                    count.checked_mul(10).and_then(|v| v.checked_add(digit)).ok_or_else(|| {
+                        SfenError::Hand("Hand count overflow while parsing digits".to_string())
+                    })?;
             } else {
                 let (color, pt) = sfen_hand_char_to_piece(c)?;
                 let actual_count = if count == 0 { 1 } else { count };
+
+                let current = self.hand[color.index()].count(pt);
+                let max = hand_max(pt);
+                if actual_count > max || current + actual_count > max {
+                    return Err(SfenError::Hand(format!(
+                        "Too many {:?} in hand: {} (current {}, max {})",
+                        pt, actual_count, current, max
+                    )));
+                }
 
                 for _ in 0..actual_count {
                     self.hand[color.index()] = self.hand[color.index()].add(pt);
                 }
                 count = 0;
             }
+        }
+
+        if count != 0 {
+            return Err(SfenError::Hand("Hand string ends with digit but no piece".to_string()));
         }
 
         Ok(())
@@ -390,6 +406,16 @@ fn sfen_hand_char_to_piece(c: char) -> Result<(Color, PieceType), SfenError> {
     Ok((color, pt))
 }
 
+/// 手駒で持てる枚数の上限を返す
+fn hand_max(pt: PieceType) -> u32 {
+    match pt {
+        PieceType::Pawn => 18,
+        PieceType::Lance | PieceType::Knight | PieceType::Silver | PieceType::Gold => 4,
+        PieceType::Bishop | PieceType::Rook => 2,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +466,14 @@ mod tests {
     }
 
     #[test]
+    fn test_sfen_roundtrip_max_hands() {
+        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b 2R2B4G4S4N4L18Prbgsnlp 37";
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        assert_eq!(pos.to_sfen(), sfen);
+    }
+
+    #[test]
     fn test_sfen_with_hands() {
         let sfen = "4k4/9/9/9/9/9/9/9/4K4 b 2P 1";
         let mut pos = Position::new();
@@ -447,6 +481,31 @@ mod tests {
 
         assert_eq!(pos.hand(Color::Black).count(PieceType::Pawn), 2);
         assert_eq!(pos.hand(Color::White).count(PieceType::Pawn), 0);
+    }
+
+    #[test]
+    fn test_sfen_hand_invalid_too_many_pawns() {
+        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b 19P 1";
+        let mut pos = Position::new();
+        let result = pos.set_sfen(sfen);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sfen_hand_invalid_trailing_digit() {
+        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b 3 1";
+        let mut pos = Position::new();
+        let result = pos.set_sfen(sfen);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sfen_hand_invalid_duplicate_overflow() {
+        // 2Rまでが上限のところにさらに1Rを加える
+        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b 2R1R 1";
+        let mut pos = Position::new();
+        let result = pos.set_sfen(sfen);
+        assert!(result.is_err());
     }
 
     #[test]
