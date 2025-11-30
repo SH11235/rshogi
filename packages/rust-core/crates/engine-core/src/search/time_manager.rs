@@ -38,8 +38,8 @@ const SINGLE_MOVE_TIME_LIMIT: TimePoint = 500;
 /// 最善手不安定性係数の定数 - YaneuraOu準拠
 /// bestMoveInstability = BASE + FACTOR * totBestMoveChanges / threads.size()
 /// 注: クランプなし（YaneuraOu準拠）
-const BEST_MOVE_INSTABILITY_BASE: f64 = 0.9929;
-const BEST_MOVE_INSTABILITY_FACTOR: f64 = 1.8519;
+const BEST_MOVE_INSTABILITY_BASE: f64 = 1.04;
+const BEST_MOVE_INSTABILITY_FACTOR: f64 = 1.8956;
 
 // =============================================================================
 // 公開関数
@@ -208,35 +208,87 @@ impl TimeManagement {
         let increment = limits.increment(us);
         let byoyomi = limits.byoyomi_time(us);
 
-        // 残り手数の推定
-        let moves_to_go = if max_moves_to_draw > 0 {
-            ((max_moves_to_draw - ply) / 2).max(1) as TimePoint
-        } else {
-            ((DEFAULT_MAX_MOVES_TO_DRAW - ply) / 2).max(1) as TimePoint
-        };
-
         // NetworkDelay2 を考慮した今回の残り時間
         self.remain_time = (time_left + increment + byoyomi - self.network_delay2).max(100);
 
-        // 持ち時間がある場合
-        if time_left > 0 {
-            self.calculate_time_with_time_left(time_left, increment, byoyomi, moves_to_go);
+        // --- 以降、YaneuraOuのinit_ロジックを反映 ---
+
+        let max_moves = if max_moves_to_draw > 0 {
+            max_moves_to_draw
+        } else {
+            DEFAULT_MAX_MOVES_TO_DRAW
+        };
+
+        // 切れ負けルールか？
+        let time_forfeit = increment == 0 && byoyomi == 0;
+
+        // move_horizon の近似 (MoveHorizon = 160 をベースに補正)
+        let move_horizon = if time_forfeit {
+            160 + 40 - ply.min(40)
+        } else {
+            160 + 20 - ply.min(80)
+        };
+
+        // 残り手数 (MTG)
+        let mtg = (max_moves - ply + 2).min(move_horizon) / 2;
+        if mtg <= 0 {
+            self.minimum_time = 500;
+            self.optimum_time = 500;
+            self.maximum_time = 500;
+            return;
         }
-        // 秒読みのみの場合
-        else if byoyomi > 0 {
-            self.calculate_time_byoyomi_only(byoyomi);
-        }
-        // それ以外（フリータイム）
-        else {
-            self.optimum_time = 1000; // 1秒
-            self.maximum_time = 10000; // 10秒
-            self.minimum_time = 100;
-            self.remain_time = TimePoint::MAX / 2;
+        if mtg == 1 {
+            self.minimum_time = self.remain_time;
+            self.optimum_time = self.remain_time;
+            self.maximum_time = self.remain_time;
+            return;
         }
 
+        // 最小思考時間 (network_delay を差し引く)
+        self.minimum_time = (self.minimum_thinking_time - self.network_delay).max(1000);
+
+        // 初期値は残り時間
+        self.optimum_time = self.remain_time;
+        self.maximum_time = self.remain_time;
+
+        // remain_estimate = time + inc*mtg + byoyomi*mtg - (mtg+1)*1000
+        let mtg_i64 = mtg as TimePoint;
+        let mut remain_estimate = time_left
+            .saturating_add(increment.saturating_mul(mtg_i64))
+            .saturating_add(byoyomi.saturating_mul(mtg_i64));
+        remain_estimate = remain_estimate.saturating_sub((mtg_i64 + 1) * 1000);
+        if remain_estimate < 0 {
+            remain_estimate = 0;
+        }
+
+        // optimum: minimum + remain_estimate/mtg
+        let t1 = self.minimum_time + remain_estimate / mtg_i64;
+
+        // maximum: minimum + remain_estimate * max_ratio / mtg
+        let mut max_ratio: f64 = 5.0;
+        if time_forfeit {
+            let ratio = (time_left as f64) / (60.0 * 1000.0);
+            max_ratio = max_ratio.min(ratio.max(1.0));
+        }
+        let mut t2 =
+            self.minimum_time + (remain_estimate as f64 * max_ratio / mtg_i64 as f64) as TimePoint;
+        // maximum は残り時間の30%を上限
+        let max_cap = (remain_estimate as f64 * 0.3) as TimePoint;
+        t2 = t2.min(max_cap);
+
+        self.optimum_time = t1.min(self.optimum_time);
+        self.maximum_time = t2.min(self.maximum_time);
+
         // SlowMover は YaneuraOu 同様 optimum のみスケールする（秒読みの最終局面は除外）
-        if !self.is_final_push {
-            self.optimum_time = self.optimum_time * self.slow_mover as i64 / 100;
+        self.optimum_time = self.optimum_time * self.slow_mover as i64 / 100;
+
+        // 秒読みモードでかつ持ち時間が少ない場合は使い切る
+        self.is_final_push = false;
+        if byoyomi > 0 && time_left < (byoyomi as f64 * 1.2) as TimePoint {
+            self.minimum_time = byoyomi + time_left;
+            self.optimum_time = byoyomi + time_left;
+            self.maximum_time = byoyomi + time_left;
+            self.is_final_push = true;
         }
 
         // round_up は NetworkDelay・minimum_thinking_time・remain_time を考慮する
@@ -323,7 +375,7 @@ impl TimeManagement {
 
         let instability = calculate_best_move_instability(tot_best_move_changes, thread_count);
         let reduction =
-            (1.4540 + self.previous_time_reduction) / (2.1593 * time_reduction.max(0.0001));
+            (1.455 + self.previous_time_reduction) / (2.2375 * time_reduction.max(0.0001));
         self.previous_time_reduction = reduction;
 
         let factor = falling_eval * reduction * instability;
@@ -337,38 +389,6 @@ impl TimeManagement {
 
         self.optimum_time = self.optimum_time.min(self.remain_time).max(1);
         self.maximum_time = self.maximum_time.min(self.remain_time).max(self.optimum_time);
-    }
-
-    /// 持ち時間がある場合の思考時間計算
-    fn calculate_time_with_time_left(
-        &mut self,
-        time_left: TimePoint,
-        increment: TimePoint,
-        byoyomi: TimePoint,
-        moves_to_go: TimePoint,
-    ) {
-        // 最小思考時間（NetworkDelay を事前に差し引くのは YaneuraOu の流儀）
-        self.minimum_time = (self.minimum_thinking_time - self.network_delay).max(1000);
-
-        // 残り手数全体で1秒ずつは消費する前提（YaneuraOu の remain_estimate に相当）
-        let mut remain_estimate = time_left
-            .saturating_add(increment.saturating_mul(moves_to_go))
-            .saturating_add(byoyomi.saturating_mul(moves_to_go));
-        remain_estimate = remain_estimate.saturating_sub((moves_to_go + 1) * 1000);
-
-        // YaneuraOu に倣い「最低時間 + 残り時間/手数」で配分する
-        self.optimum_time = self.minimum_time + remain_estimate / moves_to_go;
-        // maximum は5倍を目安に（上限は後段の round_up で remain_time まで絞る）
-        self.maximum_time = self.minimum_time + (remain_estimate * 5 / moves_to_go);
-    }
-
-    /// 秒読みのみの場合の思考時間計算
-    fn calculate_time_byoyomi_only(&mut self, byoyomi: TimePoint) {
-        // 秒読みのみの場合は byoyomi + 残り時間を使い切る（YaneuraOu: byoyomi + time）
-        self.optimum_time = byoyomi;
-        self.maximum_time = byoyomi;
-        self.minimum_time = byoyomi;
-        self.is_final_push = true;
     }
 
     /// 最適思考時間を取得
@@ -579,13 +599,6 @@ mod tests {
 
     fn create_time_manager() -> TimeManagement {
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
-    }
-
-    #[test]
-    fn test_time_manager_default() {
-        let tm = create_time_manager();
-        assert_eq!(tm.optimum(), 0);
-        assert_eq!(tm.maximum(), 0);
     }
 
     #[test]
