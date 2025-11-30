@@ -215,6 +215,16 @@ impl TimeManagement {
         self.stochastic_ponder = opts.stochastic_ponder;
     }
 
+    /// 前回の time_reduction をセット（YO準拠の持ち回り用）
+    pub fn set_previous_time_reduction(&mut self, value: f64) {
+        self.previous_time_reduction = value;
+    }
+
+    /// 現在の time_reduction を取得
+    pub fn previous_time_reduction(&self) -> f64 {
+        self.previous_time_reduction
+    }
+
     /// is_final_pushゲッター
     pub fn is_final_push(&self) -> bool {
         self.is_final_push
@@ -576,6 +586,11 @@ impl TimeManagement {
         self.stop_on_ponderhit
     }
 
+    /// stop_on_ponderhit フラグをクリア（YOのfail-low時相当）
+    pub fn reset_stop_on_ponderhit(&mut self) {
+        self.stop_on_ponderhit = false;
+    }
+
     /// 探索開始からの経過時間（ミリ秒）
     #[inline]
     pub fn elapsed(&self) -> TimePoint {
@@ -808,6 +823,13 @@ mod tests {
         // optimum/maximumは変化しない
         assert_eq!(tm.optimum(), 1000);
         assert_eq!(tm.maximum(), 2000);
+    }
+
+    #[test]
+    fn test_previous_time_reduction_roundtrip() {
+        let mut tm = create_time_manager();
+        tm.set_previous_time_reduction(0.42);
+        assert!((tm.previous_time_reduction() - 0.42).abs() < 1e-9);
     }
 
     #[test]
