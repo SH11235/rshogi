@@ -188,11 +188,24 @@ impl<'a> SearchWorker<'a> {
         }
 
         // 時間制限チェック（1024ノードごと）
-        // YaneuraOu準拠: ノード単位のチェックでは best_move_changes は使わない
-        // best_move_changes は反復深化の境目での時間計算にのみ影響
-        if self.nodes & 1023 == 0 && self.time_manager.should_stop_immediately() {
-            self.abort = true;
-            return true;
+        // YaneuraOu準拠の2フェーズロジック
+        if self.nodes & 1023 == 0 {
+            let elapsed = self.time_manager.elapsed();
+
+            // フェーズ1: search_end 設定済み → 即座に停止
+            if self.time_manager.search_end() > 0 && elapsed >= self.time_manager.search_end() {
+                self.abort = true;
+                return true;
+            }
+
+            // フェーズ2: search_end 未設定 → maximum超過時に設定
+            if self.time_manager.search_end() == 0
+                && self.limits.use_time_management()
+                && elapsed > self.time_manager.maximum()
+            {
+                self.time_manager.set_search_end(elapsed);
+                // 注: ここでは停止せず、次のチェックで秒境界で停止
+            }
         }
 
         false
@@ -603,13 +616,8 @@ impl<'a> SearchWorker<'a> {
             // 指し手を実行
             self.stack[ply as usize].current_move = mv;
 
-            // ContHistKey用の情報をdo_move前に取得
-            let moved_piece = pos.moved_piece(mv);
-            let cont_hist_piece = if mv.is_promotion() {
-                moved_piece.promote().unwrap_or(moved_piece)
-            } else {
-                moved_piece
-            };
+            // ContHistKey用の情報をMoveから取得（YaneuraOu方式）
+            let cont_hist_piece = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
             pos.do_move(mv, gives_check);
@@ -1091,15 +1099,8 @@ impl<'a> SearchWorker<'a> {
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
 
-            // ContHistKey用の情報をdo_move前に取得
-            // YaneuraOu方式: moved_piece_after()はMove自体に格納された情報を使うが、
-            // Rust実装ではPositionから取得するためdo_move前に呼ぶ必要がある
-            let moved_piece = pos.moved_piece(mv);
-            let cont_hist_pc = if mv.is_promotion() {
-                moved_piece.promote().unwrap_or(moved_piece)
-            } else {
-                moved_piece
-            };
+            // ContHistKey用の情報をMoveから取得（YaneuraOu方式）
+            let cont_hist_pc = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
             pos.do_move(mv, gives_check);

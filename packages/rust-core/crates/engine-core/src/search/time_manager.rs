@@ -10,6 +10,27 @@ use std::sync::Arc;
 use std::time::Instant;
 
 // =============================================================================
+// ヘルパー関数
+// =============================================================================
+
+/// 秒境界に切り上げ（YaneuraOu準拠）
+///
+/// 1ms → 1000ms, 1001ms → 2000ms のように切り上げ
+///
+/// # Arguments
+/// * `time_ms` - 切り上げ対象の時間（ミリ秒）
+///
+/// # Returns
+/// 秒境界（1000ms単位）に切り上げた時間
+fn round_up(time_ms: TimePoint) -> TimePoint {
+    const SECOND: TimePoint = 1000;
+    if time_ms == 0 {
+        return 0;
+    }
+    ((time_ms + SECOND - 1) / SECOND) * SECOND
+}
+
+// =============================================================================
 // 定数
 // =============================================================================
 
@@ -294,6 +315,12 @@ impl TimeManagement {
         tot_best_move_changes: f64,
         thread_count: usize,
     ) {
+        // YaneuraOu準拠: byoyomiモード (is_final_push=true) では時間を変更しない
+        // byoyomiは固定時間なので、動的な調整は適用しない
+        if self.is_final_push {
+            return;
+        }
+
         let instability = calculate_best_move_instability(tot_best_move_changes, thread_count);
         let reduction =
             (1.4540 + self.previous_time_reduction) / (2.1593 * time_reduction.max(0.0001));
@@ -347,8 +374,9 @@ impl TimeManagement {
     /// 秒読みのみの場合の思考時間計算
     fn calculate_time_byoyomi_only(&mut self, byoyomi: TimePoint) {
         // 秒読みの場合は秒読み時間をフルに使う
-        self.optimum_time = byoyomi - self.network_delay;
-        self.maximum_time = byoyomi - self.network_delay / 2;
+        // network_delay は init() の最後で一度だけ適用される（二重適用を防ぐ）
+        self.optimum_time = byoyomi;
+        self.maximum_time = byoyomi;
         self.minimum_time = self.minimum_thinking_time;
         self.is_final_push = true;
     }
@@ -369,6 +397,13 @@ impl TimeManagement {
     #[inline]
     pub fn minimum(&self) -> TimePoint {
         self.minimum_time
+    }
+
+    /// 探索終了時刻を取得（start_timeからの経過時間、ミリ秒）
+    /// 0の場合は未設定
+    #[inline]
+    pub fn search_end(&self) -> TimePoint {
+        self.search_end
     }
 
     /// 探索開始からの経過時間（ミリ秒）
@@ -471,9 +506,44 @@ impl TimeManagement {
         self.ponderhit.store(false, Ordering::Relaxed);
     }
 
-    /// 探索終了時刻を設定
-    pub fn set_search_end(&mut self, end_time: TimePoint) {
-        self.search_end = end_time;
+    /// 探索終了時刻を設定（YaneuraOu準拠、秒境界に切り上げ）
+    ///
+    /// YaneuraOu timeman.cpp:314-341 の実装を再現
+    ///
+    /// # Arguments
+    /// * `elapsed_ms` - 探索開始からの経過時間（ミリ秒）
+    ///
+    /// # 動作
+    /// - 経過時間と最小思考時間の大きい方を採用
+    /// - 秒境界に切り上げ
+    /// - ponderhit時間を考慮した調整
+    pub fn set_search_end(&mut self, elapsed_ms: TimePoint) {
+        // start_time と ponderhit_time の差分（通常は0、ponder時のみ非0）
+        // ponderhit_time は init() で start_time に設定されるため、
+        // 通常の探索では duration = 0
+        let duration_start_to_ponderhit = if self.ponderhit_time >= self.start_time {
+            self.ponderhit_time.duration_since(self.start_time).as_millis() as TimePoint
+        } else {
+            0
+        };
+
+        // YaneuraOuのロジックを完全再現
+        // TimePoint t1 = e + startTime - ponderhitTime;
+        // elapsed_ms は start_time からの経過なので、ponderhit調整が必要
+        let t1 = elapsed_ms.saturating_sub(duration_start_to_ponderhit);
+
+        // TimePoint t2 = isFinalPush ? minimum() : minimum() + startTime - ponderhitTime;
+        let t2 = if self.is_final_push {
+            self.minimum_time
+        } else {
+            self.minimum_time.saturating_sub(duration_start_to_ponderhit)
+        };
+
+        let max_time = std::cmp::max(t1, t2);
+        let rounded = round_up(max_time);
+
+        // search_end = round_up(std::max(t1, t2)) + ponderhitTime - startTime;
+        self.search_end = rounded.saturating_add(duration_start_to_ponderhit);
     }
 
     /// 外部から停止を要求
@@ -510,6 +580,16 @@ mod tests {
 
     fn create_time_manager() -> TimeManagement {
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
+    }
+
+    #[test]
+    fn test_round_up() {
+        assert_eq!(round_up(0), 0);
+        assert_eq!(round_up(1), 1000);
+        assert_eq!(round_up(999), 1000);
+        assert_eq!(round_up(1000), 1000);
+        assert_eq!(round_up(1001), 2000);
+        assert_eq!(round_up(5234), 6000);
     }
 
     #[test]

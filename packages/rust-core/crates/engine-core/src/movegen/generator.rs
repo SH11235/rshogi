@@ -60,19 +60,21 @@ fn generate_pawn_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx
     for from in pawns.iter() {
         // 歩の利きを計算
         let attacks = pawn_effect(us, from) & target;
+        let moved_pc = pos.piece_on(from);
 
         for to in attacks.iter() {
             if promo_ranks.contains(to) {
                 // 成る手を生成
-                add_move(moves, idx, Move::new_move(from, to, true));
+                let promoted_pc = moved_pc.promote().unwrap();
+                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
 
                 // 不成も生成（1段目でないとき）
                 if !rank1.contains(to) {
-                    add_move(moves, idx, Move::new_move(from, to, false));
+                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
                 // 成れない → 不成のみ
-                add_move(moves, idx, Move::new_move(from, to, false));
+                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
@@ -93,19 +95,21 @@ fn generate_lance_moves(pos: &Position, target: Bitboard, moves: &mut [Move], id
 
     for from in lances.iter() {
         let attacks = lance_effect(us, from, occupied) & target;
+        let moved_pc = pos.piece_on(from);
 
         for to in attacks.iter() {
             if promo_ranks.contains(to) {
                 // 成る手を生成
-                add_move(moves, idx, Move::new_move(from, to, true));
+                let promoted_pc = moved_pc.promote().unwrap();
+                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
 
                 // 不成（1段目でないとき）
                 if !rank1.contains(to) {
-                    add_move(moves, idx, Move::new_move(from, to, false));
+                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
                 // 敵陣外 → 不成のみ
-                add_move(moves, idx, Move::new_move(from, to, false));
+                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
@@ -125,16 +129,18 @@ fn generate_knight_moves(pos: &Position, target: Bitboard, moves: &mut [Move], i
 
     for from in knights.iter() {
         let attacks = knight_effect(us, from) & target;
+        let moved_pc = pos.piece_on(from);
 
         for to in attacks.iter() {
             if promo_ranks.contains(to) {
                 // 成る手を生成
-                add_move(moves, idx, Move::new_move(from, to, true));
+                let promoted_pc = moved_pc.promote().unwrap();
+                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
             }
 
             // 不成（1,2段目でないとき）
             if !rank12.contains(to) {
-                add_move(moves, idx, Move::new_move(from, to, false));
+                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
@@ -154,17 +160,19 @@ fn generate_silver_moves(pos: &Position, target: Bitboard, moves: &mut [Move], i
     for from in silvers.iter() {
         let attacks = silver_effect(us, from) & target;
         let from_in_promo = promo_ranks.contains(from);
+        let moved_pc = pos.piece_on(from);
 
         for to in attacks.iter() {
             let to_in_promo = promo_ranks.contains(to);
 
             // 成る手（移動元または移動先が敵陣）
             if from_in_promo || to_in_promo {
-                add_move(moves, idx, Move::new_move(from, to, true));
+                let promoted_pc = moved_pc.promote().unwrap();
+                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
             }
 
             // 不成
-            add_move(moves, idx, Move::new_move(from, to, false));
+            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
@@ -184,18 +192,20 @@ fn generate_bishop_moves(pos: &Position, target: Bitboard, moves: &mut [Move], i
     for from in bishops.iter() {
         let attacks = bishop_effect(from, occupied) & target;
         let from_in_promo = promo_ranks.contains(from);
+        let moved_pc = pos.piece_on(from);
 
         for to in attacks.iter() {
             let to_in_promo = promo_ranks.contains(to);
 
             if from_in_promo || to_in_promo {
                 // 成る手を生成
-                add_move(moves, idx, Move::new_move(from, to, true));
+                let promoted_pc = moved_pc.promote().unwrap();
+                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
                 // 不成も生成
-                add_move(moves, idx, Move::new_move(from, to, false));
+                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             } else {
                 // 敵陣に関係ない → 不成のみ
-                add_move(moves, idx, Move::new_move(from, to, false));
+                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
@@ -216,18 +226,20 @@ fn generate_rook_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx
     for from in rooks.iter() {
         let attacks = rook_effect(from, occupied) & target;
         let from_in_promo = promo_ranks.contains(from);
+        let moved_pc = pos.piece_on(from);
 
         for to in attacks.iter() {
             let to_in_promo = promo_ranks.contains(to);
 
             if from_in_promo || to_in_promo {
                 // 成る手を生成
-                add_move(moves, idx, Move::new_move(from, to, true));
+                let promoted_pc = moved_pc.promote().unwrap();
+                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
                 // 不成も生成
-                add_move(moves, idx, Move::new_move(from, to, false));
+                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             } else {
                 // 敵陣に関係ない → 不成のみ
-                add_move(moves, idx, Move::new_move(from, to, false));
+                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
@@ -246,8 +258,9 @@ fn generate_gold_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx
 
     for from in golds.iter() {
         let attacks = gold_effect(us, from) & target;
+        let moved_pc = pos.piece_on(from);
         for to in attacks.iter() {
-            add_move(moves, idx, Move::new_move(from, to, false));
+            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
@@ -260,8 +273,9 @@ fn generate_horse_moves(pos: &Position, target: Bitboard, moves: &mut [Move], id
 
     for from in horses.iter() {
         let attacks = horse_effect(from, occupied) & target;
+        let moved_pc = pos.piece_on(from);
         for to in attacks.iter() {
-            add_move(moves, idx, Move::new_move(from, to, false));
+            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
@@ -274,8 +288,9 @@ fn generate_dragon_moves(pos: &Position, target: Bitboard, moves: &mut [Move], i
 
     for from in dragons.iter() {
         let attacks = dragon_effect(from, occupied) & target;
+        let moved_pc = pos.piece_on(from);
         for to in attacks.iter() {
-            add_move(moves, idx, Move::new_move(from, to, false));
+            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
@@ -286,8 +301,9 @@ fn generate_king_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx
     let king_sq = pos.king_square(us);
 
     let attacks = king_effect(king_sq) & target;
+    let moved_pc = pos.piece_on(king_sq);
     for to in attacks.iter() {
-        add_move(moves, idx, Move::new_move(king_sq, to, false));
+        add_move(moves, idx, Move::new_move_with_piece(king_sq, to, false, moved_pc));
     }
 }
 
@@ -327,8 +343,9 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move], idx
     let valid_targets = valid_targets & pawn_drop_mask(us, our_pawns);
 
     // 打ち歩詰めチェックは後でis_legalで行う
+    let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
     for to in valid_targets.iter() {
-        add_move(moves, idx, Move::new_drop(PieceType::Pawn, to));
+        add_move(moves, idx, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
     }
 }
 
@@ -343,15 +360,17 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move],
 
     // 香（1段目には打てない）
     if hand.has(PieceType::Lance) {
+        let dropped_pc = crate::types::Piece::make(us, PieceType::Lance);
         for to in (target & !rank1).iter() {
-            add_move(moves, idx, Move::new_drop(PieceType::Lance, to));
+            add_move(moves, idx, Move::new_drop_with_piece(PieceType::Lance, to, dropped_pc));
         }
     }
 
     // 桂（1,2段目には打てない）
     if hand.has(PieceType::Knight) {
+        let dropped_pc = crate::types::Piece::make(us, PieceType::Knight);
         for to in (target & !rank12).iter() {
-            add_move(moves, idx, Move::new_drop(PieceType::Knight, to));
+            add_move(moves, idx, Move::new_drop_with_piece(PieceType::Knight, to, dropped_pc));
         }
     }
 
@@ -363,8 +382,9 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move],
         PieceType::Rook,
     ] {
         if hand.has(pt) {
+            let dropped_pc = crate::types::Piece::make(us, pt);
             for to in target.iter() {
-                add_move(moves, idx, Move::new_drop(pt, to));
+                add_move(moves, idx, Move::new_drop_with_piece(pt, to, dropped_pc));
             }
         }
     }
