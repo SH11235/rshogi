@@ -383,7 +383,13 @@ impl Search {
             .root_moves
             .iter()
             .find(|rm| rm.mv() == best_move)
-            .and_then(|rm| if rm.pv.len() > 1 { Some(rm.pv[1]) } else { None })
+            .and_then(|rm| {
+                if rm.pv.len() > 1 {
+                    Some(rm.pv[1])
+                } else {
+                    None
+                }
+            })
             .unwrap_or(Move::NONE);
 
         // 次回のfallingEval計算のために平均スコアを保存

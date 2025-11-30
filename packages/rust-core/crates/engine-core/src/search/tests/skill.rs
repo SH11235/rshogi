@@ -39,10 +39,7 @@ fn skill_forces_multipv_to_four() {
             );
 
             let max_multipv = multipv.into_iter().max().unwrap_or(0);
-            assert!(
-                max_multipv >= 4,
-                "Skill有効時はMultiPVが最低4まで引き上げられるはず"
-            );
+            assert!(max_multipv >= 4, "Skill有効時はMultiPVが最低4まで引き上げられるはず");
         })
         .unwrap()
         .join()
