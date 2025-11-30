@@ -376,6 +376,29 @@ impl Search {
                 break;
             }
 
+            // YaneuraOu準拠: 詰みを読みきった場合の早期終了
+            // 詰みまでの手数の2.5倍以上の深さを探索したら終了
+            // 注: MultiPVが実装されていないため、常に適用
+            if depth > 1 && !worker.root_moves.is_empty() {
+                let best_value = worker.root_moves[0].score;
+
+                // 勝ちを読みきっている場合
+                if best_value.is_win() {
+                    let mate_ply = best_value.mate_ply();
+                    if (mate_ply + 2) * 5 / 2 < depth {
+                        break;
+                    }
+                }
+
+                // 詰まされる形の場合
+                if best_value.is_loss() {
+                    let mate_ply = best_value.mate_ply();
+                    if (mate_ply + 2) * 5 / 2 < depth {
+                        break;
+                    }
+                }
+            }
+
             // ponderhitを検出した場合、時間再計算のみ行い探索は継続
             if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
                 worker.time_manager.on_ponderhit();
@@ -466,6 +489,26 @@ impl Search {
 
                 // best_move_changes は集約後リセット
                 worker.best_move_changes = 0.0;
+
+                // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
+                // 注: MultiPVが実装されていないため、常に適用
+                let best_value = worker.root_moves[0].score;
+
+                // 勝ちを読みきっている場合
+                if best_value.is_win() {
+                    let mate_ply = best_value.mate_ply();
+                    if (mate_ply + 2) * 5 / 2 < depth {
+                        break;
+                    }
+                }
+
+                // 詰まされる形の場合
+                if best_value.is_loss() {
+                    let mate_ply = best_value.mate_ply();
+                    if (mate_ply + 2) * 5 / 2 < depth {
+                        break;
+                    }
+                }
             }
         }
     }
