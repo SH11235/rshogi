@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::position::Position;
 use crate::tt::TranspositionTable;
-use crate::types::{Depth, Move, Value};
+use crate::types::{Depth, Move, Value, MAX_PLY};
 
 use super::alpha_beta::init_reductions;
 use super::time_manager::{
@@ -79,8 +79,9 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove) -> (Value, Value, Value) 
         inf * inf
     };
     let mean_sq = rm.mean_squared_score.unwrap_or(fallback).abs();
+    let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
-    let delta_raw = 5 + (mean_sq / 11131) as i32;
+    let delta_raw = 5 + (mean_sq / 11131).min(i32::MAX as i64) as i32;
     let delta = Value::new(delta_raw);
     let alpha_raw = (rm.average_score.raw() - delta.raw()).max(-Value::INFINITE.raw());
     let beta_raw = (rm.average_score.raw() + delta.raw()).min(Value::INFINITE.raw());
@@ -130,6 +131,8 @@ pub struct Search {
     /// Skill Level オプション
     skill_options: SkillOptions,
 
+    /// 直前イテレーションのスコア（YaneuraOu準拠）
+    best_previous_score: Option<Value>,
     /// 直前イテレーションの平均スコア（YaneuraOu準拠）
     best_previous_average_score: Option<Value>,
     /// 直近のイテレーション値（YaneuraOuは4要素リングバッファ）
@@ -138,6 +141,8 @@ pub struct Search {
     iter_idx: usize,
     /// 直前に安定したとみなした深さ
     last_best_move_depth: Depth,
+    /// 直前の最善手（PV変化検出用）
+    last_best_move: Move,
     /// totBestMoveChanges（世代減衰込み）
     tot_best_move_changes: f64,
     /// 直前の手数（手番反転の検出用）
@@ -178,16 +183,20 @@ impl Search {
         // 手番が変わっている場合はスコア符号を反転
         if let Some(last_ply) = self.last_game_ply {
             if (last_ply - ply).abs() & 1 == 1 {
+                if let Some(prev_score) = self.best_previous_score {
+                    self.best_previous_score = Some(Value::new(-prev_score.raw()));
+                }
                 if let Some(prev_avg) = self.best_previous_average_score {
                     self.best_previous_average_score = Some(Value::new(-prev_avg.raw()));
                 }
             }
         }
 
-        let seed = self.best_previous_average_score.unwrap_or(Value::ZERO);
+        let seed = self.best_previous_score.unwrap_or(Value::ZERO);
         self.iter_value = [seed; 4];
         self.iter_idx = 0;
         self.last_best_move_depth = 0;
+        self.last_best_move = Move::NONE;
         self.tot_best_move_changes = 0.0;
         self.last_game_ply = Some(ply);
     }
@@ -219,16 +228,9 @@ impl Search {
         let time_reduction =
             calculate_time_reduction(worker.completed_depth, self.last_best_move_depth);
 
-        // 状態更新
-        if let Some(prev_avg) = self.best_previous_average_score {
-            let avg = (prev_avg.raw() + best_value.raw()) / 2;
-            self.best_previous_average_score = Some(Value::new(avg));
-        } else {
-            self.best_previous_average_score = Some(best_value);
-        }
+        // 状態更新（iter_valueのみ）
         self.iter_value[self.iter_idx] = best_value;
         self.iter_idx = (self.iter_idx + 1) % self.iter_value.len();
-        self.last_best_move_depth = worker.completed_depth;
         self.tot_best_move_changes = tot_best_move_changes;
 
         (falling_eval, time_reduction, tot_best_move_changes, thread_count)
@@ -250,10 +252,12 @@ impl Search {
             start_time: None,
             time_options: super::TimeOptions::default(),
             skill_options: SkillOptions::default(),
+            best_previous_score: None,
             best_previous_average_score: None,
             iter_value: [Value::ZERO; 4],
             iter_idx: 0,
             last_best_move_depth: 0,
+            last_best_move: Move::NONE,
             tot_best_move_changes: 0.0,
             last_game_ply: None,
             max_moves_to_draw: DEFAULT_MAX_MOVES_TO_DRAW,
@@ -367,7 +371,7 @@ impl Search {
         let max_depth = if limits.depth > 0 {
             limits.depth
         } else {
-            100 // 十分大きな値
+            MAX_PLY // YaneuraOu準拠: 可能な限り深く探索
         };
 
         // SkillLevel設定を構築（手加減）
@@ -411,7 +415,13 @@ impl Search {
 
         // 次回のfallingEval計算のために平均スコアを保存
         if let Some(best_rm) = worker.root_moves.get(0) {
-            self.best_previous_average_score = Some(best_rm.score);
+            self.best_previous_score = Some(best_rm.score);
+            self.best_previous_average_score =
+                Some(if best_rm.average_score.raw() == -Value::INFINITE.raw() {
+                    best_rm.score
+                } else {
+                    best_rm.average_score
+                });
         }
         self.last_game_ply = Some(ply);
 
@@ -589,6 +599,10 @@ impl Search {
             if !worker.abort {
                 worker.completed_depth = depth;
                 worker.best_move = worker.root_moves[0].mv();
+                if worker.best_move != self.last_best_move {
+                    self.last_best_move = worker.best_move;
+                    self.last_best_move_depth = depth;
+                }
 
                 // 🆕 YaneuraOu準拠: previous_scoreを次のiterationのためにシード
                 // （YaneuraOu行1267-1270: rm.previousScore = rm.score）
@@ -702,6 +716,7 @@ mod tests {
     #[test]
     fn test_prepare_time_metrics_resets_iter_state() {
         let mut search = Search::new(16);
+        search.best_previous_score = Some(Value::new(200));
         search.best_previous_average_score = Some(Value::new(123));
         search.last_game_ply = Some(5);
         search.iter_value = [Value::new(1), Value::new(2), Value::new(3), Value::new(4)];
@@ -711,8 +726,9 @@ mod tests {
 
         search.prepare_time_metrics(6);
 
+        assert_eq!(search.best_previous_score, Some(Value::new(-200)));
         assert_eq!(search.best_previous_average_score, Some(Value::new(-123)));
-        assert_eq!(search.iter_value, [Value::new(-123); 4]);
+        assert_eq!(search.iter_value, [Value::new(-200); 4]);
         assert_eq!(search.iter_idx, 0);
         assert_eq!(search.last_best_move_depth, 0);
         assert_eq!(search.tot_best_move_changes, 0.0);

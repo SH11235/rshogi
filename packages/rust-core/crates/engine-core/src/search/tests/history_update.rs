@@ -24,7 +24,7 @@ fn tt_move_history_updates_on_bestmove() {
     let _ = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
 
     let opts = search.time_options(); // just to avoid warnings
-    assert_eq!(opts.minimum_thinking_time > 0, true);
+    assert!(opts.minimum_thinking_time > 0);
 
     // 内部のtt_move_historyがゼロでないことを確認できるAPIがないので、
     // 少なくともpanicしないことのみを確認する（実際の更新はMovePicker内で加点される）
