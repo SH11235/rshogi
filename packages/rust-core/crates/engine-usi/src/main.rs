@@ -114,10 +114,12 @@ impl UsiEngine {
         // オプション（将来的に追加）
         println!("option name USI_Hash type spin default 256 min 1 max 4096");
         println!("option name USI_Ponder type check default false");
+        println!("option name Stochastic_Ponder type check default false");
         println!("option name NetworkDelay type spin default 120 min 0 max 10000");
         println!("option name NetworkDelay2 type spin default 1120 min 0 max 10000");
-        println!("option name MinimumThinkingTime type spin default 2000 min 1 max 100000");
+        println!("option name MinimumThinkingTime type spin default 2000 min 1000 max 100000");
         println!("option name SlowMover type spin default 100 min 1 max 1000");
+        println!("option name MaxMovesToDraw type spin default 100000 min 0 max 100000");
         println!("usiok");
     }
 
@@ -207,6 +209,31 @@ impl UsiEngine {
                         let mut opts = search.time_options();
                         opts.slow_mover = v;
                         search.set_time_options(opts);
+                    }
+                }
+            }
+            "USI_Ponder" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    if let Some(search) = self.search.as_mut() {
+                        let mut opts = search.time_options();
+                        opts.usi_ponder = v;
+                        search.set_time_options(opts);
+                    }
+                }
+            }
+            "Stochastic_Ponder" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    if let Some(search) = self.search.as_mut() {
+                        let mut opts = search.time_options();
+                        opts.stochastic_ponder = v;
+                        search.set_time_options(opts);
+                    }
+                }
+            }
+            "MaxMovesToDraw" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    if let Some(search) = self.search.as_mut() {
+                        search.set_max_moves_to_draw(v);
                     }
                 }
             }
@@ -385,6 +412,12 @@ impl UsiEngine {
                         limits.byoyomi[1] = byoyomi;
                     }
                 }
+                "rtime" => {
+                    idx += 1;
+                    if idx < tokens.len() {
+                        limits.rtime = tokens[idx].parse().unwrap_or(0);
+                    }
+                }
                 "searchmoves" => {
                     // searchmoves <move1> <move2> ...
                     idx += 1;
@@ -402,6 +435,7 @@ impl UsiEngine {
                                 | "binc"
                                 | "winc"
                                 | "byoyomi"
+                                | "rtime"
                         ) {
                             idx -= 1; // 巻き戻して次のループで処理
                             break;

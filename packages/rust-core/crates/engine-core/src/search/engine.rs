@@ -11,7 +11,10 @@ use crate::tt::TranspositionTable;
 use crate::types::{Depth, Move, Value};
 
 use super::alpha_beta::init_reductions;
-use super::time_manager::{calculate_falling_eval, calculate_time_reduction};
+use super::time_manager::{
+    calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
+    DEFAULT_MAX_MOVES_TO_DRAW,
+};
 use super::{LimitsType, SearchWorker, TimeManagement};
 
 // =============================================================================
@@ -115,6 +118,9 @@ pub struct Search {
     last_best_move_depth: Depth,
     /// totBestMoveChanges（世代減衰込み）
     tot_best_move_changes: f64,
+
+    /// 引き分けまでの最大手数（YaneuraOu準拠のエンジンオプション）
+    max_moves_to_draw: i32,
 }
 
 /// ワーカーから集約する軽量サマリ（並列探索を見据えて追加）
@@ -214,6 +220,7 @@ impl Search {
             iter_idx: 0,
             last_best_move_depth: 0,
             tot_best_move_changes: 0.0,
+            max_moves_to_draw: DEFAULT_MAX_MOVES_TO_DRAW,
         }
     }
 
@@ -261,6 +268,16 @@ impl Search {
         self.time_options
     }
 
+    /// 引き分けまでの最大手数を設定
+    pub fn set_max_moves_to_draw(&mut self, v: i32) {
+        self.max_moves_to_draw = if v > 0 { v } else { DEFAULT_MAX_MOVES_TO_DRAW };
+    }
+
+    /// 引き分けまでの最大手数を取得
+    pub fn max_moves_to_draw(&self) -> i32 {
+        self.max_moves_to_draw
+    }
+
     /// 探索を実行
     ///
     /// # Arguments
@@ -292,9 +309,9 @@ impl Search {
         let mut time_manager =
             TimeManagement::new(Arc::clone(&self.stop), Arc::clone(&self.ponderhit_flag));
         time_manager.set_options(&self.time_options);
-        // ply（現在の手数）は局面から取得、max_moves_to_drawはデフォルトで256とする
+        // ply（現在の手数）は局面から取得、max_moves_to_drawはYaneuraOu準拠のデフォルトを使う
         let ply = pos.game_ply();
-        time_manager.init(&limits, pos.side_to_move(), ply, 256);
+        time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
 
         // 探索ワーカーを作成（ttの借用期間を限定するためArcをクローン）
         let tt_owned = Arc::clone(&self.tt);
@@ -378,8 +395,8 @@ impl Search {
 
             // YaneuraOu準拠: 詰みを読みきった場合の早期終了
             // 詰みまでの手数の2.5倍以上の深さを探索したら終了
-            // 注: MultiPVが実装されていないため、常に適用
-            if depth > 1 && !worker.root_moves.is_empty() {
+            // MultiPV=1の時のみ適用（MultiPV>1では全候補を探索する必要がある）
+            if worker.limits.multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                 let best_value = worker.root_moves[0].score;
 
                 // 勝ちを読みきっている場合
@@ -480,33 +497,46 @@ impl Search {
                 let tot_best_move_changes = self.tot_best_move_changes / 2.0 + changes_sum;
                 let (falling_eval, time_reduction, tot_changes, threads) =
                     self.compute_time_factors(worker, tot_best_move_changes, thread_count);
-                worker.time_manager.apply_time_multipliers(
+                let total_time = worker.time_manager.total_time_for_iteration(
                     falling_eval,
                     time_reduction,
                     tot_changes,
                     threads,
                 );
 
+                // 実測 effort を正規化
+                let nodes_effort =
+                    normalize_nodes_effort(worker.root_moves[0].effort, worker.nodes);
+                worker.time_manager.apply_iteration_timing(
+                    worker.time_manager.elapsed(),
+                    total_time,
+                    nodes_effort,
+                    worker.limits.ponder,
+                    worker.completed_depth,
+                );
+
                 // best_move_changes は集約後リセット
                 worker.best_move_changes = 0.0;
 
                 // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
-                // 注: MultiPVが実装されていないため、常に適用
-                let best_value = worker.root_moves[0].score;
+                // MultiPV=1の時のみ適用
+                if worker.limits.multi_pv == 1 {
+                    let best_value = worker.root_moves[0].score;
 
-                // 勝ちを読みきっている場合
-                if best_value.is_win() {
-                    let mate_ply = best_value.mate_ply();
-                    if (mate_ply + 2) * 5 / 2 < depth {
-                        break;
+                    // 勝ちを読みきっている場合
+                    if best_value.is_win() {
+                        let mate_ply = best_value.mate_ply();
+                        if (mate_ply + 2) * 5 / 2 < depth {
+                            break;
+                        }
                     }
-                }
 
-                // 詰まされる形の場合
-                if best_value.is_loss() {
-                    let mate_ply = best_value.mate_ply();
-                    if (mate_ply + 2) * 5 / 2 < depth {
-                        break;
+                    // 詰まされる形の場合
+                    if best_value.is_loss() {
+                        let mate_ply = best_value.mate_ply();
+                        if (mate_ply + 2) * 5 / 2 < depth {
+                            break;
+                        }
                     }
                 }
             }
@@ -570,6 +600,16 @@ mod tests {
         assert_eq!(search.iter_idx, 0);
         assert_eq!(search.last_best_move_depth, 0);
         assert_eq!(search.tot_best_move_changes, 0.0);
+    }
+
+    #[test]
+    fn test_set_max_moves_to_draw_option() {
+        let mut search = Search::new(16);
+        search.set_max_moves_to_draw(512);
+        assert_eq!(search.max_moves_to_draw(), 512);
+
+        search.set_max_moves_to_draw(0);
+        assert_eq!(search.max_moves_to_draw(), DEFAULT_MAX_MOVES_TO_DRAW);
     }
 
     #[test]

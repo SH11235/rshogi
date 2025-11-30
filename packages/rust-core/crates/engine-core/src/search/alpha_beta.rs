@@ -253,6 +253,11 @@ impl<'a> SearchWorker<'a> {
                 break;
             }
 
+            // イテレーション開始時にeffortをリセット
+            for rm in self.root_moves.iter_mut() {
+                rm.effort = 0.0;
+            }
+
             self.root_depth = d;
             self.sel_depth = 0;
 
@@ -325,6 +330,8 @@ impl<'a> SearchWorker<'a> {
             let mv = self.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
 
+            let nodes_before = self.nodes;
+
             // 探索
             pos.do_move(mv, gives_check);
             self.nodes += 1;
@@ -357,6 +364,10 @@ impl<'a> SearchWorker<'a> {
             };
 
             pos.undo_move(mv);
+
+            // この手に費やしたノード数をeffortに積算
+            let nodes_delta = self.nodes.saturating_sub(nodes_before);
+            self.root_moves[rm_idx].effort += nodes_delta as f64;
 
             if self.abort {
                 return Value::ZERO;
