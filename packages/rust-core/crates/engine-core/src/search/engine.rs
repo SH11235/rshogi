@@ -145,6 +145,8 @@ pub struct Search {
     last_best_move: Move,
     /// totBestMoveChanges（世代減衰込み）
     tot_best_move_changes: f64,
+    /// 直前の timeReduction（YO準拠で次手に持ち回る）
+    previous_time_reduction: f64,
     /// 直前の手数（手番反転の検出用）
     last_game_ply: Option<i32>,
 
@@ -184,16 +186,25 @@ impl Search {
         if let Some(last_ply) = self.last_game_ply {
             if (last_ply - ply).abs() & 1 == 1 {
                 if let Some(prev_score) = self.best_previous_score {
-                    self.best_previous_score = Some(Value::new(-prev_score.raw()));
+                    if prev_score != Value::INFINITE {
+                        self.best_previous_score = Some(Value::new(-prev_score.raw()));
+                    }
                 }
                 if let Some(prev_avg) = self.best_previous_average_score {
-                    self.best_previous_average_score = Some(Value::new(-prev_avg.raw()));
+                    if prev_avg != Value::INFINITE {
+                        self.best_previous_average_score = Some(Value::new(-prev_avg.raw()));
+                    }
                 }
             }
         }
 
-        let seed = self.best_previous_score.unwrap_or(Value::ZERO);
-        self.iter_value = [seed; 4];
+        // best_previous_score が番兵(INFINITE)のときは 0 初期化（YO準拠）
+        if self.best_previous_score == Some(Value::INFINITE) {
+            self.iter_value = [Value::ZERO; 4];
+        } else {
+            let seed = self.best_previous_score.unwrap_or(Value::ZERO);
+            self.iter_value = [seed; 4];
+        }
         self.iter_idx = 0;
         self.last_best_move_depth = 0;
         self.last_best_move = Move::NONE;
@@ -217,12 +228,9 @@ impl Search {
         };
 
         // fallingEval
-        let falling_eval = if let Some(prev_avg) = self.best_previous_average_score {
-            let iter_val = self.iter_value[self.iter_idx];
-            calculate_falling_eval(prev_avg.raw(), iter_val.raw(), best_value.raw())
-        } else {
-            1.0
-        };
+        let prev_avg_raw = self.best_previous_average_score.unwrap_or(Value::INFINITE).raw();
+        let iter_val = self.iter_value[self.iter_idx];
+        let falling_eval = calculate_falling_eval(prev_avg_raw, iter_val.raw(), best_value.raw());
 
         // timeReduction
         let time_reduction =
@@ -252,13 +260,14 @@ impl Search {
             start_time: None,
             time_options: super::TimeOptions::default(),
             skill_options: SkillOptions::default(),
-            best_previous_score: None,
-            best_previous_average_score: None,
+            best_previous_score: Some(Value::INFINITE),
+            best_previous_average_score: Some(Value::INFINITE),
             iter_value: [Value::ZERO; 4],
             iter_idx: 0,
             last_best_move_depth: 0,
             last_best_move: Move::NONE,
             tot_best_move_changes: 0.0,
+            previous_time_reduction: 0.85,
             last_game_ply: None,
             max_moves_to_draw: DEFAULT_MAX_MOVES_TO_DRAW,
         }
@@ -360,6 +369,7 @@ impl Search {
         let mut time_manager =
             TimeManagement::new(Arc::clone(&self.stop), Arc::clone(&self.ponderhit_flag));
         time_manager.set_options(&self.time_options);
+        time_manager.set_previous_time_reduction(self.previous_time_reduction);
         // ply（現在の手数）は局面から取得、max_moves_to_drawはYaneuraOu準拠のデフォルトを使う
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
 
@@ -413,33 +423,44 @@ impl Search {
             })
             .unwrap_or(Move::NONE);
 
+        let best_previous_score = worker.root_moves.get(0).map(|rm| rm.score);
+        let best_previous_average_score = worker.root_moves.get(0).map(|rm| {
+            if rm.average_score.raw() == -Value::INFINITE.raw() {
+                rm.score
+            } else {
+                rm.average_score
+            }
+        });
+
+        let completed_depth = worker.completed_depth;
+        let nodes = worker.nodes;
+        let score = if worker.root_moves.is_empty() {
+            Value::ZERO
+        } else {
+            worker
+                .root_moves
+                .iter()
+                .find(|rm| rm.mv() == best_move)
+                .map(|rm| rm.score)
+                .unwrap_or(worker.root_moves[0].score)
+        };
+
+        drop(worker);
+
+        // 次の手番のために timeReduction を持ち回る
+        self.previous_time_reduction = time_manager.previous_time_reduction();
+
         // 次回のfallingEval計算のために平均スコアを保存
-        if let Some(best_rm) = worker.root_moves.get(0) {
-            self.best_previous_score = Some(best_rm.score);
-            self.best_previous_average_score =
-                Some(if best_rm.average_score.raw() == -Value::INFINITE.raw() {
-                    best_rm.score
-                } else {
-                    best_rm.average_score
-                });
-        }
+        self.best_previous_score = best_previous_score;
+        self.best_previous_average_score = best_previous_average_score;
         self.last_game_ply = Some(ply);
 
         SearchResult {
             best_move,
             ponder_move,
-            score: if worker.root_moves.is_empty() {
-                Value::ZERO
-            } else {
-                worker
-                    .root_moves
-                    .iter()
-                    .find(|rm| rm.mv() == best_move)
-                    .map(|rm| rm.score)
-                    .unwrap_or(worker.root_moves[0].score)
-            },
-            depth: worker.completed_depth,
-            nodes: worker.nodes,
+            score,
+            depth: completed_depth,
+            nodes,
         }
     }
 
@@ -474,6 +495,11 @@ impl Search {
             effective_multi_pv = effective_multi_pv.max(4);
         }
         effective_multi_pv = effective_multi_pv.min(worker.root_moves.len());
+
+        // 中断時にPVを巻き戻すための保持
+        let mut last_best_pv = vec![Move::NONE];
+        let mut last_best_score = Value::new(-Value::INFINITE.raw());
+        let mut last_best_move_depth = 0;
 
         // 反復深化
         for depth in 1..=max_depth {
@@ -528,13 +554,15 @@ impl Search {
                 // Aspiration Window（average/mean_squaredベース）
                 let (mut alpha, mut beta, mut delta) =
                     compute_aspiration_window(&worker.root_moves[pv_idx]);
+                let mut failed_high_cnt = 0;
 
                 // Aspiration Windowループ
                 loop {
+                    let adjusted_depth = (depth - failed_high_cnt).max(1);
                     // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
                     // pv_idx>0の場合のみsearch_root_for_pvを使用
                     let score = if pv_idx == 0 {
-                        worker.search_root(pos, depth, alpha, beta)
+                        worker.search_root(pos, adjusted_depth, alpha, beta)
                     } else {
                         worker.search_root_for_pv(pos, depth, alpha, beta, pv_idx)
                     };
@@ -545,10 +573,17 @@ impl Search {
 
                     // Window調整
                     if score <= alpha {
-                        beta = Value::new((alpha.raw() + beta.raw()) / 2);
-                        alpha = Value::new(score.raw().saturating_sub(delta.raw()).max(-32001));
+                        beta = alpha;
+                        alpha = Value::new(
+                            score.raw().saturating_sub(delta.raw()).max(-Value::INFINITE.raw()),
+                        );
+                        failed_high_cnt = 0;
+                        worker.time_manager.reset_stop_on_ponderhit();
                     } else if score >= beta {
-                        beta = Value::new(score.raw().saturating_add(delta.raw()).min(32001));
+                        beta = Value::new(
+                            score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
+                        );
+                        failed_high_cnt += 1;
                     } else {
                         break;
                     }
@@ -645,6 +680,15 @@ impl Search {
                 // best_move_changes は集約後リセット
                 worker.best_move_changes = 0.0;
 
+                // PVが変わったときのみ last_best_* を更新（YO準拠）
+                if !worker.root_moves[0].pv.is_empty()
+                    && worker.root_moves[0].pv[0] != last_best_pv[0]
+                {
+                    last_best_pv = worker.root_moves[0].pv.clone();
+                    last_best_score = worker.root_moves[0].score;
+                    last_best_move_depth = depth;
+                }
+
                 // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
                 // MultiPV=1の時のみ適用
                 if effective_multi_pv == 1 {
@@ -665,6 +709,19 @@ impl Search {
                             break;
                         }
                     }
+                }
+            }
+        }
+
+        // 中断した探索で信頼できないPVになった場合のフォールバック（YO準拠）
+        if worker.abort && !worker.root_moves.is_empty() && worker.root_moves[0].score.is_loss() {
+            let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
+            if head != Move::NONE {
+                if let Some(idx) = worker.root_moves.find(head) {
+                    worker.root_moves.move_to_front(idx);
+                    worker.root_moves[0].pv = last_best_pv;
+                    worker.root_moves[0].score = last_best_score;
+                    worker.completed_depth = last_best_move_depth;
                 }
             }
         }
@@ -733,6 +790,20 @@ mod tests {
         assert_eq!(search.last_best_move_depth, 0);
         assert_eq!(search.tot_best_move_changes, 0.0);
         assert_eq!(search.last_game_ply, Some(6));
+    }
+
+    #[test]
+    fn test_prepare_time_metrics_seeds_zero_for_infinite() {
+        let mut search = Search::new(16);
+        search.best_previous_score = Some(Value::INFINITE);
+        search.best_previous_average_score = Some(Value::INFINITE);
+
+        search.prepare_time_metrics(1);
+
+        assert_eq!(search.iter_value, [Value::ZERO; 4]);
+        assert_eq!(search.iter_idx, 0);
+        assert_eq!(search.best_previous_score, Some(Value::INFINITE));
+        assert_eq!(search.best_previous_average_score, Some(Value::INFINITE));
     }
 
     #[test]
