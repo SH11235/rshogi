@@ -287,6 +287,7 @@ impl Default for CapturePieceToHistory {
 /// PieceToHistory: [piece][to] -> score
 ///
 /// 駒と移動先でインデックスする履歴。
+#[derive(Clone)]
 pub struct PieceToHistory {
     table: [[StatsEntry<30000>; Square::NUM]; PIECE_NUM],
 }
@@ -336,29 +337,33 @@ impl Default for PieceToHistory {
 /// 連続する2手の組み合わせ履歴。
 /// 1手前の駒と移動先から、現在の駒と移動先へのスコア。
 pub struct ContinuationHistory {
-    table: Box<[[PieceToHistory; Square::NUM]; PIECE_NUM]>,
+    table: Vec<PieceToHistory>,
 }
 
 impl ContinuationHistory {
     /// 新しいContinuationHistoryを作成
     pub fn new() -> Self {
         Self {
-            table: Box::new(std::array::from_fn(|_| {
-                std::array::from_fn(|_| PieceToHistory::new())
-            })),
+            table: vec![PieceToHistory::new(); PIECE_NUM * Square::NUM],
         }
+    }
+
+    #[inline]
+    fn index(prev_pc: Piece, prev_to: Square) -> usize {
+        prev_pc.index() * Square::NUM + prev_to.index()
     }
 
     /// 内部テーブルへの参照を取得
     #[inline]
     pub fn get_table(&self, prev_pc: Piece, prev_to: Square) -> &PieceToHistory {
-        &self.table[prev_pc.index()][prev_to.index()]
+        &self.table[Self::index(prev_pc, prev_to)]
     }
 
     /// 内部テーブルへの可変参照を取得
     #[inline]
     pub fn get_table_mut(&mut self, prev_pc: Piece, prev_to: Square) -> &mut PieceToHistory {
-        &mut self.table[prev_pc.index()][prev_to.index()]
+        let idx = Self::index(prev_pc, prev_to);
+        &mut self.table[idx]
     }
 
     /// 1手前・2手前などの継続手を更新
@@ -370,27 +375,25 @@ impl ContinuationHistory {
         to: Square,
         bonus: i32,
     ) {
-        self.table[prev_pc.index()][prev_to.index()].update(pc, to, bonus);
+        self.get_table_mut(prev_pc, prev_to).update(pc, to, bonus);
     }
 
     /// 値を取得
     #[inline]
     pub fn get(&self, prev_pc: Piece, prev_to: Square, pc: Piece, to: Square) -> i16 {
-        self.table[prev_pc.index()][prev_to.index()].get(pc, to)
+        self.get_table(prev_pc, prev_to).get(pc, to)
     }
 
     /// 値を更新
     #[inline]
     pub fn update(&mut self, prev_pc: Piece, prev_to: Square, pc: Piece, to: Square, bonus: i32) {
-        self.table[prev_pc.index()][prev_to.index()].update(pc, to, bonus);
+        self.get_table_mut(prev_pc, prev_to).update(pc, to, bonus);
     }
 
     /// クリア
     pub fn clear(&mut self) {
-        for pc_table in self.table.iter_mut() {
-            for sq_table in pc_table.iter_mut() {
-                sq_table.clear();
-            }
+        for entry in self.table.iter_mut() {
+            entry.clear();
         }
     }
 }
@@ -409,14 +412,15 @@ impl Default for ContinuationHistory {
 ///
 /// 歩の陣形に対する履歴。
 pub struct PawnHistory {
-    table: Box<[[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]; PAWN_HISTORY_SIZE]>,
+    table: Vec<[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]>,
 }
 
 impl PawnHistory {
     /// 新しいPawnHistoryを作成
     pub fn new() -> Self {
+        let row = [[StatsEntry::default(); Square::NUM]; PIECE_NUM];
         Self {
-            table: Box::new([[[StatsEntry::default(); Square::NUM]; PIECE_NUM]; PAWN_HISTORY_SIZE]),
+            table: vec![row; PAWN_HISTORY_SIZE],
         }
     }
 
