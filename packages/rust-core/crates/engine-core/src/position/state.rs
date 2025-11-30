@@ -1,7 +1,10 @@
 //! 局面状態（StateInfo）
+//!
+//! Zobrist ハッシュや王手情報に加えて、NNUE 差分更新用の Accumulator/DirtyPiece を保持する。
 
 use crate::bitboard::Bitboard;
-use crate::types::{Color, Move, Piece, PieceType, Value};
+use crate::nnue::Accumulator;
+use crate::types::{Color, Move, Piece, PieceType, Square, Value};
 
 /// 局面状態
 ///
@@ -41,6 +44,64 @@ pub struct StateInfo {
     pub material_value: Value,
     /// 直前の指し手
     pub last_move: Move,
+    /// NNUE Accumulator（差分更新用の中間表現）
+    pub accumulator: Box<Accumulator>,
+    /// 差分更新用の駒移動情報
+    pub dirty_piece: DirtyPiece,
+}
+
+/// 差分更新用の駒移動情報
+#[derive(Clone)]
+pub struct DirtyPiece {
+    /// 変化した駒（最大3つ: 動いた駒 + 取られた駒 + 成り後の駒など）
+    pub pieces: Vec<ChangedPiece>,
+    /// 手駒の変化
+    pub hand_changes: Vec<HandChange>,
+    /// 玉が動いたかどうか [Color]
+    pub king_moved: [bool; Color::NUM],
+}
+
+impl Default for DirtyPiece {
+    fn default() -> Self {
+        Self {
+            pieces: Vec::new(),
+            hand_changes: Vec::new(),
+            king_moved: [false; Color::NUM],
+        }
+    }
+}
+
+impl DirtyPiece {
+    /// 情報をクリア
+    pub fn clear(&mut self) {
+        self.pieces.clear();
+        self.hand_changes.clear();
+        self.king_moved = [false; Color::NUM];
+    }
+}
+
+/// 1 駒分の変更情報
+#[derive(Clone, Copy)]
+pub struct ChangedPiece {
+    /// 駒の色
+    pub color: Color,
+    /// 変更前の駒（盤上に無ければ Piece::NONE）
+    pub old_piece: Piece,
+    /// 変更前の位置（盤上に無ければ None）
+    pub old_sq: Option<Square>,
+    /// 変更後の駒（盤上に無ければ Piece::NONE）
+    pub new_piece: Piece,
+    /// 変更後の位置（盤上に無ければ None）
+    pub new_sq: Option<Square>,
+}
+
+/// 手駒の変化情報
+#[derive(Clone, Copy)]
+pub struct HandChange {
+    pub owner: Color,
+    pub piece_type: PieceType,
+    pub old_count: u8,
+    pub new_count: u8,
 }
 
 impl StateInfo {
@@ -62,6 +123,8 @@ impl StateInfo {
             repetition: 0,
             material_value: Value::ZERO,
             last_move: Move::NONE,
+            accumulator: Box::new(Accumulator::new()),
+            dirty_piece: DirtyPiece::default(),
         }
     }
 
@@ -90,6 +153,8 @@ impl StateInfo {
             repetition: 0,
             material_value: self.material_value,
             last_move: Move::NONE,
+            accumulator: Box::new(Accumulator::new()),
+            dirty_piece: DirtyPiece::default(),
         }
     }
 }
