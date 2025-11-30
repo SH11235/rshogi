@@ -19,25 +19,25 @@ fn create_time_manager() -> TimeManagement {
 // best_move_instability テスト
 // =============================================================================
 
-/// 不安定性係数計算: totBestMoveChanges = 0 → instability ≈ 0.9929
+/// 不安定性係数計算: totBestMoveChanges = 0 → instability ≈ 1.04
 #[test]
 fn test_best_move_instability_zero_changes() {
     use super::super::time_manager::calculate_best_move_instability;
 
     let result = calculate_best_move_instability(0.0, 1);
     assert!(
-        (result - 0.9929).abs() < 0.001,
-        "totBestMoveChanges=0の場合、instability≈0.9929であるべき。got={result}"
+        (result - 1.04).abs() < 0.001,
+        "totBestMoveChanges=0の場合、instability≈1.04であるべき。got={result}"
     );
 }
 
-/// 不安定性係数計算: totBestMoveChanges = 0.5 → instability ≈ 1.9189
+/// 不安定性係数計算: totBestMoveChanges = 0.5 → instability ≈ 1.9878
 #[test]
 fn test_best_move_instability_half_change() {
     use super::super::time_manager::calculate_best_move_instability;
 
     let result = calculate_best_move_instability(0.5, 1);
-    let expected = 0.9929 + 1.8519 * 0.5; // = 1.91885
+    let expected = 1.04 + 1.8956 * 0.5; // = 1.9878
     assert!(
         (result - expected).abs() < 0.001,
         "totBestMoveChanges=0.5の場合、instability≈{expected}であるべき。got={result}"
@@ -50,7 +50,7 @@ fn test_best_move_instability_no_clamp_upper() {
     use super::super::time_manager::calculate_best_move_instability;
 
     let result = calculate_best_move_instability(10.0, 1);
-    let expected = 0.9929 + 1.8519 * 10.0; // = 19.5119
+    let expected = 1.04 + 1.8956 * 10.0; // = 19.996
     assert!(
         (result - expected).abs() < 0.001,
         "totBestMoveChanges=10の場合、クランプなしでinstability≈{expected}であるべき。got={result}"
@@ -64,7 +64,7 @@ fn test_best_move_instability_thread_normalization() {
 
     // 4スレッドで changes=2 の場合
     let result = calculate_best_move_instability(2.0, 4);
-    let expected = 0.9929 + 1.8519 * 2.0 / 4.0; // = 0.9929 + 0.92595 = 1.91885
+    let expected = 1.04 + 1.8956 * 2.0 / 4.0; // = 1.04 + 0.9478 = 1.9878
     assert!(
         (result - expected).abs() < 0.001,
         "スレッド数で正規化されるべき。expected={expected}, got={result}"
