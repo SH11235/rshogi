@@ -566,6 +566,9 @@ impl<'a> SearchWorker<'a> {
             if !pos.pseudo_legal(mv) {
                 continue;
             }
+            if !pos.is_legal(mv) {
+                continue;
+            }
             if self.check_abort() {
                 return Value::ZERO;
             }
@@ -1069,6 +1072,11 @@ impl<'a> SearchWorker<'a> {
         }
 
         for mv in ordered_moves {
+            // 合法性チェック（pseudo_legalは通っているはずだが、is_legalも確認）
+            if !pos.is_legal(mv) {
+                continue;
+            }
+
             // 王手中でなければ捕獲手のみ
             if !in_check && !pos.is_capture(mv) {
                 continue;
@@ -1083,23 +1091,25 @@ impl<'a> SearchWorker<'a> {
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
 
+            // ContHistKey用の情報をdo_move前に取得
+            // YaneuraOu方式: moved_piece_after()はMove自体に格納された情報を使うが、
+            // Rust実装ではPositionから取得するためdo_move前に呼ぶ必要がある
+            let moved_piece = pos.moved_piece(mv);
+            let cont_hist_pc = if mv.is_promotion() {
+                moved_piece.promote().unwrap_or(moved_piece)
+            } else {
+                moved_piece
+            };
+            let cont_hist_to = mv.to();
+
             pos.do_move(mv, gives_check);
             self.nodes += 1;
 
             // YaneuraOu方式: do_move後にContHistKeyを設定（静止探索でも必要）
             // これにより次のqsearch呼び出しでbuild_cont_tablesが直前手を参照できる
-            {
-                let cont_hist_piece = pos.moved_piece(mv);
-                let cont_hist_to = mv.to();
-                let cont_hist_pc = if mv.is_promotion() {
-                    cont_hist_piece.promote().unwrap_or(cont_hist_piece)
-                } else {
-                    cont_hist_piece
-                };
-                // in_checkは親ノード（現在のノード）の王手状態を使用
-                self.stack[ply as usize].cont_hist_key =
-                    Some(ContHistKey::new(in_check, is_capture, cont_hist_pc, cont_hist_to));
-            }
+            // in_checkは親ノード（現在のノード）の王手状態を使用
+            self.stack[ply as usize].cont_hist_key =
+                Some(ContHistKey::new(in_check, is_capture, cont_hist_pc, cont_hist_to));
 
             let value = -self.qsearch::<NT>(pos, -beta, -alpha, ply + 1);
 

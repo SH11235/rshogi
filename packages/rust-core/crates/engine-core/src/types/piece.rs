@@ -118,6 +118,12 @@ impl Piece {
     pub const fn raw(self) -> u8 {
         self.0
     }
+
+    /// 内部値からPieceを生成
+    #[inline]
+    pub const fn from_raw(value: u8) -> Piece {
+        Piece(value)
+    }
 }
 
 impl Default for Piece {
