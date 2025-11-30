@@ -29,6 +29,10 @@ struct UsiEngine {
     position: Position,
     /// 置換表サイズ（USI_Hashで変更）
     tt_size_mb: usize,
+    /// MultiPV値
+    multi_pv: usize,
+    /// Skill Level オプション
+    skill_options: engine_core::search::SkillOptions,
     /// 探索スレッドのハンドル
     search_thread: Option<thread::JoinHandle<(Search, SearchResult)>>,
     /// 探索停止用のフラグ（探索スレッドと共有）
@@ -49,6 +53,8 @@ impl UsiEngine {
             search: Some(Search::new(tt_size_mb)), // デフォルト256MB
             position: Position::new(),
             tt_size_mb,
+            multi_pv: 1,
+            skill_options: engine_core::search::SkillOptions::default(),
             search_thread: None,
             stop_flag: None,
             ponderhit_flag: None,
@@ -115,11 +121,15 @@ impl UsiEngine {
         println!("option name USI_Hash type spin default 256 min 1 max 4096");
         println!("option name USI_Ponder type check default false");
         println!("option name Stochastic_Ponder type check default false");
+        println!("option name MultiPV type spin default 1 min 1 max 500");
         println!("option name NetworkDelay type spin default 120 min 0 max 10000");
         println!("option name NetworkDelay2 type spin default 1120 min 0 max 10000");
         println!("option name MinimumThinkingTime type spin default 2000 min 1000 max 100000");
         println!("option name SlowMover type spin default 100 min 1 max 1000");
         println!("option name MaxMovesToDraw type spin default 100000 min 0 max 100000");
+        println!("option name Skill Level type spin default 20 min 0 max 20");
+        println!("option name UCI_LimitStrength type check default false");
+        println!("option name UCI_Elo type spin default 0 min 0 max 4000");
         println!("usiok");
     }
 
@@ -230,11 +240,46 @@ impl UsiEngine {
                     }
                 }
             }
+            "Skill Level" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    if let Some(search) = self.search.as_mut() {
+                        let mut opts = self.skill_options;
+                        opts.skill_level = v.clamp(0, 20);
+                        self.skill_options = opts;
+                        search.set_skill_options(opts);
+                    }
+                }
+            }
+            "UCI_LimitStrength" => {
+                if let Ok(v) = value.parse::<bool>() {
+                    if let Some(search) = self.search.as_mut() {
+                        let mut opts = self.skill_options;
+                        opts.uci_limit_strength = v;
+                        self.skill_options = opts;
+                        search.set_skill_options(opts);
+                    }
+                }
+            }
+            "UCI_Elo" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    if let Some(search) = self.search.as_mut() {
+                        let mut opts = self.skill_options;
+                        opts.uci_elo = v;
+                        self.skill_options = opts;
+                        search.set_skill_options(opts);
+                    }
+                }
+            }
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>() {
                     if let Some(search) = self.search.as_mut() {
                         search.set_max_moves_to_draw(v);
                     }
+                }
+            }
+            "MultiPV" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    self.multi_pv = v;
                 }
             }
             _ => {
@@ -312,6 +357,7 @@ impl UsiEngine {
         }
 
         let mut search = self.search.take().unwrap_or_else(|| Search::new(self.tt_size_mb));
+        search.set_skill_options(self.skill_options);
         let stop_flag = search.stop_flag();
         let ponderhit_flag = search.ponderhit_flag();
         self.stop_flag = Some(stop_flag.clone());
@@ -451,6 +497,9 @@ impl UsiEngine {
             idx += 1;
         }
 
+        // MultiPVを設定
+        limits.multi_pv = self.multi_pv;
+
         limits
     }
 
@@ -478,7 +527,9 @@ impl UsiEngine {
                 }
                 Err(_) => {
                     eprintln!("info string search thread panicked, resetting Search");
-                    self.search = Some(Search::new(self.tt_size_mb));
+                    let mut search = Search::new(self.tt_size_mb);
+                    search.set_skill_options(self.skill_options);
+                    self.search = Some(search);
                 }
             }
         }

@@ -83,6 +83,11 @@ impl Bitboard {
     /// 最下位ビットのSquareを取得して消す
     #[inline]
     pub fn pop(&mut self) -> Square {
+        if self.is_empty() {
+            debug_assert!(!self.is_empty(), "pop() called on empty Bitboard");
+            return Square::SQ_11;
+        }
+
         if self.p[0] != 0 {
             let idx = self.p[0].trailing_zeros();
             self.p[0] &= self.p[0] - 1;

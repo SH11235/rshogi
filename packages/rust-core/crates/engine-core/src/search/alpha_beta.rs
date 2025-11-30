@@ -496,7 +496,8 @@ impl<'a> SearchWorker<'a> {
 
                 if value > alpha {
                     // best_move_changesのカウント（2番目以降の手で更新された場合）
-                    if rm_idx > pv_idx {
+                    // MultiPVでは pv_idx == 0（第1PVライン）のみカウントする
+                    if pv_idx == 0 && rm_idx > pv_idx {
                         self.best_move_changes += 1.0;
                     }
 

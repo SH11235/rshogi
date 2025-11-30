@@ -15,7 +15,7 @@ use super::time_manager::{
     calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
-use super::{LimitsType, SearchWorker, TimeManagement};
+use super::{LimitsType, SearchWorker, Skill, SkillOptions, TimeManagement};
 
 // =============================================================================
 // SearchInfo - 探索情報（USI info出力用）
@@ -48,15 +48,15 @@ impl SearchInfo {
     /// USI形式のinfo文字列を生成
     pub fn to_usi_string(&self) -> String {
         let mut s = format!(
-            "info depth {} seldepth {} multipv {} score cp {} nodes {} time {} nps {} hashfull {}",
-            self.depth,
-            self.sel_depth,
-            self.multi_pv,
-            self.score.raw(),
-            self.nodes,
-            self.time_ms,
-            self.nps,
-            self.hashfull
+            "info depth {depth} seldepth {sel_depth} multipv {multi_pv} score cp {score} nodes {nodes} time {time_ms} nps {nps} hashfull {hashfull}",
+            depth = self.depth,
+            sel_depth = self.sel_depth,
+            multi_pv = self.multi_pv,
+            score = self.score.raw(),
+            nodes = self.nodes,
+            time_ms = self.time_ms,
+            nps = self.nps,
+            hashfull = self.hashfull
         );
 
         if !self.pv.is_empty() {
@@ -110,6 +110,8 @@ pub struct Search {
     start_time: Option<Instant>,
     /// 時間オプション
     time_options: super::TimeOptions,
+    /// Skill Level オプション
+    skill_options: SkillOptions,
 
     /// 直前イテレーションの平均スコア（YaneuraOu準拠）
     best_previous_average_score: Option<Value>,
@@ -230,6 +232,7 @@ impl Search {
             ponderhit_flag: Arc::new(AtomicBool::new(false)),
             start_time: None,
             time_options: super::TimeOptions::default(),
+            skill_options: SkillOptions::default(),
             best_previous_average_score: None,
             iter_value: [Value::ZERO; 4],
             iter_idx: 0,
@@ -282,6 +285,16 @@ impl Search {
     /// 時間オプションを取得
     pub fn time_options(&self) -> super::TimeOptions {
         self.time_options
+    }
+
+    /// Skillオプションを設定（USI setoptionから呼び出す想定）
+    pub fn set_skill_options(&mut self, opts: SkillOptions) {
+        self.skill_options = opts;
+    }
+
+    /// Skillオプションを取得
+    pub fn skill_options(&self) -> SkillOptions {
+        self.skill_options
     }
 
     /// 引き分けまでの最大手数を設定
@@ -340,24 +353,38 @@ impl Search {
             100 // 十分大きな値
         };
 
+        // SkillLevel設定を構築（手加減）
+        let mut skill = Skill::from_options(&self.skill_options);
+        let skill_enabled = skill.enabled();
+
         // 探索実行（コールバックなしの場合はダミーを渡す）
-        match on_info {
+        let effective_multi_pv = match on_info {
             Some(callback) => {
-                self.search_with_callback(pos, &mut worker, max_depth, callback);
+                self.search_with_callback(pos, &mut worker, max_depth, callback, skill_enabled)
             }
             None => {
                 let mut noop = |_info: &SearchInfo| {};
-                self.search_with_callback(pos, &mut worker, max_depth, &mut noop);
+                self.search_with_callback(pos, &mut worker, max_depth, &mut noop, skill_enabled)
+            }
+        };
+
+        // Skill有効時は pick_best でbestmoveを差し替える
+        if skill_enabled && !worker.root_moves.is_empty() && effective_multi_pv > 0 {
+            let mut rng = rand::rng();
+            let best = skill.pick_best(&worker.root_moves, effective_multi_pv, &mut rng);
+            if best != Move::NONE {
+                worker.best_move = best;
             }
         }
 
         // 結果を収集
         let best_move = worker.best_move;
-        let ponder_move = if !worker.root_moves.is_empty() && worker.root_moves[0].pv.len() > 1 {
-            worker.root_moves[0].pv[1]
-        } else {
-            Move::NONE
-        };
+        let ponder_move = worker
+            .root_moves
+            .iter()
+            .find(|rm| rm.mv() == best_move)
+            .and_then(|rm| if rm.pv.len() > 1 { Some(rm.pv[1]) } else { None })
+            .unwrap_or(Move::NONE);
 
         // 次回のfallingEval計算のために平均スコアを保存
         if let Some(best_rm) = worker.root_moves.get(0) {
@@ -371,7 +398,12 @@ impl Search {
             score: if worker.root_moves.is_empty() {
                 Value::ZERO
             } else {
-                worker.root_moves[0].score
+                worker
+                    .root_moves
+                    .iter()
+                    .find(|rm| rm.mv() == best_move)
+                    .map(|rm| rm.score)
+                    .unwrap_or(worker.root_moves[0].score)
             },
             depth: worker.completed_depth,
             nodes: worker.nodes,
@@ -385,7 +417,9 @@ impl Search {
         worker: &mut SearchWorker,
         max_depth: Depth,
         mut on_info: F,
-    ) where
+        skill_enabled: bool,
+    ) -> usize
+    where
         F: FnMut(&SearchInfo),
     {
         // ルート手を初期化
@@ -393,7 +427,7 @@ impl Search {
 
         if worker.root_moves.is_empty() {
             worker.best_move = Move::NONE;
-            return;
+            return 0;
         }
 
         // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
@@ -402,6 +436,11 @@ impl Search {
         }
 
         let start = self.start_time.unwrap();
+        let mut effective_multi_pv = worker.limits.multi_pv;
+        if skill_enabled {
+            effective_multi_pv = effective_multi_pv.max(4);
+        }
+        effective_multi_pv = effective_multi_pv.min(worker.root_moves.len());
 
         // 反復深化
         for depth in 1..=max_depth {
@@ -418,7 +457,7 @@ impl Search {
             // YaneuraOu準拠: 詰みを読みきった場合の早期終了
             // 詰みまでの手数の2.5倍以上の深さを探索したら終了
             // MultiPV=1の時のみ適用（MultiPV>1では全候補を探索する必要がある）
-            if worker.limits.multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
+            if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                 let best_value = worker.root_moves[0].score;
 
                 // 勝ちを読みきっている場合
@@ -447,8 +486,6 @@ impl Search {
             worker.sel_depth = 0;
 
             // MultiPVループ（YaneuraOu準拠）
-            let effective_multi_pv = worker.limits.multi_pv.min(worker.root_moves.len());
-
             for pv_idx in 0..effective_multi_pv {
                 if worker.abort {
                     break;
@@ -502,6 +539,8 @@ impl Search {
 
                 // 安定ソート [pv_idx..]
                 worker.root_moves.stable_sort_range(pv_idx, worker.root_moves.len());
+                // 📝 YaneuraOu行1477-1483: 探索済みのPVライン全体も安定ソートして順位を保つ
+                worker.root_moves.stable_sort_range(0, pv_idx + 1);
 
                 // 各PVごとにinfo出力
                 let elapsed = start.elapsed();
@@ -532,10 +571,21 @@ impl Search {
                 }
             }
 
+            // 🆕 MultiPVループ完了後の最終ソート（YaneuraOu行1499）
+            if !worker.abort && effective_multi_pv > 1 {
+                worker.root_moves.stable_sort_range(0, effective_multi_pv);
+            }
+
             // Depth完了後の処理
             if !worker.abort {
                 worker.completed_depth = depth;
                 worker.best_move = worker.root_moves[0].mv();
+
+                // 🆕 YaneuraOu準拠: previous_scoreを次のiterationのためにシード
+                // （YaneuraOu行1267-1270: rm.previousScore = rm.score）
+                for rm in worker.root_moves.iter_mut() {
+                    rm.previous_score = rm.score;
+                }
 
                 // 評価変動・timeReduction・最善手不安定性をまとめて適用（YaneuraOu準拠）
                 let summary = WorkerSummary::from(&*worker);
@@ -574,7 +624,7 @@ impl Search {
 
                 // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
                 // MultiPV=1の時のみ適用
-                if worker.limits.multi_pv == 1 {
+                if effective_multi_pv == 1 {
                     let best_value = worker.root_moves[0].score;
 
                     // 勝ちを読みきっている場合
@@ -595,6 +645,8 @@ impl Search {
                 }
             }
         }
+
+        effective_multi_pv
     }
 }
 
