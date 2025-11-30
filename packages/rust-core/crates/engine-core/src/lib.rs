@@ -15,7 +15,6 @@
 //! - `time`: 時間管理
 //!
 
-// Phase 1: 基本型
 pub mod types;
 
 // Phase 2: 盤面表現
