@@ -1,16 +1,21 @@
 //! 指し手（Move）
 
-use super::{PieceType, Square};
+use super::{Piece, PieceType, Square};
 
-/// 指し手（16bit）
+/// 指し手（32bit）
 ///
-/// bit 0-6:  移動先 (to)
-/// bit 7-13: 移動元 (from) / 駒打ちの場合はPieceType
-/// bit 14:   駒打ちフラグ
-/// bit 15:   成りフラグ
+/// 下位16bit（YaneuraOu互換）:
+/// - bit 0-6:  移動先 (to)
+/// - bit 7-13: 移動元 (from) / 駒打ちの場合はPieceType
+/// - bit 14:   駒打ちフラグ
+/// - bit 15:   成りフラグ
+///
+/// 上位16bit:
+/// - bit 16-23: 移動後の駒 (moved_piece_after)
+/// - bit 24-31: 予約（将来拡張用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct Move(u16);
+pub struct Move(u32);
 
 impl Move {
     /// 無効な指し手
@@ -18,26 +23,63 @@ impl Move {
     /// パス（null move）
     pub const NULL: Move = Move(0x0081);
 
-    const TO_MASK: u16 = 0x007F; // bit 0-6
-    const FROM_MASK: u16 = 0x3F80; // bit 7-13
+    // 下位16bitのマスク（YaneuraOu互換）
+    const TO_MASK: u32 = 0x007F; // bit 0-6
+    const FROM_MASK: u32 = 0x3F80; // bit 7-13
     const FROM_SHIFT: u32 = 7;
-    const DROP_FLAG: u16 = 0x4000; // bit 14
-    const PROMOTE_FLAG: u16 = 0x8000; // bit 15
+    const DROP_FLAG: u32 = 0x4000; // bit 14
+    const PROMOTE_FLAG: u32 = 0x8000; // bit 15
+    const LOWER_16BIT_MASK: u32 = 0xFFFF;
 
-    /// 移動の指し手を生成
+    // 上位16bitのマスク
+    const PIECE_SHIFT: u32 = 16;
+
+    /// 移動の指し手を生成（駒情報なし）
     #[inline]
     pub const fn new_move(from: Square, to: Square, promote: bool) -> Move {
-        let mut m = (to.raw() as u16) | ((from.raw() as u16) << Self::FROM_SHIFT);
+        let mut m = (to.raw() as u32) | ((from.raw() as u32) << Self::FROM_SHIFT);
         if promote {
             m |= Self::PROMOTE_FLAG;
         }
         Move(m)
     }
 
-    /// 駒打ちの指し手を生成
+    /// 移動の指し手を生成（駒情報あり）
+    /// moved_piece_after: 移動後の駒（成りの場合は成った後の駒）
+    #[inline]
+    pub const fn new_move_with_piece(
+        from: Square,
+        to: Square,
+        promote: bool,
+        moved_piece_after: Piece,
+    ) -> Move {
+        let mut m = (to.raw() as u32) | ((from.raw() as u32) << Self::FROM_SHIFT);
+        if promote {
+            m |= Self::PROMOTE_FLAG;
+        }
+        m |= (moved_piece_after.raw() as u32) << Self::PIECE_SHIFT;
+        Move(m)
+    }
+
+    /// 駒打ちの指し手を生成（駒情報なし）
     #[inline]
     pub const fn new_drop(piece_type: PieceType, to: Square) -> Move {
-        Move((to.raw() as u16) | ((piece_type as u16) << Self::FROM_SHIFT) | Self::DROP_FLAG)
+        Move((to.raw() as u32) | ((piece_type as u32) << Self::FROM_SHIFT) | Self::DROP_FLAG)
+    }
+
+    /// 駒打ちの指し手を生成（駒情報あり）
+    /// moved_piece_after: 打つ駒（Color付き）
+    #[inline]
+    pub const fn new_drop_with_piece(
+        piece_type: PieceType,
+        to: Square,
+        moved_piece_after: Piece,
+    ) -> Move {
+        let m = (to.raw() as u32)
+            | ((piece_type as u32) << Self::FROM_SHIFT)
+            | Self::DROP_FLAG
+            | ((moved_piece_after.raw() as u32) << Self::PIECE_SHIFT);
+        Move(m)
     }
 
     /// 移動先を取得
@@ -61,6 +103,26 @@ impl Move {
         debug_assert!(self.is_drop());
         // SAFETY: PieceType は 1-7 の範囲（手駒のみ）
         unsafe { std::mem::transmute(((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as u8) }
+    }
+
+    /// 移動後の駒を取得（YaneuraOu互換）
+    /// 成りの場合は成った後の駒、駒打ちの場合は打った駒を返す
+    /// 駒情報が設定されていない場合はPiece::NONEを返す
+    #[inline]
+    pub const fn moved_piece_after(self) -> Piece {
+        Piece::from_raw((self.0 >> Self::PIECE_SHIFT) as u8)
+    }
+
+    /// 駒情報が設定されているかどうか
+    #[inline]
+    pub const fn has_piece_info(self) -> bool {
+        (self.0 >> Self::PIECE_SHIFT) != 0
+    }
+
+    /// 駒情報を設定して新しいMoveを返す
+    #[inline]
+    pub const fn with_piece(self, piece: Piece) -> Move {
+        Move((self.0 & Self::LOWER_16BIT_MASK) | ((piece.raw() as u32) << Self::PIECE_SHIFT))
     }
 
     /// 駒打ちかどうか
@@ -110,43 +172,62 @@ impl Move {
         self.is_promote()
     }
 
-    /// 内部値を取得
+    /// 内部値を取得（下位16bitのみ、YaneuraOu互換）
     #[inline]
     pub const fn raw(self) -> u16 {
+        (self.0 & Self::LOWER_16BIT_MASK) as u16
+    }
+
+    /// 内部値を取得（32bit全体）
+    #[inline]
+    pub const fn raw32(self) -> u32 {
         self.0
     }
 
-    /// u16からMoveを生成
+    /// u16からMoveを生成（駒情報なし）
     #[inline]
     pub const fn from_u16(value: u16) -> Move {
-        Move(value)
+        Move(value as u32)
     }
 
     /// u16からMoveを生成（範囲チェック付き）
     #[inline]
     pub const fn from_u16_checked(value: u16) -> Option<Move> {
-        let to = value & Self::TO_MASK;
-        let from = (value & Self::FROM_MASK) >> Self::FROM_SHIFT;
-        if to >= Square::NUM as u16 {
+        let value32 = value as u32;
+        let to = value32 & Self::TO_MASK;
+        let from = (value32 & Self::FROM_MASK) >> Self::FROM_SHIFT;
+        if to >= Square::NUM as u32 {
             return None;
         }
 
-        if (value & Self::DROP_FLAG) != 0 {
-            let piece = (value & Self::FROM_MASK) >> Self::FROM_SHIFT;
-            if piece == 0 || piece > PieceType::Gold as u16 {
+        if (value32 & Self::DROP_FLAG) != 0 {
+            let piece = (value32 & Self::FROM_MASK) >> Self::FROM_SHIFT;
+            if piece == 0 || piece > PieceType::Gold as u32 {
                 return None;
             }
-        } else if from >= Square::NUM as u16 {
+        } else if from >= Square::NUM as u32 {
             return None;
         }
 
-        Some(Move(value))
+        Some(Move(value32))
     }
 
-    /// u16に変換
+    /// u16に変換（下位16bitのみ）
     #[inline]
     pub const fn to_u16(self) -> u16 {
+        (self.0 & Self::LOWER_16BIT_MASK) as u16
+    }
+
+    /// u32に変換
+    #[inline]
+    pub const fn to_u32(self) -> u32 {
         self.0
+    }
+
+    /// u32からMoveを生成
+    #[inline]
+    pub const fn from_u32(value: u32) -> Move {
+        Move(value)
     }
 
     /// USI形式の文字列に変換
