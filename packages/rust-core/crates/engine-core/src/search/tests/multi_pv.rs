@@ -2,7 +2,7 @@
 //!
 //! YaneuraOu準拠のMultiPV実装の単体テスト
 
-use crate::search::types::RootMove;
+use crate::search::types::{RootMove, RootMoves};
 use crate::types::{Move, Value};
 
 // =============================================================================
@@ -101,6 +101,80 @@ fn test_multi_pv_stable_sort_per_pv() {
     assert_eq!(root_moves[2].pv[0], Move::from_usi("7g7f").unwrap());
 }
 
+/// RootMoves.stable_sort_range()の動作確認
+#[test]
+fn test_stable_sort_range() {
+    // 4つの手を追加（スコアは未ソート状態）
+    let mut rm1 = RootMove::new(Move::from_usi("7g7f").unwrap());
+    rm1.score = Value::new(100);
+    let mut rm2 = RootMove::new(Move::from_usi("2g2f").unwrap());
+    rm2.score = Value::new(200);
+    let mut rm3 = RootMove::new(Move::from_usi("5g5f").unwrap());
+    rm3.score = Value::new(150);
+    let mut rm4 = RootMove::new(Move::from_usi("8h7g").unwrap());
+    rm4.score = Value::new(200); // rm2と同点
+
+    let mut root_moves =
+        RootMoves::from_vec(vec![rm1.clone(), rm2.clone(), rm3.clone(), rm4.clone()]);
+
+    // 範囲[0..4]を安定ソート
+    root_moves.stable_sort_range(0, 4);
+
+    // 期待: スコア降順、同点なら元の順序
+    // [200(rm2), 200(rm4), 150(rm3), 100(rm1)]
+    assert_eq!(root_moves[0].score.raw(), 200);
+    assert_eq!(
+        root_moves[0].pv[0],
+        Move::from_usi("2g2f").unwrap(),
+        "同点の場合、元の順序を保持（rm2が先）"
+    );
+
+    assert_eq!(root_moves[1].score.raw(), 200);
+    assert_eq!(
+        root_moves[1].pv[0],
+        Move::from_usi("8h7g").unwrap(),
+        "同点の場合、元の順序を保持（rm4が後）"
+    );
+
+    assert_eq!(root_moves[2].score.raw(), 150);
+    assert_eq!(root_moves[2].pv[0], Move::from_usi("5g5f").unwrap());
+
+    assert_eq!(root_moves[3].score.raw(), 100);
+    assert_eq!(root_moves[3].pv[0], Move::from_usi("7g7f").unwrap());
+}
+
+/// RootMoves.stable_sort_range()の範囲指定テスト
+#[test]
+fn test_stable_sort_range_partial() {
+    let mut rm1 = RootMove::new(Move::from_usi("7g7f").unwrap());
+    rm1.score = Value::new(100);
+    let mut rm2 = RootMove::new(Move::from_usi("2g2f").unwrap());
+    rm2.score = Value::new(50);
+    let mut rm3 = RootMove::new(Move::from_usi("5g5f").unwrap());
+    rm3.score = Value::new(150);
+    let mut rm4 = RootMove::new(Move::from_usi("8h7g").unwrap());
+    rm4.score = Value::new(75);
+
+    let mut root_moves =
+        RootMoves::from_vec(vec![rm1.clone(), rm2.clone(), rm3.clone(), rm4.clone()]);
+
+    // 範囲[1..4]のみソート（rm1は固定）
+    root_moves.stable_sort_range(1, 4);
+
+    // 期待: [100(rm1-固定), 150(rm3), 75(rm4), 50(rm2)]
+    assert_eq!(root_moves[0].score.raw(), 100);
+    assert_eq!(root_moves[0].pv[0], Move::from_usi("7g7f").unwrap(), "範囲外は変更されない");
+
+    assert_eq!(root_moves[1].score.raw(), 150);
+    assert_eq!(root_moves[1].pv[0], Move::from_usi("5g5f").unwrap());
+
+    assert_eq!(root_moves[2].score.raw(), 75);
+    assert_eq!(root_moves[2].pv[0], Move::from_usi("8h7g").unwrap());
+
+    assert_eq!(root_moves[3].score.raw(), 50);
+    assert_eq!(root_moves[3].pv[0], Move::from_usi("2g2f").unwrap());
+}
+
 // =============================================================================
 // Phase 2.3: 詰み早期終了のMultiPV制限
 // =============================================================================
@@ -152,4 +226,151 @@ fn test_no_early_exit_when_mated() {
 
     // is_win() が false なので終了しない
     assert!(!should_exit, "詰まされる側は早期終了しない");
+}
+
+// =============================================================================
+// Phase 3: 統合テスト（MultiPVループの実動作確認）
+// =============================================================================
+
+/// MultiPV=3で3つのPVライン出力
+#[test]
+fn test_multi_pv_3_integration() {
+    use crate::position::Position;
+    use crate::search::engine::{Search, SearchInfo};
+    use crate::search::LimitsType;
+
+    let mut search = Search::new(16); // 16MB TT
+    let mut pos = Position::new();
+    pos.set_hirate(); // 平手初期局面
+
+    let limits = LimitsType {
+        depth: 1,
+        multi_pv: 3,
+        ..Default::default()
+    };
+
+    let mut infos = Vec::new();
+    search.go(
+        &mut pos,
+        limits,
+        Some(|info: &SearchInfo| {
+            infos.push(info.clone());
+        }),
+    );
+
+    // depth=1で3つのPVラインが出力されるはず
+    let depth1_infos: Vec<_> = infos.iter().filter(|info| info.depth == 1).collect();
+
+    assert!(
+        depth1_infos.len() >= 3,
+        "MultiPV=3なので最低3つのPVライン。実際: {}",
+        depth1_infos.len()
+    );
+
+    // multipv 1, 2, 3が含まれることを確認
+    let multipv_values: Vec<usize> = depth1_infos.iter().map(|info| info.multi_pv).collect();
+
+    assert!(multipv_values.contains(&1), "multipv 1が含まれる。実際: {multipv_values:?}");
+    assert!(multipv_values.contains(&2), "multipv 2が含まれる。実際: {multipv_values:?}");
+    assert!(multipv_values.contains(&3), "multipv 3が含まれる。実際: {multipv_values:?}");
+
+    // 各PVラインが異なる初手を持つことを確認
+    let mut first_moves = std::collections::HashSet::new();
+    for info in &depth1_infos {
+        if !info.pv.is_empty() {
+            first_moves.insert(info.pv[0].to_u32());
+        }
+    }
+
+    assert!(
+        first_moves.len() >= 2,
+        "MultiPV=3なので少なくとも2つ以上の異なる候補手があるはず。実際: {}",
+        first_moves.len()
+    );
+}
+
+/// MultiPV=1でも multipv 1 を出力することを確認
+#[test]
+fn test_multi_pv_1_outputs_multipv_field() {
+    use crate::position::Position;
+    use crate::search::engine::{Search, SearchInfo};
+    use crate::search::LimitsType;
+
+    let mut search = Search::new(16);
+    let mut pos = Position::new();
+    pos.set_hirate();
+
+    let limits = LimitsType {
+        depth: 1,
+        multi_pv: 1,
+        ..Default::default()
+    };
+
+    let mut last_info = None;
+    search.go(
+        &mut pos,
+        limits,
+        Some(|info: &SearchInfo| {
+            if info.depth == 1 {
+                last_info = Some(info.clone());
+            }
+        }),
+    );
+
+    let info = last_info.expect("depth=1のinfo出力があるはず");
+    assert_eq!(info.multi_pv, 1, "MultiPV=1でも multipv 1 を出力");
+
+    // USI文字列にも含まれることを確認
+    let usi_string = info.to_usi_string();
+    assert!(
+        usi_string.contains("multipv 1"),
+        "USI出力に 'multipv 1' が含まれる。実際: {usi_string}"
+    );
+}
+
+/// 合法手数を超えるMultiPV値がクランプされることを確認
+#[test]
+fn test_multi_pv_clamped_to_legal_moves_integration() {
+    use crate::position::Position;
+    use crate::search::engine::{Search, SearchInfo};
+    use crate::search::LimitsType;
+
+    let mut search = Search::new(16);
+    let mut pos = Position::new();
+    pos.set_hirate();
+
+    let limits = LimitsType {
+        depth: 1,
+        multi_pv: 100, // 合法手数（平手初期局面は30手程度）より多い
+        ..Default::default()
+    };
+
+    let mut infos = Vec::new();
+    search.go(
+        &mut pos,
+        limits,
+        Some(|info: &SearchInfo| {
+            if info.depth == 1 {
+                infos.push(info.clone());
+            }
+        }),
+    );
+
+    // 合法手数でクランプされるので、100は出力されない
+    let max_multipv = infos.iter().map(|info| info.multi_pv).max().unwrap_or(0);
+
+    assert!(max_multipv < 100, "合法手数でクランプされる。最大MultiPV: {max_multipv}");
+    assert!(
+        max_multipv >= 10,
+        "平手初期局面なので少なくとも10手以上の合法手がある。実際: {max_multipv}"
+    );
+
+    // 全てのmultipv値が連続していることを確認
+    let mut multipv_values: Vec<usize> = infos.iter().map(|info| info.multi_pv).collect();
+    multipv_values.sort();
+    multipv_values.dedup();
+
+    for i in 0..multipv_values.len() {
+        assert_eq!(multipv_values[i], i + 1, "multipv値が1から連続している");
+    }
 }
