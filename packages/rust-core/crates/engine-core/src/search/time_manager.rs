@@ -13,23 +13,6 @@ use std::time::Instant;
 // ヘルパー関数
 // =============================================================================
 
-/// 秒境界に切り上げ（YaneuraOu準拠）
-///
-/// 1ms → 1000ms, 1001ms → 2000ms のように切り上げ
-///
-/// # Arguments
-/// * `time_ms` - 切り上げ対象の時間（ミリ秒）
-///
-/// # Returns
-/// 秒境界（1000ms単位）に切り上げた時間
-fn round_up(time_ms: TimePoint) -> TimePoint {
-    const SECOND: TimePoint = 1000;
-    if time_ms == 0 {
-        return 0;
-    }
-    ((time_ms + SECOND - 1) / SECOND) * SECOND
-}
-
 // =============================================================================
 // 定数
 // =============================================================================
@@ -138,6 +121,9 @@ pub struct TimeManagement {
     /// SlowMover（百分率）
     slow_mover: i32,
 
+    /// 今回の最大残り時間（NetworkDelay2 減算後）
+    remain_time: TimePoint,
+
     /// 探索停止フラグ（外部から設定される）
     stop: Arc<AtomicBool>,
 
@@ -167,6 +153,7 @@ impl TimeManagement {
             network_delay: DEFAULT_NETWORK_DELAY,
             network_delay2: DEFAULT_NETWORK_DELAY2,
             slow_mover: DEFAULT_SLOW_MOVER,
+            remain_time: TimePoint::MAX / 2,
             stop,
             ponderhit,
             single_move_limit: false,
@@ -197,14 +184,14 @@ impl TimeManagement {
         self.ponderhit.store(false, Ordering::Relaxed);
         self.single_move_limit = false;
         self.previous_time_reduction = 1.0;
-        self.previous_time_reduction = 1.0;
 
         // movetime指定の場合
         if limits.has_movetime() {
             let movetime = limits.movetime;
-            self.optimum_time = (movetime - self.network_delay).max(self.minimum_thinking_time);
-            self.maximum_time = self.optimum_time;
-            self.minimum_time = self.optimum_time;
+            self.remain_time = movetime;
+            self.optimum_time = movetime;
+            self.maximum_time = movetime;
+            self.minimum_time = movetime;
             return;
         }
 
@@ -212,6 +199,7 @@ impl TimeManagement {
         if !limits.use_time_management() {
             self.optimum_time = TimePoint::MAX / 2;
             self.maximum_time = TimePoint::MAX / 2;
+            self.remain_time = TimePoint::MAX / 2;
             self.minimum_time = 0;
             return;
         }
@@ -227,10 +215,12 @@ impl TimeManagement {
             ((DEFAULT_MAX_MOVES_TO_DRAW - ply) / 2).max(1) as TimePoint
         };
 
+        // NetworkDelay2 を考慮した今回の残り時間
+        self.remain_time = (time_left + increment + byoyomi - self.network_delay2).max(100);
+
         // 持ち時間がある場合
         if time_left > 0 {
-            let remain_time = (time_left + increment + byoyomi - self.network_delay2).max(100);
-            self.calculate_time_with_time_left(remain_time, increment, byoyomi, moves_to_go);
+            self.calculate_time_with_time_left(time_left, increment, byoyomi, moves_to_go);
         }
         // 秒読みのみの場合
         else if byoyomi > 0 {
@@ -241,16 +231,26 @@ impl TimeManagement {
             self.optimum_time = 1000; // 1秒
             self.maximum_time = 10000; // 10秒
             self.minimum_time = 100;
+            self.remain_time = TimePoint::MAX / 2;
         }
 
-        // SlowMover（百分率）でスケール
-        self.optimum_time = self.optimum_time * self.slow_mover as i64 / 100;
-        self.maximum_time = self.maximum_time * self.slow_mover as i64 / 100;
+        // SlowMover は YaneuraOu 同様 optimum のみスケールする（秒読みの最終局面は除外）
+        if !self.is_final_push {
+            self.optimum_time = self.optimum_time * self.slow_mover as i64 / 100;
+        }
 
-        // ネットワーク遅延を考慮
-        self.optimum_time = (self.optimum_time - self.network_delay).max(1);
-        self.maximum_time = (self.maximum_time - self.network_delay).max(1);
-        self.minimum_time = self.minimum_time.min(self.optimum_time);
+        // round_up は NetworkDelay・minimum_thinking_time・remain_time を考慮する
+        self.minimum_time = self.round_up(self.minimum_time);
+        self.optimum_time = self.optimum_time.min(self.remain_time).max(1);
+        self.maximum_time = self.round_up(self.maximum_time);
+
+        // 最低限の整合性確保
+        if self.optimum_time < self.minimum_time {
+            self.optimum_time = self.minimum_time;
+        }
+        if self.maximum_time < self.optimum_time {
+            self.maximum_time = self.optimum_time;
+        }
     }
 
     /// 今回の思考時間を決定する（合法手数を考慮）
@@ -334,6 +334,9 @@ impl TimeManagement {
         if self.single_move_limit {
             self.apply_single_move_limit();
         }
+
+        self.optimum_time = self.optimum_time.min(self.remain_time).max(1);
+        self.maximum_time = self.maximum_time.min(self.remain_time).max(self.optimum_time);
     }
 
     /// 持ち時間がある場合の思考時間計算
@@ -344,40 +347,27 @@ impl TimeManagement {
         byoyomi: TimePoint,
         moves_to_go: TimePoint,
     ) {
-        // 基本的な時間配分（YaneuraOu準拠）
-        // optimum = time_left / moves_to_go + increment
-        // maximum = time_left * 0.8 + increment
+        // 最小思考時間（NetworkDelay を事前に差し引くのは YaneuraOu の流儀）
+        self.minimum_time = (self.minimum_thinking_time - self.network_delay).max(1000);
 
-        let base_time = time_left / moves_to_go;
-        let optimum = base_time + increment;
-        let maximum = (time_left * 8 / 10) + increment;
+        // 残り手数全体で1秒ずつは消費する前提（YaneuraOu の remain_estimate に相当）
+        let mut remain_estimate = time_left
+            .saturating_add(increment.saturating_mul(moves_to_go))
+            .saturating_add(byoyomi.saturating_mul(moves_to_go));
+        remain_estimate = remain_estimate.saturating_sub((moves_to_go + 1) * 1000);
 
-        // 秒読みがある場合は少し余裕を持たせる
-        if byoyomi > 0 {
-            self.optimum_time = optimum.min(time_left + byoyomi - self.minimum_thinking_time);
-            self.maximum_time = maximum.min(time_left + byoyomi - self.minimum_thinking_time / 2);
-        } else {
-            self.optimum_time = optimum.min(time_left - self.minimum_thinking_time);
-            self.maximum_time = maximum.min(time_left - self.minimum_thinking_time / 2);
-        }
-        self.minimum_time = self.minimum_thinking_time;
-
-        // 時間が少ない場合の調整
-        if self.optimum_time < self.minimum_time {
-            self.optimum_time = self.minimum_time;
-        }
-        if self.maximum_time < self.optimum_time {
-            self.maximum_time = self.optimum_time;
-        }
+        // YaneuraOu に倣い「最低時間 + 残り時間/手数」で配分する
+        self.optimum_time = self.minimum_time + remain_estimate / moves_to_go;
+        // maximum は5倍を目安に（上限は後段の round_up で remain_time まで絞る）
+        self.maximum_time = self.minimum_time + (remain_estimate * 5 / moves_to_go);
     }
 
     /// 秒読みのみの場合の思考時間計算
     fn calculate_time_byoyomi_only(&mut self, byoyomi: TimePoint) {
-        // 秒読みの場合は秒読み時間をフルに使う
-        // network_delay は init() の最後で一度だけ適用される（二重適用を防ぐ）
+        // 秒読みのみの場合は byoyomi + 残り時間を使い切る（YaneuraOu: byoyomi + time）
         self.optimum_time = byoyomi;
         self.maximum_time = byoyomi;
-        self.minimum_time = self.minimum_thinking_time;
+        self.minimum_time = byoyomi;
         self.is_final_push = true;
     }
 
@@ -540,7 +530,7 @@ impl TimeManagement {
         };
 
         let max_time = std::cmp::max(t1, t2);
-        let rounded = round_up(max_time);
+        let rounded = self.round_up(max_time);
 
         // search_end = round_up(std::max(t1, t2)) + ponderhitTime - startTime;
         self.search_end = rounded.saturating_add(duration_start_to_ponderhit);
@@ -556,11 +546,20 @@ impl TimeManagement {
         self.stop.store(false, Ordering::Relaxed);
     }
 
-    /// 秒単位で切り上げ（ネットワーク遅延を考慮）
+    /// 秒単位で切り上げ（ネットワーク遅延・minimum_thinking_time・remain_timeを考慮）
     pub fn round_up(&self, t: TimePoint) -> TimePoint {
-        let with_delay = t + self.network_delay;
-        // 秒単位で切り上げ
-        ((with_delay + 999) / 1000) * 1000
+        // 1000ms単位に切り上げ
+        let mut rounded = ((t + 999) / 1000) * 1000;
+        // 最小思考時間を下回らない
+        rounded = rounded.max(self.minimum_thinking_time);
+        // NetworkDelay を前倒しで差し引く
+        rounded = rounded.saturating_sub(self.network_delay);
+        // 差し引きで元より小さくなるならもう1秒追加
+        if rounded < t {
+            rounded += 1000;
+        }
+        // remain_time を超えないようにする
+        rounded.min(self.remain_time)
     }
 }
 
@@ -580,16 +579,6 @@ mod tests {
 
     fn create_time_manager() -> TimeManagement {
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
-    }
-
-    #[test]
-    fn test_round_up() {
-        assert_eq!(round_up(0), 0);
-        assert_eq!(round_up(1), 1000);
-        assert_eq!(round_up(999), 1000);
-        assert_eq!(round_up(1000), 1000);
-        assert_eq!(round_up(1001), 2000);
-        assert_eq!(round_up(5234), 6000);
     }
 
     #[test]
@@ -622,7 +611,7 @@ mod tests {
         tm.init(&limits, Color::Black, 0, 256);
 
         assert!(tm.optimum() > 0);
-        assert!(tm.maximum() > tm.optimum());
+        assert!(tm.maximum() >= tm.optimum());
         assert!(tm.maximum() <= 60000);
     }
 
@@ -679,17 +668,17 @@ mod tests {
     fn test_time_manager_round_up() {
         let tm = create_time_manager();
 
-        // 1ms -> 1秒 + ネットワーク遅延
+        // minimum_thinking_time=2000, network_delay=120, remain_timeは十分に大きい
         let result = tm.round_up(1);
-        assert_eq!(result, 1000);
+        assert_eq!(result, 1880);
 
-        // 500ms -> 1秒
+        // 500ms -> minimum_thinking_time に引き上げた上で network_delay を差し引く
         let result = tm.round_up(500);
-        assert_eq!(result, 1000);
+        assert_eq!(result, 1880);
 
-        // 1001ms -> 2秒
+        // 1001ms -> 2秒を切り上げるが minimum_thinking_time が優先
         let result = tm.round_up(1001);
-        assert_eq!(result, 2000);
+        assert_eq!(result, 1880);
     }
 
     #[test]
@@ -712,6 +701,29 @@ mod tests {
             tm.search_end,
             tm.round_up(tm.minimum())
         );
+    }
+
+    #[test]
+    fn test_round_up_uses_remain_time_and_delay() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
+        tm.set_options(&TimeOptions {
+            network_delay: 120,
+            network_delay2: 1120,
+            minimum_thinking_time: 2000,
+            slow_mover: 100,
+        });
+
+        let mut limits = LimitsType::new();
+        limits.byoyomi[Color::Black.index()] = 5000;
+        limits.set_start_time();
+
+        tm.init(&limits, Color::Black, 0, 256);
+
+        // YaneuraOu: remain_time = 5000 - 1120 = 3880
+        assert_eq!(tm.optimum(), 3880);
+        assert_eq!(tm.maximum(), 3880);
+        assert_eq!(tm.minimum(), 3880);
     }
 
     #[test]

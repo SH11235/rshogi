@@ -370,6 +370,12 @@ impl Search {
                 break;
             }
 
+            // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
+            // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
+            if depth > 1 && worker.time_manager.should_stop(depth) {
+                break;
+            }
+
             // ponderhitを検出した場合、時間再計算のみ行い探索は継続
             if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
                 worker.time_manager.on_ponderhit();
