@@ -272,7 +272,7 @@ impl PartialEq for RootMove {
 
 impl Eq for RootMove {}
 
-/// スコアの降順でソート（YaneuraOu準拠: scoreのみで比較）
+/// スコアの降順でソート（YaneuraOu準拠: score優先、同点はprevious_score）
 impl PartialOrd for RootMove {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -282,8 +282,11 @@ impl PartialOrd for RootMove {
 impl Ord for RootMove {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // 降順ソート: スコアが高い方が先
-        // YaneuraOu準拠: スコアのみで比較、previousScore/averageScoreは比較に使わない
-        other.score.raw().cmp(&self.score.raw())
+        // YaneuraOu準拠: スコア同点時はprevious_scoreで比較
+        match other.score.raw().cmp(&self.score.raw()) {
+            std::cmp::Ordering::Equal => other.previous_score.raw().cmp(&self.previous_score.raw()),
+            ord => ord,
+        }
     }
 }
 
@@ -405,21 +408,24 @@ impl RootMoves {
         }
 
         // インデックス付きソート: (元のindex, スコア)でソート
-        let mut indexed: Vec<(usize, Value)> = self.moves[start..end]
+        let mut indexed: Vec<(usize, Value, Value)> = self.moves[start..end]
             .iter()
             .enumerate()
-            .map(|(i, rm)| (start + i, rm.score))
+            .map(|(i, rm)| (start + i, rm.score, rm.previous_score))
             .collect();
 
-        // スコア降順、同点なら元のインデックス昇順（安定性）
+        // スコア降順、同点ならprevious_score降順、それでも同点なら元のインデックス昇順（安定性）
         indexed.sort_by(|a, b| match b.1.cmp(&a.1) {
-            std::cmp::Ordering::Equal => a.0.cmp(&b.0), // 安定性
+            std::cmp::Ordering::Equal => match b.2.cmp(&a.2) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ord => ord,
+            },
             ord => ord,
         });
 
         // ソート結果を適用
         let sorted_moves: Vec<RootMove> =
-            indexed.iter().map(|(idx, _)| self.moves[*idx].clone()).collect();
+            indexed.iter().map(|(idx, _, _)| self.moves[*idx].clone()).collect();
 
         self.moves[start..end].clone_from_slice(&sorted_moves);
     }
@@ -560,14 +566,26 @@ mod tests {
         // rm1(100) vs rm2(50): rm1 が先に来るので rm1 < rm2
         assert!(rm1 < rm2, "高スコアが先（小さい）になるべき");
 
-        // YaneuraOu準拠: 同点時はEqualを返す
+        // YaneuraOu準拠: スコア同点時はprevious_scoreでも比較
         rm1.score = Value::new(100);
         rm2.score = Value::new(100);
         rm1.previous_score = Value::new(80);
         rm2.previous_score = Value::new(90);
 
-        // 同点の場合、cmp()はEqualを返す（previousScore不使用）
-        assert_eq!(rm1.cmp(&rm2), std::cmp::Ordering::Equal, "同スコア時はEqual（YaneuraOu準拠）");
+        // スコア同点時はprevious_scoreで比較（rm2の方が大きいので降順ソートでrm2が先）
+        assert_eq!(
+            rm1.cmp(&rm2),
+            std::cmp::Ordering::Greater,
+            "previous_score: 80 < 90 なので、降順ソートでrm2が先"
+        );
+
+        // スコアもprevious_scoreも同じ場合はEqual
+        rm1.previous_score = Value::new(90);
+        assert_eq!(
+            rm1.cmp(&rm2),
+            std::cmp::Ordering::Equal,
+            "スコアもprevious_scoreも同じ場合はEqual（YaneuraOu準拠）"
+        );
     }
 
     #[test]

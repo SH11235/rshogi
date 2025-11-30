@@ -465,9 +465,11 @@ fn test_maximum_time_30_percent_cap() {
 fn test_ponder_optimum_time_increase() {
     // Ponder無効時
     let mut tm_no_ponder = create_time_manager();
-    let mut opts_no_ponder = TimeOptions::default();
-    opts_no_ponder.usi_ponder = false;
-    opts_no_ponder.stochastic_ponder = false;
+    let opts_no_ponder = TimeOptions {
+        usi_ponder: false,
+        stochastic_ponder: false,
+        ..Default::default()
+    };
     tm_no_ponder.set_options(&opts_no_ponder);
 
     let mut limits = LimitsType::new();
@@ -481,9 +483,11 @@ fn test_ponder_optimum_time_increase() {
 
     // Ponder有効時
     let mut tm_ponder = create_time_manager();
-    let mut opts_ponder = TimeOptions::default();
-    opts_ponder.usi_ponder = true;
-    opts_ponder.stochastic_ponder = false;
+    let opts_ponder = TimeOptions {
+        usi_ponder: true,
+        stochastic_ponder: false,
+        ..Default::default()
+    };
     tm_ponder.set_options(&opts_ponder);
 
     limits.set_start_time(); // 再設定
@@ -499,9 +503,11 @@ fn test_ponder_optimum_time_increase() {
 fn test_stochastic_ponder_no_increase() {
     // Stochastic_Ponder無効時
     let mut tm_normal = create_time_manager();
-    let mut opts_normal = TimeOptions::default();
-    opts_normal.usi_ponder = true;
-    opts_normal.stochastic_ponder = false;
+    let opts_normal = TimeOptions {
+        usi_ponder: true,
+        stochastic_ponder: false,
+        ..Default::default()
+    };
     tm_normal.set_options(&opts_normal);
 
     let mut limits = LimitsType::new();
@@ -512,9 +518,11 @@ fn test_stochastic_ponder_no_increase() {
 
     // Stochastic_Ponder有効時
     let mut tm_stochastic = create_time_manager();
-    let mut opts_stochastic = TimeOptions::default();
-    opts_stochastic.usi_ponder = true;
-    opts_stochastic.stochastic_ponder = true;
+    let opts_stochastic = TimeOptions {
+        usi_ponder: true,
+        stochastic_ponder: true,
+        ..Default::default()
+    };
     tm_stochastic.set_options(&opts_stochastic);
 
     limits.set_start_time();
