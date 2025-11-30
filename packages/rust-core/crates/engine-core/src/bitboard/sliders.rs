@@ -1,37 +1,154 @@
 //! 遠方駒（香、角、飛）の利き計算
 
-use crate::types::{Color, Square};
+use std::array;
+use std::sync::OnceLock;
+
+use crate::types::{Color, File, Rank, Square};
 
 use super::Bitboard;
 
-/// 方向を表す定数
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i8)]
-pub enum Direction {
-    /// 上（段が減る方向）
-    Up = -1,
-    /// 下（段が増える方向）
-    Down = 1,
-    /// 左（筋が増える方向）
-    Left = 9,
-    /// 右（筋が減る方向）
-    Right = -9,
-    /// 左上
-    UpLeft = 8,
-    /// 右上
-    UpRight = -10,
-    /// 左下
-    DownLeft = 10,
-    /// 右下
-    DownRight = -8,
+struct SliderTable {
+    rook_masks: [Vec<Square>; Square::NUM],
+    rook_attacks: [Vec<Bitboard>; Square::NUM],
+    bishop_masks: [Vec<Square>; Square::NUM],
+    bishop_attacks: [Vec<Bitboard>; Square::NUM],
+    lance_forward: [[Bitboard; Square::NUM]; Color::NUM],
 }
 
-impl Direction {
-    /// 方向のオフセット値を取得
-    #[inline]
-    pub const fn offset(self) -> i8 {
-        self as i8
+static SLIDER_ATTACKS: OnceLock<SliderTable> = OnceLock::new();
+
+fn slider_attacks() -> &'static SliderTable {
+    SLIDER_ATTACKS.get_or_init(SliderTable::new)
+}
+
+impl SliderTable {
+    fn new() -> Self {
+        let mut rook_masks: [Vec<Square>; Square::NUM] = array::from_fn(|_| Vec::new());
+        let mut rook_attacks: [Vec<Bitboard>; Square::NUM] = array::from_fn(|_| Vec::new());
+        let mut bishop_masks: [Vec<Square>; Square::NUM] = array::from_fn(|_| Vec::new());
+        let mut bishop_attacks: [Vec<Bitboard>; Square::NUM] = array::from_fn(|_| Vec::new());
+        let mut lance_forward = [[Bitboard::EMPTY; Square::NUM]; Color::NUM];
+
+        for sq in Square::all() {
+            let idx = sq.index();
+
+            let rook_rays = build_rays(sq, &[(0, -1), (0, 1), (1, 0), (-1, 0)]);
+            let rook_mask = flatten_rays(&rook_rays);
+            rook_masks[idx] = rook_mask.clone();
+            rook_attacks[idx] = build_attack_table(&rook_rays, &rook_mask);
+
+            let bishop_rays = build_rays(sq, &[(1, -1), (-1, -1), (1, 1), (-1, 1)]);
+            let bishop_mask = flatten_rays(&bishop_rays);
+            bishop_masks[idx] = bishop_mask.clone();
+            bishop_attacks[idx] = build_attack_table(&bishop_rays, &bishop_mask);
+        }
+
+        for color in [Color::Black, Color::White] {
+            for sq in Square::all() {
+                lance_forward[color.index()][sq.index()] = forward_ray(color, sq);
+            }
+        }
+
+        SliderTable {
+            rook_masks,
+            rook_attacks,
+            bishop_masks,
+            bishop_attacks,
+            lance_forward,
+        }
     }
+}
+
+fn build_rays(sq: Square, dirs: &[(i32, i32)]) -> Vec<Vec<Square>> {
+    dirs.iter().map(|&(df, dr)| ray(sq, df, dr)).collect()
+}
+
+fn ray(sq: Square, df: i32, dr: i32) -> Vec<Square> {
+    let mut squares = Vec::new();
+    let mut file = sq.file() as i32 + df;
+    let mut rank = sq.rank() as i32 + dr;
+    while in_bounds(file, rank) {
+        squares.push(Square::new(
+            File::from_u8(file as u8).unwrap(),
+            Rank::from_u8(rank as u8).unwrap(),
+        ));
+        file += df;
+        rank += dr;
+    }
+    squares
+}
+
+fn flatten_rays(rays: &[Vec<Square>]) -> Vec<Square> {
+    rays.iter().flat_map(|v| v.iter().copied()).collect()
+}
+
+fn build_attack_table(rays: &[Vec<Square>], mask: &[Square]) -> Vec<Bitboard> {
+    debug_assert!(mask.len() < usize::BITS as usize);
+    let table_len = 1usize << mask.len();
+    let mut table = Vec::with_capacity(table_len);
+    for idx in 0..table_len {
+        let occupied = occupancy_from_index(idx, mask);
+        let attacks = attacks_from_rays(rays, occupied);
+        table.push(attacks);
+    }
+    table
+}
+
+fn occupancy_from_index(index: usize, mask: &[Square]) -> Bitboard {
+    let mut bb = Bitboard::EMPTY;
+    for (i, sq) in mask.iter().enumerate() {
+        if (index >> i) & 1 == 1 {
+            bb.set(*sq);
+        }
+    }
+    bb
+}
+
+fn occupancy_to_index(occupied: Bitboard, mask: &[Square]) -> usize {
+    let mut idx = 0usize;
+    for (i, sq) in mask.iter().enumerate() {
+        if occupied.contains(*sq) {
+            idx |= 1usize << i;
+        }
+    }
+    idx
+}
+
+fn attacks_from_rays(rays: &[Vec<Square>], occupied: Bitboard) -> Bitboard {
+    let mut result = Bitboard::EMPTY;
+    for ray in rays {
+        for &target in ray {
+            result.set(target);
+            if occupied.contains(target) {
+                break;
+            }
+        }
+    }
+    result
+}
+
+fn forward_ray(color: Color, sq: Square) -> Bitboard {
+    let dir = if color == Color::Black {
+        (0, -1)
+    } else {
+        (0, 1)
+    };
+    let mut result = Bitboard::EMPTY;
+    let mut file = sq.file() as i32 + dir.0;
+    let mut rank = sq.rank() as i32 + dir.1;
+    while in_bounds(file, rank) {
+        let target =
+            Square::new(File::from_u8(file as u8).unwrap(), Rank::from_u8(rank as u8).unwrap());
+        result.set(target);
+        file += dir.0;
+        rank += dir.1;
+    }
+    result
+}
+
+#[inline]
+fn in_bounds(file: i32, rank: i32) -> bool {
+    (0..=8).contains(&file) && (0..=8).contains(&rank)
 }
 
 /// 香の利きを計算
@@ -42,28 +159,27 @@ impl Direction {
 /// * `occupied` - 盤上の駒があるマスのBitboard
 #[inline]
 pub fn lance_effect(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
-    match color {
-        Color::Black => sliding_effect_single(sq, occupied, Direction::Up),
-        Color::White => sliding_effect_single(sq, occupied, Direction::Down),
-    }
+    let table = slider_attacks();
+    let forward = table.lance_forward[color.index()][sq.index()];
+    rook_effect(sq, occupied) & forward
 }
 
 /// 角の利きを計算
 #[inline]
 pub fn bishop_effect(sq: Square, occupied: Bitboard) -> Bitboard {
-    sliding_effect_single(sq, occupied, Direction::UpLeft)
-        | sliding_effect_single(sq, occupied, Direction::UpRight)
-        | sliding_effect_single(sq, occupied, Direction::DownLeft)
-        | sliding_effect_single(sq, occupied, Direction::DownRight)
+    let table = slider_attacks();
+    let mask = &table.bishop_masks[sq.index()];
+    let idx = occupancy_to_index(occupied, mask);
+    table.bishop_attacks[sq.index()][idx]
 }
 
 /// 飛車の利きを計算
 #[inline]
 pub fn rook_effect(sq: Square, occupied: Bitboard) -> Bitboard {
-    sliding_effect_single(sq, occupied, Direction::Up)
-        | sliding_effect_single(sq, occupied, Direction::Down)
-        | sliding_effect_single(sq, occupied, Direction::Left)
-        | sliding_effect_single(sq, occupied, Direction::Right)
+    let table = slider_attacks();
+    let mask = &table.rook_masks[sq.index()];
+    let idx = occupancy_to_index(occupied, mask);
+    table.rook_attacks[sq.index()][idx]
 }
 
 /// 馬の利きを計算（角の利き + 王の利き）
@@ -76,68 +192,6 @@ pub fn horse_effect(sq: Square, occupied: Bitboard) -> Bitboard {
 #[inline]
 pub fn dragon_effect(sq: Square, occupied: Bitboard) -> Bitboard {
     rook_effect(sq, occupied) | super::king_effect(sq)
-}
-
-/// 単一方向の飛び利きを計算
-fn sliding_effect_single(sq: Square, occupied: Bitboard, dir: Direction) -> Bitboard {
-    let mut result = Bitboard::EMPTY;
-    let offset = dir.offset() as i32;
-    let mut current = sq.index() as i32 + offset;
-
-    // 方向に応じた境界チェック
-    while is_valid_slide(sq.index() as i32, current, dir) {
-        let target_sq = unsafe { Square::from_u8_unchecked(current as u8) };
-        result.set(target_sq);
-
-        // 駒にぶつかったら停止
-        if occupied.contains(target_sq) {
-            break;
-        }
-
-        current += offset;
-    }
-
-    result
-}
-
-/// スライド移動が有効かどうかをチェック
-#[inline]
-fn is_valid_slide(from: i32, to: i32, dir: Direction) -> bool {
-    if !(0..81).contains(&to) {
-        return false;
-    }
-
-    let from_file = from / 9;
-    let from_rank = from % 9;
-    let to_file = to / 9;
-    let to_rank = to % 9;
-
-    match dir {
-        Direction::Up => to_file == from_file && to_rank >= 0,
-        Direction::Down => to_file == from_file && to_rank <= 8,
-        Direction::Left => to_rank == from_rank && to_file <= 8,
-        Direction::Right => to_rank == from_rank && to_file >= 0,
-        Direction::UpLeft => {
-            let file_diff = to_file - from_file;
-            let rank_diff = to_rank - from_rank;
-            file_diff == -rank_diff && file_diff > 0
-        }
-        Direction::UpRight => {
-            let file_diff = to_file - from_file;
-            let rank_diff = to_rank - from_rank;
-            file_diff == rank_diff && file_diff < 0
-        }
-        Direction::DownLeft => {
-            let file_diff = to_file - from_file;
-            let rank_diff = to_rank - from_rank;
-            file_diff == rank_diff && file_diff > 0
-        }
-        Direction::DownRight => {
-            let file_diff = to_file - from_file;
-            let rank_diff = to_rank - from_rank;
-            file_diff == -rank_diff && file_diff < 0
-        }
-    }
 }
 
 /// 2マス間のBitboard（両端を含まない）
@@ -245,7 +299,64 @@ pub fn line_bb(sq1: Square, sq2: Square) -> Bitboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{File, Rank};
+    use crate::types::{Color, File, Rank};
+
+    fn slider_naive(sq: Square, occupied: Bitboard, dirs: &[(i32, i32)]) -> Bitboard {
+        let mut result = Bitboard::EMPTY;
+        let file = sq.file() as i32;
+        let rank = sq.rank() as i32;
+
+        for (df, dr) in dirs {
+            let mut f = file + df;
+            let mut r = rank + dr;
+            while (0..=8).contains(&f) && (0..=8).contains(&r) {
+                let target =
+                    Square::new(File::from_u8(f as u8).unwrap(), Rank::from_u8(r as u8).unwrap());
+                result.set(target);
+                if occupied.contains(target) {
+                    break;
+                }
+                f += df;
+                r += dr;
+            }
+        }
+
+        result
+    }
+
+    fn rook_naive(sq: Square, occupied: Bitboard) -> Bitboard {
+        slider_naive(sq, occupied, &[(0, -1), (0, 1), (1, 0), (-1, 0)])
+    }
+
+    fn bishop_naive(sq: Square, occupied: Bitboard) -> Bitboard {
+        slider_naive(sq, occupied, &[(1, -1), (-1, -1), (1, 1), (-1, 1)])
+    }
+
+    fn lance_naive(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
+        let dir = if color == Color::Black {
+            (0, -1)
+        } else {
+            (0, 1)
+        };
+        slider_naive(sq, occupied, &[dir])
+    }
+
+    fn rand64(state: &mut u64) -> u64 {
+        *state ^= *state << 7;
+        *state ^= *state >> 9;
+        *state ^= *state << 8;
+        *state
+    }
+
+    fn random_bitboard(state: &mut u64) -> Bitboard {
+        let mut bb = Bitboard::EMPTY;
+        for sq in Square::all() {
+            if rand64(state) & 1 == 1 {
+                bb.set(sq);
+            }
+        }
+        bb
+    }
 
     #[test]
     fn test_lance_effect_black() {
@@ -414,5 +525,43 @@ mod tests {
         // 1九から9一への対角線
         assert!(bb.contains(sq55));
         assert!(bb.contains(sq64));
+    }
+
+    #[test]
+    fn test_rook_effect_random_matches_naive() {
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        for _ in 0..32 {
+            let occ = random_bitboard(&mut seed);
+            for sq in Square::all() {
+                let expected = rook_naive(sq, occ);
+                assert_eq!(rook_effect(sq, occ), expected, "sq={:?}", sq);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bishop_effect_random_matches_naive() {
+        let mut seed = 0x0F1E_2D3C_4B5A_6978u64;
+        for _ in 0..32 {
+            let occ = random_bitboard(&mut seed);
+            for sq in Square::all() {
+                let expected = bishop_naive(sq, occ);
+                assert_eq!(bishop_effect(sq, occ), expected, "sq={:?}", sq);
+            }
+        }
+    }
+
+    #[test]
+    fn test_lance_effect_random_matches_naive() {
+        let mut seed = 0x55AA_A55Au64;
+        for _ in 0..32 {
+            let occ = random_bitboard(&mut seed);
+            for sq in Square::all() {
+                let expected_b = lance_naive(Color::Black, sq, occ);
+                let expected_w = lance_naive(Color::White, sq, occ);
+                assert_eq!(lance_effect(Color::Black, sq, occ), expected_b, "sq={:?}", sq);
+                assert_eq!(lance_effect(Color::White, sq, occ), expected_w, "sq={:?}", sq);
+            }
+        }
     }
 }
