@@ -2,6 +2,7 @@
 //!
 //! YaneuraOu準拠のMultiPV実装の単体テスト
 
+use crate::search::engine::compute_aspiration_window;
 use crate::search::types::{RootMove, RootMoves};
 use crate::types::{Move, Value};
 use std::thread;
@@ -449,6 +450,72 @@ fn test_multi_pv_scores_sorted_desc() {
                 second.score.raw()
             );
         }
+    });
+}
+
+/// aspiration window が平均・二乗平均スコアを使うことを確認
+#[test]
+fn test_aspiration_window_uses_average_and_mean_squared() {
+    let mut rm = RootMove::new(Move::from_usi("7g7f").unwrap());
+    rm.average_score = Value::new(120);
+    rm.mean_squared_score = Some(11131 * 10); // delta=5+10=15
+
+    let (alpha, beta, delta) = compute_aspiration_window(&rm);
+    assert_eq!(delta.raw(), 15);
+    assert_eq!(alpha.raw(), 105);
+    assert_eq!(beta.raw(), 135);
+}
+
+/// 未シード時はフルウィンドウになる
+#[test]
+fn test_aspiration_window_defaults_to_full_window_when_unseeded() {
+    let rm = RootMove::new(Move::from_usi("7g7f").unwrap());
+    let (alpha, beta, _) = compute_aspiration_window(&rm);
+
+    assert_eq!(alpha.raw(), -Value::INFINITE.raw());
+    assert_eq!(beta, Value::INFINITE);
+}
+
+/// depthごとにinfoが一度だけ出る（過剰出力しない）
+#[test]
+fn test_multi_pv_outputs_once_per_depth() {
+    use crate::position::Position;
+    use crate::search::engine::{Search, SearchInfo};
+    use crate::search::LimitsType;
+
+    run_with_large_stack(|| {
+        let mut search = Search::new(16);
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        let limits = LimitsType {
+            depth: 1,
+            multi_pv: 2,
+            ..Default::default()
+        };
+        let expected_multipv = limits.multi_pv;
+
+        let mut depth1_infos = Vec::new();
+        search.go(
+            &mut pos,
+            limits,
+            Some(|info: &SearchInfo| {
+                if info.depth == 1 {
+                    depth1_infos.push(info.clone());
+                }
+            }),
+        );
+
+        assert_eq!(
+            depth1_infos.len(),
+            expected_multipv,
+            "depthごとにMultiPV本数分だけinfoを出力する"
+        );
+
+        let mut multipv: Vec<_> = depth1_infos.iter().map(|info| info.multi_pv).collect();
+        multipv.sort();
+        multipv.dedup();
+        assert_eq!(multipv, vec![1, 2], "multipv値が1,2のみに収まる");
     });
 }
 

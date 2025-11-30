@@ -15,7 +15,7 @@ use super::time_manager::{
     calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
-use super::{LimitsType, SearchWorker, Skill, SkillOptions, TimeManagement};
+use super::{LimitsType, RootMove, SearchWorker, Skill, SkillOptions, TimeManagement};
 
 // =============================================================================
 // SearchInfo - 探索情報（USI info出力用）
@@ -69,6 +69,23 @@ impl SearchInfo {
 
         s
     }
+}
+
+/// YaneuraOu準拠のaspiration windowを計算
+pub(crate) fn compute_aspiration_window(rm: &RootMove) -> (Value, Value, Value) {
+    // mean_squared_score がない場合は巨大なdeltaでフルウィンドウにする
+    let fallback = {
+        let inf = Value::INFINITE.raw() as i64;
+        inf * inf
+    };
+    let mean_sq = rm.mean_squared_score.unwrap_or(fallback).abs();
+
+    let delta_raw = 5 + (mean_sq / 11131) as i32;
+    let delta = Value::new(delta_raw);
+    let alpha_raw = (rm.average_score.raw() - delta.raw()).max(-Value::INFINITE.raw());
+    let beta_raw = (rm.average_score.raw() + delta.raw()).min(Value::INFINITE.raw());
+
+    (Value::new(alpha_raw), Value::new(beta_raw), delta)
 }
 
 // =============================================================================
@@ -492,29 +509,15 @@ impl Search {
             worker.sel_depth = 0;
 
             // MultiPVループ（YaneuraOu準拠）
+            let mut processed_pv = 0;
             for pv_idx in 0..effective_multi_pv {
                 if worker.abort {
                     break;
                 }
 
-                // Aspiration Window
-                let prev_score = if depth > 1 && pv_idx < worker.root_moves.len() {
-                    worker.root_moves[pv_idx].previous_score
-                } else {
-                    Value::new(0)
-                };
-
-                let mut delta = Value::new(10);
-                let mut alpha = if depth >= 4 {
-                    Value::new(prev_score.raw().saturating_sub(delta.raw()).max(-32001))
-                } else {
-                    Value::new(-32001)
-                };
-                let mut beta = if depth >= 4 {
-                    Value::new(prev_score.raw().saturating_add(delta.raw()).min(32001))
-                } else {
-                    Value::new(32001)
-                };
+                // Aspiration Window（average/mean_squaredベース）
+                let (mut alpha, mut beta, mut delta) =
+                    compute_aspiration_window(&worker.root_moves[pv_idx]);
 
                 // Aspiration Windowループ
                 loop {
@@ -547,8 +550,16 @@ impl Search {
                 worker.root_moves.stable_sort_range(pv_idx, worker.root_moves.len());
                 // 📝 YaneuraOu行1477-1483: 探索済みのPVライン全体も安定ソートして順位を保つ
                 worker.root_moves.stable_sort_range(0, pv_idx + 1);
+                processed_pv = pv_idx + 1;
+            }
 
-                // 各PVごとにinfo出力
+            // 🆕 MultiPVループ完了後の最終ソート（YaneuraOu行1499）
+            if !worker.abort && effective_multi_pv > 1 {
+                worker.root_moves.stable_sort_range(0, effective_multi_pv);
+            }
+
+            // info出力は深さごとにまとめて行う（GUI詰まり防止のYO仕様）
+            if processed_pv > 0 {
                 let elapsed = start.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
                 let nps = if time_ms > 0 {
@@ -557,29 +568,21 @@ impl Search {
                     0
                 };
 
-                let info = SearchInfo {
-                    depth,
-                    sel_depth: worker.root_moves[pv_idx].sel_depth,
-                    score: worker.root_moves[pv_idx].score,
-                    nodes: worker.nodes,
-                    time_ms,
-                    nps,
-                    hashfull: self.tt.hashfull(3) as u32,
-                    pv: worker.root_moves[pv_idx].pv.clone(),
-                    multi_pv: pv_idx + 1, // 1-indexed
-                };
+                for pv_idx in 0..processed_pv {
+                    let info = SearchInfo {
+                        depth,
+                        sel_depth: worker.root_moves[pv_idx].sel_depth,
+                        score: worker.root_moves[pv_idx].score,
+                        nodes: worker.nodes,
+                        time_ms,
+                        nps,
+                        hashfull: self.tt.hashfull(3) as u32,
+                        pv: worker.root_moves[pv_idx].pv.clone(),
+                        multi_pv: pv_idx + 1, // 1-indexed
+                    };
 
-                on_info(&info);
-
-                // 時間チェック
-                if worker.abort {
-                    break;
+                    on_info(&info);
                 }
-            }
-
-            // 🆕 MultiPVループ完了後の最終ソート（YaneuraOu行1499）
-            if !worker.abort && effective_multi_pv > 1 {
-                worker.root_moves.stable_sort_range(0, effective_multi_pv);
             }
 
             // Depth完了後の処理

@@ -195,6 +195,8 @@ pub struct RootMove {
     pub previous_score: Value,
     /// 平均スコア
     pub average_score: Value,
+    /// 二乗平均スコア（aspiration window用）
+    pub mean_squared_score: Option<i64>,
     /// スコアの下界フラグ
     pub score_lower_bound: bool,
     /// スコアの上界フラグ
@@ -215,6 +217,7 @@ impl RootMove {
             score: Value::new(-32001), // MINUS_INFINITE相当
             previous_score: Value::new(-32001),
             average_score: Value::new(-32001),
+            mean_squared_score: None,
             score_lower_bound: false,
             score_upper_bound: false,
             sel_depth: 0,
@@ -240,6 +243,24 @@ impl RootMove {
     pub fn extract_ponder_from_tt(&mut self, _pos: &Position) -> bool {
         // Phase 6c以降で実装
         false
+    }
+
+    /// 平均スコア・二乗平均スコアを蓄積（YaneuraOuのaspiration初期窓用）
+    pub fn accumulate_score_stats(&mut self, value: Value) {
+        // average_score: 初回はそのまま、2回目以降は前回と現在の平均
+        self.average_score = if self.average_score.raw() == -Value::INFINITE.raw() {
+            value
+        } else {
+            let avg = (self.average_score.raw() + value.raw()) / 2;
+            Value::new(avg)
+        };
+
+        // mean_squared_score: |value| * value を平均
+        let sample = (value.raw() as i64) * (value.raw().abs() as i64);
+        self.mean_squared_score = Some(match self.mean_squared_score {
+            Some(prev) => (prev + sample) / 2,
+            None => sample,
+        });
     }
 }
 
@@ -613,5 +634,21 @@ mod tests {
         for (i, s) in stack.iter().enumerate() {
             assert_eq!(s.ply, i as i32);
         }
+    }
+
+    #[test]
+    fn test_root_move_accumulate_score_stats() {
+        let mv = Move::from_usi("7g7f").unwrap();
+        let mut rm = RootMove::new(mv);
+
+        // 初回はそのまま反映
+        rm.accumulate_score_stats(Value::new(100));
+        assert_eq!(rm.average_score.raw(), 100);
+        assert_eq!(rm.mean_squared_score, Some(10_000));
+
+        // 2回目以降は平均を取る
+        rm.accumulate_score_stats(Value::new(-60));
+        assert_eq!(rm.average_score.raw(), 20); // (100 + -60) / 2
+        assert_eq!(rm.mean_squared_score, Some((10_000 + 3_600) / 2));
     }
 }

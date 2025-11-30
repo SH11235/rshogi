@@ -374,8 +374,13 @@ impl<'a> SearchWorker<'a> {
             }
 
             // スコア更新（この手の探索で到達したsel_depthを記録）
-            self.root_moves[rm_idx].score = value;
-            self.root_moves[rm_idx].sel_depth = self.sel_depth;
+            let mut updated_alpha = rm_idx == 0; // 先頭手は維持（YO準拠）
+            {
+                let rm = &mut self.root_moves[rm_idx];
+                rm.score = value;
+                rm.sel_depth = self.sel_depth;
+                rm.accumulate_score_stats(value);
+            }
 
             if value > best_value {
                 best_value = value;
@@ -390,6 +395,7 @@ impl<'a> SearchWorker<'a> {
 
                     alpha = value;
                     pv_idx = rm_idx;
+                    updated_alpha = true;
 
                     // PVを更新
                     self.root_moves[rm_idx].pv.truncate(1);
@@ -399,6 +405,11 @@ impl<'a> SearchWorker<'a> {
                         break;
                     }
                 }
+            }
+
+            // α未更新の手はスコアを -INFINITE に落として順序維持（YO準拠）
+            if !updated_alpha {
+                self.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
             }
         }
 
@@ -488,8 +499,13 @@ impl<'a> SearchWorker<'a> {
             }
 
             // スコア更新
-            self.root_moves[rm_idx].score = value;
-            self.root_moves[rm_idx].sel_depth = self.sel_depth;
+            let mut updated_alpha = rm_idx == pv_idx; // PVラインの先頭は維持
+            {
+                let rm = &mut self.root_moves[rm_idx];
+                rm.score = value;
+                rm.sel_depth = self.sel_depth;
+                rm.accumulate_score_stats(value);
+            }
 
             if value > best_value {
                 best_value = value;
@@ -503,6 +519,7 @@ impl<'a> SearchWorker<'a> {
 
                     alpha = value;
                     best_rm_idx = rm_idx;
+                    updated_alpha = true;
 
                     // PVを更新
                     self.root_moves[rm_idx].pv.truncate(1);
@@ -512,6 +529,11 @@ impl<'a> SearchWorker<'a> {
                         break;
                     }
                 }
+            }
+
+            // α未更新の手は -INFINITE で前回順序を保持（YO準拠）
+            if !updated_alpha {
+                self.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
             }
         }
 
