@@ -91,7 +91,7 @@ fn test_skill_level_with_high_multi_pv() {
 /// 各PVごとに安定ソート（スコア降順）
 #[test]
 fn test_multi_pv_stable_sort_per_pv() {
-    let mut root_moves = vec![
+    let mut root_moves = [
         RootMove::new(Move::from_usi("7g7f").unwrap()),
         RootMove::new(Move::from_usi("2g2f").unwrap()),
         RootMove::new(Move::from_usi("5g5f").unwrap()),
@@ -393,8 +393,8 @@ fn test_multi_pv_clamped_to_legal_moves_integration() {
         multipv_values.sort();
         multipv_values.dedup();
 
-        for i in 0..multipv_values.len() {
-            assert_eq!(multipv_values[i], i + 1, "multipv値が1から連続している");
+        for (i, &value) in multipv_values.iter().enumerate() {
+            assert_eq!(value, i + 1, "multipv値が1から連続している");
         }
     });
 }

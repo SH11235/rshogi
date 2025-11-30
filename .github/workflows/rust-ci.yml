@@ -114,7 +114,7 @@ jobs:
           workspaces: "packages/rust-core -> target"
           cache-on-failure: true
       - name: Run tests
-        run: cargo test --workspace -- --test-threads=2
+        run: cargo test --release --workspace -- --test-threads=2
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
