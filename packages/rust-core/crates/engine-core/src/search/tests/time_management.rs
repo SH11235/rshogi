@@ -114,98 +114,45 @@ fn test_apply_iteration_timing_sets_stop_on_ponderhit() {
 // 合法手1つの500ms上限テスト
 // =============================================================================
 
-/// 合法手1つの場合、optimum_time <= 500ms
+/// 合法手1つの場合、停止閾値が500msに丸められる
 #[test]
-fn test_single_root_move_limits_optimum_to_500ms() {
+fn test_single_root_move_caps_stop_threshold() {
+    use std::time::Duration;
+
     let mut tm = create_time_manager();
     let mut limits = LimitsType::new();
     limits.time[Color::Black.index()] = 60000; // 1分
-    limits.set_start_time();
+    limits.start_time = Some(std::time::Instant::now() - Duration::from_millis(600));
 
     tm.init_with_root_moves_count(&limits, Color::Black, 0, 256, 1);
+    // total_time は大きく与えるが、single_move_limit により 500ms に丸められる
+    tm.apply_iteration_timing(600, 2000.0, 0.0, false, 12);
 
-    assert!(
-        tm.optimum() <= 500,
-        "合法手1つの場合、optimum <= 500msであるべき。got={}",
-        tm.optimum()
-    );
+    assert!(tm.should_stop_immediately(), "500ms閾値を超えているので停止すべき");
 }
 
-/// 合法手1つの場合、maximum_time <= 500ms
+/// movetime指定ではsearch_endが設定され、経過時間で停止する
 #[test]
-fn test_single_root_move_limits_maximum_to_500ms() {
+fn test_movetime_sets_search_end_and_stop() {
+    use std::time::Duration;
+
     let mut tm = create_time_manager();
     let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 60000;
-    limits.set_start_time();
+    limits.movetime = 50;
+    limits.start_time = Some(std::time::Instant::now() - Duration::from_millis(60));
 
-    tm.init_with_root_moves_count(&limits, Color::Black, 0, 256, 1);
+    tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
 
-    assert!(
-        tm.maximum() <= 500,
-        "合法手1つの場合、maximum <= 500msであるべき。got={}",
-        tm.maximum()
-    );
+    assert_eq!(tm.search_end(), 50, "movetime指定時はsearch_endが設定される");
+    assert!(tm.should_stop(1), "movetime超過で停止する");
 }
 
-/// 合法手複数の場合は500ms制限なし
+/// Deepデフォルトは遅延値が大きい（YaneuraOu DEEP相当）
 #[test]
-fn test_multiple_root_moves_no_500ms_limit() {
-    let mut tm = create_time_manager();
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 60000; // 1分
-    limits.set_start_time();
-
-    tm.init_with_root_moves_count(&limits, Color::Black, 0, 256, 30);
-
-    assert!(
-        tm.optimum() > 500,
-        "合法手複数の場合、optimum > 500msであるべき。got={}",
-        tm.optimum()
-    );
-}
-
-/// 元々の時間が500ms未満の場合はそのまま（minimum_thinking_timeを低く設定）
-#[test]
-fn test_single_root_move_with_short_time() {
-    let mut tm = create_time_manager();
-    // minimum_thinking_timeを低く設定して、短いmovetimeが有効になるようにする
-    tm.set_options(&TimeOptions {
-        network_delay: 0,
-        network_delay2: 0,
-        minimum_thinking_time: 50,
-        slow_mover: 100,
-        usi_ponder: false,
-        stochastic_ponder: false,
-    });
-    let mut limits = LimitsType::new();
-    limits.movetime = 100; // 100ms固定
-    limits.set_start_time();
-
-    tm.init_with_root_moves_count(&limits, Color::Black, 0, 256, 1);
-
-    // 元々100msなので500ms制限は影響しない（min(500, 100) = 100）
-    assert!(tm.optimum() <= 100, "元々短い時間の場合はそのまま。got={}", tm.optimum());
-}
-
-/// 合法手1つの場合、不安定性係数を適用しても500ms上限が維持される
-#[test]
-fn test_single_root_move_limit_reapplied_after_instability() {
-    let mut tm = create_time_manager();
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 60000; // 1分
-    limits.set_start_time();
-
-    tm.init_with_root_moves_count(&limits, Color::Black, 0, 256, 1);
-    // 大きくスケールさせる
-    tm.apply_best_move_instability(10.0, 1);
-
-    assert!(
-        tm.optimum() <= 500 && tm.maximum() <= 500,
-        "不安定性係数適用後も500ms上限を超えるべきではない: optimum={}, maximum={}",
-        tm.optimum(),
-        tm.maximum()
-    );
+fn test_time_options_deep_defaults() {
+    let deep = TimeOptions::deep_defaults();
+    assert_eq!(deep.network_delay, 400);
+    assert_eq!(deep.network_delay2, 1400);
 }
 
 // =============================================================================
