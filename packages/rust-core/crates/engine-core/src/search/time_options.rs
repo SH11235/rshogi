@@ -8,6 +8,8 @@ pub struct TimeOptions {
     pub network_delay2: TimePoint,
     pub minimum_thinking_time: TimePoint,
     pub slow_mover: i32,
+    pub usi_ponder: bool,
+    pub stochastic_ponder: bool,
 }
 
 impl Default for TimeOptions {
@@ -18,6 +20,8 @@ impl Default for TimeOptions {
             network_delay2: 1120,
             minimum_thinking_time: 2000,
             slow_mover: 100,
+            usi_ponder: false,
+            stochastic_ponder: false,
         }
     }
 }

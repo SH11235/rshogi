@@ -19,7 +19,7 @@ pub type TimePoint = i64;
 /// 探索制限条件
 ///
 /// USI `go` コマンドで指定されるパラメータを保持する。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LimitsType {
     /// 両者の残り時間（ミリ秒）
     pub time: [TimePoint; Color::NUM],
@@ -32,6 +32,10 @@ pub struct LimitsType {
 
     /// 思考時間固定（ミリ秒、0以外なら有効）
     pub movetime: TimePoint,
+
+    /// rtime: ランダム化された固定思考時間（ミリ秒）
+    /// YaneuraOu互換の go rtime 用
+    pub rtime: TimePoint,
 
     /// 探索深さ固定（0以外なら有効）
     pub depth: i32,
@@ -51,12 +55,37 @@ pub struct LimitsType {
     /// ponder有効フラグ
     pub ponder: bool,
 
+    /// MultiPV（候補手複数探索）の数（1以上、デフォルト1）
+    /// YaneuraOu準拠: 複数の候補手を探索して表示する
+    pub multi_pv: usize,
+
     /// 探索対象の手のリスト
     /// 空なら全合法手を探索
     pub search_moves: Vec<crate::types::Move>,
 
     /// 探索開始時刻
     pub start_time: Option<Instant>,
+}
+
+impl Default for LimitsType {
+    fn default() -> Self {
+        Self {
+            time: [0; Color::NUM],
+            inc: [0; Color::NUM],
+            byoyomi: [0; Color::NUM],
+            movetime: 0,
+            rtime: 0,
+            depth: 0,
+            mate: 0,
+            perft: 0,
+            infinite: false,
+            nodes: 0,
+            ponder: false,
+            multi_pv: 1, // デフォルトは1（通常探索）
+            search_moves: Vec::new(),
+            start_time: None,
+        }
+    }
 }
 
 impl LimitsType {
@@ -145,6 +174,7 @@ mod tests {
         assert_eq!(limits.time[0], 0);
         assert_eq!(limits.time[1], 0);
         assert_eq!(limits.depth, 0);
+        assert_eq!(limits.rtime, 0);
         assert!(!limits.infinite);
         assert!(limits.search_moves.is_empty());
     }
