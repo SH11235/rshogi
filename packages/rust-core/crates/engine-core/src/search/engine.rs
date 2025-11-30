@@ -118,6 +118,8 @@ pub struct Search {
     last_best_move_depth: Depth,
     /// totBestMoveChanges（世代減衰込み）
     tot_best_move_changes: f64,
+    /// 直前の手数（手番反転の検出用）
+    last_game_ply: Option<i32>,
 
     /// 引き分けまでの最大手数（YaneuraOu準拠のエンジンオプション）
     max_moves_to_draw: i32,
@@ -149,13 +151,23 @@ fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
 }
 
 impl Search {
-    /// 時間計測用のメトリクスをリセット（対局/Go開始時）
-    fn reset_time_metrics(&mut self) {
-        self.best_previous_average_score = None;
-        self.iter_value = [Value::ZERO; 4];
+    /// 時間計測用のメトリクスを準備（対局/Go開始時）
+    fn prepare_time_metrics(&mut self, ply: i32) {
+        // 手番が変わっている場合はスコア符号を反転
+        if let Some(last_ply) = self.last_game_ply {
+            if (last_ply - ply).abs() & 1 == 1 {
+                if let Some(prev_avg) = self.best_previous_average_score {
+                    self.best_previous_average_score = Some(Value::new(-prev_avg.raw()));
+                }
+            }
+        }
+
+        let seed = self.best_previous_average_score.unwrap_or(Value::ZERO);
+        self.iter_value = [seed; 4];
         self.iter_idx = 0;
         self.last_best_move_depth = 0;
         self.tot_best_move_changes = 0.0;
+        self.last_game_ply = Some(ply);
     }
 
     /// fallingEval / timeReduction / totBestMoveChanges を計算
@@ -220,6 +232,7 @@ impl Search {
             iter_idx: 0,
             last_best_move_depth: 0,
             tot_best_move_changes: 0.0,
+            last_game_ply: None,
             max_moves_to_draw: DEFAULT_MAX_MOVES_TO_DRAW,
         }
     }
@@ -296,7 +309,8 @@ impl Search {
     where
         F: FnMut(&SearchInfo),
     {
-        self.reset_time_metrics();
+        let ply = pos.game_ply();
+        self.prepare_time_metrics(ply);
         // 停止フラグをリセット
         self.stop.store(false, Ordering::SeqCst);
         // ponderhitフラグをリセット
@@ -310,7 +324,6 @@ impl Search {
             TimeManagement::new(Arc::clone(&self.stop), Arc::clone(&self.ponderhit_flag));
         time_manager.set_options(&self.time_options);
         // ply（現在の手数）は局面から取得、max_moves_to_drawはYaneuraOu準拠のデフォルトを使う
-        let ply = pos.game_ply();
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
 
         // 探索ワーカーを作成（ttの借用期間を限定するためArcをクローン）
@@ -342,6 +355,12 @@ impl Search {
         } else {
             Move::NONE
         };
+
+        // 次回のfallingEval計算のために平均スコアを保存
+        if let Some(best_rm) = worker.root_moves.get(0) {
+            self.best_previous_average_score = Some(best_rm.score);
+        }
+        self.last_game_ply = Some(ply);
 
         SearchResult {
             best_move,
@@ -507,6 +526,13 @@ impl Search {
                 // 実測 effort を正規化
                 let nodes_effort =
                     normalize_nodes_effort(worker.root_moves[0].effort, worker.nodes);
+
+                // 合法手が1つの場合は使う時間そのものを500msに丸める（YaneuraOu準拠）
+                let total_time = if worker.root_moves.len() == 1 {
+                    total_time.min(500.0)
+                } else {
+                    total_time
+                };
                 worker.time_manager.apply_iteration_timing(
                     worker.time_manager.elapsed(),
                     total_time,
@@ -585,21 +611,23 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_time_metrics() {
+    fn test_prepare_time_metrics_resets_iter_state() {
         let mut search = Search::new(16);
         search.best_previous_average_score = Some(Value::new(123));
+        search.last_game_ply = Some(5);
         search.iter_value = [Value::new(1), Value::new(2), Value::new(3), Value::new(4)];
         search.iter_idx = 2;
         search.last_best_move_depth = 5;
         search.tot_best_move_changes = 7.5;
 
-        search.reset_time_metrics();
+        search.prepare_time_metrics(6);
 
-        assert!(search.best_previous_average_score.is_none());
-        assert_eq!(search.iter_value, [Value::ZERO; 4]);
+        assert_eq!(search.best_previous_average_score, Some(Value::new(-123)));
+        assert_eq!(search.iter_value, [Value::new(-123); 4]);
         assert_eq!(search.iter_idx, 0);
         assert_eq!(search.last_best_move_depth, 0);
         assert_eq!(search.tot_best_move_changes, 0.0);
+        assert_eq!(search.last_game_ply, Some(6));
     }
 
     #[test]

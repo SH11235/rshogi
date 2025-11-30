@@ -271,6 +271,8 @@ impl TimeManagement {
             self.optimum_time = movetime;
             self.maximum_time = movetime;
             self.minimum_time = movetime;
+            self.search_end = movetime;
+            self.last_stop_threshold = Some(movetime);
             return;
         }
 
@@ -438,10 +440,8 @@ impl TimeManagement {
     /// 合法手1つの場合の時間制限適用
     ///
     /// YaneuraOu準拠: 視聴者体験を向上させるため、合法手が1つだけの場合に
-    /// 使用時間を500ms以下に制限する
+    /// 使用時間を500ms以下に制限する（実際の制限はtotal_time計算後に適用）
     pub fn apply_single_move_limit(&mut self) {
-        self.optimum_time = self.optimum_time.min(SINGLE_MOVE_TIME_LIMIT);
-        self.maximum_time = self.maximum_time.min(SINGLE_MOVE_TIME_LIMIT);
         self.single_move_limit = true;
     }
 
