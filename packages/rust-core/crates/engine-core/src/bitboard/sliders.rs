@@ -317,6 +317,16 @@ mod tests {
     }
 
     #[test]
+    fn test_bishop_effect_corner() {
+        let sq11 = Square::new(File::File1, Rank::Rank1);
+        let bb = bishop_effect(sq11, Bitboard::EMPTY);
+        assert_eq!(bb.count(), 8);
+        assert!(bb.contains(Square::new(File::File2, Rank::Rank2)));
+        assert!(bb.contains(Square::new(File::File9, Rank::Rank9)));
+        assert!(!bb.contains(sq11));
+    }
+
+    #[test]
     fn test_rook_effect() {
         // 5五の飛車 -> 縦横に利き
         let sq55 = Square::new(File::File5, Rank::Rank5);
@@ -334,6 +344,16 @@ mod tests {
         assert!(bb.contains(Square::new(File::File6, Rank::Rank5)));
         // 右方向
         assert!(bb.contains(Square::new(File::File4, Rank::Rank5)));
+    }
+
+    #[test]
+    fn test_rook_effect_corner() {
+        let sq11 = Square::new(File::File1, Rank::Rank1);
+        let bb = rook_effect(sq11, Bitboard::EMPTY);
+        assert_eq!(bb.count(), 16);
+        assert!(bb.contains(Square::new(File::File1, Rank::Rank9)));
+        assert!(bb.contains(Square::new(File::File9, Rank::Rank1)));
+        assert!(!bb.contains(sq11));
     }
 
     #[test]
