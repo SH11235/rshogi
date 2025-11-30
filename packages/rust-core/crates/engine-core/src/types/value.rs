@@ -1,6 +1,12 @@
 //! 評価値（Value）
+//!
+//! 値のスケールは YaneuraOu 準拠で、`Value::MATE` 付近を詰みスコアとして予約している。
+//! 通常の評価値は主に [-MATE_IN_MAX_PLY, MATE_IN_MAX_PLY] の範囲で用いる。
 
 /// 評価値
+///
+/// 通常の局面評価と、詰み表現（`mate_in` / `mated_in` 系）を同一の整数スケールで扱う。
+/// `is_mate_score` と `mate_ply` により、詰みスコアかどうかと手数の復元が可能。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Value(i32);

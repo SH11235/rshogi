@@ -7,4 +7,12 @@
 //! - `do_move` / `undo_move`: 手の実行と巻き戻し
 //! - SFEN形式の解析・出力
 
-// TODO: Phase 2で実装
+mod pos;
+mod sfen;
+mod state;
+mod zobrist;
+
+pub use pos::Position;
+pub use sfen::{SfenError, SFEN_HIRATE};
+pub use state::StateInfo;
+pub use zobrist::{zobrist_hand, zobrist_psq, zobrist_side, ZOBRIST};
