@@ -600,8 +600,9 @@ impl<'a> SearchWorker<'a> {
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
 
-        // YaneuraOu準拠: tt_hitをスタックに記録
+        // YaneuraOu準拠: tt_hit/tt_pvをスタックに記録
         self.stack[ply as usize].tt_hit = tt_hit;
+        self.stack[ply as usize].tt_pv = pv_node || (tt_hit && tt_data.is_pv);
         let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(tt_data.value, ply)
@@ -666,6 +667,8 @@ impl<'a> SearchWorker<'a> {
         // ProbCut（YaneuraOu準拠の簡易版）
         // =================================================================
         if !in_check && depth >= 3 && static_eval != Value::NONE {
+            // YaneuraOu: improving再計算（static_eval >= betaなら改善とみなす）
+            let improving = improving || static_eval >= beta;
             let prob_beta = beta + Value::new(215 - 60 * improving as i32);
             if !(beta.is_mate_score()
                 || (tt_hit && tt_value != Value::NONE && tt_value < prob_beta))
@@ -730,10 +733,11 @@ impl<'a> SearchWorker<'a> {
 
                         if value >= prob_beta {
                             let stored_depth = (probcut_depth + 1).max(1);
+                            // YaneuraOu: ss->ttPvを使用
                             tt_result.write(
                                 key,
                                 value_to_tt(value, ply),
-                                pv_node,
+                                self.stack[ply as usize].tt_pv,
                                 Bound::Lower,
                                 stored_depth,
                                 mv,
@@ -1328,6 +1332,7 @@ impl<'a> SearchWorker<'a> {
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
         self.stack[ply as usize].tt_hit = tt_hit;
+        self.stack[ply as usize].tt_pv = pv_node || (tt_hit && tt_data.is_pv);
         let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(tt_data.value, ply)
@@ -1383,10 +1388,11 @@ impl<'a> SearchWorker<'a> {
                 v = Value::new((v.raw() + beta.raw()) / 2);
             }
             if !tt_hit {
+                // YaneuraOu: pvHitを使用
                 tt_result.write(
                     key,
                     value_to_tt(v, ply),
-                    pv_node,
+                    self.stack[ply as usize].tt_pv,
                     Bound::Lower,
                     DEPTH_UNSEARCHED,
                     Move::NONE,
@@ -1610,10 +1616,11 @@ impl<'a> SearchWorker<'a> {
             Bound::Upper
         };
 
+        // YaneuraOu: pvHitを使用
         tt_result.write(
             key,
             value_to_tt(best_value, ply),
-            pv_node,
+            self.stack[ply as usize].tt_pv,
             bound,
             DEPTH_QS,
             best_move,
