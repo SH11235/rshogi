@@ -426,6 +426,15 @@ impl UsiEngine {
                         limits.movetime = tokens[idx].parse().unwrap_or(0);
                     }
                 }
+                "mate" => {
+                    idx += 1;
+                    if idx < tokens.len() {
+                        limits.mate = match tokens[idx] {
+                            "infinite" => i32::MAX,
+                            v => v.parse().unwrap_or(0),
+                        };
+                    }
+                }
                 "btime" => {
                     idx += 1;
                     if idx < tokens.len() {
@@ -482,6 +491,7 @@ impl UsiEngine {
                                 | "winc"
                                 | "byoyomi"
                                 | "rtime"
+                                | "mate"
                         ) {
                             idx -= 1; // 巻き戻して次のループで処理
                             break;
@@ -542,6 +552,30 @@ impl UsiEngine {
         println!("SFEN: {}", self.position.to_sfen());
         println!("Side to move: {:?}", self.position.side_to_move());
         println!("Game ply: {}", self.position.game_ply());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_go_mate_sets_limits() {
+        let engine = UsiEngine::new();
+        let tokens = vec!["go", "mate", "5"];
+
+        let limits = engine.parse_go_options(&tokens);
+        assert_eq!(limits.mate, 5);
+        assert!(!limits.use_time_management(), "mate search disables time management");
+    }
+
+    #[test]
+    fn parse_go_mate_infinite_defaults_to_max() {
+        let engine = UsiEngine::new();
+        let tokens = vec!["go", "mate", "infinite"];
+
+        let limits = engine.parse_go_options(&tokens);
+        assert_eq!(limits.mate, i32::MAX);
     }
 }
 
