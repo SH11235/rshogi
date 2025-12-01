@@ -84,7 +84,7 @@ impl Position {
 
         // 王手駒の計算
         let them = !self.side_to_move;
-        self.state.checkers =
+        self.state_mut().checkers =
             self.attackers_to_c(self.king_square[self.side_to_move.index()], them);
 
         Ok(())
@@ -341,11 +341,12 @@ impl Position {
             }
         }
 
-        self.state.board_key = board_key;
-        self.state.hand_key = hand_key;
-        self.state.pawn_key = pawn_key;
-        self.state.minor_piece_key = minor_piece_key;
-        self.state.non_pawn_key = non_pawn_key;
+        let st = self.state_mut();
+        st.board_key = board_key;
+        st.hand_key = hand_key;
+        st.pawn_key = pawn_key;
+        st.minor_piece_key = minor_piece_key;
+        st.non_pawn_key = non_pawn_key;
     }
 }
 

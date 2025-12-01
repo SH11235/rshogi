@@ -558,6 +558,27 @@ impl UsiEngine {
     }
 }
 
+fn main() -> Result<()> {
+    // ロガー初期化（標準エラー出力）
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .target(env_logger::Target::Stderr)
+        .init();
+
+    let mut engine = UsiEngine::new();
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        let line = line.trim();
+
+        if !engine.process_command(line)? {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,25 +610,4 @@ mod tests {
         let limits = engine.parse_go_options(&tokens);
         assert_eq!(limits.mate, i32::MAX);
     }
-}
-
-fn main() -> Result<()> {
-    // ロガー初期化（標準エラー出力）
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Stderr)
-        .init();
-
-    let mut engine = UsiEngine::new();
-    let stdin = io::stdin();
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        let line = line.trim();
-
-        if !engine.process_command(line)? {
-            break;
-        }
-    }
-
-    Ok(())
 }
