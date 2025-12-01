@@ -89,6 +89,30 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove) -> (Value, Value, Value) 
     (Value::new(alpha_raw), Value::new(beta_raw), delta)
 }
 
+/// YaneuraOu準拠の詰みスコアに対する深さ打ち切り判定
+#[inline]
+fn proven_mate_depth_exceeded(best_value: Value, depth: Depth) -> bool {
+    if best_value.is_win() || best_value.is_loss() {
+        let mate_ply = best_value.mate_ply();
+        return (mate_ply + 2) * 5 / 2 < depth;
+    }
+
+    false
+}
+
+/// `go mate` 指定時に、要求手数以内の詰みが見つかったか判定する
+#[inline]
+fn mate_within_limit(best_value: Value, mate_limit_moves: i32) -> bool {
+    if mate_limit_moves <= 0 || !best_value.is_mate_score() {
+        return false;
+    }
+
+    let mate_ply = best_value.mate_ply() as i64;
+    let limit_plies = (mate_limit_moves as i64).saturating_mul(2);
+
+    mate_ply <= limit_plies
+}
+
 // =============================================================================
 // SearchResult - 探索結果
 // =============================================================================
@@ -520,20 +544,13 @@ impl Search {
             if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                 let best_value = worker.root_moves[0].score;
 
-                // 勝ちを読みきっている場合
-                if best_value.is_win() {
-                    let mate_ply = best_value.mate_ply();
-                    if (mate_ply + 2) * 5 / 2 < depth {
+                if worker.limits.mate == 0 {
+                    if proven_mate_depth_exceeded(best_value, depth) {
                         break;
                     }
-                }
-
-                // 詰まされる形の場合
-                if best_value.is_loss() {
-                    let mate_ply = best_value.mate_ply();
-                    if (mate_ply + 2) * 5 / 2 < depth {
-                        break;
-                    }
+                } else if mate_within_limit(best_value, worker.limits.mate) {
+                    worker.time_manager.request_stop();
+                    break;
                 }
             }
 
@@ -692,23 +709,16 @@ impl Search {
 
                 // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
                 // MultiPV=1の時のみ適用
-                if effective_multi_pv == 1 {
+                if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                     let best_value = worker.root_moves[0].score;
 
-                    // 勝ちを読みきっている場合
-                    if best_value.is_win() {
-                        let mate_ply = best_value.mate_ply();
-                        if (mate_ply + 2) * 5 / 2 < depth {
+                    if worker.limits.mate == 0 {
+                        if proven_mate_depth_exceeded(best_value, depth) {
                             break;
                         }
-                    }
-
-                    // 詰まされる形の場合
-                    if best_value.is_loss() {
-                        let mate_ply = best_value.mate_ply();
-                        if (mate_ply + 2) * 5 / 2 < depth {
-                            break;
-                        }
+                    } else if mate_within_limit(best_value, worker.limits.mate) {
+                        worker.time_manager.request_stop();
+                        break;
                     }
                 }
             }
@@ -815,6 +825,19 @@ mod tests {
 
         search.set_max_moves_to_draw(0);
         assert_eq!(search.max_moves_to_draw(), DEFAULT_MAX_MOVES_TO_DRAW);
+    }
+
+    #[test]
+    fn test_mate_within_limit_converts_moves_to_plies() {
+        // mate in 9 ply is within a 5-move limit (10 ply)
+        assert!(mate_within_limit(Value::mate_in(9), 5));
+        assert!(!mate_within_limit(Value::mate_in(11), 5));
+    }
+
+    #[test]
+    fn test_mate_within_limit_handles_mated_scores() {
+        // mated in 7 ply should still trigger when limit is 4 moves (8 ply)
+        assert!(mate_within_limit(Value::mated_in(7), 4));
     }
 
     #[test]
