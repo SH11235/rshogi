@@ -502,6 +502,54 @@ impl Default for CounterMoveHistory {
 }
 
 // =============================================================================
+// CorrectionHistory
+// =============================================================================
+
+/// CorrectionHistory: [pawn_key_index][king_sq] -> correction
+///
+/// 静的評価の補正履歴。
+/// YaneuraOu準拠: qsearchで静的評価に補正を適用。
+pub struct CorrectionHistory {
+    table: Vec<[StatsEntry<CORRECTION_HISTORY_LIMIT>; Square::NUM]>,
+}
+
+impl CorrectionHistory {
+    /// 新しいCorrectionHistoryを作成
+    pub fn new() -> Self {
+        Self {
+            table: vec![[StatsEntry::default(); Square::NUM]; CORRECTION_HISTORY_SIZE],
+        }
+    }
+
+    /// 値を取得
+    #[inline]
+    pub fn get(&self, pawn_key_index: usize, king_sq: Square) -> i16 {
+        self.table[pawn_key_index % CORRECTION_HISTORY_SIZE][king_sq.index()].get()
+    }
+
+    /// 値を更新
+    #[inline]
+    pub fn update(&mut self, pawn_key_index: usize, king_sq: Square, bonus: i32) {
+        self.table[pawn_key_index % CORRECTION_HISTORY_SIZE][king_sq.index()].update(bonus);
+    }
+
+    /// クリア
+    pub fn clear(&mut self) {
+        for pawn_table in self.table.iter_mut() {
+            for entry in pawn_table.iter_mut() {
+                entry.set(0);
+            }
+        }
+    }
+}
+
+impl Default for CorrectionHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
 // ボーナス計算（YaneuraOu準拠）
 // =============================================================================
 

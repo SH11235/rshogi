@@ -299,7 +299,8 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     }
 
     // SILVER
-    let mut bb = check_cand_bb(us, PieceTypeCheck::Silver, sq_king) & pos.pieces(us, PieceType::Silver);
+    let mut bb =
+        check_cand_bb(us, PieceTypeCheck::Silver, sq_king) & pos.pieces(us, PieceType::Silver);
     while bb.is_not_empty() {
         let from = bb.pop();
         let mut bb_check = silver_effect(us, from) & bb_move & king_effect(sq_king); // 近接のみ
@@ -338,7 +339,8 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     }
 
     // KNIGHT
-    let mut bb = check_cand_bb(us, PieceTypeCheck::Knight, sq_king) & pos.pieces(us, PieceType::Knight);
+    let mut bb =
+        check_cand_bb(us, PieceTypeCheck::Knight, sq_king) & pos.pieces(us, PieceType::Knight);
     while bb.is_not_empty() {
         let from = bb.pop();
         let mut bb_check = knight_effect(us, from) & bb_move; // 近接のみ

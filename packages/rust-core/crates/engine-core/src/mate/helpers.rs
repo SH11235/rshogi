@@ -137,8 +137,8 @@ pub fn attacks_around_king_slider(pos: &Position, our_king: Color) -> Bitboard {
     let occ = pos.occupied();
     let mut sum = Bitboard::EMPTY;
 
-    let lances = pos.pieces(them, PieceType::Lance)
-        & check_around_bb(them, PieceType::Lance, sq_king);
+    let lances =
+        pos.pieces(them, PieceType::Lance) & check_around_bb(them, PieceType::Lance, sq_king);
     for from in lances.iter() {
         sum |= lance_effect(them, from, occ);
     }

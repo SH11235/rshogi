@@ -94,12 +94,23 @@ fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
 
             // 歩(不成): 敵歩利き先が王手となる升。ただし敵陣は除外。
             let enemy_field = crate::mate::enemy_field(us);
-            table[idx][PieceTypeCheck::PawnWithNoPro as usize][c] =
-                pawn_effect(!us, sq_king) & !enemy_field;
+            let mut bb_no_pro = Bitboard::EMPTY;
+            let mut step = pawn_effect(!us, sq_king) & !enemy_field;
+            if step.is_not_empty() {
+                // stepは最大1升なのでpopで十分
+                let to = step.pop();
+                bb_no_pro = pawn_effect(!us, to);
+            }
+            table[idx][PieceTypeCheck::PawnWithNoPro as usize][c] = bb_no_pro;
 
             // 歩(成): 金利きで敵陣のみ
-            table[idx][PieceTypeCheck::PawnWithPro as usize][c] =
-                gold_effect(!us, sq_king) & enemy_field;
+            let mut bb_pro = Bitboard::EMPTY;
+            let mut promo_targets = gold_effect(!us, sq_king) & enemy_field;
+            while promo_targets.is_not_empty() {
+                let to = promo_targets.pop();
+                bb_pro |= pawn_effect(!us, to);
+            }
+            table[idx][PieceTypeCheck::PawnWithPro as usize][c] = bb_pro;
 
             // 香: 盤上の駒を無視した1歩利き + 敵陣での成りも候補に含める
             let mut lance_bb = lance_effect(!us, sq_king, Bitboard::EMPTY);
