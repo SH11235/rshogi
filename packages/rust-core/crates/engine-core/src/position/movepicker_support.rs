@@ -164,12 +164,7 @@ impl Position {
     ///
     /// 歩の配置に基づくハッシュ値からインデックスを計算する。
     pub fn pawn_history_index(&self) -> usize {
-        // 歩のBitboardからシンプルなハッシュを計算
-        let b_pawns = self.pieces(Color::Black, PieceType::Pawn);
-        let w_pawns = self.pieces(Color::White, PieceType::Pawn);
-
-        let hash = b_pawns.as_u128() ^ (w_pawns.as_u128().rotate_left(7));
-        (hash as usize) & (crate::search::PAWN_HISTORY_SIZE - 1)
+        (self.pawn_key() as usize) & (crate::search::PAWN_HISTORY_SIZE - 1)
     }
 
     // =========================================================================

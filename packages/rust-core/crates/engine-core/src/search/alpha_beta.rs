@@ -9,12 +9,13 @@ use crate::nnue::evaluate;
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::TranspositionTable;
-use crate::types::{Bound, Depth, Move, Piece, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{Bound, Color, Depth, Move, Piece, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
 
 use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
     pawn_history_bonus, quiet_malus, stat_bonus, ButterflyHistory, CapturePieceToHistory,
-    ContinuationHistory, LowPlyHistory, PawnHistory, CONTINUATION_HISTORY_WEIGHTS,
+    ContinuationHistory, CorrectionHistory, LowPlyHistory, PawnHistory,
+    CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE,
     LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
@@ -33,6 +34,20 @@ use super::{LimitsType, MovePicker, TimeManagement};
 const FUTILITY_MARGIN_BASE: i32 = 117;
 
 use std::sync::OnceLock;
+
+/// 引き分けスコアに揺らぎを与える（YaneuraOu準拠）
+#[inline]
+fn draw_jitter(nodes: u64) -> i32 {
+    // VALUE_DRAW - 1 + (nodes & 0x2) 相当の±1ゆらぎ
+    ((nodes & 0x2) as i32) - 1
+}
+
+/// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）
+#[inline]
+fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
+    let corrected = unadjusted.raw() + correction_value / 131_072;
+    Value::new(corrected.clamp(Value::MATED_IN_MAX_PLY.raw() + 1, Value::MATE_IN_MAX_PLY.raw() - 1))
+}
 
 /// LMR用のreduction配列
 type Reductions = [[[i32; 64]; 64]; 2];
@@ -107,6 +122,7 @@ pub struct SearchWorker<'a> {
     pub continuation_history: [[ContinuationHistory; 2]; 2],
     pub low_ply_history: LowPlyHistory,
     pub tt_move_history: TTMoveHistory,
+    pub correction_history: CorrectionHistory,
 
     /// 探索ノード数
     pub nodes: u64,
@@ -134,6 +150,9 @@ pub struct SearchWorker<'a> {
     /// YaneuraOu準拠: move_count > 1 && !pvIdx の時にインクリメント
     /// 反復深化の各世代で /= 2 して減衰させる
     pub best_move_changes: f64,
+
+    /// 引き分けまでの最大手数（YaneuraOu準拠）
+    pub max_moves_to_draw: i32,
 }
 
 impl<'a> SearchWorker<'a> {
@@ -144,6 +163,7 @@ impl<'a> SearchWorker<'a> {
         tt: &'a TranspositionTable,
         limits: &'a LimitsType,
         time_manager: &'a mut TimeManagement,
+        max_moves_to_draw: i32,
     ) -> Self {
         assert!(
             is_reductions_initialized(),
@@ -161,6 +181,7 @@ impl<'a> SearchWorker<'a> {
             continuation_history: Default::default(),
             low_ply_history: LowPlyHistory::new(),
             tt_move_history: TTMoveHistory::new(),
+            correction_history: CorrectionHistory::new(),
             nodes: 0,
             sel_depth: 0,
             root_depth: 0,
@@ -169,6 +190,7 @@ impl<'a> SearchWorker<'a> {
             best_move: Move::NONE,
             abort: false,
             best_move_changes: 0.0,
+            max_moves_to_draw,
         }
     }
 
@@ -243,6 +265,86 @@ impl<'a> SearchWorker<'a> {
             }
         }
         tables
+    }
+
+    /// 補正履歴から静的評価の補正値を算出（YaneuraOu準拠）
+    #[inline]
+    fn correction_value(&self, pos: &Position, ply: i32) -> i32 {
+        let us = pos.side_to_move();
+        let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
+        let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
+        let non_pawn_idx_w =
+            (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
+        let non_pawn_idx_b =
+            (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
+
+        let pcv = self.correction_history.pawn_value(pawn_idx, us) as i32;
+        let micv = self.correction_history.minor_value(minor_idx, us) as i32;
+        let wnpcv = self.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
+        let bnpcv = self.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
+
+        let mut cntcv = 0;
+        if ply >= 2 {
+            let prev_move = self.stack[(ply - 1) as usize].current_move;
+            if prev_move.is_some() {
+                if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
+                    let pc = pos.piece_on(prev_move.to());
+                    cntcv = self.correction_history.continuation_value(
+                        prev2_key.piece,
+                        prev2_key.to,
+                        pc,
+                        prev_move.to(),
+                    ) as i32;
+                }
+            }
+        }
+
+        8867 * pcv + 8136 * micv + 10_757 * (wnpcv + bnpcv) + 7232 * cntcv
+    }
+
+    /// 補正履歴の更新（YaneuraOu準拠）
+    #[inline]
+    fn update_correction_history(&mut self, pos: &Position, ply: i32, bonus: i32) {
+        let us = pos.side_to_move();
+        let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
+        let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
+        let non_pawn_idx_w =
+            (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
+        let non_pawn_idx_b =
+            (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
+
+        const NON_PAWN_WEIGHT: i32 = 165;
+
+        self.correction_history.update_pawn(pawn_idx, us, bonus);
+        self.correction_history.update_minor(minor_idx, us, bonus * 153 / 128);
+        self.correction_history.update_non_pawn(
+            non_pawn_idx_w,
+            Color::White,
+            us,
+            bonus * NON_PAWN_WEIGHT / 128,
+        );
+        self.correction_history.update_non_pawn(
+            non_pawn_idx_b,
+            Color::Black,
+            us,
+            bonus * NON_PAWN_WEIGHT / 128,
+        );
+
+        if ply >= 2 {
+            let prev_move = self.stack[(ply - 1) as usize].current_move;
+            if prev_move.is_some() {
+                if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
+                    let pc = pos.piece_on(prev_move.to());
+                    self.correction_history.update_continuation(
+                        prev2_key.piece,
+                        prev2_key.to,
+                        pc,
+                        prev_move.to(),
+                        bonus * 153 / 128,
+                    );
+                }
+            }
+        }
     }
 
     /// 探索のメインエントリーポイント
@@ -620,20 +722,60 @@ impl<'a> SearchWorker<'a> {
             return tt_value;
         }
 
+        // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
+        if NT != NodeType::Root as u8 && !in_check && !tt_hit {
+            let mate_move = pos.mate_1ply();
+            if mate_move.is_some() {
+                let value = Value::mate_in(ply + 1);
+                let stored_depth = (depth + 6).min(MAX_PLY - 1);
+                // YaneuraOu準拠: mate_in は root からの手数込みなので value_to_tt は通さずそのまま保存
+                tt_result.write(
+                    key,
+                    value,
+                    self.stack[ply as usize].tt_pv,
+                    Bound::Exact,
+                    stored_depth,
+                    mate_move,
+                    Value::NONE,
+                    self.tt.generation(),
+                );
+                return value;
+            }
+        }
+
         // =================================================================
         // 静的評価
         // =================================================================
-        let static_eval = if in_check {
+        let correction_value = self.correction_value(pos, ply);
+        let mut unadjusted_static_eval = Value::NONE;
+        let mut static_eval = if in_check {
             Value::NONE
         } else if tt_hit && tt_data.eval != Value::NONE {
-            tt_data.eval
+            unadjusted_static_eval = tt_data.eval;
+            unadjusted_static_eval
         } else {
-            evaluate(pos)
+            unadjusted_static_eval = evaluate(pos);
+            unadjusted_static_eval
         };
+
+        if !in_check && unadjusted_static_eval != Value::NONE {
+            static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
+        }
+
+        if !in_check
+            && tt_hit
+            && tt_value != Value::NONE
+            && !tt_value.is_mate_score()
+            && ((tt_value > static_eval && tt_data.bound == Bound::Lower)
+                || (tt_value < static_eval && tt_data.bound == Bound::Upper))
+        {
+            static_eval = tt_value;
+        }
+
         self.stack[ply as usize].static_eval = static_eval;
 
         // improving判定
-        let improving = if ply >= 2 && !in_check {
+        let mut improving = if ply >= 2 && !in_check {
             static_eval > self.stack[(ply - 2) as usize].static_eval
         } else {
             false
@@ -657,7 +799,8 @@ impl<'a> SearchWorker<'a> {
         // Futility Pruning（非PV、静的評価が十分高い場合）
         // =================================================================
         if !pv_node && !in_check && depth <= 8 && static_eval != Value::NONE {
-            let futility_margin = Value::new(FUTILITY_MARGIN_BASE * depth);
+            let futility_margin =
+                Value::new(FUTILITY_MARGIN_BASE * depth + (correction_value.abs() / 171_290));
             if static_eval - futility_margin >= beta {
                 return static_eval;
             }
@@ -668,8 +811,8 @@ impl<'a> SearchWorker<'a> {
         // =================================================================
         if !in_check && depth >= 3 && static_eval != Value::NONE {
             // YaneuraOu: improving再計算（static_eval >= betaなら改善とみなす）
-            let improving = improving || static_eval >= beta;
-            let prob_beta = beta + Value::new(215 - 60 * improving as i32);
+            let improving_prob = improving || static_eval >= beta;
+            let prob_beta = beta + Value::new(215 - 60 * improving_prob as i32);
             if !(beta.is_mate_score()
                 || (tt_hit && tt_value != Value::NONE && tt_value < prob_beta))
             {
@@ -699,12 +842,8 @@ impl<'a> SearchWorker<'a> {
                     let dynamic_reduction = (static_eval - beta).raw() / 300;
                     let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
 
-                    let mut tried = 0;
-
+                    // YaneuraOu準拠: 全捕獲手を試す（PV:2手/NonPV:4手の制限を撤廃）
                     for mv in probcut_moves {
-                        if tried >= if pv_node { 2 } else { 4 } {
-                            break;
-                        }
                         if !pos.is_legal(mv) {
                             continue;
                         }
@@ -729,7 +868,6 @@ impl<'a> SearchWorker<'a> {
                             );
                         }
                         pos.undo_move(mv);
-                        tried += 1;
 
                         if value >= prob_beta {
                             let stored_depth = (probcut_depth + 1).max(1);
@@ -741,7 +879,7 @@ impl<'a> SearchWorker<'a> {
                                 Bound::Lower,
                                 stored_depth,
                                 mv,
-                                static_eval,
+                                unadjusted_static_eval,
                                 self.tt.generation(),
                             );
 
@@ -798,6 +936,11 @@ impl<'a> SearchWorker<'a> {
                 }
                 return null_value;
             }
+        }
+
+        // Null move 後のimproving再計算（YaneuraOu準拠）
+        if !in_check && static_eval != Value::NONE {
+            improving |= static_eval >= beta;
         }
 
         // =================================================================
@@ -882,6 +1025,8 @@ impl<'a> SearchWorker<'a> {
             }
         }
 
+        // TODO: singular extension（YaneuraOu準拠）は未実装。
+        // 追加時は補正履歴の寄与（abs(correctionValue)/249096 を margin に加算）も含める。
         for mv in ordered_moves {
             if !pos.pseudo_legal(mv) {
                 continue;
@@ -955,6 +1100,10 @@ impl<'a> SearchWorker<'a> {
 
                 // capture にはあまり reduction しない
                 let r = if is_capture { r / 2 } else { r };
+
+                // YaneuraOu: 補正履歴が大きいときは過度なLMRを抑制する
+                let corr_reduction = correction_value.abs() / 27_160;
+                let r = (r - corr_reduction).max(0);
 
                 new_depth = (depth - 1 - r).max(1);
             }
@@ -1270,6 +1419,18 @@ impl<'a> SearchWorker<'a> {
             }
         }
 
+        // CorrectionHistoryの更新（YaneuraOu準拠）
+        if !in_check && best_move.is_some() && !pos.is_capture(best_move) {
+            let static_eval = self.stack[ply as usize].static_eval;
+            if static_eval != Value::NONE
+                && ((best_value < static_eval && best_value < beta) || best_value > static_eval)
+            {
+                let bonus = ((best_value.raw() - static_eval.raw()) * depth / 8)
+                    .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
+                self.update_correction_history(pos, ply, bonus);
+            }
+        }
+
         // =================================================================
         // 置換表更新
         // =================================================================
@@ -1288,7 +1449,7 @@ impl<'a> SearchWorker<'a> {
             bound,
             depth,
             best_move,
-            static_eval,
+            unadjusted_static_eval,
             self.tt.generation(),
         );
 
@@ -1323,16 +1484,26 @@ impl<'a> SearchWorker<'a> {
         if rep_state.is_repetition() || rep_state.is_superior_inferior() {
             let v = draw_value(rep_state, pos.side_to_move());
             if v != Value::NONE {
+                if v == Value::DRAW {
+                    let jittered = Value::new(v.raw() + draw_jitter(self.nodes));
+                    return value_from_tt(jittered, ply);
+                }
                 return value_from_tt(v, ply);
             }
+        }
+
+        // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
+        if self.max_moves_to_draw > 0 && pos.game_ply() > self.max_moves_to_draw {
+            return Value::new(Value::DRAW.raw() + draw_jitter(self.nodes));
         }
 
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
+        let pv_hit = tt_hit && tt_data.is_pv;
         self.stack[ply as usize].tt_hit = tt_hit;
-        self.stack[ply as usize].tt_pv = pv_node || (tt_hit && tt_data.is_pv);
+        self.stack[ply as usize].tt_pv = pv_hit;
         let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(tt_data.value, ply)
@@ -1351,10 +1522,13 @@ impl<'a> SearchWorker<'a> {
 
         let mut best_move = Move::NONE;
 
-        let static_eval = if in_check {
+        let correction_value = self.correction_value(pos, ply);
+        let mut unadjusted_static_eval = Value::NONE;
+        let mut static_eval = if in_check {
             Value::NONE
         } else if tt_hit && tt_data.eval != Value::NONE {
-            tt_data.eval
+            unadjusted_static_eval = tt_data.eval;
+            unadjusted_static_eval
         } else {
             // 置換表に無いときだけ簡易1手詰め判定を行う
             if !tt_hit {
@@ -1363,8 +1537,14 @@ impl<'a> SearchWorker<'a> {
                     return Value::mate_in(ply + 1);
                 }
             }
-            evaluate(pos)
+            unadjusted_static_eval = evaluate(pos);
+            unadjusted_static_eval
         };
+
+        if !in_check && unadjusted_static_eval != Value::NONE {
+            static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
+        }
+
         self.stack[ply as usize].static_eval = static_eval;
 
         let mut alpha = alpha;
@@ -1379,6 +1559,8 @@ impl<'a> SearchWorker<'a> {
                 || (tt_value < best_value && tt_data.bound == Bound::Upper);
             if improves {
                 best_value = tt_value;
+                static_eval = tt_value;
+                self.stack[ply as usize].static_eval = static_eval;
             }
         }
 
@@ -1392,11 +1574,11 @@ impl<'a> SearchWorker<'a> {
                 tt_result.write(
                     key,
                     value_to_tt(v, ply),
-                    self.stack[ply as usize].tt_pv,
+                    pv_hit,
                     Bound::Lower,
                     DEPTH_UNSEARCHED,
                     Move::NONE,
-                    static_eval,
+                    unadjusted_static_eval,
                     self.tt.generation(),
                 );
             }
@@ -1543,6 +1725,8 @@ impl<'a> SearchWorker<'a> {
 
                 if !capture {
                     let mut cont_score = 0;
+
+                    // ss-1の参照
                     if ply >= 1 {
                         if let Some(key) = self.stack[(ply - 1) as usize].cont_hist_key {
                             let in_check_idx = key.in_check as usize;
@@ -1555,6 +1739,7 @@ impl<'a> SearchWorker<'a> {
                             ) as i32;
                         }
                     }
+
                     let pawn_idx = pos.pawn_history_index();
                     cont_score +=
                         self.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32;
@@ -1620,11 +1805,11 @@ impl<'a> SearchWorker<'a> {
         tt_result.write(
             key,
             value_to_tt(best_value, ply),
-            self.stack[ply as usize].tt_pv,
+            pv_hit,
             bound,
             DEPTH_QS,
             best_move,
-            static_eval,
+            unadjusted_static_eval,
             self.tt.generation(),
         );
 

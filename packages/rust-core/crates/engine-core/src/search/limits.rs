@@ -41,6 +41,7 @@ pub struct LimitsType {
     pub depth: i32,
 
     /// 詰み専用探索の手数（0以外なら有効）
+    /// USI `go mate N` の N は手数（1手=先後1回ずつ）で、内部比較では 2*N 手目まで探索する。
     pub mate: i32,
 
     /// perftテスト中のフラグ（非0なら深さ）
