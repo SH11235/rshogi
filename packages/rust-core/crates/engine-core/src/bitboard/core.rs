@@ -28,6 +28,12 @@ impl Bitboard {
         Bitboard { p: [p0, p1] }
     }
 
+    /// u64ペアから生成（YaneuraOuのBitboard(p0,p1)相当）
+    #[inline]
+    pub const fn from_u64_pair(p0: u64, p1: u64) -> Bitboard {
+        Bitboard::new(p0, p1)
+    }
+
     /// 単一マスのBitboard
     #[inline]
     pub const fn from_square(sq: Square) -> Bitboard {
@@ -188,6 +194,17 @@ impl Bitboard {
     #[inline]
     pub const fn iter(self) -> BitboardIter {
         BitboardIter(self)
+    }
+
+    /// (~self) & rhs を計算
+    #[inline]
+    pub const fn andnot(self, rhs: Bitboard) -> Bitboard {
+        Bitboard {
+            p: [
+                (!self.p[0] & rhs.p[0]) & 0x7FFF_FFFF_FFFF_FFFF,
+                (!self.p[1] & rhs.p[1]) & 0x0003_FFFF,
+            ],
+        }
     }
 }
 
@@ -460,6 +477,30 @@ mod tests {
         assert_eq!(bb_xor.count(), 1);
         assert!(bb_xor.contains(sq1));
         assert!(!bb_xor.contains(sq2));
+    }
+
+    #[test]
+    fn test_bitboard_from_u64_pair() {
+        let bb = Bitboard::from_u64_pair(0x1234, 0x5678);
+        assert_eq!(bb.p0(), 0x1234);
+        assert_eq!(bb.p1(), 0x5678);
+    }
+
+    #[test]
+    fn test_bitboard_andnot() {
+        let sq1 = Square::new(File::File1, Rank::Rank1);
+        let sq2 = Square::new(File::File2, Rank::Rank2);
+        let sq3 = Square::new(File::File3, Rank::Rank3);
+
+        let a = Bitboard::from_square(sq1) | Bitboard::from_square(sq2);
+        let b = Bitboard::from_square(sq2) | Bitboard::from_square(sq3);
+
+        let expected = (!a) & b;
+        let result = a.andnot(b);
+
+        assert_eq!(result, expected);
+        assert!(result.contains(sq3));
+        assert!(!result.contains(sq2));
     }
 
     #[test]
