@@ -231,7 +231,7 @@ impl TimeManagement {
     }
 
     /// remain_timeゲッター（テスト用）
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn remain_time(&self) -> TimePoint {
         self.remain_time
     }

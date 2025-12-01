@@ -9,7 +9,7 @@ use crate::nnue::evaluate;
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::TranspositionTable;
-use crate::types::{Bound, Depth, Move, Piece, Value, DEPTH_QS, MAX_PLY};
+use crate::types::{Bound, Depth, Move, Piece, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
 
 use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
@@ -17,9 +17,11 @@ use super::history::{
     ContinuationHistory, LowPlyHistory, PawnHistory, CONTINUATION_HISTORY_WEIGHTS,
     LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
+use super::movepicker::piece_value;
 use super::tt_history::TTMoveHistory;
 use super::types::{
-    init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves, StackArray,
+    draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves,
+    StackArray,
 };
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -118,6 +120,9 @@ pub struct SearchWorker<'a> {
     /// 探索完了済み深さ
     pub completed_depth: Depth,
 
+    /// 全合法手生成フラグ（YaneuraOu互換）
+    pub generate_all_legal_moves: bool,
+
     /// 最善手
     pub best_move: Move,
 
@@ -160,6 +165,7 @@ impl<'a> SearchWorker<'a> {
             sel_depth: 0,
             root_depth: 0,
             completed_depth: 0,
+            generate_all_legal_moves: false,
             best_move: Move::NONE,
             abort: false,
             best_move_changes: 0.0,
@@ -172,6 +178,11 @@ impl<'a> SearchWorker<'a> {
     /// 古い情報の重みを低くする
     pub fn decay_best_move_changes(&mut self) {
         self.best_move_changes /= 2.0;
+    }
+
+    /// 全合法手生成モードの設定（YaneuraOu互換）
+    pub fn set_generate_all_legal_moves(&mut self, flag: bool) {
+        self.generate_all_legal_moves = flag;
     }
 
     /// 中断チェック
@@ -559,7 +570,7 @@ impl<'a> SearchWorker<'a> {
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
-            return self.qsearch::<NT>(pos, alpha, beta, ply);
+            return self.qsearch::<NT>(pos, depth, alpha, beta, ply);
         }
 
         // 最大深さチェック
@@ -591,7 +602,7 @@ impl<'a> SearchWorker<'a> {
 
         // YaneuraOu準拠: tt_hitをスタックに記録
         self.stack[ply as usize].tt_hit = tt_hit;
-        let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
+        let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(tt_data.value, ply)
         } else {
@@ -633,7 +644,8 @@ impl<'a> SearchWorker<'a> {
         if !pv_node && !in_check && depth <= 3 {
             let razoring_threshold = alpha - Value::new(200 * depth);
             if static_eval < razoring_threshold {
-                let value = self.qsearch::<{ NodeType::NonPV as u8 }>(pos, alpha, beta, ply);
+                let value =
+                    self.qsearch::<{ NodeType::NonPV as u8 }>(pos, DEPTH_QS, alpha, beta, ply);
                 if value <= alpha {
                     return value;
                 }
@@ -647,6 +659,110 @@ impl<'a> SearchWorker<'a> {
             let futility_margin = Value::new(FUTILITY_MARGIN_BASE * depth);
             if static_eval - futility_margin >= beta {
                 return static_eval;
+            }
+        }
+
+        // =================================================================
+        // ProbCut（YaneuraOu準拠の簡易版）
+        // =================================================================
+        if !in_check && depth >= 3 && static_eval != Value::NONE {
+            let prob_beta = beta + Value::new(215 - 60 * improving as i32);
+            if !(beta.is_mate_score()
+                || (tt_hit && tt_value != Value::NONE && tt_value < prob_beta))
+            {
+                let threshold = prob_beta - static_eval;
+                if threshold > Value::ZERO {
+                    let probcut_moves = {
+                        let cont_tables = self.build_cont_tables(ply);
+                        let mp = MovePicker::new_probcut(
+                            pos,
+                            tt_move,
+                            threshold,
+                            &self.main_history,
+                            &self.low_ply_history,
+                            &self.capture_history,
+                            cont_tables,
+                            &self.pawn_history,
+                            ply,
+                            self.generate_all_legal_moves,
+                        );
+                        let mut buf = Vec::new();
+                        for mv in mp {
+                            buf.push(mv);
+                        }
+                        buf
+                    };
+
+                    let dynamic_reduction = (static_eval - beta).raw() / 300;
+                    let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
+
+                    let mut tried = 0;
+
+                    for mv in probcut_moves {
+                        if tried >= if pv_node { 2 } else { 4 } {
+                            break;
+                        }
+                        if !pos.is_legal(mv) {
+                            continue;
+                        }
+
+                        pos.do_move(mv, pos.gives_check(mv));
+                        self.nodes += 1;
+                        let mut value = -self.qsearch::<{ NodeType::NonPV as u8 }>(
+                            pos,
+                            DEPTH_QS,
+                            -prob_beta,
+                            -prob_beta + Value::new(1),
+                            ply + 1,
+                        );
+
+                        if value >= prob_beta && probcut_depth > 0 {
+                            value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                                pos,
+                                probcut_depth,
+                                -prob_beta,
+                                -prob_beta + Value::new(1),
+                                ply + 1,
+                            );
+                        }
+                        pos.undo_move(mv);
+                        tried += 1;
+
+                        if value >= prob_beta {
+                            let stored_depth = (probcut_depth + 1).max(1);
+                            tt_result.write(
+                                key,
+                                value_to_tt(value, ply),
+                                pv_node,
+                                Bound::Lower,
+                                stored_depth,
+                                mv,
+                                static_eval,
+                                self.tt.generation(),
+                            );
+
+                            if value.raw().abs() < Value::INFINITE.raw() {
+                                return value - (prob_beta - beta);
+                            }
+                            return value;
+                        }
+                    }
+                }
+            }
+        }
+
+        // small probcut
+        if depth >= 1 {
+            let sp_beta = beta + Value::new(417);
+            if tt_hit
+                && tt_data.bound == Bound::Lower
+                && tt_data.depth >= depth - 4
+                && tt_value != Value::NONE
+                && tt_value >= sp_beta
+                && !tt_value.is_mate_score()
+                && !beta.is_mate_score()
+            {
+                return sp_beta;
             }
         }
 
@@ -693,9 +809,16 @@ impl<'a> SearchWorker<'a> {
         // 合法手を生成（簡易実装）
         let mut ordered_moves = Vec::new();
 
-        // YaneuraOu方式: 過去6手分のContinuationHistoryテーブルを構築
-        let cont_tables = self.build_cont_tables(ply);
+        // qsearch/ProbCut互換: 捕獲フェーズではTT手もcapture_stageで制約
+        if depth <= DEPTH_QS
+            && tt_move.is_some()
+            && (!pos.capture_stage(tt_move) && !pos.gives_check(tt_move) || depth < -16)
         {
+            tt_move = Move::NONE;
+        }
+
+        {
+            let cont_tables = self.build_cont_tables(ply);
             let mut mp = MovePicker::new(
                 pos,
                 tt_move,
@@ -706,6 +829,7 @@ impl<'a> SearchWorker<'a> {
                 cont_tables,
                 &self.pawn_history,
                 ply,
+                self.generate_all_legal_moves,
             );
 
             while let Some(mv) = {
@@ -717,6 +841,40 @@ impl<'a> SearchWorker<'a> {
                 }
             } {
                 ordered_moves.push(mv);
+            }
+
+            // qsearchでは捕獲以外のチェックも生成（YaneuraOu準拠）
+            if !in_check && depth == DEPTH_QS {
+                let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+                let gen_type = if self.generate_all_legal_moves {
+                    crate::movegen::GenType::QuietChecksAll
+                } else {
+                    crate::movegen::GenType::QuietChecks
+                };
+                let count = crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
+                for mv in buf.iter().take(count) {
+                    if ordered_moves.contains(mv) {
+                        continue;
+                    }
+                    ordered_moves.push(*mv);
+                }
+            }
+
+            // depth <= -5 なら recaptures のみに絞る
+            if depth <= -5 && ply >= 1 {
+                let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+                let rec_sq = self.stack[(ply - 1) as usize].current_move.to();
+                let gen_type = if self.generate_all_legal_moves {
+                    crate::movegen::GenType::RecapturesAll
+                } else {
+                    crate::movegen::GenType::Recaptures
+                };
+                let count =
+                    crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
+                ordered_moves.clear();
+                for mv in buf.iter().take(count) {
+                    ordered_moves.push(*mv);
+                }
             }
         }
 
@@ -1137,6 +1295,7 @@ impl<'a> SearchWorker<'a> {
     fn qsearch<const NT: u8>(
         &mut self,
         pos: &mut Position,
+        depth: Depth,
         alpha: Value,
         beta: Value,
         ply: i32,
@@ -1144,120 +1303,276 @@ impl<'a> SearchWorker<'a> {
         let pv_node = NT == NodeType::PV as u8;
         let in_check = pos.in_check();
 
-        // 最大深さチェック
         if ply >= MAX_PLY {
             return if in_check { Value::ZERO } else { evaluate(pos) };
         }
 
-        // 選択的深さを更新
         if pv_node && self.sel_depth < ply + 1 {
             self.sel_depth = ply + 1;
         }
 
-        // 中断チェック
         if self.check_abort() {
             return Value::ZERO;
         }
 
-        let mut alpha = alpha;
-        let mut best_value: Value;
-
-        // 王手がかかっていない場合はstand-pat
-        if !in_check {
-            let static_eval = evaluate(pos);
-            best_value = static_eval;
-
-            if best_value >= beta {
-                return best_value;
+        let rep_state = pos.repetition_state(ply);
+        if rep_state.is_repetition() || rep_state.is_superior_inferior() {
+            let v = draw_value(rep_state, pos.side_to_move());
+            if v != Value::NONE {
+                return value_from_tt(v, ply);
             }
-
-            if best_value > alpha {
-                alpha = best_value;
-            }
-        } else {
-            // 王手がかかっている場合は全ての手を探索
-            best_value = Value::mated_in(ply);
         }
 
-        // 指し手生成
+        let key = pos.key();
+        let tt_result = self.tt.probe(key, pos);
+        let tt_hit = tt_result.found;
+        let tt_data = tt_result.data;
+        self.stack[ply as usize].tt_hit = tt_hit;
+        let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
+        let tt_value = if tt_hit {
+            value_from_tt(tt_data.value, ply)
+        } else {
+            Value::NONE
+        };
+
+        if !pv_node
+            && tt_hit
+            && tt_data.depth >= DEPTH_QS
+            && tt_value != Value::NONE
+            && tt_data.bound.can_cutoff(tt_value, beta)
+        {
+            return tt_value;
+        }
+
+        let mut best_move = Move::NONE;
+
+        let static_eval = if in_check {
+            Value::NONE
+        } else if tt_hit && tt_data.eval != Value::NONE {
+            tt_data.eval
+        } else {
+            // 置換表に無いときだけ簡易1手詰め判定を行う
+            if !tt_hit {
+                let mate_move = pos.mate_1ply();
+                if mate_move.is_some() {
+                    return Value::mate_in(ply + 1);
+                }
+            }
+            evaluate(pos)
+        };
+        self.stack[ply as usize].static_eval = static_eval;
+
+        let mut alpha = alpha;
+        let mut best_value = if in_check {
+            Value::mated_in(ply)
+        } else {
+            static_eval
+        };
+
+        if !in_check && tt_hit && tt_value != Value::NONE && !tt_value.is_mate_score() {
+            let improves = (tt_value > best_value && tt_data.bound == Bound::Lower)
+                || (tt_value < best_value && tt_data.bound == Bound::Upper);
+            if improves {
+                best_value = tt_value;
+            }
+        }
+
+        if !in_check && best_value >= beta {
+            let mut v = best_value;
+            if !v.is_mate_score() {
+                v = Value::new((v.raw() + beta.raw()) / 2);
+            }
+            if !tt_hit {
+                tt_result.write(
+                    key,
+                    value_to_tt(v, ply),
+                    pv_node,
+                    Bound::Lower,
+                    DEPTH_UNSEARCHED,
+                    Move::NONE,
+                    static_eval,
+                    self.tt.generation(),
+                );
+            }
+            return v;
+        }
+
+        if !in_check && best_value > alpha {
+            alpha = best_value;
+        }
+
+        let futility_base = if in_check {
+            Value::NONE
+        } else {
+            static_eval + Value::new(352)
+        };
+
+        if depth <= DEPTH_QS
+            && tt_move.is_some()
+            && ((!pos.capture_stage(tt_move) && !pos.gives_check(tt_move)) || depth < -16)
+        {
+            tt_move = Move::NONE;
+        }
+
+        let prev_move = if ply >= 1 {
+            self.stack[(ply - 1) as usize].current_move
+        } else {
+            Move::NONE
+        };
+
+        let ordered_moves = {
+            let cont_tables = self.build_cont_tables(ply);
+            let mut buf_moves = Vec::new();
+
+            {
+                let mp = if in_check {
+                    MovePicker::new_evasions(
+                        pos,
+                        tt_move,
+                        &self.main_history,
+                        &self.low_ply_history,
+                        &self.capture_history,
+                        cont_tables,
+                        &self.pawn_history,
+                        ply,
+                        self.generate_all_legal_moves,
+                    )
+                } else {
+                    MovePicker::new(
+                        pos,
+                        tt_move,
+                        DEPTH_QS,
+                        &self.main_history,
+                        &self.low_ply_history,
+                        &self.capture_history,
+                        cont_tables,
+                        &self.pawn_history,
+                        ply,
+                        self.generate_all_legal_moves,
+                    )
+                };
+
+                for mv in mp {
+                    buf_moves.push(mv);
+                }
+            }
+
+            if !in_check && depth == DEPTH_QS {
+                let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+                let gen_type = if self.generate_all_legal_moves {
+                    crate::movegen::GenType::QuietChecksAll
+                } else {
+                    crate::movegen::GenType::QuietChecks
+                };
+                let count = crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
+                for mv in buf.iter().take(count) {
+                    if buf_moves.contains(mv) {
+                        continue;
+                    }
+                    buf_moves.push(*mv);
+                }
+            }
+
+            if !in_check && depth <= -5 && ply >= 1 && !prev_move.is_none() {
+                let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+                let rec_sq = prev_move.to();
+                let gen_type = if self.generate_all_legal_moves {
+                    crate::movegen::GenType::RecapturesAll
+                } else {
+                    crate::movegen::GenType::Recaptures
+                };
+                let count =
+                    crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
+                buf_moves.clear();
+                for mv in buf.iter().take(count) {
+                    buf_moves.push(*mv);
+                }
+            }
+
+            buf_moves
+        };
+
         let mut move_count = 0;
 
-        // YaneuraOu方式: 過去6手分のContinuationHistoryテーブルを構築
-        let cont_tables = self.build_cont_tables(ply);
-
-        let mut ordered_moves = Vec::new();
-        {
-            let mut mp = if in_check {
-                MovePicker::new_evasions(
-                    pos,
-                    Move::NONE,
-                    &self.main_history,
-                    &self.low_ply_history,
-                    &self.capture_history,
-                    cont_tables,
-                    &self.pawn_history,
-                    ply,
-                )
-            } else {
-                MovePicker::new(
-                    pos,
-                    Move::NONE,
-                    DEPTH_QS,
-                    &self.main_history,
-                    &self.low_ply_history,
-                    &self.capture_history,
-                    cont_tables,
-                    &self.pawn_history,
-                    ply,
-                )
-            };
-
-            while let Some(mv) = {
-                let m = mp.next_move();
-                if m.is_none() {
-                    None
-                } else {
-                    Some(m)
-                }
-            } {
-                ordered_moves.push(mv);
-            }
-        }
-
         for mv in ordered_moves {
-            // 合法性チェック（pseudo_legalは通っているはずだが、is_legalも確認）
             if !pos.is_legal(mv) {
                 continue;
             }
 
-            // 王手中でなければ捕獲手のみ
-            if !in_check && !pos.is_capture(mv) {
+            let gives_check = pos.gives_check(mv);
+            let capture = pos.capture_stage(mv);
+
+            if !in_check && depth <= DEPTH_QS && !capture && !gives_check {
                 continue;
             }
 
-            // SEEで悪い捕獲を枝刈り
-            if !in_check && !pos.see_ge(mv, Value::ZERO) {
+            if !in_check && capture && !pos.see_ge(mv, Value::ZERO) {
                 continue;
             }
 
             move_count += 1;
-            let gives_check = pos.gives_check(mv);
-            let is_capture = pos.is_capture(mv);
 
-            // ContHistKey用の情報をMoveから取得（YaneuraOu方式）
+            if !best_value.is_loss() {
+                if !gives_check
+                    && (prev_move.is_none() || mv.to() != prev_move.to())
+                    && futility_base != Value::NONE
+                {
+                    if move_count > 2 {
+                        continue;
+                    }
+
+                    let futility_value =
+                        futility_base + Value::new(piece_value(pos.piece_on(mv.to())));
+
+                    if futility_value <= alpha {
+                        best_value = best_value.max(futility_value);
+                        continue;
+                    }
+
+                    if !pos.see_ge(mv, alpha - futility_base) {
+                        best_value = best_value.min(alpha.min(futility_base));
+                        continue;
+                    }
+                }
+
+                if !capture {
+                    let mut cont_score = 0;
+                    if ply >= 1 {
+                        if let Some(key) = self.stack[(ply - 1) as usize].cont_hist_key {
+                            let in_check_idx = key.in_check as usize;
+                            let capture_idx = key.capture as usize;
+                            cont_score += self.continuation_history[in_check_idx][capture_idx].get(
+                                key.piece,
+                                key.to,
+                                mv.moved_piece_after(),
+                                mv.to(),
+                            ) as i32;
+                        }
+                    }
+                    let pawn_idx = pos.pawn_history_index();
+                    cont_score +=
+                        self.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32;
+                    if cont_score <= 5868 {
+                        continue;
+                    }
+                }
+
+                if !pos.see_ge(mv, Value::new(-74)) {
+                    continue;
+                }
+            }
+
+            self.stack[ply as usize].current_move = mv;
             let cont_hist_pc = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
             pos.do_move(mv, gives_check);
             self.nodes += 1;
 
-            // YaneuraOu方式: do_move後にContHistKeyを設定（静止探索でも必要）
-            // これにより次のqsearch呼び出しでbuild_cont_tablesが直前手を参照できる
-            // in_checkは親ノード（現在のノード）の王手状態を使用
             self.stack[ply as usize].cont_hist_key =
-                Some(ContHistKey::new(in_check, is_capture, cont_hist_pc, cont_hist_to));
+                Some(ContHistKey::new(in_check, capture, cont_hist_pc, cont_hist_to));
 
-            let value = -self.qsearch::<NT>(pos, -beta, -alpha, ply + 1);
+            let value = -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1);
 
             pos.undo_move(mv);
 
@@ -1267,6 +1582,7 @@ impl<'a> SearchWorker<'a> {
 
             if value > best_value {
                 best_value = value;
+                best_move = mv;
 
                 if value > alpha {
                     alpha = value;
@@ -1278,10 +1594,32 @@ impl<'a> SearchWorker<'a> {
             }
         }
 
-        // 王手中に合法手がない場合は詰み
         if in_check && move_count == 0 {
             return Value::mated_in(ply);
         }
+
+        if !best_value.is_mate_score() && best_value > beta {
+            best_value = Value::new((best_value.raw() + beta.raw()) / 2);
+        }
+
+        let bound = if best_value >= beta {
+            Bound::Lower
+        } else if pv_node && best_move.is_some() {
+            Bound::Exact
+        } else {
+            Bound::Upper
+        };
+
+        tt_result.write(
+            key,
+            value_to_tt(best_value, ply),
+            pv_node,
+            bound,
+            DEPTH_QS,
+            best_move,
+            static_eval,
+            self.tt.generation(),
+        );
 
         best_value
     }
