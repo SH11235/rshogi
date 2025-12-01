@@ -47,12 +47,26 @@ pub struct SearchInfo {
 impl SearchInfo {
     /// USI形式のinfo文字列を生成
     pub fn to_usi_string(&self) -> String {
+        let score_str =
+            if self.score.is_mate_score() && self.score.raw().abs() < Value::INFINITE.raw() {
+                // USIでは手数(plies)で出力し、負値は自分が詰まされる側を示す
+                let mate_ply = self.score.mate_ply();
+                let signed_ply = if self.score.is_loss() {
+                    -(mate_ply as i32)
+                } else {
+                    mate_ply as i32
+                };
+                format!("mate {signed_ply}")
+            } else {
+                format!("cp {}", self.score.raw())
+            };
+
         let mut s = format!(
-            "info depth {depth} seldepth {sel_depth} multipv {multi_pv} score cp {score} nodes {nodes} time {time_ms} nps {nps} hashfull {hashfull}",
+            "info depth {depth} seldepth {sel_depth} multipv {multi_pv} score {score} nodes {nodes} time {time_ms} nps {nps} hashfull {hashfull}",
             depth = self.depth,
             sel_depth = self.sel_depth,
             multi_pv = self.multi_pv,
-            score = self.score.raw(),
+            score = score_str,
             nodes = self.nodes,
             time_ms = self.time_ms,
             nps = self.nps,
@@ -942,5 +956,41 @@ mod tests {
         assert!(usi.contains("multipv 1"));
         assert!(usi.contains("score cp 123"));
         assert!(usi.contains("nodes 10000"));
+    }
+
+    #[test]
+    fn test_search_info_to_usi_formats_mate_score() {
+        let info = SearchInfo {
+            depth: 9,
+            sel_depth: 9,
+            score: Value::mate_in(5),
+            nodes: 42,
+            time_ms: 10,
+            nps: 4200,
+            hashfull: 0,
+            pv: vec![],
+            multi_pv: 1,
+        };
+
+        let usi = info.to_usi_string();
+        assert!(usi.contains("score mate 5"));
+    }
+
+    #[test]
+    fn test_search_info_to_usi_formats_mated_score_with_negative_sign() {
+        let info = SearchInfo {
+            depth: 9,
+            sel_depth: 9,
+            score: Value::mated_in(4),
+            nodes: 42,
+            time_ms: 10,
+            nps: 4200,
+            hashfull: 0,
+            pv: vec![],
+            multi_pv: 1,
+        };
+
+        let usi = info.to_usi_string();
+        assert!(usi.contains("score mate -4"));
     }
 }
