@@ -7,7 +7,7 @@ use crate::bitboard::{
     bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, rook_effect,
     silver_effect, Bitboard,
 };
-use crate::movegen::{generate_evasions, generate_non_evasions, ExtMove, MAX_MOVES};
+use crate::movegen::{generate_evasions, generate_with_type, ExtMove, GenType, MAX_MOVES};
 use crate::types::{Color, Move, Piece, PieceType, Square, Value};
 
 impl Position {
@@ -108,6 +108,20 @@ impl Position {
         }
     }
 
+    /// capture_stage: 捕獲手かどうか（ProbCut等の判定用）
+    #[inline]
+    pub fn capture_stage(&self, m: Move) -> bool {
+        !m.is_drop() && self.piece_on(m.to()).is_some()
+    }
+
+    /// pseudo-legal判定（生成モード指定版）
+    #[inline]
+    pub fn pseudo_legal_with_all(&self, m: Move, _generate_all_legal_moves: bool) -> bool {
+        // 現状の pseudo_legal はALL/非ALLで挙動差がないためそのまま呼ぶ。
+        // 将来的に不成抑止などを切替える場合に備えたインターフェース。
+        self.pseudo_legal(m)
+    }
+
     /// 取る手かどうか
     #[inline]
     pub fn is_capture(&self, m: Move) -> bool {
@@ -115,6 +129,16 @@ impl Position {
             false
         } else {
             self.piece_on(m.to()).is_some()
+        }
+    }
+
+    /// 指し手で動いた後の駒（成り後・打ち駒を含む）を取得
+    #[inline]
+    pub fn moved_piece_after_move(&self, m: Move) -> Piece {
+        if m.has_piece_info() {
+            m.moved_piece_after()
+        } else {
+            self.moved_piece(m)
         }
     }
 
@@ -150,10 +174,9 @@ impl Position {
         let count = if self.in_check() {
             generate_evasions(self, &mut buffer)
         } else {
-            generate_non_evasions(self, &mut buffer)
+            generate_with_type(self, GenType::CapturesProPlus, &mut buffer, None)
         };
 
-        // 捕獲手のみをフィルタ
         let mut capture_count = 0;
         for m in buffer.iter().take(count) {
             if self.is_capture(*m) {
@@ -168,13 +191,12 @@ impl Position {
     pub fn generate_quiets(&self, moves: &mut [ExtMove]) -> usize {
         let mut buffer = [Move::NONE; MAX_MOVES];
         let count = if self.in_check() {
-            // 王手回避中は静かな手を別途生成しない
             return 0;
         } else {
-            generate_non_evasions(self, &mut buffer)
+            // YaneuraOu標準のQUIETS相当: 成りも含む静かな手を生成する
+            generate_with_type(self, GenType::Quiets, &mut buffer, None)
         };
 
-        // 静かな手（非捕獲手）のみをフィルタ
         let mut quiet_count = 0;
         for m in buffer.iter().take(count) {
             if !self.is_capture(*m) && quiet_count < moves.len() {
@@ -190,7 +212,7 @@ impl Position {
         debug_assert!(self.in_check());
 
         let mut buffer = [Move::NONE; MAX_MOVES];
-        let count = generate_evasions(self, &mut buffer);
+        let count = generate_with_type(self, GenType::Evasions, &mut buffer, None);
 
         for i in 0..count {
             moves[i] = ExtMove::new(buffer[i], 0);

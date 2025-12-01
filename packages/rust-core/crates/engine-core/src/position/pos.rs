@@ -4,7 +4,8 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::types::{Color, Hand, Move, Piece, PieceType, Square};
+use crate::movegen::{self, MoveList};
+use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Square};
 
 use super::state::{ChangedPiece, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
@@ -139,6 +140,16 @@ impl Position {
     #[inline]
     pub fn game_ply(&self) -> i32 {
         self.game_ply
+    }
+
+    /// 千日手/優劣局面判定（do_move 時に計算した情報を使用）
+    pub fn repetition_state(&self, ply: i32) -> RepetitionState {
+        let rep = self.state.repetition;
+        if rep != 0 && rep.abs() < ply {
+            return self.state.repetition_type;
+        }
+
+        RepetitionState::None
     }
 
     /// 現在の状態を取得
@@ -471,6 +482,15 @@ impl Position {
             }
         }
 
+        // 4. 連続王手カウンタの更新（YaneuraOu準拠）
+        if gives_check {
+            new_state.continuous_check[us.index()] = self.state.continuous_check[us.index()] + 2;
+        } else {
+            new_state.continuous_check[us.index()] = 0;
+        }
+        // 受け手側はリセット
+        new_state.continuous_check[them.index()] = 0;
+
         // 5. 手番交代
         self.side_to_move = them;
 
@@ -481,12 +501,18 @@ impl Position {
             Bitboard::EMPTY
         };
 
-        // 7. StateInfoの付け替え
+        // 7. 千日手判定に使う手駒スナップショットを保存
+        new_state.hand_snapshot = self.hand;
+
+        // 8. StateInfoの付け替え（previous をぶら下げる）
         new_state.last_move = m;
         let old_state = std::mem::replace(&mut self.state, new_state);
         self.state.previous = Some(old_state);
 
-        // 8. pin情報と王手マスの更新
+        // 9. 繰り返し情報の更新
+        self.update_repetition_info();
+
+        // 10. pin情報と王手マスの更新
         self.update_blockers_and_pinners();
         self.update_check_squares();
     }
@@ -550,6 +576,7 @@ impl Position {
         new_state.plies_from_null = 0;
         new_state.captured_piece = Piece::NONE;
         new_state.last_move = Move::NULL;
+        new_state.hand_snapshot = self.hand;
 
         self.side_to_move = !self.side_to_move;
 
@@ -567,6 +594,72 @@ impl Position {
     pub fn undo_null_move(&mut self) {
         self.side_to_move = !self.side_to_move;
         self.state = self.state.previous.take().unwrap();
+    }
+
+    /// 繰り返し情報を更新（最大16手遡り）
+    fn update_repetition_info(&mut self) {
+        // 初期化
+        self.state.repetition = 0;
+        self.state.repetition_times = 0;
+        self.state.repetition_type = RepetitionState::None;
+
+        let max_back = self.state.plies_from_null.min(16);
+        if max_back < 4 {
+            return;
+        }
+
+        let side = self.side_to_move;
+        let cc_side = self.state.continuous_check[side.index()];
+        let cc_opp = self.state.continuous_check[(!side).index()];
+
+        let mut dist = 2;
+        let mut st_opt = self.state.previous.as_deref().and_then(|s| s.previous.as_deref());
+
+        while dist <= max_back {
+            if let Some(stp) = st_opt {
+                if stp.board_key == self.state.board_key {
+                    let prev_hand = stp.hand_snapshot[side.index()];
+                    let cur_hand = self.state.hand_snapshot[side.index()];
+
+                    if cur_hand == prev_hand {
+                        let times = stp.repetition_times + 1;
+                        self.state.repetition_times = times;
+                        self.state.repetition = if times >= 3 { -dist } else { dist };
+
+                        let mut rep_type = if dist <= cc_side {
+                            RepetitionState::Lose
+                        } else if dist <= cc_opp {
+                            RepetitionState::Win
+                        } else {
+                            RepetitionState::Draw
+                        };
+
+                        if stp.repetition_times > 0 && stp.repetition_type != rep_type {
+                            rep_type = RepetitionState::Draw;
+                        }
+
+                        self.state.repetition_type = rep_type;
+                        return;
+                    }
+
+                    if cur_hand.is_superior_or_equal(prev_hand) {
+                        self.state.repetition_type = RepetitionState::Superior;
+                        self.state.repetition = dist;
+                        return;
+                    }
+
+                    if prev_hand.is_superior_or_equal(cur_hand) {
+                        self.state.repetition_type = RepetitionState::Inferior;
+                        self.state.repetition = dist;
+                        return;
+                    }
+                }
+                st_opt = stp.previous.as_deref().and_then(|p| p.previous.as_deref());
+                dist += 2;
+            } else {
+                break;
+            }
+        }
     }
 
     /// 王手になるかどうか
@@ -608,6 +701,31 @@ impl Position {
         }
 
         false
+    }
+}
+
+impl Position {
+    /// 1手詰めを検出（該当手があれば返す。なければ Move::NONE）
+    pub fn mate_1ply(&mut self) -> Move {
+        let mut list = MoveList::new();
+        movegen::generate_legal(self, &mut list);
+
+        for mv in list.iter() {
+            let gives_check = self.gives_check(*mv);
+            self.do_move(*mv, gives_check);
+
+            let mut reply_list = MoveList::new();
+            movegen::generate_legal(self, &mut reply_list);
+            let has_reply = !reply_list.is_empty();
+
+            self.undo_move(*mv);
+
+            if !has_reply {
+                return *mv;
+            }
+        }
+
+        Move::NONE
     }
 }
 
