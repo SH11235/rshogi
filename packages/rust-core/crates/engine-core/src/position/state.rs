@@ -4,7 +4,7 @@
 
 use crate::bitboard::Bitboard;
 use crate::nnue::Accumulator;
-use crate::types::{Color, Move, Piece, PieceType, Square, Value};
+use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Square, Value};
 
 /// 局面状態
 ///
@@ -26,6 +26,8 @@ pub struct StateInfo {
     pub board_key: u64,
     /// 手駒ハッシュ
     pub hand_key: u64,
+    /// 手駒スナップショット（千日手判定用）
+    pub hand_snapshot: [Hand; Color::NUM],
     /// 王手している駒
     pub checkers: Bitboard,
     /// 前の局面へのポインタ
@@ -40,6 +42,10 @@ pub struct StateInfo {
     pub captured_piece: Piece,
     /// 千日手判定用カウンタ
     pub repetition: i32,
+    /// 千日手繰り返し回数
+    pub repetition_times: i32,
+    /// 千日手種別
+    pub repetition_type: RepetitionState,
     /// 駒割評価値
     pub material_value: Value,
     /// 直前の指し手
@@ -114,6 +120,7 @@ impl StateInfo {
             continuous_check: [0; Color::NUM],
             board_key: 0,
             hand_key: 0,
+            hand_snapshot: [Hand::EMPTY; Color::NUM],
             checkers: Bitboard::EMPTY,
             previous: None,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
@@ -121,6 +128,8 @@ impl StateInfo {
             check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
             captured_piece: Piece::NONE,
             repetition: 0,
+            repetition_times: 0,
+            repetition_type: RepetitionState::None,
             material_value: Value::ZERO,
             last_move: Move::NONE,
             accumulator: Box::new(Accumulator::new()),
@@ -144,6 +153,7 @@ impl StateInfo {
             // 以下は再計算される
             board_key: self.board_key,
             hand_key: self.hand_key,
+            hand_snapshot: self.hand_snapshot,
             checkers: Bitboard::EMPTY,
             previous: None,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
@@ -151,6 +161,8 @@ impl StateInfo {
             check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
             captured_piece: Piece::NONE,
             repetition: 0,
+            repetition_times: 0,
+            repetition_type: RepetitionState::None,
             material_value: self.material_value,
             last_move: Move::NONE,
             accumulator: Box::new(Accumulator::new()),

@@ -76,8 +76,6 @@ enum PromotionMode {
     Both,
     /// 成りのみ生成
     PromoteOnly,
-    /// 不成のみ生成（成れる場合でも不成に固定）
-    NonPromoteOnly,
 }
 
 // ============================================================================
@@ -115,19 +113,6 @@ fn generate_pawn_moves(
                 (true, PromotionMode::PromoteOnly) => {
                     let promoted_pc = moved_pc.promote().unwrap();
                     add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
-                }
-                (true, PromotionMode::NonPromoteOnly) => {
-                    if !to_is_rank1 {
-                        add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
-                    } else {
-                        // 1段目は成り強制
-                        let promoted_pc = moved_pc.promote().unwrap();
-                        add_move(
-                            moves,
-                            idx,
-                            Move::new_move_with_piece(from, to, true, promoted_pc),
-                        );
-                    }
                 }
                 (true, PromotionMode::Both) => {
                     let promoted_pc = moved_pc.promote().unwrap();
@@ -671,8 +656,9 @@ fn generate_recaptures(
     pawn_promo_mode: PromotionMode,
 ) -> usize {
     let target = Bitboard::from_square(sq);
-    let targets = GenerateTargets::with_drop(target, target);
-    generate_non_evasions_core(pos, moves, targets, include_non_promotions, pawn_promo_mode, true)
+    // YaneuraOuのRECAPTURESは移動のみ（駒打ちは含めない）
+    let targets = GenerateTargets::new(target);
+    generate_non_evasions_core(pos, moves, targets, include_non_promotions, pawn_promo_mode, false)
 }
 
 /// GenType に応じた指し手生成（pseudo-legal）
@@ -708,25 +694,66 @@ pub fn generate_with_type(
         }
         QuietsProMinus => {
             let targets = GenerateTargets::with_drop(empties, empties);
-            generate_non_evasions_core(
+            // QUIETS_PRO_MINUS は「歩の静かな成りを含めない」以外は通常のQUIETSと同じ。
+            let mut idx = generate_non_evasions_core(
                 pos,
                 moves,
                 targets,
                 false,
-                PromotionMode::NonPromoteOnly,
+                PromotionMode::PromoteOnly,
                 true,
-            )
+            );
+
+            // 歩の静かな成りを除外するためフィルタ
+            let filtered: Vec<_> = moves
+                .iter()
+                .take(idx)
+                .copied()
+                .filter(|m| {
+                    if pos.is_capture(*m) {
+                        return true;
+                    }
+                    let from = m.from();
+                    let to = m.to();
+                    let pt = pos.piece_on(from).piece_type();
+                    !(pt == PieceType::Pawn
+                        && m.is_promotion()
+                        && enemy_field(pos.side_to_move()).contains(to))
+                })
+                .collect();
+            idx = filtered.len();
+            for (i, mv) in filtered.into_iter().enumerate() {
+                moves[i] = mv;
+            }
+            idx
         }
         QuietsProMinusAll => {
             let targets = GenerateTargets::with_drop(empties, empties);
-            generate_non_evasions_core(
-                pos,
-                moves,
-                targets,
-                true,
-                PromotionMode::NonPromoteOnly,
-                true,
-            )
+            // QUIETS_PRO_MINUS_ALL も歩の静かな成りのみ除外（不成生成は許容）
+            let mut idx =
+                generate_non_evasions_core(pos, moves, targets, true, PromotionMode::Both, true);
+
+            let filtered: Vec<_> = moves
+                .iter()
+                .take(idx)
+                .copied()
+                .filter(|m| {
+                    if pos.is_capture(*m) {
+                        return true;
+                    }
+                    let from = m.from();
+                    let to = m.to();
+                    let pt = pos.piece_on(from).piece_type();
+                    !(pt == PieceType::Pawn
+                        && m.is_promotion()
+                        && enemy_field(pos.side_to_move()).contains(to))
+                })
+                .collect();
+            idx = filtered.len();
+            for (i, mv) in filtered.into_iter().enumerate() {
+                moves[i] = mv;
+            }
+            idx
         }
         Captures => {
             let targets = GenerateTargets::new(enemy);
@@ -756,7 +783,7 @@ pub fn generate_with_type(
         }
         CapturesProPlusAll => {
             let targets = GenerateTargets::new(enemy);
-            generate_non_evasions_core(pos, moves, targets, true, PromotionMode::PromoteOnly, false)
+            generate_non_evasions_core(pos, moves, targets, true, PromotionMode::Both, false)
         }
         Recaptures => {
             let sq = recapture_sq.expect("Recaptures requires a target square");
