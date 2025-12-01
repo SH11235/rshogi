@@ -4,7 +4,7 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Square};
+use crate::types::{Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square};
 
 use super::state::{ChangedPiece, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
@@ -89,6 +89,40 @@ impl Position {
     #[inline]
     pub fn pieces(&self, c: Color, pt: PieceType) -> Bitboard {
         self.by_color[c.index()] & self.by_type[pt as usize]
+    }
+
+    /// 駒種集合のBitboard（先後無視）
+    #[inline]
+    pub fn pieces_by_types(&self, set: PieceTypeSet) -> Bitboard {
+        if set.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        if set.is_all() {
+            return self.occupied();
+        }
+
+        let mut bb = Bitboard::EMPTY;
+        for pt in set.iter() {
+            bb |= self.by_type[pt as usize];
+        }
+        bb
+    }
+
+    /// 駒種集合のBitboard（手番指定）
+    #[inline]
+    pub fn pieces_c_by_types(&self, c: Color, set: PieceTypeSet) -> Bitboard {
+        if set.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        if set.is_all() {
+            return self.by_color[c.index()];
+        }
+
+        let mut bb = Bitboard::EMPTY;
+        for pt in set.iter() {
+            bb |= self.by_type[pt as usize] & self.by_color[c.index()];
+        }
+        bb
     }
 
     /// 手駒を取得
@@ -278,7 +312,29 @@ impl Position {
 
     /// 現在のpin状態（指定升を除外）
     pub fn pinned_pieces(&self, them: Color, avoid: Square) -> Bitboard {
-        self.blockers_for_king(them) & !Bitboard::from_square(avoid)
+        self.pinned_pieces_excluding(them, avoid)
+    }
+
+    /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
+    pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
+        let occ = self.occupied() & !Bitboard::from_square(avoid);
+        self.pinned_pieces_with_occupancy(them, occ, Bitboard::EMPTY)
+    }
+
+    /// from->toに動かした後の占有でのpin駒（やねうら王のpinned_pieces(Them, from, to)相当）
+    pub fn pinned_pieces_after_move(&self, them: Color, from: Square, to: Square) -> Bitboard {
+        let mut occ = self.occupied();
+        occ ^= Bitboard::from_square(from);
+        occ |= Bitboard::from_square(to);
+
+        let enemy = !them;
+        let enemy_removed = if self.piece_on(to).is_some() && self.piece_on(to).color() == enemy {
+            Bitboard::from_square(to)
+        } else {
+            Bitboard::EMPTY
+        };
+
+        self.pinned_pieces_with_occupancy(them, occ, enemy_removed)
     }
 
     /// fromの駒を動かしたときに開き王手になるか（簡易判定）
@@ -308,35 +364,10 @@ impl Position {
     /// pin駒とpinしている駒を更新
     pub(super) fn update_blockers_and_pinners(&mut self) {
         for c in [Color::Black, Color::White] {
-            self.state.blockers_for_king[c.index()] = Bitboard::EMPTY;
-            self.state.pinners[c.index()] = Bitboard::EMPTY;
-
-            let ksq = self.king_square[c.index()];
-            let them = !c;
-            let occupied = self.occupied();
-
-            // 敵の遠方駒からの利き
-            let snipers = (lance_effect(c, ksq, Bitboard::EMPTY)
-                & self.pieces(them, PieceType::Lance))
-                | (bishop_effect(ksq, Bitboard::EMPTY)
-                    & (self.pieces(them, PieceType::Bishop) | self.pieces(them, PieceType::Horse)))
-                | (rook_effect(ksq, Bitboard::EMPTY)
-                    & (self.pieces(them, PieceType::Rook) | self.pieces(them, PieceType::Dragon)));
-
-            for sniper_sq in snipers.iter() {
-                // 玉とsniperの間にある駒
-                let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
-                // 間に1枚だけある場合、それがblocker
-                if !between.is_empty() && !between.more_than_one() {
-                    self.state.blockers_for_king[c.index()] =
-                        self.state.blockers_for_king[c.index()] | between;
-                    // blockerが敵の駒なら、sniperはpinner
-                    if (between & self.pieces_c(them)).is_empty() {
-                        // blockerは自駒なので、sniperはpinner
-                        self.state.pinners[c.index()].set(sniper_sq);
-                    }
-                }
-            }
+            let (blockers, pinners) =
+                self.compute_blockers_and_pinners(c, self.occupied(), Bitboard::EMPTY);
+            self.state.blockers_for_king[c.index()] = blockers;
+            self.state.pinners[c.index()] = pinners;
         }
     }
 
@@ -726,6 +757,60 @@ impl Default for Position {
     }
 }
 
+impl Position {
+    /// 占有を指定してpin駒を再計算（king_color側の玉に対するpin）
+    fn pinned_pieces_with_occupancy(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> Bitboard {
+        let (blockers, _) = self.compute_blockers_and_pinners(king_color, occupied, enemy_removed);
+        blockers & self.pieces_c(king_color)
+    }
+
+    /// 占有を指定してpin候補とpinnerを再計算
+    fn compute_blockers_and_pinners(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> (Bitboard, Bitboard) {
+        let ksq = self.king_square[king_color.index()];
+        let enemy = !king_color;
+
+        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
+        let bishop_bb = (self.pieces(enemy, PieceType::Bishop)
+            | self.pieces(enemy, PieceType::Horse))
+            & !enemy_removed;
+        let rook_bb = (self.pieces(enemy, PieceType::Rook) | self.pieces(enemy, PieceType::Dragon))
+            & !enemy_removed;
+
+        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let mut blockers = Bitboard::EMPTY;
+        let mut pinners = Bitboard::EMPTY;
+        for sniper_sq in snipers.iter() {
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
+            if between.is_empty() || between.more_than_one() {
+                continue;
+            }
+
+            // blockerが自駒のときのみpin対象
+            if (between & self.pieces_c(enemy)).is_empty() {
+                blockers |= between;
+                pinners.set(sniper_sq);
+            } else {
+                blockers |= between;
+            }
+        }
+
+        (blockers, pinners)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +836,76 @@ mod tests {
         pos.remove_piece(sq);
         assert_eq!(pos.piece_on(sq), Piece::NONE);
         assert!(!pos.pieces(Color::Black, PieceType::Pawn).contains(sq));
+    }
+
+    #[test]
+    fn test_pieces_by_type_set() {
+        let mut pos = Position::new();
+        let gold_sq = Square::new(File::File5, Rank::Rank5);
+        let pro_sq = Square::new(File::File4, Rank::Rank4);
+        let dragon_sq = Square::new(File::File9, Rank::Rank9);
+
+        pos.put_piece(Piece::B_GOLD, gold_sq);
+        pos.put_piece(Piece::B_PRO_PAWN, pro_sq);
+        pos.put_piece(Piece::W_DRAGON, dragon_sq);
+
+        let gold_like = pos.pieces_c_by_types(Color::Black, PieceTypeSet::golds());
+        assert!(gold_like.contains(gold_sq));
+        assert!(gold_like.contains(pro_sq));
+        assert!(!gold_like.contains(dragon_sq));
+
+        let sliders = pos.pieces_by_types(PieceTypeSet::rook_dragon());
+        assert!(sliders.contains(dragon_sq));
+        assert!(!sliders.contains(gold_sq));
+
+        let all_black = pos.pieces_c_by_types(Color::Black, PieceTypeSet::ALL);
+        assert_eq!(all_black.count(), 2);
+    }
+
+    #[test]
+    fn test_pinned_pieces_variants() {
+        let mut pos = Position::new();
+        // 玉と駒配置
+        let ksq = Square::new(File::File5, Rank::Rank9);
+        let rook_sq = Square::new(File::File5, Rank::Rank1);
+        let blocker_sq = Square::new(File::File5, Rank::Rank5);
+        pos.put_piece(Piece::B_KING, ksq);
+        pos.put_piece(Piece::W_ROOK, rook_sq);
+        pos.put_piece(Piece::B_GOLD, blocker_sq);
+        pos.king_square[Color::Black.index()] = ksq;
+        pos.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
+
+        // 通常: blockerはpinされている
+        let pinned = pos.pinned_pieces_excluding(Color::Black, Square::SQ_11);
+        assert!(pinned.contains(blocker_sq));
+
+        // blockerを除去した占有でpinは消える
+        let pinned_removed = pos.pinned_pieces_excluding(Color::Black, blocker_sq);
+        assert!(pinned_removed.is_empty());
+
+        // rookを取った場合、pinは消える
+        let capture_sq = Square::new(File::File5, Rank::Rank2);
+        pos.put_piece(Piece::B_PAWN, capture_sq);
+        let pinned_after_capture = pos.pinned_pieces_after_move(Color::Black, capture_sq, rook_sq);
+        assert!(pinned_after_capture.is_empty());
+        // 以降の検証に影響しないよう除去
+        pos.remove_piece(capture_sq);
+
+        // pinners配列も更新される
+        pos.update_blockers_and_pinners();
+        assert!(pos.state.pinners[Color::Black.index()].contains(rook_sq));
+
+        // 敵駒が間にいる場合はpinnerにならない
+        let mut pos2 = Position::new();
+        pos2.put_piece(Piece::B_KING, ksq);
+        pos2.put_piece(Piece::W_ROOK, rook_sq);
+        let enemy_blocker = Square::new(File::File5, Rank::Rank4);
+        pos2.put_piece(Piece::W_GOLD, enemy_blocker);
+        pos2.king_square[Color::Black.index()] = ksq;
+        pos2.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
+        pos2.update_blockers_and_pinners();
+        assert!(pos2.state.blockers_for_king[Color::Black.index()].contains(enemy_blocker));
+        assert!(!pos2.state.pinners[Color::Black.index()].contains(rook_sq));
     }
 
     #[test]
