@@ -4,7 +4,6 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::movegen::{self, MoveList};
 use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Square};
 
 use super::state::{ChangedPiece, StateInfo};
@@ -275,6 +274,16 @@ impl Position {
     #[inline]
     pub fn check_squares(&self, pt: PieceType) -> Bitboard {
         self.state.check_squares[pt as usize]
+    }
+
+    /// 現在のpin状態（指定升を除外）
+    pub fn pinned_pieces(&self, them: Color, avoid: Square) -> Bitboard {
+        self.blockers_for_king(them) & !Bitboard::from_square(avoid)
+    }
+
+    /// fromの駒を動かしたときに開き王手になるか（簡易判定）
+    pub fn discovered(&self, from: Square, to: Square, ksq: Square, pinned: Bitboard) -> bool {
+        pinned.contains(from) && !crate::mate::aligned(from, to, ksq)
     }
 
     // ========== 内部操作 ==========
@@ -707,25 +716,7 @@ impl Position {
 impl Position {
     /// 1手詰めを検出（該当手があれば返す。なければ Move::NONE）
     pub fn mate_1ply(&mut self) -> Move {
-        let mut list = MoveList::new();
-        movegen::generate_legal(self, &mut list);
-
-        for mv in list.iter() {
-            let gives_check = self.gives_check(*mv);
-            self.do_move(*mv, gives_check);
-
-            let mut reply_list = MoveList::new();
-            movegen::generate_legal(self, &mut reply_list);
-            let has_reply = !reply_list.is_empty();
-
-            self.undo_move(*mv);
-
-            if !has_reply {
-                return *mv;
-            }
-        }
-
-        Move::NONE
+        crate::mate::mate_1ply(self).unwrap_or(Move::NONE)
     }
 }
 

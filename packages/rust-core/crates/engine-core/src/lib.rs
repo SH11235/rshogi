@@ -13,28 +13,32 @@
 //! - `search`: 探索アルゴリズム
 //! - `movepick`: 手の順序付け
 //! - `time`: 時間管理
+//! - `mate`: 1手詰め探索
 //!
 
 pub mod types;
 
-// Phase 2: 盤面表現
+// 盤面表現
 pub mod bitboard;
 pub mod position;
 
-// Phase 3: 合法手生成
+// 合法手生成
 pub mod movegen;
 
-// Phase 4: NNUE評価
+// NNUE評価
 pub mod nnue;
 
-// Phase 5: 置換表
+// 置換表
 pub mod tt;
 
-// Phase 6-8: 探索
+//  探索
 pub mod search;
 
-// Phase 7: 手の順序付け
+// 手の順序付け
 pub mod movepick;
 
-// Phase 9: 時間管理
+// 時間管理
 pub mod time;
+
+// 1手詰め探索
+pub mod mate;
