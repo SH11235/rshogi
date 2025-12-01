@@ -505,41 +505,116 @@ impl Default for CounterMoveHistory {
 // CorrectionHistory
 // =============================================================================
 
-/// CorrectionHistory: [pawn_key_index][king_sq] -> correction
+/// CorrectionHistory (YaneuraOu準拠)
 ///
-/// 静的評価の補正履歴。
-/// YaneuraOu準拠: qsearchで静的評価に補正を適用。
+/// - Pawn/Minor: [key_index][color] -> correction
+/// - NonPawn: [key_index][side_to_move][piece_color] -> correction
+/// - Continuation: [prev_pc][prev_to][pc][to] -> correction
 pub struct CorrectionHistory {
-    table: Vec<[StatsEntry<CORRECTION_HISTORY_LIMIT>; Square::NUM]>,
+    pawn: Box<[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE]>,
+    minor: Box<[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE]>,
+    non_pawn: Box<
+        [[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; Color::NUM]; CORRECTION_HISTORY_SIZE],
+    >,
+    continuation: Box<
+        [[[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Square::NUM]; Piece::NUM]; Square::NUM];
+            Piece::NUM],
+    >,
 }
 
 impl CorrectionHistory {
-    /// 新しいCorrectionHistoryを作成
+    /// 新しいCorrectionHistoryを作成（初期値込み）
     pub fn new() -> Self {
-        Self {
-            table: vec![[StatsEntry::default(); Square::NUM]; CORRECTION_HISTORY_SIZE],
-        }
+        let mut history = Self {
+            pawn: Box::new([[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE]),
+            minor: Box::new([[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE]),
+            non_pawn: Box::new(
+                [[[StatsEntry::default(); Color::NUM]; Color::NUM]; CORRECTION_HISTORY_SIZE],
+            ),
+            continuation: Box::new(
+                [[[[StatsEntry::default(); Square::NUM]; Piece::NUM]; Square::NUM]; Piece::NUM],
+            ),
+        };
+        history.fill_initial_values();
+        history
     }
 
-    /// 値を取得
-    #[inline]
-    pub fn get(&self, pawn_key_index: usize, king_sq: Square) -> i16 {
-        self.table[pawn_key_index % CORRECTION_HISTORY_SIZE][king_sq.index()].get()
-    }
-
-    /// 値を更新
-    #[inline]
-    pub fn update(&mut self, pawn_key_index: usize, king_sq: Square, bonus: i32) {
-        self.table[pawn_key_index % CORRECTION_HISTORY_SIZE][king_sq.index()].update(bonus);
-    }
-
-    /// クリア
+    /// 初期値で埋め直す
     pub fn clear(&mut self) {
-        for pawn_table in self.table.iter_mut() {
-            for entry in pawn_table.iter_mut() {
-                entry.set(0);
+        self.fill_initial_values();
+    }
+
+    fn fill_initial_values(&mut self) {
+        for entry in self.pawn.iter_mut().flatten() {
+            entry.set(5);
+        }
+        for entry in self.minor.iter_mut().flatten() {
+            entry.set(0);
+        }
+        for entry in self.non_pawn.iter_mut().flatten().flatten() {
+            entry.set(0);
+        }
+        for prev_pc in self.continuation.iter_mut() {
+            for prev_to in prev_pc.iter_mut() {
+                for entry in prev_to.iter_mut().flatten() {
+                    entry.set(8);
+                }
             }
         }
+    }
+
+    #[inline]
+    pub fn pawn_value(&self, idx: usize, color: Color) -> i16 {
+        self.pawn[idx % CORRECTION_HISTORY_SIZE][color.index()].get()
+    }
+
+    #[inline]
+    pub fn update_pawn(&mut self, idx: usize, color: Color, bonus: i32) {
+        self.pawn[idx % CORRECTION_HISTORY_SIZE][color.index()].update(bonus);
+    }
+
+    #[inline]
+    pub fn minor_value(&self, idx: usize, color: Color) -> i16 {
+        self.minor[idx % CORRECTION_HISTORY_SIZE][color.index()].get()
+    }
+
+    #[inline]
+    pub fn update_minor(&mut self, idx: usize, color: Color, bonus: i32) {
+        self.minor[idx % CORRECTION_HISTORY_SIZE][color.index()].update(bonus);
+    }
+
+    #[inline]
+    pub fn non_pawn_value(&self, idx: usize, board_color: Color, stm: Color) -> i16 {
+        self.non_pawn[idx % CORRECTION_HISTORY_SIZE][board_color.index()][stm.index()].get()
+    }
+
+    #[inline]
+    pub fn update_non_pawn(&mut self, idx: usize, board_color: Color, stm: Color, bonus: i32) {
+        self.non_pawn[idx % CORRECTION_HISTORY_SIZE][board_color.index()][stm.index()]
+            .update(bonus);
+    }
+
+    #[inline]
+    pub fn continuation_value(
+        &self,
+        prev_pc: Piece,
+        prev_to: Square,
+        pc: Piece,
+        to: Square,
+    ) -> i16 {
+        self.continuation[prev_pc.index()][prev_to.index()][pc.index()][to.index()].get()
+    }
+
+    #[inline]
+    pub fn update_continuation(
+        &mut self,
+        prev_pc: Piece,
+        prev_to: Square,
+        pc: Piece,
+        to: Square,
+        bonus: i32,
+    ) {
+        self.continuation[prev_pc.index()][prev_to.index()][pc.index()][to.index()].update(bonus);
     }
 }
 
