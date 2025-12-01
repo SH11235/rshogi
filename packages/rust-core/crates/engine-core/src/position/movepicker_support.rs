@@ -148,6 +148,14 @@ impl Position {
         self.is_capture(m) || m.is_promotion()
     }
 
+    /// 取る手または歩成りの手かどうか（ProbCut用）
+    /// YaneuraOu: capture_or_pawn_promotion
+    #[inline]
+    pub fn capture_or_pawn_promotion(&self, m: Move) -> bool {
+        self.is_capture(m)
+            || (m.is_promotion() && self.moved_piece(m).piece_type() == PieceType::Pawn)
+    }
+
     // =========================================================================
     // 歩の陣形インデックス
     // =========================================================================
