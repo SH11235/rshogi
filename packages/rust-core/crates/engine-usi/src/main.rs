@@ -428,12 +428,15 @@ impl UsiEngine {
                 }
                 "mate" => {
                     idx += 1;
-                    if idx < tokens.len() {
-                        limits.mate = match tokens[idx] {
+                    // `go mate` without a value is treated as infinite (YaneuraOu互換)
+                    limits.mate = if idx < tokens.len() {
+                        match tokens[idx] {
                             "infinite" => i32::MAX,
                             v => v.parse().unwrap_or(0),
-                        };
-                    }
+                        }
+                    } else {
+                        i32::MAX
+                    };
                 }
                 "btime" => {
                     idx += 1;
@@ -567,6 +570,15 @@ mod tests {
         let limits = engine.parse_go_options(&tokens);
         assert_eq!(limits.mate, 5);
         assert!(!limits.use_time_management(), "mate search disables time management");
+    }
+
+    #[test]
+    fn parse_go_mate_without_value_defaults_to_infinite() {
+        let engine = UsiEngine::new();
+        let tokens = vec!["go", "mate"];
+
+        let limits = engine.parse_go_options(&tokens);
+        assert_eq!(limits.mate, i32::MAX);
     }
 
     #[test]
