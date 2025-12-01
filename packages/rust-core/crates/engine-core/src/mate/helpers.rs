@@ -4,6 +4,7 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard, FILE_BB,
 };
+use crate::mate::tables::check_around_bb;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
 
@@ -87,32 +88,35 @@ pub fn attacks_slider_avoiding(
 /// * `our_king` - 自玉の色
 pub fn attacks_around_king_non_slider(pos: &Position, our_king: Color) -> Bitboard {
     let them = !our_king;
+    let sq_king = pos.king_square(our_king);
     let mut sum = Bitboard::EMPTY;
     for from in pos.pieces(them, PieceType::Pawn).iter() {
         sum |= pawn_effect(them, from);
     }
-    for from in pos.pieces(them, PieceType::Knight).iter() {
+    let knights =
+        pos.pieces(them, PieceType::Knight) & check_around_bb(them, PieceType::Knight, sq_king);
+    for from in knights.iter() {
         sum |= knight_effect(them, from);
     }
-    for from in pos.pieces(them, PieceType::Silver).iter() {
+    let silvers =
+        pos.pieces(them, PieceType::Silver) & check_around_bb(them, PieceType::Silver, sq_king);
+    for from in silvers.iter() {
         sum |= silver_effect(them, from);
     }
-    let gold_like = pos.pieces(them, PieceType::Gold)
+    let gold_like = (pos.pieces(them, PieceType::Gold)
         | pos.pieces(them, PieceType::ProPawn)
         | pos.pieces(them, PieceType::ProLance)
         | pos.pieces(them, PieceType::ProKnight)
-        | pos.pieces(them, PieceType::ProSilver);
+        | pos.pieces(them, PieceType::ProSilver))
+        & check_around_bb(them, PieceType::Gold, sq_king);
     for from in gold_like.iter() {
         sum |= gold_effect(them, from);
     }
-    for from in pos.pieces(them, PieceType::King).iter() {
-        sum |= king_effect(from);
-    }
-    // 馬・龍の近接部分もNonSlider相当として扱う
-    for from in pos.pieces(them, PieceType::Horse).iter() {
-        sum |= king_effect(from);
-    }
-    for from in pos.pieces(them, PieceType::Dragon).iter() {
+    let hdk = (pos.pieces(them, PieceType::King)
+        | pos.pieces(them, PieceType::Horse)
+        | pos.pieces(them, PieceType::Dragon))
+        & check_around_bb(them, PieceType::King, sq_king);
+    for from in hdk.iter() {
         sum |= king_effect(from);
     }
 
@@ -129,22 +133,23 @@ pub fn attacks_around_king_non_slider(pos: &Position, our_king: Color) -> Bitboa
 /// * `our_king` - 自玉の色
 pub fn attacks_around_king_slider(pos: &Position, our_king: Color) -> Bitboard {
     let them = !our_king;
+    let sq_king = pos.king_square(our_king);
     let occ = pos.occupied();
     let mut sum = Bitboard::EMPTY;
 
-    for from in pos.pieces(them, PieceType::Lance).iter() {
+    let lances =
+        pos.pieces(them, PieceType::Lance) & check_around_bb(them, PieceType::Lance, sq_king);
+    for from in lances.iter() {
         sum |= lance_effect(them, from, occ);
     }
-    for from in pos.pieces(them, PieceType::Bishop).iter() {
+    let bishops = (pos.pieces(them, PieceType::Bishop) | pos.pieces(them, PieceType::Horse))
+        & check_around_bb(them, PieceType::Bishop, sq_king);
+    for from in bishops.iter() {
         sum |= bishop_effect(from, occ);
     }
-    for from in pos.pieces(them, PieceType::Horse).iter() {
-        sum |= bishop_effect(from, occ);
-    }
-    for from in pos.pieces(them, PieceType::Rook).iter() {
-        sum |= rook_effect(from, occ);
-    }
-    for from in pos.pieces(them, PieceType::Dragon).iter() {
+    let rooks = (pos.pieces(them, PieceType::Rook) | pos.pieces(them, PieceType::Dragon))
+        & check_around_bb(them, PieceType::Rook, sq_king);
+    for from in rooks.iter() {
         sum |= rook_effect(from, occ);
     }
 
@@ -164,51 +169,9 @@ pub fn attacks_around_king_in_avoiding(
     from: Square,
     occ: Bitboard,
 ) -> Bitboard {
-    let avoid = !Bitboard::from_square(from);
     let them = !us;
-    let mut sum = Bitboard::EMPTY;
-
-    // NonSlider（avoid適用）
-    for sq in (pos.pieces(them, PieceType::Pawn) & avoid).iter() {
-        sum |= pawn_effect(them, sq);
-    }
-    for sq in (pos.pieces(them, PieceType::Knight) & avoid).iter() {
-        sum |= knight_effect(them, sq);
-    }
-    for sq in (pos.pieces(them, PieceType::Silver) & avoid).iter() {
-        sum |= silver_effect(them, sq);
-    }
-    let gold_like = (pos.pieces(them, PieceType::Gold)
-        | pos.pieces(them, PieceType::ProPawn)
-        | pos.pieces(them, PieceType::ProLance)
-        | pos.pieces(them, PieceType::ProKnight)
-        | pos.pieces(them, PieceType::ProSilver))
-        & avoid;
-    for sq in gold_like.iter() {
-        sum |= gold_effect(them, sq);
-    }
-    for sq in (pos.pieces(them, PieceType::King) & avoid).iter() {
-        sum |= king_effect(sq);
-    }
-
-    // Slider（avoid適用）
-    for sq in (pos.pieces(them, PieceType::Lance) & avoid).iter() {
-        sum |= lance_effect(them, sq, occ);
-    }
-    for sq in (pos.pieces(them, PieceType::Bishop) & avoid).iter() {
-        sum |= bishop_effect(sq, occ);
-    }
-    for sq in (pos.pieces(them, PieceType::Horse) & avoid).iter() {
-        sum |= horse_effect(sq, occ);
-    }
-    for sq in (pos.pieces(them, PieceType::Rook) & avoid).iter() {
-        sum |= rook_effect(sq, occ);
-    }
-    for sq in (pos.pieces(them, PieceType::Dragon) & avoid).iter() {
-        sum |= dragon_effect(sq, occ);
-    }
-
-    sum
+    attacks_around_king_non_slider_in_avoiding(pos, them, us, from)
+        | attacks_slider_avoiding(pos, them, from, occ)
 }
 
 /// 玉がtoとbb_avoid以外の升に逃げられるか
@@ -230,10 +193,8 @@ pub fn can_king_escape(
     slide: Bitboard,
 ) -> bool {
     let king_sq = pos.king_square(us);
-    let mut escape = king_effect(king_sq);
-    escape &= !bb_avoid;
-    escape &= !Bitboard::from_square(to);
-    escape &= !pos.pieces_c(us);
+    let slide = slide | Bitboard::from_square(to);
+    let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
 
     for dest in escape.iter() {
         let attacked = pos.attackers_to_occ(dest, slide) & pos.pieces_c(!us);
@@ -265,17 +226,13 @@ pub fn can_king_escape_with_from(
     slide: Bitboard,
 ) -> bool {
     let king_sq = pos.king_square(us);
-    let mut escape = king_effect(king_sq);
-    escape &= !bb_avoid;
-    escape &= !Bitboard::from_square(to);
-    escape &= !pos.pieces_c(us);
+    let slide = (slide | Bitboard::from_square(to)) & !Bitboard::from_square(king_sq);
+    let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
 
     for dest in escape.iter() {
-        let mut occ = slide;
-        // exclude moving piece from attack evaluation
-        occ &= !Bitboard::from_square(from);
-        let attacked = pos.attackers_to_occ(dest, occ) & pos.pieces_c(!us);
-        if attacked.is_empty() {
+        let attacked = pos.attackers_to_occ(dest, slide) & pos.pieces_c(!us);
+        let attacked_wo_from = attacked & !Bitboard::from_square(from);
+        if attacked_wo_from.is_empty() {
             return true;
         }
     }
@@ -369,6 +326,53 @@ pub fn can_pawn_drop(pos: &Position, us: Color, sq: Square) -> bool {
     }
 
     true
+}
+
+fn attacks_around_king_non_slider_in_avoiding(
+    pos: &Position,
+    them: Color,
+    our_king: Color,
+    avoid: Square,
+) -> Bitboard {
+    let sq_king = pos.king_square(our_king);
+    let mut sum = Bitboard::EMPTY;
+    let avoid_bb = !Bitboard::from_square(avoid);
+
+    for from in (pos.pieces(them, PieceType::Pawn) & avoid_bb).iter() {
+        sum |= pawn_effect(them, from);
+    }
+    let knights = (pos.pieces(them, PieceType::Knight)
+        & check_around_bb(them, PieceType::Knight, sq_king))
+        & avoid_bb;
+    for from in knights.iter() {
+        sum |= knight_effect(them, from);
+    }
+    let silvers = (pos.pieces(them, PieceType::Silver)
+        & check_around_bb(them, PieceType::Silver, sq_king))
+        & avoid_bb;
+    for from in silvers.iter() {
+        sum |= silver_effect(them, from);
+    }
+    let gold_like = (pos.pieces(them, PieceType::Gold)
+        | pos.pieces(them, PieceType::ProPawn)
+        | pos.pieces(them, PieceType::ProLance)
+        | pos.pieces(them, PieceType::ProKnight)
+        | pos.pieces(them, PieceType::ProSilver))
+        & check_around_bb(them, PieceType::Gold, sq_king)
+        & avoid_bb;
+    for from in gold_like.iter() {
+        sum |= gold_effect(them, from);
+    }
+    let hdk = (pos.pieces(them, PieceType::King)
+        | pos.pieces(them, PieceType::Horse)
+        | pos.pieces(them, PieceType::Dragon))
+        & check_around_bb(them, PieceType::King, sq_king)
+        & avoid_bb;
+    for from in hdk.iter() {
+        sum |= king_effect(from);
+    }
+
+    sum
 }
 
 #[cfg(test)]

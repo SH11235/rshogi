@@ -47,12 +47,26 @@ pub struct SearchInfo {
 impl SearchInfo {
     /// USI形式のinfo文字列を生成
     pub fn to_usi_string(&self) -> String {
+        let score_str =
+            if self.score.is_mate_score() && self.score.raw().abs() < Value::INFINITE.raw() {
+                // USIでは手数(plies)で出力し、負値は自分が詰まされる側を示す
+                let mate_ply = self.score.mate_ply();
+                let signed_ply = if self.score.is_loss() {
+                    -mate_ply
+                } else {
+                    mate_ply
+                };
+                format!("mate {signed_ply}")
+            } else {
+                format!("cp {}", self.score.raw())
+            };
+
         let mut s = format!(
-            "info depth {depth} seldepth {sel_depth} multipv {multi_pv} score cp {score} nodes {nodes} time {time_ms} nps {nps} hashfull {hashfull}",
+            "info depth {depth} seldepth {sel_depth} multipv {multi_pv} score {score} nodes {nodes} time {time_ms} nps {nps} hashfull {hashfull}",
             depth = self.depth,
             sel_depth = self.sel_depth,
             multi_pv = self.multi_pv,
-            score = self.score.raw(),
+            score = score_str,
             nodes = self.nodes,
             time_ms = self.time_ms,
             nps = self.nps,
@@ -87,6 +101,39 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove) -> (Value, Value, Value) 
     let beta_raw = (rm.average_score.raw() + delta.raw()).min(Value::INFINITE.raw());
 
     (Value::new(alpha_raw), Value::new(beta_raw), delta)
+}
+
+/// YaneuraOu準拠の詰みスコアに対する深さ打ち切り判定
+#[inline]
+fn proven_mate_depth_exceeded(best_value: Value, depth: Depth) -> bool {
+    if best_value.is_win() || best_value.is_loss() {
+        let mate_ply = best_value.mate_ply();
+        return (mate_ply + 2) * 5 / 2 < depth;
+    }
+
+    false
+}
+
+/// `go mate` 指定時に、要求手数以内の詰みが見つかったか判定する
+#[inline]
+fn mate_within_limit(
+    best_value: Value,
+    score_lower_bound: bool,
+    score_upper_bound: bool,
+    mate_limit_moves: i32,
+) -> bool {
+    if mate_limit_moves <= 0
+        || score_lower_bound
+        || score_upper_bound
+        || !best_value.is_mate_score()
+    {
+        return false;
+    }
+
+    let mate_ply = best_value.mate_ply() as i64;
+    let limit_plies = (mate_limit_moves as i64).saturating_mul(2);
+
+    mate_ply <= limit_plies
 }
 
 // =============================================================================
@@ -375,7 +422,8 @@ impl Search {
 
         // 探索ワーカーを作成（ttの借用期間を限定するためArcをクローン）
         let tt_owned = Arc::clone(&self.tt);
-        let mut worker = SearchWorker::new(&tt_owned, &limits, &mut time_manager);
+        let mut worker =
+            SearchWorker::new(&tt_owned, &limits, &mut time_manager, self.max_moves_to_draw);
 
         // 探索深さを決定
         let max_depth = if limits.depth > 0 {
@@ -519,20 +567,18 @@ impl Search {
             if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                 let best_value = worker.root_moves[0].score;
 
-                // 勝ちを読みきっている場合
-                if best_value.is_win() {
-                    let mate_ply = best_value.mate_ply();
-                    if (mate_ply + 2) * 5 / 2 < depth {
+                if worker.limits.mate == 0 {
+                    if proven_mate_depth_exceeded(best_value, depth) {
                         break;
                     }
-                }
-
-                // 詰まされる形の場合
-                if best_value.is_loss() {
-                    let mate_ply = best_value.mate_ply();
-                    if (mate_ply + 2) * 5 / 2 < depth {
-                        break;
-                    }
+                } else if mate_within_limit(
+                    best_value,
+                    worker.root_moves[0].score_lower_bound,
+                    worker.root_moves[0].score_upper_bound,
+                    worker.limits.mate,
+                ) {
+                    worker.time_manager.request_stop();
+                    break;
                 }
             }
 
@@ -691,23 +737,21 @@ impl Search {
 
                 // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
                 // MultiPV=1の時のみ適用
-                if effective_multi_pv == 1 {
+                if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                     let best_value = worker.root_moves[0].score;
 
-                    // 勝ちを読みきっている場合
-                    if best_value.is_win() {
-                        let mate_ply = best_value.mate_ply();
-                        if (mate_ply + 2) * 5 / 2 < depth {
+                    if worker.limits.mate == 0 {
+                        if proven_mate_depth_exceeded(best_value, depth) {
                             break;
                         }
-                    }
-
-                    // 詰まされる形の場合
-                    if best_value.is_loss() {
-                        let mate_ply = best_value.mate_ply();
-                        if (mate_ply + 2) * 5 / 2 < depth {
-                            break;
-                        }
+                    } else if mate_within_limit(
+                        best_value,
+                        worker.root_moves[0].score_lower_bound,
+                        worker.root_moves[0].score_upper_bound,
+                        worker.limits.mate,
+                    ) {
+                        worker.time_manager.request_stop();
+                        break;
                     }
                 }
             }
@@ -763,7 +807,7 @@ mod tests {
         let mut limits = LimitsType::new();
         limits.set_start_time();
         let tt = TranspositionTable::new(16);
-        let mut worker = SearchWorker::new(&tt, &limits, &mut tm);
+        let mut worker = SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
         worker.best_move_changes = 3.5;
 
         let summary = WorkerSummary::from(&worker);
@@ -814,6 +858,25 @@ mod tests {
 
         search.set_max_moves_to_draw(0);
         assert_eq!(search.max_moves_to_draw(), DEFAULT_MAX_MOVES_TO_DRAW);
+    }
+
+    #[test]
+    fn test_mate_within_limit_converts_moves_to_plies() {
+        // mate in 9 ply is within a 5-move limit (10 ply)
+        assert!(mate_within_limit(Value::mate_in(9), false, false, 5));
+        assert!(!mate_within_limit(Value::mate_in(11), false, false, 5));
+    }
+
+    #[test]
+    fn test_mate_within_limit_handles_mated_scores() {
+        // mated in 7 ply should still trigger when limit is 4 moves (8 ply)
+        assert!(mate_within_limit(Value::mated_in(7), false, false, 4));
+    }
+
+    #[test]
+    fn test_mate_within_limit_requires_exact_score() {
+        assert!(!mate_within_limit(Value::mate_in(7), true, false, 4));
+        assert!(!mate_within_limit(Value::mate_in(7), false, true, 4));
     }
 
     #[test]
@@ -893,5 +956,41 @@ mod tests {
         assert!(usi.contains("multipv 1"));
         assert!(usi.contains("score cp 123"));
         assert!(usi.contains("nodes 10000"));
+    }
+
+    #[test]
+    fn test_search_info_to_usi_formats_mate_score() {
+        let info = SearchInfo {
+            depth: 9,
+            sel_depth: 9,
+            score: Value::mate_in(5),
+            nodes: 42,
+            time_ms: 10,
+            nps: 4200,
+            hashfull: 0,
+            pv: vec![],
+            multi_pv: 1,
+        };
+
+        let usi = info.to_usi_string();
+        assert!(usi.contains("score mate 5"));
+    }
+
+    #[test]
+    fn test_search_info_to_usi_formats_mated_score_with_negative_sign() {
+        let info = SearchInfo {
+            depth: 9,
+            sel_depth: 9,
+            score: Value::mated_in(4),
+            nodes: 42,
+            time_ms: 10,
+            nps: 4200,
+            hashfull: 0,
+            pv: vec![],
+            multi_pv: 1,
+        };
+
+        let usi = info.to_usi_string();
+        assert!(usi.contains("score mate -4"));
     }
 }

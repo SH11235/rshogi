@@ -4,10 +4,26 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Square};
+use crate::types::{Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square};
 
 use super::state::{ChangedPiece, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
+
+/// 小駒（香・桂・銀・金とその成り駒）かどうか
+#[inline]
+pub(super) fn is_minor_piece(pc: Piece) -> bool {
+    matches!(
+        pc.piece_type(),
+        PieceType::Lance
+            | PieceType::Knight
+            | PieceType::Silver
+            | PieceType::Gold
+            | PieceType::ProPawn
+            | PieceType::ProLance
+            | PieceType::ProKnight
+            | PieceType::ProSilver
+    )
+}
 
 /// 将棋の局面
 pub struct Position {
@@ -24,8 +40,10 @@ pub struct Position {
     pub(super) hand: [Hand; Color::NUM],
 
     // === 状態 ===
-    /// 現在の状態
-    pub(super) state: Box<StateInfo>,
+    /// 状態スタック
+    pub(super) state_stack: Vec<StateInfo>,
+    /// 現在の状態インデックス
+    state_idx: usize,
     /// 初期局面からの手数
     pub(super) game_ply: i32,
     /// 手番
@@ -35,6 +53,42 @@ pub struct Position {
 }
 
 impl Position {
+    /// 部分ハッシュを更新（XOR）
+    #[inline]
+    fn xor_partial_keys(&self, st: &mut StateInfo, pc: Piece, sq: Square) {
+        if pc.piece_type() == PieceType::Pawn {
+            st.pawn_key ^= zobrist_psq(pc, sq);
+        } else {
+            if is_minor_piece(pc) {
+                st.minor_piece_key ^= zobrist_psq(pc, sq);
+            }
+            st.non_pawn_key[pc.color().index()] ^= zobrist_psq(pc, sq);
+        }
+    }
+
+    #[inline]
+    fn cur_state(&self) -> &StateInfo {
+        &self.state_stack[self.state_idx]
+    }
+
+    #[inline]
+    fn cur_state_mut(&mut self) -> &mut StateInfo {
+        &mut self.state_stack[self.state_idx]
+    }
+
+    /// 状態スタックに新しい StateInfo を積む（必要なら再利用）
+    #[inline]
+    fn push_state(&mut self, mut st: StateInfo) {
+        st.previous = Some(self.state_idx);
+        let next_idx = self.state_idx + 1;
+        if self.state_stack.len() > next_idx {
+            self.state_stack[next_idx] = st;
+        } else {
+            self.state_stack.push(st);
+        }
+        self.state_idx = next_idx;
+    }
+
     // ========== 局面設定 ==========
 
     /// 空の局面を生成
@@ -44,7 +98,8 @@ impl Position {
             by_type: [Bitboard::EMPTY; PieceType::NUM + 1],
             by_color: [Bitboard::EMPTY; Color::NUM],
             hand: [Hand::EMPTY; Color::NUM],
-            state: Box::new(StateInfo::new()),
+            state_stack: vec![StateInfo::new()],
+            state_idx: 0,
             game_ply: 0,
             side_to_move: Color::Black,
             king_square: [Square::SQ_11; Color::NUM],
@@ -64,7 +119,7 @@ impl Position {
     /// YaneuraOu: pos.captured_piece()
     #[inline]
     pub fn captured_piece(&self) -> Piece {
-        self.state.captured_piece
+        self.cur_state().captured_piece
     }
 
     /// 全駒のBitboard（占有）
@@ -89,6 +144,40 @@ impl Position {
     #[inline]
     pub fn pieces(&self, c: Color, pt: PieceType) -> Bitboard {
         self.by_color[c.index()] & self.by_type[pt as usize]
+    }
+
+    /// 駒種集合のBitboard（先後無視）
+    #[inline]
+    pub fn pieces_by_types(&self, set: PieceTypeSet) -> Bitboard {
+        if set.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        if set.is_all() {
+            return self.occupied();
+        }
+
+        let mut bb = Bitboard::EMPTY;
+        for pt in set.iter() {
+            bb |= self.by_type[pt as usize];
+        }
+        bb
+    }
+
+    /// 駒種集合のBitboard（手番指定）
+    #[inline]
+    pub fn pieces_c_by_types(&self, c: Color, set: PieceTypeSet) -> Bitboard {
+        if set.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        if set.is_all() {
+            return self.by_color[c.index()];
+        }
+
+        let mut bb = Bitboard::EMPTY;
+        for pt in set.iter() {
+            bb |= self.by_type[pt as usize] & self.by_color[c.index()];
+        }
+        bb
     }
 
     /// 手駒を取得
@@ -143,9 +232,9 @@ impl Position {
 
     /// 千日手/優劣局面判定（do_move 時に計算した情報を使用）
     pub fn repetition_state(&self, ply: i32) -> RepetitionState {
-        let rep = self.state.repetition;
+        let rep = self.cur_state().repetition;
         if rep != 0 && rep.abs() < ply {
-            return self.state.repetition_type;
+            return self.cur_state().repetition_type;
         }
 
         RepetitionState::None
@@ -154,19 +243,42 @@ impl Position {
     /// 現在の状態を取得
     #[inline]
     pub fn state(&self) -> &StateInfo {
-        &self.state
+        self.cur_state()
+    }
+
+    /// 直前の局面の状態（StateInfo）を取得
+    pub fn previous_state(&self) -> Option<&StateInfo> {
+        self.cur_state().previous.map(|idx| &self.state_stack[idx])
     }
 
     /// 現在の状態を可変で取得（NNUE差分更新など内部状態の更新用）
     #[inline]
     pub fn state_mut(&mut self) -> &mut StateInfo {
-        &mut self.state
+        self.cur_state_mut()
     }
 
     /// 局面のハッシュキー
     #[inline]
     pub fn key(&self) -> u64 {
-        self.state.key()
+        self.cur_state().key()
+    }
+
+    /// 歩ハッシュ
+    #[inline]
+    pub fn pawn_key(&self) -> u64 {
+        self.cur_state().pawn_key
+    }
+
+    /// 小駒ハッシュ
+    #[inline]
+    pub fn minor_piece_key(&self) -> u64 {
+        self.cur_state().minor_piece_key
+    }
+
+    /// 歩以外のハッシュ（手番別）
+    #[inline]
+    pub fn non_pawn_key(&self, c: Color) -> u64 {
+        self.cur_state().non_pawn_key[c.index()]
     }
 
     // ========== 利き計算 ==========
@@ -255,30 +367,52 @@ impl Position {
     /// 自玉へのピン駒
     #[inline]
     pub fn blockers_for_king(&self, c: Color) -> Bitboard {
-        self.state.blockers_for_king[c.index()]
+        self.cur_state().blockers_for_king[c.index()]
     }
 
     /// 王手している駒
     #[inline]
     pub fn checkers(&self) -> Bitboard {
-        self.state.checkers
+        self.cur_state().checkers
     }
 
     /// 王手されているか
     #[inline]
     pub fn in_check(&self) -> bool {
-        !self.state.checkers.is_empty()
+        !self.cur_state().checkers.is_empty()
     }
 
     /// 指定駒種で王手となる升
     #[inline]
     pub fn check_squares(&self, pt: PieceType) -> Bitboard {
-        self.state.check_squares[pt as usize]
+        self.cur_state().check_squares[pt as usize]
     }
 
     /// 現在のpin状態（指定升を除外）
     pub fn pinned_pieces(&self, them: Color, avoid: Square) -> Bitboard {
-        self.blockers_for_king(them) & !Bitboard::from_square(avoid)
+        self.pinned_pieces_excluding(them, avoid)
+    }
+
+    /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
+    pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
+        let occ = self.occupied() & !Bitboard::from_square(avoid);
+        self.pinned_pieces_with_occupancy(them, occ, Bitboard::EMPTY)
+    }
+
+    /// from->toに動かした後の占有でのpin駒（やねうら王のpinned_pieces(Them, from, to)相当）
+    pub fn pinned_pieces_after_move(&self, them: Color, from: Square, to: Square) -> Bitboard {
+        let mut occ = self.occupied();
+        occ ^= Bitboard::from_square(from);
+        occ |= Bitboard::from_square(to);
+
+        let enemy = !them;
+        let enemy_removed = if self.piece_on(to).is_some() && self.piece_on(to).color() == enemy {
+            Bitboard::from_square(to)
+        } else {
+            Bitboard::EMPTY
+        };
+
+        self.pinned_pieces_with_occupancy(them, occ, enemy_removed)
     }
 
     /// fromの駒を動かしたときに開き王手になるか（簡易判定）
@@ -308,35 +442,13 @@ impl Position {
     /// pin駒とpinしている駒を更新
     pub(super) fn update_blockers_and_pinners(&mut self) {
         for c in [Color::Black, Color::White] {
-            self.state.blockers_for_king[c.index()] = Bitboard::EMPTY;
-            self.state.pinners[c.index()] = Bitboard::EMPTY;
-
-            let ksq = self.king_square[c.index()];
-            let them = !c;
-            let occupied = self.occupied();
-
-            // 敵の遠方駒からの利き
-            let snipers = (lance_effect(c, ksq, Bitboard::EMPTY)
-                & self.pieces(them, PieceType::Lance))
-                | (bishop_effect(ksq, Bitboard::EMPTY)
-                    & (self.pieces(them, PieceType::Bishop) | self.pieces(them, PieceType::Horse)))
-                | (rook_effect(ksq, Bitboard::EMPTY)
-                    & (self.pieces(them, PieceType::Rook) | self.pieces(them, PieceType::Dragon)));
-
-            for sniper_sq in snipers.iter() {
-                // 玉とsniperの間にある駒
-                let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
-                // 間に1枚だけある場合、それがblocker
-                if !between.is_empty() && !between.more_than_one() {
-                    self.state.blockers_for_king[c.index()] =
-                        self.state.blockers_for_king[c.index()] | between;
-                    // blockerが敵の駒なら、sniperはpinner
-                    if (between & self.pieces_c(them)).is_empty() {
-                        // blockerは自駒なので、sniperはpinner
-                        self.state.pinners[c.index()].set(sniper_sq);
-                    }
-                }
-            }
+            let (blockers, pinners) = {
+                let occ = self.occupied();
+                self.compute_blockers_and_pinners(c, occ, Bitboard::EMPTY)
+            };
+            let st = self.cur_state_mut();
+            st.blockers_for_king[c.index()] = blockers;
+            st.pinners[c.index()] = pinners;
         }
     }
 
@@ -345,24 +457,25 @@ impl Position {
         let them = !self.side_to_move;
         let ksq = self.king_square[them.index()];
         let occupied = self.occupied();
+        let st = self.cur_state_mut();
 
         // 各駒種で王手となるマス
-        self.state.check_squares[PieceType::Pawn as usize] = pawn_effect(them, ksq);
-        self.state.check_squares[PieceType::Knight as usize] = knight_effect(them, ksq);
-        self.state.check_squares[PieceType::Silver as usize] = silver_effect(them, ksq);
-        self.state.check_squares[PieceType::Gold as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::King as usize] = Bitboard::EMPTY; // 玉で王手はない
-        self.state.check_squares[PieceType::Lance as usize] = lance_effect(them, ksq, occupied);
-        self.state.check_squares[PieceType::Bishop as usize] = bishop_effect(ksq, occupied);
-        self.state.check_squares[PieceType::Rook as usize] = rook_effect(ksq, occupied);
+        st.check_squares[PieceType::Pawn as usize] = pawn_effect(them, ksq);
+        st.check_squares[PieceType::Knight as usize] = knight_effect(them, ksq);
+        st.check_squares[PieceType::Silver as usize] = silver_effect(them, ksq);
+        st.check_squares[PieceType::Gold as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::King as usize] = Bitboard::EMPTY; // 玉で王手はない
+        st.check_squares[PieceType::Lance as usize] = lance_effect(them, ksq, occupied);
+        st.check_squares[PieceType::Bishop as usize] = bishop_effect(ksq, occupied);
+        st.check_squares[PieceType::Rook as usize] = rook_effect(ksq, occupied);
 
         // 成駒
-        self.state.check_squares[PieceType::ProPawn as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::ProLance as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::ProKnight as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::ProSilver as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::Horse as usize] = horse_effect(ksq, occupied);
-        self.state.check_squares[PieceType::Dragon as usize] = dragon_effect(ksq, occupied);
+        st.check_squares[PieceType::ProPawn as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::ProLance as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::ProKnight as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::ProSilver as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::Horse as usize] = horse_effect(ksq, occupied);
+        st.check_squares[PieceType::Dragon as usize] = dragon_effect(ksq, occupied);
     }
 
     // ========== 指し手実行 ==========
@@ -371,9 +484,10 @@ impl Position {
     pub fn do_move(&mut self, m: Move, gives_check: bool) {
         let us = self.side_to_move;
         let them = !us;
+        let prev_continuous = self.cur_state().continuous_check;
 
         // 1. 新しいStateInfoを作成
-        let mut new_state = Box::new(self.state.partial_clone());
+        let mut new_state = self.cur_state().partial_clone();
         // NNUE 関連は毎手リセットし、DirtyPiece はここで構築する。
         new_state.accumulator.reset();
         new_state.dirty_piece.clear();
@@ -409,6 +523,7 @@ impl Position {
             // 盤上に配置
             self.put_piece(pc, to);
             new_state.board_key ^= zobrist_psq(pc, to);
+            self.xor_partial_keys(&mut new_state, pc, to);
 
             new_state.captured_piece = Piece::NONE;
 
@@ -442,6 +557,7 @@ impl Position {
 
                 self.remove_piece(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
+                self.xor_partial_keys(&mut new_state, captured, to);
 
                 // 手駒に追加（成駒は生駒に戻す）
                 self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
@@ -455,6 +571,7 @@ impl Position {
             // 駒を移動
             self.remove_piece(from);
             new_state.board_key ^= zobrist_psq(pc, from);
+            self.xor_partial_keys(&mut new_state, pc, from);
 
             let moved_pc = if m.is_promote() {
                 pc.promote().unwrap()
@@ -463,6 +580,7 @@ impl Position {
             };
             self.put_piece(moved_pc, to);
             new_state.board_key ^= zobrist_psq(moved_pc, to);
+            self.xor_partial_keys(&mut new_state, moved_pc, to);
 
             // 玉の移動
             if pc.piece_type() == PieceType::King {
@@ -493,7 +611,7 @@ impl Position {
 
         // 4. 連続王手カウンタの更新（YaneuraOu準拠）
         if gives_check {
-            new_state.continuous_check[us.index()] = self.state.continuous_check[us.index()] + 2;
+            new_state.continuous_check[us.index()] = prev_continuous[us.index()] + 2;
         } else {
             new_state.continuous_check[us.index()] = 0;
         }
@@ -515,8 +633,7 @@ impl Position {
 
         // 8. StateInfoの付け替え（previous をぶら下げる）
         new_state.last_move = m;
-        let old_state = std::mem::replace(&mut self.state, new_state);
-        self.state.previous = Some(old_state);
+        self.push_state(new_state);
 
         // 9. 繰り返し情報の更新
         self.update_repetition_info();
@@ -532,6 +649,8 @@ impl Position {
         self.side_to_move = !self.side_to_move;
         self.game_ply -= 1;
         let us = self.side_to_move;
+        let captured = self.cur_state().captured_piece;
+        let prev_idx = self.cur_state().previous.expect("No previous state for undo");
 
         // 2. 駒の移動を戻す
         if m.is_drop() {
@@ -562,7 +681,6 @@ impl Position {
             }
 
             // 取った駒を復元
-            let captured = self.state.captured_piece;
             if captured.is_some() {
                 self.put_piece(captured, to);
                 // 手駒から除去
@@ -572,12 +690,12 @@ impl Position {
         }
 
         // 3. StateInfoを戻す
-        self.state = self.state.previous.take().unwrap();
+        self.state_idx = prev_idx;
     }
 
     /// null moveを実行
     pub fn do_null_move(&mut self) {
-        let mut new_state = Box::new(self.state.partial_clone());
+        let mut new_state = self.cur_state().partial_clone();
         new_state.accumulator.reset();
         new_state.dirty_piece.clear();
 
@@ -589,11 +707,10 @@ impl Position {
 
         self.side_to_move = !self.side_to_move;
 
-        let old_state = std::mem::replace(&mut self.state, new_state);
-        self.state.previous = Some(old_state);
+        self.push_state(new_state);
 
         // null move後は王手されていないはず
-        self.state.checkers = Bitboard::EMPTY;
+        self.cur_state_mut().checkers = Bitboard::EMPTY;
 
         self.update_blockers_and_pinners();
         self.update_check_squares();
@@ -602,73 +719,87 @@ impl Position {
     /// null moveを戻す
     pub fn undo_null_move(&mut self) {
         self.side_to_move = !self.side_to_move;
-        self.state = self.state.previous.take().unwrap();
+        let prev_idx = self.cur_state().previous.expect("No previous state for undo_null_move");
+        self.state_idx = prev_idx;
     }
 
     /// 繰り返し情報を更新（最大16手遡り）
     fn update_repetition_info(&mut self) {
         // 初期化
-        self.state.repetition = 0;
-        self.state.repetition_times = 0;
-        self.state.repetition_type = RepetitionState::None;
-
-        let max_back = self.state.plies_from_null.min(16);
-        if max_back < 4 {
-            return;
-        }
-
         let side = self.side_to_move;
-        let cc_side = self.state.continuous_check[side.index()];
-        let cc_opp = self.state.continuous_check[(!side).index()];
+        let (plies_from_null, board_key, hand_snapshot, prev_idx_opt, cc_side, cc_opp) = {
+            let st = self.cur_state();
+            (
+                st.plies_from_null,
+                st.board_key,
+                st.hand_snapshot,
+                st.previous,
+                st.continuous_check[side.index()],
+                st.continuous_check[(!side).index()],
+            )
+        };
 
-        let mut dist = 2;
-        let mut st_opt = self.state.previous.as_deref().and_then(|s| s.previous.as_deref());
+        let max_back = plies_from_null.min(16);
+        let mut repetition = 0;
+        let mut repetition_times = 0;
+        let mut repetition_type = RepetitionState::None;
 
-        while dist <= max_back {
-            if let Some(stp) = st_opt {
-                if stp.board_key == self.state.board_key {
-                    let prev_hand = stp.hand_snapshot[side.index()];
-                    let cur_hand = self.state.hand_snapshot[side.index()];
+        if max_back >= 4 {
+            let mut dist = 2;
+            let mut st_idx_opt = prev_idx_opt.and_then(|idx| self.state_stack[idx].previous);
 
-                    if cur_hand == prev_hand {
-                        let times = stp.repetition_times + 1;
-                        self.state.repetition_times = times;
-                        self.state.repetition = if times >= 3 { -dist } else { dist };
+            while dist <= max_back {
+                if let Some(st_idx) = st_idx_opt {
+                    let stp = &self.state_stack[st_idx];
+                    if stp.board_key == board_key {
+                        let prev_hand = stp.hand_snapshot[side.index()];
+                        let cur_hand = hand_snapshot[side.index()];
 
-                        let mut rep_type = if dist <= cc_side {
-                            RepetitionState::Lose
-                        } else if dist <= cc_opp {
-                            RepetitionState::Win
-                        } else {
-                            RepetitionState::Draw
-                        };
+                        if cur_hand == prev_hand {
+                            let times = stp.repetition_times + 1;
+                            repetition_times = times;
+                            repetition = if times >= 3 { -dist } else { dist };
 
-                        if stp.repetition_times > 0 && stp.repetition_type != rep_type {
-                            rep_type = RepetitionState::Draw;
+                            let mut rep_type = if dist <= cc_side {
+                                RepetitionState::Lose
+                            } else if dist <= cc_opp {
+                                RepetitionState::Win
+                            } else {
+                                RepetitionState::Draw
+                            };
+
+                            if stp.repetition_times > 0 && stp.repetition_type != rep_type {
+                                rep_type = RepetitionState::Draw;
+                            }
+
+                            repetition_type = rep_type;
+                            break;
                         }
 
-                        self.state.repetition_type = rep_type;
-                        return;
-                    }
+                        if cur_hand.is_superior_or_equal(prev_hand) {
+                            repetition_type = RepetitionState::Superior;
+                            repetition = dist;
+                            break;
+                        }
 
-                    if cur_hand.is_superior_or_equal(prev_hand) {
-                        self.state.repetition_type = RepetitionState::Superior;
-                        self.state.repetition = dist;
-                        return;
+                        if prev_hand.is_superior_or_equal(cur_hand) {
+                            repetition_type = RepetitionState::Inferior;
+                            repetition = dist;
+                            break;
+                        }
                     }
-
-                    if prev_hand.is_superior_or_equal(cur_hand) {
-                        self.state.repetition_type = RepetitionState::Inferior;
-                        self.state.repetition = dist;
-                        return;
-                    }
+                    st_idx_opt = stp.previous.and_then(|idx| self.state_stack[idx].previous);
+                    dist += 2;
+                } else {
+                    break;
                 }
-                st_opt = stp.previous.as_deref().and_then(|p| p.previous.as_deref());
-                dist += 2;
-            } else {
-                break;
             }
         }
+
+        let st = self.cur_state_mut();
+        st.repetition = repetition;
+        st.repetition_times = repetition_times;
+        st.repetition_type = repetition_type;
     }
 
     /// 王手になるかどうか
@@ -726,6 +857,60 @@ impl Default for Position {
     }
 }
 
+impl Position {
+    /// 占有を指定してpin駒を再計算（king_color側の玉に対するpin）
+    fn pinned_pieces_with_occupancy(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> Bitboard {
+        let (blockers, _) = self.compute_blockers_and_pinners(king_color, occupied, enemy_removed);
+        blockers & self.pieces_c(king_color)
+    }
+
+    /// 占有を指定してpin候補とpinnerを再計算
+    fn compute_blockers_and_pinners(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> (Bitboard, Bitboard) {
+        let ksq = self.king_square[king_color.index()];
+        let enemy = !king_color;
+
+        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
+        let bishop_bb = (self.pieces(enemy, PieceType::Bishop)
+            | self.pieces(enemy, PieceType::Horse))
+            & !enemy_removed;
+        let rook_bb = (self.pieces(enemy, PieceType::Rook) | self.pieces(enemy, PieceType::Dragon))
+            & !enemy_removed;
+
+        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let mut blockers = Bitboard::EMPTY;
+        let mut pinners = Bitboard::EMPTY;
+        for sniper_sq in snipers.iter() {
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
+            if between.is_empty() || between.more_than_one() {
+                continue;
+            }
+
+            // blockerが自駒のときのみpin対象
+            if (between & self.pieces_c(enemy)).is_empty() {
+                blockers |= between;
+                pinners.set(sniper_sq);
+            } else {
+                blockers |= between;
+            }
+        }
+
+        (blockers, pinners)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +936,76 @@ mod tests {
         pos.remove_piece(sq);
         assert_eq!(pos.piece_on(sq), Piece::NONE);
         assert!(!pos.pieces(Color::Black, PieceType::Pawn).contains(sq));
+    }
+
+    #[test]
+    fn test_pieces_by_type_set() {
+        let mut pos = Position::new();
+        let gold_sq = Square::new(File::File5, Rank::Rank5);
+        let pro_sq = Square::new(File::File4, Rank::Rank4);
+        let dragon_sq = Square::new(File::File9, Rank::Rank9);
+
+        pos.put_piece(Piece::B_GOLD, gold_sq);
+        pos.put_piece(Piece::B_PRO_PAWN, pro_sq);
+        pos.put_piece(Piece::W_DRAGON, dragon_sq);
+
+        let gold_like = pos.pieces_c_by_types(Color::Black, PieceTypeSet::golds());
+        assert!(gold_like.contains(gold_sq));
+        assert!(gold_like.contains(pro_sq));
+        assert!(!gold_like.contains(dragon_sq));
+
+        let sliders = pos.pieces_by_types(PieceTypeSet::rook_dragon());
+        assert!(sliders.contains(dragon_sq));
+        assert!(!sliders.contains(gold_sq));
+
+        let all_black = pos.pieces_c_by_types(Color::Black, PieceTypeSet::ALL);
+        assert_eq!(all_black.count(), 2);
+    }
+
+    #[test]
+    fn test_pinned_pieces_variants() {
+        let mut pos = Position::new();
+        // 玉と駒配置
+        let ksq = Square::new(File::File5, Rank::Rank9);
+        let rook_sq = Square::new(File::File5, Rank::Rank1);
+        let blocker_sq = Square::new(File::File5, Rank::Rank5);
+        pos.put_piece(Piece::B_KING, ksq);
+        pos.put_piece(Piece::W_ROOK, rook_sq);
+        pos.put_piece(Piece::B_GOLD, blocker_sq);
+        pos.king_square[Color::Black.index()] = ksq;
+        pos.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
+
+        // 通常: blockerはpinされている
+        let pinned = pos.pinned_pieces_excluding(Color::Black, Square::SQ_11);
+        assert!(pinned.contains(blocker_sq));
+
+        // blockerを除去した占有でpinは消える
+        let pinned_removed = pos.pinned_pieces_excluding(Color::Black, blocker_sq);
+        assert!(pinned_removed.is_empty());
+
+        // rookを取った場合、pinは消える
+        let capture_sq = Square::new(File::File5, Rank::Rank2);
+        pos.put_piece(Piece::B_PAWN, capture_sq);
+        let pinned_after_capture = pos.pinned_pieces_after_move(Color::Black, capture_sq, rook_sq);
+        assert!(pinned_after_capture.is_empty());
+        // 以降の検証に影響しないよう除去
+        pos.remove_piece(capture_sq);
+
+        // pinners配列も更新される
+        pos.update_blockers_and_pinners();
+        assert!(pos.state().pinners[Color::Black.index()].contains(rook_sq));
+
+        // 敵駒が間にいる場合はpinnerにならない
+        let mut pos2 = Position::new();
+        pos2.put_piece(Piece::B_KING, ksq);
+        pos2.put_piece(Piece::W_ROOK, rook_sq);
+        let enemy_blocker = Square::new(File::File5, Rank::Rank4);
+        pos2.put_piece(Piece::W_GOLD, enemy_blocker);
+        pos2.king_square[Color::Black.index()] = ksq;
+        pos2.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
+        pos2.update_blockers_and_pinners();
+        assert!(pos2.state().blockers_for_king[Color::Black.index()].contains(enemy_blocker));
+        assert!(!pos2.state().pinners[Color::Black.index()].contains(rook_sq));
     }
 
     #[test]

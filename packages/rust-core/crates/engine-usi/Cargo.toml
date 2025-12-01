@@ -10,6 +10,10 @@ repository = "https://github.com/sh11235/shogi"
 [dependencies]
 # Workspace dependencies
 anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
 
@@ -19,6 +23,10 @@ engine-core = { path = "../engine-core" }
 [[bin]]
 name = "engine-usi"
 path = "src/main.rs"
+
+[[bin]]
+name = "engine-selfplay"
+path = "src/bin/engine_selfplay.rs"
 
 [dev-dependencies]
 assert_cmd = "2.0"

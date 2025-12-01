@@ -426,6 +426,18 @@ impl UsiEngine {
                         limits.movetime = tokens[idx].parse().unwrap_or(0);
                     }
                 }
+                "mate" => {
+                    idx += 1;
+                    // `go mate` without a value is treated as infinite (YaneuraOu互換)
+                    limits.mate = if idx < tokens.len() {
+                        match tokens[idx] {
+                            "infinite" => i32::MAX,
+                            v => v.parse().unwrap_or(0),
+                        }
+                    } else {
+                        i32::MAX
+                    };
+                }
                 "btime" => {
                     idx += 1;
                     if idx < tokens.len() {
@@ -482,6 +494,7 @@ impl UsiEngine {
                                 | "winc"
                                 | "byoyomi"
                                 | "rtime"
+                                | "mate"
                         ) {
                             idx -= 1; // 巻き戻して次のループで処理
                             break;
@@ -564,4 +577,37 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_go_mate_sets_limits() {
+        let engine = UsiEngine::new();
+        let tokens = vec!["go", "mate", "5"];
+
+        let limits = engine.parse_go_options(&tokens);
+        assert_eq!(limits.mate, 5);
+        assert!(!limits.use_time_management(), "mate search disables time management");
+    }
+
+    #[test]
+    fn parse_go_mate_without_value_defaults_to_infinite() {
+        let engine = UsiEngine::new();
+        let tokens = vec!["go", "mate"];
+
+        let limits = engine.parse_go_options(&tokens);
+        assert_eq!(limits.mate, i32::MAX);
+    }
+
+    #[test]
+    fn parse_go_mate_infinite_defaults_to_max() {
+        let engine = UsiEngine::new();
+        let tokens = vec!["go", "mate", "infinite"];
+
+        let limits = engine.parse_go_options(&tokens);
+        assert_eq!(limits.mate, i32::MAX);
+    }
 }

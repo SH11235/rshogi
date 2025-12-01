@@ -2,7 +2,7 @@
 
 use crate::types::{Color, File, Piece, PieceType, Rank, Square};
 
-use super::pos::Position;
+use super::pos::{is_minor_piece, Position};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 
 /// 平手初期局面のSFEN
@@ -84,7 +84,7 @@ impl Position {
 
         // 王手駒の計算
         let them = !self.side_to_move;
-        self.state.checkers =
+        self.state_mut().checkers =
             self.attackers_to_c(self.king_square[self.side_to_move.index()], them);
 
         Ok(())
@@ -295,13 +295,26 @@ impl Position {
     fn compute_hash(&mut self) {
         let mut board_key = 0u64;
         let mut hand_key = 0u64;
+        let mut pawn_key = 0u64;
+        let mut minor_piece_key = 0u64;
+        let mut non_pawn_key = [0u64; Color::NUM];
 
         // 盤上の駒
         for sq_idx in 0..Square::NUM {
             let sq = unsafe { Square::from_u8_unchecked(sq_idx as u8) };
             let pc = self.piece_on(sq);
             if pc.is_some() {
-                board_key ^= zobrist_psq(pc, sq);
+                let z = zobrist_psq(pc, sq);
+                board_key ^= z;
+
+                if pc.piece_type() == PieceType::Pawn {
+                    pawn_key ^= z;
+                } else {
+                    if is_minor_piece(pc) {
+                        minor_piece_key ^= z;
+                    }
+                    non_pawn_key[pc.color().index()] ^= z;
+                }
             }
         }
 
@@ -328,8 +341,12 @@ impl Position {
             }
         }
 
-        self.state.board_key = board_key;
-        self.state.hand_key = hand_key;
+        let st = self.state_mut();
+        st.board_key = board_key;
+        st.hand_key = hand_key;
+        st.pawn_key = pawn_key;
+        st.minor_piece_key = minor_piece_key;
+        st.non_pawn_key = non_pawn_key;
     }
 }
 
