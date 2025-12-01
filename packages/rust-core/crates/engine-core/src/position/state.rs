@@ -16,6 +16,10 @@ pub struct StateInfo {
     pub material_key: u64,
     /// 歩のハッシュ（打ち歩詰め判定用）
     pub pawn_key: u64,
+    /// 小駒（香・桂・銀・金・その成り駒）のハッシュ
+    pub minor_piece_key: u64,
+    /// 歩以外の駒のハッシュ（手番別）
+    pub non_pawn_key: [u64; Color::NUM],
     /// null moveからの手数
     pub plies_from_null: i32,
     /// 連続王手カウンタ [Color]
@@ -118,6 +122,8 @@ impl StateInfo {
         StateInfo {
             material_key: 0,
             pawn_key: 0,
+            minor_piece_key: 0,
+            non_pawn_key: [0; Color::NUM],
             plies_from_null: 0,
             continuous_check: [0; Color::NUM],
             game_ply: 0,
@@ -151,6 +157,8 @@ impl StateInfo {
         StateInfo {
             material_key: self.material_key,
             pawn_key: self.pawn_key,
+            minor_piece_key: self.minor_piece_key,
+            non_pawn_key: self.non_pawn_key,
             plies_from_null: self.plies_from_null,
             continuous_check: self.continuous_check,
             game_ply: self.game_ply,
@@ -190,6 +198,9 @@ mod tests {
         let state = StateInfo::new();
         assert_eq!(state.board_key, 0);
         assert_eq!(state.hand_key, 0);
+        assert_eq!(state.pawn_key, 0);
+        assert_eq!(state.minor_piece_key, 0);
+        assert_eq!(state.non_pawn_key, [0; Color::NUM]);
         assert_eq!(state.key(), 0);
         assert!(state.checkers.is_empty());
         assert!(state.previous.is_none());
@@ -209,11 +220,15 @@ mod tests {
         state.material_key = 100;
         state.plies_from_null = 5;
         state.continuous_check = [3, 2];
+        state.minor_piece_key = 42;
+        state.non_pawn_key = [7, 11];
 
         let cloned = state.partial_clone();
         assert_eq!(cloned.material_key, 100);
         assert_eq!(cloned.plies_from_null, 5);
         assert_eq!(cloned.continuous_check, [3, 2]);
+        assert_eq!(cloned.minor_piece_key, 42);
+        assert_eq!(cloned.non_pawn_key, [7, 11]);
         assert!(cloned.previous.is_none());
     }
 }

@@ -9,6 +9,22 @@ use crate::types::{Color, Hand, Move, Piece, PieceType, PieceTypeSet, Repetition
 use super::state::{ChangedPiece, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 
+/// 小駒（香・桂・銀・金とその成り駒）かどうか
+#[inline]
+pub(super) fn is_minor_piece(pc: Piece) -> bool {
+    matches!(
+        pc.piece_type(),
+        PieceType::Lance
+            | PieceType::Knight
+            | PieceType::Silver
+            | PieceType::Gold
+            | PieceType::ProPawn
+            | PieceType::ProLance
+            | PieceType::ProKnight
+            | PieceType::ProSilver
+    )
+}
+
 /// 将棋の局面
 pub struct Position {
     // === 盤面 ===
@@ -35,6 +51,19 @@ pub struct Position {
 }
 
 impl Position {
+    /// 部分ハッシュを更新（XOR）
+    #[inline]
+    fn xor_partial_keys(&self, st: &mut StateInfo, pc: Piece, sq: Square) {
+        if pc.piece_type() == PieceType::Pawn {
+            st.pawn_key ^= zobrist_psq(pc, sq);
+        } else {
+            if is_minor_piece(pc) {
+                st.minor_piece_key ^= zobrist_psq(pc, sq);
+            }
+            st.non_pawn_key[pc.color().index()] ^= zobrist_psq(pc, sq);
+        }
+    }
+
     // ========== 局面設定 ==========
 
     /// 空の局面を生成
@@ -201,6 +230,24 @@ impl Position {
     #[inline]
     pub fn key(&self) -> u64 {
         self.state.key()
+    }
+
+    /// 歩ハッシュ
+    #[inline]
+    pub fn pawn_key(&self) -> u64 {
+        self.state.pawn_key
+    }
+
+    /// 小駒ハッシュ
+    #[inline]
+    pub fn minor_piece_key(&self) -> u64 {
+        self.state.minor_piece_key
+    }
+
+    /// 歩以外のハッシュ（手番別）
+    #[inline]
+    pub fn non_pawn_key(&self, c: Color) -> u64 {
+        self.state.non_pawn_key[c.index()]
     }
 
     // ========== 利き計算 ==========
@@ -440,6 +487,7 @@ impl Position {
             // 盤上に配置
             self.put_piece(pc, to);
             new_state.board_key ^= zobrist_psq(pc, to);
+            self.xor_partial_keys(&mut new_state, pc, to);
 
             new_state.captured_piece = Piece::NONE;
 
@@ -473,6 +521,7 @@ impl Position {
 
                 self.remove_piece(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
+                self.xor_partial_keys(&mut new_state, captured, to);
 
                 // 手駒に追加（成駒は生駒に戻す）
                 self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
@@ -486,6 +535,7 @@ impl Position {
             // 駒を移動
             self.remove_piece(from);
             new_state.board_key ^= zobrist_psq(pc, from);
+            self.xor_partial_keys(&mut new_state, pc, from);
 
             let moved_pc = if m.is_promote() {
                 pc.promote().unwrap()
@@ -494,6 +544,7 @@ impl Position {
             };
             self.put_piece(moved_pc, to);
             new_state.board_key ^= zobrist_psq(moved_pc, to);
+            self.xor_partial_keys(&mut new_state, moved_pc, to);
 
             // 玉の移動
             if pc.piece_type() == PieceType::King {
