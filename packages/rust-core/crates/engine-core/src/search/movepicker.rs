@@ -45,8 +45,14 @@ pub enum Stage {
     // 通常探索（王手なし）
     /// 置換表の指し手
     MainTT,
+    /// ProbCut: 置換表の指し手
+    ProbCutTT,
     /// 捕獲手の生成
     CaptureInit,
+    /// ProbCut: 捕獲手生成
+    ProbCutInit,
+    /// ProbCut: SEEしきい値付き捕獲
+    ProbCut,
     /// 良い捕獲手（SEE >= threshold）
     GoodCapture,
     /// 静かな手の生成
@@ -81,6 +87,9 @@ impl Stage {
         match self {
             Stage::MainTT => Stage::CaptureInit,
             Stage::CaptureInit => Stage::GoodCapture,
+            Stage::ProbCutTT => Stage::ProbCutInit,
+            Stage::ProbCutInit => Stage::ProbCut,
+            Stage::ProbCut => Stage::ProbCut, // 終端
             Stage::GoodCapture => Stage::QuietInit,
             Stage::QuietInit => Stage::GoodQuiet,
             Stage::GoodQuiet => Stage::BadCapture,
@@ -121,9 +130,11 @@ pub struct MovePicker<'a> {
     // 状態
     stage: Stage,
     tt_move: Move,
+    probcut_threshold: Option<Value>,
     depth: Depth,
     ply: i32,
     skip_quiets: bool,
+    generate_all_legal_moves: bool,
 
     // 指し手バッファ
     moves: [ExtMove; MAX_MOVES],
@@ -136,7 +147,6 @@ pub struct MovePicker<'a> {
 
 impl<'a> MovePicker<'a> {
     /// 通常探索・静止探索用コンストラクタ
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pos: &'a Position,
         tt_move: Move,
@@ -147,24 +157,25 @@ impl<'a> MovePicker<'a> {
         continuation_history: [Option<&'a PieceToHistory>; 6],
         pawn_history: &'a PawnHistory,
         ply: i32,
+        generate_all_legal_moves: bool,
     ) -> Self {
         let stage = if pos.in_check() {
             // 王手回避
-            if tt_move.is_some() && pos.pseudo_legal(tt_move) {
+            if tt_move.is_some() && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves) {
                 Stage::EvasionTT
             } else {
                 Stage::EvasionInit
             }
         } else if depth > DEPTH_QS {
             // 通常探索
-            if tt_move.is_some() && pos.pseudo_legal(tt_move) {
+            if tt_move.is_some() && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves) {
                 Stage::MainTT
             } else {
                 Stage::CaptureInit
             }
         } else {
             // 静止探索
-            if tt_move.is_some() && pos.pseudo_legal(tt_move) {
+            if tt_move.is_some() && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves) {
                 Stage::QSearchTT
             } else {
                 Stage::QCaptureInit
@@ -180,9 +191,11 @@ impl<'a> MovePicker<'a> {
             pawn_history,
             stage,
             tt_move,
+            probcut_threshold: None,
             depth,
             ply,
             skip_quiets: false,
+            generate_all_legal_moves,
             moves: [ExtMove::new(Move::NONE, 0); MAX_MOVES],
             cur: 0,
             end_cur: 0,
@@ -202,13 +215,63 @@ impl<'a> MovePicker<'a> {
         continuation_history: [Option<&'a PieceToHistory>; 6],
         pawn_history: &'a PawnHistory,
         ply: i32,
+        generate_all_legal_moves: bool,
     ) -> Self {
         debug_assert!(pos.in_check());
 
-        let stage = if tt_move.is_some() && pos.pseudo_legal(tt_move) {
-            Stage::EvasionTT
+        let stage =
+            if tt_move.is_some() && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves) {
+                Stage::EvasionTT
+            } else {
+                Stage::EvasionInit
+            };
+
+        Self {
+            pos,
+            main_history,
+            low_ply_history,
+            capture_history,
+            continuation_history,
+            pawn_history,
+            stage,
+            tt_move,
+            probcut_threshold: None,
+            depth: DEPTH_QS,
+            ply,
+            skip_quiets: false,
+            generate_all_legal_moves,
+            moves: [ExtMove::new(Move::NONE, 0); MAX_MOVES],
+            cur: 0,
+            end_cur: 0,
+            end_bad_captures: 0,
+            end_captures: 0,
+            end_generated: 0,
+        }
+    }
+
+    /// ProbCut専用コンストラクタ
+    pub fn new_probcut(
+        pos: &'a Position,
+        tt_move: Move,
+        threshold: Value,
+        main_history: &'a ButterflyHistory,
+        low_ply_history: &'a LowPlyHistory,
+        capture_history: &'a CapturePieceToHistory,
+        continuation_history: [Option<&'a PieceToHistory>; 6],
+        pawn_history: &'a PawnHistory,
+        ply: i32,
+        generate_all_legal_moves: bool,
+    ) -> Self {
+        debug_assert!(!pos.in_check());
+
+        let stage = if tt_move.is_some()
+            && pos.is_capture(tt_move)
+            && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves)
+            && pos.see_ge(tt_move, threshold)
+        {
+            Stage::ProbCutTT
         } else {
-            Stage::EvasionInit
+            Stage::ProbCutInit
         };
 
         Self {
@@ -220,9 +283,11 @@ impl<'a> MovePicker<'a> {
             pawn_history,
             stage,
             tt_move,
+            probcut_threshold: Some(threshold),
             depth: DEPTH_QS,
             ply,
             skip_quiets: false,
+            generate_all_legal_moves,
             moves: [ExtMove::new(Move::NONE, 0); MAX_MOVES],
             cur: 0,
             end_cur: 0,
@@ -246,7 +311,7 @@ impl<'a> MovePicker<'a> {
                 // ==============================
                 // TT手を返す
                 // ==============================
-                Stage::MainTT | Stage::EvasionTT | Stage::QSearchTT => {
+                Stage::MainTT | Stage::EvasionTT | Stage::QSearchTT | Stage::ProbCutTT => {
                     self.stage = self.stage.next();
                     return self.tt_move;
                 }
@@ -254,12 +319,59 @@ impl<'a> MovePicker<'a> {
                 // ==============================
                 // 捕獲手の生成
                 // ==============================
-                Stage::CaptureInit | Stage::QCaptureInit => {
+                Stage::CaptureInit | Stage::QCaptureInit | Stage::ProbCutInit => {
                     self.cur = 0;
                     self.end_bad_captures = 0;
 
                     // 捕獲手を生成
-                    let count = self.pos.generate_captures(&mut self.moves);
+                    let count = if self.generate_all_legal_moves {
+                        // All指定時は生成タイプを切り替え
+                        let mut buf = [Move::NONE; MAX_MOVES];
+                        let gen_count = crate::movegen::generate_with_type(
+                            self.pos,
+                            crate::movegen::GenType::CapturesProPlusAll,
+                            &mut buf,
+                            None,
+                        );
+                        let mut c = 0;
+                        for mv in buf.iter().take(gen_count) {
+                            if self.pos.is_capture(*mv) {
+                                self.moves[c] = ExtMove::new(*mv, 0);
+                                c += 1;
+                            }
+                        }
+                        c
+                    } else if matches!(self.stage, Stage::ProbCutInit) {
+                        // ProbCut: 捕獲手生成（All切替はgenerate_all_legal_movesフラグで）
+                        let mut buf = [ExtMove::new(Move::NONE, 0); MAX_MOVES];
+                        let mut tmp_count = 0usize;
+                        let mut moves_raw = [Move::NONE; MAX_MOVES];
+                        let gen_count = if self.generate_all_legal_moves {
+                            crate::movegen::generate_with_type(
+                                self.pos,
+                                crate::movegen::GenType::CapturesAll,
+                                &mut moves_raw,
+                                None,
+                            )
+                        } else {
+                            crate::movegen::generate_with_type(
+                                self.pos,
+                                crate::movegen::GenType::CapturesProPlus,
+                                &mut moves_raw,
+                                None,
+                            )
+                        };
+                        for mv in moves_raw.iter().take(gen_count) {
+                            if self.pos.is_capture(*mv) {
+                                buf[tmp_count] = ExtMove::new(*mv, 0);
+                                tmp_count += 1;
+                            }
+                        }
+                        self.moves[..tmp_count].copy_from_slice(&buf[..tmp_count]);
+                        tmp_count
+                    } else {
+                        self.pos.generate_captures(&mut self.moves)
+                    };
                     self.end_cur = count;
                     self.end_captures = count;
 
@@ -285,7 +397,27 @@ impl<'a> MovePicker<'a> {
                 Stage::QuietInit => {
                     if !self.skip_quiets {
                         // 静かな手を生成
-                        let count = self.pos.generate_quiets(&mut self.moves[self.end_captures..]);
+                        let count = if self.generate_all_legal_moves {
+                            let mut buf = [Move::NONE; MAX_MOVES];
+                            let gen_count = crate::movegen::generate_with_type(
+                                self.pos,
+                                crate::movegen::GenType::QuietsAll,
+                                &mut buf,
+                                None,
+                            );
+                            let mut c = 0;
+                            for mv in buf.iter().take(gen_count) {
+                                if !self.pos.is_capture(*mv)
+                                    && self.end_captures + c < self.moves.len()
+                                {
+                                    self.moves[self.end_captures + c] = ExtMove::new(*mv, 0);
+                                    c += 1;
+                                }
+                            }
+                            c
+                        } else {
+                            self.pos.generate_quiets(&mut self.moves[self.end_captures..])
+                        };
                         self.end_cur = self.end_captures + count;
                         self.end_generated = self.end_cur;
 
@@ -346,7 +478,21 @@ impl<'a> MovePicker<'a> {
                 // ==============================
                 Stage::EvasionInit => {
                     // 回避手を生成
-                    let count = self.pos.generate_evasions_ext(&mut self.moves);
+                    let count = if self.generate_all_legal_moves {
+                        let mut buf = [Move::NONE; MAX_MOVES];
+                        let gen_count = crate::movegen::generate_with_type(
+                            self.pos,
+                            crate::movegen::GenType::EvasionsAll,
+                            &mut buf,
+                            None,
+                        );
+                        for (i, mv) in buf.iter().take(gen_count).enumerate() {
+                            self.moves[i] = ExtMove::new(*mv, 0);
+                        }
+                        gen_count
+                    } else {
+                        self.pos.generate_evasions_ext(&mut self.moves)
+                    };
                     self.cur = 0;
                     self.end_cur = count;
                     self.end_generated = count;
@@ -369,6 +515,18 @@ impl<'a> MovePicker<'a> {
                 // ==============================
                 Stage::QCapture => {
                     return self.select(|_, _| true).unwrap_or(Move::NONE);
+                }
+
+                // ==============================
+                // ProbCut: SEEが閾値以上の捕獲のみ
+                // ==============================
+                Stage::ProbCut => {
+                    if let Some(th) = self.probcut_threshold {
+                        return self
+                            .select(|s, ext| s.pos.see_ge(ext.mv, th))
+                            .unwrap_or(Move::NONE);
+                    }
+                    return Move::NONE;
                 }
             }
         }
@@ -564,7 +722,7 @@ fn partial_insertion_sort(moves: &mut [ExtMove], limit: i32) {
 }
 
 /// 駒の価値（MVV用）
-fn piece_value(pc: Piece) -> i32 {
+pub(crate) fn piece_value(pc: Piece) -> i32 {
     if pc.is_none() {
         return 0;
     }

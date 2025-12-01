@@ -108,6 +108,20 @@ impl Position {
         }
     }
 
+    /// capture_stage: 捕獲手かどうか（ProbCut等の判定用）
+    #[inline]
+    pub fn capture_stage(&self, m: Move) -> bool {
+        !m.is_drop() && self.piece_on(m.to()).is_some()
+    }
+
+    /// pseudo-legal判定（生成モード指定版）
+    #[inline]
+    pub fn pseudo_legal_with_all(&self, m: Move, _generate_all_legal_moves: bool) -> bool {
+        // 現状の pseudo_legal はALL/非ALLで挙動差がないためそのまま呼ぶ。
+        // 将来的に不成抑止などを切替える場合に備えたインターフェース。
+        self.pseudo_legal(m)
+    }
+
     /// 取る手かどうか
     #[inline]
     pub fn is_capture(&self, m: Move) -> bool {
@@ -179,7 +193,8 @@ impl Position {
         let count = if self.in_check() {
             return 0;
         } else {
-            generate_with_type(self, GenType::QuietsProMinus, &mut buffer, None)
+            // YaneuraOu標準のQUIETS相当: 成りも含む静かな手を生成する
+            generate_with_type(self, GenType::Quiets, &mut buffer, None)
         };
 
         let mut quiet_count = 0;

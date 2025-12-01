@@ -7,7 +7,7 @@
 
 use crate::movegen::{generate_legal, MoveList};
 use crate::position::Position;
-use crate::types::{Move, Piece, Square, Value, MAX_PLY};
+use crate::types::{Move, Piece, RepetitionState, Square, Value, MAX_PLY};
 
 // =============================================================================
 // 定数
@@ -499,6 +499,19 @@ pub fn value_from_tt(v: Value, ply: i32) -> Value {
         Value::new(v.raw() + ply)
     } else {
         v
+    }
+}
+
+/// 千日手/優劣局面を評価値に変換（YaneuraOu簡易版）
+#[inline]
+pub fn draw_value(state: RepetitionState, _stm: crate::types::Color) -> Value {
+    match state {
+        RepetitionState::Draw => Value::DRAW,
+        RepetitionState::Win => Value::MATE,
+        RepetitionState::Lose => -Value::MATE,
+        RepetitionState::Superior => Value::MATE_IN_MAX_PLY,
+        RepetitionState::Inferior => Value::MATED_IN_MAX_PLY,
+        RepetitionState::None => Value::NONE,
     }
 }
 
