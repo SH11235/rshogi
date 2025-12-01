@@ -175,7 +175,7 @@ fn test_worker_best_move_changes_initial_value() {
             let limits = LimitsType::new();
             let mut tm = create_time_manager();
 
-            let worker = SearchWorker::new(&tt, &limits, &mut tm);
+            let worker = SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
 
             assert_eq!(worker.best_move_changes, 0.0, "初期値は0.0であるべき");
         })
@@ -200,7 +200,7 @@ fn test_worker_best_move_changes_decay() {
             let limits = LimitsType::new();
             let mut tm = create_time_manager();
 
-            let mut worker = SearchWorker::new(&tt, &limits, &mut tm);
+            let mut worker = SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
             worker.best_move_changes = 4.0;
             worker.decay_best_move_changes();
 

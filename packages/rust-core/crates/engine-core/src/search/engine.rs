@@ -375,7 +375,8 @@ impl Search {
 
         // 探索ワーカーを作成（ttの借用期間を限定するためArcをクローン）
         let tt_owned = Arc::clone(&self.tt);
-        let mut worker = SearchWorker::new(&tt_owned, &limits, &mut time_manager);
+        let mut worker =
+            SearchWorker::new(&tt_owned, &limits, &mut time_manager, self.max_moves_to_draw);
 
         // 探索深さを決定
         let max_depth = if limits.depth > 0 {
@@ -763,7 +764,7 @@ mod tests {
         let mut limits = LimitsType::new();
         limits.set_start_time();
         let tt = TranspositionTable::new(16);
-        let mut worker = SearchWorker::new(&tt, &limits, &mut tm);
+        let mut worker = SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
         worker.best_move_changes = 3.5;
 
         let summary = WorkerSummary::from(&worker);

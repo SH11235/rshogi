@@ -264,9 +264,8 @@ impl<'a> MovePicker<'a> {
     ) -> Self {
         debug_assert!(!pos.in_check());
 
-        // YaneuraOu: capture_or_pawn_promotion を使用
         let stage = if tt_move.is_some()
-            && pos.capture_or_pawn_promotion(tt_move)
+            && pos.is_capture(tt_move)
             && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves)
             && pos.see_ge(tt_move, threshold)
         {
@@ -362,9 +361,9 @@ impl<'a> MovePicker<'a> {
                                 None,
                             )
                         };
-                        // YaneuraOu: 捕獲または歩成りのみフィルタ
+                        // 捕獲手のみフィルタ
                         for mv in moves_raw.iter().take(gen_count) {
-                            if self.pos.capture_or_pawn_promotion(*mv) {
+                            if self.pos.is_capture(*mv) {
                                 buf[tmp_count] = ExtMove::new(*mv, 0);
                                 tmp_count += 1;
                             }

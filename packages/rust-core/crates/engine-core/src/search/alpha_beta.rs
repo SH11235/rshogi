@@ -35,6 +35,13 @@ const FUTILITY_MARGIN_BASE: i32 = 117;
 
 use std::sync::OnceLock;
 
+/// 引き分けスコアに揺らぎを与える（YaneuraOu準拠）
+#[inline]
+fn draw_jitter(nodes: u64) -> i32 {
+    // VALUE_DRAW - 1 + (nodes & 0x2) 相当の±1ゆらぎ
+    ((nodes & 0x2) as i32) - 1
+}
+
 /// LMR用のreduction配列
 type Reductions = [[[i32; 64]; 64]; 2];
 
@@ -136,6 +143,9 @@ pub struct SearchWorker<'a> {
     /// YaneuraOu準拠: move_count > 1 && !pvIdx の時にインクリメント
     /// 反復深化の各世代で /= 2 して減衰させる
     pub best_move_changes: f64,
+
+    /// 引き分けまでの最大手数（YaneuraOu準拠）
+    pub max_moves_to_draw: i32,
 }
 
 impl<'a> SearchWorker<'a> {
@@ -146,6 +156,7 @@ impl<'a> SearchWorker<'a> {
         tt: &'a TranspositionTable,
         limits: &'a LimitsType,
         time_manager: &'a mut TimeManagement,
+        max_moves_to_draw: i32,
     ) -> Self {
         assert!(
             is_reductions_initialized(),
@@ -172,6 +183,7 @@ impl<'a> SearchWorker<'a> {
             best_move: Move::NONE,
             abort: false,
             best_move_changes: 0.0,
+            max_moves_to_draw,
         }
     }
 
@@ -623,15 +635,16 @@ impl<'a> SearchWorker<'a> {
             return tt_value;
         }
 
-        // 1手詰め判定（置換表未ヒット時のみ）
-        if !in_check && !tt_hit {
+        // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
+        if NT != NodeType::Root as u8 && !in_check && !tt_hit {
             let mate_move = pos.mate_1ply();
             if mate_move.is_some() {
                 let value = Value::mate_in(ply + 1);
                 let stored_depth = (depth + 6).min(MAX_PLY - 1);
+                // YaneuraOu準拠: mate_in は root からの手数込みなので value_to_tt は通さずそのまま保存
                 tt_result.write(
                     key,
-                    value_to_tt(value, ply),
+                    value,
                     self.stack[ply as usize].tt_pv,
                     Bound::Exact,
                     stored_depth,
@@ -1341,22 +1354,26 @@ impl<'a> SearchWorker<'a> {
         if rep_state.is_repetition() || rep_state.is_superior_inferior() {
             let v = draw_value(rep_state, pos.side_to_move());
             if v != Value::NONE {
+                if v == Value::DRAW {
+                    let jittered = Value::new(v.raw() + draw_jitter(self.nodes));
+                    return value_from_tt(jittered, ply);
+                }
                 return value_from_tt(v, ply);
             }
         }
 
-        // 320手ルール（YaneuraOu準拠）
-        const MAX_MOVES_TO_DRAW: i32 = 320;
-        if pos.game_ply() >= MAX_MOVES_TO_DRAW {
-            return Value::DRAW;
+        // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
+        if self.max_moves_to_draw > 0 && pos.game_ply() > self.max_moves_to_draw {
+            return Value::new(Value::DRAW.raw() + draw_jitter(self.nodes));
         }
 
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
+        let pv_hit = tt_hit && tt_data.is_pv;
         self.stack[ply as usize].tt_hit = tt_hit;
-        self.stack[ply as usize].tt_pv = pv_node || (tt_hit && tt_data.is_pv);
+        self.stack[ply as usize].tt_pv = pv_hit;
         let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(tt_data.value, ply)
@@ -1426,7 +1443,7 @@ impl<'a> SearchWorker<'a> {
                 tt_result.write(
                     key,
                     value_to_tt(v, ply),
-                    self.stack[ply as usize].tt_pv,
+                    pv_hit,
                     Bound::Lower,
                     DEPTH_UNSEARCHED,
                     Move::NONE,
@@ -1592,20 +1609,6 @@ impl<'a> SearchWorker<'a> {
                         }
                     }
 
-                    // ss-2の参照（YaneuraOu準拠）
-                    if ply >= 2 {
-                        if let Some(key) = self.stack[(ply - 2) as usize].cont_hist_key {
-                            let in_check_idx = key.in_check as usize;
-                            let capture_idx = key.capture as usize;
-                            cont_score += self.continuation_history[in_check_idx][capture_idx].get(
-                                key.piece,
-                                key.to,
-                                mv.moved_piece_after(),
-                                mv.to(),
-                            ) as i32;
-                        }
-                    }
-
                     let pawn_idx = pos.pawn_history_index();
                     cont_score +=
                         self.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32;
@@ -1671,7 +1674,7 @@ impl<'a> SearchWorker<'a> {
         tt_result.write(
             key,
             value_to_tt(best_value, ply),
-            self.stack[ply as usize].tt_pv,
+            pv_hit,
             bound,
             DEPTH_QS,
             best_move,
