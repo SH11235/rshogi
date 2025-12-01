@@ -9,7 +9,6 @@ pub mod tables;
 use crate::bitboard::{
     bishop_effect, king_effect, lance_effect, line_bb, rook_effect, Bitboard, RANK_BB,
 };
-use crate::movegen::{self, MoveList};
 use crate::position::Position;
 use crate::types::{Color, Move, Square};
 
@@ -75,7 +74,7 @@ fn enemy_field(us: Color) -> Bitboard {
 /// 1手詰め判定（簡易版）
 ///
 /// 王手がかかっていない局面で1手詰めかどうかを判定する。
-/// 高速化のためのテーブルは利用するが、判定は合法手全探索で行う。
+/// 高速化のためのテーブルを利用し、やねうら王の簡易版ロジックに準拠する。
 pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
     // 王手がかかっている局面では判定しない
     if pos.in_check() {
@@ -89,29 +88,6 @@ pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
 
     if let Some(mv) = move_mate::check_move_mate(pos, us) {
         return Some(mv);
-    }
-
-    brute_mate(pos)
-}
-
-/// フォールバックの全合法探索版1手詰め
-fn brute_mate(pos: &mut Position) -> Option<Move> {
-    let mut list = MoveList::new();
-    movegen::generate_legal(pos, &mut list);
-
-    for mv in list.iter() {
-        let gives_check = pos.gives_check(*mv);
-        pos.do_move(*mv, gives_check);
-
-        let mut reply = MoveList::new();
-        movegen::generate_legal(pos, &mut reply);
-        let mate = reply.is_empty();
-
-        pos.undo_move(*mv);
-
-        if mate {
-            return Some(*mv);
-        }
     }
 
     None
@@ -156,12 +132,6 @@ mod tests {
         assert!(can_promote_to(Color::White, from.inverse()));
     }
 
-    fn mate_by_brute(sfen: &str) -> Option<Move> {
-        let mut pos = Position::new();
-        pos.set_sfen(sfen).unwrap();
-        super::brute_mate(&mut pos)
-    }
-
     fn mate_by_new(sfen: &str) -> Option<Move> {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
@@ -172,7 +142,6 @@ mod tests {
     fn test_hirate_no_mate() {
         let sfen = crate::position::SFEN_HIRATE;
         assert_eq!(mate_by_new(sfen), None);
-        assert_eq!(mate_by_brute(sfen), None);
     }
 
     #[test]
@@ -181,8 +150,6 @@ mod tests {
         // 1二に金打ちで詰み
         let sfen = "4K4/9/9/9/9/9/9/6R2/7Pk b G 1";
         let new_mv = mate_by_new(sfen);
-        let brute_mv = mate_by_brute(sfen);
-        assert_eq!(new_mv, brute_mv);
         assert!(new_mv.is_some());
     }
 }

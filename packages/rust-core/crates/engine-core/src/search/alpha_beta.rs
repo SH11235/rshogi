@@ -14,8 +14,9 @@ use crate::types::{Bound, Depth, Move, Piece, Value, DEPTH_QS, DEPTH_UNSEARCHED,
 use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
     pawn_history_bonus, quiet_malus, stat_bonus, ButterflyHistory, CapturePieceToHistory,
-    ContinuationHistory, LowPlyHistory, PawnHistory, CONTINUATION_HISTORY_WEIGHTS,
-    LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
+    ContinuationHistory, CorrectionHistory, LowPlyHistory, PawnHistory,
+    CONTINUATION_HISTORY_WEIGHTS, LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS,
+    TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
 use super::tt_history::TTMoveHistory;
@@ -107,6 +108,7 @@ pub struct SearchWorker<'a> {
     pub continuation_history: [[ContinuationHistory; 2]; 2],
     pub low_ply_history: LowPlyHistory,
     pub tt_move_history: TTMoveHistory,
+    pub correction_history: CorrectionHistory,
 
     /// 探索ノード数
     pub nodes: u64,
@@ -161,6 +163,7 @@ impl<'a> SearchWorker<'a> {
             continuation_history: Default::default(),
             low_ply_history: LowPlyHistory::new(),
             tt_move_history: TTMoveHistory::new(),
+            correction_history: CorrectionHistory::new(),
             nodes: 0,
             sel_depth: 0,
             root_depth: 0,
@@ -699,12 +702,8 @@ impl<'a> SearchWorker<'a> {
                     let dynamic_reduction = (static_eval - beta).raw() / 300;
                     let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
 
-                    let mut tried = 0;
-
+                    // YaneuraOu準拠: 全捕獲手を試す（PV:2手/NonPV:4手の制限を撤廃）
                     for mv in probcut_moves {
-                        if tried >= if pv_node { 2 } else { 4 } {
-                            break;
-                        }
                         if !pos.is_legal(mv) {
                             continue;
                         }
@@ -729,7 +728,6 @@ impl<'a> SearchWorker<'a> {
                             );
                         }
                         pos.undo_move(mv);
-                        tried += 1;
 
                         if value >= prob_beta {
                             let stored_depth = (probcut_depth + 1).max(1);
@@ -1327,6 +1325,12 @@ impl<'a> SearchWorker<'a> {
             }
         }
 
+        // 320手ルール（YaneuraOu準拠）
+        const MAX_MOVES_TO_DRAW: i32 = 320;
+        if pos.game_ply() >= MAX_MOVES_TO_DRAW {
+            return Value::DRAW;
+        }
+
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
         let tt_hit = tt_result.found;
@@ -1351,7 +1355,7 @@ impl<'a> SearchWorker<'a> {
 
         let mut best_move = Move::NONE;
 
-        let static_eval = if in_check {
+        let mut static_eval = if in_check {
             Value::NONE
         } else if tt_hit && tt_data.eval != Value::NONE {
             tt_data.eval
@@ -1365,6 +1369,16 @@ impl<'a> SearchWorker<'a> {
             }
             evaluate(pos)
         };
+
+        // 静的評価に補正履歴を適用 (YaneuraOu準拠 Phase 6)
+        // 初期実装: 補正値は常に0（動作確認用）
+        if !in_check && static_eval != Value::NONE {
+            let pawn_idx = pos.pawn_history_index();
+            let king_sq = pos.king_square(pos.side_to_move());
+            let correction = self.correction_history.get(pawn_idx, king_sq);
+            static_eval = Value::new(static_eval.raw() + correction as i32);
+        }
+
         self.stack[ply as usize].static_eval = static_eval;
 
         let mut alpha = alpha;
@@ -1543,6 +1557,8 @@ impl<'a> SearchWorker<'a> {
 
                 if !capture {
                     let mut cont_score = 0;
+
+                    // ss-1の参照
                     if ply >= 1 {
                         if let Some(key) = self.stack[(ply - 1) as usize].cont_hist_key {
                             let in_check_idx = key.in_check as usize;
@@ -1555,6 +1571,21 @@ impl<'a> SearchWorker<'a> {
                             ) as i32;
                         }
                     }
+
+                    // ss-2の参照（YaneuraOu準拠）
+                    if ply >= 2 {
+                        if let Some(key) = self.stack[(ply - 2) as usize].cont_hist_key {
+                            let in_check_idx = key.in_check as usize;
+                            let capture_idx = key.capture as usize;
+                            cont_score += self.continuation_history[in_check_idx][capture_idx].get(
+                                key.piece,
+                                key.to,
+                                mv.moved_piece_after(),
+                                mv.to(),
+                            ) as i32;
+                        }
+                    }
+
                     let pawn_idx = pos.pawn_history_index();
                     cont_score +=
                         self.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32;

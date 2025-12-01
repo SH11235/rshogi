@@ -20,6 +20,8 @@ pub struct StateInfo {
     pub plies_from_null: i32,
     /// 連続王手カウンタ [Color]
     pub continuous_check: [i32; Color::NUM],
+    /// ゲーム開始からの総手数（320手ルール用）
+    pub game_ply: u16,
 
     // === 再計算される部分 ===
     /// 盤面ハッシュ（手番込み）
@@ -118,6 +120,7 @@ impl StateInfo {
             pawn_key: 0,
             plies_from_null: 0,
             continuous_check: [0; Color::NUM],
+            game_ply: 0,
             board_key: 0,
             hand_key: 0,
             hand_snapshot: [Hand::EMPTY; Color::NUM],
@@ -150,6 +153,7 @@ impl StateInfo {
             pawn_key: self.pawn_key,
             plies_from_null: self.plies_from_null,
             continuous_check: self.continuous_check,
+            game_ply: self.game_ply,
             // 以下は再計算される
             board_key: self.board_key,
             hand_key: self.hand_key,
