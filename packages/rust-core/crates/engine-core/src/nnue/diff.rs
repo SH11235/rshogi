@@ -16,10 +16,10 @@ use crate::types::{Color, Piece};
 /// 呼び出し側で全計算にフォールバックする前提とする。
 pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, Vec<usize>) {
     let state = pos.state();
-    let Some(_prev) = state.previous.as_ref() else {
+    if pos.previous_state().is_none() {
         // 前の局面が無い（初期状態など）
         return (Vec::new(), Vec::new());
-    };
+    }
 
     // 玉が動いた場合は全計算が必要（HalfKP は自玉位置×駒配置のため）
     if state.dirty_piece.king_moved[perspective.index()] {

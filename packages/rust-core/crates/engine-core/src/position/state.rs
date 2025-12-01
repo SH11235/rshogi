@@ -36,8 +36,8 @@ pub struct StateInfo {
     pub hand_snapshot: [Hand; Color::NUM],
     /// 王手している駒
     pub checkers: Bitboard,
-    /// 前の局面へのポインタ
-    pub previous: Option<Box<StateInfo>>,
+    /// 前の局面のインデックス（StateInfoプール内）
+    pub previous: Option<usize>,
     /// pin駒 [Color]（自玉へのピン）
     pub blockers_for_king: [Bitboard; Color::NUM],
     /// pinしている駒 [Color]
@@ -57,7 +57,7 @@ pub struct StateInfo {
     /// 直前の指し手
     pub last_move: Move,
     /// NNUE Accumulator（差分更新用の中間表現）
-    pub accumulator: Box<Accumulator>,
+    pub accumulator: Accumulator,
     /// 差分更新用の駒移動情報
     pub dirty_piece: DirtyPiece,
 }
@@ -141,7 +141,7 @@ impl StateInfo {
             repetition_type: RepetitionState::None,
             material_value: Value::ZERO,
             last_move: Move::NONE,
-            accumulator: Box::new(Accumulator::new()),
+            accumulator: Accumulator::new(),
             dirty_piece: DirtyPiece::default(),
         }
     }
@@ -177,7 +177,7 @@ impl StateInfo {
             repetition_type: RepetitionState::None,
             material_value: self.material_value,
             last_move: Move::NONE,
-            accumulator: Box::new(Accumulator::new()),
+            accumulator: Accumulator::new(),
             dirty_piece: DirtyPiece::default(),
         }
     }

@@ -1025,6 +1025,8 @@ impl<'a> SearchWorker<'a> {
             }
         }
 
+        // TODO: singular extension（YaneuraOu準拠）は未実装。
+        // 追加時は補正履歴の寄与（abs(correctionValue)/249096 を margin に加算）も含める。
         for mv in ordered_moves {
             if !pos.pseudo_legal(mv) {
                 continue;
@@ -1098,6 +1100,10 @@ impl<'a> SearchWorker<'a> {
 
                 // capture にはあまり reduction しない
                 let r = if is_capture { r / 2 } else { r };
+
+                // YaneuraOu: 補正履歴が大きいときは過度なLMRを抑制する
+                let corr_reduction = correction_value.abs() / 27_160;
+                let r = (r - corr_reduction).max(0);
 
                 new_depth = (depth - 1 - r).max(1);
             }

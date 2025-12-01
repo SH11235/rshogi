@@ -52,9 +52,9 @@ impl SearchInfo {
                 // USIでは手数(plies)で出力し、負値は自分が詰まされる側を示す
                 let mate_ply = self.score.mate_ply();
                 let signed_ply = if self.score.is_loss() {
-                    -(mate_ply as i32)
+                    -mate_ply
                 } else {
-                    mate_ply as i32
+                    mate_ply
                 };
                 format!("mate {signed_ply}")
             } else {
