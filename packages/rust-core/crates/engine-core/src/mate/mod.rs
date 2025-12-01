@@ -148,7 +148,7 @@ mod tests {
     fn test_drop_mate_gold_corner() {
         // 白玉1一、先手玉5九、先手: 飛3二・歩2一、持ち駒: 金
         // 1二に金打ちで詰み
-        let sfen = "4K4/9/9/9/9/9/9/6R2/7Pk b G 1";
+        let sfen = "7Pk/6R2/9/9/9/9/9/9/4K4 b G 1";
         let new_mv = mate_by_new(sfen);
         assert!(new_mv.is_some());
     }

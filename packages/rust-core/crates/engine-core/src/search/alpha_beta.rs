@@ -623,6 +623,26 @@ impl<'a> SearchWorker<'a> {
             return tt_value;
         }
 
+        // 1手詰め判定（置換表未ヒット時のみ）
+        if !in_check && !tt_hit {
+            let mate_move = pos.mate_1ply();
+            if mate_move.is_some() {
+                let value = Value::mate_in(ply + 1);
+                let stored_depth = (depth + 6).min(MAX_PLY - 1);
+                tt_result.write(
+                    key,
+                    value_to_tt(value, ply),
+                    self.stack[ply as usize].tt_pv,
+                    Bound::Exact,
+                    stored_depth,
+                    mate_move,
+                    Value::NONE,
+                    self.tt.generation(),
+                );
+                return value;
+            }
+        }
+
         // =================================================================
         // 静的評価
         // =================================================================
