@@ -102,8 +102,17 @@ fn proven_mate_depth_exceeded(best_value: Value, depth: Depth) -> bool {
 
 /// `go mate` 指定時に、要求手数以内の詰みが見つかったか判定する
 #[inline]
-fn mate_within_limit(best_value: Value, mate_limit_moves: i32) -> bool {
-    if mate_limit_moves <= 0 || !best_value.is_mate_score() {
+fn mate_within_limit(
+    best_value: Value,
+    score_lower_bound: bool,
+    score_upper_bound: bool,
+    mate_limit_moves: i32,
+) -> bool {
+    if mate_limit_moves <= 0
+        || score_lower_bound
+        || score_upper_bound
+        || !best_value.is_mate_score()
+    {
         return false;
     }
 
@@ -548,7 +557,12 @@ impl Search {
                     if proven_mate_depth_exceeded(best_value, depth) {
                         break;
                     }
-                } else if mate_within_limit(best_value, worker.limits.mate) {
+                } else if mate_within_limit(
+                    best_value,
+                    worker.root_moves[0].score_lower_bound,
+                    worker.root_moves[0].score_upper_bound,
+                    worker.limits.mate,
+                ) {
                     worker.time_manager.request_stop();
                     break;
                 }
@@ -716,7 +730,12 @@ impl Search {
                         if proven_mate_depth_exceeded(best_value, depth) {
                             break;
                         }
-                    } else if mate_within_limit(best_value, worker.limits.mate) {
+                    } else if mate_within_limit(
+                        best_value,
+                        worker.root_moves[0].score_lower_bound,
+                        worker.root_moves[0].score_upper_bound,
+                        worker.limits.mate,
+                    ) {
                         worker.time_manager.request_stop();
                         break;
                     }
@@ -830,14 +849,20 @@ mod tests {
     #[test]
     fn test_mate_within_limit_converts_moves_to_plies() {
         // mate in 9 ply is within a 5-move limit (10 ply)
-        assert!(mate_within_limit(Value::mate_in(9), 5));
-        assert!(!mate_within_limit(Value::mate_in(11), 5));
+        assert!(mate_within_limit(Value::mate_in(9), false, false, 5));
+        assert!(!mate_within_limit(Value::mate_in(11), false, false, 5));
     }
 
     #[test]
     fn test_mate_within_limit_handles_mated_scores() {
         // mated in 7 ply should still trigger when limit is 4 moves (8 ply)
-        assert!(mate_within_limit(Value::mated_in(7), 4));
+        assert!(mate_within_limit(Value::mated_in(7), false, false, 4));
+    }
+
+    #[test]
+    fn test_mate_within_limit_requires_exact_score() {
+        assert!(!mate_within_limit(Value::mate_in(7), true, false, 4));
+        assert!(!mate_within_limit(Value::mate_in(7), false, true, 4));
     }
 
     #[test]
