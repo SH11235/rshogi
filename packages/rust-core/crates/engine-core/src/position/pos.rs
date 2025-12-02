@@ -442,7 +442,8 @@ impl Position {
     /// pin駒とpinしている駒を更新
     pub(super) fn update_blockers_and_pinners(&mut self) {
         for c in [Color::Black, Color::White] {
-            let (blockers, pinners) = self.compute_blockers_and_pinners(c, self.occupied(), Bitboard::EMPTY);
+            let (blockers, pinners) =
+                self.compute_blockers_and_pinners(c, self.occupied(), Bitboard::EMPTY);
             let st = self.cur_state_mut();
             st.blockers_for_king[c.index()] = blockers;
             st.pinners[c.index()] = pinners;
@@ -583,7 +584,11 @@ impl Position {
             new_state.board_key ^= zobrist_psq(pc, from);
             self.xor_partial_keys(&mut new_state, pc, from);
 
-            let moved_pc = if m.is_promote() { pc.promote().unwrap() } else { pc };
+            let moved_pc = if m.is_promote() {
+                pc.promote().unwrap()
+            } else {
+                pc
+            };
             moved_pt = moved_pc.piece_type();
             self.put_piece(moved_pc, to);
             new_state.board_key ^= zobrist_psq(moved_pc, to);
@@ -632,7 +637,8 @@ impl Position {
         if gives_check {
             let ksq = self.king_square[them.index()];
             // 直接王手
-            checkers |= self.cur_state().check_squares[moved_pt as usize] & Bitboard::from_square(moved_to);
+            checkers |=
+                self.cur_state().check_squares[moved_pt as usize] & Bitboard::from_square(moved_to);
 
             // 開き王手
             if let Some(from_sq) = moved_from {
