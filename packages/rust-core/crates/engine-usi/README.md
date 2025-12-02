@@ -1,10 +1,10 @@
 # engine-usi
 
-USIプロトコルエンジンと、自己対局ハーネス（`engine-selfplay`）を含むクレートです。
+USIプロトコルエンジンと、自己対局ハーネス（`engine_selfplay`）を含むクレートです。
 
 ## 自己対局ハーネスの使い方
 
-バイナリ: `engine-selfplay`
+バイナリ: `engine_selfplay`
 
 主なオプション:
 - `--games` 対局数（デフォルト1）
@@ -18,13 +18,13 @@ USIプロトコルエンジンと、自己対局ハーネス（`engine-selfplay`
 ### よく使うコマンド例
 
 - 1秒秒読みで数をこなす（infoログなし、デフォルト出力先）  
-  `cargo run -p engine-usi --bin engine-selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
+  `cargo run -p engine-usi --bin engine_selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
 
 - 5秒秒読み + network-delay2=1120、infoログ付きで指定パスに出力  
-  `cargo run -p engine-usi --bin engine-selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
+  `cargo run -p engine-usi --bin engine_selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
 
 - 特定SFENの再現（startposファイルを用意して1局だけ）  
-  `cargo run -p engine-usi --bin engine-selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+  `cargo run -p engine-usi --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
 
 ### 出力ファイル
 
