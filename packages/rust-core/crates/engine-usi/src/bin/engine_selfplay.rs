@@ -27,13 +27,13 @@ const MIN_THINK_MS: u64 = 10;
 /// # よく使うコマンド例
 ///
 /// - 1秒秒読みで数をこなす（infoログなし、デフォルト出力先）:
-///   `cargo run -p engine-usi --bin engine-selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
+///   `cargo run -p engine-usi --bin engine_selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
 ///
 /// - 5秒秒読み + network-delay2=1120、infoログ付きで指定パスに出力:
-///   `cargo run -p engine-usi --bin engine-selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
+///   `cargo run -p engine-usi --bin engine_selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
 ///
 /// - 特定SFENの再現（startposファイルを用意して1局だけ）:
-///   `cargo run -p engine-usi --bin engine-selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+///   `cargo run -p engine-usi --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
 ///
 /// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
 ///
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[test]
     fn time_control_allocates_fractional_budget() -> AnyResult<()> {
-        let mut cli = Cli::parse_from(["engine-selfplay"]);
+        let mut cli = Cli::parse_from(["engine_selfplay"]);
         cli.btime = 60_000;
         cli.wtime = 60_000;
         cli.byoyomi = 1_000;
