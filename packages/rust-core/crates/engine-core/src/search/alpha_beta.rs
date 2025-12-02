@@ -31,7 +31,9 @@ use super::{LimitsType, MovePicker, TimeManagement};
 // =============================================================================
 
 /// Futility margin（depth × 係数）
-const FUTILITY_MARGIN_BASE: i32 = 117;
+///
+/// YaneuraOu準拠での基準係数。枝刈りでtt未ヒットのカットノードは係数を少し下げる。
+const FUTILITY_MARGIN_BASE: i32 = 90;
 
 use std::sync::OnceLock;
 
@@ -799,8 +801,23 @@ impl<'a> SearchWorker<'a> {
         // Futility Pruning（非PV、静的評価が十分高い場合）
         // =================================================================
         if !pv_node && !in_check && depth <= 8 && static_eval != Value::NONE {
-            let futility_margin =
-                Value::new(FUTILITY_MARGIN_BASE * depth + (correction_value.abs() / 171_290));
+            // YaneuraOu準拠: improving/opponentWorsening を織り込んだマージン（yaneuraou-search.cpp:2739以降）
+            let opponent_worsening = if ply >= 1 {
+                let prev_eval = self.stack[(ply - 1) as usize].static_eval;
+                prev_eval != Value::NONE && static_eval > -prev_eval
+            } else {
+                false
+            };
+
+            let cut_node = !pv_node; // Non-PVノード相当
+            let futility_mult = FUTILITY_MARGIN_BASE - 20 * (cut_node && !tt_hit) as i32;
+            let futility_margin = Value::new(
+                futility_mult * depth
+                    - (improving as i32) * futility_mult * 2
+                    - (opponent_worsening as i32) * futility_mult / 3
+                    + (correction_value.abs() / 171_290),
+            );
+
             if static_eval - futility_margin >= beta {
                 return static_eval;
             }
