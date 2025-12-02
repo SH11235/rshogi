@@ -15,7 +15,28 @@ use engine_core::types::{Color, Move, PieceType, Square};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
+const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// 残り約40手を想定して1手あたりの持ち時間を配分する。
+const TIME_ALLOCATION_MOVES: u64 = 40;
+const MIN_THINK_MS: u64 = 10;
+
 /// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
+///
+/// # よく使うコマンド例
+///
+/// - 1秒秒読みで数をこなす（infoログなし、デフォルト出力先）:
+///   `cargo run -p engine-usi --bin engine-selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
+///
+/// - 5秒秒読み + network-delay2=1120、infoログ付きで指定パスに出力:
+///   `cargo run -p engine-usi --bin engine-selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
+///
+/// - 特定SFENの再現（startposファイルを用意して1局だけ）:
+///   `cargo run -p engine-usi --bin engine-selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+///
+/// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
+///
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -114,6 +135,10 @@ struct Cli {
     /// Enable info log output
     #[arg(long, default_value_t = false)]
     log_info: bool,
+
+    /// Flush game log on every move (safer, but slower)
+    #[arg(long, default_value_t = false)]
+    flush_each_move: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -145,6 +170,8 @@ struct MetaSettings {
     minimum_thinking_time: Option<i64>,
     slowmover: Option<i32>,
     ponder: bool,
+    #[serde(default)]
+    flush_each_move: bool,
     startpos_file: Option<String>,
     sfen: Option<String>,
 }
@@ -154,6 +181,14 @@ struct EngineCommandMeta {
     path: String,
     args_black: Vec<String>,
     args_white: Vec<String>,
+    #[serde(default)]
+    source: String,
+}
+
+/// バイナリの発見元を含む解決結果。
+struct ResolvedEnginePath {
+    path: PathBuf,
+    source: &'static str,
 }
 
 #[derive(Serialize)]
@@ -165,6 +200,8 @@ struct MoveLog {
     side_to_move: char,
     sfen_before: String,
     move_usi: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_move_usi: Option<String>,
     engine: &'static str,
     elapsed_ms: u64,
     think_limit_ms: u64,
@@ -259,6 +296,7 @@ struct InfoSnapshot {
 }
 
 impl InfoSnapshot {
+    /// info 行を解析し、multipv=1 の情報を保持する。
     fn update_from_line(&mut self, line: &str) {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.first().copied() != Some("info") {
@@ -382,6 +420,7 @@ struct TimeArgs {
     winc: u64,
 }
 
+/// USI 互換の時間管理を最低限行うヘルパー。
 #[derive(Clone, Copy)]
 struct TimeControl {
     black_time: u64,
@@ -412,12 +451,21 @@ impl TimeControl {
         }
     }
 
+    /// 残り時間を分割して1手あたりの思考上限を決める。
     fn think_limit_ms(&self, side: Color) -> u64 {
+        let remaining = self.remaining(side);
+        let inc = self.increment_for(side);
         if self.byoyomi > 0 {
-            self.byoyomi
-        } else {
-            self.remaining(side).saturating_add(self.increment_for(side))
+            let available = remaining.saturating_add(self.byoyomi);
+            let per_move_budget = remaining / TIME_ALLOCATION_MOVES;
+            let candidate = self.byoyomi.saturating_add(per_move_budget);
+            let lower = self.byoyomi.max(MIN_THINK_MS.min(available));
+            return candidate.clamp(lower, available);
         }
+        let per_move_budget = remaining / TIME_ALLOCATION_MOVES;
+        let candidate = per_move_budget.saturating_add(inc);
+        let lower = MIN_THINK_MS.min(remaining);
+        candidate.clamp(lower, remaining)
     }
 
     fn remaining(&self, side: Color) -> u64 {
@@ -457,6 +505,7 @@ impl TimeControl {
     }
 }
 
+/// エンジンプロセス起動時の設定。
 struct EngineConfig {
     path: PathBuf,
     args: Vec<String>,
@@ -469,6 +518,7 @@ struct EngineConfig {
     ponder: bool,
 }
 
+/// 1本のエンジンに対する入出力をカプセル化する。
 struct EngineProcess {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -519,7 +569,7 @@ impl EngineProcess {
     fn initialize(&mut self, cfg: &EngineConfig) -> Result<()> {
         self.write_line("usi")?;
         loop {
-            let line = self.recv_line(Duration::from_secs(30))?;
+            let line = self.recv_line(ENGINE_READY_TIMEOUT)?;
             if let Some(rest) = line.strip_prefix("option ") {
                 if let Some(name) = parse_option_name(rest) {
                     self.opt_names.insert(name);
@@ -652,7 +702,7 @@ impl EngineProcess {
     fn sync_ready(&mut self) -> Result<()> {
         self.write_line("isready")?;
         loop {
-            let line = self.recv_line(Duration::from_secs(30))?;
+            let line = self.recv_line(ENGINE_READY_TIMEOUT)?;
             if line == "readyok" {
                 break;
             }
@@ -684,12 +734,12 @@ impl EngineProcess {
 impl Drop for EngineProcess {
     fn drop(&mut self) {
         let _ = self.write_line("quit");
-        let deadline = Instant::now() + Duration::from_millis(300);
+        let deadline = Instant::now() + ENGINE_QUIT_TIMEOUT;
         while Instant::now() < deadline {
             if let Ok(Some(_)) = self.child.try_wait() {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(ENGINE_QUIT_POLL_INTERVAL);
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -759,13 +809,16 @@ fn main() -> Result<()> {
     };
 
     let engine_path = resolve_engine_path(&cli);
+    let engine_path_display = engine_path.path.display();
+    let engine_path_source = engine_path.source;
+    println!("using engine binary: {engine_path_display} ({engine_path_source})");
     let common_args = cli.engine_args.clone().unwrap_or_default();
     let black_args = cli.engine_args_black.clone().unwrap_or_else(|| common_args.clone());
     let white_args = cli.engine_args_white.clone().unwrap_or(common_args.clone());
 
     let mut black = EngineProcess::spawn(
         &EngineConfig {
-            path: engine_path.clone(),
+            path: engine_path.path.clone(),
             args: black_args.clone(),
             threads: cli.threads,
             hash_mb: cli.hash_mb,
@@ -779,7 +832,7 @@ fn main() -> Result<()> {
     )?;
     let mut white = EngineProcess::spawn(
         &EngineConfig {
-            path: engine_path.clone(),
+            path: engine_path.path.clone(),
             args: white_args.clone(),
             threads: cli.threads,
             hash_mb: cli.hash_mb,
@@ -811,11 +864,13 @@ fn main() -> Result<()> {
             minimum_thinking_time: cli.minimum_thinking_time,
             slowmover: cli.slowmover,
             ponder: cli.ponder,
+            flush_each_move: cli.flush_each_move,
             startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
             sfen: cli.sfen.clone(),
         },
         engine_cmd: EngineCommandMeta {
-            path: engine_path.display().to_string(),
+            path: engine_path.path.display().to_string(),
+            source: engine_path.source.to_string(),
             args_black: black_args.clone(),
             args_white: white_args.clone(),
         },
@@ -865,6 +920,7 @@ fn main() -> Result<()> {
 
             let timed_out = search.timed_out;
             let mut move_usi = search.bestmove.clone().unwrap_or_else(|| "none".to_string());
+            let mut raw_move_usi = None;
             let mut terminal = false;
             let elapsed_ms = search.elapsed_ms;
             let eval_log = search.eval.clone();
@@ -881,8 +937,10 @@ fn main() -> Result<()> {
                     move_usi = "timeout".to_string();
                 }
             } else if let Some(ref mv_str) = search.bestmove {
+                raw_move_usi = Some(mv_str.clone());
                 match mv_str.as_str() {
                     "resign" => {
+                        move_usi = mv_str.clone();
                         outcome = if side == Color::Black {
                             GameOutcome::WhiteWin
                         } else {
@@ -892,6 +950,7 @@ fn main() -> Result<()> {
                         terminal = true;
                     }
                     "win" => {
+                        move_usi = mv_str.clone();
                         outcome = if side == Color::Black {
                             GameOutcome::BlackWin
                         } else {
@@ -900,11 +959,15 @@ fn main() -> Result<()> {
                         outcome_reason = "win";
                         terminal = true;
                     }
-                    _ => {
-                        let mv = Move::from_usi(mv_str).ok_or_else(|| {
-                            anyhow!("{}: invalid move '{}'", engine_label, mv_str)
-                        })?;
-                        if !pos.is_legal(mv) {
+                    _ => match Move::from_usi(mv_str) {
+                        Some(mv) if pos.is_legal(mv) => {
+                            let gives_check = pos.gives_check(mv);
+                            pos.do_move(mv, gives_check);
+                            tc.update_after_move(side, search.elapsed_ms);
+                            move_usi = mv_str.clone();
+                            raw_move_usi = None;
+                        }
+                        _ => {
                             outcome = if side == Color::Black {
                                 GameOutcome::WhiteWin
                             } else {
@@ -912,12 +975,9 @@ fn main() -> Result<()> {
                             };
                             outcome_reason = "illegal_move";
                             terminal = true;
-                        } else {
-                            let gives_check = pos.gives_check(mv);
-                            pos.do_move(mv, gives_check);
-                            tc.update_after_move(side, search.elapsed_ms);
+                            move_usi = "illegal".to_string();
                         }
-                    }
+                    },
                 }
             } else {
                 outcome = if side == Color::Black {
@@ -936,6 +996,7 @@ fn main() -> Result<()> {
                 side_to_move: side_label(side),
                 sfen_before,
                 move_usi,
+                raw_move_usi,
                 engine: engine_label,
                 elapsed_ms,
                 think_limit_ms,
@@ -944,7 +1005,9 @@ fn main() -> Result<()> {
             };
             serde_json::to_writer(&mut writer, &move_log)?;
             writer.write_all(b"\n")?;
-            writer.flush()?;
+            if cli.flush_each_move {
+                writer.flush()?;
+            }
 
             if terminal || outcome != GameOutcome::InProgress {
                 break;
@@ -1005,42 +1068,62 @@ fn default_kif_path(jsonl: &Path) -> PathBuf {
     parent.join(format!("{stem}.kif"))
 }
 
-fn resolve_engine_path(cli: &Cli) -> PathBuf {
+/// エンジンバイナリを探す。明示指定 > 環境変数 > 同ディレクトリの release > debug > フォールバックの優先順位。
+fn resolve_engine_path(cli: &Cli) -> ResolvedEnginePath {
     if let Some(path) = &cli.engine_path {
-        return path.clone();
+        return ResolvedEnginePath {
+            path: path.clone(),
+            source: "cli",
+        };
     }
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_engine-usi") {
-        return PathBuf::from(p);
+        return ResolvedEnginePath {
+            path: PathBuf::from(p),
+            source: "cargo-env",
+        };
     }
     if let Ok(exec) = std::env::current_exe() {
         if let Some(dir) = exec.parent() {
-            #[cfg(windows)]
-            let candidate = dir.join("engine-usi.exe");
-            #[cfg(not(windows))]
-            let candidate = dir.join("engine-usi");
-            if candidate.exists() {
-                return candidate;
-            }
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_file() {
-                        continue;
-                    }
-                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                        #[cfg(windows)]
-                        let matches = name.starts_with("engine-usi") && name.ends_with(".exe");
-                        #[cfg(not(windows))]
-                        let matches = name.starts_with("engine-usi");
-                        if matches {
-                            return path;
-                        }
-                    }
-                }
+            if let Some(found) = find_engine_in_dir(dir) {
+                return found;
             }
         }
     }
-    PathBuf::from("engine-usi")
+    ResolvedEnginePath {
+        path: PathBuf::from("engine-usi"),
+        source: "fallback",
+    }
+}
+
+fn find_engine_in_dir(dir: &Path) -> Option<ResolvedEnginePath> {
+    #[cfg(windows)]
+    let release_names = ["engine-usi.exe"];
+    #[cfg(not(windows))]
+    let release_names = ["engine-usi"];
+    #[cfg(windows)]
+    let debug_names = ["engine-usi-debug.exe"];
+    #[cfg(not(windows))]
+    let debug_names = ["engine-usi-debug"];
+
+    for name in release_names {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(ResolvedEnginePath {
+                path: candidate,
+                source: "auto:release",
+            });
+        }
+    }
+    for name in debug_names {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(ResolvedEnginePath {
+                path: candidate,
+                source: "auto:debug",
+            });
+        }
+    }
+    None
 }
 
 fn load_start_positions(
@@ -1093,12 +1176,14 @@ fn load_start_positions(
     }
 }
 
+/// USI position 行を分解した結果。
 struct ParsedPosition {
     startpos: bool,
     sfen: Option<String>,
     moves: Vec<String>,
 }
 
+/// `position ...` 形式の行をパースする。
 fn parse_position_line(line: &str) -> Result<ParsedPosition> {
     let mut tokens = line.split_whitespace().peekable();
     if tokens.peek().is_some_and(|tok| *tok == "position") {
@@ -1131,12 +1216,11 @@ fn parse_position_line(line: &str) -> Result<ParsedPosition> {
                 moves,
             })
         }
-        other => {
-            bail!("expected 'startpos' or 'sfen' after 'position', got {:?}", other)
-        }
+        other => bail!("expected 'startpos' or 'sfen' after 'position', got {:?}", other),
     }
 }
 
+/// sfen 文字列だけが渡されたときの簡易パーサ。
 fn parse_sfen_only(line: &str) -> Result<ParsedPosition> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -1149,6 +1233,7 @@ fn parse_sfen_only(line: &str) -> Result<ParsedPosition> {
     })
 }
 
+/// moves トークン以降を USI 形式の指し手列として回収する。
 fn parse_moves<'a, I>(iter: I) -> Result<Vec<String>>
 where
     I: Iterator<Item = &'a str>,
@@ -1229,6 +1314,75 @@ fn side_label(color: Color) -> char {
 
 fn duration_to_millis(d: Duration) -> u64 {
     d.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result as AnyResult;
+    use clap::Parser;
+
+    #[test]
+    fn time_control_allocates_fractional_budget() -> AnyResult<()> {
+        let mut cli = Cli::parse_from(["engine-selfplay"]);
+        cli.btime = 60_000;
+        cli.wtime = 60_000;
+        cli.byoyomi = 1_000;
+        let tc = TimeControl::new(&cli);
+        assert_eq!(tc.think_limit_ms(Color::Black), 2_500);
+        assert_eq!(tc.updated_time(60_000, 0, 1_500), 59_500);
+
+        cli.byoyomi = 0;
+        cli.binc = 1_000;
+        let tc_inc = TimeControl::new(&cli);
+        assert_eq!(tc_inc.think_limit_ms(Color::Black), 2_500);
+        assert_eq!(tc_inc.updated_time(5_000, 1_000, 4_000), 2_000);
+        Ok(())
+    }
+
+    #[test]
+    fn info_snapshot_parses_primary_pv() {
+        let mut snap = InfoSnapshot::default();
+        snap.update_from_line(
+            "info depth 10 seldepth 12 nodes 12345 time 67 nps 890 score cp 34 pv 7g7f 3c3d",
+        );
+        assert_eq!(snap.depth, Some(10));
+        assert_eq!(snap.seldepth, Some(12));
+        assert_eq!(snap.nodes, Some(12_345));
+        assert_eq!(snap.time_ms, Some(67));
+        assert_eq!(snap.nps, Some(890));
+        assert_eq!(snap.score_cp, Some(34));
+        assert_eq!(snap.score_mate, None);
+        assert_eq!(snap.pv, vec!["7g7f".to_string(), "3c3d".to_string()]);
+
+        // multipv != 1 は無視される
+        snap.update_from_line("info multipv 2 depth 20 score cp 100 pv 2g2f");
+        assert_eq!(snap.depth, Some(10));
+    }
+
+    #[test]
+    fn parse_position_line_covers_startpos_and_sfen() -> AnyResult<()> {
+        let parsed = parse_position_line("position startpos moves 7g7f 3c3d")?;
+        assert!(parsed.startpos);
+        assert_eq!(parsed.moves, vec!["7g7f", "3c3d"]);
+
+        let sfen_line = "position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1 moves 7g7f";
+        let parsed_sfen = parse_position_line(sfen_line)?;
+        assert!(!parsed_sfen.startpos);
+        assert_eq!(parsed_sfen.moves, vec!["7g7f"]);
+        assert!(parsed_sfen.sfen.as_deref().is_some_and(|s| s.starts_with("lnsgkgsnl")));
+
+        let parsed_sfen_only =
+            parse_sfen_only("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")?;
+        assert!(parsed_sfen_only.sfen.is_some());
+        assert!(parsed_sfen_only.moves.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_position_line_rejects_missing_moves_keyword() {
+        assert!(parse_position_line("position startpos 7g7f").is_err());
+    }
 }
 
 #[derive(Default)]
