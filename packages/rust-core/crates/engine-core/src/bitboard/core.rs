@@ -18,8 +18,13 @@ impl Bitboard {
     pub const EMPTY: Bitboard = Bitboard { p: [0, 0] };
 
     /// 全マスが立っているBitboard
+    /// - p[0]: Files 1-7 (63bit使用、bit63未使用)
+    /// - p[1]: Files 8-9 (18bit使用、bit18-63未使用)
     pub const ALL: Bitboard = Bitboard {
-        p: [0x7FFF_FFFF_FFFF_FFFF, 0x0003_FFFF],
+        p: [
+            0x7FFF_FFFF_FFFF_FFFF, // Files 1-7: 63bit set
+            0x0003_FFFF,           // Files 8-9: bits 0-17 set
+        ],
     };
 
     /// 内部配列を直接指定して生成
@@ -204,6 +209,174 @@ impl Bitboard {
                 (!self.p[0] & rhs.p[0]) & 0x7FFF_FFFF_FFFF_FFFF,
                 (!self.p[1] & rhs.p[1]) & 0x0003_FFFF,
             ],
+        }
+    }
+
+    // ==== Qugiyアルゴリズム用メソッド ====
+
+    /// Squareがp[0]とp[1]のどちらに属するかを返す
+    ///
+    /// # Returns
+    /// - `0`: p[0]に属する（1-7筋、index < 63）
+    /// - `1`: p[1]に属する（8-9筋、index >= 63）
+    #[inline]
+    pub const fn part(sq: Square) -> usize {
+        if sq.index() < 63 {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// p[N]を取得（N = 0 or 1）
+    ///
+    /// # Type Parameters
+    /// * `N` - 0 (p[0]) または 1 (p[1])
+    #[inline]
+    pub const fn extract64<const N: usize>(self) -> u64 {
+        self.p[N]
+    }
+
+    /// 128bit全体で1減算（Qugiyアルゴリズム用）
+    ///
+    /// # Algorithm
+    /// - p[0] - 1を計算
+    /// - p[0]がゼロの場合のみp[1]から桁借り
+    ///
+    /// # Performance
+    /// - SSE4.1: `_mm_cmpeq_epi64` + `_mm_alignr_epi8` + `_mm_add_epi64`
+    /// - SSE2: `_mm_sub_epi64` + MSB抽出 + 追加減算
+    /// - Scalar: 条件分岐
+    #[inline]
+    pub fn decrement(self) -> Bitboard {
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            let m = std::mem::transmute::<[u64; 2], __m128i>(self.p);
+            let t2 = _mm_cmpeq_epi64(m, _mm_setzero_si128());
+            let t2 = _mm_alignr_epi8::<8>(t2, _mm_set1_epi64x(-1));
+            let t1 = _mm_add_epi64(m, t2);
+            let p: [u64; 2] = std::mem::transmute(t1);
+            Bitboard { p }
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "sse4.1")
+        ))]
+        unsafe {
+            use std::arch::x86_64::*;
+            let m = std::mem::transmute::<[u64; 2], __m128i>(self.p);
+            let c = _mm_set_epi64x(0, 1);
+            let t1 = _mm_sub_epi64(m, c);
+            let t2 = _mm_srli_epi64::<63>(t1);
+            let t2 = _mm_slli_si128::<8>(t2);
+            let t1 = _mm_sub_epi64(t1, t2);
+            let p: [u64; 2] = std::mem::transmute(t1);
+            Bitboard { p }
+        }
+
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
+        {
+            Bitboard::from_u64_pair(
+                self.p[0].wrapping_sub(1),
+                if self.p[0] == 0 {
+                    self.p[1].wrapping_sub(1)
+                } else {
+                    self.p[1]
+                },
+            )
+        }
+    }
+
+    /// バイト順序を反転（Qugiyアルゴリズム用）
+    ///
+    /// 飛車の右方向と角の右上・右下方向の利きを求める際に使用。
+    ///
+    /// # Performance
+    /// - SSSE3: `_mm_shuffle_epi8`
+    /// - Scalar: `swap_bytes` + p[0]/p[1]交換
+    #[inline]
+    pub fn byte_reverse(self) -> Bitboard {
+        #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            let m = std::mem::transmute::<[u64; 2], __m128i>(self.p);
+            let shuffle = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+            let result = _mm_shuffle_epi8(m, shuffle);
+            let p: [u64; 2] = std::mem::transmute(result);
+            Bitboard { p }
+        }
+
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
+        {
+            Bitboard::from_u64_pair(self.p[1].swap_bytes(), self.p[0].swap_bytes())
+        }
+    }
+
+    /// SSE2 unpack命令の実装（静的メソッド）
+    ///
+    /// # Arguments
+    /// * `hi_in`, `lo_in` - 入力Bitboard
+    ///
+    /// # Returns
+    /// `(hi_out, lo_out)` where:
+    /// - `hi_out.p[0] = lo_in.p[1]`, `hi_out.p[1] = hi_in.p[1]`
+    /// - `lo_out.p[0] = lo_in.p[0]`, `lo_out.p[1] = hi_in.p[0]`
+    #[inline]
+    pub fn unpack(hi_in: Bitboard, lo_in: Bitboard) -> (Bitboard, Bitboard) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            let hi_m = std::mem::transmute::<[u64; 2], __m128i>(hi_in.p);
+            let lo_m = std::mem::transmute::<[u64; 2], __m128i>(lo_in.p);
+            let hi_out_m = _mm_unpackhi_epi64(lo_m, hi_m);
+            let lo_out_m = _mm_unpacklo_epi64(lo_m, hi_m);
+            let hi_out_p: [u64; 2] = std::mem::transmute(hi_out_m);
+            let lo_out_p: [u64; 2] = std::mem::transmute(lo_out_m);
+            (Bitboard { p: hi_out_p }, Bitboard { p: lo_out_p })
+        }
+
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
+        {
+            let hi_out = Bitboard::from_u64_pair(lo_in.p[1], hi_in.p[1]);
+            let lo_out = Bitboard::from_u64_pair(lo_in.p[0], hi_in.p[0]);
+            (hi_out, lo_out)
+        }
+    }
+
+    /// 2組のBitboardペアで128bit減算（静的メソッド）
+    ///
+    /// hi_in, lo_inをそれぞれ128bit整数とみなして1減算。
+    ///
+    /// # Algorithm
+    /// - `lo_out = lo_in - 1`
+    /// - `hi_out = hi_in + (lo_in == 0 ? -1 : 0)`（桁借り）
+    #[inline]
+    pub fn decrement_pair(hi_in: Bitboard, lo_in: Bitboard) -> (Bitboard, Bitboard) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            let hi_m = std::mem::transmute::<[u64; 2], __m128i>(hi_in.p);
+            let lo_m = std::mem::transmute::<[u64; 2], __m128i>(lo_in.p);
+            let hi_out_m = _mm_add_epi64(hi_m, _mm_cmpeq_epi64(lo_m, _mm_setzero_si128()));
+            let lo_out_m = _mm_add_epi64(lo_m, _mm_set1_epi64x(-1));
+            let hi_out_p: [u64; 2] = std::mem::transmute(hi_out_m);
+            let lo_out_p: [u64; 2] = std::mem::transmute(lo_out_m);
+            (Bitboard { p: hi_out_p }, Bitboard { p: lo_out_p })
+        }
+
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "sse4.1")))]
+        {
+            let hi_out_p0 = hi_in.p[0].wrapping_add(if lo_in.p[0] == 0 { u64::MAX } else { 0 });
+            let hi_out_p1 = hi_in.p[1].wrapping_add(if lo_in.p[1] == 0 { u64::MAX } else { 0 });
+            let lo_out_p0 = lo_in.p[0].wrapping_sub(1);
+            let lo_out_p1 = lo_in.p[1].wrapping_sub(1);
+            (
+                Bitboard::from_u64_pair(hi_out_p0, hi_out_p1),
+                Bitboard::from_u64_pair(lo_out_p0, lo_out_p1),
+            )
         }
     }
 }
@@ -549,5 +722,102 @@ mod tests {
         let bb63 = Bitboard::from_square(sq63);
         assert_eq!(bb63.p0(), 0);
         assert_eq!(bb63.p1(), 1);
+    }
+
+    // ==== Qugiyアルゴリズム用メソッドのテスト ====
+
+    #[test]
+    fn test_from_u64_pair() {
+        let bb = Bitboard::from_u64_pair(0x1234567890ABCDEF, 0xFEDCBA09);
+        assert_eq!(bb.extract64::<0>(), 0x1234567890ABCDEF);
+        assert_eq!(bb.extract64::<1>(), 0xFEDCBA09);
+    }
+
+    #[test]
+    fn test_part() {
+        let sq1 = Square::new(File::File1, Rank::Rank1); // index = 0
+        let sq62 = Square::new(File::File7, Rank::Rank9); // index = 62
+        let sq63 = Square::new(File::File8, Rank::Rank1); // index = 63
+        let sq80 = Square::new(File::File9, Rank::Rank9); // index = 80
+
+        assert_eq!(Bitboard::part(sq1), 0);
+        assert_eq!(Bitboard::part(sq62), 0);
+        assert_eq!(Bitboard::part(sq63), 1);
+        assert_eq!(Bitboard::part(sq80), 1);
+    }
+
+    #[test]
+    fn test_decrement_basic() {
+        // p[0]のみの減算
+        let bb = Bitboard::from_u64_pair(5, 0);
+        let result = bb.decrement();
+        assert_eq!(result.extract64::<0>(), 4);
+        assert_eq!(result.extract64::<1>(), 0);
+    }
+
+    #[test]
+    fn test_decrement_with_borrow() {
+        // p[0] = 0の場合、p[1]から桁借り
+        let bb = Bitboard::from_u64_pair(0, 1);
+        let result = bb.decrement();
+        assert_eq!(result.extract64::<0>(), u64::MAX);
+        assert_eq!(result.extract64::<1>(), 0);
+    }
+
+    #[test]
+    fn test_byte_reverse() {
+        let bb = Bitboard::from_u64_pair(0x0102030405060708, 0x090A0B0C0D0E0F10);
+        let reversed = bb.byte_reverse();
+        // バイト反転：p[0]とp[1]を交換し、各u64のバイト順を反転
+        assert_eq!(reversed.extract64::<0>(), 0x100F0E0D0C0B0A09);
+        assert_eq!(reversed.extract64::<1>(), 0x0807060504030201);
+    }
+
+    #[test]
+    fn test_unpack() {
+        let hi = Bitboard::from_u64_pair(0xAAAAAAAA, 0xBBBBBBBB);
+        let lo = Bitboard::from_u64_pair(0xCCCCCCCC, 0xDDDDDDDD);
+
+        let (hi_out, lo_out) = Bitboard::unpack(hi, lo);
+
+        // hi_out.p[0] = lo.p[1], hi_out.p[1] = hi.p[1]
+        assert_eq!(hi_out.extract64::<0>(), 0xDDDDDDDD);
+        assert_eq!(hi_out.extract64::<1>(), 0xBBBBBBBB);
+
+        // lo_out.p[0] = lo.p[0], lo_out.p[1] = hi.p[0]
+        assert_eq!(lo_out.extract64::<0>(), 0xCCCCCCCC);
+        assert_eq!(lo_out.extract64::<1>(), 0xAAAAAAAA);
+    }
+
+    #[test]
+    fn test_decrement_pair() {
+        let hi = Bitboard::from_u64_pair(10, 20);
+        let lo = Bitboard::from_u64_pair(5, 3);
+
+        let (hi_out, lo_out) = Bitboard::decrement_pair(hi, lo);
+
+        // lo - 1
+        assert_eq!(lo_out.extract64::<0>(), 4);
+        assert_eq!(lo_out.extract64::<1>(), 2);
+
+        // hiは変化なし（lo != 0）
+        assert_eq!(hi_out.extract64::<0>(), 10);
+        assert_eq!(hi_out.extract64::<1>(), 20);
+    }
+
+    #[test]
+    fn test_decrement_pair_with_borrow() {
+        let hi = Bitboard::from_u64_pair(10, 20);
+        let lo = Bitboard::from_u64_pair(0, 0);
+
+        let (hi_out, lo_out) = Bitboard::decrement_pair(hi, lo);
+
+        // lo - 1 (underflow)
+        assert_eq!(lo_out.extract64::<0>(), u64::MAX);
+        assert_eq!(lo_out.extract64::<1>(), u64::MAX);
+
+        // hi - 1 (両方とも桁借り)
+        assert_eq!(hi_out.extract64::<0>(), 9);
+        assert_eq!(hi_out.extract64::<1>(), 19);
     }
 }
