@@ -650,6 +650,15 @@ impl Position {
                     }
                 }
             }
+
+            // 捕獲で遮断駒を取り除いた場合の開き王手
+            let prev_blockers = self.cur_state().blockers_for_king[them.index()];
+            if prev_blockers.contains(moved_to) {
+                if let Some(dir) = crate::bitboard::direct_of(ksq, moved_to) {
+                    let ray = crate::bitboard::direct_effect(moved_to, dir, self.occupied());
+                    checkers |= ray & self.pieces_c(us);
+                }
+            }
         }
         new_state.checkers = checkers;
 
@@ -1036,6 +1045,29 @@ mod tests {
             pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
         assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
         assert_eq!(pos.cur_state().pinners[Color::White.index()], pinners_full);
+
+        // 捕獲で遮断駒を除去した場合の開き王手も検出される
+        // 先手の飛車 1一, 後手玉 1九, 後手歩 1七 を先手桂が1七で取るケースを再現
+        let mut pos = Position::new();
+        let wk = Square::new(File::File1, Rank::Rank9);
+        let br = Square::new(File::File1, Rank::Rank1);
+        let bp_block = Square::new(File::File1, Rank::Rank7);
+        let bk = Square::new(File::File5, Rank::Rank9); // 先手玉はどこでもよい
+        let knight_from = Square::new(File::File2, Rank::Rank5);
+        pos.put_piece(Piece::W_KING, wk);
+        pos.king_square[Color::White.index()] = wk;
+        pos.put_piece(Piece::B_KING, bk);
+        pos.king_square[Color::Black.index()] = bk;
+        pos.put_piece(Piece::B_ROOK, br);
+        pos.put_piece(Piece::W_PAWN, bp_block);
+        pos.put_piece(Piece::B_KNIGHT, knight_from);
+        pos.side_to_move = Color::Black;
+        pos.update_blockers_and_pinners();
+
+        let mv_capture = Move::new_move(knight_from, bp_block, false);
+        pos.do_move(mv_capture, true);
+        // checkersに飛車が含まれていれば開き王手が検出されている
+        assert!(pos.cur_state().checkers.contains(br));
 
         // 玉を動かした場合も再計算される
         let king_from = pos.king_square(Color::Black);

@@ -18,8 +18,13 @@ impl Bitboard {
     pub const EMPTY: Bitboard = Bitboard { p: [0, 0] };
 
     /// 全マスが立っているBitboard
+    /// - p[0]: Files 1-7 (63bit使用、bit63未使用)
+    /// - p[1]: Files 8-9 (18bit使用、bit18-63未使用)
     pub const ALL: Bitboard = Bitboard {
-        p: [0x7FFF_FFFF_FFFF_FFFF, 0x0003_FFFF],
+        p: [
+            0x7FFF_FFFF_FFFF_FFFF, // Files 1-7: 63bit set
+            0x0003_FFFF,           // Files 8-9: bits 0-17 set
+        ],
     };
 
     /// 内部配列を直接指定して生成
