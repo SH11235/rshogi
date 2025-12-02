@@ -71,7 +71,8 @@ fn in_bounds(file: i32, rank: i32) -> bool {
 }
 
 fn square_from_coords(file: i32, rank: i32) -> Square {
-    // SAFETY: 呼び出し元で盤外を弾いている
+    debug_assert!(in_bounds(file, rank), "coordinates out of bounds");
+    // SAFETY: 呼び出し元/上のassertで盤内を保証
     unsafe { Square::from_u8_unchecked((file * 9 + rank) as u8) }
 }
 
@@ -225,33 +226,45 @@ fn init_qugiy_step_effect() -> [[Bitboard; Square::NUM]; 6] {
 #[inline]
 pub fn lance_effect(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
     let table = slider_attacks();
+    let part = Bitboard::part(sq);
+    let se = table.lance_step_effect[color.index()][sq.index()];
+
     match color {
         Color::White => {
-            if Bitboard::part(sq) == 0 {
-                let mask =
-                    table.lance_step_effect[Color::White.index()][sq.index()].extract64::<0>();
-                let em = occupied.extract64::<0>() & mask;
-                let t = em.wrapping_sub(1);
+            let mask = if part == 0 {
+                se.extract64::<0>()
+            } else {
+                se.extract64::<1>()
+            };
+            let em = (if part == 0 {
+                occupied.extract64::<0>()
+            } else {
+                occupied.extract64::<1>()
+            }) & mask;
+            let t = em.wrapping_sub(1);
+            if part == 0 {
                 Bitboard::from_u64_pair((em ^ t) & mask, 0)
             } else {
-                let mask =
-                    table.lance_step_effect[Color::White.index()][sq.index()].extract64::<1>();
-                let em = occupied.extract64::<1>() & mask;
-                let t = em.wrapping_sub(1);
                 Bitboard::from_u64_pair(0, (em ^ t) & mask)
             }
         }
         Color::Black => {
-            if Bitboard::part(sq) == 0 {
-                let se = table.lance_step_effect[Color::Black.index()][sq.index()].extract64::<0>();
-                let mocc = se & occupied.extract64::<0>();
-                let mocc = !0u64 << msb64(mocc | 1);
-                Bitboard::from_u64_pair(mocc & se, 0)
+            let se_mask = if part == 0 {
+                se.extract64::<0>()
             } else {
-                let se = table.lance_step_effect[Color::Black.index()][sq.index()].extract64::<1>();
-                let mocc = se & occupied.extract64::<1>();
-                let mocc = !0u64 << msb64(mocc | 1);
-                Bitboard::from_u64_pair(0, mocc & se)
+                se.extract64::<1>()
+            };
+            let mocc = se_mask
+                & if part == 0 {
+                    occupied.extract64::<0>()
+                } else {
+                    occupied.extract64::<1>()
+                };
+            let mocc = !0u64 << msb64(mocc | 1);
+            if part == 0 {
+                Bitboard::from_u64_pair(mocc & se_mask, 0)
+            } else {
+                Bitboard::from_u64_pair(0, mocc & se_mask)
             }
         }
     }
