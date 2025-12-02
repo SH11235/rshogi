@@ -35,6 +35,12 @@ use super::{LimitsType, MovePicker, TimeManagement};
 /// YaneuraOu準拠での基準係数。枝刈りでtt未ヒットのカットノードは係数を少し下げる。
 const FUTILITY_MARGIN_BASE: i32 = 90;
 
+/// IIR関連のしきい値（yaneuraou-search.cpp:2769-2774 由来）
+const IIR_PRIOR_REDUCTION_THRESHOLD_SHALLOW: i32 = 1;
+const IIR_PRIOR_REDUCTION_THRESHOLD_DEEP: i32 = 3;
+const IIR_DEPTH_BOUNDARY: Depth = 10;
+const IIR_EVAL_SUM_THRESHOLD: i32 = 177;
+
 use std::sync::OnceLock;
 
 /// 引き分けスコアに揺らぎを与える（YaneuraOu準拠）
@@ -675,6 +681,8 @@ impl<'a> SearchWorker<'a> {
     /// 通常探索ノード
     ///
     /// NTは NodeType を const genericで受け取る（コンパイル時最適化）
+    /// cut_node は「βカットが期待される（ゼロウィンドウの非PVなど）」ときに true を渡す。
+    /// 再探索やPV探索では all_node 扱いにするため false を渡す（YaneuraOuのcutNode引き渡しと対応）。
     fn search_node<const NT: u8>(
         &mut self,
         pos: &mut Position,
@@ -714,6 +722,7 @@ impl<'a> SearchWorker<'a> {
         self.stack[ply as usize].in_check = in_check;
         self.stack[ply as usize].move_count = 0;
         // 1手前のreduction量を保持（yaneuraou-search.cpp:2155）
+        // 親ノードのreductionはこのノードでのみ参照し、兄弟ノードに漏らさないためここでクリアする。
         let prior_reduction = if ply >= 1 {
             let parent_idx = (ply - 1) as usize;
             let pr = self.stack[parent_idx].reduction;
@@ -818,7 +827,14 @@ impl<'a> SearchWorker<'a> {
         };
 
         // priorReduction に応じた深さ調整（yaneuraou-search.cpp:2769-2774）
-        if prior_reduction >= if depth < 10 { 1 } else { 3 } && !opponent_worsening {
+        if prior_reduction
+            >= if depth < IIR_DEPTH_BOUNDARY {
+                IIR_PRIOR_REDUCTION_THRESHOLD_SHALLOW
+            } else {
+                IIR_PRIOR_REDUCTION_THRESHOLD_DEEP
+            }
+            && !opponent_worsening
+        {
             depth += 1;
         }
         if prior_reduction >= 2
@@ -826,7 +842,9 @@ impl<'a> SearchWorker<'a> {
             && ply >= 1
             && static_eval != Value::NONE
             && self.stack[(ply - 1) as usize].static_eval != Value::NONE
-            && static_eval + self.stack[(ply - 1) as usize].static_eval > Value::new(177)
+            // Value は ±32002 程度なので i32 加算でオーバーフローしない
+            && static_eval + self.stack[(ply - 1) as usize].static_eval
+                > Value::new(IIR_EVAL_SUM_THRESHOLD)
         {
             depth -= 1;
         }
@@ -1182,6 +1200,7 @@ impl<'a> SearchWorker<'a> {
             // =============================================================
             let value = if new_depth < depth - 1 {
                 // Reduced search
+                // reduction は「この子ノードに渡す一時値」で、兄弟に漏らさないよう呼び出しの前後で毎回クリアする。
                 let reduction_from_parent = depth - 1 - new_depth;
                 self.stack[ply as usize].reduction = reduction_from_parent;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
@@ -1225,6 +1244,7 @@ impl<'a> SearchWorker<'a> {
                 value
             } else if !pv_node || move_count > 1 {
                 // Zero window search
+                // 減衰なしの探索なので reduction は都度 0 に戻してから呼ぶ。
                 self.stack[ply as usize].reduction = 0;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
@@ -1252,6 +1272,7 @@ impl<'a> SearchWorker<'a> {
                 value
             } else {
                 // Full window search
+                // PVフル探索は reduction を持ち越さない。
                 self.stack[ply as usize].reduction = 0;
                 -self.search_node::<{ NodeType::PV as u8 }>(
                     pos,
