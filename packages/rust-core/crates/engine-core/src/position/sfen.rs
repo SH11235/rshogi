@@ -3,7 +3,7 @@
 use crate::types::{Color, File, Piece, PieceType, Rank, Square};
 
 use super::pos::{is_minor_piece, Position};
-use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
+use super::zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side};
 
 /// 平手初期局面のSFEN
 pub const SFEN_HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
@@ -295,7 +295,7 @@ impl Position {
     fn compute_hash(&mut self) {
         let mut board_key = 0u64;
         let mut hand_key = 0u64;
-        let mut pawn_key = 0u64;
+        let mut pawn_key = zobrist_no_pawns();
         let mut minor_piece_key = 0u64;
         let mut non_pawn_key = [0u64; Color::NUM];
 
@@ -334,9 +334,10 @@ impl Position {
                 PieceType::Bishop,
                 PieceType::Rook,
             ] {
-                let cnt = self.hand[color.index()].count(pt);
-                for _ in 0..cnt {
-                    hand_key ^= zobrist_hand(color, pt);
+                let cnt = self.hand[color.index()].count(pt) as u64;
+                if cnt > 0 {
+                    let z = zobrist_hand(color, pt);
+                    hand_key = hand_key.wrapping_add(z.wrapping_mul(cnt));
                 }
             }
         }

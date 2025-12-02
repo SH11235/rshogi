@@ -167,10 +167,8 @@ impl<'a> SearchWorker<'a> {
         time_manager: &'a mut TimeManagement,
         max_moves_to_draw: i32,
     ) -> Self {
-        assert!(
-            is_reductions_initialized(),
-            "REDUCTIONS not initialized. Call init_reductions() at startup."
-        );
+        // 必要ならここで初期化（テスト並列実行でも安全に利用できるようにする）
+        init_reductions();
         Self {
             tt,
             limits,
@@ -216,6 +214,12 @@ impl<'a> SearchWorker<'a> {
             return true;
         }
 
+        // 外部からの停止要求
+        if self.time_manager.stop_requested() {
+            self.abort = true;
+            return true;
+        }
+
         // ノード数制限チェック
         if self.limits.nodes > 0 && self.nodes >= self.limits.nodes {
             self.abort = true;
@@ -236,6 +240,8 @@ impl<'a> SearchWorker<'a> {
             // フェーズ2: search_end 未設定 → maximum超過時に設定
             if self.time_manager.search_end() == 0
                 && self.limits.use_time_management()
+                // YaneuraOu準拠: ponder中は時間切れ判定を行わない
+                && !self.limits.ponder
                 && elapsed > self.time_manager.maximum()
             {
                 self.time_manager.set_search_end(elapsed);

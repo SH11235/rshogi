@@ -2,6 +2,7 @@
 //!
 //! Zobrist ハッシュや王手情報に加えて、NNUE 差分更新用の Accumulator/DirtyPiece を保持する。
 
+use super::zobrist::zobrist_no_pawns;
 use crate::bitboard::Bitboard;
 use crate::nnue::Accumulator;
 use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Square, Value};
@@ -121,7 +122,7 @@ impl StateInfo {
     pub fn new() -> Self {
         StateInfo {
             material_key: 0,
-            pawn_key: 0,
+            pawn_key: zobrist_no_pawns(),
             minor_piece_key: 0,
             non_pawn_key: [0; Color::NUM],
             plies_from_null: 0,
@@ -198,7 +199,7 @@ mod tests {
         let state = StateInfo::new();
         assert_eq!(state.board_key, 0);
         assert_eq!(state.hand_key, 0);
-        assert_eq!(state.pawn_key, 0);
+        assert_eq!(state.pawn_key, zobrist_no_pawns());
         assert_eq!(state.minor_piece_key, 0);
         assert_eq!(state.non_pawn_key, [0; Color::NUM]);
         assert_eq!(state.key(), 0);
