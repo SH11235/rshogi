@@ -54,6 +54,15 @@ fn draw_jitter(nodes: u64) -> i32 {
     ((nodes & DRAW_JITTER_MASK) as i32) + DRAW_JITTER_OFFSET
 }
 
+/// depthに対するmsb（YaneuraOuのlm r補正用）
+#[inline]
+fn msb(x: i32) -> i32 {
+    if x <= 0 {
+        return 0;
+    }
+    31 - x.leading_zeros() as i32
+}
+
 /// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）
 #[inline]
 fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
@@ -61,8 +70,14 @@ fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
     Value::new(corrected.clamp(Value::MATED_IN_MAX_PLY.raw() + 1, Value::MATE_IN_MAX_PLY.raw() - 1))
 }
 
-/// LMR用のreduction配列
-type Reductions = [[[i32; 64]; 64]; 2];
+/// LMR用のreduction配列（YaneuraOu準拠の1次元テーブル）
+type Reductions = [i32; 64];
+
+// YaneuraOuのreduction式で用いる定数（yaneuraou-search.cpp:3163-3170,4759）
+const REDUCTION_DELTA_SCALE: i32 = 731;
+const REDUCTION_NON_IMPROVING_MULT: i32 = 216;
+const REDUCTION_NON_IMPROVING_DIV: i32 = 512;
+const REDUCTION_BASE_OFFSET: i32 = 1089;
 
 /// Reduction配列（遅延初期化）
 static REDUCTIONS: OnceLock<Box<Reductions>> = OnceLock::new();
@@ -70,14 +85,10 @@ static REDUCTIONS: OnceLock<Box<Reductions>> = OnceLock::new();
 /// reduction配列を初期化
 pub fn init_reductions() {
     REDUCTIONS.get_or_init(|| {
-        let mut table: Box<Reductions> = Box::new([[[0; 64]; 64]; 2]);
-        for imp_idx in 0..2 {
-            for d in 1..64 {
-                for mc in 1..64 {
-                    let r = (1.56 + (d as f64).ln() * (mc as f64).ln() / 2.17).floor() as i32;
-                    table[imp_idx][d][mc] = r - (imp_idx as i32);
-                }
-            }
+        let mut table: Box<Reductions> = Box::new([0; 64]);
+        for i in 1..64 {
+            // YaneuraOu: reductions[i] = int(2782 / 128.0 * log(i)) （yaneuraou-search.cpp:1818）
+            table[i] = (2782.0 / 128.0 * (i as f64).ln()) as i32;
         }
         table
     });
@@ -88,14 +99,26 @@ pub fn init_reductions() {
 /// # Panics
 /// `init_reductions()`が呼ばれていない場合にpanicする
 #[inline]
-fn reduction(imp: bool, depth: i32, move_count: i32) -> i32 {
-    let imp_idx = if imp { 1 } else { 0 };
-    let d = (depth as usize).min(63);
-    let mc = (move_count as usize).min(63);
+fn reduction(imp: bool, depth: i32, move_count: i32, delta: i32, root_delta: i32) -> i32 {
+    if depth <= 0 || move_count <= 0 {
+        return 0;
+    }
 
-    REDUCTIONS
+    let d = depth.clamp(1, 63) as usize;
+    let mc = move_count.clamp(1, 63) as usize;
+    let table = REDUCTIONS
         .get()
-        .expect("REDUCTIONS not initialized. Call init_reductions() at startup.")[imp_idx][d][mc]
+        .expect("REDUCTIONS not initialized. Call init_reductions() at startup.");
+    let reduction_scale = table[d] * table[mc];
+    let root_delta = root_delta.max(1);
+    let delta = delta.max(0);
+
+    // YaneuraOuのreduction式（yaneuraou-search.cpp:3163-3170,4759）
+    // 1024倍スケールで返す。ttPv加算は呼び出し側で行う。
+    reduction_scale - delta * REDUCTION_DELTA_SCALE / root_delta
+        + (!imp as i32) * reduction_scale * REDUCTION_NON_IMPROVING_MULT
+            / REDUCTION_NON_IMPROVING_DIV
+        + REDUCTION_BASE_OFFSET
 }
 
 /// Reductionテーブルが初期化済みかどうかを確認
@@ -144,6 +167,9 @@ pub struct SearchWorker<'a> {
 
     /// ルート深さ
     pub root_depth: Depth,
+
+    /// ルートでのウィンドウ幅（beta - alpha）。YaneuraOuのLMRスケール用。
+    pub root_delta: i32,
 
     /// 探索完了済み深さ
     pub completed_depth: Depth,
@@ -195,6 +221,7 @@ impl<'a> SearchWorker<'a> {
             nodes: 0,
             sel_depth: 0,
             root_depth: 0,
+            root_delta: 1,
             completed_depth: 0,
             generate_all_legal_moves: false,
             best_move: Move::NONE,
@@ -446,6 +473,8 @@ impl<'a> SearchWorker<'a> {
         alpha: Value,
         beta: Value,
     ) -> Value {
+        self.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
+
         let mut alpha = alpha;
         let mut best_value = Value::new(-32001);
         let mut pv_idx = 0;
@@ -572,6 +601,8 @@ impl<'a> SearchWorker<'a> {
         beta: Value,
         pv_idx: usize,
     ) -> Value {
+        self.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
+
         let mut alpha = alpha;
         let mut best_value = Value::new(-32001);
         let mut best_rm_idx = pv_idx;
@@ -693,10 +724,10 @@ impl<'a> SearchWorker<'a> {
         cut_node: bool,
     ) -> Value {
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
-        // YaneuraOuのallNode定義: !(PvNode || cutNode)（yaneuraou-search.cpp:1854付近）
-        let all_node = !(pv_node || cut_node);
         let mut depth = depth;
         let in_check = pos.in_check();
+        // YaneuraOuのallNode定義: !(PvNode || cutNode)（yaneuraou-search.cpp:1854付近）
+        let all_node = !(pv_node || cut_node);
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
@@ -721,6 +752,7 @@ impl<'a> SearchWorker<'a> {
         // スタック設定
         self.stack[ply as usize].in_check = in_check;
         self.stack[ply as usize].move_count = 0;
+        self.stack[(ply + 1) as usize].cutoff_cnt = 0;
         // 1手前のreduction量を保持（yaneuraou-search.cpp:2155）
         // 親ノードのreductionはこのノードでのみ参照し、兄弟ノードに漏らさないためここでクリアする。
         let prior_reduction = if ply >= 1 {
@@ -750,6 +782,7 @@ impl<'a> SearchWorker<'a> {
         } else {
             Value::NONE
         };
+        let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
 
         // TTカットオフ（非PVノード）
         if !pv_node
@@ -899,7 +932,7 @@ impl<'a> SearchWorker<'a> {
                 -beta,
                 -beta + Value::new(1),
                 ply + 1,
-                false,
+                true,
             );
             pos.undo_null_move();
 
@@ -982,7 +1015,7 @@ impl<'a> SearchWorker<'a> {
                                 -prob_beta,
                                 -prob_beta + Value::new(1),
                                 ply + 1,
-                                !cut_node,
+                                true,
                             );
                         }
                         pos.undo_move(mv);
@@ -1035,6 +1068,7 @@ impl<'a> SearchWorker<'a> {
         let mut move_count = 0;
         let mut quiets_tried: Vec<Move> = Vec::new();
         let mut captures_tried: Vec<Move> = Vec::new();
+        let mover = pos.side_to_move();
 
         // 合法手を生成（簡易実装）
         let mut ordered_moves = Vec::new();
@@ -1127,6 +1161,103 @@ impl<'a> SearchWorker<'a> {
             let is_capture = pos.is_capture(mv);
             let gives_check = pos.gives_check(mv);
 
+            // quietの指し手の連続回数（YaneuraOu: quietMoveStreak）
+            self.stack[(ply + 1) as usize].quiet_move_streak = if !is_capture && !gives_check {
+                self.stack[ply as usize].quiet_move_streak + 1
+            } else {
+                0
+            };
+
+            let mut new_depth = depth - 1;
+
+            // =============================================================
+            // Reduction計算とStep14の枝刈り
+            // =============================================================
+            let delta = (beta.raw() - alpha.raw()).max(0);
+            let mut r = reduction(improving, depth, move_count, delta, self.root_delta.max(1));
+
+            // YaneuraOu: ttPvなら reduction を少し増やす（yaneuraou-search.cpp:3168-3170）
+            if self.stack[ply as usize].tt_pv {
+                r += 931;
+            }
+
+            let cont_tables = self.build_cont_tables(ply);
+            let mut lmr_depth = new_depth - r / 1024;
+
+            // Step14: 浅い深さの枝刈り（YaneuraOu準拠）
+            if ply != 0 && !best_value.is_loss() {
+                if move_count >= (3 + depth * depth) / (2 - improving as i32)
+                    && !is_capture
+                    && !gives_check
+                {
+                    continue;
+                }
+
+                if is_capture || gives_check {
+                    let captured = pos.piece_on(mv.to());
+                    let capt_hist = self.capture_history.get(
+                        mv.moved_piece_after(),
+                        mv.to(),
+                        captured.piece_type(),
+                    ) as i32;
+
+                    if !gives_check && lmr_depth < 7 && !in_check {
+                        let futility_value = self.stack[ply as usize].static_eval
+                            + Value::new(232 + 224 * lmr_depth)
+                            + Value::new(piece_value(captured))
+                            + Value::new(131 * capt_hist / 1024);
+                        if futility_value <= alpha {
+                            continue;
+                        }
+                    }
+
+                    let margin = (158 * depth + capt_hist / 31).clamp(0, 283 * depth);
+                    if !pos.see_ge(mv, Value::new(-margin)) {
+                        continue;
+                    }
+                } else {
+                    let mut history = 0;
+                    if let Some(t0) = cont_tables[0] {
+                        history += t0.get(mv.moved_piece_after(), mv.to()) as i32;
+                    }
+                    if let Some(t1) = cont_tables[1] {
+                        history += t1.get(mv.moved_piece_after(), mv.to()) as i32;
+                    }
+                    history += self.pawn_history.get(
+                        pos.pawn_history_index(),
+                        mv.moved_piece_after(),
+                        mv.to(),
+                    ) as i32;
+
+                    if history < -4361 * depth {
+                        continue;
+                    }
+
+                    history += 71 * self.main_history.get(mover, mv) as i32 / 32;
+                    lmr_depth += history / 3233;
+
+                    let base_futility = if best_move.is_some() { 46 } else { 230 };
+                    let futility_value = self.stack[ply as usize].static_eval
+                        + Value::new(base_futility + 131 * lmr_depth)
+                        + Value::new(91 * (self.stack[ply as usize].static_eval > alpha) as i32);
+
+                    if !in_check && lmr_depth < 11 && futility_value <= alpha {
+                        if best_value <= futility_value
+                            && !best_value.is_mate_score()
+                            && !futility_value.is_win()
+                        {
+                            best_value = futility_value;
+                        }
+                        continue;
+                    }
+
+                    lmr_depth = lmr_depth.max(0);
+                    if !pos.see_ge(mv, Value::new(-26 * lmr_depth * lmr_depth)) {
+                        continue;
+                    }
+                }
+            }
+
             // =============================================================
             // Late Move Pruning
             // =============================================================
@@ -1177,35 +1308,73 @@ impl<'a> SearchWorker<'a> {
             // =============================================================
             // Late Move Reduction (LMR)
             // =============================================================
-            let mut new_depth = depth - 1;
+            let cont_tables = self.build_cont_tables(ply);
+            let msb_depth = msb(depth);
+            let tt_value_higher = tt_hit && tt_value != Value::NONE && tt_value > alpha;
+            let tt_depth_ge = tt_hit && tt_data.depth >= depth;
 
-            if depth >= 2 && move_count > 1 + (pv_node as i32) {
-                let r = reduction(improving, depth, move_count);
-
-                // 王手には reduction しない
-                let r = if gives_check { 0 } else { r };
-
-                // capture にはあまり reduction しない
-                let r = if is_capture { r / 2 } else { r };
-
-                // YaneuraOu: 補正履歴が大きいときは過度なLMRを抑制する
-                let corr_reduction = correction_value.abs() / 27_160;
-                let r = (r - corr_reduction).max(0);
-
-                new_depth = (depth - 1 - r).max(1);
+            if self.stack[ply as usize].tt_pv {
+                r -= 2510
+                    + (pv_node as i32) * 963
+                    + (tt_value_higher as i32) * 916
+                    + (tt_depth_ge as i32) * (943 + (cut_node as i32) * 1180);
             }
+
+            r += 679 - 6 * msb_depth;
+            r -= move_count * (67 - 2 * msb_depth);
+            r -= correction_value.abs() / 27_160;
+
+            if cut_node {
+                let no_tt_move = !tt_hit || tt_move.is_none();
+                r += 2998 + 2 * msb_depth + (948 + 14 * msb_depth) * (no_tt_move as i32);
+            }
+
+            if tt_capture {
+                r += 1402 - 39 * msb_depth;
+            }
+
+            if self.stack[(ply + 1) as usize].cutoff_cnt > 2 {
+                r += 925 + 33 * msb_depth + (all_node as i32) * (701 + 224 * msb_depth);
+            }
+
+            r += self.stack[(ply + 1) as usize].quiet_move_streak * 51;
+
+            if mv == tt_move {
+                r -= 2121 + 28 * msb_depth;
+            }
+
+            // statScoreによる補正
+            let stat_score = if is_capture {
+                let captured = pos.captured_piece();
+                let captured_pt = captured.piece_type();
+                let moved_piece = mv.moved_piece_after();
+                let hist = self.capture_history.get(moved_piece, mv.to(), captured_pt) as i32;
+                782 * piece_value(captured) / 128 + hist
+            } else {
+                let moved_piece = mv.moved_piece_after();
+                let main_hist = self.main_history.get(mover, mv) as i32;
+                let cont0 = cont_tables[0].map(|t| t.get(moved_piece, mv.to()) as i32).unwrap_or(0);
+                let cont1 = cont_tables[1].map(|t| t.get(moved_piece, mv.to()) as i32).unwrap_or(0);
+                2 * main_hist + cont0 + cont1
+            };
+            self.stack[ply as usize].stat_score = stat_score;
+            r -= stat_score * (729 - 12 * msb_depth) / 8192;
 
             // =============================================================
             // 探索
             // =============================================================
-            let value = if new_depth < depth - 1 {
-                // Reduced search
-                // reduction は「この子ノードに渡す一時値」で、兄弟に漏らさないよう呼び出しの前後で毎回クリアする。
-                let reduction_from_parent = depth - 1 - new_depth;
+            let value = if depth >= 2 && move_count > 1 {
+                let d = (std::cmp::max(
+                    1,
+                    std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
+                ) + pv_node as i32)
+                    .max(1);
+
+                let reduction_from_parent = (depth - 1) - d;
                 self.stack[ply as usize].reduction = reduction_from_parent;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
-                    new_depth,
+                    d,
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
@@ -1213,38 +1382,80 @@ impl<'a> SearchWorker<'a> {
                 );
                 self.stack[ply as usize].reduction = 0;
 
-                // Re-search if reduced search beats alpha
-                if value > alpha && new_depth < depth - 1 {
-                    self.stack[ply as usize].reduction = 0;
-                    value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                        pos,
-                        depth - 1,
-                        -alpha - Value::new(1),
-                        -alpha,
-                        ply + 1,
-                        !cut_node,
-                    );
-                    self.stack[ply as usize].reduction = 0;
+                if value > alpha {
+                    let do_deeper =
+                        d < new_depth && value > (best_value + Value::new(43 + 2 * new_depth));
+                    let do_shallower = value < best_value + Value::new(9);
+                    new_depth += do_deeper as i32 - do_shallower as i32;
+
+                    if new_depth > d {
+                        value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                            pos,
+                            new_depth,
+                            -alpha - Value::new(1),
+                            -alpha,
+                            ply + 1,
+                            !cut_node,
+                        );
+                    }
+
+                    // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
+                    let moved_piece = mv.moved_piece_after();
+                    let to_sq = mv.to();
+                    // (offset, weight) : offset手前の手に対する重み（1024=1倍）
+                    const CONTHIST_BONUSES: &[(i32, i32)] = &[
+                        (1, 1108), // 1手前
+                        (2, 652),  // 2手前
+                        (3, 273),  // 3手前
+                        (4, 572),  // 4手前
+                        (5, 126),  // 5手前
+                        (6, 449),  // 6手前
+                    ];
+                    for &(offset, weight) in CONTHIST_BONUSES {
+                        if self.stack[ply as usize].in_check && offset > 2 {
+                            break;
+                        }
+                        let idx = ply - offset;
+                        if idx < 0 {
+                            break;
+                        }
+                        if let Some(key) = self.stack[idx as usize].cont_hist_key {
+                            let in_check_idx = key.in_check as usize;
+                            let capture_idx = key.capture as usize;
+                            let bonus = 1412 * weight / 1024 + if offset < 2 { 80 } else { 0 };
+                            self.continuation_history[in_check_idx][capture_idx].update(
+                                key.piece,
+                                key.to,
+                                moved_piece,
+                                to_sq,
+                                bonus,
+                            );
+                        }
+                    }
+                    // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
+                    // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
+                } else if value > alpha && value < best_value + Value::new(9) {
+                    #[allow(unused_assignments)]
+                    {
+                        new_depth -= 1;
+                    }
                 }
 
-                // Full window re-search for PV nodes
-                if pv_node && value > alpha && value < beta {
+                if pv_node && (move_count == 1 || value > alpha) {
                     self.stack[ply as usize].reduction = 0;
-                    value = -self.search_node::<{ NodeType::PV as u8 }>(
+                    -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
                         -beta,
                         -alpha,
                         ply + 1,
                         false,
-                    );
-                    self.stack[ply as usize].reduction = 0;
+                    )
+                } else {
+                    value
                 }
-
-                value
             } else if !pv_node || move_count > 1 {
                 // Zero window search
-                // 減衰なしの探索なので reduction は都度 0 に戻してから呼ぶ。
                 self.stack[ply as usize].reduction = 0;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
@@ -1272,7 +1483,6 @@ impl<'a> SearchWorker<'a> {
                 value
             } else {
                 // Full window search
-                // PVフル探索は reduction を持ち越さない。
                 self.stack[ply as usize].reduction = 0;
                 -self.search_node::<{ NodeType::PV as u8 }>(
                     pos,
@@ -1283,7 +1493,6 @@ impl<'a> SearchWorker<'a> {
                     false,
                 )
             };
-
             pos.undo_move(mv);
 
             if self.abort {
@@ -1308,6 +1517,8 @@ impl<'a> SearchWorker<'a> {
                     }
 
                     if value >= beta {
+                        // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
+                        self.stack[ply as usize].cutoff_cnt += 1;
                         break;
                     }
                 }
@@ -1943,17 +2154,24 @@ mod tests {
     fn test_init_reductions() {
         init_reductions();
         // reduction(true, 10, 5) などが正の値を返すことを確認
-        assert!(reduction(true, 10, 5) >= 0);
-        assert!(reduction(false, 10, 5) >= reduction(true, 10, 5));
+        let root_delta = 64;
+        let delta = 32;
+        assert!(reduction(true, 10, 5, delta, root_delta) / 1024 >= 0);
+        assert!(
+            reduction(false, 10, 5, delta, root_delta) / 1024
+                >= reduction(true, 10, 5, delta, root_delta) / 1024
+        );
     }
 
     #[test]
     fn test_reduction_bounds() {
         init_reductions();
         // 境界値テスト
-        assert_eq!(reduction(true, 0, 0), 0); // depth=0, mc=0 は計算外
-        assert!(reduction(true, 63, 63) < 64);
-        assert!(reduction(false, 63, 63) < 64);
+        let root_delta = 64;
+        let delta = 32;
+        assert_eq!(reduction(true, 0, 0, delta, root_delta), 0); // depth=0, mc=0 は計算外
+        assert!(reduction(true, 63, 63, delta, root_delta) / 1024 < 64);
+        assert!(reduction(false, 63, 63, delta, root_delta) / 1024 < 64);
     }
 
     /// LMRテーブルが初期化済みかどうかを確認できることをテスト
@@ -1974,15 +2192,17 @@ mod tests {
     fn test_reduction_returns_nonzero_for_large_values() {
         init_reductions();
 
+        let root_delta = 64;
+        let delta = 32;
         // 深い探索で多くの手を試した場合、reductionは正の値であるべき
-        let r = reduction(false, 10, 10);
+        let r = reduction(false, 10, 10, delta, root_delta) / 1024;
         assert!(
             r > 0,
             "reduction should return positive value for depth=10, move_count=10, got {r}"
         );
 
         // improving=trueの場合は若干小さい値になる
-        let r_imp = reduction(true, 10, 10);
+        let r_imp = reduction(true, 10, 10, delta, root_delta) / 1024;
         assert!(r >= r_imp, "non-improving should have >= reduction than improving");
     }
 
@@ -1991,14 +2211,28 @@ mod tests {
     fn test_reduction_small_values() {
         init_reductions();
 
+        let root_delta = 64;
+        let delta = 32;
         // 小さな値でもpanicしないことを確認
-        let r = reduction(true, 1, 1);
+        let r = reduction(true, 1, 1, delta, root_delta) / 1024;
         assert!(r >= 0, "reduction should not be negative");
     }
 
-    // 注: SearchWorkerのスタック使用量が大きいため、Box化などの最適化が必要
-    // sel_depthのリセットは iterate_root の各手のループ内で行われる（alpha_beta.rs:XXX行目）
-    // バグ修正: self.sel_depth = 0; を各ルート手の処理開始時に追加
-    //
-    // SearchWorkerのユニットテストは統合テストで行う
+    #[test]
+    fn test_reduction_extremes_no_overflow() {
+        init_reductions();
+        // 最大depth/mcでもオーバーフローせずに値が得られることを確認
+        let delta = 0;
+        let root_delta = 1;
+        let r = reduction(false, 63, 63, delta, root_delta);
+        assert!(r >= 0 && r < i32::MAX / 2, "reduction extreme should be in safe range, got {r}");
+    }
+
+    #[test]
+    fn test_reduction_zero_root_delta_clamped() {
+        init_reductions();
+        // root_delta=0 を渡しても内部で1にクランプされることを確認
+        let r = reduction(false, 10, 10, 0, 0) / 1024;
+        assert!(r >= 0, "reduction should clamp root_delta to >=1 even when 0 is passed");
+    }
 }
