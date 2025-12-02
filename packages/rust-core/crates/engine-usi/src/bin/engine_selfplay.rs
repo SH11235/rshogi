@@ -139,6 +139,14 @@ struct Cli {
     /// Flush game log on every move (safer, but slower)
     #[arg(long, default_value_t = false)]
     flush_each_move: bool,
+
+    /// 評価値行を別ファイルに書き出す（startpos moves 行 + 評価値列）
+    #[arg(long, default_value_t = false)]
+    emit_eval_file: bool,
+
+    /// ノード数などの簡易メトリクスを各対局ごとに JSONL で出力
+    #[arg(long, default_value_t = false)]
+    emit_metrics: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -172,6 +180,10 @@ struct MetaSettings {
     ponder: bool,
     #[serde(default)]
     flush_each_move: bool,
+    #[serde(default)]
+    emit_eval_file: bool,
+    #[serde(default)]
+    emit_metrics: bool,
     startpos_file: Option<String>,
     sfen: Option<String>,
 }
@@ -218,6 +230,71 @@ struct ResultLog<'a> {
     outcome: &'a str,
     reason: &'a str,
     plies: u32,
+}
+
+#[derive(Serialize)]
+struct MetricsLog {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    game_id: u32,
+    plies: u32,
+    nodes_black: u64,
+    nodes_white: u64,
+    nodes_first60: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_cp_black: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_cp_white: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_mate_black: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_mate_white: Option<i32>,
+    outcome: String,
+    reason: String,
+}
+
+#[derive(Default)]
+struct MetricsCollector {
+    nodes_black: u64,
+    nodes_white: u64,
+    nodes_first60: u64,
+    last_cp_black: Option<i32>,
+    last_cp_white: Option<i32>,
+    last_mate_black: Option<i32>,
+    last_mate_white: Option<i32>,
+}
+
+impl MetricsCollector {
+    fn update(&mut self, side: Color, eval: Option<&EvalLog>, ply: u32) {
+        let Some(eval) = eval else { return };
+        if let Some(nodes) = eval.nodes {
+            if side == Color::Black {
+                self.nodes_black = self.nodes_black.saturating_add(nodes);
+            } else {
+                self.nodes_white = self.nodes_white.saturating_add(nodes);
+            }
+            if ply <= 60 {
+                self.nodes_first60 = self.nodes_first60.saturating_add(nodes);
+            }
+        }
+        if let Some(mate) = eval.score_mate {
+            if side == Color::Black {
+                self.last_mate_black = Some(mate);
+                self.last_cp_black = None;
+            } else {
+                self.last_mate_white = Some(mate);
+                self.last_cp_white = None;
+            }
+        } else if let Some(cp) = eval.score_cp {
+            if side == Color::Black {
+                self.last_cp_black = Some(cp);
+                self.last_mate_black = None;
+            } else {
+                self.last_cp_white = Some(cp);
+                self.last_mate_white = None;
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -807,6 +884,36 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let mut eval_writer = if cli.emit_eval_file {
+        let eval_path = default_eval_path(&output_path);
+        if let Some(parent) = eval_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+        }
+        Some(BufWriter::new(
+            File::create(&eval_path)
+                .with_context(|| format!("failed to create {}", eval_path.display()))?,
+        ))
+    } else {
+        None
+    };
+    let mut metrics_writer = if cli.emit_metrics {
+        let metrics_path = default_metrics_path(&output_path);
+        if let Some(parent) = metrics_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+        }
+        Some(BufWriter::new(
+            File::create(&metrics_path)
+                .with_context(|| format!("failed to create {}", metrics_path.display()))?,
+        ))
+    } else {
+        None
+    };
 
     let engine_path = resolve_engine_path(&cli);
     let engine_path_display = engine_path.path.display();
@@ -865,6 +972,8 @@ fn main() -> Result<()> {
             slowmover: cli.slowmover,
             ponder: cli.ponder,
             flush_each_move: cli.flush_each_move,
+            emit_eval_file: cli.emit_eval_file,
+            emit_metrics: cli.emit_metrics,
             startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
             sfen: cli.sfen.clone(),
         },
@@ -890,6 +999,9 @@ fn main() -> Result<()> {
         let mut outcome = GameOutcome::InProgress;
         let mut outcome_reason = "max_moves";
         let mut plies_played = 0u32;
+        let mut move_list: Vec<String> = Vec::new();
+        let mut eval_list: Vec<String> = Vec::new();
+        let mut metrics = MetricsCollector::default();
 
         for ply_idx in 0..cli.max_moves {
             plies_played = ply_idx + 1;
@@ -989,6 +1101,15 @@ fn main() -> Result<()> {
                 terminal = true;
             }
 
+            if cli.emit_eval_file {
+                eval_list.push(eval_label(eval_log.as_ref()));
+                move_list.push(move_usi.clone());
+            }
+
+            if cli.emit_metrics {
+                metrics.update(side, eval_log.as_ref(), plies_played);
+            }
+
             let move_log = MoveLog {
                 kind: "move",
                 game_id: game_idx + 1,
@@ -1027,11 +1148,54 @@ fn main() -> Result<()> {
         };
         serde_json::to_writer(&mut writer, &result)?;
         writer.write_all(b"\n")?;
+        if cli.emit_eval_file {
+            if let Some(w) = eval_writer.as_mut() {
+                let start_cmd = &start_commands[(game_idx as usize) % start_commands.len()];
+                let moves_text = if move_list.is_empty() {
+                    String::new()
+                } else {
+                    format!(" moves {}", move_list.join(" "))
+                };
+                writeln!(w, "game {}: {}{}", game_idx + 1, start_cmd, moves_text)?;
+                if !eval_list.is_empty() {
+                    writeln!(w, "eval {}", eval_list.join(" "))?;
+                } else {
+                    writeln!(w, "eval")?;
+                }
+                writeln!(w)?;
+            }
+        }
+        if cli.emit_metrics {
+            if let Some(w) = metrics_writer.as_mut() {
+                let metrics_log = MetricsLog {
+                    kind: "metrics",
+                    game_id: game_idx + 1,
+                    plies: plies_played,
+                    nodes_black: metrics.nodes_black,
+                    nodes_white: metrics.nodes_white,
+                    nodes_first60: metrics.nodes_first60,
+                    last_cp_black: metrics.last_cp_black,
+                    last_cp_white: metrics.last_cp_white,
+                    last_mate_black: metrics.last_mate_black,
+                    last_mate_white: metrics.last_mate_white,
+                    outcome: outcome.label().to_string(),
+                    reason: outcome_reason.to_string(),
+                };
+                serde_json::to_writer(&mut *w, &metrics_log)?;
+                w.write_all(b"\n")?;
+            }
+        }
         writer.flush()?;
     }
 
     if let Some(logger) = info_logger.as_mut() {
         logger.flush()?;
+    }
+    if let Some(w) = eval_writer.as_mut() {
+        w.flush()?;
+    }
+    if let Some(w) = metrics_writer.as_mut() {
+        w.flush()?;
     }
     writer.flush()?;
     println!("selfplay log written to {}", output_path.display());
@@ -1066,6 +1230,18 @@ fn default_kif_path(jsonl: &Path) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
     parent.join(format!("{stem}.kif"))
+}
+
+fn default_eval_path(jsonl: &Path) -> PathBuf {
+    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
+    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    parent.join(format!("{stem}.eval.txt"))
+}
+
+fn default_metrics_path(jsonl: &Path) -> PathBuf {
+    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
+    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    parent.join(format!("{stem}.metrics.jsonl"))
 }
 
 /// エンジンバイナリを探す。明示指定 > 環境変数 > 同ディレクトリの release > debug > フォールバックの優先順位。
@@ -1686,6 +1862,19 @@ fn write_eval_comments<W: Write>(writer: &mut W, eval: Option<&EvalLog>) -> Resu
         }
     }
     Ok(())
+}
+
+fn eval_label(eval: Option<&EvalLog>) -> String {
+    let Some(eval) = eval else {
+        return "?".to_string();
+    };
+    if let Some(mate) = eval.score_mate {
+        return format!("mate{mate}");
+    }
+    if let Some(cp) = eval.score_cp {
+        return format!("{cp:+}");
+    }
+    "?".to_string()
 }
 
 fn format_mm_ss(ms: u64) -> String {
