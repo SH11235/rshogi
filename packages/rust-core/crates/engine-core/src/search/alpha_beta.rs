@@ -1110,6 +1110,96 @@ impl<'a> SearchWorker<'a> {
                 0
             };
 
+            let mut new_depth = depth - 1;
+
+            // =============================================================
+            // Reduction計算とStep14の枝刈り
+            // =============================================================
+            let delta = (beta.raw() - alpha.raw()).max(0);
+            let mut r = reduction(improving, depth, move_count, delta, self.root_delta.max(1));
+
+            // YaneuraOu: ttPvなら reduction を少し増やす（yaneuraou-search.cpp:3168-3170）
+            if self.stack[ply as usize].tt_pv {
+                r += 931;
+            }
+
+            let mut lmr_depth = new_depth - r / 1024;
+
+            // Step14: 浅い深さの枝刈り（YaneuraOu準拠）
+            if ply != 0 && !best_value.is_loss() {
+                if move_count >= (3 + depth * depth) / (2 - improving as i32)
+                    && !is_capture
+                    && !gives_check
+                {
+                    continue;
+                }
+
+                if is_capture || gives_check {
+                    let captured = pos.piece_on(mv.to());
+                    let capt_hist = self.capture_history.get(
+                        mv.moved_piece_after(),
+                        mv.to(),
+                        captured.piece_type(),
+                    ) as i32;
+
+                    if !gives_check && lmr_depth < 7 && !in_check {
+                        let futility_value = self.stack[ply as usize].static_eval
+                            + Value::new(232 + 224 * lmr_depth)
+                            + Value::new(piece_value(captured))
+                            + Value::new(131 * capt_hist / 1024);
+                        if futility_value <= alpha {
+                            continue;
+                        }
+                    }
+
+                    let margin = (158 * depth + capt_hist / 31).clamp(0, 283 * depth);
+                    if !pos.see_ge(mv, Value::new(-margin)) {
+                        continue;
+                    }
+                } else {
+                    let cont_tables = self.build_cont_tables(ply);
+                    let mut history = 0;
+                    if let Some(t0) = cont_tables[0] {
+                        history += t0.get(mv.moved_piece_after(), mv.to()) as i32;
+                    }
+                    if let Some(t1) = cont_tables[1] {
+                        history += t1.get(mv.moved_piece_after(), mv.to()) as i32;
+                    }
+                    history += self.pawn_history.get(
+                        pos.pawn_history_index(),
+                        mv.moved_piece_after(),
+                        mv.to(),
+                    ) as i32;
+
+                    if history < -4361 * depth {
+                        continue;
+                    }
+
+                    history += 71 * self.main_history.get(mover, mv) as i32 / 32;
+                    lmr_depth += history / 3233;
+
+                    let base_futility = if best_move.is_some() { 46 } else { 230 };
+                    let futility_value = self.stack[ply as usize].static_eval
+                        + Value::new(base_futility + 131 * lmr_depth)
+                        + Value::new(91 * (self.stack[ply as usize].static_eval > alpha) as i32);
+
+                    if !in_check && lmr_depth < 11 && futility_value <= alpha {
+                        if best_value <= futility_value
+                            && !best_value.is_mate_score()
+                            && !futility_value.is_win()
+                        {
+                            best_value = futility_value;
+                        }
+                        continue;
+                    }
+
+                    lmr_depth = lmr_depth.max(0);
+                    if !pos.see_ge(mv, Value::new(-26 * lmr_depth * lmr_depth)) {
+                        continue;
+                    }
+                }
+            }
+
             // =============================================================
             // Late Move Pruning
             // =============================================================
@@ -1160,154 +1250,159 @@ impl<'a> SearchWorker<'a> {
             // =============================================================
             // Late Move Reduction (LMR)
             // =============================================================
-            let mut new_depth = depth - 1;
+            let msb_depth = msb(depth);
+            let tt_value_higher = tt_hit && tt_value != Value::NONE && tt_value > alpha;
+            let tt_depth_ge = tt_hit && tt_data.depth >= depth;
 
-            if depth >= 2 && move_count > 1 + (pv_node as i32) {
-                let delta = (beta.raw() - alpha.raw()).max(0);
-                let mut r = reduction(improving, depth, move_count, delta, self.root_delta.max(1));
-
-                // YaneuraOu: ttPvなら reduction を少し増やす（yaneuraou-search.cpp:3168-3170）
-                if self.stack[ply as usize].tt_pv {
-                    r += 931;
-                }
-
-                let msb_depth = msb(depth);
-                let tt_value_higher = tt_hit && tt_value != Value::NONE && tt_value > alpha;
-                let tt_depth_ge = tt_hit && tt_data.depth >= depth;
-
-                // PvNode/cutNode/tt関連の補正（yaneuraou-search.cpp:3484-3530）
-                if self.stack[ply as usize].tt_pv {
-                    r -= 2510
-                        + (pv_node as i32) * 963
-                        + (tt_value_higher as i32) * 916
-                        + (tt_depth_ge as i32) * (943 + (cut_node as i32) * 1180);
-                }
-
-                r += 679 - 6 * msb_depth;
-                r -= move_count * (67 - 2 * msb_depth);
-                r -= correction_value.abs() / 27_160;
-
-                if cut_node {
-                    let no_tt_move = !tt_hit || tt_move.is_none();
-                    r += 2998 + 2 * msb_depth + (948 + 14 * msb_depth) * (no_tt_move as i32);
-                }
-
-                if tt_capture {
-                    r += 1402 - 39 * msb_depth;
-                }
-
-                if self.stack[(ply + 1) as usize].cutoff_cnt > 2 {
-                    r += 925 + 33 * msb_depth + (all_node as i32) * (701 + 224 * msb_depth);
-                }
-
-                r += self.stack[(ply + 1) as usize].quiet_move_streak * 51;
-
-                if mv == tt_move {
-                    r -= 2121 + 28 * msb_depth;
-                }
-
-                // statScoreによる補正
-                let stat_score = if is_capture {
-                    let captured = pos.captured_piece();
-                    let captured_pt = captured.piece_type();
-                    let moved_piece = mv.moved_piece_after();
-                    let hist = self.capture_history.get(moved_piece, mv.to(), captured_pt) as i32;
-                    782 * piece_value(captured) / 128 + hist
-                } else {
-                    let moved_piece = mv.moved_piece_after();
-                    let main_hist = self.main_history.get(mover, mv) as i32;
-                    let cont_tables_for_stat = self.build_cont_tables(ply);
-                    let cont0 = cont_tables_for_stat[0]
-                        .map(|t| t.get(moved_piece, mv.to()) as i32)
-                        .unwrap_or(0);
-                    let cont1 = cont_tables_for_stat[1]
-                        .map(|t| t.get(moved_piece, mv.to()) as i32)
-                        .unwrap_or(0);
-                    2 * main_hist + cont0 + cont1
-                };
-                self.stack[ply as usize].stat_score = stat_score;
-                r -= stat_score * (729 - 12 * msb_depth) / 8192;
-
-                // 1024倍スケールを実際の削減量に変換
-                let r = r / 1024;
-
-                // 王手には reduction しない
-                let r = if gives_check { 0 } else { r };
-
-                // capture にはあまり reduction しない
-                let r = if is_capture { r / 2 } else { r };
-
-                // YaneuraOu: 補正履歴が大きいときは過度なLMRを抑制する
-                let corr_reduction = correction_value.abs() / 27_160;
-                let r = (r - corr_reduction).max(0);
-
-                new_depth = (depth - 1 - r).max(1);
+            if self.stack[ply as usize].tt_pv {
+                r -= 2510
+                    + (pv_node as i32) * 963
+                    + (tt_value_higher as i32) * 916
+                    + (tt_depth_ge as i32) * (943 + (cut_node as i32) * 1180);
             }
+
+            r += 679 - 6 * msb_depth;
+            r -= move_count * (67 - 2 * msb_depth);
+            r -= correction_value.abs() / 27_160;
+
+            if cut_node {
+                let no_tt_move = !tt_hit || tt_move.is_none();
+                r += 2998 + 2 * msb_depth + (948 + 14 * msb_depth) * (no_tt_move as i32);
+            }
+
+            if tt_capture {
+                r += 1402 - 39 * msb_depth;
+            }
+
+            if self.stack[(ply + 1) as usize].cutoff_cnt > 2 {
+                r += 925 + 33 * msb_depth + (all_node as i32) * (701 + 224 * msb_depth);
+            }
+
+            r += self.stack[(ply + 1) as usize].quiet_move_streak * 51;
+
+            if mv == tt_move {
+                r -= 2121 + 28 * msb_depth;
+            }
+
+            // statScoreによる補正
+            let stat_score = if is_capture {
+                let captured = pos.captured_piece();
+                let captured_pt = captured.piece_type();
+                let moved_piece = mv.moved_piece_after();
+                let hist = self.capture_history.get(moved_piece, mv.to(), captured_pt) as i32;
+                782 * piece_value(captured) / 128 + hist
+            } else {
+                let moved_piece = mv.moved_piece_after();
+                let main_hist = self.main_history.get(mover, mv) as i32;
+                let cont_tables_for_stat = self.build_cont_tables(ply);
+                let cont0 = cont_tables_for_stat[0]
+                    .map(|t| t.get(moved_piece, mv.to()) as i32)
+                    .unwrap_or(0);
+                let cont1 = cont_tables_for_stat[1]
+                    .map(|t| t.get(moved_piece, mv.to()) as i32)
+                    .unwrap_or(0);
+                2 * main_hist + cont0 + cont1
+            };
+            self.stack[ply as usize].stat_score = stat_score;
+            r -= stat_score * (729 - 12 * msb_depth) / 8192;
 
             // =============================================================
             // 探索
             // =============================================================
-            let value = if new_depth < depth - 1 {
-                // Reduced search
+            let value = if depth >= 2 && move_count > 1 {
+                let d = (std::cmp::max(
+                    1,
+                    std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
+                ) + pv_node as i32)
+                    .max(1);
+
+                self.stack[ply as usize].reduction = new_depth - d;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
-                    new_depth,
+                    d,
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
                     true,
                 );
+                self.stack[ply as usize].reduction = 0;
 
-                // Re-search if reduced search beats alpha
-                if value > alpha && new_depth < depth - 1 {
-                    value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                        pos,
-                        depth - 1,
-                        -alpha - Value::new(1),
-                        -alpha,
-                        ply + 1,
-                        true,
-                    );
+                if value > alpha {
+                    let do_deeper =
+                        d < new_depth && value > (best_value + Value::new(43 + 2 * new_depth));
+                    let do_shallower = value < best_value + Value::new(9);
+                    new_depth += do_deeper as i32 - do_shallower as i32;
+
+                    if new_depth > d {
+                        value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                            pos,
+                            new_depth,
+                            -alpha - Value::new(1),
+                            -alpha,
+                            ply + 1,
+                            !cut_node,
+                        );
+                    }
                 }
 
-                // Full window re-search for PV nodes
-                if pv_node && value > alpha && value < beta {
-                    value = -self.search_node::<{ NodeType::PV as u8 }>(
+                if pv_node && (move_count == 1 || value > alpha) {
+                    -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
                         -beta,
                         -alpha,
                         ply + 1,
                         false,
-                    );
+                    )
+                } else {
+                    // YaneuraOu: fail high後に必ずcontHistを更新 (yaneuraou-search.cpp:3614-3618)
+                    let moved_piece = mv.moved_piece_after();
+                    let to_sq = mv.to();
+                    for offset in 1..=6 {
+                        let idx = ply + 1 - offset;
+                        if idx < 0 {
+                            break;
+                        }
+                        let in_check_idx = self.stack[idx as usize].in_check as usize;
+                        let prev_mv = self.stack[idx as usize].current_move;
+                        let capture_idx = if prev_mv.is_some() {
+                            pos.is_capture(prev_mv) as usize
+                        } else {
+                            0
+                        };
+                        self.continuation_history[in_check_idx][capture_idx].update(
+                            moved_piece,
+                            to_sq,
+                            moved_piece,
+                            to_sq,
+                            1412,
+                        );
+                    }
+                    // cutoffCntインクリメント条件 (extension<2 || PvNode) を fail high時に加算で近似
+                    if value > alpha {
+                        self.stack[ply as usize].cutoff_cnt += 1;
+                    }
+                    value
                 }
-
-                value
             } else if !pv_node || move_count > 1 {
-                // Zero window search
-                let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                let mut r_adj = r;
+                if tt_move.is_none() {
+                    r_adj += 1199 + 35 * msb_depth;
+                }
+                if depth <= 4 {
+                    r_adj += 1150;
+                }
+
+                let reduce = (r_adj > 3200) as i32 + ((r_adj > 4600 && new_depth > 2) as i32);
+                -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
-                    depth - 1,
+                    new_depth - reduce,
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
-                    true,
-                );
-
-                if pv_node && value > alpha && value < beta {
-                    value = -self.search_node::<{ NodeType::PV as u8 }>(
-                        pos,
-                        depth - 1,
-                        -beta,
-                        -alpha,
-                        ply + 1,
-                        false,
-                    );
-                }
-
-                value
+                    !cut_node,
+                )
             } else {
-                // Full window search
                 -self.search_node::<{ NodeType::PV as u8 }>(
                     pos,
                     depth - 1,
@@ -1317,7 +1412,6 @@ impl<'a> SearchWorker<'a> {
                     false,
                 )
             };
-
             pos.undo_move(mv);
 
             if self.abort {
