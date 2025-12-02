@@ -349,12 +349,8 @@ impl UsiEngine {
         // 制限を解析
         let limits = self.parse_go_options(tokens);
 
-        // 探索を別スレッドで開始
-        let mut pos = Position::new();
-        if let Err(e) = pos.set_sfen(&self.position.to_sfen()) {
-            eprintln!("info string Error cloning position: {e}");
-            return;
-        }
+        // 探索を別スレッドで開始（千日手判定のため履歴ごと複製する）
+        let mut pos = self.position.clone();
 
         let mut search = self.search.take().unwrap_or_else(|| Search::new(self.tt_size_mb));
         search.set_skill_options(self.skill_options);
