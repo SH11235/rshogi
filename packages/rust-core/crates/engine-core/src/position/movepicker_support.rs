@@ -294,6 +294,11 @@ impl Position {
             self.occupied() ^ Bitboard::from_square(from) ^ Bitboard::from_square(to);
         let mut stm = !self.side_to_move(); // 相手の手番から開始
 
+        debug_assert!(
+            self.piece_on(from).is_some(),
+            "see_ge_detailed called with empty from square"
+        );
+
         // 初期攻撃者集合（occupiedに依存）
         let mut attackers = self.attackers_to_occ(to, occupied) & occupied;
 
@@ -406,8 +411,9 @@ impl Position {
             }
         }
 
-        // ここには来ないはず
-        (Square::SQ_11, 0)
+        unreachable!(
+            "least_valuable_attacker should always find an attacker when attackers is non-empty"
+        );
     }
 }
 

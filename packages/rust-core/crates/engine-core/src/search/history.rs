@@ -35,10 +35,10 @@ pub const LOW_PLY_HISTORY_SIZE: usize = 5;
 pub const FROM_TO_SIZE: usize = (Square::NUM + 7) * Square::NUM;
 
 /// 駒種の数（PieceType::NUM相当）
-const PIECE_TYPE_NUM: usize = 15; // None含む
+const PIECE_TYPE_NUM: usize = PieceType::NUM + 1; // None含む
 
 /// 駒の数（Piece::NUM相当、先後含む）
-const PIECE_NUM: usize = 31; // None含む
+const PIECE_NUM: usize = Piece::NUM; // NONE含む
 
 // =============================================================================
 // YaneuraOu準拠定数

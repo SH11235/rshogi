@@ -38,10 +38,14 @@ const FUTILITY_MARGIN_BASE: i32 = 90;
 use std::sync::OnceLock;
 
 /// 引き分けスコアに揺らぎを与える（YaneuraOu準拠）
+const DRAW_JITTER_MASK: u64 = 0x2;
+const DRAW_JITTER_OFFSET: i32 = -1; // VALUE_DRAW(0) 周辺に ±1 の揺らぎを入れる
+
 #[inline]
 fn draw_jitter(nodes: u64) -> i32 {
-    // VALUE_DRAW - 1 + (nodes & 0x2) 相当の±1ゆらぎ
-    ((nodes & 0x2) as i32) - 1
+    // YaneuraOu: value_draw(nodes) = VALUE_DRAW - 1 + (nodes & 0x2)
+    // 千日手盲点を避けるため、VALUE_DRAW(0) を ±1 にばらつかせる。
+    ((nodes & DRAW_JITTER_MASK) as i32) + DRAW_JITTER_OFFSET
 }
 
 /// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）

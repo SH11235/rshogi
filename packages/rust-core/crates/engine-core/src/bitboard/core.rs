@@ -118,6 +118,7 @@ impl Bitboard {
     /// 空でないことが保証されている場合のみ使用すること。
     #[inline]
     pub const fn lsb_unchecked(self) -> Square {
+        debug_assert!(self.is_not_empty(), "lsb_unchecked() called on empty Bitboard");
         if self.p[0] != 0 {
             // SAFETY: trailing_zeros() < 64、かつp[0]の有効ビットは0-62
             unsafe { Square::from_u8_unchecked(self.p[0].trailing_zeros() as u8) }
