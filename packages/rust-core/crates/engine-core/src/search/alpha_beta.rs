@@ -31,7 +31,9 @@ use super::{LimitsType, MovePicker, TimeManagement};
 // =============================================================================
 
 /// Futility margin（depth × 係数）
-const FUTILITY_MARGIN_BASE: i32 = 117;
+///
+/// YaneuraOu準拠での基準係数。枝刈りでtt未ヒットのカットノードは係数を少し下げる。
+const FUTILITY_MARGIN_BASE: i32 = 90;
 
 use std::sync::OnceLock;
 
@@ -799,20 +801,69 @@ impl<'a> SearchWorker<'a> {
         // Futility Pruning（非PV、静的評価が十分高い場合）
         // =================================================================
         if !pv_node && !in_check && depth <= 8 && static_eval != Value::NONE {
-            let futility_margin =
-                Value::new(FUTILITY_MARGIN_BASE * depth + (correction_value.abs() / 171_290));
+            // YaneuraOu準拠: improving/opponentWorsening を織り込んだマージン（yaneuraou-search.cpp:2739以降）
+            let opponent_worsening = if ply >= 1 {
+                let prev_eval = self.stack[(ply - 1) as usize].static_eval;
+                prev_eval != Value::NONE && static_eval > -prev_eval
+            } else {
+                false
+            };
+
+            let cut_node = !pv_node; // Non-PVノード相当
+            let futility_mult = FUTILITY_MARGIN_BASE - 20 * (cut_node && !tt_hit) as i32;
+            let futility_margin = Value::new(
+                futility_mult * depth
+                    - (improving as i32) * futility_mult * 2
+                    - (opponent_worsening as i32) * futility_mult / 3
+                    + (correction_value.abs() / 171_290),
+            );
+
             if static_eval - futility_margin >= beta {
                 return static_eval;
             }
         }
 
         // =================================================================
+        // Null Move Pruning
+        // =================================================================
+        if !pv_node
+            && !in_check
+            && static_eval >= beta
+            && depth >= 3
+            && ply >= 1
+            && !self.stack[(ply - 1) as usize].current_move.is_none()
+        {
+            let r = 3 + depth / 3;
+            pos.do_null_move();
+            let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                pos,
+                depth - r,
+                -beta,
+                -beta + Value::new(1),
+                ply + 1,
+            );
+            pos.undo_null_move();
+
+            if null_value >= beta {
+                // 詰みスコアは信頼しない
+                if null_value.is_win() {
+                    return beta;
+                }
+                return null_value;
+            }
+        }
+
+        // Null move 後のimproving再計算（YaneuraOu準拠）
+        if !in_check && static_eval != Value::NONE {
+            improving |= static_eval >= beta;
+        }
+
+        // =================================================================
         // ProbCut（YaneuraOu準拠の簡易版）
         // =================================================================
         if !in_check && depth >= 3 && static_eval != Value::NONE {
-            // YaneuraOu: improving再計算（static_eval >= betaなら改善とみなす）
-            let improving_prob = improving || static_eval >= beta;
-            let prob_beta = beta + Value::new(215 - 60 * improving_prob as i32);
+            // YaneuraOu: null move後のimprovingを共有してprobCutBetaを決定
+            let prob_beta = beta + Value::new(215 - 60 * improving as i32);
             if !(beta.is_mate_score()
                 || (tt_hit && tt_value != Value::NONE && tt_value < prob_beta))
             {
@@ -906,41 +957,6 @@ impl<'a> SearchWorker<'a> {
             {
                 return sp_beta;
             }
-        }
-
-        // =================================================================
-        // Null Move Pruning
-        // =================================================================
-        if !pv_node
-            && !in_check
-            && static_eval >= beta
-            && depth >= 3
-            && ply >= 1
-            && !self.stack[(ply - 1) as usize].current_move.is_none()
-        {
-            let r = 3 + depth / 3;
-            pos.do_null_move();
-            let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                pos,
-                depth - r,
-                -beta,
-                -beta + Value::new(1),
-                ply + 1,
-            );
-            pos.undo_null_move();
-
-            if null_value >= beta {
-                // 詰みスコアは信頼しない
-                if null_value.is_win() {
-                    return beta;
-                }
-                return null_value;
-            }
-        }
-
-        // Null move 後のimproving再計算（YaneuraOu準拠）
-        if !in_check && static_eval != Value::NONE {
-            improving |= static_eval >= beta;
         }
 
         // =================================================================
@@ -1047,8 +1063,12 @@ impl<'a> SearchWorker<'a> {
             // =============================================================
             // Late Move Pruning
             // =============================================================
-            if !pv_node && !in_check && !is_capture && move_count >= 3 + depth * depth {
-                continue;
+            if !pv_node && !in_check && !is_capture {
+                // YaneuraOu: improvingフラグに応じて閾値を変える（改善していない局面では早めに静かな手を刈る）
+                let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
+                if move_count >= lmp_limit {
+                    continue;
+                }
             }
 
             // =============================================================

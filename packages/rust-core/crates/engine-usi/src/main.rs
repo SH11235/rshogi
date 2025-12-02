@@ -398,6 +398,8 @@ impl UsiEngine {
     /// goオプションを解析
     fn parse_go_options(&self, tokens: &[&str]) -> LimitsType {
         let mut limits = LimitsType::default();
+        // YaneuraOu準拠: go受信時点で探索開始時刻を記録し、この時刻を基準に時間管理する
+        limits.set_start_time();
         let mut idx = 1;
 
         while idx < tokens.len() {
