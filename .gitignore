@@ -64,3 +64,4 @@ packages/rust-core/data/floodgate/raw/
 _shared/*
 
 runs_local/
+.serena/
