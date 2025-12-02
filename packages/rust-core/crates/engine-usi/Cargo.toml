@@ -24,9 +24,5 @@ engine-core = { path = "../engine-core" }
 name = "engine-usi"
 path = "src/main.rs"
 
-[[bin]]
-name = "engine-selfplay"
-path = "src/bin/engine_selfplay.rs"
-
 [dev-dependencies]
 assert_cmd = "2.0"
