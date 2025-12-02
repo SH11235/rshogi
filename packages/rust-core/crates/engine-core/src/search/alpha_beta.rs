@@ -1384,8 +1384,6 @@ impl<'a> SearchWorker<'a> {
                     new_depth += do_deeper as i32 - do_shallower as i32;
 
                     if new_depth > d {
-                        let reduction_from_parent = (depth - 1) - new_depth;
-                        self.stack[ply as usize].reduction = reduction_from_parent;
                         value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                             pos,
                             new_depth,
@@ -1394,7 +1392,6 @@ impl<'a> SearchWorker<'a> {
                             ply + 1,
                             !cut_node,
                         );
-                        self.stack[ply as usize].reduction = 0;
                     }
 
                     // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
@@ -1425,9 +1422,6 @@ impl<'a> SearchWorker<'a> {
                     }
                     // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
                     // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
-                    if value >= beta {
-                        self.stack[ply as usize].cutoff_cnt += 1;
-                    }
                 } else if value > alpha && value < best_value + Value::new(9) {
                     #[allow(unused_assignments)]
                     {
