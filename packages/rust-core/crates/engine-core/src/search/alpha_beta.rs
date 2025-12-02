@@ -1343,6 +1343,38 @@ impl<'a> SearchWorker<'a> {
                             !cut_node,
                         );
                     }
+
+                    // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
+                    let moved_piece = mv.moved_piece_after();
+                    let to_sq = mv.to();
+                    const CONTHIST_BONUSES: &[(i32, i32)] =
+                        &[(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
+                    for &(offset, weight) in CONTHIST_BONUSES {
+                        if self.stack[ply as usize].in_check && offset > 2 {
+                            break;
+                        }
+                        let idx = ply - offset;
+                        if idx < 0 {
+                            break;
+                        }
+                        if let Some(key) = self.stack[idx as usize].cont_hist_key {
+                            let in_check_idx = key.in_check as usize;
+                            let capture_idx = key.capture as usize;
+                            let bonus = 1412 * weight / 1024 + if offset < 2 { 80 } else { 0 };
+                            self.continuation_history[in_check_idx][capture_idx].update(
+                                key.piece,
+                                key.to,
+                                moved_piece,
+                                to_sq,
+                                bonus,
+                            );
+                        }
+                    }
+                    // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
+                    // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
+                    if value >= beta {
+                        self.stack[ply as usize].cutoff_cnt += 1;
+                    }
                 }
 
                 if pv_node && (move_count == 1 || value > alpha) {
@@ -1355,33 +1387,6 @@ impl<'a> SearchWorker<'a> {
                         false,
                     )
                 } else {
-                    // YaneuraOu: fail high後に必ずcontHistを更新 (yaneuraou-search.cpp:3614-3618)
-                    let moved_piece = mv.moved_piece_after();
-                    let to_sq = mv.to();
-                    for offset in 1..=6 {
-                        let idx = ply + 1 - offset;
-                        if idx < 0 {
-                            break;
-                        }
-                        let in_check_idx = self.stack[idx as usize].in_check as usize;
-                        let prev_mv = self.stack[idx as usize].current_move;
-                        let capture_idx = if prev_mv.is_some() {
-                            pos.is_capture(prev_mv) as usize
-                        } else {
-                            0
-                        };
-                        self.continuation_history[in_check_idx][capture_idx].update(
-                            moved_piece,
-                            to_sq,
-                            moved_piece,
-                            to_sq,
-                            1412,
-                        );
-                    }
-                    // cutoffCntインクリメント条件 (extension<2 || PvNode) を fail high時に加算で近似
-                    if value > alpha {
-                        self.stack[ply as usize].cutoff_cnt += 1;
-                    }
                     value
                 }
             } else if !pv_node || move_count > 1 {
@@ -1436,6 +1441,7 @@ impl<'a> SearchWorker<'a> {
                     }
 
                     if value >= beta {
+                        // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
                         self.stack[ply as usize].cutoff_cnt += 1;
                         break;
                     }
