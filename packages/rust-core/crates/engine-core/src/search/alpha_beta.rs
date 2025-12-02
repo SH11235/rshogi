@@ -2218,9 +2218,21 @@ mod tests {
         assert!(r >= 0, "reduction should not be negative");
     }
 
-    // 注: SearchWorkerのスタック使用量が大きいため、Box化などの最適化が必要
-    // sel_depthのリセットは iterate_root の各手のループ内で行われる（alpha_beta.rs:XXX行目）
-    // バグ修正: self.sel_depth = 0; を各ルート手の処理開始時に追加
-    //
-    // SearchWorkerのユニットテストは統合テストで行う
+    #[test]
+    fn test_reduction_extremes_no_overflow() {
+        init_reductions();
+        // 最大depth/mcでもオーバーフローせずに値が得られることを確認
+        let delta = 0;
+        let root_delta = 1;
+        let r = reduction(false, 63, 63, delta, root_delta);
+        assert!(r >= 0 && r < i32::MAX / 2, "reduction extreme should be in safe range, got {r}");
+    }
+
+    #[test]
+    fn test_reduction_zero_root_delta_clamped() {
+        init_reductions();
+        // root_delta=0 を渡しても内部で1にクランプされることを確認
+        let r = reduction(false, 10, 10, 0, 0) / 1024;
+        assert!(r >= 0, "reduction should clamp root_delta to >=1 even when 0 is passed");
+    }
 }
