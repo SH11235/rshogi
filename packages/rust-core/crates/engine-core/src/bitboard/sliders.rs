@@ -228,12 +228,14 @@ pub fn lance_effect(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
     match color {
         Color::White => {
             if Bitboard::part(sq) == 0 {
-                let mask = table.lance_step_effect[Color::White.index()][sq.index()].extract64::<0>();
+                let mask =
+                    table.lance_step_effect[Color::White.index()][sq.index()].extract64::<0>();
                 let em = occupied.extract64::<0>() & mask;
                 let t = em.wrapping_sub(1);
                 Bitboard::from_u64_pair((em ^ t) & mask, 0)
             } else {
-                let mask = table.lance_step_effect[Color::White.index()][sq.index()].extract64::<1>();
+                let mask =
+                    table.lance_step_effect[Color::White.index()][sq.index()].extract64::<1>();
                 let em = occupied.extract64::<1>() & mask;
                 let t = em.wrapping_sub(1);
                 Bitboard::from_u64_pair(0, (em ^ t) & mask)
@@ -582,7 +584,11 @@ mod tests {
     }
 
     fn lance_naive(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
-        let dir = if color == Color::Black { (0, -1) } else { (0, 1) };
+        let dir = if color == Color::Black {
+            (0, -1)
+        } else {
+            (0, 1)
+        };
         slider_naive(sq, occupied, &[dir])
     }
 
@@ -785,18 +791,9 @@ mod tests {
     #[test]
     fn test_direct_of_basic() {
         let c = Square::new(File::File5, Rank::Rank5);
-        assert_eq!(
-            direct_of(c, Square::new(File::File4, Rank::Rank4)),
-            Some(Direct::RU)
-        );
-        assert_eq!(
-            direct_of(c, Square::new(File::File6, Rank::Rank5)),
-            Some(Direct::L)
-        );
-        assert_eq!(
-            direct_of(c, Square::new(File::File5, Rank::Rank7)),
-            Some(Direct::D)
-        );
+        assert_eq!(direct_of(c, Square::new(File::File4, Rank::Rank4)), Some(Direct::RU));
+        assert_eq!(direct_of(c, Square::new(File::File6, Rank::Rank5)), Some(Direct::L));
+        assert_eq!(direct_of(c, Square::new(File::File5, Rank::Rank7)), Some(Direct::D));
         assert_eq!(direct_of(c, Square::new(File::File7, Rank::Rank4)), None);
     }
 
