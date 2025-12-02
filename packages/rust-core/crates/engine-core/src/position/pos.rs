@@ -1222,4 +1222,31 @@ mod tests {
         assert_eq!(pos.state().continuous_check[Color::White.index()], 0);
         assert_eq!(pos.side_to_move(), Color::White);
     }
+
+    /// パニック再現SFENで敵玉取りや自殺手が非合法になることを確認
+    #[test]
+    fn panic_position_disallows_king_capture() {
+        let sfen = "ln2k1+L1+R/2s2s3/p1pl1p3/1+r2p1p1p/9/4B4/5PPPP/4Gg3/2+b2GKNL w S2NPgs7p 107";
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+
+        // 白手番で「4h3i」（敵玉取り）は非合法
+        let capture_king = Move::from_usi("4h3i").unwrap();
+        assert!(!pos.is_legal(capture_king));
+
+        // 黒手番で玉を3h→3iに動かす手（敵の利きに飛び込む）は非合法
+        let mut pos_black = Position::new();
+        pos_black.set_sfen(sfen).unwrap();
+        pos_black.side_to_move = Color::Black;
+        let b_king = pos_black.king_square(Color::Black);
+        pos_black.remove_piece(b_king);
+        let king_from = Square::from_usi("3h").unwrap();
+        let king_to = Square::from_usi("3i").unwrap();
+        pos_black.put_piece(Piece::B_KING, king_from);
+        pos_black.king_square[Color::Black.index()] = king_from;
+        pos_black.update_blockers_and_pinners();
+        pos_black.update_check_squares();
+        let king_move = Move::new_move(king_from, king_to, false);
+        assert!(!pos_black.is_legal(king_move));
+    }
 }

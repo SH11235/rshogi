@@ -960,6 +960,17 @@ impl Position {
 
         let from = mv.from();
         let to = mv.to();
+        let to_pc = self.piece_on(to);
+
+        // 移動先に自駒がある/敵玉がいる手は非合法
+        if to_pc.is_some() {
+            if to_pc.color() == us {
+                return false;
+            }
+            if to_pc.piece_type() == PieceType::King {
+                return false;
+            }
+        }
 
         // 玉の移動
         if from == king_sq {
