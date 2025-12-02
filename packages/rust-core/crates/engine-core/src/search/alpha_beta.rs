@@ -463,7 +463,7 @@ impl<'a> SearchWorker<'a> {
 
             // PVS
             let value = if rm_idx == 0 {
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1)
+                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1, false)
             } else {
                 // Zero Window Search
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
@@ -472,6 +472,7 @@ impl<'a> SearchWorker<'a> {
                     -alpha - Value::new(1),
                     -alpha,
                     1,
+                    true,
                 );
 
                 // Re-search if needed
@@ -482,6 +483,7 @@ impl<'a> SearchWorker<'a> {
                         -beta,
                         -alpha,
                         1,
+                        false,
                     );
                 }
 
@@ -588,7 +590,7 @@ impl<'a> SearchWorker<'a> {
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1)
+                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1, false)
             } else {
                 // それ以降はZero Window Search
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
@@ -597,6 +599,7 @@ impl<'a> SearchWorker<'a> {
                     -alpha - Value::new(1),
                     -alpha,
                     1,
+                    true,
                 );
 
                 // Re-search if needed
@@ -607,6 +610,7 @@ impl<'a> SearchWorker<'a> {
                         -beta,
                         -alpha,
                         1,
+                        false,
                     );
                 }
 
@@ -678,11 +682,10 @@ impl<'a> SearchWorker<'a> {
         alpha: Value,
         beta: Value,
         ply: i32,
+        cut_node: bool,
     ) -> Value {
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
         // YaneuraOuのallNode定義: !(PvNode || cutNode)（yaneuraou-search.cpp:1854付近）
-        // cut_nodeは非PVかつゼロウィンドウ探索とみなす
-        let cut_node = !pv_node && beta <= alpha + Value::new(1);
         let all_node = !(pv_node || cut_node);
         let mut depth = depth;
         let in_check = pos.in_check();
@@ -879,6 +882,7 @@ impl<'a> SearchWorker<'a> {
                 -beta,
                 -beta + Value::new(1),
                 ply + 1,
+                false,
             );
             pos.undo_null_move();
 
@@ -961,6 +965,7 @@ impl<'a> SearchWorker<'a> {
                                 -prob_beta,
                                 -prob_beta + Value::new(1),
                                 ply + 1,
+                                !cut_node,
                             );
                         }
                         pos.undo_move(mv);
@@ -1186,6 +1191,7 @@ impl<'a> SearchWorker<'a> {
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
+                    true,
                 );
                 self.stack[ply as usize].reduction = 0;
 
@@ -1198,6 +1204,7 @@ impl<'a> SearchWorker<'a> {
                         -alpha - Value::new(1),
                         -alpha,
                         ply + 1,
+                        !cut_node,
                     );
                     self.stack[ply as usize].reduction = 0;
                 }
@@ -1211,6 +1218,7 @@ impl<'a> SearchWorker<'a> {
                         -beta,
                         -alpha,
                         ply + 1,
+                        false,
                     );
                     self.stack[ply as usize].reduction = 0;
                 }
@@ -1225,6 +1233,7 @@ impl<'a> SearchWorker<'a> {
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
+                    !cut_node,
                 );
                 self.stack[ply as usize].reduction = 0;
 
@@ -1236,6 +1245,7 @@ impl<'a> SearchWorker<'a> {
                         -beta,
                         -alpha,
                         ply + 1,
+                        false,
                     );
                     self.stack[ply as usize].reduction = 0;
                 }
@@ -1244,7 +1254,14 @@ impl<'a> SearchWorker<'a> {
             } else {
                 // Full window search
                 self.stack[ply as usize].reduction = 0;
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, ply + 1)
+                -self.search_node::<{ NodeType::PV as u8 }>(
+                    pos,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    false,
+                )
             };
 
             pos.undo_move(mv);
