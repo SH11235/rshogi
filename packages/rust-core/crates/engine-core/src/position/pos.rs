@@ -26,6 +26,7 @@ pub(super) fn is_minor_piece(pc: Piece) -> bool {
 }
 
 /// 将棋の局面
+#[derive(Clone)]
 pub struct Position {
     // === 盤面 ===
     /// 各マスの駒 [Square]
