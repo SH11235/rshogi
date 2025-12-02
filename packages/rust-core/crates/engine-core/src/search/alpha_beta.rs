@@ -35,6 +35,12 @@ use super::{LimitsType, MovePicker, TimeManagement};
 /// YaneuraOu準拠での基準係数。枝刈りでtt未ヒットのカットノードは係数を少し下げる。
 const FUTILITY_MARGIN_BASE: i32 = 90;
 
+/// IIR関連のしきい値（yaneuraou-search.cpp:2769-2774 由来）
+const IIR_PRIOR_REDUCTION_THRESHOLD_SHALLOW: i32 = 1;
+const IIR_PRIOR_REDUCTION_THRESHOLD_DEEP: i32 = 3;
+const IIR_DEPTH_BOUNDARY: Depth = 10;
+const IIR_EVAL_SUM_THRESHOLD: i32 = 177;
+
 use std::sync::OnceLock;
 
 /// 引き分けスコアに揺らぎを与える（YaneuraOu準拠）
@@ -463,7 +469,7 @@ impl<'a> SearchWorker<'a> {
 
             // PVS
             let value = if rm_idx == 0 {
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1)
+                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1, false)
             } else {
                 // Zero Window Search
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
@@ -472,6 +478,7 @@ impl<'a> SearchWorker<'a> {
                     -alpha - Value::new(1),
                     -alpha,
                     1,
+                    true,
                 );
 
                 // Re-search if needed
@@ -482,6 +489,7 @@ impl<'a> SearchWorker<'a> {
                         -beta,
                         -alpha,
                         1,
+                        false,
                     );
                 }
 
@@ -588,7 +596,7 @@ impl<'a> SearchWorker<'a> {
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1)
+                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1, false)
             } else {
                 // それ以降はZero Window Search
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
@@ -597,6 +605,7 @@ impl<'a> SearchWorker<'a> {
                     -alpha - Value::new(1),
                     -alpha,
                     1,
+                    true,
                 );
 
                 // Re-search if needed
@@ -607,6 +616,7 @@ impl<'a> SearchWorker<'a> {
                         -beta,
                         -alpha,
                         1,
+                        false,
                     );
                 }
 
@@ -671,6 +681,8 @@ impl<'a> SearchWorker<'a> {
     /// 通常探索ノード
     ///
     /// NTは NodeType を const genericで受け取る（コンパイル時最適化）
+    /// cut_node は「βカットが期待される（ゼロウィンドウの非PVなど）」ときに true を渡す。
+    /// 再探索やPV探索では all_node 扱いにするため false を渡す（YaneuraOuのcutNode引き渡しと対応）。
     fn search_node<const NT: u8>(
         &mut self,
         pos: &mut Position,
@@ -678,8 +690,12 @@ impl<'a> SearchWorker<'a> {
         alpha: Value,
         beta: Value,
         ply: i32,
+        cut_node: bool,
     ) -> Value {
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
+        // YaneuraOuのallNode定義: !(PvNode || cutNode)（yaneuraou-search.cpp:1854付近）
+        let all_node = !(pv_node || cut_node);
+        let mut depth = depth;
         let in_check = pos.in_check();
 
         // 深さが0以下なら静止探索へ
@@ -705,6 +721,17 @@ impl<'a> SearchWorker<'a> {
         // スタック設定
         self.stack[ply as usize].in_check = in_check;
         self.stack[ply as usize].move_count = 0;
+        // 1手前のreduction量を保持（yaneuraou-search.cpp:2155）
+        // 親ノードのreductionはこのノードでのみ参照し、兄弟ノードに漏らさないためここでクリアする。
+        let prior_reduction = if ply >= 1 {
+            let parent_idx = (ply - 1) as usize;
+            let pr = self.stack[parent_idx].reduction;
+            self.stack[parent_idx].reduction = 0;
+            pr
+        } else {
+            0
+        };
+        self.stack[ply as usize].reduction = 0;
 
         // =================================================================
         // 置換表プローブ
@@ -792,6 +819,35 @@ impl<'a> SearchWorker<'a> {
         } else {
             false
         };
+        let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
+            let prev_eval = self.stack[(ply - 1) as usize].static_eval;
+            prev_eval != Value::NONE && static_eval > -prev_eval
+        } else {
+            false
+        };
+
+        // priorReduction に応じた深さ調整（yaneuraou-search.cpp:2769-2774）
+        if prior_reduction
+            >= if depth < IIR_DEPTH_BOUNDARY {
+                IIR_PRIOR_REDUCTION_THRESHOLD_SHALLOW
+            } else {
+                IIR_PRIOR_REDUCTION_THRESHOLD_DEEP
+            }
+            && !opponent_worsening
+        {
+            depth += 1;
+        }
+        if prior_reduction >= 2
+            && depth >= 2
+            && ply >= 1
+            && static_eval != Value::NONE
+            && self.stack[(ply - 1) as usize].static_eval != Value::NONE
+            // Value は ±32002 程度なので i32 加算でオーバーフローしない
+            && static_eval + self.stack[(ply - 1) as usize].static_eval
+                > Value::new(IIR_EVAL_SUM_THRESHOLD)
+        {
+            depth -= 1;
+        }
 
         // =================================================================
         // Razoring（非PV、浅い深さで評価値が低い場合に静止探索）
@@ -811,15 +867,7 @@ impl<'a> SearchWorker<'a> {
         // Futility Pruning（非PV、静的評価が十分高い場合）
         // =================================================================
         if !pv_node && !in_check && depth <= 8 && static_eval != Value::NONE {
-            // YaneuraOu準拠: improving/opponentWorsening を織り込んだマージン（yaneuraou-search.cpp:2739以降）
-            let opponent_worsening = if ply >= 1 {
-                let prev_eval = self.stack[(ply - 1) as usize].static_eval;
-                prev_eval != Value::NONE && static_eval > -prev_eval
-            } else {
-                false
-            };
-
-            let cut_node = !pv_node; // Non-PVノード相当
+            // YaneuraOu準拠: improving/opponentWorsening を織り込んだマージン
             let futility_mult = FUTILITY_MARGIN_BASE - 20 * (cut_node && !tt_hit) as i32;
             let futility_margin = Value::new(
                 futility_mult * depth
@@ -851,6 +899,7 @@ impl<'a> SearchWorker<'a> {
                 -beta,
                 -beta + Value::new(1),
                 ply + 1,
+                false,
             );
             pos.undo_null_move();
 
@@ -866,6 +915,13 @@ impl<'a> SearchWorker<'a> {
         // Null move 後のimproving再計算（YaneuraOu準拠）
         if !in_check && static_eval != Value::NONE {
             improving |= static_eval >= beta;
+        }
+
+        // Internal Iterative Reductions（improving再計算後に実施）
+        // YaneuraOu準拠: !allNode && depth>=6 && !ttMove && priorReduction<=3
+        // （yaneuraou-search.cpp:2912-2919）
+        if !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
+            depth -= 1;
         }
 
         // =================================================================
@@ -926,6 +982,7 @@ impl<'a> SearchWorker<'a> {
                                 -prob_beta,
                                 -prob_beta + Value::new(1),
                                 ply + 1,
+                                !cut_node,
                             );
                         }
                         pos.undo_move(mv);
@@ -1143,61 +1200,88 @@ impl<'a> SearchWorker<'a> {
             // =============================================================
             let value = if new_depth < depth - 1 {
                 // Reduced search
+                // reduction は「この子ノードに渡す一時値」で、兄弟に漏らさないよう呼び出しの前後で毎回クリアする。
+                let reduction_from_parent = depth - 1 - new_depth;
+                self.stack[ply as usize].reduction = reduction_from_parent;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
                     new_depth,
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
+                    true,
                 );
+                self.stack[ply as usize].reduction = 0;
 
                 // Re-search if reduced search beats alpha
                 if value > alpha && new_depth < depth - 1 {
+                    self.stack[ply as usize].reduction = 0;
                     value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                         pos,
                         depth - 1,
                         -alpha - Value::new(1),
                         -alpha,
                         ply + 1,
+                        !cut_node,
                     );
+                    self.stack[ply as usize].reduction = 0;
                 }
 
                 // Full window re-search for PV nodes
                 if pv_node && value > alpha && value < beta {
+                    self.stack[ply as usize].reduction = 0;
                     value = -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
                         -beta,
                         -alpha,
                         ply + 1,
+                        false,
                     );
+                    self.stack[ply as usize].reduction = 0;
                 }
 
                 value
             } else if !pv_node || move_count > 1 {
                 // Zero window search
+                // 減衰なしの探索なので reduction は都度 0 に戻してから呼ぶ。
+                self.stack[ply as usize].reduction = 0;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
                     depth - 1,
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
+                    !cut_node,
                 );
+                self.stack[ply as usize].reduction = 0;
 
                 if pv_node && value > alpha && value < beta {
+                    self.stack[ply as usize].reduction = 0;
                     value = -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
                         -beta,
                         -alpha,
                         ply + 1,
+                        false,
                     );
+                    self.stack[ply as usize].reduction = 0;
                 }
 
                 value
             } else {
                 // Full window search
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, ply + 1)
+                // PVフル探索は reduction を持ち越さない。
+                self.stack[ply as usize].reduction = 0;
+                -self.search_node::<{ NodeType::PV as u8 }>(
+                    pos,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    false,
+                )
             };
 
             pos.undo_move(mv);
