@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -11,8 +11,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::Local;
 use clap::Parser;
 use engine_core::position::{Position, SFEN_HIRATE};
-use engine_core::types::{Color, Move};
-use serde::Serialize;
+use engine_core::types::{Color, Move, PieceType, Square};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
 #[derive(Parser, Debug)]
@@ -115,10 +116,10 @@ struct Cli {
     log_info: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct MetaLog {
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: String,
     timestamp: String,
     settings: MetaSettings,
     engine_cmd: EngineCommandMeta,
@@ -127,7 +128,7 @@ struct MetaLog {
     info_log: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct MetaSettings {
     games: u32,
     max_moves: u32,
@@ -148,7 +149,7 @@ struct MetaSettings {
     sfen: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct EngineCommandMeta {
     path: String,
     args_black: Vec<String>,
@@ -168,6 +169,8 @@ struct MoveLog {
     elapsed_ms: u64,
     think_limit_ms: u64,
     timed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eval: Option<EvalLog>,
 }
 
 #[derive(Serialize)]
@@ -178,6 +181,26 @@ struct ResultLog<'a> {
     outcome: &'a str,
     reason: &'a str,
     plies: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct EvalLog {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score_cp: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score_mate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seldepth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pv: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -220,6 +243,133 @@ impl InfoLogger {
     fn flush(&mut self) -> Result<()> {
         self.writer.flush()?;
         Ok(())
+    }
+}
+
+#[derive(Default, Clone)]
+struct InfoSnapshot {
+    score_cp: Option<i32>,
+    score_mate: Option<i32>,
+    depth: Option<u32>,
+    seldepth: Option<u32>,
+    nodes: Option<u64>,
+    time_ms: Option<u64>,
+    nps: Option<u64>,
+    pv: Vec<String>,
+}
+
+impl InfoSnapshot {
+    fn update_from_line(&mut self, line: &str) {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.first().copied() != Some("info") {
+            return;
+        }
+        let mut multipv = 1u32;
+        let mut idx = 1;
+        while idx + 1 < tokens.len() {
+            if tokens[idx] == "multipv" {
+                multipv = tokens[idx + 1].parse::<u32>().unwrap_or(1);
+                break;
+            }
+            idx += 1;
+        }
+        if multipv != 1 {
+            return;
+        }
+        let mut i = 1;
+        while i < tokens.len() {
+            match tokens[i] {
+                "depth" => {
+                    if i + 1 < tokens.len() {
+                        self.depth = tokens[i + 1].parse::<u32>().ok();
+                        i += 1;
+                    }
+                }
+                "seldepth" => {
+                    if i + 1 < tokens.len() {
+                        self.seldepth = tokens[i + 1].parse::<u32>().ok();
+                        i += 1;
+                    }
+                }
+                "nodes" => {
+                    if i + 1 < tokens.len() {
+                        self.nodes = tokens[i + 1].parse::<u64>().ok();
+                        i += 1;
+                    }
+                }
+                "time" => {
+                    if i + 1 < tokens.len() {
+                        self.time_ms = tokens[i + 1].parse::<u64>().ok();
+                        i += 1;
+                    }
+                }
+                "nps" => {
+                    if i + 1 < tokens.len() {
+                        self.nps = tokens[i + 1].parse::<u64>().ok();
+                        i += 1;
+                    }
+                }
+                "score" => {
+                    if i + 2 < tokens.len() {
+                        match tokens[i + 1] {
+                            "cp" => {
+                                self.score_cp = tokens[i + 2].parse::<i32>().ok();
+                                self.score_mate = None;
+                                i += 2;
+                            }
+                            "mate" => {
+                                self.score_mate = tokens[i + 2].parse::<i32>().ok();
+                                self.score_cp = None;
+                                i += 2;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "pv" => {
+                    let mut pv = Vec::new();
+                    let mut j = i + 1;
+                    while j < tokens.len() {
+                        pv.push(tokens[j].to_string());
+                        j += 1;
+                    }
+                    if !pv.is_empty() {
+                        self.pv = pv;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    fn into_eval_log(self) -> Option<EvalLog> {
+        if self.score_cp.is_none()
+            && self.score_mate.is_none()
+            && self.depth.is_none()
+            && self.seldepth.is_none()
+            && self.nodes.is_none()
+            && self.time_ms.is_none()
+            && self.nps.is_none()
+            && self.pv.is_empty()
+        {
+            return None;
+        }
+        Some(EvalLog {
+            score_cp: self.score_cp,
+            score_mate: self.score_mate,
+            depth: self.depth,
+            seldepth: self.seldepth,
+            nodes: self.nodes,
+            time_ms: self.time_ms,
+            nps: self.nps,
+            pv: if self.pv.is_empty() {
+                None
+            } else {
+                Some(self.pv)
+            },
+        })
     }
 }
 
@@ -428,6 +578,7 @@ impl EngineProcess {
             Duration::from_millis(req.think_limit_ms.saturating_add(req.timeout_margin_ms));
         let hard_limit = soft_limit + Duration::from_millis(req.timeout_margin_ms);
         let mut stop_sent = false;
+        let mut snapshot = InfoSnapshot::default();
 
         loop {
             let elapsed = start.elapsed();
@@ -442,6 +593,7 @@ impl EngineProcess {
                     bestmove: None,
                     elapsed_ms: duration_to_millis(elapsed),
                     timed_out: true,
+                    eval: snapshot.into_eval_log(),
                 });
             }
 
@@ -449,6 +601,7 @@ impl EngineProcess {
             match self.rx.recv_timeout(remaining) {
                 Ok(line) => {
                     if line.starts_with("info") {
+                        snapshot.update_from_line(&line);
                         if let Some(logger) = info_logger.as_mut() {
                             logger.log(InfoLogEntry {
                                 kind: "info",
@@ -471,6 +624,7 @@ impl EngineProcess {
                             bestmove: Some(mv),
                             elapsed_ms,
                             timed_out,
+                            eval: snapshot.into_eval_log(),
                         });
                     }
                 }
@@ -484,6 +638,7 @@ impl EngineProcess {
                             bestmove: None,
                             elapsed_ms,
                             timed_out: true,
+                            eval: snapshot.into_eval_log(),
                         });
                     }
                 }
@@ -556,6 +711,7 @@ struct SearchOutcome {
     bestmove: Option<String>,
     elapsed_ms: u64,
     timed_out: bool,
+    eval: Option<EvalLog>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -637,7 +793,7 @@ fn main() -> Result<()> {
     )?;
 
     let meta = MetaLog {
-        kind: "meta",
+        kind: "meta".to_string(),
         timestamp: timestamp.to_rfc3339(),
         settings: MetaSettings {
             games: cli.games,
@@ -711,6 +867,7 @@ fn main() -> Result<()> {
             let mut move_usi = search.bestmove.clone().unwrap_or_else(|| "none".to_string());
             let mut terminal = false;
             let elapsed_ms = search.elapsed_ms;
+            let eval_log = search.eval.clone();
 
             if timed_out {
                 outcome = if side == Color::Black {
@@ -783,6 +940,7 @@ fn main() -> Result<()> {
                 elapsed_ms,
                 think_limit_ms,
                 timed_out,
+                eval: eval_log,
             };
             serde_json::to_writer(&mut writer, &move_log)?;
             writer.write_all(b"\n")?;
@@ -817,6 +975,18 @@ fn main() -> Result<()> {
     if cli.log_info {
         println!("info log written to {}", info_path.display());
     }
+    let kif_path = default_kif_path(&output_path);
+    match convert_jsonl_to_kif(&output_path, &kif_path) {
+        Ok(paths) if paths.is_empty() => eprintln!("failed to create KIF: no games found"),
+        Ok(paths) if paths.len() == 1 => println!("kif written to {}", paths[0].display()),
+        Ok(paths) => {
+            println!("kif written (per game):");
+            for p in paths {
+                println!("  {}", p.display());
+            }
+        }
+        Err(err) => eprintln!("failed to create KIF: {}", err),
+    }
     Ok(())
 }
 
@@ -827,6 +997,12 @@ fn resolve_output_path(out: Option<&Path>, timestamp: &chrono::DateTime<Local>) 
     let dir = PathBuf::from("runs/selfplay");
     let name = format!("{}-selfplay.jsonl", timestamp.format("%Y%m%d-%H%M%S"));
     dir.join(name)
+}
+
+fn default_kif_path(jsonl: &Path) -> PathBuf {
+    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
+    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    parent.join(format!("{stem}.kif"))
 }
 
 fn resolve_engine_path(cli: &Cli) -> PathBuf {
@@ -1053,4 +1229,322 @@ fn side_label(color: Color) -> char {
 
 fn duration_to_millis(d: Duration) -> u64 {
     d.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Default)]
+struct GameLog {
+    moves: Vec<MoveEntry>,
+    result: Option<ResultEntry>,
+}
+
+#[derive(Deserialize, Clone)]
+struct MoveEntry {
+    game_id: u32,
+    ply: u32,
+    sfen_before: String,
+    move_usi: String,
+    #[serde(default)]
+    elapsed_ms: Option<u64>,
+    #[serde(default)]
+    eval: Option<EvalLog>,
+}
+
+#[derive(Deserialize)]
+struct ResultEntry {
+    game_id: u32,
+    outcome: String,
+    reason: String,
+    plies: u32,
+}
+
+fn convert_jsonl_to_kif(input: &Path, output: &Path) -> Result<Vec<PathBuf>> {
+    let file =
+        File::open(input).with_context(|| format!("failed to open input {}", input.display()))?;
+    let reader = BufReader::new(file);
+
+    let mut meta: Option<MetaLog> = None;
+    let mut games: BTreeMap<u32, GameLog> = BTreeMap::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed)
+            .with_context(|| format!("failed to parse JSON line: {}", trimmed))?;
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("meta") => {
+                meta = Some(serde_json::from_value(value)?);
+            }
+            Some("move") => {
+                let entry: MoveEntry = serde_json::from_value(value)?;
+                games.entry(entry.game_id).or_default().moves.push(entry);
+            }
+            Some("result") => {
+                let entry: ResultEntry = serde_json::from_value(value)?;
+                let gid = entry.game_id;
+                games.entry(gid).or_default().result = Some(entry);
+            }
+            _ => {}
+        }
+    }
+
+    if games.is_empty() {
+        bail!("no games found in {}", input.display());
+    }
+
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    let ext = output.extension().and_then(|s| s.to_str()).unwrap_or("kif");
+
+    let multi = games.len() > 1;
+    let mut written = Vec::new();
+    for (game_id, game) in games {
+        let path = if multi {
+            parent.join(format!("{stem}_g{game_id:02}.{ext}"))
+        } else {
+            output.to_path_buf()
+        };
+        let mut writer = BufWriter::new(
+            File::create(&path).with_context(|| format!("failed to create {}", path.display()))?,
+        );
+        export_game_to_kif(&mut writer, meta.as_ref(), game_id, &game)?;
+        writer.flush()?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+fn export_game_to_kif<W: Write>(
+    writer: &mut W,
+    meta: Option<&MetaLog>,
+    game_id: u32,
+    game: &GameLog,
+) -> Result<()> {
+    let (mut pos, start_sfen) = start_position_for_game(meta, game_id, &game.moves)
+        .ok_or_else(|| anyhow!("could not determine start position for game {}", game_id))?;
+
+    let timestamp = meta.map(|m| m.timestamp.clone()).unwrap_or_else(|| "-".to_string());
+    let (black_name, white_name) = engine_names_for(meta);
+    let (btime, wtime) = meta.map(|m| (m.settings.btime, m.settings.wtime)).unwrap_or((0, 0));
+    writeln!(writer, "開始日時：{}", timestamp)?;
+    writeln!(writer, "手合割：平手")?;
+    writeln!(writer, "先手：{}", black_name)?;
+    writeln!(writer, "後手：{}", white_name)?;
+    writeln!(writer, "持ち時間：先手{}ms / 後手{}ms", btime, wtime)?;
+    writeln!(writer, "開始局面：{}", start_sfen)?;
+    writeln!(writer, "手数----指手---------消費時間--")?;
+
+    let mut moves = game.moves.clone();
+    moves.sort_by_key(|m| m.ply);
+    let mut total_black = 0u64;
+    let mut total_white = 0u64;
+
+    for entry in moves {
+        if entry.move_usi == "resign" || entry.move_usi == "win" || entry.move_usi == "timeout" {
+            break;
+        }
+        let side = pos.side_to_move();
+        let mv = Move::from_usi(&entry.move_usi)
+            .ok_or_else(|| anyhow!("invalid move in log: {}", entry.move_usi))?;
+        if !pos.is_legal(mv) {
+            bail!("illegal move '{}' in log for game {}", entry.move_usi, game_id);
+        }
+        let elapsed_ms = entry.elapsed_ms.unwrap_or(0);
+        let total_time = if side == Color::Black {
+            total_black + elapsed_ms
+        } else {
+            total_white + elapsed_ms
+        };
+        let line = format_move_kif(entry.ply, &pos, mv, elapsed_ms, total_time);
+        writeln!(writer, "{}", line)?;
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+        if side == Color::Black {
+            total_black = total_time;
+        } else {
+            total_white = total_time;
+        }
+        write_eval_comments(writer, entry.eval.as_ref())?;
+    }
+
+    let final_plies = game
+        .result
+        .as_ref()
+        .map(|r| r.plies)
+        .or_else(|| game.moves.last().map(|m| m.ply))
+        .unwrap_or(0);
+    if let Some(res) = game.result.as_ref() {
+        if res.reason != "max_moves" {
+            writeln!(writer, "**終了理由={}", res.reason)?;
+        }
+    }
+    let summary = match game.result.as_ref().map(|r| r.outcome.as_str()).unwrap_or("draw") {
+        "black_win" => format!("まで{}手で先手の勝ち", final_plies),
+        "white_win" => format!("まで{}手で後手の勝ち", final_plies),
+        _ => format!("まで{}手で引き分け", final_plies),
+    };
+    writeln!(writer, "\n{}", summary)?;
+    Ok(())
+}
+
+fn start_position_for_game(
+    meta: Option<&MetaLog>,
+    game_id: u32,
+    moves: &[MoveEntry],
+) -> Option<(Position, String)> {
+    if let Some(meta) = meta {
+        if !meta.start_positions.is_empty() {
+            let idx = ((game_id - 1) as usize) % meta.start_positions.len();
+            if let Ok((pos, sfen)) = start_position_from_command(&meta.start_positions[idx]) {
+                return Some((pos, sfen));
+            }
+        }
+    }
+    moves.first().and_then(|m| {
+        let mut pos = Position::new();
+        pos.set_sfen(&m.sfen_before).ok()?;
+        let sfen = pos.to_sfen();
+        Some((pos, sfen))
+    })
+}
+
+fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
+    let parsed = parse_position_line(cmd)?;
+    let pos = build_position(&parsed)?;
+    let sfen = pos.to_sfen();
+    Ok((pos, sfen))
+}
+
+fn engine_names_for(meta: Option<&MetaLog>) -> (String, String) {
+    let default = ("black".to_string(), "white".to_string());
+    let Some(meta) = meta else { return default };
+    let path = Path::new(&meta.engine_cmd.path);
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or(&meta.engine_cmd.path);
+    (format!("{} (black)", name), format!("{} (white)", name))
+}
+
+fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
+    let prefix = if pos.side_to_move() == Color::Black {
+        "▲"
+    } else {
+        "△"
+    };
+    let dest = square_label_kanji(mv.to());
+    let (label, from_suffix) = if mv.is_drop() {
+        (format!("{}打", piece_label(mv.drop_piece_type(), false)), String::new())
+    } else {
+        let from = mv.from();
+        let piece = pos.piece_on(from);
+        let promoted = piece.piece_type().is_promoted() || mv.is_promote();
+        let suffix = format!("({}{})", square_file_digit(from), square_rank_digit(from));
+        (piece_label(piece.piece_type(), promoted).to_string(), suffix)
+    };
+    let per_move = format_mm_ss(elapsed_ms);
+    let total = format_hh_mm_ss(total_ms);
+    format!(
+        "{:>4} {}{}{}{}   ({:>5}/{})",
+        ply, prefix, dest, label, from_suffix, per_move, total
+    )
+}
+
+fn square_label_kanji(sq: Square) -> String {
+    format!("{}{}", file_kanji(sq), rank_kanji(sq))
+}
+
+fn file_kanji(sq: Square) -> &'static str {
+    const FILES: [&str; 10] = ["", "１", "２", "３", "４", "５", "６", "７", "８", "９"];
+    let idx = sq.file().to_usi_char().to_digit(10).unwrap_or(1) as usize;
+    FILES[idx]
+}
+
+fn rank_kanji(sq: Square) -> &'static str {
+    const RANKS: [&str; 9] = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    let rank = sq.rank().to_usi_char() as u8;
+    let idx = (rank - b'a') as usize;
+    RANKS.get(idx).copied().unwrap_or("一")
+}
+
+fn square_file_digit(sq: Square) -> char {
+    sq.file().to_usi_char()
+}
+
+fn square_rank_digit(sq: Square) -> char {
+    let rank = sq.rank().to_usi_char();
+    let idx = (rank as u8 - b'a') + 1;
+    char::from_digit(idx as u32, 10).unwrap_or('1')
+}
+
+fn piece_label(piece_type: PieceType, promoted: bool) -> &'static str {
+    match (piece_type, promoted) {
+        (PieceType::Pawn, false) => "歩",
+        (PieceType::Pawn, true) => "と",
+        (PieceType::Lance, false) => "香",
+        (PieceType::Lance, true) => "成香",
+        (PieceType::Knight, false) => "桂",
+        (PieceType::Knight, true) => "成桂",
+        (PieceType::Silver, false) => "銀",
+        (PieceType::Silver, true) => "成銀",
+        (PieceType::Gold, _) => "金",
+        (PieceType::Bishop, false) => "角",
+        (PieceType::Bishop, true) => "馬",
+        (PieceType::Rook, false) => "飛",
+        (PieceType::Rook, true) => "龍",
+        (PieceType::King, _) => "玉",
+        (PieceType::ProPawn, _) => "と",
+        (PieceType::ProLance, _) => "成香",
+        (PieceType::ProKnight, _) => "成桂",
+        (PieceType::ProSilver, _) => "成銀",
+        (PieceType::Horse, _) => "馬",
+        (PieceType::Dragon, _) => "龍",
+    }
+}
+
+fn write_eval_comments<W: Write>(writer: &mut W, eval: Option<&EvalLog>) -> Result<()> {
+    let Some(eval) = eval else {
+        return Ok(());
+    };
+    writeln!(writer, "*info")?;
+    if let Some(mate) = eval.score_mate {
+        writeln!(writer, "**詰み={}", mate)?;
+    } else if let Some(cp) = eval.score_cp {
+        writeln!(writer, "**評価値={:+}", cp)?;
+    }
+    if let Some(depth) = eval.depth {
+        writeln!(writer, "**深さ={}", depth)?;
+    }
+    if let Some(seldepth) = eval.seldepth {
+        writeln!(writer, "**選択深さ={}", seldepth)?;
+    }
+    if let Some(nodes) = eval.nodes {
+        writeln!(writer, "**ノード数={}", nodes)?;
+    }
+    if let Some(time_ms) = eval.time_ms {
+        writeln!(writer, "**探索時間={}ms", time_ms)?;
+    }
+    if let Some(nps) = eval.nps {
+        writeln!(writer, "**NPS={}", nps)?;
+    }
+    if let Some(pv) = eval.pv.as_ref() {
+        if !pv.is_empty() {
+            writeln!(writer, "**読み筋={}", pv.join(" "))?;
+        }
+    }
+    Ok(())
+}
+
+fn format_mm_ss(ms: u64) -> String {
+    let secs = ms / 1000;
+    let m = secs / 60;
+    let s = secs % 60;
+    format!("{:>2}:{:02}", m, s)
+}
+
+fn format_hh_mm_ss(ms: u64) -> String {
+    let secs = ms / 1000;
+    let h = secs / 3600;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }
