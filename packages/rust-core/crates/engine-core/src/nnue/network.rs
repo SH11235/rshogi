@@ -130,17 +130,14 @@ pub fn is_nnue_initialized() -> bool {
 pub fn evaluate(pos: &mut Position) -> Value {
     if let Some(network) = NETWORK.get() {
         // 前局面の Accumulator を生ポインタで保持（借用競合を避けるため）
-        let prev_acc_ptr = {
-            let state = pos.state();
-            state.previous.as_ref().map(|s| &*s.accumulator as *const Accumulator)
-        };
+        let prev_acc_ptr = { pos.previous_state().map(|s| &s.accumulator as *const Accumulator) };
 
         // StateInfo 上の Accumulator をインプレースで更新
         {
             // 生ポインタ経由で可変参照を取得し、pos への借用衝突を回避
             let acc_ptr = {
                 let state = pos.state_mut();
-                &mut *state.accumulator as *mut Accumulator
+                &mut state.accumulator as *mut Accumulator
             };
 
             // SAFETY: acc_ptr は state.accumulator の有効期間内でのみ使用する。
@@ -149,7 +146,7 @@ pub fn evaluate(pos: &mut Position) -> Value {
             if !acc.computed_accumulation {
                 let mut updated = false;
                 if let Some(prev_acc_ptr) = prev_acc_ptr {
-                    // SAFETY: prev_acc_ptr は state.previous の有効期間内でのみ使用する読み取り専用ポインタ。
+                    // SAFETY: prev_acc_ptr は previous_state の有効期間内でのみ使用する読み取り専用ポインタ。
                     let prev_acc = unsafe { &*prev_acc_ptr };
                     if prev_acc.computed_accumulation {
                         updated =
@@ -282,7 +279,7 @@ mod tests {
         acc.computed_accumulation = true;
         {
             let state = pos.state_mut();
-            state.accumulator = Box::new(acc);
+            state.accumulator = acc;
         }
 
         // 1回目の evaluate: computed_accumulation が true のままならそのまま評価する

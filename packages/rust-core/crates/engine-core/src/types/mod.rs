@@ -40,7 +40,7 @@ pub use file::File;
 pub use hand::Hand;
 pub use moves::Move;
 pub use piece::Piece;
-pub use piece_type::PieceType;
+pub use piece_type::{PieceType, PieceTypeSet};
 pub use rank::Rank;
 pub use repetition::RepetitionState;
 pub use square::Square;

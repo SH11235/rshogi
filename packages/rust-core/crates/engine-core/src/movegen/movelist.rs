@@ -53,7 +53,10 @@ impl MoveList {
     /// 指し手を追加
     #[inline]
     pub fn push(&mut self, mv: Move) {
-        debug_assert!(self.len < MAX_MOVES);
+        if self.len >= MAX_MOVES {
+            // バッファ溢れ時はそれ以上追加しない（releaseでも安全に）
+            return;
+        }
         self.moves[self.len] = mv;
         self.len += 1;
     }
@@ -149,5 +152,16 @@ mod tests {
         list.push(mv);
 
         assert_eq!(list[0], mv);
+    }
+
+    #[test]
+    fn test_movelist_push_overflow_is_safe() {
+        let mut list = MoveList::new();
+        for _ in 0..MAX_MOVES {
+            list.push(Move::NONE);
+        }
+        let len_before = list.len();
+        list.push(Move::NONE);
+        assert_eq!(list.len(), len_before);
     }
 }

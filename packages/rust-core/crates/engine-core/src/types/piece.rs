@@ -50,6 +50,15 @@ impl Piece {
     pub const W_HORSE: Piece = Piece(29);
     pub const W_DRAGON: Piece = Piece(30);
 
+    /// 駒の種類数（NONEを含む、配列サイズ用）
+    pub const NUM: usize = 31;
+
+    /// ColorとPieceTypeから生成（newのエイリアス）
+    #[inline]
+    pub const fn make(color: Color, piece_type: PieceType) -> Piece {
+        Piece::new(color, piece_type)
+    }
+
     /// ColorとPieceTypeから生成
     #[inline]
     pub const fn new(color: Color, piece_type: PieceType) -> Piece {
@@ -108,6 +117,12 @@ impl Piece {
     #[inline]
     pub const fn raw(self) -> u8 {
         self.0
+    }
+
+    /// 内部値からPieceを生成
+    #[inline]
+    pub const fn from_raw(value: u8) -> Piece {
+        Piece(value)
     }
 }
 
