@@ -849,8 +849,7 @@ impl<'a> SearchWorker<'a> {
         // Futility Pruning（非PV、静的評価が十分高い場合）
         // =================================================================
         if !pv_node && !in_check && depth <= 8 && static_eval != Value::NONE {
-            // YaneuraOu準拠: improving/opponentWorsening を織り込んだマージン（yaneuraou-search.cpp:2739以降）
-            let cut_node = !pv_node; // Non-PVノード相当
+            // YaneuraOu準拠: improving/opponentWorsening を織り込んだマージン
             let futility_mult = FUTILITY_MARGIN_BASE - 20 * (cut_node && !tt_hit) as i32;
             let futility_margin = Value::new(
                 futility_mult * depth
