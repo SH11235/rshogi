@@ -4,8 +4,8 @@
 
 use super::Position;
 use crate::bitboard::{
-    bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, rook_effect,
-    silver_effect, Bitboard,
+    bishop_effect, direct_of, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect,
+    ray_effect, rook_effect, silver_effect, Bitboard, Direct,
 };
 use crate::movegen::{generate_evasions, generate_with_type, ExtMove, GenType, MAX_MOVES};
 use crate::types::{Color, Move, Piece, PieceType, Square, Value};
@@ -294,9 +294,11 @@ impl Position {
             self.occupied() ^ Bitboard::from_square(from) ^ Bitboard::from_square(to);
         let mut stm = !self.side_to_move(); // 相手の手番から開始
 
+        // 初期攻撃者集合（occupiedに依存）
+        let mut attackers = self.attackers_to_occ(to, occupied) & occupied;
+
         loop {
             // 次に to に利く最も価値の低い駒を探す
-            let attackers = self.attackers_to_occ(to, occupied) & occupied;
             let our_attackers = attackers & self.pieces_c(stm);
 
             if our_attackers.is_empty() {
@@ -309,7 +311,35 @@ impl Position {
                 self.least_valuable_attacker(our_attackers, stm, to, occupied);
 
             // 駒を取り除く
-            occupied ^= Bitboard::from_square(attacker_sq);
+            let attacker_bb = Bitboard::from_square(attacker_sq);
+            attackers ^= attacker_bb;
+            occupied ^= attacker_bb;
+
+            // attacker_sq が遮っていたラインの背後の利きを追加する（やねうら王 SEE と同様）
+            if let Some(dir) = direct_of(to, attacker_sq) {
+                let ray = ray_effect(dir, to, occupied);
+                let extras = match dir {
+                    Direct::RU | Direct::RD | Direct::LU | Direct::LD => {
+                        ray & (self.pieces_pt(PieceType::Bishop) | self.pieces_pt(PieceType::Horse))
+                    }
+                    Direct::U => {
+                        let rookers =
+                            self.pieces_pt(PieceType::Rook) | self.pieces_pt(PieceType::Dragon);
+                        let lance = self.pieces(Color::White, PieceType::Lance);
+                        ray & (rookers | lance)
+                    }
+                    Direct::D => {
+                        let rookers =
+                            self.pieces_pt(PieceType::Rook) | self.pieces_pt(PieceType::Dragon);
+                        let lance = self.pieces(Color::Black, PieceType::Lance);
+                        ray & (rookers | lance)
+                    }
+                    Direct::L | Direct::R => {
+                        ray & (self.pieces_pt(PieceType::Rook) | self.pieces_pt(PieceType::Dragon))
+                    }
+                };
+                attackers |= extras & occupied;
+            }
 
             // バランスを更新
             balance = -balance - 1 - victim_value;
@@ -319,8 +349,7 @@ impl Position {
                 // pinされた駒でも、相手が玉なら勝ち確定
                 if attacker_value == see_piece_value(PieceType::King) {
                     // 相手に取り返す駒があるかチェック
-                    let their_attackers =
-                        self.attackers_to_occ(to, occupied) & occupied & self.pieces_c(!stm);
+                    let their_attackers = attackers & self.pieces_c(!stm);
                     if !their_attackers.is_empty() {
                         // 相手に取り返す駒がある場合は、バランスを反転
                         stm = !stm;
