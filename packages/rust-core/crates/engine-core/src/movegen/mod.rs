@@ -14,6 +14,8 @@ mod generator;
 mod movelist;
 mod types;
 
-pub use generator::{generate_all, generate_evasions, generate_legal, generate_non_evasions};
+pub use generator::{
+    generate_all, generate_evasions, generate_legal, generate_non_evasions, generate_with_type,
+};
 pub use movelist::MoveList;
 pub use types::{ExtMove, GenType, MAX_MOVES};

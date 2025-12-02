@@ -4,12 +4,29 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::types::{Color, Hand, Move, Piece, PieceType, Square};
+use crate::types::{Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square};
 
 use super::state::{ChangedPiece, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 
+/// 小駒（香・桂・銀・金とその成り駒）かどうか
+#[inline]
+pub(super) fn is_minor_piece(pc: Piece) -> bool {
+    matches!(
+        pc.piece_type(),
+        PieceType::Lance
+            | PieceType::Knight
+            | PieceType::Silver
+            | PieceType::Gold
+            | PieceType::ProPawn
+            | PieceType::ProLance
+            | PieceType::ProKnight
+            | PieceType::ProSilver
+    )
+}
+
 /// 将棋の局面
+#[derive(Clone)]
 pub struct Position {
     // === 盤面 ===
     /// 各マスの駒 [Square]
@@ -24,8 +41,10 @@ pub struct Position {
     pub(super) hand: [Hand; Color::NUM],
 
     // === 状態 ===
-    /// 現在の状態
-    pub(super) state: Box<StateInfo>,
+    /// 状態スタック
+    pub(super) state_stack: Vec<StateInfo>,
+    /// 現在の状態インデックス
+    state_idx: usize,
     /// 初期局面からの手数
     pub(super) game_ply: i32,
     /// 手番
@@ -35,6 +54,42 @@ pub struct Position {
 }
 
 impl Position {
+    /// 部分ハッシュを更新（XOR）
+    #[inline]
+    fn xor_partial_keys(&self, st: &mut StateInfo, pc: Piece, sq: Square) {
+        if pc.piece_type() == PieceType::Pawn {
+            st.pawn_key ^= zobrist_psq(pc, sq);
+        } else {
+            if is_minor_piece(pc) {
+                st.minor_piece_key ^= zobrist_psq(pc, sq);
+            }
+            st.non_pawn_key[pc.color().index()] ^= zobrist_psq(pc, sq);
+        }
+    }
+
+    #[inline]
+    fn cur_state(&self) -> &StateInfo {
+        &self.state_stack[self.state_idx]
+    }
+
+    #[inline]
+    fn cur_state_mut(&mut self) -> &mut StateInfo {
+        &mut self.state_stack[self.state_idx]
+    }
+
+    /// 状態スタックに新しい StateInfo を積む（必要なら再利用）
+    #[inline]
+    fn push_state(&mut self, mut st: StateInfo) {
+        st.previous = Some(self.state_idx);
+        let next_idx = self.state_idx + 1;
+        if self.state_stack.len() > next_idx {
+            self.state_stack[next_idx] = st;
+        } else {
+            self.state_stack.push(st);
+        }
+        self.state_idx = next_idx;
+    }
+
     // ========== 局面設定 ==========
 
     /// 空の局面を生成
@@ -44,7 +99,8 @@ impl Position {
             by_type: [Bitboard::EMPTY; PieceType::NUM + 1],
             by_color: [Bitboard::EMPTY; Color::NUM],
             hand: [Hand::EMPTY; Color::NUM],
-            state: Box::new(StateInfo::new()),
+            state_stack: vec![StateInfo::new()],
+            state_idx: 0,
             game_ply: 0,
             side_to_move: Color::Black,
             king_square: [Square::SQ_11; Color::NUM],
@@ -57,6 +113,14 @@ impl Position {
     #[inline]
     pub fn piece_on(&self, sq: Square) -> Piece {
         self.board[sq.index()]
+    }
+
+    /// 直前の手で取られた駒を返す
+    ///
+    /// YaneuraOu: pos.captured_piece()
+    #[inline]
+    pub fn captured_piece(&self) -> Piece {
+        self.cur_state().captured_piece
     }
 
     /// 全駒のBitboard（占有）
@@ -81,6 +145,40 @@ impl Position {
     #[inline]
     pub fn pieces(&self, c: Color, pt: PieceType) -> Bitboard {
         self.by_color[c.index()] & self.by_type[pt as usize]
+    }
+
+    /// 駒種集合のBitboard（先後無視）
+    #[inline]
+    pub fn pieces_by_types(&self, set: PieceTypeSet) -> Bitboard {
+        if set.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        if set.is_all() {
+            return self.occupied();
+        }
+
+        let mut bb = Bitboard::EMPTY;
+        for pt in set.iter() {
+            bb |= self.by_type[pt as usize];
+        }
+        bb
+    }
+
+    /// 駒種集合のBitboard（手番指定）
+    #[inline]
+    pub fn pieces_c_by_types(&self, c: Color, set: PieceTypeSet) -> Bitboard {
+        if set.is_empty() {
+            return Bitboard::EMPTY;
+        }
+        if set.is_all() {
+            return self.by_color[c.index()];
+        }
+
+        let mut bb = Bitboard::EMPTY;
+        for pt in set.iter() {
+            bb |= self.by_type[pt as usize] & self.by_color[c.index()];
+        }
+        bb
     }
 
     /// 手駒を取得
@@ -133,22 +231,55 @@ impl Position {
         self.game_ply
     }
 
+    /// 千日手/優劣局面判定（do_move 時に計算した情報を使用）
+    pub fn repetition_state(&self, ply: i32) -> RepetitionState {
+        let rep = self.cur_state().repetition;
+        if rep != 0 && rep.abs() < ply {
+            return self.cur_state().repetition_type;
+        }
+
+        RepetitionState::None
+    }
+
     /// 現在の状態を取得
     #[inline]
     pub fn state(&self) -> &StateInfo {
-        &self.state
+        self.cur_state()
+    }
+
+    /// 直前の局面の状態（StateInfo）を取得
+    pub fn previous_state(&self) -> Option<&StateInfo> {
+        self.cur_state().previous.map(|idx| &self.state_stack[idx])
     }
 
     /// 現在の状態を可変で取得（NNUE差分更新など内部状態の更新用）
     #[inline]
     pub fn state_mut(&mut self) -> &mut StateInfo {
-        &mut self.state
+        self.cur_state_mut()
     }
 
     /// 局面のハッシュキー
     #[inline]
     pub fn key(&self) -> u64 {
-        self.state.key()
+        self.cur_state().key()
+    }
+
+    /// 歩ハッシュ
+    #[inline]
+    pub fn pawn_key(&self) -> u64 {
+        self.cur_state().pawn_key
+    }
+
+    /// 小駒ハッシュ
+    #[inline]
+    pub fn minor_piece_key(&self) -> u64 {
+        self.cur_state().minor_piece_key
+    }
+
+    /// 歩以外のハッシュ（手番別）
+    #[inline]
+    pub fn non_pawn_key(&self, c: Color) -> u64 {
+        self.cur_state().non_pawn_key[c.index()]
     }
 
     // ========== 利き計算 ==========
@@ -237,25 +368,57 @@ impl Position {
     /// 自玉へのピン駒
     #[inline]
     pub fn blockers_for_king(&self, c: Color) -> Bitboard {
-        self.state.blockers_for_king[c.index()]
+        self.cur_state().blockers_for_king[c.index()]
     }
 
     /// 王手している駒
     #[inline]
     pub fn checkers(&self) -> Bitboard {
-        self.state.checkers
+        self.cur_state().checkers
     }
 
     /// 王手されているか
     #[inline]
     pub fn in_check(&self) -> bool {
-        !self.state.checkers.is_empty()
+        !self.cur_state().checkers.is_empty()
     }
 
     /// 指定駒種で王手となる升
     #[inline]
     pub fn check_squares(&self, pt: PieceType) -> Bitboard {
-        self.state.check_squares[pt as usize]
+        self.cur_state().check_squares[pt as usize]
+    }
+
+    /// 現在のpin状態（指定升を除外）
+    pub fn pinned_pieces(&self, them: Color, avoid: Square) -> Bitboard {
+        self.pinned_pieces_excluding(them, avoid)
+    }
+
+    /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
+    pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
+        let occ = self.occupied() & !Bitboard::from_square(avoid);
+        self.pinned_pieces_with_occupancy(them, occ, Bitboard::EMPTY)
+    }
+
+    /// from->toに動かした後の占有でのpin駒（やねうら王のpinned_pieces(Them, from, to)相当）
+    pub fn pinned_pieces_after_move(&self, them: Color, from: Square, to: Square) -> Bitboard {
+        let mut occ = self.occupied();
+        occ ^= Bitboard::from_square(from);
+        occ |= Bitboard::from_square(to);
+
+        let enemy = !them;
+        let enemy_removed = if self.piece_on(to).is_some() && self.piece_on(to).color() == enemy {
+            Bitboard::from_square(to)
+        } else {
+            Bitboard::EMPTY
+        };
+
+        self.pinned_pieces_with_occupancy(them, occ, enemy_removed)
+    }
+
+    /// fromの駒を動かしたときに開き王手になるか（簡易判定）
+    pub fn discovered(&self, from: Square, to: Square, ksq: Square, pinned: Bitboard) -> bool {
+        pinned.contains(from) && !crate::mate::aligned(from, to, ksq)
     }
 
     // ========== 内部操作 ==========
@@ -280,35 +443,11 @@ impl Position {
     /// pin駒とpinしている駒を更新
     pub(super) fn update_blockers_and_pinners(&mut self) {
         for c in [Color::Black, Color::White] {
-            self.state.blockers_for_king[c.index()] = Bitboard::EMPTY;
-            self.state.pinners[c.index()] = Bitboard::EMPTY;
-
-            let ksq = self.king_square[c.index()];
-            let them = !c;
-            let occupied = self.occupied();
-
-            // 敵の遠方駒からの利き
-            let snipers = (lance_effect(c, ksq, Bitboard::EMPTY)
-                & self.pieces(them, PieceType::Lance))
-                | (bishop_effect(ksq, Bitboard::EMPTY)
-                    & (self.pieces(them, PieceType::Bishop) | self.pieces(them, PieceType::Horse)))
-                | (rook_effect(ksq, Bitboard::EMPTY)
-                    & (self.pieces(them, PieceType::Rook) | self.pieces(them, PieceType::Dragon)));
-
-            for sniper_sq in snipers.iter() {
-                // 玉とsniperの間にある駒
-                let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
-                // 間に1枚だけある場合、それがblocker
-                if !between.is_empty() && !between.more_than_one() {
-                    self.state.blockers_for_king[c.index()] =
-                        self.state.blockers_for_king[c.index()] | between;
-                    // blockerが敵の駒なら、sniperはpinner
-                    if (between & self.pieces_c(them)).is_empty() {
-                        // blockerは自駒なので、sniperはpinner
-                        self.state.pinners[c.index()].set(sniper_sq);
-                    }
-                }
-            }
+            let (blockers, pinners) =
+                self.compute_blockers_and_pinners(c, self.occupied(), Bitboard::EMPTY);
+            let st = self.cur_state_mut();
+            st.blockers_for_king[c.index()] = blockers;
+            st.pinners[c.index()] = pinners;
         }
     }
 
@@ -317,24 +456,25 @@ impl Position {
         let them = !self.side_to_move;
         let ksq = self.king_square[them.index()];
         let occupied = self.occupied();
+        let st = self.cur_state_mut();
 
         // 各駒種で王手となるマス
-        self.state.check_squares[PieceType::Pawn as usize] = pawn_effect(them, ksq);
-        self.state.check_squares[PieceType::Knight as usize] = knight_effect(them, ksq);
-        self.state.check_squares[PieceType::Silver as usize] = silver_effect(them, ksq);
-        self.state.check_squares[PieceType::Gold as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::King as usize] = Bitboard::EMPTY; // 玉で王手はない
-        self.state.check_squares[PieceType::Lance as usize] = lance_effect(them, ksq, occupied);
-        self.state.check_squares[PieceType::Bishop as usize] = bishop_effect(ksq, occupied);
-        self.state.check_squares[PieceType::Rook as usize] = rook_effect(ksq, occupied);
+        st.check_squares[PieceType::Pawn as usize] = pawn_effect(them, ksq);
+        st.check_squares[PieceType::Knight as usize] = knight_effect(them, ksq);
+        st.check_squares[PieceType::Silver as usize] = silver_effect(them, ksq);
+        st.check_squares[PieceType::Gold as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::King as usize] = Bitboard::EMPTY; // 玉で王手はない
+        st.check_squares[PieceType::Lance as usize] = lance_effect(them, ksq, occupied);
+        st.check_squares[PieceType::Bishop as usize] = bishop_effect(ksq, occupied);
+        st.check_squares[PieceType::Rook as usize] = rook_effect(ksq, occupied);
 
         // 成駒
-        self.state.check_squares[PieceType::ProPawn as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::ProLance as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::ProKnight as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::ProSilver as usize] = gold_effect(them, ksq);
-        self.state.check_squares[PieceType::Horse as usize] = horse_effect(ksq, occupied);
-        self.state.check_squares[PieceType::Dragon as usize] = dragon_effect(ksq, occupied);
+        st.check_squares[PieceType::ProPawn as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::ProLance as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::ProKnight as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::ProSilver as usize] = gold_effect(them, ksq);
+        st.check_squares[PieceType::Horse as usize] = horse_effect(ksq, occupied);
+        st.check_squares[PieceType::Dragon as usize] = dragon_effect(ksq, occupied);
     }
 
     // ========== 指し手実行 ==========
@@ -343,9 +483,15 @@ impl Position {
     pub fn do_move(&mut self, m: Move, gives_check: bool) {
         let us = self.side_to_move;
         let them = !us;
+        let prev_continuous = self.cur_state().continuous_check;
+
+        // 現在の占有とblockers/pinners、玉位置を退避（差分更新で利用）
+        let prev_blockers = self.cur_state().blockers_for_king;
+        let prev_pinners = self.cur_state().pinners;
+        let prev_king_sq = self.king_square;
 
         // 1. 新しいStateInfoを作成
-        let mut new_state = Box::new(self.state.partial_clone());
+        let mut new_state = self.cur_state().partial_clone();
         // NNUE 関連は毎手リセットし、DirtyPiece はここで構築する。
         new_state.accumulator.reset();
         new_state.dirty_piece.clear();
@@ -358,10 +504,16 @@ impl Position {
         new_state.board_key ^= zobrist_side();
 
         // 4. 駒の移動
+        let mut moved_from: Option<Square> = None;
+        let moved_to: Square;
+        let moved_pt: PieceType;
+
         if m.is_drop() {
             let pt = m.drop_piece_type();
             let to = m.to();
             let pc = Piece::new(us, pt);
+            moved_to = to;
+            moved_pt = pt;
 
             // DirtyPiece: 手駒の変化（us の pt が 1 減る）
             let old_hand = self.hand[us.index()];
@@ -376,11 +528,12 @@ impl Position {
 
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
-            new_state.hand_key ^= zobrist_hand(us, pt);
+            new_state.hand_key = new_state.hand_key.wrapping_sub(zobrist_hand(us, pt));
 
             // 盤上に配置
             self.put_piece(pc, to);
             new_state.board_key ^= zobrist_psq(pc, to);
+            self.xor_partial_keys(&mut new_state, pc, to);
 
             new_state.captured_piece = Piece::NONE;
 
@@ -395,29 +548,56 @@ impl Position {
         } else {
             let from = m.from();
             let to = m.to();
+            moved_from = Some(from);
+            moved_to = to;
             let pc = self.piece_on(from);
             let captured = self.piece_on(to);
+            moved_pt = if m.is_promote() {
+                pc.piece_type().promote().unwrap()
+            } else {
+                pc.piece_type()
+            };
 
             // 駒を取る場合
             if captured.is_some() {
                 let captured_pt = captured.piece_type().unpromote();
-                // DirtyPiece: 手駒の変化（us の captured_pt が 1 増える）
-                let old_hand = self.hand[us.index()];
-                let old_count = old_hand.count(captured_pt) as u8;
-                let new_count = old_count.saturating_add(1);
-                new_state.dirty_piece.hand_changes.push(super::state::HandChange {
-                    owner: us,
-                    piece_type: captured_pt,
-                    old_count,
-                    new_count,
-                });
-
+                debug_assert!(
+                    captured_pt != PieceType::King,
+                    "illegal capture of king at {} by move {} in position {}",
+                    to.to_usi(),
+                    m.to_usi(),
+                    self.to_sfen()
+                );
                 self.remove_piece(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
+                self.xor_partial_keys(&mut new_state, captured, to);
 
-                // 手駒に追加（成駒は生駒に戻す）
-                self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
-                new_state.hand_key ^= zobrist_hand(us, captured_pt);
+                // 手駒に追加（成駒は生駒に戻す）※手駒にならない駒種は無視
+                if matches!(
+                    captured_pt,
+                    PieceType::Pawn
+                        | PieceType::Lance
+                        | PieceType::Knight
+                        | PieceType::Silver
+                        | PieceType::Gold
+                        | PieceType::Bishop
+                        | PieceType::Rook
+                ) {
+                    // DirtyPiece: 手駒の変化（us の captured_pt が 1 増える）
+                    let old_hand = self.hand[us.index()];
+                    let old_count = old_hand.count(captured_pt) as u8;
+                    let new_count = old_count.saturating_add(1);
+                    new_state.dirty_piece.hand_changes.push(super::state::HandChange {
+                        owner: us,
+                        piece_type: captured_pt,
+                        old_count,
+                        new_count,
+                    });
+
+                    self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
+                    new_state.hand_key =
+                        new_state.hand_key.wrapping_add(zobrist_hand(us, captured_pt));
+                }
 
                 // 駒割評価値の更新
                 // TODO: material_value の更新
@@ -427,6 +607,7 @@ impl Position {
             // 駒を移動
             self.remove_piece(from);
             new_state.board_key ^= zobrist_psq(pc, from);
+            self.xor_partial_keys(&mut new_state, pc, from);
 
             let moved_pc = if m.is_promote() {
                 pc.promote().unwrap()
@@ -435,6 +616,7 @@ impl Position {
             };
             self.put_piece(moved_pc, to);
             new_state.board_key ^= zobrist_psq(moved_pc, to);
+            self.xor_partial_keys(&mut new_state, moved_pc, to);
 
             // 玉の移動
             if pc.piece_type() == PieceType::King {
@@ -462,24 +644,102 @@ impl Position {
                 });
             }
         }
+        // 6. 王手情報の更新（diffベース）
+        let mut checkers = Bitboard::EMPTY;
+        if gives_check {
+            let ksq = self.king_square[them.index()];
+            // 直接王手
+            checkers |=
+                self.cur_state().check_squares[moved_pt as usize] & Bitboard::from_square(moved_to);
+
+            // 開き王手（動かした駒が遮断駒だった場合）
+            if let Some(from_sq) = moved_from {
+                let prev_blockers = self.cur_state().blockers_for_king[them.index()];
+                if prev_blockers.contains(from_sq) {
+                    if let Some(dir) = crate::bitboard::direct_of(ksq, from_sq) {
+                        let ray = crate::bitboard::direct_effect(from_sq, dir, self.occupied());
+                        checkers |= ray & self.pieces_c(us);
+                    }
+                }
+            }
+
+            // 捕獲で遮断駒を取り除いた場合の開き王手
+            let prev_blockers = self.cur_state().blockers_for_king[them.index()];
+            if prev_blockers.contains(moved_to) {
+                if let Some(dir) = crate::bitboard::direct_of(ksq, moved_to) {
+                    let ray = crate::bitboard::direct_effect(moved_to, dir, self.occupied());
+                    checkers |= ray & self.pieces_c(us);
+                }
+            }
+        } else {
+            // 安全のため盤面から再計算（gives_checkの取り違えがあっても整合性を保つ）
+            checkers = self.attackers_to_c(self.king_square[them.index()], us);
+        }
+        let is_check = !checkers.is_empty();
+        // 4. 連続王手カウンタの更新（YaneuraOu準拠）
+        if is_check {
+            new_state.continuous_check[us.index()] = prev_continuous[us.index()] + 2;
+        } else {
+            new_state.continuous_check[us.index()] = 0;
+        }
+        // 受け手側はリセット
+        new_state.continuous_check[them.index()] = 0;
 
         // 5. 手番交代
         self.side_to_move = them;
 
         // 6. 王手情報の更新
-        new_state.checkers = if gives_check {
-            self.attackers_to_c(self.king_square[them.index()], us)
-        } else {
-            Bitboard::EMPTY
-        };
+        new_state.checkers = checkers;
 
-        // 7. StateInfoの付け替え
+        // 7. 千日手判定に使う手駒スナップショットを保存
+        new_state.hand_snapshot = self.hand;
+
+        // 8. StateInfoの付け替え（previous をぶら下げる）
         new_state.last_move = m;
-        let old_state = std::mem::replace(&mut self.state, new_state);
-        self.state.previous = Some(old_state);
+        self.push_state(new_state);
 
-        // 8. pin情報と王手マスの更新
-        self.update_blockers_and_pinners();
+        // 9. 繰り返し情報の更新
+        self.update_repetition_info();
+
+        // 10. pin情報を差分更新（王との直線/斜め上の駒が動いた場合のみ再計算）
+        {
+            let occ_after = self.occupied();
+            let changed_sqs: [Option<Square>; 2] = [moved_from, Some(moved_to)];
+
+            for c in [Color::Black, Color::White] {
+                let king_sq_prev = prev_king_sq[c.index()];
+                let king_sq_now = self.king_square[c.index()];
+                let king_moved = king_sq_prev != king_sq_now;
+
+                let mut needs_recompute = king_moved;
+                if !needs_recompute {
+                    for sq in changed_sqs.iter().flatten().copied() {
+                        if prev_blockers[c.index()].contains(sq)
+                            || prev_pinners[c.index()].contains(sq)
+                            || crate::bitboard::direct_of(king_sq_now, sq).is_some()
+                        {
+                            needs_recompute = true;
+                            break;
+                        }
+                    }
+                }
+
+                if !needs_recompute {
+                    let st = self.cur_state_mut();
+                    st.blockers_for_king[c.index()] = prev_blockers[c.index()];
+                    st.pinners[c.index()] = prev_pinners[c.index()];
+                    continue;
+                }
+
+                let (blockers, pinners) =
+                    self.compute_blockers_and_pinners(c, occ_after, Bitboard::EMPTY);
+                let st = self.cur_state_mut();
+                st.blockers_for_king[c.index()] = blockers;
+                st.pinners[c.index()] = pinners;
+            }
+        }
+
+        // 11. 王手マスの更新
         self.update_check_squares();
     }
 
@@ -489,6 +749,8 @@ impl Position {
         self.side_to_move = !self.side_to_move;
         self.game_ply -= 1;
         let us = self.side_to_move;
+        let captured = self.cur_state().captured_piece;
+        let prev_idx = self.cur_state().previous.expect("No previous state for undo");
 
         // 2. 駒の移動を戻す
         if m.is_drop() {
@@ -519,7 +781,6 @@ impl Position {
             }
 
             // 取った駒を復元
-            let captured = self.state.captured_piece;
             if captured.is_some() {
                 self.put_piece(captured, to);
                 // 手駒から除去
@@ -529,12 +790,12 @@ impl Position {
         }
 
         // 3. StateInfoを戻す
-        self.state = self.state.previous.take().unwrap();
+        self.state_idx = prev_idx;
     }
 
     /// null moveを実行
     pub fn do_null_move(&mut self) {
-        let mut new_state = Box::new(self.state.partial_clone());
+        let mut new_state = self.cur_state().partial_clone();
         new_state.accumulator.reset();
         new_state.dirty_piece.clear();
 
@@ -542,14 +803,14 @@ impl Position {
         new_state.plies_from_null = 0;
         new_state.captured_piece = Piece::NONE;
         new_state.last_move = Move::NULL;
+        new_state.hand_snapshot = self.hand;
 
         self.side_to_move = !self.side_to_move;
 
-        let old_state = std::mem::replace(&mut self.state, new_state);
-        self.state.previous = Some(old_state);
+        self.push_state(new_state);
 
         // null move後は王手されていないはず
-        self.state.checkers = Bitboard::EMPTY;
+        self.cur_state_mut().checkers = Bitboard::EMPTY;
 
         self.update_blockers_and_pinners();
         self.update_check_squares();
@@ -558,7 +819,87 @@ impl Position {
     /// null moveを戻す
     pub fn undo_null_move(&mut self) {
         self.side_to_move = !self.side_to_move;
-        self.state = self.state.previous.take().unwrap();
+        let prev_idx = self.cur_state().previous.expect("No previous state for undo_null_move");
+        self.state_idx = prev_idx;
+    }
+
+    /// 繰り返し情報を更新（最大16手遡り）
+    fn update_repetition_info(&mut self) {
+        // 初期化
+        let side = self.side_to_move;
+        let (plies_from_null, board_key, hand_snapshot, prev_idx_opt, cc_side, cc_opp) = {
+            let st = self.cur_state();
+            (
+                st.plies_from_null,
+                st.board_key,
+                st.hand_snapshot,
+                st.previous,
+                st.continuous_check[side.index()],
+                st.continuous_check[(!side).index()],
+            )
+        };
+
+        let max_back = plies_from_null.min(16);
+        let mut repetition = 0;
+        let mut repetition_times = 0;
+        let mut repetition_type = RepetitionState::None;
+
+        if max_back >= 4 {
+            let mut dist = 2;
+            let mut st_idx_opt = prev_idx_opt.and_then(|idx| self.state_stack[idx].previous);
+
+            while dist <= max_back {
+                if let Some(st_idx) = st_idx_opt {
+                    let stp = &self.state_stack[st_idx];
+                    if stp.board_key == board_key {
+                        let prev_hand = stp.hand_snapshot[side.index()];
+                        let cur_hand = hand_snapshot[side.index()];
+
+                        if cur_hand == prev_hand {
+                            let times = stp.repetition_times + 1;
+                            repetition_times = times;
+                            repetition = if times >= 3 { -dist } else { dist };
+
+                            let mut rep_type = if dist <= cc_side {
+                                RepetitionState::Lose
+                            } else if dist <= cc_opp {
+                                RepetitionState::Win
+                            } else {
+                                RepetitionState::Draw
+                            };
+
+                            if stp.repetition_times > 0 && stp.repetition_type != rep_type {
+                                rep_type = RepetitionState::Draw;
+                            }
+
+                            repetition_type = rep_type;
+                            break;
+                        }
+
+                        if cur_hand.is_superior_or_equal(prev_hand) {
+                            repetition_type = RepetitionState::Superior;
+                            repetition = dist;
+                            break;
+                        }
+
+                        if prev_hand.is_superior_or_equal(cur_hand) {
+                            repetition_type = RepetitionState::Inferior;
+                            repetition = dist;
+                            break;
+                        }
+                    }
+                    st_idx_opt = stp.previous.and_then(|idx| self.state_stack[idx].previous);
+                    dist += 2;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let st = self.cur_state_mut();
+        st.repetition = repetition;
+        st.repetition_times = repetition_times;
+        st.repetition_type = repetition_type;
     }
 
     /// 王手になるかどうか
@@ -578,7 +919,7 @@ impl Position {
 
         // 直接王手：移動先が王手マスにあるか
         let moved_pt = if m.is_promote() {
-            pt.promote().unwrap()
+            pt.promote().unwrap_or(pt)
         } else {
             pt
         };
@@ -603,9 +944,70 @@ impl Position {
     }
 }
 
+impl Position {
+    /// 1手詰めを検出（該当手があれば返す。なければ Move::NONE）
+    pub fn mate_1ply(&mut self) -> Move {
+        crate::mate::mate_1ply(self).unwrap_or(Move::NONE)
+    }
+}
+
 impl Default for Position {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Position {
+    /// 占有を指定してpin駒を再計算（king_color側の玉に対するpin）
+    fn pinned_pieces_with_occupancy(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> Bitboard {
+        let (blockers, _) = self.compute_blockers_and_pinners(king_color, occupied, enemy_removed);
+        blockers & self.pieces_c(king_color)
+    }
+
+    /// 占有を指定してpin候補とpinnerを再計算
+    fn compute_blockers_and_pinners(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> (Bitboard, Bitboard) {
+        let ksq = self.king_square[king_color.index()];
+        let enemy = !king_color;
+
+        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
+        let bishop_bb = (self.pieces(enemy, PieceType::Bishop)
+            | self.pieces(enemy, PieceType::Horse))
+            & !enemy_removed;
+        let rook_bb = (self.pieces(enemy, PieceType::Rook) | self.pieces(enemy, PieceType::Dragon))
+            & !enemy_removed;
+
+        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let mut blockers = Bitboard::EMPTY;
+        let mut pinners = Bitboard::EMPTY;
+        for sniper_sq in snipers.iter() {
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
+            if between.is_empty() || between.more_than_one() {
+                continue;
+            }
+
+            // blockerが自駒のときのみpin対象
+            if (between & self.pieces_c(enemy)).is_empty() {
+                blockers |= between;
+                pinners.set(sniper_sq);
+            } else {
+                blockers |= between;
+            }
+        }
+
+        (blockers, pinners)
     }
 }
 
@@ -634,6 +1036,147 @@ mod tests {
         pos.remove_piece(sq);
         assert_eq!(pos.piece_on(sq), Piece::NONE);
         assert!(!pos.pieces(Color::Black, PieceType::Pawn).contains(sq));
+    }
+
+    #[test]
+    fn test_blockers_pinners_incremental_matches_full() {
+        // 配置: 先手玉5九, 後手玉1一, 後手飛5六, 先手金5八（玉を遮る）, 先手桂1三（玉筋外）
+        let mut pos = Position::new();
+        let bk = Square::new(File::File5, Rank::Rank9);
+        let wk = Square::new(File::File1, Rank::Rank1);
+        let rook = Square::new(File::File5, Rank::Rank6);
+        let blocker = Square::new(File::File5, Rank::Rank8);
+        let knight = Square::new(File::File1, Rank::Rank3);
+
+        pos.put_piece(Piece::B_KING, bk);
+        pos.king_square[Color::Black.index()] = bk;
+        pos.put_piece(Piece::W_KING, wk);
+        pos.king_square[Color::White.index()] = wk;
+        pos.put_piece(Piece::W_ROOK, rook);
+        pos.put_piece(Piece::B_GOLD, blocker);
+        pos.put_piece(Piece::B_KNIGHT, knight);
+
+        pos.update_blockers_and_pinners();
+
+        let prev_blockers = pos.blockers_for_king(Color::Black);
+        let prev_pinners = pos.cur_state().pinners[Color::White.index()];
+
+        // 玉筋とは無関係の桂を動かしてもblockers/pinnersは変わらない
+        let mv_offline = Move::new_move(knight, Square::new(File::File1, Rank::Rank2), false);
+        pos.do_move(mv_offline, false);
+        assert_eq!(pos.blockers_for_king(Color::Black), prev_blockers);
+        assert_eq!(pos.cur_state().pinners[Color::White.index()], prev_pinners);
+
+        // 金を筋から外すとblockers/pinnersが更新される（再計算と一致）
+        let mv_unblock = Move::new_move(blocker, Square::new(File::File6, Rank::Rank8), false);
+        pos.do_move(mv_unblock, false);
+        let (blockers_full, pinners_full) =
+            pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
+        assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
+        assert_eq!(pos.cur_state().pinners[Color::White.index()], pinners_full);
+
+        // 捕獲で遮断駒を除去した場合の開き王手も検出される
+        // 先手の飛車 1一, 後手玉 1九, 先手金 1七（遮断駒）, 後手歩 2七 を1七の金で取って開き王手になるケース
+        let mut pos = Position::new();
+        let wk = Square::new(File::File1, Rank::Rank9);
+        let br = Square::new(File::File1, Rank::Rank1);
+        let b_blocker = Square::new(File::File1, Rank::Rank7);
+        let w_target = Square::new(File::File2, Rank::Rank7);
+        let bk = Square::new(File::File5, Rank::Rank9); // 先手玉はどこでもよい
+        pos.put_piece(Piece::W_KING, wk);
+        pos.king_square[Color::White.index()] = wk;
+        pos.put_piece(Piece::B_KING, bk);
+        pos.king_square[Color::Black.index()] = bk;
+        pos.put_piece(Piece::B_ROOK, br);
+        pos.put_piece(Piece::B_GOLD, b_blocker);
+        pos.put_piece(Piece::W_PAWN, w_target);
+        pos.side_to_move = Color::Black;
+        pos.update_blockers_and_pinners();
+
+        let mv_capture = Move::new_move(b_blocker, w_target, false);
+        pos.do_move(mv_capture, false);
+        // checkersに飛車が含まれていれば開き王手が検出されている
+        assert!(pos.cur_state().checkers.contains(br));
+
+        // 玉を動かした場合も再計算される
+        let king_from = pos.king_square(Color::Black);
+        let king_to = Square::new(File::File6, Rank::Rank9);
+        let king_move = Move::new_move(king_from, king_to, false);
+        pos.do_move(king_move, false);
+        let (blockers_full, pinners_full) =
+            pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
+        assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
+        assert_eq!(pos.cur_state().pinners[Color::White.index()], pinners_full);
+    }
+
+    #[test]
+    fn test_pieces_by_type_set() {
+        let mut pos = Position::new();
+        let gold_sq = Square::new(File::File5, Rank::Rank5);
+        let pro_sq = Square::new(File::File4, Rank::Rank4);
+        let dragon_sq = Square::new(File::File9, Rank::Rank9);
+
+        pos.put_piece(Piece::B_GOLD, gold_sq);
+        pos.put_piece(Piece::B_PRO_PAWN, pro_sq);
+        pos.put_piece(Piece::W_DRAGON, dragon_sq);
+
+        let gold_like = pos.pieces_c_by_types(Color::Black, PieceTypeSet::golds());
+        assert!(gold_like.contains(gold_sq));
+        assert!(gold_like.contains(pro_sq));
+        assert!(!gold_like.contains(dragon_sq));
+
+        let sliders = pos.pieces_by_types(PieceTypeSet::rook_dragon());
+        assert!(sliders.contains(dragon_sq));
+        assert!(!sliders.contains(gold_sq));
+
+        let all_black = pos.pieces_c_by_types(Color::Black, PieceTypeSet::ALL);
+        assert_eq!(all_black.count(), 2);
+    }
+
+    #[test]
+    fn test_pinned_pieces_variants() {
+        let mut pos = Position::new();
+        // 玉と駒配置
+        let ksq = Square::new(File::File5, Rank::Rank9);
+        let rook_sq = Square::new(File::File5, Rank::Rank1);
+        let blocker_sq = Square::new(File::File5, Rank::Rank5);
+        pos.put_piece(Piece::B_KING, ksq);
+        pos.put_piece(Piece::W_ROOK, rook_sq);
+        pos.put_piece(Piece::B_GOLD, blocker_sq);
+        pos.king_square[Color::Black.index()] = ksq;
+        pos.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
+
+        // 通常: blockerはpinされている
+        let pinned = pos.pinned_pieces_excluding(Color::Black, Square::SQ_11);
+        assert!(pinned.contains(blocker_sq));
+
+        // blockerを除去した占有でpinは消える
+        let pinned_removed = pos.pinned_pieces_excluding(Color::Black, blocker_sq);
+        assert!(pinned_removed.is_empty());
+
+        // rookを取った場合、pinは消える
+        let capture_sq = Square::new(File::File5, Rank::Rank2);
+        pos.put_piece(Piece::B_PAWN, capture_sq);
+        let pinned_after_capture = pos.pinned_pieces_after_move(Color::Black, capture_sq, rook_sq);
+        assert!(pinned_after_capture.is_empty());
+        // 以降の検証に影響しないよう除去
+        pos.remove_piece(capture_sq);
+
+        // pinners配列も更新される
+        pos.update_blockers_and_pinners();
+        assert!(pos.state().pinners[Color::Black.index()].contains(rook_sq));
+
+        // 敵駒が間にいる場合はpinnerにならない
+        let mut pos2 = Position::new();
+        pos2.put_piece(Piece::B_KING, ksq);
+        pos2.put_piece(Piece::W_ROOK, rook_sq);
+        let enemy_blocker = Square::new(File::File5, Rank::Rank4);
+        pos2.put_piece(Piece::W_GOLD, enemy_blocker);
+        pos2.king_square[Color::Black.index()] = ksq;
+        pos2.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
+        pos2.update_blockers_and_pinners();
+        assert!(pos2.state().blockers_for_king[Color::Black.index()].contains(enemy_blocker));
+        assert!(!pos2.state().pinners[Color::Black.index()].contains(rook_sq));
     }
 
     #[test]
@@ -772,5 +1315,90 @@ mod tests {
 
         assert_eq!(pos.piece_on(sq23), Piece::B_PAWN);
         assert_eq!(pos.piece_on(sq22), Piece::NONE);
+    }
+
+    /// 自己対局中に発生した王手見落としによるpanicを再現し、checkersが正しく更新されることを確認する。
+    #[test]
+    fn test_checkers_matches_attackers_after_moves() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        // byoyomi 3000ms の自己対局ログより抽出（最後の timeout は除外）。
+        let moves = [
+            "7g7f", "4a3b", "1g1f", "5a5b", "4g4f", "3c3d", "6g6f", "1c1d", "5i4h", "9c9d", "4h4g",
+            "4c4d", "2h3h", "9a9c", "1i1g", "3a4b", "3h7h", "5c5d", "5g5f", "6c6d", "7h1h", "8b6b",
+            "1h5h", "6d6e", "6f6e", "6b6e", "5h6h", "P*6g", "6h4h", "4d4e", "8h2b+", "3b2b",
+            "B*7g", "4e4f",
+        ];
+
+        for (idx, mv_str) in moves.iter().enumerate() {
+            let mv = Move::from_usi(mv_str).unwrap_or_else(|| panic!("invalid move: {mv_str}"));
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+
+            let king_sq = pos.king_square(pos.side_to_move());
+            let expected_checkers = pos.attackers_to_c(king_sq, !pos.side_to_move());
+
+            assert_eq!(
+                pos.checkers(),
+                expected_checkers,
+                "checkers mismatch at ply {} after move {} in sfen {}",
+                idx + 1,
+                mv_str,
+                pos.to_sfen()
+            );
+        }
+    }
+
+    #[test]
+    fn test_do_move_sets_checkers_from_board_state() {
+        let mut pos = Position::new();
+        // 玉と持ち駒だけの簡単な局面を作り、わざとgives_check=falseで王手の手を指す。
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+
+        let drop_sq = Square::from_usi("4a").unwrap();
+        let mv = Move::new_drop(PieceType::Gold, drop_sq);
+
+        // 王手になるにもかかわらず false を渡しても、盤面から正しくチェック状態が計算されることを確認。
+        pos.do_move(mv, false);
+        let expected_checkers = pos.attackers_to_c(pos.king_square(Color::White), Color::Black);
+        assert!(!expected_checkers.is_empty(), "drop should give check");
+        assert_eq!(pos.checkers(), expected_checkers);
+        assert_eq!(pos.state().continuous_check[Color::Black.index()], 2);
+        assert_eq!(pos.state().continuous_check[Color::White.index()], 0);
+        assert_eq!(pos.side_to_move(), Color::White);
+    }
+
+    /// パニック再現SFENで敵玉取りや自殺手が非合法になることを確認
+    #[test]
+    fn panic_position_disallows_king_capture() {
+        let sfen = "ln2k1+L1+R/2s2s3/p1pl1p3/1+r2p1p1p/9/4B4/5PPPP/4Gg3/2+b2GKNL w S2NPgs7p 107";
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+
+        // 白手番で「4h3i」（敵玉取り）は非合法
+        let capture_king = Move::from_usi("4h3i").unwrap();
+        assert!(!pos.is_legal(capture_king));
+
+        // 黒手番で玉を3h→3iに動かす手（敵の利きに飛び込む）は非合法
+        let mut pos_black = Position::new();
+        pos_black.set_sfen(sfen).unwrap();
+        pos_black.side_to_move = Color::Black;
+        let b_king = pos_black.king_square(Color::Black);
+        pos_black.remove_piece(b_king);
+        let king_from = Square::from_usi("3h").unwrap();
+        let king_to = Square::from_usi("3i").unwrap();
+        pos_black.put_piece(Piece::B_KING, king_from);
+        pos_black.king_square[Color::Black.index()] = king_from;
+        pos_black.update_blockers_and_pinners();
+        pos_black.update_check_squares();
+        let king_move = Move::new_move(king_from, king_to, false);
+        assert!(!pos_black.is_legal(king_move));
     }
 }

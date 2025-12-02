@@ -12,6 +12,7 @@
 //! （`put_piece` / `remove_piece` / `do_move` 系）を通じて更新されることを前提とし、
 //! 常に互いに整合しているように保つ。
 
+mod movepicker_support;
 mod pos;
 mod sfen;
 mod state;
@@ -20,4 +21,4 @@ mod zobrist;
 pub use pos::Position;
 pub use sfen::{SfenError, SFEN_HIRATE};
 pub use state::StateInfo;
-pub use zobrist::{zobrist_hand, zobrist_psq, zobrist_side, ZOBRIST};
+pub use zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side, ZOBRIST};

@@ -9,16 +9,66 @@ pub const MAX_MOVES: usize = 600;
 /// 指し手生成のタイプ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenType {
-    /// 駒を取る指し手 + 歩の敵陣での成り
+    /// 駒を取らない指し手
+    Quiets,
+    /// 駒を取る指し手
+    Captures,
+    /// 駒を取らない指し手（不成含む）
+    QuietsAll,
+    /// 駒を取る指し手（不成含む）
+    CapturesAll,
+    /// 駒を取る指し手 + 歩の価値ある成り
     CapturesProPlus,
-    /// 駒を取らない指し手 - 歩の敵陣での成り
+    /// 駒を取らない指し手 - 歩の敵陣成り
     QuietsProMinus,
+    /// 駒を取る指し手 + 歩の価値ある成り（不成含む）
+    CapturesProPlusAll,
+    /// 駒を取らない指し手 - 歩の敵陣成り（不成含む）
+    QuietsProMinusAll,
     /// 王手回避手
     Evasions,
-    /// 王手がかかっていないときの全ての手
+    /// 王手回避手（不成含む）
+    EvasionsAll,
+    /// 王手がかかっていない全ての手
     NonEvasions,
+    /// 王手がかかっていない全ての手（不成含む）
+    NonEvasionsAll,
     /// 合法手すべて（is_legal()チェック付き）
     Legal,
+    /// 合法手すべて（不成含む）
+    LegalAll,
+    /// 王手となる指し手
+    Checks,
+    /// 王手となる指し手（不成含む）
+    ChecksAll,
+    /// 駒を取らない王手
+    QuietChecks,
+    /// 駒を取らない王手（不成含む）
+    QuietChecksAll,
+    /// 指定升への再捕獲
+    Recaptures,
+    /// 指定升への再捕獲（不成含む）
+    RecapturesAll,
+}
+
+impl GenType {
+    /// 不成も含めて生成するタイプか
+    #[inline]
+    pub const fn includes_non_promotions(self) -> bool {
+        matches!(
+            self,
+            Self::QuietsAll
+                | Self::CapturesAll
+                | Self::CapturesProPlusAll
+                | Self::QuietsProMinusAll
+                | Self::EvasionsAll
+                | Self::NonEvasionsAll
+                | Self::LegalAll
+                | Self::ChecksAll
+                | Self::QuietChecksAll
+                | Self::RecapturesAll
+        )
+    }
 }
 
 /// 指し手とスコアのペア（オーダリング用）
