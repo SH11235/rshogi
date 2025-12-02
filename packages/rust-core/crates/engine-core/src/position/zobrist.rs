@@ -6,10 +6,12 @@ use crate::types::{Color, Piece, PieceType, Square};
 pub struct Zobrist {
     /// 手番用
     pub side: u64,
-    /// 駒×升 [Piece.index()][Square.index()]
-    pub psq: [[u64; Square::NUM]; 32],
-    /// 手駒（加算型）[Color][PieceType]
-    pub hand: [[u64; 8]; Color::NUM],
+    /// 駒×升 [Piece.index()][Square.index()]（盤外番兵分を+1確保）
+    pub psq: [[u64; Square::NUM + 1]; 32],
+    /// 手駒（加算型）[Color][手駒用PieceType]
+    pub hand: [[u64; PieceType::HAND_NUM]; Color::NUM],
+    /// 盤上に歩が一枚もない時のキー
+    pub no_pawns: u64,
 }
 
 impl Zobrist {
@@ -17,8 +19,9 @@ impl Zobrist {
     pub const fn init() -> Self {
         let mut zobrist = Zobrist {
             side: 0,
-            psq: [[0; Square::NUM]; 32],
-            hand: [[0; 8]; Color::NUM],
+            psq: [[0; Square::NUM + 1]; 32],
+            hand: [[0; PieceType::HAND_NUM]; Color::NUM],
+            no_pawns: 0,
         };
 
         // XorShift64で疑似乱数生成
@@ -28,8 +31,13 @@ impl Zobrist {
         seed = xorshift64(seed);
         zobrist.side = seed;
 
+        // 無歩時のキー
+        seed = xorshift64(seed);
+        zobrist.no_pawns = seed;
+
         // 駒×升
-        let mut pc = 0;
+        // pc == 0 (Piece::NONE) は常に0を保つためスキップ
+        let mut pc = 1;
         while pc < 32 {
             let mut sq = 0;
             while sq < Square::NUM {
@@ -40,11 +48,11 @@ impl Zobrist {
             pc += 1;
         }
 
-        // 手駒
+        // 手駒（HAND_NUMぶんのみ生成）
         let mut c = 0;
         while c < Color::NUM {
             let mut pt = 0;
-            while pt < 8 {
+            while pt < PieceType::HAND_NUM {
                 seed = xorshift64(seed);
                 zobrist.hand[c][pt] = seed;
                 pt += 1;
@@ -73,10 +81,30 @@ pub fn zobrist_psq(pc: Piece, sq: Square) -> u64 {
     ZOBRIST.psq[pc.index()][sq.index()]
 }
 
+/// 盤上に歩が無い状態のハッシュを取得
+#[inline]
+pub fn zobrist_no_pawns() -> u64 {
+    ZOBRIST.no_pawns
+}
+
 /// 手駒のハッシュを取得
 #[inline]
 pub fn zobrist_hand(color: Color, pt: PieceType) -> u64 {
-    ZOBRIST.hand[color.index()][pt as usize]
+    let idx = hand_index(pt).expect("zobrist_hand called with non-hand piece");
+    ZOBRIST.hand[color.index()][idx]
+}
+
+const fn hand_index(pt: PieceType) -> Option<usize> {
+    match pt {
+        PieceType::Pawn => Some(0),
+        PieceType::Lance => Some(1),
+        PieceType::Knight => Some(2),
+        PieceType::Silver => Some(3),
+        PieceType::Gold => Some(4),
+        PieceType::Bishop => Some(5),
+        PieceType::Rook => Some(6),
+        _ => None,
+    }
 }
 
 /// 手番のハッシュを取得

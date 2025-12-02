@@ -5,6 +5,7 @@
 
 use super::{LimitsType, TimeOptions, TimePoint};
 use crate::types::Color;
+use log::debug;
 use rand::Rng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -546,6 +547,23 @@ impl TimeManagement {
                 self.set_search_end(elapsed);
             }
         }
+
+        debug!(
+            target: "engine_core::search",
+            "apply_iteration_timing: elapsed={}ms total_time={:.3} max_time={} min_time={} stop_threshold={:?} search_end={} nodes_effort={:.1} depth={} ponder={} final_push={} single_move_limit={} stop_on_ponderhit={}",
+            elapsed,
+            total_time,
+            self.maximum_time,
+            self.minimum_time,
+            self.last_stop_threshold,
+            self.search_end,
+            nodes_effort,
+            completed_depth,
+            ponder,
+            self.is_final_push,
+            self.single_move_limit,
+            self.stop_on_ponderhit,
+        );
     }
 
     /// 最適思考時間を取得
@@ -632,6 +650,14 @@ impl TimeManagement {
     fn should_stop_internal(&mut self, elapsed: TimePoint) -> bool {
         // 外部からの停止要求
         if self.stop.load(Ordering::Relaxed) {
+            debug!(
+                target: "engine_core::search",
+                "stop check: external stop elapsed={} search_end={} last_stop_threshold={:?} max_time={}",
+                elapsed,
+                self.search_end,
+                self.last_stop_threshold,
+                self.maximum_time
+            );
             return true;
         }
 
@@ -642,18 +668,36 @@ impl TimeManagement {
 
         // search_endが設定されていればそれで判定
         if self.search_end > 0 && elapsed >= self.search_end {
+            debug!(
+                target: "engine_core::search",
+                "stop check: search_end reached elapsed={} search_end={}",
+                elapsed,
+                self.search_end
+            );
             return true;
         }
 
         // total_time由来の直近閾値
         if let Some(threshold) = self.last_stop_threshold {
             if elapsed >= threshold {
+                debug!(
+                    target: "engine_core::search",
+                    "stop check: last_stop_threshold reached elapsed={} threshold={}",
+                    elapsed,
+                    threshold
+                );
                 return true;
             }
         }
 
         // 最大時間を超えた（セーフティ）
         if elapsed >= self.maximum_time {
+            debug!(
+                target: "engine_core::search",
+                "stop check: maximum_time reached elapsed={} max_time={}",
+                elapsed,
+                self.maximum_time
+            );
             return true;
         }
 
@@ -737,6 +781,12 @@ impl TimeManagement {
     /// 停止フラグをリセット
     pub fn reset_stop(&self) {
         self.stop.store(false, Ordering::Relaxed);
+    }
+
+    /// 停止要求が出ているか
+    #[inline]
+    pub fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 }
 

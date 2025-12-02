@@ -64,8 +64,8 @@ impl Hand {
     /// 1枚減らす
     #[inline]
     pub const fn sub(self, pt: PieceType) -> Hand {
-        debug_assert!(self.has(pt));
         let (shift, _) = Self::shift_mask(pt);
+        debug_assert!(self.has(pt));
         Hand(self.0 - (1 << shift))
     }
 

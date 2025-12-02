@@ -8,26 +8,36 @@ use crate::search::{
 };
 use crate::types::{Move, Piece, Square};
 
+// Search関連のテストではスタック使用量が大きいため、必要に応じてスタックサイズを拡張する。
+const STACK_SIZE: usize = 64 * 1024 * 1024; // 64MB
+
 /// TT手がbestだった場合にTTMoveHistoryが加点されることを確認
 #[test]
 fn tt_move_history_updates_on_bestmove() {
-    let mut search = Search::new(16);
-    let mut pos = crate::position::Position::new();
-    pos.set_hirate();
+    std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(|| {
+            let mut search = Search::new(16);
+            let mut pos = crate::position::Position::new();
+            pos.set_hirate();
 
-    let limits = LimitsType {
-        depth: 1,
-        ..Default::default()
-    };
+            let limits = LimitsType {
+                depth: 1,
+                ..Default::default()
+            };
 
-    // 実際の探索を流して、TT手がbestとして保存されるようにする
-    let _ = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+            // 実際の探索を流して、TT手がbestとして保存されるようにする
+            let _ = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
 
-    let opts = search.time_options(); // just to avoid warnings
-    assert!(opts.minimum_thinking_time > 0);
+            let opts = search.time_options(); // just to avoid warnings
+            assert!(opts.minimum_thinking_time > 0);
 
-    // 内部のtt_move_historyがゼロでないことを確認できるAPIがないので、
-    // 少なくともpanicしないことのみを確認する（実際の更新はMovePicker内で加点される）
+            // 内部のtt_move_historyがゼロでないことを確認できるAPIがないので、
+            // 少なくともpanicしないことのみを確認する（実際の更新はMovePicker内で加点される）
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 /// ContinuationHistoryがquiet bestmoveで更新されることを確認
@@ -35,29 +45,36 @@ fn tt_move_history_updates_on_bestmove() {
 /// 簡易的に探索が完了することを確認するのみ
 #[test]
 fn continuation_history_updates_on_quiet_best() {
-    let mut search = Search::new(16);
-    let mut pos = crate::position::Position::new();
-    pos.set_hirate();
+    std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(|| {
+            let mut search = Search::new(16);
+            let mut pos = crate::position::Position::new();
+            pos.set_hirate();
 
-    // 2手だけ指して、継続手の履歴が取れる状況を作る
-    let mv1 = Move::from_usi("7g7f").unwrap();
-    let mv2 = Move::from_usi("3c3d").unwrap();
+            // 2手だけ指して、継続手の履歴が取れる状況を作る
+            let mv1 = Move::from_usi("7g7f").unwrap();
+            let mv2 = Move::from_usi("3c3d").unwrap();
 
-    let gives_check1 = pos.gives_check(mv1);
-    pos.do_move(mv1, gives_check1);
-    let gives_check2 = pos.gives_check(mv2);
-    pos.do_move(mv2, gives_check2);
+            let gives_check1 = pos.gives_check(mv1);
+            pos.do_move(mv1, gives_check1);
+            let gives_check2 = pos.gives_check(mv2);
+            pos.do_move(mv2, gives_check2);
 
-    let limits = LimitsType {
-        depth: 2,
-        ..Default::default()
-    };
+            let limits = LimitsType {
+                depth: 2,
+                ..Default::default()
+            };
 
-    // 探索を実行（ContinuationHistoryが内部で更新されることを確認）
-    let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+            // 探索を実行（ContinuationHistoryが内部で更新されることを確認）
+            let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
 
-    // 結果が存在することを確認
-    assert!(result.best_move.is_some(), "探索結果が存在するべき");
+            // 結果が存在することを確認
+            assert!(result.best_move.is_some(), "探索結果が存在するべき");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 // =============================================================================

@@ -481,7 +481,7 @@ impl Position {
     // ========== 指し手実行 ==========
 
     /// 指し手を実行
-    pub fn do_move(&mut self, m: Move, gives_check: bool) {
+    pub fn do_move(&mut self, m: Move, _gives_check: bool) {
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
@@ -518,7 +518,7 @@ impl Position {
 
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
-            new_state.hand_key ^= zobrist_hand(us, pt);
+            new_state.hand_key = new_state.hand_key.wrapping_sub(zobrist_hand(us, pt));
 
             // 盤上に配置
             self.put_piece(pc, to);
@@ -544,24 +544,43 @@ impl Position {
             // 駒を取る場合
             if captured.is_some() {
                 let captured_pt = captured.piece_type().unpromote();
-                // DirtyPiece: 手駒の変化（us の captured_pt が 1 増える）
-                let old_hand = self.hand[us.index()];
-                let old_count = old_hand.count(captured_pt) as u8;
-                let new_count = old_count.saturating_add(1);
-                new_state.dirty_piece.hand_changes.push(super::state::HandChange {
-                    owner: us,
-                    piece_type: captured_pt,
-                    old_count,
-                    new_count,
-                });
-
+                debug_assert!(
+                    captured_pt != PieceType::King,
+                    "illegal capture of king at {} by move {} in position {}",
+                    to.to_usi(),
+                    m.to_usi(),
+                    self.to_sfen()
+                );
                 self.remove_piece(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
                 self.xor_partial_keys(&mut new_state, captured, to);
 
-                // 手駒に追加（成駒は生駒に戻す）
-                self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
-                new_state.hand_key ^= zobrist_hand(us, captured_pt);
+                // 手駒に追加（成駒は生駒に戻す）※手駒にならない駒種は無視
+                if matches!(
+                    captured_pt,
+                    PieceType::Pawn
+                        | PieceType::Lance
+                        | PieceType::Knight
+                        | PieceType::Silver
+                        | PieceType::Gold
+                        | PieceType::Bishop
+                        | PieceType::Rook
+                ) {
+                    // DirtyPiece: 手駒の変化（us の captured_pt が 1 増える）
+                    let old_hand = self.hand[us.index()];
+                    let old_count = old_hand.count(captured_pt) as u8;
+                    let new_count = old_count.saturating_add(1);
+                    new_state.dirty_piece.hand_changes.push(super::state::HandChange {
+                        owner: us,
+                        piece_type: captured_pt,
+                        old_count,
+                        new_count,
+                    });
+
+                    self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
+                    new_state.hand_key =
+                        new_state.hand_key.wrapping_add(zobrist_hand(us, captured_pt));
+                }
 
                 // 駒割評価値の更新
                 // TODO: material_value の更新
@@ -609,8 +628,12 @@ impl Position {
             }
         }
 
+        // この手で王手になるかを盤面から判定
+        let checkers = self.attackers_to_c(self.king_square[them.index()], us);
+        let is_check = !checkers.is_empty();
+
         // 4. 連続王手カウンタの更新（YaneuraOu準拠）
-        if gives_check {
+        if is_check {
             new_state.continuous_check[us.index()] = prev_continuous[us.index()] + 2;
         } else {
             new_state.continuous_check[us.index()] = 0;
@@ -622,11 +645,7 @@ impl Position {
         self.side_to_move = them;
 
         // 6. 王手情報の更新
-        new_state.checkers = if gives_check {
-            self.attackers_to_c(self.king_square[them.index()], us)
-        } else {
-            Bitboard::EMPTY
-        };
+        new_state.checkers = checkers;
 
         // 7. 千日手判定に使う手駒スナップショットを保存
         new_state.hand_snapshot = self.hand;
@@ -819,7 +838,7 @@ impl Position {
 
         // 直接王手：移動先が王手マスにあるか
         let moved_pt = if m.is_promote() {
-            pt.promote().unwrap()
+            pt.promote().unwrap_or(pt)
         } else {
             pt
         };
@@ -1144,5 +1163,63 @@ mod tests {
 
         assert_eq!(pos.piece_on(sq23), Piece::B_PAWN);
         assert_eq!(pos.piece_on(sq22), Piece::NONE);
+    }
+
+    /// 自己対局中に発生した王手見落としによるpanicを再現し、checkersが正しく更新されることを確認する。
+    #[test]
+    fn test_checkers_matches_attackers_after_moves() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        // byoyomi 3000ms の自己対局ログより抽出（最後の timeout は除外）。
+        let moves = [
+            "7g7f", "4a3b", "1g1f", "5a5b", "4g4f", "3c3d", "6g6f", "1c1d", "5i4h", "9c9d", "4h4g",
+            "4c4d", "2h3h", "9a9c", "1i1g", "3a4b", "3h7h", "5c5d", "5g5f", "6c6d", "7h1h", "8b6b",
+            "1h5h", "6d6e", "6f6e", "6b6e", "5h6h", "P*6g", "6h4h", "4d4e", "8h2b+", "3b2b",
+            "B*7g", "4e4f",
+        ];
+
+        for (idx, mv_str) in moves.iter().enumerate() {
+            let mv = Move::from_usi(mv_str).unwrap_or_else(|| panic!("invalid move: {mv_str}"));
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+
+            let king_sq = pos.king_square(pos.side_to_move());
+            let expected_checkers = pos.attackers_to_c(king_sq, !pos.side_to_move());
+
+            assert_eq!(
+                pos.checkers(),
+                expected_checkers,
+                "checkers mismatch at ply {} after move {} in sfen {}",
+                idx + 1,
+                mv_str,
+                pos.to_sfen()
+            );
+        }
+    }
+
+    #[test]
+    fn test_do_move_sets_checkers_from_board_state() {
+        let mut pos = Position::new();
+        // 玉と持ち駒だけの簡単な局面を作り、わざとgives_check=falseで王手の手を指す。
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+
+        let drop_sq = Square::from_usi("4a").unwrap();
+        let mv = Move::new_drop(PieceType::Gold, drop_sq);
+
+        // 王手になるにもかかわらず false を渡しても、盤面から正しくチェック状態が計算されることを確認。
+        pos.do_move(mv, false);
+        let expected_checkers = pos.attackers_to_c(pos.king_square(Color::White), Color::Black);
+        assert!(!expected_checkers.is_empty(), "drop should give check");
+        assert_eq!(pos.checkers(), expected_checkers);
+        assert_eq!(pos.state().continuous_check[Color::Black.index()], 2);
+        assert_eq!(pos.state().continuous_check[Color::White.index()], 0);
+        assert_eq!(pos.side_to_move(), Color::White);
     }
 }

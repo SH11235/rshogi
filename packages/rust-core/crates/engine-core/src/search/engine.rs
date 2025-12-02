@@ -196,6 +196,10 @@ pub struct Search {
     previous_time_reduction: f64,
     /// 直前の手数（手番反転の検出用）
     last_game_ply: Option<i32>,
+    /// 次のiterationで深さを伸ばすかどうか（YaneuraOu準拠）
+    increase_depth: bool,
+    /// 深さを伸ばせなかった回数（aspiration時の調整に使用）
+    search_again_counter: i32,
 
     /// 引き分けまでの最大手数（YaneuraOu準拠のエンジンオプション）
     max_moves_to_draw: i32,
@@ -257,6 +261,8 @@ impl Search {
         self.last_best_move = Move::NONE;
         self.tot_best_move_changes = 0.0;
         self.last_game_ply = Some(ply);
+        self.increase_depth = true;
+        self.search_again_counter = 0;
     }
 
     /// fallingEval / timeReduction / totBestMoveChanges を計算
@@ -316,6 +322,8 @@ impl Search {
             tot_best_move_changes: 0.0,
             previous_time_reduction: 0.85,
             last_game_ply: None,
+            increase_depth: true,
+            search_again_counter: 0,
             max_moves_to_draw: DEFAULT_MAX_MOVES_TO_DRAW,
         }
     }
@@ -524,6 +532,10 @@ impl Search {
     where
         F: FnMut(&SearchInfo),
     {
+        // 深さペーシングの状態を初期化
+        self.increase_depth = true;
+        self.search_again_counter = 0;
+
         // ルート手を初期化
         worker.root_moves = super::RootMoves::from_legal_moves(pos, &worker.limits.search_moves);
 
@@ -551,13 +563,18 @@ impl Search {
 
         // 反復深化
         for depth in 1..=max_depth {
+            // 前回のiterationで深さを伸ばせなかった場合のカウンター（YO準拠）
+            if depth > 1 && !self.increase_depth {
+                self.search_again_counter += 1;
+            }
+
             if worker.abort {
                 break;
             }
 
             // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
             // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
-            if depth > 1 && worker.time_manager.should_stop(depth) {
+            if depth > 1 && !worker.limits.ponder && worker.time_manager.should_stop(depth) {
                 break;
             }
 
@@ -604,7 +621,9 @@ impl Search {
 
                 // Aspiration Windowループ
                 loop {
-                    let adjusted_depth = (depth - failed_high_cnt).max(1);
+                    let adjusted_depth =
+                        (depth - failed_high_cnt - (3 * (self.search_again_counter + 1) / 4))
+                            .max(1);
                     // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
                     // pv_idx>0の場合のみsearch_root_for_pvを使用
                     let score = if pv_idx == 0 {
@@ -696,32 +715,44 @@ impl Search {
                 let (changes_sum, thread_count) =
                     aggregate_best_move_changes(&[summary.best_move_changes]);
                 let tot_best_move_changes = self.tot_best_move_changes / 2.0 + changes_sum;
-                let (falling_eval, time_reduction, tot_changes, threads) =
-                    self.compute_time_factors(worker, tot_best_move_changes, thread_count);
-                let total_time = worker.time_manager.total_time_for_iteration(
-                    falling_eval,
-                    time_reduction,
-                    tot_changes,
-                    threads,
-                );
+                if worker.limits.use_time_management()
+                    && !worker.time_manager.stop_on_ponderhit()
+                    && worker.time_manager.search_end() == 0
+                {
+                    let (falling_eval, time_reduction, tot_changes, threads) =
+                        self.compute_time_factors(worker, tot_best_move_changes, thread_count);
+                    let total_time = worker.time_manager.total_time_for_iteration(
+                        falling_eval,
+                        time_reduction,
+                        tot_changes,
+                        threads,
+                    );
 
-                // 実測 effort を正規化
-                let nodes_effort =
-                    normalize_nodes_effort(worker.root_moves[0].effort, worker.nodes);
+                    // 実測 effort を正規化
+                    let nodes_effort =
+                        normalize_nodes_effort(worker.root_moves[0].effort, worker.nodes);
 
-                // 合法手が1つの場合は使う時間そのものを500msに丸める（YaneuraOu準拠）
-                let total_time = if worker.root_moves.len() == 1 {
-                    total_time.min(500.0)
-                } else {
-                    total_time
-                };
-                worker.time_manager.apply_iteration_timing(
-                    worker.time_manager.elapsed(),
-                    total_time,
-                    nodes_effort,
-                    worker.limits.ponder,
-                    worker.completed_depth,
-                );
+                    // 合法手が1つの場合は使う時間そのものを500msに丸める（YaneuraOu準拠）
+                    let total_time = if worker.root_moves.len() == 1 {
+                        total_time.min(500.0)
+                    } else {
+                        total_time
+                    };
+                    let elapsed_time = worker.time_manager.elapsed() as f64;
+                    worker.time_manager.apply_iteration_timing(
+                        worker.time_manager.elapsed(),
+                        total_time,
+                        nodes_effort,
+                        worker.limits.ponder,
+                        worker.completed_depth,
+                    );
+
+                    // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
+                    self.increase_depth =
+                        worker.limits.ponder || elapsed_time <= total_time * 0.5138;
+                }
+                // tot_best_move_changes は decay 後の値を保持（時間管理を使わない場合も持ち回る）
+                self.tot_best_move_changes = tot_best_move_changes;
 
                 // best_move_changes は集約後リセット
                 worker.best_move_changes = 0.0;
@@ -801,17 +832,30 @@ mod tests {
 
     #[test]
     fn test_worker_summary_from_worker() {
-        // 簡易にSearchWorkerを初期化してサマリを取る
-        let mut tm =
-            TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-        let mut limits = LimitsType::new();
-        limits.set_start_time();
-        let tt = TranspositionTable::new(16);
-        let mut worker = SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
-        worker.best_move_changes = 3.5;
+        // SearchWorker はスタックを大きく消費するため、別スレッドで実行する。
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut tm = TimeManagement::new(
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicBool::new(false)),
+                );
+                let mut limits = LimitsType::new();
+                limits.set_start_time();
+                let tt = TranspositionTable::new(16);
+                let mut worker =
+                    SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
+                worker.best_move_changes = 3.5;
 
-        let summary = WorkerSummary::from(&worker);
-        assert!((summary.best_move_changes - 3.5).abs() < 1e-9, "best_move_changes should match");
+                let summary = WorkerSummary::from(&worker);
+                assert!(
+                    (summary.best_move_changes - 3.5).abs() < 1e-9,
+                    "best_move_changes should match"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
