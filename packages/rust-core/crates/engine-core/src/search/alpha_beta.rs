@@ -73,6 +73,12 @@ fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
 /// LMR用のreduction配列（YaneuraOu準拠の1次元テーブル）
 type Reductions = [i32; 64];
 
+// YaneuraOuのreduction式で用いる定数（yaneuraou-search.cpp:3163-3170,4759）
+const REDUCTION_DELTA_SCALE: i32 = 731;
+const REDUCTION_NON_IMPROVING_MULT: i32 = 216;
+const REDUCTION_NON_IMPROVING_DIV: i32 = 512;
+const REDUCTION_BASE_OFFSET: i32 = 1089;
+
 /// Reduction配列（遅延初期化）
 static REDUCTIONS: OnceLock<Box<Reductions>> = OnceLock::new();
 
@@ -104,12 +110,15 @@ fn reduction(imp: bool, depth: i32, move_count: i32, delta: i32, root_delta: i32
         .get()
         .expect("REDUCTIONS not initialized. Call init_reductions() at startup.");
     let reduction_scale = table[d] * table[mc];
-    let root_delta = root_delta.abs().max(1);
+    let root_delta = root_delta.max(1);
     let delta = delta.max(0);
 
     // YaneuraOuのreduction式（yaneuraou-search.cpp:3163-3170,4759）
     // 1024倍スケールで返す。ttPv加算は呼び出し側で行う。
-    reduction_scale - delta * 731 / root_delta + (!imp as i32) * reduction_scale * 216 / 512 + 1089
+    reduction_scale - delta * REDUCTION_DELTA_SCALE / root_delta
+        + (!imp as i32) * reduction_scale * REDUCTION_NON_IMPROVING_MULT
+            / REDUCTION_NON_IMPROVING_DIV
+        + REDUCTION_BASE_OFFSET
 }
 
 /// Reductionテーブルが初期化済みかどうかを確認
@@ -1172,6 +1181,7 @@ impl<'a> SearchWorker<'a> {
                 r += 931;
             }
 
+            let cont_tables = self.build_cont_tables(ply);
             let mut lmr_depth = new_depth - r / 1024;
 
             // Step14: 浅い深さの枝刈り（YaneuraOu準拠）
@@ -1206,7 +1216,6 @@ impl<'a> SearchWorker<'a> {
                         continue;
                     }
                 } else {
-                    let cont_tables = self.build_cont_tables(ply);
                     let mut history = 0;
                     if let Some(t0) = cont_tables[0] {
                         history += t0.get(mv.moved_piece_after(), mv.to()) as i32;
@@ -1299,6 +1308,7 @@ impl<'a> SearchWorker<'a> {
             // =============================================================
             // Late Move Reduction (LMR)
             // =============================================================
+            let cont_tables = self.build_cont_tables(ply);
             let msb_depth = msb(depth);
             let tt_value_higher = tt_hit && tt_value != Value::NONE && tt_value > alpha;
             let tt_depth_ge = tt_hit && tt_data.depth >= depth;
@@ -1343,13 +1353,8 @@ impl<'a> SearchWorker<'a> {
             } else {
                 let moved_piece = mv.moved_piece_after();
                 let main_hist = self.main_history.get(mover, mv) as i32;
-                let cont_tables_for_stat = self.build_cont_tables(ply);
-                let cont0 = cont_tables_for_stat[0]
-                    .map(|t| t.get(moved_piece, mv.to()) as i32)
-                    .unwrap_or(0);
-                let cont1 = cont_tables_for_stat[1]
-                    .map(|t| t.get(moved_piece, mv.to()) as i32)
-                    .unwrap_or(0);
+                let cont0 = cont_tables[0].map(|t| t.get(moved_piece, mv.to()) as i32).unwrap_or(0);
+                let cont1 = cont_tables[1].map(|t| t.get(moved_piece, mv.to()) as i32).unwrap_or(0);
                 2 * main_hist + cont0 + cont1
             };
             self.stack[ply as usize].stat_score = stat_score;
@@ -1397,8 +1402,15 @@ impl<'a> SearchWorker<'a> {
                     // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
                     let moved_piece = mv.moved_piece_after();
                     let to_sq = mv.to();
-                    const CONTHIST_BONUSES: &[(i32, i32)] =
-                        &[(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
+                    // (offset, weight) : offset手前の手に対する重み（1024=1倍）
+                    const CONTHIST_BONUSES: &[(i32, i32)] = &[
+                        (1, 1108), // 1手前
+                        (2, 652),  // 2手前
+                        (3, 273),  // 3手前
+                        (4, 572),  // 4手前
+                        (5, 126),  // 5手前
+                        (6, 449),  // 6手前
+                    ];
                     for &(offset, weight) in CONTHIST_BONUSES {
                         if self.stack[ply as usize].in_check && offset > 2 {
                             break;
