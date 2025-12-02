@@ -34,11 +34,5 @@ pub mod tt;
 //  探索
 pub mod search;
 
-// 手の順序付け
-pub mod movepick;
-
-// 時間管理
-pub mod time;
-
 // 1手詰め探索
 pub mod mate;
