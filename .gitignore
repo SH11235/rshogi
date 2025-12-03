@@ -42,27 +42,15 @@ packages/web/coverage/
 
 # Rust build artifacts
 packages/rust-core/target/
-packages/rust-core/pkg/
+packages/engine-wasm/pkg/
 target/
-
-# WASM build artifacts
-packages/web/src/wasm/
-
+packages/rust-core/data/floodgate/raw/
+packages/rust-core/target_before
 
 # private memo
 memo/
 
-# Benchmark results
-packages/core/benchmark-results.md
-packages/core/ai-benchmark-*.json
-
-# Opening book data (copied from core during build)
-packages/web/public/data/*.binz
-packages/web/public/data/*.bin.binz
-
-packages/rust-core/data/floodgate/raw/
 _shared/*
 
 runs_local/
 .serena/
-packages/rust-core/target_before
