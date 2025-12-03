@@ -22,7 +22,7 @@ function formatEvent(event: EngineEvent): string {
 }
 
 function App() {
-    const engineRef = useRef<ReturnType<typeof createTauriEngineClient>>();
+    const engineRef = useRef<ReturnType<typeof createTauriEngineClient> | null>(null);
     const engine = useMemo(() => {
         if (!engineRef.current) {
             engineRef.current = createTauriEngineClient({
