@@ -250,6 +250,15 @@ impl CapturePieceToHistory {
         }
     }
 
+    /// YaneuraOu の `type_of(capturedPiece)` 相当。
+    ///
+    /// 捕獲がない場合（captured = NONE）は index=0 を使う。
+    #[inline]
+    pub fn get_with_captured_piece(&self, pc: Piece, to: Square, captured: Piece) -> i16 {
+        let captured_idx = (captured.raw() & 0x0F) as usize;
+        self.table[pc.index()][to.index()][captured_idx].get()
+    }
+
     /// 値を取得
     #[inline]
     pub fn get(&self, pc: Piece, to: Square, captured_pt: PieceType) -> i16 {
