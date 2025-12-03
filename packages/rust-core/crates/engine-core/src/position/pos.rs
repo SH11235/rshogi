@@ -4,7 +4,10 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::types::{Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square};
+use crate::eval::material::{base_piece_value, hand_piece_value, signed_piece_value};
+use crate::types::{
+    Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
+};
 
 use super::state::{ChangedPiece, StateInfo};
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
@@ -495,6 +498,7 @@ impl Position {
         // NNUE 関連は毎手リセットし、DirtyPiece はここで構築する。
         new_state.accumulator.reset();
         new_state.dirty_piece.clear();
+        let mut material_value = new_state.material_value.raw();
 
         // 2. 局面情報の更新
         self.game_ply += 1;
@@ -529,6 +533,12 @@ impl Position {
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
             new_state.hand_key = new_state.hand_key.wrapping_sub(zobrist_hand(us, pt));
+
+            // material_value: 手駒 → 盤上（実質差分ゼロだが明示的に更新）
+            let sign = if us == Color::Black { 1 } else { -1 };
+            let base = base_piece_value(pt);
+            material_value -= sign * base;
+            material_value += sign * base;
 
             // 盤上に配置
             self.put_piece(pc, to);
@@ -572,6 +582,9 @@ impl Position {
                 new_state.board_key ^= zobrist_psq(captured, to);
                 self.xor_partial_keys(&mut new_state, captured, to);
 
+                // material_value: 盤上から駒が消える
+                material_value -= signed_piece_value(captured);
+
                 // 手駒に追加（成駒は生駒に戻す）※手駒にならない駒種は無視
                 if matches!(
                     captured_pt,
@@ -597,10 +610,9 @@ impl Position {
                     self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
                     new_state.hand_key =
                         new_state.hand_key.wrapping_add(zobrist_hand(us, captured_pt));
-                }
 
-                // 駒割評価値の更新
-                // TODO: material_value の更新
+                    material_value += hand_piece_value(us, captured_pt);
+                }
             }
             new_state.captured_piece = captured;
 
@@ -617,6 +629,11 @@ impl Position {
             self.put_piece(moved_pc, to);
             new_state.board_key ^= zobrist_psq(moved_pc, to);
             self.xor_partial_keys(&mut new_state, moved_pc, to);
+
+            // 成りによるmaterial差分
+            if moved_pc != pc {
+                material_value += signed_piece_value(moved_pc) - signed_piece_value(pc);
+            }
 
             // 玉の移動
             if pc.piece_type() == PieceType::King {
@@ -693,6 +710,7 @@ impl Position {
 
         // 7. 千日手判定に使う手駒スナップショットを保存
         new_state.hand_snapshot = self.hand;
+        new_state.material_value = Value::new(material_value);
 
         // 8. StateInfoの付け替え（previous をぶら下げる）
         new_state.last_move = m;
