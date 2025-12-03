@@ -250,6 +250,23 @@ impl CapturePieceToHistory {
         }
     }
 
+    /// YaneuraOu の `type_of(capturedPiece)` 相当。
+    ///
+    /// 捕獲された駒そのものを渡す版。下位4bit（0=NONE, 1..14=PieceType）を
+    /// インデックスに使うため、呼び出し側で `piece_type()` を取らなくてよい。
+    /// 捕獲がない場合（captured = NONE）は index=0 を使う。
+    #[inline]
+    pub fn get_with_captured_piece(&self, pc: Piece, to: Square, captured: Piece) -> i16 {
+        let captured_idx = (captured.raw() & 0x0F) as usize;
+        debug_assert!(
+            captured_idx < PIECE_TYPE_NUM,
+            "captured_idx {} out of bounds (PIECE_TYPE_NUM = {})",
+            captured_idx,
+            PIECE_TYPE_NUM
+        );
+        self.table[pc.index()][to.index()][captured_idx].get()
+    }
+
     /// 値を取得
     #[inline]
     pub fn get(&self, pc: Piece, to: Square, captured_pt: PieceType) -> i16 {
@@ -865,5 +882,27 @@ mod tests {
         assert_eq!(capture_malus(1, 5), 415);
         // depth=10: min(708*10-148, 2287) = min(6932, 2287) = 2287
         assert_eq!(capture_malus(10, 0), 2287);
+    }
+
+    #[test]
+    fn test_capture_piece_to_history_with_captured_piece() {
+        let mut history = CapturePieceToHistory::new();
+        let pc = Piece::B_GOLD;
+        let to = Square::SQ_55;
+        let captured = Piece::W_SILVER;
+
+        // 初期値は0
+        assert_eq!(history.get_with_captured_piece(pc, to, captured), 0);
+
+        // 更新後、get/with_captured_pieceが同じ値を返す
+        history.update(pc, to, captured.piece_type(), 100);
+        assert_eq!(
+            history.get_with_captured_piece(pc, to, captured),
+            history.get(pc, to, captured.piece_type())
+        );
+
+        // NONEの場合はindex=0を使う
+        let captured_none = Piece::NONE;
+        assert_eq!(history.get_with_captured_piece(pc, to, captured_none), 0);
     }
 }
