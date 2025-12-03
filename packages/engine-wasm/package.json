@@ -1,0 +1,38 @@
+{
+    "name": "@shogi/engine-wasm",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "sideEffects": false,
+    "main": "./dist/index.js",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "default": "./dist/index.js"
+        },
+        "./pkg/*": {
+            "default": "./pkg/*"
+        }
+    },
+    "scripts": {
+        "build": "pnpm run build:wasm && tsc -p tsconfig.build.json",
+        "build:wasm": "node ./scripts/build-wasm.mjs",
+        "dev": "tsc -p tsconfig.build.json --watch",
+        "format": "pnpm --workspace-root exec biome format --write .",
+        "format:check": "pnpm --workspace-root exec biome format .",
+        "lint": "pnpm --workspace-root exec biome check .",
+        "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
+        "typecheck": "tsc -p tsconfig.json",
+        "test": "pnpm run build:wasm && node ./test/startpos-e2e.mjs"
+    },
+    "dependencies": {
+        "@shogi/engine-client": "workspace:*"
+    },
+    "devDependencies": {
+        "typescript": "~5.9.3",
+        "vitest": "^4.0.15"
+    }
+}
