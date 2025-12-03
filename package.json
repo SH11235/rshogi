@@ -18,6 +18,7 @@
     "lint:affected": "turbo lint --filter='[HEAD~1]'",
     "typecheck": "turbo typecheck",
     "typecheck:affected": "turbo typecheck --filter='[HEAD~1]'",
+    "prepare": "git config core.hooksPath .husky",
     "format": "pnpm format:js && pnpm format:rust",
     "format:check": "pnpm format:check:js && pnpm format:check:rust",
     "format:ci": "pnpm format:check:js",
@@ -48,8 +49,8 @@
     "node": "24.11.1"
   },
   "lint-staged": {
-    "**/*.{ts,tsx,js,jsx,css}": [
-      "biome check --write --files-ignore-unknown=true"
+    "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,yml,yaml}": [
+      "pnpm --workspace-root exec biome format --write --files-ignore-unknown=true"
     ]
   }
 }
