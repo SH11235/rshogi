@@ -36,6 +36,7 @@ export interface TauriEngineClientOptions extends EngineInitOptions {
 const DEFAULT_EVENT_NAME = "engine://event";
 
 export function createTauriEngineClient(options: TauriEngineClientOptions = {}): EngineClient {
+    const useMockOnError = options.useMockOnError ?? true;
     const mock = createMockEngineClient();
     const listeners = new Set<EngineEventHandler>();
     const mockSubscriptions = new Map<EngineEventHandler, () => void>();
@@ -82,13 +83,14 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
         try {
             unlisten = await ipc.listen<EngineEvent>(eventName, (evt) => emit(evt.payload));
         } catch (error) {
-            if (options.useMockOnError === false) throw error;
+            console.error("Failed to subscribe to engine events:", error);
+            if (useMockOnError === false) throw error;
             await switchToMock();
         }
     };
 
     const handleIpcError = async (error: unknown) => {
-        if (options.useMockOnError === false) throw error;
+        if (useMockOnError === false) throw error;
         await switchToMock();
     };
 

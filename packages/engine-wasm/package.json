@@ -12,17 +12,21 @@
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js",
             "default": "./dist/index.js"
+        },
+        "./pkg/*": {
+            "default": "./pkg/*"
         }
     },
     "scripts": {
-        "build": "tsc -p tsconfig.build.json",
+        "build": "pnpm run build:wasm && tsc -p tsconfig.build.json",
+        "build:wasm": "node ./scripts/build-wasm.mjs",
         "dev": "tsc -p tsconfig.build.json --watch",
         "format": "pnpm --workspace-root exec biome format --write .",
         "format:check": "pnpm --workspace-root exec biome format .",
         "lint": "pnpm --workspace-root exec biome check .",
         "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
         "typecheck": "tsc -p tsconfig.json",
-        "test": "vitest"
+        "test": "pnpm run build:wasm && node ./test/startpos-e2e.mjs"
     },
     "dependencies": {
         "@shogi/engine-client": "workspace:*"

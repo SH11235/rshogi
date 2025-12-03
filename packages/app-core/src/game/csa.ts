@@ -67,6 +67,7 @@ export function movesToCsa(moves: string[], metadata: CsaMetadata = {}): string 
     moves.forEach((move, index) => {
         const parsed = parseUsiMove(move);
         if (!parsed) {
+            console.warn(`Failed to parse USI move at index ${index}: ${move}`);
             return;
         }
         const piece = board[parsed.from];

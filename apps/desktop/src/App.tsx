@@ -30,7 +30,10 @@ function App() {
     useEffect(() => {
         let handle: SearchHandle | null = null;
         const unsubscribe = engine.subscribe((event) => {
-            setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), formatEvent(event)]);
+            setLogs((prev) => {
+                const next = [...prev, formatEvent(event)];
+                return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next;
+            });
             if (event.type === "bestmove") {
                 setBestmove(event.move);
             }
@@ -51,7 +54,7 @@ function App() {
 
         return () => {
             if (handle) {
-                handle.cancel().catch(() => undefined);
+                handle.cancel().catch((err) => console.warn("Failed to cancel search:", err));
             }
             unsubscribe();
             engine.dispose().catch(() => undefined);

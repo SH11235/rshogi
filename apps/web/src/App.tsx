@@ -25,7 +25,7 @@ function App() {
     const engine = useMemo(
         () =>
             createWasmEngineClient({
-                stopMode: "terminate", // worker を terminate して確実に止めるモード（今は mock 内部）
+                stopMode: "terminate", // worker を terminate して確実に止めるモード
             }),
         [],
     );
@@ -71,7 +71,7 @@ function App() {
                 status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
             </p>
             <section className="logs">
-                <h2>Events (worker mock for now)</h2>
+                <h2>Events (wasm worker)</h2>
                 <ul>
                     {logs.map((line, idx) => (
                         <li key={`${idx}-${line}`}>{line}</li>

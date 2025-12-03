@@ -3,24 +3,40 @@ export type EngineBackend = "native" | "wasm" | "external-usi";
 export type EngineStopMode = "terminate" | "cooperative";
 
 export interface EngineInitOptions {
+    /** バックエンドの種類 (native/wasm/external-usi) */
     backend?: EngineBackend;
+    /** 並列設定 (native で使用、wasm では無効) */
     threads?: number;
+    /** Worker 数 (将来の並列用) */
     workers?: number;
+    /** 停止モード: terminate または cooperative */
     stopMode?: EngineStopMode;
+    /** NNUE/モデルのパス/URI */
     nnuePath?: string;
     modelUri?: string;
+    /** 定跡パス */
     bookPath?: string;
+    /** トランスポジションテーブルサイズ (MB) */
+    ttSizeMb?: number;
+    /** マルチPVの出力本数 */
+    multiPv?: number;
 }
 
 export interface SearchLimits {
+    /** 探索最大深さ */
     maxDepth?: number;
+    /** ノード数上限 */
     nodes?: number;
+    /** 秒読み (ms) */
     byoyomiMs?: number;
+    /** 固定消費時間 (ms) */
     movetimeMs?: number;
 }
 
 export interface SearchParams {
+    /** 探索条件 */
     limits?: SearchLimits;
+    /** 先読みモード */
     ponder?: boolean;
 }
 
@@ -28,7 +44,9 @@ export interface EngineInfoEvent {
     type: "info";
     depth?: number;
     seldepth?: number;
+    /** 評価値 (センチポーン) */
     scoreCp?: number;
+    /** メイトスコア (手数) */
     scoreMate?: number;
     nodes?: number;
     nps?: number;
@@ -74,6 +92,7 @@ export interface EngineClient {
 export function createMockEngineClient(): EngineClient {
     const listeners = new Set<EngineEventHandler>();
     let activeHandle: { cancelled: boolean } | null = null;
+    let activeTimeout: ReturnType<typeof setTimeout> | null = null;
 
     const emit = (event: EngineEvent) => {
         listeners.forEach((listener) => listener(event));
@@ -89,6 +108,10 @@ export function createMockEngineClient(): EngineClient {
         async search(): Promise<SearchHandle> {
             if (activeHandle) {
                 activeHandle.cancelled = true;
+                if (activeTimeout) {
+                    clearTimeout(activeTimeout);
+                    activeTimeout = null;
+                }
             }
             const handle = { cancelled: false };
             activeHandle = handle;
@@ -106,16 +129,20 @@ export function createMockEngineClient(): EngineClient {
                 });
             }, 10);
 
-            const timeout = setTimeout(() => {
+            activeTimeout = setTimeout(() => {
                 if (handle.cancelled) return;
                 emit({ type: "bestmove", move: "resign" });
                 activeHandle = null;
+                activeTimeout = null;
             }, 50);
 
             return {
                 async cancel() {
                     handle.cancelled = true;
-                    clearTimeout(timeout);
+                    if (activeTimeout) {
+                        clearTimeout(activeTimeout);
+                        activeTimeout = null;
+                    }
                     activeHandle = null;
                 },
             };
@@ -124,6 +151,10 @@ export function createMockEngineClient(): EngineClient {
             if (activeHandle) {
                 activeHandle.cancelled = true;
                 activeHandle = null;
+                if (activeTimeout) {
+                    clearTimeout(activeTimeout);
+                    activeTimeout = null;
+                }
             }
         },
         async setOption() {
@@ -138,6 +169,10 @@ export function createMockEngineClient(): EngineClient {
             if (activeHandle) {
                 activeHandle.cancelled = true;
                 activeHandle = null;
+                if (activeTimeout) {
+                    clearTimeout(activeTimeout);
+                    activeTimeout = null;
+                }
             }
         },
     };

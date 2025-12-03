@@ -61,6 +61,7 @@ export function cloneBoard(board: BoardState): BoardState {
 }
 
 export function applyMove(board: BoardState, move: string): BoardState {
+    // TODO: capture handling, promotion legality, and strict validation are not implemented.
     if (!move || move === "resign") {
         return board;
     }

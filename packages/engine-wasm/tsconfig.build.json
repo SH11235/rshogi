@@ -4,11 +4,8 @@
         "noEmit": false,
         "declaration": true,
         "declarationMap": true,
-        "outDir": "dist",
-        "paths": {
-            "@shogi/engine-client": ["../engine-client/dist/index"],
-            "@shogi/engine-client/*": ["../engine-client/dist/*"]
-        }
+        "allowImportingTsExtensions": false,
+        "outDir": "dist"
     },
     "include": ["src"]
 }

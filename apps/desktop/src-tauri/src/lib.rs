@@ -1,7 +1,6 @@
 use std::sync::Mutex;
 use tauri::async_runtime::JoinHandle;
-use tauri::State;
-use tauri::{Manager, Window};
+use tauri::{Emitter, State, Window};
 
 const ENGINE_EVENT: &str = "engine://event";
 
@@ -16,7 +15,7 @@ struct EngineStateInner {
     handle: Option<JoinHandle<()>>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 enum EngineEvent {
     #[serde(rename = "info")]
@@ -24,8 +23,10 @@ enum EngineEvent {
         depth: Option<u32>,
         nodes: Option<u64>,
         nps: Option<u64>,
-        scoreCp: Option<i32>,
-        scoreMate: Option<i32>,
+        #[serde(rename = "scoreCp")]
+        score_cp: Option<i32>,
+        #[serde(rename = "scoreMate")]
+        score_mate: Option<i32>,
     },
     #[serde(rename = "bestmove")]
     BestMove {
@@ -39,7 +40,10 @@ enum EngineEvent {
 
 #[tauri::command]
 fn engine_init(state: State<EngineState>, opts: Option<serde_json::Value>) -> Result<(), String> {
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let mut inner = state
+        .inner
+        .lock()
+        .map_err(|e| format!("Failed to acquire engine state lock: {e}"))?;
     inner.position = "startpos".to_string();
     let _ = opts; // TODO: map options when native engine is wired.
     Ok(())
@@ -51,7 +55,10 @@ fn engine_position(
     sfen: String,
     moves: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let mut inner = state
+        .inner
+        .lock()
+        .map_err(|e| format!("Failed to acquire engine state lock: {e}"))?;
     inner.position = if let Some(moves) = moves {
         format!("{} moves {}", sfen, moves.join(" "))
     } else {
@@ -74,39 +81,41 @@ async fn engine_search(
 ) -> Result<(), String> {
     // stop any existing search
     {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = state
+            .inner
+            .lock()
+            .map_err(|e| format!("Failed to acquire engine state lock: {e}"))?;
         if let Some(handle) = inner.handle.take() {
             handle.abort();
         }
-        let pos = inner.position.clone();
+        let _pos = inner.position.clone();
         let _ = params; // TODO: use params for time controls when native engine is wired.
         // Spawn a tiny mock search: emit one info and one bestmove.
         inner.handle = Some(tauri::async_runtime::spawn(async move {
             window
-                .emit_all(
+                .emit(
                     ENGINE_EVENT,
                     EngineEvent::Info {
                         depth: Some(1),
                         nodes: Some(128),
                         nps: Some(2048),
-                        scoreCp: Some(0),
-                        scoreMate: None,
+                        score_cp: Some(0),
+                        score_mate: None,
                     },
                 )
-                .ok();
+                .unwrap_or_else(|e| eprintln!("Failed to emit engine info event: {e:?}"));
 
-            tauri::async_runtime::sleep(std::time::Duration::from_millis(50)).await;
-
-            let mv = if pos.is_empty() { "resign" } else { "resign" };
+            // TODO: Replace with actual move generation when engine is wired.
+            let mv = "resign";
             window
-                .emit_all(
+                .emit(
                     ENGINE_EVENT,
                     EngineEvent::BestMove {
                         mv: mv.to_string(),
                         ponder: None,
                     },
                 )
-                .ok();
+                .unwrap_or_else(|e| eprintln!("Failed to emit engine bestmove event: {e:?}"));
         }));
     }
 
@@ -115,7 +124,10 @@ async fn engine_search(
 
 #[tauri::command]
 fn engine_stop(state: State<EngineState>) -> Result<(), String> {
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let mut inner = state
+        .inner
+        .lock()
+        .map_err(|e| format!("Failed to acquire engine state lock: {e}"))?;
     if let Some(handle) = inner.handle.take() {
         handle.abort();
     }
