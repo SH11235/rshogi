@@ -127,6 +127,8 @@ pub fn is_reductions_initialized() -> bool {
 }
 
 /// 置換表プローブの結果をまとめたコンテキスト
+///
+/// TTプローブ後の即時カットオフ判定や、後続の枝刈りロジックで使用される。
 struct TTContext {
     key: u64,
     result: ProbeResult,
@@ -137,12 +139,22 @@ struct TTContext {
     capture: bool,
 }
 
+/// 置換表プローブの結果（続行 or カットオフ）
+enum ProbeOutcome {
+    /// 探索続行（TTContext付き）
+    Continue(TTContext),
+    /// 即時カットオフ値
+    Cutoff(Value),
+}
+
 /// 静的評価まわりの情報をまとめたコンテキスト
 struct EvalContext {
     static_eval: Value,
     unadjusted_static_eval: Value,
     correction_value: i32,
+    /// 2手前と比較して局面が改善しているか
     improving: bool,
+    /// 相手側の局面が悪化しているか
     opponent_worsening: bool,
 }
 
@@ -476,7 +488,7 @@ impl<'a> SearchWorker<'a> {
         ply: i32,
         pv_node: bool,
         in_check: bool,
-    ) -> Result<TTContext, Value> {
+    ) -> ProbeOutcome {
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
         let tt_hit = tt_result.found;
@@ -499,7 +511,7 @@ impl<'a> SearchWorker<'a> {
             && tt_value != Value::NONE
             && tt_data.bound.can_cutoff(tt_value, beta)
         {
-            return Err(tt_value);
+            return ProbeOutcome::Cutoff(tt_value);
         }
 
         // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
@@ -518,11 +530,11 @@ impl<'a> SearchWorker<'a> {
                     Value::NONE,
                     self.tt.generation(),
                 );
-                return Err(value);
+                return ProbeOutcome::Cutoff(value);
             }
         }
 
-        Ok(TTContext {
+        ProbeOutcome::Continue(TTContext {
             key,
             result: tt_result,
             data: tt_data,
@@ -832,7 +844,7 @@ impl<'a> SearchWorker<'a> {
         }
 
         let cont_tables = self.build_cont_tables(ply);
-        let mut mp = MovePicker::new(
+        let mp = MovePicker::new(
             pos,
             tt_move,
             depth,
@@ -845,16 +857,7 @@ impl<'a> SearchWorker<'a> {
             self.generate_all_legal_moves,
         );
 
-        while let Some(mv) = {
-            let m = mp.next_move();
-            if m.is_none() {
-                None
-            } else {
-                Some(m)
-            }
-        } {
-            ordered_moves.push(mv);
-        }
+        ordered_moves.extend(mp.filter(|m| m.is_some()));
 
         // qsearchでは捕獲以外のチェックも生成（YaneuraOu準拠）
         if !in_check && depth == DEPTH_QS {
@@ -897,7 +900,9 @@ impl<'a> SearchWorker<'a> {
         let mut lmr_depth = ctx.lmr_depth;
 
         if ctx.ply != 0 && !ctx.best_value.is_loss() {
-            let lmp_limit = (3 + ctx.depth * ctx.depth) / (2 - ctx.improving as i32);
+            let lmp_denominator = 2 - ctx.improving as i32;
+            debug_assert!(lmp_denominator > 0, "LMP denominator must be positive");
+            let lmp_limit = (3 + ctx.depth * ctx.depth) / lmp_denominator;
             if ctx.move_count >= lmp_limit && !ctx.is_capture && !ctx.gives_check {
                 return Step14Outcome::Skip { best_value: None };
             }
@@ -965,6 +970,7 @@ impl<'a> SearchWorker<'a> {
                 }
 
                 lmr_depth = lmr_depth.max(0);
+                // lmr_depth は探索深さ由来で十数〜数十程度に収まるため i32 乗算でオーバーフローしない
                 if !ctx.pos.see_ge(ctx.mv, Value::new(-26 * lmr_depth * lmr_depth)) {
                     return Step14Outcome::Skip { best_value: None };
                 }
@@ -1342,8 +1348,8 @@ impl<'a> SearchWorker<'a> {
         // 置換表プローブ（即時カットオフ含む）
         let tt_ctx = match self.probe_transposition::<NT>(pos, depth, beta, ply, pv_node, in_check)
         {
-            Ok(ctx) => ctx,
-            Err(value) => return value,
+            ProbeOutcome::Continue(ctx) => ctx,
+            ProbeOutcome::Cutoff(value) => return value,
         };
         let tt_move = tt_ctx.mv;
         let tt_value = tt_ctx.value;
@@ -1704,9 +1710,6 @@ impl<'a> SearchWorker<'a> {
                     }
                     // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
                     // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
-                    if value >= beta {
-                        self.stack[ply as usize].cutoff_cnt += 1;
-                    }
                 } else if value > alpha && value < best_value + Value::new(9) {
                     #[allow(unused_assignments)]
                     {
