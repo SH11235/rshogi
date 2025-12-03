@@ -27,7 +27,10 @@ type ModelCache = { uri: string; bytes: Uint8Array };
 const ctx: {
     postMessage: (value: unknown) => void;
     onmessage: ((msg: { data: WorkerCommand }) => void) | null;
-} = self as any;
+} = self as unknown as {
+    postMessage: (value: unknown) => void;
+    onmessage: ((msg: { data: WorkerCommand }) => void) | null;
+};
 
 let engineInitialized = false;
 let cachedModel: ModelCache | null = null;

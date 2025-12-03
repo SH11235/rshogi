@@ -9,7 +9,6 @@ export type PlaceholderProps = {
 export function Placeholder({ label = "Shogi UI", className }: PlaceholderProps): ReactElement {
     return (
         <div
-            aria-label="shogi-ui-placeholder"
             className={cn(
                 "flex flex-col gap-3 rounded-lg border border-dashed border-muted-foreground/50 bg-muted/40 p-4 text-sm text-muted-foreground",
                 className,

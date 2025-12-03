@@ -80,7 +80,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let lastInitOpts: WasmEngineInitOptions | undefined;
 
     const emit = (event: EngineEvent) => {
-        listeners.forEach((handler) => handler(event));
+        for (const handler of listeners) {
+            handler(event);
+        }
     };
 
     let mockUnsubscribe: (() => void) | null = null;
@@ -91,10 +93,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     };
 
     const detachMock = () => {
-        if (mockUnsubscribe) {
-            mockUnsubscribe();
-            mockUnsubscribe = null;
-        }
+        if (!mockUnsubscribe) return;
+        mockUnsubscribe();
+        mockUnsubscribe = null;
     };
 
     if (backend === "mock") {

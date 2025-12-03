@@ -95,7 +95,9 @@ export function createMockEngineClient(): EngineClient {
     let activeTimeout: ReturnType<typeof setTimeout> | null = null;
 
     const emit = (event: EngineEvent) => {
-        listeners.forEach((listener) => listener(event));
+        for (const listener of listeners) {
+            listener(event);
+        }
     };
 
     return {

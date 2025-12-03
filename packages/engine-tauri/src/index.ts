@@ -55,18 +55,22 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
     let unlisten: UnlistenFn | null = null;
 
     const emit = (event: EngineEvent) => {
-        listeners.forEach((handler) => handler(event));
+        for (const handler of listeners) {
+            handler(event);
+        }
     };
 
     const attachListenersToMock = () => {
-        listeners.forEach((handler) => {
-            if (mockSubscriptions.has(handler)) return;
+        for (const handler of listeners) {
+            if (mockSubscriptions.has(handler)) continue;
             mockSubscriptions.set(handler, mock.subscribe(handler));
-        });
+        }
     };
 
     const detachMockSubscriptions = () => {
-        mockSubscriptions.forEach((unsubscribe) => unsubscribe());
+        for (const unsubscribe of mockSubscriptions.values()) {
+            unsubscribe();
+        }
         mockSubscriptions.clear();
     };
 

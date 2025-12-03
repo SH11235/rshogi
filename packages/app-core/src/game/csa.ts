@@ -7,7 +7,6 @@ import {
     createInitialBoard,
     type Piece,
     type PieceType,
-    type Player,
     type Square,
 } from "./board";
 

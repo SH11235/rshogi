@@ -37,10 +37,14 @@ export function createInitialBoard(): BoardState {
     });
     place("2b", { owner: gote, type: "R" });
     place("8b", { owner: gote, type: "B" });
-    BOARD_FILES.forEach((file) => place(`${file}c` as Square, { owner: gote, type: "P" }));
+    BOARD_FILES.forEach((file) => {
+        place(`${file}c` as Square, { owner: gote, type: "P" });
+    });
 
     // Sente setup
-    BOARD_FILES.forEach((file) => place(`${file}g` as Square, { owner: sente, type: "P" }));
+    BOARD_FILES.forEach((file) => {
+        place(`${file}g` as Square, { owner: sente, type: "P" });
+    });
     place("2h", { owner: sente, type: "B" });
     place("8h", { owner: sente, type: "R" });
     ["9i", "8i", "7i", "6i", "5i", "4i", "3i", "2i", "1i"].forEach((square, index) => {
