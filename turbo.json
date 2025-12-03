@@ -10,29 +10,26 @@
             "persistent": true
         },
         "test": {
-            "dependsOn": ["^build"],
             "inputs": ["src/**/*.{ts,tsx,js,jsx}", "**/*.test.{ts,tsx,js,jsx}"]
         },
         "test:unit": {
-            "dependsOn": ["^build"],
             "inputs": ["src/**/*.{ts,tsx,js,jsx}", "src/**/*.test.{ts,tsx,js,jsx}"]
         },
         "lint": {
-            "inputs": ["src/**/*.{ts,tsx,js,jsx}", "*.{ts,tsx,js,jsx}", "biome.json", ".eslintrc*"],
+            "inputs": ["src/**/*.{ts,tsx,js,jsx,mjs,cjs}", "*.{ts,tsx,js,jsx,mjs,cjs}", "biome.json", ".eslintrc*"],
             "outputs": []
         },
         "lint:fix": {
-            "inputs": ["src/**/*.{ts,tsx,js,jsx}", "*.{ts,tsx,js,jsx}", "biome.json", ".eslintrc*"],
+            "inputs": ["src/**/*.{ts,tsx,js,jsx,mjs,cjs}", "*.{ts,tsx,js,jsx,mjs,cjs}", "biome.json", ".eslintrc*"],
             "outputs": [],
             "cache": false
         },
         "typecheck": {
-            "dependsOn": ["^build"],
             "inputs": ["src/**/*.{ts,tsx}", "*.{ts,tsx}", "tsconfig*.json"],
             "outputs": []
         },
         "format": {
-            "inputs": ["**/*.{ts,tsx,js,jsx,json,md,css}"],
+            "inputs": ["**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,yml,yaml}"],
             "outputs": [],
             "cache": false
         },
