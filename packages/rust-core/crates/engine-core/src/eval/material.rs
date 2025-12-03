@@ -136,6 +136,7 @@ fn dist(a: Square, b: Square) -> usize {
     df.max(dr)
 }
 
+/// 距離に応じた利き評価値テーブルを生成（base * 1024 / (distance+1)）
 const fn make_effect_values(base: i32) -> [i32; 9] {
     let mut arr = [0; 9];
     let mut i = 0;
@@ -157,6 +158,9 @@ fn multi_effect_value() -> &'static [i32; 11] {
     static TABLE: OnceLock<[i32; 11]> = OnceLock::new();
     TABLE.get_or_init(|| {
         let mut arr = [0i32; 11];
+        // YaneuraOu の optimizer が出力した近似式
+        // 6365 - pow(0.8525, m-1) * 5341 (m=1..10)
+        // 利きが増えるほど逓減しつつ上限に漸近する特性を再現するための定数
         for (m, value) in arr.iter_mut().enumerate().skip(1) {
             *value = (6365.0 - 0.8525f64.powi((m as i32) - 1) * 5341.0) as i32;
         }
@@ -196,9 +200,15 @@ fn lv7_tables() -> &'static Lv7Tables {
     })
 }
 
+// 自駒への味方/敵の利きが 0/1/2 のときの補正係数（MaterialLv7-9）
+// 値は YaneuraOu から移植。後で 4096 で割って駒価値に掛ける。
 const OUR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 33, 43];
 const THEIR_EFFECT_TO_OUR_PIECE: [i32; 3] = [0, 113, 122];
 
+// 玉の位置ボーナス（先手視点の81升テーブル）
+// インデックス: (8 - file) + rank * 9 （先手1段1筋が先頭、左から9筋→1筋の順）
+// 高い値ほど玉にとって安全とみなす。後手は Inv(sq) でミラーし、符号を反転して用いる。
+// 値は YaneuraOu MaterialLv8/9 から移植。
 const KING_POS_BONUS: [i32; 81] = [
     875, 655, 830, 680, 770, 815, 720, 945, 755, 605, 455, 610, 595, 730, 610, 600, 590, 615, 565,
     640, 555, 525, 635, 565, 440, 600, 575, 520, 515, 580, 420, 640, 535, 565, 500, 510, 220, 355,
@@ -207,6 +217,8 @@ const KING_POS_BONUS: [i32; 81] = [
     200, 320, 275, 70, 200,
 ];
 
+// 利き方向ごとの重み（direction_of の戻り値 0..9 に対応）
+// 0:真上,1:右上上,2:右上,3:右右上,4:右,5:右右下,6:右下,7:右下下,8:真下,9:同じ升
 const OUR_EFFECT_RATE: [i32; 10] = [1120, 1872, 112, 760, 744, 880, 1320, 600, 904, 1024];
 const THEIR_EFFECT_RATE: [i32; 10] = [1056, 1714, 1688, 1208, 248, 240, 496, 816, 928, 1024];
 
@@ -234,6 +246,9 @@ fn direction_of(king: Square, sq: Square) -> usize {
         df = -df;
     }
 
+    // 返り値の意味（YaneuraOuのバケット順）
+    // 0: 真上, 1: 右上上, 2: 右上, 3: 右右上, 4: 右
+    // 5: 右右下, 6: 右下, 7: 右下下, 8: 真下, 9: 同じ升
     if df == 0 && dr == 0 {
         return 9;
     }
@@ -265,7 +280,7 @@ fn direction_of(king: Square, sq: Square) -> usize {
         return 7;
     }
 
-    9
+    unreachable!("Unexpected direction calculation: df={df}, dr={dr}");
 }
 
 #[inline]

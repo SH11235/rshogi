@@ -4,7 +4,7 @@ use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::eval::material::{base_piece_value, hand_piece_value, signed_piece_value};
+use crate::eval::material::{hand_piece_value, signed_piece_value};
 use crate::types::{
     Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
 };
@@ -533,12 +533,7 @@ impl Position {
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
             new_state.hand_key = new_state.hand_key.wrapping_sub(zobrist_hand(us, pt));
-
-            // material_value: 手駒 → 盤上（実質差分ゼロだが明示的に更新）
-            let sign = if us == Color::Black { 1 } else { -1 };
-            let base = base_piece_value(pt);
-            material_value -= sign * base;
-            material_value += sign * base;
+            // material_value: 打ち駒では手駒→盤上で価値は変化しない
 
             // 盤上に配置
             self.put_piece(pc, to);
