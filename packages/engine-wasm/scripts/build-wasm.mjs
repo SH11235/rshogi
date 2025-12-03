@@ -19,14 +19,52 @@ const targetWasm = path.join(
 const outDir = path.resolve(__dirname, "../pkg");
 
 function run(cmd, args, cwd = process.cwd()) {
-    const result = spawnSync(cmd, args, { cwd, stdio: "inherit" });
+    // Use shell string to properly inherit environment on Windows
+    const fullCommand = `${cmd} ${args.join(" ")}`;
+
+    // Ensure Rust environment variables are properly set
+    const rustEnv = {
+        ...process.env,
+    };
+
+    // Set default toolchain if not already set (Windows-specific issue workaround)
+    if (!rustEnv.RUSTUP_TOOLCHAIN && process.platform === "win32") {
+        rustEnv.RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc";
+    }
+
+    // Try to find RUSTUP_HOME on Windows if not set (for non-standard installations)
+    if (!rustEnv.RUSTUP_HOME && process.env.USERPROFILE) {
+        const scoop = path.join(
+            process.env.USERPROFILE,
+            "scoop",
+            "persist",
+            "rustup-msvc",
+            ".rustup",
+        );
+        const defaultLoc = path.join(process.env.USERPROFILE, ".rustup");
+        if (existsSync(scoop)) {
+            rustEnv.RUSTUP_HOME = scoop;
+        } else if (existsSync(defaultLoc)) {
+            rustEnv.RUSTUP_HOME = defaultLoc;
+        }
+    }
+
+    const result = spawnSync(fullCommand, {
+        cwd,
+        stdio: "inherit",
+        shell: true,
+        env: rustEnv,
+    });
     if (result.status !== 0) {
-        throw new Error(`Command failed: ${cmd} ${args.join(" ")}`);
+        throw new Error(`Command failed: ${fullCommand}`);
     }
 }
 
 function ensureWasmBindgen() {
-    const check = spawnSync("wasm-bindgen", ["--version"], { stdio: "pipe" });
+    const check = spawnSync("wasm-bindgen --version", {
+        stdio: "pipe",
+        shell: true,
+    });
     if (check.status !== 0) {
         throw new Error(
             "wasm-bindgen CLI is required. Install it with `cargo install wasm-bindgen-cli --version 0.2.106`.",
