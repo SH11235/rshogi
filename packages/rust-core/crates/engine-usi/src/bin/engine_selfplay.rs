@@ -1551,6 +1551,7 @@ mod tests {
     use super::*;
     use anyhow::Result as AnyResult;
     use clap::Parser;
+    use std::path::PathBuf;
 
     #[test]
     fn time_control_allocates_fractional_budget() -> AnyResult<()> {
@@ -1568,6 +1569,36 @@ mod tests {
         assert_eq!(tc_inc.think_limit_ms(Color::Black), 2_500);
         assert_eq!(tc_inc.updated_time(5_000, 1_000, 4_000), 2_000);
         Ok(())
+    }
+
+    #[test]
+    fn resolve_engine_paths_uses_per_side_when_provided() {
+        let cli = Cli::parse_from([
+            "engine_selfplay",
+            "--engine-path-black",
+            "/path/to/black",
+            "--engine-path-white",
+            "/path/to/white",
+        ]);
+        let paths = resolve_engine_paths(&cli);
+        assert_eq!(paths.black.path, PathBuf::from("/path/to/black"));
+        assert_eq!(paths.white.path, PathBuf::from("/path/to/white"));
+        assert_eq!(paths.black.source, "cli:black");
+        assert_eq!(paths.white.source, "cli:white");
+    }
+
+    #[test]
+    fn resolve_engine_paths_uses_shared_when_per_side_missing() {
+        let cli = Cli::parse_from([
+            "engine_selfplay",
+            "--engine-path",
+            "/shared/path/engine-usi",
+        ]);
+        let paths = resolve_engine_paths(&cli);
+        assert_eq!(paths.black.path, PathBuf::from("/shared/path/engine-usi"));
+        assert_eq!(paths.white.path, PathBuf::from("/shared/path/engine-usi"));
+        assert_eq!(paths.black.source, "cli");
+        assert_eq!(paths.white.source, "cli");
     }
 
     #[test]
