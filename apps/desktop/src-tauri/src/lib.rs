@@ -291,6 +291,10 @@ fn spawn_search(
     mut position: Position,
     limits: LimitsType,
 ) -> Result<ActiveSearch, String> {
+    eprintln!(
+        "engine_search: spawning (depth={}, nodes_limit={}, movetime={}, ponder={})",
+        limits.depth, limits.nodes, limits.movetime, limits.ponder
+    );
     let stop_flag = search.stop_flag();
     let ponderhit_flag = search.ponderhit_flag();
 
@@ -303,6 +307,19 @@ fn spawn_search(
                 &mut position,
                 limits,
                 Some(|info: &SearchInfo| emitter.emit_info(info)),
+            );
+            eprintln!(
+                "engine_search: finished bestmove={} ponder={}",
+                if result.best_move == Move::NONE {
+                    "resign".to_string()
+                } else {
+                    result.best_move.to_usi()
+                },
+                if result.ponder_move == Move::NONE {
+                    "-".to_string()
+                } else {
+                    result.ponder_move.to_usi()
+                }
             );
             emitter.emit_bestmove(&result);
             SearchTaskResult { search }
@@ -607,6 +624,22 @@ fn engine_search(
     };
 
     let limits = build_limits(&search_params, &options);
+    // Emit a starter info so the UI can confirm subscription before search results arrive.
+    emit_event(
+        &window,
+        EngineEvent::Info {
+            depth: Some(0),
+            seldepth: None,
+            nodes: Some(0),
+            nps: None,
+            time_ms: None,
+            multipv: Some(options.multi_pv),
+            pv: None,
+            hashfull: None,
+            score_cp: None,
+            score_mate: None,
+        },
+    );
     let active_search = match spawn_search(window.clone(), search, position, limits) {
         Ok(active) => active,
         Err(err) => {
