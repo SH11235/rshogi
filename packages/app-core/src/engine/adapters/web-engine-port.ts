@@ -1,13 +1,6 @@
 import type { EngineGoResult, EnginePort } from "../types";
 
-const FALLBACK_MOVES = [
-    "7g7f",
-    "3c3d",
-    "2g2f",
-    "8c8d",
-    "2b8h+",
-    "resign",
-];
+const FALLBACK_MOVES = ["7g7f", "3c3d", "2g2f", "8c8d", "2b8h+", "resign"];
 
 export class WebEnginePort implements EnginePort {
     private started = false;

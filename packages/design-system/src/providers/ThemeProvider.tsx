@@ -60,8 +60,12 @@ export function ThemeProvider({
     defaultTheme = "system",
     storageKey = DEFAULT_STORAGE_KEY,
 }: ThemeProviderProps): ReactElement {
-    const [theme, setThemePreference] = useState<ThemePreference>(() => readStoredTheme(storageKey, defaultTheme));
-    const [systemTheme, setSystemTheme] = useState<Theme>(() => (defaultTheme === "dark" ? "dark" : getSystemTheme()));
+    const [theme, setThemePreference] = useState<ThemePreference>(() =>
+        readStoredTheme(storageKey, defaultTheme),
+    );
+    const [systemTheme, setSystemTheme] = useState<Theme>(() =>
+        defaultTheme === "dark" ? "dark" : getSystemTheme(),
+    );
 
     useEffect(() => {
         if (typeof window === "undefined") {

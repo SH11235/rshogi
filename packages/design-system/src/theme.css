@@ -20,7 +20,9 @@
     --destructive-foreground: 0 0% 100%;
     --ring: 15 86% 55%;
     --radius: 0.65rem;
-    --font-sans: "Inter", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+    --font-sans:
+        "Inter", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+        "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
 }
 
 .dark {

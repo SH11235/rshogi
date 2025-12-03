@@ -130,7 +130,7 @@ function fromCsaSquare(value: string): Square | null {
         return null;
     }
     const [file, rank] = value.split("");
-    if (!BOARD_FILES.includes(file as typeof BOARD_FILES[number])) {
+    if (!BOARD_FILES.includes(file as (typeof BOARD_FILES)[number])) {
         return null;
     }
     const mappedRank = NUMBER_TO_RANK[rank];

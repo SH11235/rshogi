@@ -11,9 +11,11 @@ const buttonVariants = cva(
             variant: {
                 default: "bg-primary text-primary-foreground shadow hover:bg-primary/90",
                 secondary: "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
-                outline: "border border-input bg-background hover:bg-muted/50 hover:text-foreground",
+                outline:
+                    "border border-input bg-background hover:bg-muted/50 hover:text-foreground",
                 ghost: "text-foreground hover:bg-muted/60",
-                destructive: "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+                destructive:
+                    "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
             },
             size: {
                 default: "h-10 px-4 py-2",
@@ -40,7 +42,13 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     ref,
 ): ReactElement {
     const Component = asChild ? Slot : "button";
-    return <Component className={cn(buttonVariants({ variant, size }), className)} ref={ref} {...props} />;
+    return (
+        <Component
+            className={cn(buttonVariants({ variant, size }), className)}
+            ref={ref}
+            {...props}
+        />
+    );
 });
 
 export const buttonStyles = buttonVariants;

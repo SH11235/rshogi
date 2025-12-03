@@ -32,7 +32,12 @@ const PIECE_LABELS: Record<string, string> = {
     P: "歩",
 };
 
-export function ShogiBoard({ grid, selectedSquare, lastMove, onSelect }: ShogiBoardProps): ReactElement {
+export function ShogiBoard({
+    grid,
+    selectedSquare,
+    lastMove,
+    onSelect,
+}: ShogiBoardProps): ReactElement {
     return (
         <div className="inline-flex flex-col gap-1 rounded-lg border border-border bg-card p-2 shadow-card">
             <div className="grid grid-cols-9 gap-px border border-border bg-border">
@@ -64,7 +69,9 @@ export function ShogiBoard({ grid, selectedSquare, lastMove, onSelect }: ShogiBo
                                     >
                                         {PIECE_LABELS[cell.piece.type] ?? cell.piece.type}
                                         {cell.piece.promoted && (
-                                            <span className="absolute right-1 top-1 text-[10px] text-destructive">成</span>
+                                            <span className="absolute right-1 top-1 text-[10px] text-destructive">
+                                                成
+                                            </span>
                                         )}
                                     </span>
                                 ) : null}

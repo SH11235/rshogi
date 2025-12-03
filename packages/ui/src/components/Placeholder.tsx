@@ -15,11 +15,13 @@ export function Placeholder({ label = "Shogi UI", className }: PlaceholderProps)
                 className,
             )}
         >
-            <span className="text-xs font-semibold uppercase tracking-[0.25em] text-primary">Design token</span>
+            <span className="text-xs font-semibold uppercase tracking-[0.25em] text-primary">
+                Design token
+            </span>
             <p className="text-base font-medium text-foreground">{label}</p>
             <p>
-                Colors reference CSS variables from <code>@shogi/design-system</code>, ensuring consistent styling
-                between apps.
+                Colors reference CSS variables from <code>@shogi/design-system</code>, ensuring
+                consistent styling between apps.
             </p>
         </div>
     );

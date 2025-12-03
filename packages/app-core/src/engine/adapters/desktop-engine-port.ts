@@ -42,12 +42,18 @@ export class DesktopEnginePort implements EnginePort {
         await invoke("engine_position", { payload: sfenOrMoves });
     }
 
-    async go(params: { byoyomi?: number; btime?: number; wtime?: number }): Promise<EngineGoResult> {
+    async go(params: {
+        byoyomi?: number;
+        btime?: number;
+        wtime?: number;
+    }): Promise<EngineGoResult> {
         const dto = await invoke<BestMoveDto>("engine_go", { params });
         return {
             bestmove: dto.bestmove,
             pv: dto.info?.pv ? ({ moves: dto.info.pv } satisfies Pv) : undefined,
-            score: dto.info?.score ? convertScore(dto.info.score.type, dto.info.score.value) : undefined,
+            score: dto.info?.score
+                ? convertScore(dto.info.score.type, dto.info.score.value)
+                : undefined,
         };
     }
 
