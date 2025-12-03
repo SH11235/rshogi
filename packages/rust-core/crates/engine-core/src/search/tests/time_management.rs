@@ -4,8 +4,10 @@
 
 use crate::search::{LimitsType, TimeManagement, TimeOptions, DEFAULT_MAX_MOVES_TO_DRAW};
 use crate::types::Color;
+use instant::Instant;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 // =============================================================================
 // ヘルパー関数
@@ -117,12 +119,10 @@ fn test_apply_iteration_timing_sets_stop_on_ponderhit() {
 /// 合法手1つの場合、停止閾値が500msに丸められる
 #[test]
 fn test_single_root_move_caps_stop_threshold() {
-    use std::time::Duration;
-
     let mut tm = create_time_manager();
     let mut limits = LimitsType::new();
     limits.time[Color::Black.index()] = 60000; // 1分
-    limits.start_time = Some(std::time::Instant::now() - Duration::from_millis(600));
+    limits.start_time = Some(Instant::now() - Duration::from_millis(600));
 
     tm.init_with_root_moves_count(&limits, Color::Black, 0, 256, 1);
     // total_time は大きく与えるが、single_move_limit により 500ms に丸められる
@@ -134,12 +134,10 @@ fn test_single_root_move_caps_stop_threshold() {
 /// movetime指定ではsearch_endが設定され、経過時間で停止する
 #[test]
 fn test_movetime_sets_search_end_and_stop() {
-    use std::time::Duration;
-
     let mut tm = create_time_manager();
     let mut limits = LimitsType::new();
     limits.movetime = 50;
-    limits.start_time = Some(std::time::Instant::now() - Duration::from_millis(60));
+    limits.start_time = Some(Instant::now() - Duration::from_millis(60));
 
     tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
 

@@ -14,6 +14,7 @@ log.workspace = true
 once_cell.workspace = true
 rand.workspace = true
 rand_xoshiro.workspace = true
+instant = { version = "0.1.12", features = ["wasm-bindgen"] }
 
 [dev-dependencies]
 # Test dependencies
