@@ -178,6 +178,9 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
         },
         subscribe(handler) {
             listeners.add(handler);
+            if (debug) {
+                console.info("[engine-tauri] subscribe", { listenerCount: listeners.size });
+            }
             if (usingMock && !mockSubscriptions.has(handler)) {
                 mockSubscriptions.set(handler, mock.subscribe(handler));
             }
@@ -188,6 +191,9 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
                 if (unsubscribe) {
                     unsubscribe();
                     mockSubscriptions.delete(handler);
+                }
+                if (debug) {
+                    console.info("[engine-tauri] unsubscribe", { listenerCount: listeners.size });
                 }
             };
         },

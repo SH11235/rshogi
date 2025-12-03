@@ -50,6 +50,9 @@ function App() {
                 setBestmove(event.move);
                 setStatus("idle");
             }
+            if (event.type === "error") {
+                setStatus("error");
+            }
         });
 
         (async () => {
