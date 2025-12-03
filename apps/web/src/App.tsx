@@ -1,35 +1,79 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { useEffect, useMemo, useState } from "react";
+import type { EngineEvent, SearchHandle } from "@shogi/engine-client";
+import { createWasmEngineClient } from "@shogi/engine-wasm";
+import "./App.css";
 
-function App() {
-  const [count, setCount] = useState(0)
+const MAX_LOGS = 6;
 
-  return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+function formatEvent(event: EngineEvent): string {
+  if (event.type === "bestmove") {
+    return `bestmove ${event.move}${event.ponder ? ` ponder ${event.ponder}` : ""}`;
+  }
+  if (event.type === "info") {
+    const score =
+      event.scoreMate !== undefined
+        ? `mate ${event.scoreMate}`
+        : event.scoreCp !== undefined
+          ? `cp ${event.scoreCp}`
+          : "";
+    return `info depth ${event.depth ?? "-"} nodes ${event.nodes ?? "-"} ${score}`;
+  }
+  return `error ${event.message}`;
 }
 
-export default App
+function App() {
+  const engine = useMemo(() => createWasmEngineClient({ stopMode: "terminate" }), []);
+  const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
+  const [bestmove, setBestmove] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  useEffect(() => {
+    let handle: SearchHandle | null = null;
+    const unsubscribe = engine.subscribe((event) => {
+      setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), formatEvent(event)]);
+      if (event.type === "bestmove") {
+        setBestmove(event.move);
+      }
+    });
+
+    (async () => {
+      try {
+        setStatus("init");
+        await engine.init();
+        await engine.loadPosition("startpos");
+        setStatus("searching");
+        handle = await engine.search({ limits: { maxDepth: 1 } });
+      } catch (error) {
+        setStatus("error");
+        setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
+      }
+    })();
+
+    return () => {
+      if (handle) {
+        handle.cancel().catch(() => undefined);
+      }
+      unsubscribe();
+      engine.dispose().catch(() => undefined);
+    };
+  }, [engine]);
+
+  return (
+    <main className="app">
+      <h1>Engine wiring (Web / Wasm)</h1>
+      <p className="status">
+        status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
+      </p>
+      <section className="logs">
+        <h2>Events (mock backend for now)</h2>
+        <ul>
+          {logs.map((line, idx) => (
+            <li key={`${idx}-${line}`}>{line}</li>
+          ))}
+        </ul>
+      </section>
+    </main>
+  );
+}
+
+export default App;

@@ -67,7 +67,11 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
     const switchToMock = async () => {
         usingMock = true;
         if (unlisten) {
-            await unlisten().catch(() => undefined);
+            try {
+                unlisten();
+            } catch {
+                // ignore unlisten errors during fallback
+            }
             unlisten = null;
         }
         attachListenersToMock();
@@ -163,7 +167,11 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
                 async () => {
                     await ipc.invoke("engine_stop").catch(() => undefined);
                     if (unlisten) {
-                        await unlisten().catch(() => undefined);
+                        try {
+                            unlisten();
+                        } catch {
+                            // ignore unlisten errors during dispose
+                        }
                         unlisten = null;
                     }
                 },

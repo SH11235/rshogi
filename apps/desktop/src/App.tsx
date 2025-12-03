@@ -1,49 +1,77 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useMemo, useState } from "react";
+import type { EngineEvent, SearchHandle } from "@shogi/engine-client";
+import { createTauriEngineClient } from "@shogi/engine-tauri";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+const MAX_LOGS = 6;
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+function formatEvent(event: EngineEvent): string {
+  if (event.type === "bestmove") {
+    return `bestmove ${event.move}${event.ponder ? ` ponder ${event.ponder}` : ""}`;
   }
+  if (event.type === "info") {
+    const score =
+      event.scoreMate !== undefined
+        ? `mate ${event.scoreMate}`
+        : event.scoreCp !== undefined
+          ? `cp ${event.scoreCp}`
+          : "";
+    return `info depth ${event.depth ?? "-"} nodes ${event.nodes ?? "-"} ${score}`;
+  }
+  return `error ${event.message}`;
+}
+
+function App() {
+  const engine = useMemo(() => createTauriEngineClient({ stopMode: "terminate" }), []);
+  const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
+  const [bestmove, setBestmove] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  useEffect(() => {
+    let handle: SearchHandle | null = null;
+    const unsubscribe = engine.subscribe((event) => {
+      setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), formatEvent(event)]);
+      if (event.type === "bestmove") {
+        setBestmove(event.move);
+      }
+    });
+
+    (async () => {
+      try {
+        setStatus("init");
+        await engine.init();
+        await engine.loadPosition("startpos");
+        setStatus("searching");
+        handle = await engine.search({ limits: { maxDepth: 1 } });
+      } catch (error) {
+        setStatus("error");
+        setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
+      }
+    })();
+
+    return () => {
+      if (handle) {
+        handle.cancel().catch(() => undefined);
+      }
+      unsubscribe();
+      engine.dispose().catch(() => undefined);
+    };
+  }, [engine]);
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      <h1>Engine wiring (Desktop / Tauri)</h1>
+      <p>
+        status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
+      </p>
+      <section className="logs">
+        <h2>Events (mock fallback until IPC is wired)</h2>
+        <ul>
+          {logs.map((line, idx) => (
+            <li key={`${idx}-${line}`}>{line}</li>
+          ))}
+        </ul>
+      </section>
     </main>
   );
 }
