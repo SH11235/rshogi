@@ -60,6 +60,9 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
     let unlisten: UnlistenFn | null = null;
 
     const emit = (event: EngineEvent) => {
+        if (debug) {
+            console.info("[engine-tauri] emit", { listenerCount: listeners.size, event });
+        }
         for (const handler of listeners) {
             handler(event);
         }

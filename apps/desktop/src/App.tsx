@@ -1,6 +1,6 @@
 import type { EngineEvent, SearchHandle } from "@shogi/engine-client";
 import { createTauriEngineClient } from "@shogi/engine-tauri";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const MAX_LOGS = 6;
@@ -22,11 +22,17 @@ function formatEvent(event: EngineEvent): string {
 }
 
 function App() {
-    const engine = useMemo(
-        () =>
-            createTauriEngineClient({ stopMode: "terminate", useMockOnError: false, debug: true }),
-        [],
-    );
+    const engineRef = useRef<ReturnType<typeof createTauriEngineClient>>();
+    const engine = useMemo(() => {
+        if (!engineRef.current) {
+            engineRef.current = createTauriEngineClient({
+                stopMode: "terminate",
+                useMockOnError: false,
+                debug: true,
+            });
+        }
+        return engineRef.current;
+    }, []);
     const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
