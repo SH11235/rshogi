@@ -36,9 +36,11 @@ function App() {
     const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
+    const handleRef = useRef<SearchHandle | null>(null);
+    const unsubscribedRef = useRef<boolean>(false);
 
     useEffect(() => {
-        let handle: SearchHandle | null = null;
+        unsubscribedRef.current = false;
         const unsubscribe = engine.subscribe((event) => {
             // Debug log to see raw events in DevTools
             console.info("[ui] engine event", event);
@@ -61,7 +63,12 @@ function App() {
                 await engine.init();
                 await engine.loadPosition("startpos");
                 setStatus("searching");
-                handle = await engine.search({ limits: { maxDepth: 1 } });
+                const handle = await engine.search({ limits: { maxDepth: 1 } });
+                if (unsubscribedRef.current) {
+                    await handle.cancel().catch(() => undefined);
+                    return;
+                }
+                handleRef.current = handle;
             } catch (error) {
                 setStatus("error");
                 setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
@@ -69,13 +76,20 @@ function App() {
         })();
 
         return () => {
+            unsubscribedRef.current = true;
+            const handle = handleRef.current;
             if (handle) {
-                handle.cancel().catch((err) => console.warn("Failed to cancel search:", err));
+                handle
+                    .cancel()
+                    .catch((err) => console.warn("Failed to cancel search:", err))
+                    .finally(() => {
+                        handleRef.current = null;
+                    });
             }
             unsubscribe();
             engine.dispose().catch(() => undefined);
         };
-    }, [engine]);
+    }, []);
 
     return (
         <main className="container">
