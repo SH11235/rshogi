@@ -31,6 +31,10 @@ export interface TauriEngineClientOptions extends EngineInitOptions {
      * エンジンイベントのチャンネル名。デフォルトは `engine://event` を想定。
      */
     eventName?: string;
+    /**
+     * コンソールにデバッグログを出すか。
+     */
+    debug?: boolean;
 }
 
 const DEFAULT_EVENT_NAME = "engine://event";
@@ -42,6 +46,7 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
         eventName = DEFAULT_EVENT_NAME,
         ...initDefaults
     } = options;
+    const debug = options.debug ?? false;
 
     const mock = createMockEngineClient();
     const listeners = new Set<EngineEventHandler>();
@@ -90,7 +95,15 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
     const ensureEventSubscription = async () => {
         if (usingMock || unlisten) return;
         try {
-            unlisten = await ipc.listen<EngineEvent>(eventName, (evt) => emit(evt.payload));
+            if (debug) {
+                console.info("[engine-tauri] subscribing to", eventName);
+            }
+            unlisten = await ipc.listen<EngineEvent>(eventName, (evt) => {
+                if (debug) {
+                    console.info("[engine-tauri] event", evt.payload);
+                }
+                emit(evt.payload);
+            });
         } catch (error) {
             console.error("Failed to subscribe to engine events:", error);
             if (useMockOnError === false) throw error;

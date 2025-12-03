@@ -23,7 +23,8 @@ function formatEvent(event: EngineEvent): string {
 
 function App() {
     const engine = useMemo(
-        () => createTauriEngineClient({ stopMode: "terminate", useMockOnError: false }),
+        () =>
+            createTauriEngineClient({ stopMode: "terminate", useMockOnError: false, debug: true }),
         [],
     );
     const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
@@ -33,12 +34,15 @@ function App() {
     useEffect(() => {
         let handle: SearchHandle | null = null;
         const unsubscribe = engine.subscribe((event) => {
+            // Debug log to see raw events in DevTools
+            console.info("[ui] engine event", event);
             setLogs((prev) => {
                 const next = [...prev, formatEvent(event)];
                 return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next;
             });
             if (event.type === "bestmove") {
                 setBestmove(event.move);
+                setStatus("idle");
             }
         });
 
