@@ -32,6 +32,7 @@
     "typescript-language-server": "^5.1.1"
   },
   "overrides": {
+    "@biomejs/biome": "2.3.5",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "@types/react": "19.2.4",
