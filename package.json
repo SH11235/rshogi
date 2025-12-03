@@ -19,7 +19,7 @@
     "typecheck": "turbo typecheck",
     "typecheck:affected": "turbo typecheck --filter='[HEAD~1]'",
     "format": "biome format --write .",
-    "format:check": "biome check .",
+    "format:check": "biome format .",
     "clean": "turbo clean && rm -rf node_modules apps/*/node_modules apps/*/dist packages/*/node_modules packages/*/dist",
     "pre-commit": "lint-staged"
   },
