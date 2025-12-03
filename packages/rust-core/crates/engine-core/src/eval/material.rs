@@ -211,8 +211,13 @@ const OUR_EFFECT_RATE: [i32; 10] = [1120, 1872, 112, 760, 744, 880, 1320, 600, 9
 const THEIR_EFFECT_RATE: [i32; 10] = [1056, 1714, 1688, 1208, 248, 240, 496, 816, 928, 1024];
 
 fn king_pos_bonus(color: Color, sq: Square) -> i32 {
-    // C++版のアクセス式を再現: (FILE_9 - file) + rank*9
-    let idx = (8 - sq.file().index()) + sq.rank().index() * 9;
+    // 後手側をミラーしてから参照する
+    let target_sq = if color == Color::Black {
+        sq
+    } else {
+        sq.inverse()
+    };
+    let idx = (8 - target_sq.file().index()) + target_sq.rank().index() * 9;
     let bonus = KING_POS_BONUS[idx];
     if color == Color::Black {
         bonus
@@ -488,6 +493,6 @@ mod tests {
         let value = evaluate_material(&pos);
 
         // 初期局面はほぼ互角（MaterialLvにより0から僅かにずれる場合がある）
-        assert!(value.raw().abs() < 1500);
+        assert!(value.raw().abs() < 200);
     }
 }
