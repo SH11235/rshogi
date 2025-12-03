@@ -104,9 +104,17 @@ struct Cli {
     #[arg(long, default_value_t = 1024)]
     hash_mb: u32,
 
-    /// Path to engine-usi binary (shared by both sides)
+    /// Path to engine-usi binary used when per-side paths are not set
     #[arg(long)]
     engine_path: Option<PathBuf>,
+
+    /// Path to engine-usi binary for Black (overrides engine_path)
+    #[arg(long)]
+    engine_path_black: Option<PathBuf>,
+
+    /// Path to engine-usi binary for White (overrides engine_path)
+    #[arg(long)]
+    engine_path_white: Option<PathBuf>,
 
     /// Common extra arguments passed to engine processes
     #[arg(long, num_args = 1..)]
@@ -195,12 +203,26 @@ struct EngineCommandMeta {
     args_white: Vec<String>,
     #[serde(default)]
     source: String,
+    #[serde(default)]
+    path_black: Option<String>,
+    #[serde(default)]
+    path_white: Option<String>,
+    #[serde(default)]
+    source_black: Option<String>,
+    #[serde(default)]
+    source_white: Option<String>,
 }
 
 /// バイナリの発見元を含む解決結果。
+#[derive(Clone)]
 struct ResolvedEnginePath {
     path: PathBuf,
     source: &'static str,
+}
+
+struct ResolvedEnginePaths {
+    black: ResolvedEnginePath,
+    white: ResolvedEnginePath,
 }
 
 #[derive(Serialize)]
@@ -915,17 +937,29 @@ fn main() -> Result<()> {
         None
     };
 
-    let engine_path = resolve_engine_path(&cli);
-    let engine_path_display = engine_path.path.display();
-    let engine_path_source = engine_path.source;
-    println!("using engine binary: {engine_path_display} ({engine_path_source})");
+    let engine_paths = resolve_engine_paths(&cli);
+    if engine_paths.black.path == engine_paths.white.path
+        && engine_paths.black.source == engine_paths.white.source
+    {
+        let engine_path_display = engine_paths.black.path.display();
+        let engine_path_source = engine_paths.black.source;
+        println!("using engine binary: {engine_path_display} ({engine_path_source})");
+    } else {
+        println!(
+            "using engine binaries: black={} ({}), white={} ({})",
+            engine_paths.black.path.display(),
+            engine_paths.black.source,
+            engine_paths.white.path.display(),
+            engine_paths.white.source
+        );
+    }
     let common_args = cli.engine_args.clone().unwrap_or_default();
     let black_args = cli.engine_args_black.clone().unwrap_or_else(|| common_args.clone());
     let white_args = cli.engine_args_white.clone().unwrap_or(common_args.clone());
 
     let mut black = EngineProcess::spawn(
         &EngineConfig {
-            path: engine_path.path.clone(),
+            path: engine_paths.black.path.clone(),
             args: black_args.clone(),
             threads: cli.threads,
             hash_mb: cli.hash_mb,
@@ -939,7 +973,7 @@ fn main() -> Result<()> {
     )?;
     let mut white = EngineProcess::spawn(
         &EngineConfig {
-            path: engine_path.path.clone(),
+            path: engine_paths.white.path.clone(),
             args: white_args.clone(),
             threads: cli.threads,
             hash_mb: cli.hash_mb,
@@ -978,8 +1012,12 @@ fn main() -> Result<()> {
             sfen: cli.sfen.clone(),
         },
         engine_cmd: EngineCommandMeta {
-            path: engine_path.path.display().to_string(),
-            source: engine_path.source.to_string(),
+            path: engine_paths.black.path.display().to_string(),
+            source: engine_paths.black.source.to_string(),
+            path_black: Some(engine_paths.black.path.display().to_string()),
+            path_white: Some(engine_paths.white.path.display().to_string()),
+            source_black: Some(engine_paths.black.source.to_string()),
+            source_white: Some(engine_paths.white.source.to_string()),
             args_black: black_args.clone(),
             args_white: white_args.clone(),
         },
@@ -1242,6 +1280,27 @@ fn default_metrics_path(jsonl: &Path) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
     parent.join(format!("{stem}.metrics.jsonl"))
+}
+
+fn resolve_engine_paths(cli: &Cli) -> ResolvedEnginePaths {
+    let shared = resolve_engine_path(cli);
+    let black = cli
+        .engine_path_black
+        .as_ref()
+        .map(|path| ResolvedEnginePath {
+            path: path.clone(),
+            source: "cli:black",
+        })
+        .unwrap_or_else(|| shared.clone());
+    let white = cli
+        .engine_path_white
+        .as_ref()
+        .map(|path| ResolvedEnginePath {
+            path: path.clone(),
+            source: "cli:white",
+        })
+        .unwrap_or_else(|| shared.clone());
+    ResolvedEnginePaths { black, white }
 }
 
 /// エンジンバイナリを探す。明示指定 > 環境変数 > 同ディレクトリの release > debug > フォールバックの優先順位。
@@ -1750,9 +1809,13 @@ fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
 fn engine_names_for(meta: Option<&MetaLog>) -> (String, String) {
     let default = ("black".to_string(), "white".to_string());
     let Some(meta) = meta else { return default };
-    let path = Path::new(&meta.engine_cmd.path);
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or(&meta.engine_cmd.path);
-    (format!("{} (black)", name), format!("{} (white)", name))
+    let black_path = meta.engine_cmd.path_black.as_deref().unwrap_or(&meta.engine_cmd.path);
+    let white_path = meta.engine_cmd.path_white.as_deref().unwrap_or(&meta.engine_cmd.path);
+    let black_name =
+        Path::new(black_path).file_name().and_then(|s| s.to_str()).unwrap_or(black_path);
+    let white_name =
+        Path::new(white_path).file_name().and_then(|s| s.to_str()).unwrap_or(white_path);
+    (format!("{} (black)", black_name), format!("{} (white)", white_name))
 }
 
 fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
