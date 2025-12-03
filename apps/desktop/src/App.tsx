@@ -32,8 +32,13 @@ function App() {
     const [logs, setLogs] = useState<string[]>([]);
     const handleRef = useRef<SearchHandle | null>(null);
     const unsubscribedRef = useRef<boolean>(false);
+    const startedRef = useRef<boolean>(false);
 
     useEffect(() => {
+        if (startedRef.current) {
+            return;
+        }
+        startedRef.current = true;
         unsubscribedRef.current = false;
         const unsubscribe = engine.subscribe((event) => {
             // Debug log to see raw events in DevTools
