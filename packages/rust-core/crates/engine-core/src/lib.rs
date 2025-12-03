@@ -20,6 +20,7 @@ pub mod types;
 
 // 盤面表現
 pub mod bitboard;
+pub mod eval;
 pub mod position;
 
 // 合法手生成
