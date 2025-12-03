@@ -1,5 +1,6 @@
 //! SFEN形式の解析・出力
 
+use crate::eval::material::compute_material_value;
 use crate::types::{Color, File, Piece, PieceType, Rank, Square};
 
 use super::pos::{is_minor_piece, Position};
@@ -86,6 +87,9 @@ impl Position {
         let them = !self.side_to_move;
         self.state_mut().checkers =
             self.attackers_to_c(self.king_square[self.side_to_move.index()], them);
+
+        // material_value を再計算
+        self.state_mut().material_value = compute_material_value(self);
 
         Ok(())
     }
