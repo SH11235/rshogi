@@ -1195,10 +1195,10 @@ impl<'a> SearchWorker<'a> {
 
                 if is_capture || gives_check {
                     let captured = pos.piece_on(mv.to());
-                    let capt_hist = self.capture_history.get(
+                    let capt_hist = self.capture_history.get_with_captured_piece(
                         mv.moved_piece_after(),
                         mv.to(),
-                        captured.piece_type(),
+                        captured,
                     ) as i32;
 
                     if !gives_check && lmr_depth < 7 && !in_check {
