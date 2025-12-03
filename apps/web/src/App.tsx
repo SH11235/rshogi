@@ -22,7 +22,13 @@ function formatEvent(event: EngineEvent): string {
 }
 
 function App() {
-    const engine = useMemo(() => createWasmEngineClient({ stopMode: "terminate" }), []);
+    const engine = useMemo(
+        () =>
+            createWasmEngineClient({
+                stopMode: "terminate", // worker を terminate して確実に止めるモード（今は mock 内部）
+            }),
+        [],
+    );
     const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
@@ -65,7 +71,7 @@ function App() {
                 status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
             </p>
             <section className="logs">
-                <h2>Events (mock backend for now)</h2>
+                <h2>Events (worker mock for now)</h2>
                 <ul>
                     {logs.map((line, idx) => (
                         <li key={`${idx}-${line}`}>{line}</li>

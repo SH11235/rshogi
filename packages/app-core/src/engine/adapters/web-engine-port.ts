@@ -20,7 +20,11 @@ export class WebEnginePort implements EnginePort {
         this.lastPosition = sfenOrMoves;
     }
 
-    async go(): Promise<EngineGoResult> {
+    async go(_params: {
+        byoyomi?: number;
+        btime?: number;
+        wtime?: number;
+    }): Promise<EngineGoResult> {
         if (!this.started) {
             throw new Error("WebEnginePort must call start before go");
         }
