@@ -16,11 +16,21 @@
             "inputs": ["src/**/*.{ts,tsx,js,jsx}", "src/**/*.test.{ts,tsx,js,jsx}"]
         },
         "lint": {
-            "inputs": ["src/**/*.{ts,tsx,js,jsx,mjs,cjs}", "*.{ts,tsx,js,jsx,mjs,cjs}", "biome.json", ".eslintrc*"],
+            "inputs": [
+                "src/**/*.{ts,tsx,js,jsx,mjs,cjs}",
+                "*.{ts,tsx,js,jsx,mjs,cjs}",
+                "biome.json",
+                ".eslintrc*"
+            ],
             "outputs": []
         },
         "lint:fix": {
-            "inputs": ["src/**/*.{ts,tsx,js,jsx,mjs,cjs}", "*.{ts,tsx,js,jsx,mjs,cjs}", "biome.json", ".eslintrc*"],
+            "inputs": [
+                "src/**/*.{ts,tsx,js,jsx,mjs,cjs}",
+                "*.{ts,tsx,js,jsx,mjs,cjs}",
+                "biome.json",
+                ".eslintrc*"
+            ],
             "outputs": [],
             "cache": false
         },
@@ -29,7 +39,14 @@
             "outputs": []
         },
         "format": {
-            "inputs": ["**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,yml,yaml}"],
+            "inputs": [
+                "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,yml,yaml,rs,toml}",
+                "Cargo.lock",
+                "**/Cargo.lock",
+                "Cargo.toml",
+                "**/Cargo.toml",
+                "apps/desktop/src-tauri/**"
+            ],
             "outputs": [],
             "cache": false
         },
