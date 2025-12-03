@@ -17,7 +17,7 @@ use crate::eval::material;
 use crate::position::Position;
 use crate::types::Value;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -113,6 +113,15 @@ impl Network {
 /// NNUEを初期化
 pub fn init_nnue<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let network = Network::load(path)?;
+    NETWORK
+        .set(network)
+        .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))
+}
+
+/// バイト列からNNUEを初期化
+pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
+    let mut cursor = Cursor::new(bytes);
+    let network = Network::read(&mut cursor)?;
     NETWORK
         .set(network)
         .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))

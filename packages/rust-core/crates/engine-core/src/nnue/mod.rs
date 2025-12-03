@@ -23,4 +23,4 @@ pub use constants::*;
 pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
 pub use layers::{AffineTransform, ClippedReLU};
-pub use network::{evaluate, init_nnue, Network};
+pub use network::{evaluate, init_nnue, init_nnue_from_bytes, Network};

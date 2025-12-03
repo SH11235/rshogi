@@ -1,57 +1,136 @@
-import {
-    EngineEvent,
-    EngineInitOptions,
-    SearchParams,
-    createMockEngineClient,
-} from "@shogi/engine-client";
+import type { EngineEvent, EngineInitOptions, SearchParams } from "@shogi/engine-client";
+import initWasm, {
+    dispose as disposeEngine,
+    init as initEngine,
+    load_model as loadModel,
+    load_position as loadPosition,
+    search as runSearch,
+    set_event_handler as setEventHandler,
+    set_option as setOption,
+    stop as stopEngine,
+} from "../pkg/engine_wasm.js";
+
+type WasmModuleSource = WebAssembly.Module | ArrayBuffer | Uint8Array | string;
+
+type InitCommand = { type: "init"; opts?: EngineInitOptions; wasmModule?: WasmModuleSource };
 
 type WorkerCommand =
-    | { type: "init"; opts?: EngineInitOptions }
+    | InitCommand
     | { type: "loadPosition"; sfen: string; moves?: string[] }
     | { type: "search"; params: SearchParams }
     | { type: "stop" }
-    | { type: "dispose" };
+    | { type: "dispose" }
+    | { type: "setOption"; name: string; value: string | number | boolean };
 
-const engine = createMockEngineClient();
-let handle: Awaited<ReturnType<typeof engine.search>> | null = null;
+type ModelCache = { uri: string; bytes: Uint8Array };
 
-function postEvent(event: EngineEvent) {
-    // eslint-disable-next-line no-restricted-globals
-    self.postMessage({ type: "event", payload: event });
+const ctx: {
+    postMessage: (value: unknown) => void;
+    onmessage: ((msg: { data: WorkerCommand }) => void) | null;
+} = self as any;
+
+let engineInitialized = false;
+let cachedModel: ModelCache | null = null;
+let lastInit: InitCommand | null = null;
+let moduleReady: Promise<void> | null = null;
+
+const postEvent = (event: EngineEvent) => {
+    ctx.postMessage({ type: "event", payload: event });
+};
+
+async function ensureModule(wasmModule?: WasmModuleSource) {
+    if (!moduleReady) {
+        const input = wasmModule ?? new URL("../pkg/engine_wasm_bg.wasm", import.meta.url);
+        moduleReady = initWasm({ module_or_path: input }).then(() => {
+            setEventHandler((event: EngineEvent) => postEvent(event));
+        });
+    }
+    await moduleReady;
 }
 
-engine.subscribe(postEvent);
+function buildInitPayload(opts?: EngineInitOptions) {
+    if (!opts) return undefined;
+    const payload: Record<string, unknown> = {};
+    const typed = opts as { ttSizeMb?: number; multiPv?: number };
+    if (typeof typed.ttSizeMb === "number") {
+        payload.tt_size_mb = typed.ttSizeMb;
+    }
+    if (typeof typed.multiPv === "number") {
+        payload.multi_pv = typed.multiPv;
+    }
+    return Object.keys(payload).length ? payload : undefined;
+}
 
-self.onmessage = async (msg: MessageEvent<WorkerCommand>) => {
+async function loadModelIfNeeded(opts?: EngineInitOptions) {
+    const uri = opts?.modelUri ?? opts?.nnuePath;
+    if (!uri) return;
+
+    if (cachedModel && cachedModel.uri === uri) {
+        await loadModel(cachedModel.bytes);
+        return;
+    }
+
+    const res = await fetch(uri);
+    if (!res.ok) {
+        throw new Error(`Failed to fetch model from ${uri}: ${res.status} ${res.statusText}`);
+    }
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    cachedModel = { uri, bytes };
+    await loadModel(bytes);
+}
+
+async function applyInit(command?: InitCommand) {
+    await ensureModule(command?.wasmModule ?? lastInit?.wasmModule);
+
+    const payload = buildInitPayload(command?.opts ?? lastInit?.opts);
+    await initEngine(payload ? JSON.stringify(payload) : undefined);
+    engineInitialized = true;
+
+    await loadModelIfNeeded(command?.opts ?? lastInit?.opts);
+}
+
+async function ensureEngineReady() {
+    if (!engineInitialized) {
+        await applyInit(lastInit ?? undefined);
+        engineInitialized = true;
+    }
+}
+
+ctx.onmessage = async (msg: { data: WorkerCommand }) => {
     const command = msg.data;
+
     try {
         switch (command.type) {
             case "init":
-                await engine.init(command.opts);
+                lastInit = command;
+                await applyInit(command);
                 break;
             case "loadPosition":
-                await engine.loadPosition(command.sfen, command.moves);
+                await ensureEngineReady();
+                await loadPosition(
+                    command.sfen,
+                    command.moves ? JSON.stringify(command.moves) : undefined,
+                );
                 break;
             case "search":
-                if (handle) {
-                    await handle.cancel().catch(() => undefined);
-                    handle = null;
-                }
-                handle = await engine.search(command.params);
+                await ensureEngineReady();
+                await runSearch(JSON.stringify(command.params ?? {}));
+                break;
+            case "setOption":
+                await ensureEngineReady();
+                await setOption(command.name, JSON.stringify(command.value));
                 break;
             case "stop":
-                if (handle) {
-                    await handle.cancel().catch(() => undefined);
-                    handle = null;
+                if (engineInitialized) {
+                    stopEngine();
                 }
-                await engine.stop();
                 break;
             case "dispose":
-                if (handle) {
-                    await handle.cancel().catch(() => undefined);
-                    handle = null;
+                if (engineInitialized) {
+                    disposeEngine();
+                    engineInitialized = false;
                 }
-                await engine.dispose();
                 break;
             default:
                 break;

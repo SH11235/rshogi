@@ -2,9 +2,9 @@
 //!
 //! USIプロトコルから呼び出すためのハイレベルインターフェース。
 
+use instant::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::position::Position;
 use crate::tt::TranspositionTable;

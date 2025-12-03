@@ -3,7 +3,7 @@
 //! USI `go` コマンドのパラメータを表現する。
 
 use crate::types::Color;
-use std::time::Instant;
+use instant::Instant;
 
 // =============================================================================
 // TimePoint

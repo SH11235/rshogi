@@ -90,7 +90,7 @@ async fn engine_search(
         }
         let _pos = inner.position.clone();
         let _ = params; // TODO: use params for time controls when native engine is wired.
-        // Spawn a tiny mock search: emit one info and one bestmove.
+                        // Spawn a tiny mock search: emit one info and one bestmove.
         inner.handle = Some(tauri::async_runtime::spawn(async move {
             window
                 .emit(

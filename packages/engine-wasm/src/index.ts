@@ -43,7 +43,8 @@ type WorkerCommand =
     | { type: "setOption"; name: string; value: string | number | boolean };
 
 function defaultWorkerFactory(): Worker {
-    return new Worker(new URL("./engine.worker.ts", import.meta.url), { type: "module" });
+    // Use the emitted JS file; pointing at .ts breaks when consuming the built package.
+    return new Worker(new URL("./engine.worker.js", import.meta.url), { type: "module" });
 }
 
 function collectTransfers(command: WorkerCommand): Transferable[] {
@@ -117,9 +118,8 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 }
             };
             worker.onerror = (err) => {
-                if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
-                    console.error("engine worker error", err);
-                }
+                // Log worker errors in non-browser tools without referencing process types in the bundle.
+                if (typeof console !== "undefined") console.error("engine worker error", err);
                 emit({ type: "error", message: "Engine worker encountered an error" });
                 fallbackToMock();
             };
@@ -210,11 +210,14 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                     if (stopMode === "terminate") {
                         terminateWorker();
                     } else {
-                        try {
-                            postToWorker({ type: "stop" });
-                        } catch {
-                            terminateWorker();
-                        }
+                        // TODO: 探索中の wasm を協調停止できるようにする（SAB/Atomics などで停止フラグを即時伝搬）。
+                        // 現状 runSearch がブロッキングで stop メッセージを処理できないため terminate にフォールバックする。
+                        emit({
+                            type: "error",
+                            message:
+                                "cooperative stop is not yet supported for wasm; falling back to terminate",
+                        });
+                        terminateWorker();
                     }
                 },
             };
@@ -227,11 +230,13 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             if (stopMode === "terminate") {
                 terminateWorker();
             } else {
-                try {
-                    postToWorker({ type: "stop" });
-                } catch {
-                    terminateWorker();
-                }
+                // TODO: 協調停止対応を追加する。現状 stop メッセージが探索中に処理されないので terminate にフォールバック。
+                emit({
+                    type: "error",
+                    message:
+                        "cooperative stop is not yet supported for wasm; falling back to terminate",
+                });
+                terminateWorker();
             }
         },
         async setOption(name: string, value: string | number | boolean) {
