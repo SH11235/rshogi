@@ -54,3 +54,4 @@ _shared/*
 
 runs_local/
 .serena/
+packages/rust-core/.cargo/config.toml
