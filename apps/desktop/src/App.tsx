@@ -1,9 +1,14 @@
 import type { EngineEvent, SearchHandle } from "@shogi/engine-client";
 import { createTauriEngineClient } from "@shogi/engine-tauri";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 
 const MAX_LOGS = 6;
+const engine = createTauriEngineClient({
+    stopMode: "terminate",
+    useMockOnError: false,
+    debug: true,
+});
 
 function formatEvent(event: EngineEvent): string {
     if (event.type === "bestmove") {
@@ -22,17 +27,6 @@ function formatEvent(event: EngineEvent): string {
 }
 
 function App() {
-    const engineRef = useRef<ReturnType<typeof createTauriEngineClient> | null>(null);
-    const engine = useMemo(() => {
-        if (!engineRef.current) {
-            engineRef.current = createTauriEngineClient({
-                stopMode: "terminate",
-                useMockOnError: false,
-                debug: true,
-            });
-        }
-        return engineRef.current;
-    }, []);
     const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
@@ -87,7 +81,6 @@ function App() {
                     });
             }
             unsubscribe();
-            engine.dispose().catch(() => undefined);
         };
     }, []);
 
