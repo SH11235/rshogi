@@ -13,6 +13,7 @@ use super::constants::{
 };
 use super::feature_transformer::FeatureTransformer;
 use super::layers::{AffineTransform, ClippedReLU};
+use crate::eval::material;
 use crate::position::Position;
 use crate::types::Value;
 use std::fs::File;
@@ -167,89 +168,15 @@ pub fn evaluate(pos: &mut Position) -> Value {
         };
         network.evaluate(pos, acc_ref)
     } else {
-        // フォールバック: 簡易駒得評価
-        evaluate_material(pos)
+        // フォールバック: Material評価
+        material::evaluate_material(pos)
     }
-}
-
-/// 簡易駒得評価（NNUEが使えない場合のフォールバック）
-fn evaluate_material(pos: &Position) -> Value {
-    use crate::types::PieceType;
-
-    let mut score = 0i32;
-
-    // 駒の価値（単位: 1歩 = 100）
-    const PIECE_VALUES: [i32; 15] = [
-        0,    // None
-        100,  // Pawn
-        300,  // Lance
-        350,  // Knight
-        400,  // Silver
-        500,  // Gold
-        800,  // Bishop
-        1000, // Rook
-        500,  // King (not used)
-        400,  // ProPawn
-        400,  // ProLance
-        400,  // ProKnight
-        400,  // ProSilver
-        1100, // Horse
-        1300, // Dragon
-    ];
-
-    // 盤上の駒
-    for sq in pos.occupied().iter() {
-        let pc = pos.piece_on(sq);
-        if pc.is_none() {
-            continue;
-        }
-
-        let pt = pc.piece_type();
-        let value = PIECE_VALUES[pt as usize];
-
-        if pc.color() == pos.side_to_move() {
-            score += value;
-        } else {
-            score -= value;
-        }
-    }
-
-    // 手駒
-    for pt in [
-        PieceType::Pawn,
-        PieceType::Lance,
-        PieceType::Knight,
-        PieceType::Silver,
-        PieceType::Gold,
-        PieceType::Bishop,
-        PieceType::Rook,
-    ] {
-        let my_hand = pos.hand(pos.side_to_move()).count(pt) as i32;
-        let opp_hand = pos.hand(!pos.side_to_move()).count(pt) as i32;
-
-        let value = PIECE_VALUES[pt as usize];
-        score += value * my_hand;
-        score -= value * opp_hand;
-    }
-
-    Value::new(score)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::position::SFEN_HIRATE;
-
-    #[test]
-    fn test_evaluate_material_hirate() {
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-
-        let value = evaluate_material(&pos);
-
-        // 初期局面は互角
-        assert_eq!(value, Value::ZERO);
-    }
 
     #[test]
     fn test_evaluate_fallback() {
