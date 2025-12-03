@@ -1,6 +1,6 @@
+import { cn } from "@shogi/design-system";
 import type { InputHTMLAttributes, ReactElement } from "react";
 import { forwardRef } from "react";
-import { cn } from "@shogi/design-system";
 
 export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {}
 

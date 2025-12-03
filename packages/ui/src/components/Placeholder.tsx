@@ -1,5 +1,5 @@
-import type { ReactElement } from "react";
 import { cn } from "@shogi/design-system";
+import type { ReactElement } from "react";
 
 export type PlaceholderProps = {
     label?: string;

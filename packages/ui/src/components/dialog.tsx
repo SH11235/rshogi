@@ -1,7 +1,7 @@
-import type { ComponentPropsWithoutRef, ElementRef, ReactElement } from "react";
-import { forwardRef } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { cn } from "@shogi/design-system";
+import type { ComponentPropsWithoutRef, ElementRef, ReactElement } from "react";
+import { forwardRef } from "react";
 
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;

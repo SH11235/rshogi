@@ -1,14 +1,14 @@
+import {
+    createMockEngineClient,
+    type EngineClient,
+    type EngineEvent,
+    type EngineEventHandler,
+    type EngineInitOptions,
+    type SearchHandle,
+    type SearchParams,
+} from "@shogi/engine-client";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
-import {
-    EngineClient,
-    EngineEvent,
-    EngineEventHandler,
-    EngineInitOptions,
-    SearchHandle,
-    SearchParams,
-    createMockEngineClient,
-} from "@shogi/engine-client";
 
 type InvokeFn = typeof tauriInvoke;
 type ListenFn = typeof tauriListen;
@@ -36,18 +36,23 @@ export interface TauriEngineClientOptions extends EngineInitOptions {
 const DEFAULT_EVENT_NAME = "engine://event";
 
 export function createTauriEngineClient(options: TauriEngineClientOptions = {}): EngineClient {
-    const useMockOnError = options.useMockOnError ?? true;
+    const {
+        ipc: ipcOverrides,
+        useMockOnError = true,
+        eventName = DEFAULT_EVENT_NAME,
+        ...initDefaults
+    } = options;
+
     const mock = createMockEngineClient();
     const listeners = new Set<EngineEventHandler>();
     const mockSubscriptions = new Map<EngineEventHandler, () => void>();
     const ipc: TauriIpc = {
-        invoke: options.ipc?.invoke ?? tauriInvoke,
-        listen: options.ipc?.listen ?? tauriListen,
+        invoke: ipcOverrides?.invoke ?? tauriInvoke,
+        listen: ipcOverrides?.listen ?? tauriListen,
     };
 
     let usingMock = false;
     let unlisten: UnlistenFn | null = null;
-    const eventName = options.eventName ?? DEFAULT_EVENT_NAME;
 
     const emit = (event: EngineEvent) => {
         listeners.forEach((handler) => handler(event));
@@ -107,12 +112,14 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
 
     return {
         async init(initOpts) {
+            const mergedInitOpts =
+                initOpts ?? (Object.keys(initDefaults).length > 0 ? initDefaults : undefined);
             return runOrMock(
                 async () => {
-                    await ipc.invoke("engine_init", { opts: initOpts });
+                    await ipc.invoke("engine_init", { opts: mergedInitOpts });
                     await ensureEventSubscription();
                 },
-                () => mock.init(initOpts),
+                () => mock.init(mergedInitOpts),
             );
         },
         async loadPosition(sfen, moves) {

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
 import type { EngineEvent, SearchHandle } from "@shogi/engine-client";
 import { createTauriEngineClient } from "@shogi/engine-tauri";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const MAX_LOGS = 6;
@@ -22,7 +22,10 @@ function formatEvent(event: EngineEvent): string {
 }
 
 function App() {
-    const engine = useMemo(() => createTauriEngineClient({ stopMode: "terminate" }), []);
+    const engine = useMemo(
+        () => createTauriEngineClient({ stopMode: "terminate", useMockOnError: false }),
+        [],
+    );
     const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
@@ -68,7 +71,7 @@ function App() {
                 status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
             </p>
             <section className="logs">
-                <h2>Events (mock fallback until IPC is wired)</h2>
+                <h2>Engine events (native backend)</h2>
                 <ul>
                     {logs.map((line, idx) => (
                         <li key={`${idx}-${line}`}>{line}</li>

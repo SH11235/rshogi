@@ -1,7 +1,7 @@
-import type { ComponentPropsWithoutRef, ElementRef, ReactElement } from "react";
-import { forwardRef } from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { cn } from "@shogi/design-system";
+import type { ComponentPropsWithoutRef, ElementRef, ReactElement } from "react";
+import { forwardRef } from "react";
 
 export const TooltipProvider = TooltipPrimitive.Provider;
 export const Tooltip = TooltipPrimitive.Root;

@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
 import assert from "node:assert";
+import { readFile } from "node:fs/promises";
 
 import initWasm, {
     init as initEngine,

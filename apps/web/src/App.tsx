@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
 import type { EngineEvent, SearchHandle } from "@shogi/engine-client";
 import { createWasmEngineClient } from "@shogi/engine-wasm";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const MAX_LOGS = 6;
