@@ -1,0 +1,14 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": false,
+        "declaration": true,
+        "declarationMap": true,
+        "outDir": "dist",
+        "paths": {
+            "@shogi/design-system": ["../../packages/design-system/dist/index"],
+            "@shogi/design-system/*": ["../../packages/design-system/dist/*"]
+        }
+    },
+    "include": ["src"]
+}

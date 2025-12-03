@@ -1,0 +1,35 @@
+{
+    "name": "@shogi/app-core",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "sideEffects": false,
+    "main": "./dist/index.js",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.build.json",
+        "dev": "tsc -p tsconfig.build.json --watch",
+        "lint": "biome check .",
+        "lint:fix": "biome check --write --files-ignore-unknown=true",
+        "typecheck": "tsc -p tsconfig.json",
+        "test": "vitest"
+    },
+    "dependencies": {
+        "@tauri-apps/api": "^2.9.0"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^2.3.5",
+        "@types/react": "^19.2.4",
+        "@types/react-dom": "^19.2.3",
+        "typescript": "~5.9.3",
+        "vitest": "^3.1.3"
+    }
+}
