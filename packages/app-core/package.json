@@ -17,8 +17,10 @@
     "scripts": {
         "build": "tsc -p tsconfig.build.json",
         "dev": "tsc -p tsconfig.build.json --watch",
-        "lint": "biome check .",
-        "lint:fix": "biome check --write --files-ignore-unknown=true",
+        "format": "pnpm --workspace-root exec biome format --write .",
+        "format:check": "pnpm --workspace-root exec biome format .",
+        "lint": "pnpm --workspace-root exec biome check .",
+        "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
         "typecheck": "tsc -p tsconfig.json",
         "test": "vitest"
     },
@@ -26,7 +28,6 @@
         "@tauri-apps/api": "^2.9.0"
     },
     "devDependencies": {
-        "@biomejs/biome": "^2.3.5",
         "@types/react": "^19.2.4",
         "@types/react-dom": "^19.2.3",
         "typescript": "~5.9.3",
