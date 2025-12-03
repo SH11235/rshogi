@@ -198,19 +198,12 @@ struct MetaSettings {
 
 #[derive(Serialize, Deserialize)]
 struct EngineCommandMeta {
-    path: String,
+    path_black: String,
+    path_white: String,
+    source_black: String,
+    source_white: String,
     args_black: Vec<String>,
     args_white: Vec<String>,
-    #[serde(default)]
-    source: String,
-    #[serde(default)]
-    path_black: Option<String>,
-    #[serde(default)]
-    path_white: Option<String>,
-    #[serde(default)]
-    source_black: Option<String>,
-    #[serde(default)]
-    source_white: Option<String>,
 }
 
 /// バイナリの発見元を含む解決結果。
@@ -220,8 +213,12 @@ struct ResolvedEnginePath {
     source: &'static str,
 }
 
+/// 先手と後手のエンジンバイナリパスの解決結果。
+/// 各プレイヤーに異なるエンジンバイナリを使用できるようにする。
 struct ResolvedEnginePaths {
+    /// 先手（Black）のエンジンバイナリパス
     black: ResolvedEnginePath,
+    /// 後手（White）のエンジンバイナリパス
     white: ResolvedEnginePath,
 }
 
@@ -1012,12 +1009,10 @@ fn main() -> Result<()> {
             sfen: cli.sfen.clone(),
         },
         engine_cmd: EngineCommandMeta {
-            path: engine_paths.black.path.display().to_string(),
-            source: engine_paths.black.source.to_string(),
-            path_black: Some(engine_paths.black.path.display().to_string()),
-            path_white: Some(engine_paths.white.path.display().to_string()),
-            source_black: Some(engine_paths.black.source.to_string()),
-            source_white: Some(engine_paths.white.source.to_string()),
+            path_black: engine_paths.black.path.display().to_string(),
+            path_white: engine_paths.white.path.display().to_string(),
+            source_black: engine_paths.black.source.to_string(),
+            source_white: engine_paths.white.source.to_string(),
             args_black: black_args.clone(),
             args_white: white_args.clone(),
         },
@@ -1809,12 +1804,14 @@ fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
 fn engine_names_for(meta: Option<&MetaLog>) -> (String, String) {
     let default = ("black".to_string(), "white".to_string());
     let Some(meta) = meta else { return default };
-    let black_path = meta.engine_cmd.path_black.as_deref().unwrap_or(&meta.engine_cmd.path);
-    let white_path = meta.engine_cmd.path_white.as_deref().unwrap_or(&meta.engine_cmd.path);
-    let black_name =
-        Path::new(black_path).file_name().and_then(|s| s.to_str()).unwrap_or(black_path);
-    let white_name =
-        Path::new(white_path).file_name().and_then(|s| s.to_str()).unwrap_or(white_path);
+    let black_name = Path::new(&meta.engine_cmd.path_black)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&meta.engine_cmd.path_black);
+    let white_name = Path::new(&meta.engine_cmd.path_white)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&meta.engine_cmd.path_white);
     (format!("{} (black)", black_name), format!("{} (white)", white_name))
 }
 
