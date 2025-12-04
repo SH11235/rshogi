@@ -1,9 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
 import type { EngineEvent, SearchHandle } from "@shogi/engine-client";
 import { createTauriEngineClient } from "@shogi/engine-tauri";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 
 const MAX_LOGS = 6;
+const engine = createTauriEngineClient({
+    stopMode: "terminate",
+    useMockOnError: false,
+    debug: true,
+});
 
 function formatEvent(event: EngineEvent): string {
     if (event.type === "bestmove") {
@@ -22,44 +27,65 @@ function formatEvent(event: EngineEvent): string {
 }
 
 function App() {
-    const engine = useMemo(() => createTauriEngineClient({ stopMode: "terminate" }), []);
     const [status, setStatus] = useState<"idle" | "init" | "searching" | "error">("idle");
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
+    const handleRef = useRef<SearchHandle | null>(null);
+    const runningRef = useRef<boolean>(false);
 
     useEffect(() => {
-        let handle: SearchHandle | null = null;
         const unsubscribe = engine.subscribe((event) => {
+            // Debug log to see raw events in DevTools
+            console.info("[ui] engine event", event);
             setLogs((prev) => {
-                const next = [...prev, formatEvent(event)];
+                const line = formatEvent(event);
+                const last = prev[prev.length - 1];
+                if (last === line) return prev; // avoid duplicate adjacent lines
+                const next = [...prev, line];
                 return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next;
             });
             if (event.type === "bestmove") {
                 setBestmove(event.move);
+                setStatus("idle");
+            }
+            if (event.type === "error") {
+                setStatus("error");
             }
         });
 
-        (async () => {
-            try {
-                setStatus("init");
-                await engine.init();
-                await engine.loadPosition("startpos");
-                setStatus("searching");
-                handle = await engine.search({ limits: { maxDepth: 1 } });
-            } catch (error) {
-                setStatus("error");
-                setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
-            }
-        })();
-
         return () => {
-            if (handle) {
-                handle.cancel().catch((err) => console.warn("Failed to cancel search:", err));
+            const toCancel = handleRef.current;
+            if (toCancel) {
+                toCancel
+                    .cancel()
+                    .catch((err) => console.warn("Failed to cancel search:", err))
+                    .finally(() => {
+                        if (handleRef.current === toCancel) {
+                            handleRef.current = null;
+                        }
+                    });
             }
             unsubscribe();
-            engine.dispose().catch(() => undefined);
         };
-    }, [engine]);
+    }, []);
+
+    const startSearch = async () => {
+        if (runningRef.current) return;
+        runningRef.current = true;
+        try {
+            setStatus("init");
+            await engine.init();
+            await engine.loadPosition("startpos");
+            setStatus("searching");
+            const handle = await engine.search({ limits: { maxDepth: 1 } });
+            handleRef.current = handle;
+        } catch (error) {
+            setStatus("error");
+            setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
+        } finally {
+            runningRef.current = false;
+        }
+    };
 
     return (
         <main className="container">
@@ -67,8 +93,13 @@ function App() {
             <p>
                 status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
             </p>
+            <p>
+                <button type="button" onClick={startSearch} disabled={status === "searching"}>
+                    Run debug search (startpos depth=1)
+                </button>
+            </p>
             <section className="logs">
-                <h2>Events (mock fallback until IPC is wired)</h2>
+                <h2>Engine events (native backend)</h2>
                 <ul>
                     {logs.map((line, idx) => (
                         <li key={`${idx}-${line}`}>{line}</li>

@@ -1,13 +1,12 @@
 import {
-    BOARD_RANKS,
-    BOARD_FILES,
     applyMove,
+    BOARD_FILES,
+    BOARD_RANKS,
+    type BoardState,
     boardFromMoves,
     createInitialBoard,
-    type BoardState,
     type Piece,
     type PieceType,
-    type Player,
     type Square,
 } from "./board";
 

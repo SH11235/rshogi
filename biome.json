@@ -27,18 +27,19 @@
             "!**/package.json",
             "!**/package-lock.json",
             "!**/pnpm-lock.yaml",
-            "!**/node_modules/**",
-            "!**/.git/**",
-            "!**/dist/**",
-            "!**/.turbo/**",
-            "!**/.vscode/**",
-            "!**/test-results/**",
-            "!**/playwright-report/**",
-            "!**/coverage/**",
-            "!**/packages/rust-core/**",
-            "!**/packages/web/src/wasm/**",
-            "!**/src-tauri/**",
-            "!**/memo/**"
+            "!**/node_modules",
+            "!**/.git",
+            "!**/dist",
+            "!**/pkg",
+            "!**/.turbo",
+            "!**/.vscode",
+            "!**/test-results",
+            "!**/playwright-report",
+            "!**/coverage",
+            "!**/packages/rust-core",
+            "!**/packages/web/src/wasm",
+            "!**/src-tauri",
+            "!**/memo"
         ]
     }
 }

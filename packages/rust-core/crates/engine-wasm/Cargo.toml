@@ -1,0 +1,21 @@
+[package]
+name = "engine-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Wasm bindings for the shogi engine core"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+wasm-bindgen = { version = "0.2.106", features = ["serde-serialize"] }
+js-sys = "0.3.83"
+serde.workspace = true
+serde_json.workspace = true
+
+[target.wasm32-unknown-unknown.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+console_error_panic_hook = "0.1"

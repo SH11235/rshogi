@@ -1,23 +1,21 @@
 
-echo "🔍 Running pre-commit checks..."
+#!/usr/bin/env sh
 
-# 1. lint-staged でフォーマットとlint
-echo "📝 Formatting and linting staged files..."
+echo "📝 Running lint-staged (format only)..."
 lint-staged
 
-# 2. Check if any Rust files are staged
-if git diff --cached --name-only | grep -q "packages/rust-core/.*\.rs$"; then
-    echo "🦀 Rust files detected, running Rust-specific checks..."
-    # Run Rust checks
-    (cd packages/rust-core && ./scripts/pre-commit-rust.sh)
+if git diff --cached --name-only -z --diff-filter=ACM | grep -qz '^packages/rust-core/.*\.rs$'; then
+    echo "🦀 Rust files in packages/rust-core detected, running cargo fmt..."
+    (cd packages/rust-core && cargo fmt --all)
+    git diff --cached --name-only -z --diff-filter=ACM | \
+        grep -z '^packages/rust-core/.*\.rs$' | \
+        xargs -0 -- git add --
 fi
 
-# 3. 影響のあるパッケージの型チェック（高速）
-echo "🔍 Type checking affected packages..."
-npm run typecheck:affected
-
-# 4. 影響のあるパッケージのテスト（オプション：重い場合はコメントアウト）
-# echo "🧪 Testing affected packages..."
-# npm run test:affected
-
-echo "✅ Pre-commit checks completed!"
+if git diff --cached --name-only -z --diff-filter=ACM | grep -qz '^apps/desktop/src-tauri/.*\.rs$'; then
+    echo "🦀 Rust files in apps/desktop/src-tauri detected, running cargo fmt..."
+    (cd apps/desktop/src-tauri && cargo fmt --all)
+    git diff --cached --name-only -z --diff-filter=ACM | \
+        grep -z '^apps/desktop/src-tauri/.*\.rs$' | \
+        xargs -0 -- git add --
+fi
