@@ -3,7 +3,29 @@ name: JS Format & Lint
 on:
   push:
     branches: [main]
+    paths:
+      - "apps/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - "biome.json"
+      - "tsconfig*.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/js-format-lint.yml"
   pull_request:
+    paths:
+      - "apps/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - "biome.json"
+      - "tsconfig*.json"
+      - "tsconfig.base.json"
+      - ".github/workflows/js-format-lint.yml"
 
 env:
   CI: true
