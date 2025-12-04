@@ -232,8 +232,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Resolve wasm-bindgen version
+        run: |
+          WASM_BINDGEN_VERSION=$(grep '^wasm-bindgen' packages/rust-core/crates/engine-wasm/Cargo.toml | sed -E 's/.*version\\s*=\\s*"([^"]+)".*/\\1/')
+          echo "WASM_BINDGEN_VERSION=$WASM_BINDGEN_VERSION" >> "$GITHUB_ENV"
+          echo "wasm-bindgen version: $WASM_BINDGEN_VERSION"
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.106
+        run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "packages/rust-core -> target"
