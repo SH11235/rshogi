@@ -14,6 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
       - id: versions
         run: |
           echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
@@ -22,9 +25,6 @@ jobs:
         with:
           node-version: ${{ steps.versions.outputs.node }}
           cache: pnpm
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ steps.versions.outputs.pnpm }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:ci
 
@@ -33,6 +33,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
       - id: versions
         run: |
           echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
@@ -41,8 +44,5 @@ jobs:
         with:
           node-version: ${{ steps.versions.outputs.node }}
           cache: pnpm
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ steps.versions.outputs.pnpm }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
