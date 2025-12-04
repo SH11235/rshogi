@@ -5,11 +5,11 @@
 
 use super::{LimitsType, TimeOptions, TimePoint};
 use crate::types::Color;
-use instant::Instant;
 use log::debug;
 use rand::Rng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 // =============================================================================
 // 定数

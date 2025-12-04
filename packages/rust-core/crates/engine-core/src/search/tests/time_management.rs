@@ -4,10 +4,10 @@
 
 use crate::search::{LimitsType, TimeManagement, TimeOptions, DEFAULT_MAX_MOVES_TO_DRAW};
 use crate::types::Color;
-use instant::Instant;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 // =============================================================================
 // ヘルパー関数
