@@ -4,16 +4,18 @@
 echo "📝 Running lint-staged (format only)..."
 lint-staged
 
-staged_core_rs=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^packages/rust-core/.*\.rs$' || true)
-if [ -n "$staged_core_rs" ]; then
+if git diff --cached --name-only -z --diff-filter=ACM | grep -qz '^packages/rust-core/.*\.rs$'; then
     echo "🦀 Rust files in packages/rust-core detected, running cargo fmt..."
     (cd packages/rust-core && cargo fmt --all)
-    echo "$staged_core_rs" | xargs git add
+    git diff --cached --name-only -z --diff-filter=ACM | \
+        grep -z '^packages/rust-core/.*\.rs$' | \
+        xargs -0 -- git add --
 fi
 
-staged_tauri_rs=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^apps/desktop/src-tauri/.*\.rs$' || true)
-if [ -n "$staged_tauri_rs" ]; then
+if git diff --cached --name-only -z --diff-filter=ACM | grep -qz '^apps/desktop/src-tauri/.*\.rs$'; then
     echo "🦀 Rust files in apps/desktop/src-tauri detected, running cargo fmt..."
     (cd apps/desktop/src-tauri && cargo fmt --all)
-    echo "$staged_tauri_rs" | xargs git add
+    git diff --cached --name-only -z --diff-filter=ACM | \
+        grep -z '^apps/desktop/src-tauri/.*\.rs$' | \
+        xargs -0 -- git add --
 fi
