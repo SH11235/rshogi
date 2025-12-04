@@ -42,6 +42,7 @@ function App() {
             });
             if (event.type === "bestmove") {
                 setBestmove(event.move);
+                setStatus("idle");
             }
         });
 
