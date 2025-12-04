@@ -234,7 +234,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Resolve wasm-bindgen version
         run: |
-          WASM_BINDGEN_VERSION=$(grep '^wasm-bindgen' packages/rust-core/crates/engine-wasm/Cargo.toml | sed -E 's/.*version\\s*=\\s*"([^"]+)".*/\\1/')
+          WASM_BINDGEN_VERSION=$(sed -n 's/^wasm-bindgen[[:space:]]*=[[:space:]]*{[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' packages/rust-core/crates/engine-wasm/Cargo.toml | head -n1)
           echo "WASM_BINDGEN_VERSION=$WASM_BINDGEN_VERSION" >> "$GITHUB_ENV"
           echo "wasm-bindgen version: $WASM_BINDGEN_VERSION"
       - name: Install wasm-bindgen-cli
