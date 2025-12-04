@@ -31,15 +31,18 @@ function App() {
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const handleRef = useRef<SearchHandle | null>(null);
-    const unsubscribedRef = useRef<boolean>(false);
-    const startedRef = useRef<boolean>(false);
+    const cleanedRef = useRef<boolean>(false);
+    const initializedRef = useRef<boolean>(false);
+    const cleanupRef = useRef<(() => void) | null>(null);
 
     useEffect(() => {
-        if (startedRef.current) {
-            return;
+        if (initializedRef.current) {
+            return cleanupRef.current ?? undefined;
         }
-        startedRef.current = true;
-        unsubscribedRef.current = false;
+        initializedRef.current = true;
+        cleanedRef.current = false;
+
+        let cancelled = false;
         const unsubscribe = engine.subscribe((event) => {
             // Debug log to see raw events in DevTools
             console.info("[ui] engine event", event);
@@ -63,7 +66,7 @@ function App() {
                 await engine.loadPosition("startpos");
                 setStatus("searching");
                 const handle = await engine.search({ limits: { maxDepth: 1 } });
-                if (unsubscribedRef.current) {
+                if (cancelled) {
                     await handle.cancel().catch(() => undefined);
                     return;
                 }
@@ -74,8 +77,10 @@ function App() {
             }
         })();
 
-        return () => {
-            unsubscribedRef.current = true;
+        cleanupRef.current = () => {
+            if (cleanedRef.current) return;
+            cleanedRef.current = true;
+            cancelled = true;
             const handle = handleRef.current;
             if (handle) {
                 handle
@@ -87,6 +92,8 @@ function App() {
             }
             unsubscribe();
         };
+
+        return cleanupRef.current;
     }, []);
 
     return (
