@@ -81,7 +81,7 @@ function App() {
                 status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
             </p>
             <p>
-                <button onClick={startSearch} disabled={status === "searching"}>
+                <button type="button" onClick={startSearch} disabled={status === "searching"}>
                     Run debug search (startpos depth=1)
                 </button>
             </p>

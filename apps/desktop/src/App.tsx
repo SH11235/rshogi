@@ -34,7 +34,6 @@ function App() {
     const runningRef = useRef<boolean>(false);
 
     useEffect(() => {
-        let cancelled = false;
         const unsubscribe = engine.subscribe((event) => {
             // Debug log to see raw events in DevTools
             console.info("[ui] engine event", event);
@@ -55,7 +54,6 @@ function App() {
         });
 
         return () => {
-            cancelled = true;
             const toCancel = handleRef.current;
             if (toCancel) {
                 toCancel
@@ -96,7 +94,7 @@ function App() {
                 status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
             </p>
             <p>
-                <button onClick={startSearch} disabled={status === "searching"}>
+                <button type="button" onClick={startSearch} disabled={status === "searching"}>
                     Run debug search (startpos depth=1)
                 </button>
             </p>
