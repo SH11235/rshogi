@@ -31,18 +31,10 @@ function App() {
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const handleRef = useRef<SearchHandle | null>(null);
-    const cleanedRef = useRef<boolean>(false);
-    const initializedRef = useRef<boolean>(false);
-    const cleanupRef = useRef<(() => void) | null>(null);
 
     useEffect(() => {
-        if (initializedRef.current) {
-            return cleanupRef.current ?? undefined;
-        }
-        initializedRef.current = true;
-        cleanedRef.current = false;
-
         let cancelled = false;
+        let handle: SearchHandle | null = null;
         const unsubscribe = engine.subscribe((event) => {
             // Debug log to see raw events in DevTools
             console.info("[ui] engine event", event);
@@ -65,35 +57,34 @@ function App() {
                 await engine.init();
                 await engine.loadPosition("startpos");
                 setStatus("searching");
-                const handle = await engine.search({ limits: { maxDepth: 1 } });
+                const h = await engine.search({ limits: { maxDepth: 1 } });
                 if (cancelled) {
-                    await handle.cancel().catch(() => undefined);
+                    await h.cancel().catch(() => undefined);
                     return;
                 }
-                handleRef.current = handle;
+                handle = h;
+                handleRef.current = h;
             } catch (error) {
                 setStatus("error");
                 setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
             }
         })();
 
-        cleanupRef.current = () => {
-            if (cleanedRef.current) return;
-            cleanedRef.current = true;
+        return () => {
             cancelled = true;
-            const handle = handleRef.current;
-            if (handle) {
-                handle
+            const toCancel = handle ?? handleRef.current;
+            if (toCancel) {
+                toCancel
                     .cancel()
                     .catch((err) => console.warn("Failed to cancel search:", err))
                     .finally(() => {
-                        handleRef.current = null;
+                        if (handleRef.current === toCancel) {
+                            handleRef.current = null;
+                        }
                     });
             }
             unsubscribe();
         };
-
-        return cleanupRef.current;
     }, []);
 
     return (
