@@ -14,8 +14,8 @@ use wasm_bindgen::prelude::*;
 const DEFAULT_TT_SIZE_MB: usize = 64;
 
 thread_local! {
-    static ENGINE: RefCell<Option<EngineState>> = RefCell::new(None);
-    static EVENT_CALLBACK: RefCell<Option<js_sys::Function>> = RefCell::new(None);
+    static ENGINE: RefCell<Option<EngineState>> = const { RefCell::new(None) };
+    static EVENT_CALLBACK: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
 }
 
 #[derive(Default, Deserialize)]
