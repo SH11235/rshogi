@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'packages/rust-core/**'
+      - 'apps/desktop/src-tauri/**'
       - '.github/workflows/rust-ci.yml'
   pull_request:
   workflow_dispatch:
@@ -26,8 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust_code: ${{ steps.filter.outputs.rust_code }}
+      tauri_code: ${{ steps.filter.outputs.tauri_code }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -46,6 +48,13 @@ jobs:
               - '!packages/rust-core/memo/**'
               - '!**/*.md'
               - '!**/*.mdx'
+            tauri_code:
+              - 'apps/desktop/src-tauri/Cargo.toml'
+              - 'apps/desktop/src-tauri/Cargo.lock'
+              - 'apps/desktop/src-tauri/build.rs'
+              - 'apps/desktop/src-tauri/src/**'
+              - '!**/*.md'
+              - '!**/*.mdx'
 
   format:
     name: Format Check
@@ -53,7 +62,23 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  format-tauri:
+    name: Format Check (tauri)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.tauri_code == 'true'
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -66,7 +91,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install mold linker
         run: |
           sudo apt-get update
@@ -90,6 +115,47 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  lint-tauri:
+    name: Clippy Lint (tauri)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.tauri_code == 'true'
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install system deps (GTK/WebKit for Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            pkg-config \
+            build-essential \
+            curl \
+            wget \
+            file
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/desktop/src-tauri -> target"
+          cache-on-failure: true
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -97,7 +163,7 @@ jobs:
     if: needs.changes.outputs.rust_code == 'true'
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install mold linker
         run: |
           sudo apt-get update
@@ -119,14 +185,81 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  test-tauri:
+    name: Test (tauri)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.tauri_code == 'true'
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install system deps (GTK/WebKit for Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            pkg-config \
+            build-essential \
+            curl \
+            wget \
+            file
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/desktop/src-tauri -> target"
+          cache-on-failure: true
+      - name: Run tests
+        run: cargo test --release --workspace -- --test-threads=2
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-audit
       - name: Run security audit
         run: cargo audit --deny warnings
+
+  wasm32:
+    name: Wasm (wasm32-unknown-unknown)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust_code == 'true'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Resolve wasm-bindgen version
+        run: |
+          WASM_BINDGEN_VERSION=$(awk -F '"' '/^wasm-bindgen[[:space:]]*=/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\./){print $i; exit}}' crates/engine-wasm/Cargo.toml)
+          if [ -z "$WASM_BINDGEN_VERSION" ]; then
+            echo "Failed to resolve wasm-bindgen version"; exit 1;
+          fi
+          echo "WASM_BINDGEN_VERSION=$WASM_BINDGEN_VERSION" >> "$GITHUB_ENV"
+          echo "wasm-bindgen version: $WASM_BINDGEN_VERSION"
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+          cache-on-failure: true
+      - name: Build wasm bindings
+        run: node scripts/build-wasm.mjs
+        working-directory: packages/engine-wasm
