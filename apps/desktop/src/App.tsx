@@ -31,19 +31,18 @@ function App() {
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const handleRef = useRef<SearchHandle | null>(null);
-    const sessionRef = useRef<number>(0);
+    const runningRef = useRef<boolean>(false);
 
     useEffect(() => {
-        const sessionId = sessionRef.current + 1;
-        sessionRef.current = sessionId;
         let cancelled = false;
-        let handle: SearchHandle | null = null;
         const unsubscribe = engine.subscribe((event) => {
-            if (sessionId !== sessionRef.current) return;
             // Debug log to see raw events in DevTools
             console.info("[ui] engine event", event);
             setLogs((prev) => {
-                const next = [...prev, formatEvent(event)];
+                const line = formatEvent(event);
+                const last = prev[prev.length - 1];
+                if (last === line) return prev; // avoid duplicate adjacent lines
+                const next = [...prev, line];
                 return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next;
             });
             if (event.type === "bestmove") {
@@ -55,32 +54,9 @@ function App() {
             }
         });
 
-        (async () => {
-            try {
-                if (sessionId !== sessionRef.current) return;
-                setStatus("init");
-                await engine.init();
-                if (sessionId !== sessionRef.current) return;
-                await engine.loadPosition("startpos");
-                if (sessionId !== sessionRef.current) return;
-                setStatus("searching");
-                const h = await engine.search({ limits: { maxDepth: 1 } });
-                if (cancelled) {
-                    await h.cancel().catch(() => undefined);
-                    return;
-                }
-                handle = h;
-                handleRef.current = h;
-            } catch (error) {
-                if (sessionId !== sessionRef.current) return;
-                setStatus("error");
-                setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
-            }
-        })();
-
         return () => {
             cancelled = true;
-            const toCancel = handle ?? handleRef.current;
+            const toCancel = handleRef.current;
             if (toCancel) {
                 toCancel
                     .cancel()
@@ -95,11 +71,34 @@ function App() {
         };
     }, []);
 
+    const startSearch = async () => {
+        if (runningRef.current) return;
+        runningRef.current = true;
+        try {
+            setStatus("init");
+            await engine.init();
+            await engine.loadPosition("startpos");
+            setStatus("searching");
+            const handle = await engine.search({ limits: { maxDepth: 1 } });
+            handleRef.current = handle;
+        } catch (error) {
+            setStatus("error");
+            setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
+        } finally {
+            runningRef.current = false;
+        }
+    };
+
     return (
         <main className="container">
             <h1>Engine wiring (Desktop / Tauri)</h1>
             <p>
                 status: {status} {bestmove ? `| bestmove: ${bestmove}` : ""}
+            </p>
+            <p>
+                <button onClick={startSearch} disabled={status === "searching"}>
+                    Run debug search (startpos depth=1)
+                </button>
             </p>
             <section className="logs">
                 <h2>Engine events (native backend)</h2>
