@@ -142,12 +142,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "apps/desktop/src-tauri -> target"
           cache-on-failure: true
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   test:
     name: Test
@@ -203,12 +210,19 @@ jobs:
             wget \
             file
       - uses: dtolnay/rust-toolchain@stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "apps/desktop/src-tauri -> target"
           cache-on-failure: true
       - name: Run tests
         run: cargo test --release --workspace -- --test-threads=2
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   security:
     name: Security Audit
