@@ -31,11 +31,15 @@ function App() {
     const [bestmove, setBestmove] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const handleRef = useRef<SearchHandle | null>(null);
+    const sessionRef = useRef<number>(0);
 
     useEffect(() => {
+        const sessionId = sessionRef.current + 1;
+        sessionRef.current = sessionId;
         let cancelled = false;
         let handle: SearchHandle | null = null;
         const unsubscribe = engine.subscribe((event) => {
+            if (sessionId !== sessionRef.current) return;
             // Debug log to see raw events in DevTools
             console.info("[ui] engine event", event);
             setLogs((prev) => {
@@ -53,9 +57,12 @@ function App() {
 
         (async () => {
             try {
+                if (sessionId !== sessionRef.current) return;
                 setStatus("init");
                 await engine.init();
+                if (sessionId !== sessionRef.current) return;
                 await engine.loadPosition("startpos");
+                if (sessionId !== sessionRef.current) return;
                 setStatus("searching");
                 const h = await engine.search({ limits: { maxDepth: 1 } });
                 if (cancelled) {
@@ -65,6 +72,7 @@ function App() {
                 handle = h;
                 handleRef.current = h;
             } catch (error) {
+                if (sessionId !== sessionRef.current) return;
                 setStatus("error");
                 setLogs((prev) => [...prev.slice(-(MAX_LOGS - 1)), `error ${String(error)}`]);
             }
