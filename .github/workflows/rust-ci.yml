@@ -225,4 +225,5 @@ jobs:
           workspaces: "packages/rust-core -> target"
           cache-on-failure: true
       - name: Build wasm bindings
-        run: node packages/engine-wasm/scripts/build-wasm.mjs
+        run: node scripts/build-wasm.mjs
+        working-directory: packages/engine-wasm
