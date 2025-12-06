@@ -30,6 +30,7 @@
         "@radix-ui/react-slot": "^1.1.1",
         "@radix-ui/react-tooltip": "^1.1.5",
         "@shogi/design-system": "workspace:*",
+        "@shogi/engine-client": "workspace:*",
         "class-variance-authority": "^0.7.0"
     },
     "devDependencies": {

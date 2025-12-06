@@ -13,8 +13,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@shogi/design-system": "workspace:*",
     "@shogi/engine-client": "workspace:*",
     "@shogi/engine-wasm": "workspace:*",
+    "@shogi/ui": "workspace:*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
