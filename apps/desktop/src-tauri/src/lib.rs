@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{
     init_search_module, LimitsType, Search, SearchInfo, SearchResult, SkillOptions, TimeOptions,
@@ -672,6 +673,15 @@ fn engine_stop(state: State<EngineState>) -> Result<(), String> {
     stop_active_search(&state)
 }
 
+#[tauri::command]
+fn engine_legal_moves(sfen: String, moves: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let position = parse_position(&sfen, moves)?;
+    let mut list = MoveList::new();
+    generate_legal(&position, &mut list);
+    let usi_moves = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
+    Ok(usi_moves)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -682,7 +692,8 @@ pub fn run() {
             engine_position,
             engine_search,
             engine_stop,
-            engine_option
+            engine_option,
+            engine_legal_moves
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

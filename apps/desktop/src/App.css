@@ -42,3 +42,9 @@
     color: hsl(var(--muted-foreground, 0 0% 48%));
     font-size: 12px;
 }
+
+.stack {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}

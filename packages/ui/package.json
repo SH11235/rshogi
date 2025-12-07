@@ -29,6 +29,7 @@
         "@radix-ui/react-dialog": "^1.1.2",
         "@radix-ui/react-slot": "^1.1.1",
         "@radix-ui/react-tooltip": "^1.1.5",
+        "@shogi/app-core": "workspace:*",
         "@shogi/design-system": "workspace:*",
         "@shogi/engine-client": "workspace:*",
         "class-variance-authority": "^0.7.0"

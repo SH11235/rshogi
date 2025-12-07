@@ -4,4 +4,5 @@ export * from "./components/engine-control-panel";
 export * from "./components/input";
 export * from "./components/Placeholder";
 export * from "./components/shogi-board";
+export * from "./components/shogi-match";
 export * from "./components/tooltip";
