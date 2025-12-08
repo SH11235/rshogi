@@ -128,12 +128,6 @@ struct SearchParamsInput {
     ponder: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchParamsWrapper {
-    params: SearchParamsInput,
-}
-
 struct SearchTaskResult {
     search: Search,
 }
@@ -416,8 +410,8 @@ fn build_limits(params: &SearchParamsInput, options: &EngineOptions) -> LimitsTy
     limits.multi_pv = options.multi_pv;
 
     eprintln!(
-        "build_limits: final limits -> depth={}, nodes={}, byoyomi={:?}, movetime={}, ponder={}",
-        limits.depth, limits.nodes, limits.byoyomi, limits.movetime, limits.ponder
+        "build_limits: final limits -> depth={}, nodes={}, time={:?}, byoyomi={:?}, movetime={}, ponder={}",
+        limits.depth, limits.nodes, limits.time, limits.byoyomi, limits.movetime, limits.ponder
     );
 
     limits
