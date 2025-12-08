@@ -623,10 +623,11 @@ fn engine_search(
 
     eprintln!("engine_search: received params = {}", params);
 
-    let wrapper: SearchParamsWrapper = match serde_json::from_value(params.clone()) {
+    let search_params: SearchParamsInput = match serde_json::from_value(params.clone()) {
         Ok(value) => value,
         Err(err) => {
-            let message = format!("Invalid search params (wrapper): {err}");
+            eprintln!("engine_search: deserialization error: {}", err);
+            let message = format!("Invalid search params: {err}");
             emit_event(
                 &window,
                 EngineEvent::Error {
@@ -637,7 +638,6 @@ fn engine_search(
         }
     };
 
-    let search_params = wrapper.params;
     eprintln!("engine_search: parsed params = {:?}", search_params);
 
     let (position, options, search) = {
