@@ -79,8 +79,8 @@ export function createInitialBoard(): BoardState {
     BOARD_FILES.forEach((file) => {
         place(`${file}g` as Square, { owner: sente, type: "P" });
     });
-    place("2h", { owner: sente, type: "B" });
-    place("8h", { owner: sente, type: "R" });
+    place("2h", { owner: sente, type: "R" });
+    place("8h", { owner: sente, type: "B" });
     ["9i", "8i", "7i", "6i", "5i", "4i", "3i", "2i", "1i"].forEach((square, index) => {
         const types: PieceType[] = ["L", "N", "S", "G", "K", "G", "S", "N", "L"];
         place(square as Square, { owner: sente, type: types[index] });
