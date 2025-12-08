@@ -1,5 +1,9 @@
 @import "@shogi/design-system/theme.css";
 
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
     font-family: var(--font-sans, "Inter", "Noto Sans JP", system-ui, sans-serif);
     background-color: hsl(var(--background, 0 0% 98%));
