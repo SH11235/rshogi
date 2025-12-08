@@ -296,6 +296,20 @@ fn spawn_search(
         "engine_search: spawning (depth={}, nodes_limit={}, movetime={}, ponder={})",
         limits.depth, limits.nodes, limits.movetime, limits.ponder
     );
+    eprintln!("spawn_search: position SFEN = {}", position.to_sfen());
+
+    // Generate legal moves to debug
+    use engine_core::movegen::{generate_legal, MoveList};
+    let mut legal_moves = MoveList::new();
+    generate_legal(&position, &mut legal_moves);
+    eprintln!("spawn_search: legal moves count = {}", legal_moves.len());
+    if legal_moves.len() > 0 {
+        eprintln!("spawn_search: first few legal moves:");
+        for (i, m) in legal_moves.iter().take(5).enumerate() {
+            eprintln!("  {}: {}", i, m.to_usi());
+        }
+    }
+
     let stop_flag = search.stop_flag();
     let ponderhit_flag = search.ponderhit_flag();
 
@@ -562,7 +576,10 @@ fn engine_position(
     sfen: String,
     moves: Option<Vec<String>>,
 ) -> Result<(), String> {
+    eprintln!("engine_position: sfen={}, moves={:?}", sfen, moves);
     let position = parse_position(&sfen, moves)?;
+
+    eprintln!("engine_position: resulting SFEN = {}", position.to_sfen());
 
     let mut inner = state
         .inner
@@ -623,6 +640,8 @@ fn engine_search(
         let search = inner.search.take().unwrap_or_else(|| inner.create_search());
         (position, options, search)
     };
+
+    eprintln!("engine_search: position SFEN = {}", position.to_sfen());
 
     let limits = build_limits(&search_params, &options);
     // Emit a starter info so the UI can confirm subscription before search results arrive.
