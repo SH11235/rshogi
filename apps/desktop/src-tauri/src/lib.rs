@@ -299,8 +299,8 @@ fn spawn_search(
     limits: LimitsType,
 ) -> Result<ActiveSearch, String> {
     eprintln!(
-        "engine_search: spawning (depth={}, nodes_limit={}, movetime={}, ponder={})",
-        limits.depth, limits.nodes, limits.movetime, limits.ponder
+        "spawn_search: limits (depth={}, nodes={}, byoyomi={:?}, movetime={}, ponder={})",
+        limits.depth, limits.nodes, limits.byoyomi, limits.movetime, limits.ponder
     );
     eprintln!("spawn_search: position SFEN = {}", position.to_sfen());
 
@@ -323,6 +323,10 @@ fn spawn_search(
         .name("engine-search".into())
         .stack_size(SEARCH_STACK_SIZE)
         .spawn(move || {
+            eprintln!(
+                "search thread: calling search.go() with limits (depth={}, nodes={}, byoyomi={:?}, movetime={})",
+                limits.depth, limits.nodes, limits.byoyomi, limits.movetime
+            );
             let mut emitter = EngineEventEmitter::new(window);
             let result = search.go(
                 &mut position,
