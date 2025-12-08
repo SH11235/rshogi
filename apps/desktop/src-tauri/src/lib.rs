@@ -128,6 +128,12 @@ struct SearchParamsInput {
     ponder: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchParamsWrapper {
+    params: SearchParamsInput,
+}
+
 struct SearchTaskResult {
     search: Search,
 }
@@ -615,10 +621,12 @@ fn engine_search(
 ) -> Result<(), String> {
     stop_active_search(&state)?;
 
-    let search_params: SearchParamsInput = match serde_json::from_value(params) {
+    eprintln!("engine_search: received params = {}", params);
+
+    let wrapper: SearchParamsWrapper = match serde_json::from_value(params.clone()) {
         Ok(value) => value,
         Err(err) => {
-            let message = format!("Invalid search params: {err}");
+            let message = format!("Invalid search params (wrapper): {err}");
             emit_event(
                 &window,
                 EngineEvent::Error {
@@ -628,6 +636,9 @@ fn engine_search(
             return Err(message);
         }
     };
+
+    let search_params = wrapper.params;
+    eprintln!("engine_search: parsed params = {:?}", search_params);
 
     let (position, options, search) = {
         let mut inner = state
