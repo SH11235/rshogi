@@ -383,23 +383,38 @@ fn build_limits(params: &SearchParamsInput, options: &EngineOptions) -> LimitsTy
     let mut limits = LimitsType::default();
     limits.set_start_time();
 
+    eprintln!("build_limits: params.limits = {:?}", params.limits);
+
     if let Some(limits_input) = &params.limits {
         if let Some(depth) = limits_input.max_depth {
+            eprintln!("build_limits: setting depth = {}", depth);
             limits.depth = depth;
         }
         if let Some(nodes) = limits_input.nodes {
+            eprintln!("build_limits: setting nodes = {}", nodes);
             limits.nodes = nodes;
         }
         if let Some(byoyomi) = limits_input.byoyomi_ms {
+            eprintln!("build_limits: setting byoyomi = {}", byoyomi);
             limits.byoyomi = [byoyomi; Color::NUM];
+            eprintln!(
+                "build_limits: after setting, limits.byoyomi = {:?}",
+                limits.byoyomi
+            );
         }
         if let Some(movetime) = limits_input.movetime_ms {
+            eprintln!("build_limits: setting movetime = {}", movetime);
             limits.movetime = movetime;
         }
     }
 
     limits.ponder = params.ponder.unwrap_or(false);
     limits.multi_pv = options.multi_pv;
+
+    eprintln!(
+        "build_limits: final limits -> depth={}, nodes={}, byoyomi={:?}, movetime={}, ponder={}",
+        limits.depth, limits.nodes, limits.byoyomi, limits.movetime, limits.ponder
+    );
 
     limits
 }
