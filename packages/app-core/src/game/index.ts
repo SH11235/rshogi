@@ -11,8 +11,8 @@ export const getPositionService = (): PositionService => {
 
     const isTauri =
         typeof window !== "undefined" &&
-        (("__TAURI__" in window) ||
-            ("__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)) ||
+        ("__TAURI__" in window ||
+            "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>) ||
             typeof (window as { __TAURI_IPC__?: unknown }).__TAURI_IPC__ === "function");
     cachedService = isTauri ? createTauriPositionService() : createWasmPositionService();
     return cachedService;

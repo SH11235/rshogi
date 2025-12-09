@@ -194,7 +194,7 @@ export function ShogiMatch({
     const [activeSearch, setActiveSearch] = useState<{ side: Player; engineId: string } | null>(
         null,
     );
-    const [autoPlay, setAutoPlay] = useState(true);
+    const [isMatchRunning, setIsMatchRunning] = useState(false);
 
     const handlesRef = useRef<Record<string, SearchHandle | null>>({});
     const lastEngineRequestPly = useRef<number | null>(null);
@@ -274,14 +274,14 @@ export function ShogiMatch({
     };
 
     const pauseAutoPlay = async () => {
-        setAutoPlay(false);
+        setIsMatchRunning(false);
         setClocks((prev) => ({ ...prev, ticking: null }));
         await stopAllEngines();
     };
 
     const resumeAutoPlay = async () => {
         if (!positionReady) return;
-        setAutoPlay(true);
+        setIsMatchRunning(true);
         setClocks((prev) => ({ ...prev, ticking: position.turn, lastUpdatedAt: Date.now() }));
         if (!isEngineTurn(position.turn)) return;
         const engineOpt = getEngineForSide(position.turn);
@@ -463,7 +463,7 @@ export function ShogiMatch({
     }, [clocks.ticking]);
 
     useEffect(() => {
-        if (!autoPlay || !hasEngines || !positionReady) return;
+        if (!isMatchRunning || !hasEngines || !positionReady) return;
         const setting = sides[position.turn];
         if (setting.role !== "engine") return;
         const fallbackEngine = engineOptions[0];
@@ -486,7 +486,7 @@ export function ShogiMatch({
         });
     }, [
         activeSearch,
-        autoPlay,
+        isMatchRunning,
         engineMap,
         engineOptions,
         hasEngines,
@@ -509,10 +509,10 @@ export function ShogiMatch({
         setLastMove(undefined);
         setSelection(null);
         setMessage(null);
-        resetClocks(true);
+        resetClocks(false);
         lastEngineRequestPly.current = null;
         setActiveSearch(null);
-        setAutoPlay(true);
+        setIsMatchRunning(false);
         legalCacheRef.current = null;
     };
 
@@ -792,7 +792,8 @@ export function ShogiMatch({
                                 </span>
                             </TooltipTrigger>
                             <TooltipContent side="top">
-                                A/B は同じ内蔵エンジンへの別クライアントです。先手/後手などに割り当てるためのスロットです。
+                                A/B
+                                は同じ内蔵エンジンへの別クライアントです。先手/後手などに割り当てるためのスロットです。
                             </TooltipContent>
                         </Tooltip>
                     </div>
@@ -868,392 +869,407 @@ export function ShogiMatch({
                     </div>
                 </div>
 
-            <div
-                style={{
-                    display: "grid",
-                    gridTemplateColumns: "minmax(320px, 1fr) 360px",
-                    gap: "12px",
-                    alignItems: "flex-start",
-                }}
-            >
-                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    <div style={{ ...baseCard, padding: "12px" }}>
-                        <div
-                            style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
-                            }}
-                        >
-                            <div style={{ fontWeight: 700 }}>盤面</div>
-                            <label
+                <div
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "minmax(320px, 1fr) 360px",
+                        gap: "12px",
+                        alignItems: "flex-start",
+                    }}
+                >
+                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                        <div style={{ ...baseCard, padding: "12px" }}>
+                            <div
                                 style={{
                                     display: "flex",
+                                    justifyContent: "space-between",
                                     alignItems: "center",
-                                    gap: "6px",
-                                    fontSize: "13px",
                                 }}
                             >
-                                <input
-                                    type="checkbox"
-                                    checked={wantPromote}
-                                    onChange={(e) => setWantPromote(e.target.checked)}
-                                />
-                                成りにする
-                            </label>
-                        </div>
-                        <div
-                            style={{
-                                marginTop: "8px",
-                                display: "flex",
-                                gap: "8px",
-                                flexDirection: "column",
-                            }}
-                        >
-                            <ShogiBoard
-                                grid={grid}
-                                selectedSquare={
-                                    selection?.kind === "square" ? selection.square : null
-                                }
-                                lastMove={
-                                    lastMove
-                                        ? { from: lastMove.from ?? undefined, to: lastMove.to }
-                                        : undefined
-                                }
-                                onSelect={(sq) => {
-                                    void handleSquareSelect(sq);
-                                }}
-                            />
-                            <div
-                                style={{
-                                    fontSize: "12px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                {candidateNote}
-                            </div>
-                        </div>
-                    </div>
-
-                    <div style={{ ...baseCard, padding: "12px" }}>
-                        <div
-                            style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
-                            }}
-                        >
-                            <div style={{ fontWeight: 700 }}>先手の持ち駒</div>
-                            <div
-                                style={{
-                                    fontSize: "12px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                手番: {position.turn === "sente" ? "先手" : "後手"}
-                            </div>
-                        </div>
-                        <div style={{ marginTop: "8px" }}>{handView("sente")}</div>
-                        <div style={{ marginTop: "14px", fontWeight: 700 }}>後手の持ち駒</div>
-                        <div style={{ marginTop: "8px" }}>{handView("gote")}</div>
-                    </div>
-                </div>
-
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                    <div
-                        style={{
-                            ...baseCard,
-                            padding: "12px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "10px",
-                        }}
-                    >
-                        <div style={{ fontWeight: 700 }}>対局設定</div>
-                        {sideSelector("sente")}
-                        {sideSelector("gote")}
-
-                        <div
-                            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}
-                        >
-                            <label
-                                htmlFor="sente-main"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                先手 持ち時間 (ms)
-                                <Input
-                                    id="sente-main"
-                                    type="number"
-                                    value={timeSettings.sente.mainMs}
-                                    onChange={(e) =>
-                                        setTimeSettings((prev) => ({
-                                            ...prev,
-                                            sente: {
-                                                ...prev.sente,
-                                                mainMs: Number(e.target.value),
-                                            },
-                                        }))
-                                    }
-                                />
-                            </label>
-                            <label
-                                htmlFor="sente-byoyomi"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                先手 秒読み (ms)
-                                <Input
-                                    id="sente-byoyomi"
-                                    type="number"
-                                    value={timeSettings.sente.byoyomiMs}
-                                    onChange={(e) =>
-                                        setTimeSettings((prev) => ({
-                                            ...prev,
-                                            sente: {
-                                                ...prev.sente,
-                                                byoyomiMs: Number(e.target.value),
-                                            },
-                                        }))
-                                    }
-                                />
-                            </label>
-                            <label
-                                htmlFor="gote-main"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                後手 持ち時間 (ms)
-                                <Input
-                                    id="gote-main"
-                                    type="number"
-                                    value={timeSettings.gote.mainMs}
-                                    onChange={(e) =>
-                                        setTimeSettings((prev) => ({
-                                            ...prev,
-                                            gote: { ...prev.gote, mainMs: Number(e.target.value) },
-                                        }))
-                                    }
-                                />
-                            </label>
-                            <label
-                                htmlFor="gote-byoyomi"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                後手 秒読み (ms)
-                                <Input
-                                    id="gote-byoyomi"
-                                    type="number"
-                                    value={timeSettings.gote.byoyomiMs}
-                                    onChange={(e) =>
-                                        setTimeSettings((prev) => ({
-                                            ...prev,
-                                            gote: {
-                                                ...prev.gote,
-                                                byoyomiMs: Number(e.target.value),
-                                            },
-                                        }))
-                                    }
-                                />
-                            </label>
-                        </div>
-
-                        <div
-                            style={{
-                                display: "flex",
-                                gap: "8px",
-                                flexWrap: "wrap",
-                                alignItems: "center",
-                            }}
-                        >
-                            <Button
-                                type="button"
-                                onClick={handleNewGame}
-                                style={{ paddingInline: "12px" }}
-                            >
-                                新規対局（初期化）
-                            </Button>
-                            <Button
-                                type="button"
-                                onClick={pauseAutoPlay}
-                                variant="outline"
-                                style={{ paddingInline: "12px" }}
-                            >
-                                停止（自動進行オフ）
-                            </Button>
-                            <Button
-                                type="button"
-                                onClick={resumeAutoPlay}
-                                variant="secondary"
-                                style={{ paddingInline: "12px" }}
-                            >
-                                この局面から再開
-                            </Button>
-                        </div>
-                        <div
-                            style={{
-                                fontSize: "12px",
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                            }}
-                        >
-                            状態:
-                            {engineOptions.map((opt) => {
-                                const status = engineStatus[opt.id] ?? "idle";
-                                const ready = engineReady[opt.id] ? "init済" : "未init";
-                                return ` [${opt.label}: ${status}/${ready}]`;
-                            })}
-                            {` | 自動進行: ${autoPlay ? "ON" : "OFF"}`}
-                        </div>
-                        {message ? (
-                            <div
-                                style={{
-                                    color: "hsl(var(--destructive, 0 72% 51%))",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                {message}
-                            </div>
-                        ) : null}
-                    </div>
-
-                    <div style={{ ...baseCard, padding: "12px" }}>
-                        <div style={{ fontWeight: 700, marginBottom: "6px" }}>時計</div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                            {renderClock("sente")}
-                            {renderClock("gote")}
-                        </div>
-                    </div>
-
-                    <div style={{ ...baseCard, padding: "12px" }}>
-                        <div style={{ fontWeight: 700, marginBottom: "6px" }}>棋譜 / 入出力</div>
-                        <div
-                            style={{
-                                fontSize: "13px",
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                            }}
-                        >
-                            先手から {moves.length} 手目
-                        </div>
-                        <ol
-                            style={{
-                                paddingLeft: "18px",
-                                maxHeight: "160px",
-                                overflow: "auto",
-                                margin: "8px 0",
-                            }}
-                        >
-                            {moves.map((mv, idx) => (
-                                <li
-                                    key={`${idx}-${mv}`}
+                                <div style={{ fontWeight: 700 }}>盤面</div>
+                                <label
                                     style={{
-                                        fontFamily: "ui-monospace, monospace",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "6px",
                                         fontSize: "13px",
                                     }}
                                 >
-                                    {idx + 1}. {mv}
-                                </li>
-                            ))}
-                        </ol>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "8px" }}>
-                            <label style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                                USI / SFEN (startpos moves)
-                                <textarea
-                                    value={exportUsi}
-                                    onChange={(e) => {
-                                        void importUsi(e.target.value);
-                                    }}
-                                    rows={3}
-                                    style={{
-                                        width: "100%",
-                                        padding: "8px",
-                                        borderRadius: "8px",
-                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                    }}
-                                />
-                            </label>
-                            <label style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                                CSA
-                                <textarea
-                                    value={exportCsa}
-                                    onChange={(e) => {
-                                        if (!positionReady) return;
-                                        void loadMoves(
-                                            parseCsaMoves(
-                                                e.target.value,
-                                                initialBoard ?? undefined,
-                                            ),
-                                        );
-                                    }}
-                                    rows={3}
-                                    style={{
-                                        width: "100%",
-                                        padding: "8px",
-                                        borderRadius: "8px",
-                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                    }}
-                                />
-                            </label>
-                        </div>
-                    </div>
-
-                    <div style={{ ...baseCard, padding: "12px" }}>
-                        <div style={{ fontWeight: 700, marginBottom: "6px" }}>エンジンログ</div>
-                        <ul
-                            style={{
-                                listStyle: "none",
-                                padding: 0,
-                                margin: 0,
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "4px",
-                                maxHeight: "160px",
-                                overflow: "auto",
-                            }}
-                        >
-                            {eventLogs.map((log, idx) => (
-                                <li
-                                    key={`${idx}-${log}`}
-                                    style={{
-                                        fontFamily: "ui-monospace, monospace",
-                                        fontSize: "12px",
-                                    }}
-                                >
-                                    {log}
-                                </li>
-                            ))}
-                        </ul>
-                        {errorLogs.length ? (
+                                    <input
+                                        type="checkbox"
+                                        checked={wantPromote}
+                                        onChange={(e) => setWantPromote(e.target.checked)}
+                                    />
+                                    成りにする
+                                </label>
+                            </div>
                             <div
                                 style={{
                                     marginTop: "8px",
-                                    color: "hsl(var(--destructive, 0 72% 51%))",
-                                    fontSize: "12px",
+                                    display: "flex",
+                                    gap: "8px",
+                                    flexDirection: "column",
                                 }}
                             >
-                                {errorLogs[0]}
+                                <ShogiBoard
+                                    grid={grid}
+                                    selectedSquare={
+                                        selection?.kind === "square" ? selection.square : null
+                                    }
+                                    lastMove={
+                                        lastMove
+                                            ? { from: lastMove.from ?? undefined, to: lastMove.to }
+                                            : undefined
+                                    }
+                                    onSelect={(sq) => {
+                                        void handleSquareSelect(sq);
+                                    }}
+                                />
+                                <div
+                                    style={{
+                                        fontSize: "12px",
+                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                    }}
+                                >
+                                    {candidateNote}
+                                </div>
                             </div>
-                        ) : null}
+                        </div>
+
+                        <div style={{ ...baseCard, padding: "12px" }}>
+                            <div
+                                style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                }}
+                            >
+                                <div style={{ fontWeight: 700 }}>先手の持ち駒</div>
+                                <div
+                                    style={{
+                                        fontSize: "12px",
+                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                    }}
+                                >
+                                    手番: {position.turn === "sente" ? "先手" : "後手"}
+                                </div>
+                            </div>
+                            <div style={{ marginTop: "8px" }}>{handView("sente")}</div>
+                            <div style={{ marginTop: "14px", fontWeight: 700 }}>後手の持ち駒</div>
+                            <div style={{ marginTop: "8px" }}>{handView("gote")}</div>
+                        </div>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                        <div
+                            style={{
+                                ...baseCard,
+                                padding: "12px",
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "10px",
+                            }}
+                        >
+                            <div style={{ fontWeight: 700 }}>対局設定</div>
+                            {sideSelector("sente")}
+                            {sideSelector("gote")}
+
+                            <div
+                                style={{
+                                    display: "grid",
+                                    gridTemplateColumns: "1fr 1fr",
+                                    gap: "8px",
+                                }}
+                            >
+                                <label
+                                    htmlFor="sente-main"
+                                    style={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: "4px",
+                                        fontSize: "13px",
+                                    }}
+                                >
+                                    先手 持ち時間 (ms)
+                                    <Input
+                                        id="sente-main"
+                                        type="number"
+                                        value={timeSettings.sente.mainMs}
+                                        onChange={(e) =>
+                                            setTimeSettings((prev) => ({
+                                                ...prev,
+                                                sente: {
+                                                    ...prev.sente,
+                                                    mainMs: Number(e.target.value),
+                                                },
+                                            }))
+                                        }
+                                    />
+                                </label>
+                                <label
+                                    htmlFor="sente-byoyomi"
+                                    style={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: "4px",
+                                        fontSize: "13px",
+                                    }}
+                                >
+                                    先手 秒読み (ms)
+                                    <Input
+                                        id="sente-byoyomi"
+                                        type="number"
+                                        value={timeSettings.sente.byoyomiMs}
+                                        onChange={(e) =>
+                                            setTimeSettings((prev) => ({
+                                                ...prev,
+                                                sente: {
+                                                    ...prev.sente,
+                                                    byoyomiMs: Number(e.target.value),
+                                                },
+                                            }))
+                                        }
+                                    />
+                                </label>
+                                <label
+                                    htmlFor="gote-main"
+                                    style={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: "4px",
+                                        fontSize: "13px",
+                                    }}
+                                >
+                                    後手 持ち時間 (ms)
+                                    <Input
+                                        id="gote-main"
+                                        type="number"
+                                        value={timeSettings.gote.mainMs}
+                                        onChange={(e) =>
+                                            setTimeSettings((prev) => ({
+                                                ...prev,
+                                                gote: {
+                                                    ...prev.gote,
+                                                    mainMs: Number(e.target.value),
+                                                },
+                                            }))
+                                        }
+                                    />
+                                </label>
+                                <label
+                                    htmlFor="gote-byoyomi"
+                                    style={{
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: "4px",
+                                        fontSize: "13px",
+                                    }}
+                                >
+                                    後手 秒読み (ms)
+                                    <Input
+                                        id="gote-byoyomi"
+                                        type="number"
+                                        value={timeSettings.gote.byoyomiMs}
+                                        onChange={(e) =>
+                                            setTimeSettings((prev) => ({
+                                                ...prev,
+                                                gote: {
+                                                    ...prev.gote,
+                                                    byoyomiMs: Number(e.target.value),
+                                                },
+                                            }))
+                                        }
+                                    />
+                                </label>
+                            </div>
+
+                            <div
+                                style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    flexWrap: "wrap",
+                                    alignItems: "center",
+                                }}
+                            >
+                                <Button
+                                    type="button"
+                                    onClick={handleNewGame}
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    新規対局（初期化）
+                                </Button>
+                                <Button
+                                    type="button"
+                                    onClick={pauseAutoPlay}
+                                    variant="outline"
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    停止（自動進行オフ）
+                                </Button>
+                                <Button
+                                    type="button"
+                                    onClick={resumeAutoPlay}
+                                    variant="secondary"
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    対局開始 / 再開
+                                </Button>
+                            </div>
+                            <div
+                                style={{
+                                    fontSize: "12px",
+                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                }}
+                            >
+                                状態:
+                                {engineOptions.map((opt) => {
+                                    const status = engineStatus[opt.id] ?? "idle";
+                                    const ready = engineReady[opt.id] ? "init済" : "未init";
+                                    return ` [${opt.label}: ${status}/${ready}]`;
+                                })}
+                                {` | 対局: ${isMatchRunning ? "実行中" : "停止中"}`}
+                            </div>
+                            {message ? (
+                                <div
+                                    style={{
+                                        color: "hsl(var(--destructive, 0 72% 51%))",
+                                        fontSize: "13px",
+                                    }}
+                                >
+                                    {message}
+                                </div>
+                            ) : null}
+                        </div>
+
+                        <div style={{ ...baseCard, padding: "12px" }}>
+                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>時計</div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                                {renderClock("sente")}
+                                {renderClock("gote")}
+                            </div>
+                        </div>
+
+                        <div style={{ ...baseCard, padding: "12px" }}>
+                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>
+                                棋譜 / 入出力
+                            </div>
+                            <div
+                                style={{
+                                    fontSize: "13px",
+                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                }}
+                            >
+                                先手から {moves.length} 手目
+                            </div>
+                            <ol
+                                style={{
+                                    paddingLeft: "18px",
+                                    maxHeight: "160px",
+                                    overflow: "auto",
+                                    margin: "8px 0",
+                                }}
+                            >
+                                {moves.map((mv, idx) => (
+                                    <li
+                                        key={`${idx}-${mv}`}
+                                        style={{
+                                            fontFamily: "ui-monospace, monospace",
+                                            fontSize: "13px",
+                                        }}
+                                    >
+                                        {idx + 1}. {mv}
+                                    </li>
+                                ))}
+                            </ol>
+                            <div
+                                style={{ display: "grid", gridTemplateColumns: "1fr", gap: "8px" }}
+                            >
+                                <label
+                                    style={{ display: "flex", flexDirection: "column", gap: "4px" }}
+                                >
+                                    USI / SFEN (startpos moves)
+                                    <textarea
+                                        value={exportUsi}
+                                        onChange={(e) => {
+                                            void importUsi(e.target.value);
+                                        }}
+                                        rows={3}
+                                        style={{
+                                            width: "100%",
+                                            padding: "8px",
+                                            borderRadius: "8px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    />
+                                </label>
+                                <label
+                                    style={{ display: "flex", flexDirection: "column", gap: "4px" }}
+                                >
+                                    CSA
+                                    <textarea
+                                        value={exportCsa}
+                                        onChange={(e) => {
+                                            if (!positionReady) return;
+                                            void loadMoves(
+                                                parseCsaMoves(
+                                                    e.target.value,
+                                                    initialBoard ?? undefined,
+                                                ),
+                                            );
+                                        }}
+                                        rows={3}
+                                        style={{
+                                            width: "100%",
+                                            padding: "8px",
+                                            borderRadius: "8px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    />
+                                </label>
+                            </div>
+                        </div>
+
+                        <div style={{ ...baseCard, padding: "12px" }}>
+                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>エンジンログ</div>
+                            <ul
+                                style={{
+                                    listStyle: "none",
+                                    padding: 0,
+                                    margin: 0,
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "4px",
+                                    maxHeight: "160px",
+                                    overflow: "auto",
+                                }}
+                            >
+                                {eventLogs.map((log, idx) => (
+                                    <li
+                                        key={`${idx}-${log}`}
+                                        style={{
+                                            fontFamily: "ui-monospace, monospace",
+                                            fontSize: "12px",
+                                        }}
+                                    >
+                                        {log}
+                                    </li>
+                                ))}
+                            </ul>
+                            {errorLogs.length ? (
+                                <div
+                                    style={{
+                                        marginTop: "8px",
+                                        color: "hsl(var(--destructive, 0 72% 51%))",
+                                        fontSize: "12px",
+                                    }}
+                                >
+                                    {errorLogs[0]}
+                                </div>
+                            ) : null}
+                        </div>
                     </div>
                 </div>
-            </div>
-        </section>
+            </section>
         </TooltipProvider>
     );
 }
