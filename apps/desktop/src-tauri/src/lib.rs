@@ -329,7 +329,7 @@ fn spawn_search(
                 Some(|info: &SearchInfo| emitter.emit_info(info)),
             );
             eprintln!(
-                "engine_search: finished bestmove={} ponder={}",
+                "engine_search: finished bestmove={} ponder={} depth={} nodes={} score={}",
                 if result.best_move == Move::NONE {
                     "resign".to_string()
                 } else {
@@ -339,7 +339,10 @@ fn spawn_search(
                     "-".to_string()
                 } else {
                     result.ponder_move.to_usi()
-                }
+                },
+                result.depth,
+                result.nodes,
+                result.score.raw()
             );
             emitter.emit_bestmove(&result);
             SearchTaskResult { search }
