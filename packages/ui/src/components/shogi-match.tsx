@@ -230,6 +230,7 @@ export function ShogiMatch({
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
+    const settingsLocked = isMatchRunning;
 
     useEffect(() => {
         const service = getPositionService();
@@ -789,9 +790,7 @@ export function ShogiMatch({
         );
     };
 
-    const candidateNote = positionReady
-        ? "合法手はRustエンジンの結果に基づいています。"
-        : "局面を読み込み中です。";
+    const candidateNote = positionReady ? null : "局面を読み込み中です。";
 
     const uiEngineOptions = useMemo(() => {
         // 内蔵エンジンの A/B スロットは UI に露出させず、単一の「内蔵エンジン」として扱う。
@@ -833,6 +832,7 @@ export function ShogiMatch({
                                 },
                             }))
                         }
+                        disabled={settingsLocked}
                         style={{
                             padding: "8px",
                             borderRadius: "8px",
@@ -890,7 +890,9 @@ export function ShogiMatch({
                                 [side]: { ...prev[side], engineId: e.target.value },
                             }))
                         }
-                        disabled={setting.role !== "engine" || uiEngineOptions.length === 0}
+                        disabled={
+                            settingsLocked || setting.role !== "engine" || uiEngineOptions.length === 0
+                        }
                         style={{
                             padding: "8px",
                             borderRadius: "8px",
@@ -1048,16 +1050,26 @@ export function ShogiMatch({
                     <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                         <div
                             style={{
-                                ...baseCard,
-                                padding: "12px",
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "10px",
+                        ...baseCard,
+                        padding: "12px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "10px",
+                    }}
+                >
+                    <div style={{ fontWeight: 700 }}>対局設定</div>
+                    {settingsLocked ? (
+                        <div
+                            style={{
+                                fontSize: "12px",
+                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
                             }}
                         >
-                            <div style={{ fontWeight: 700 }}>対局設定</div>
-                            {sideSelector("sente")}
-                            {sideSelector("gote")}
+                            対局中は設定を変更できません。停止すると編集できます。
+                        </div>
+                    ) : null}
+                    {sideSelector("sente")}
+                    {sideSelector("gote")}
 
                             <div
                                 style={{
@@ -1080,6 +1092,7 @@ export function ShogiMatch({
                                         id="sente-main"
                                         type="number"
                                         value={timeSettings.sente.mainMs}
+                                        disabled={settingsLocked}
                                         onChange={(e) =>
                                             setTimeSettings((prev) => ({
                                                 ...prev,
@@ -1105,6 +1118,7 @@ export function ShogiMatch({
                                         id="sente-byoyomi"
                                         type="number"
                                         value={timeSettings.sente.byoyomiMs}
+                                        disabled={settingsLocked}
                                         onChange={(e) =>
                                             setTimeSettings((prev) => ({
                                                 ...prev,
@@ -1130,6 +1144,7 @@ export function ShogiMatch({
                                         id="gote-main"
                                         type="number"
                                         value={timeSettings.gote.mainMs}
+                                        disabled={settingsLocked}
                                         onChange={(e) =>
                                             setTimeSettings((prev) => ({
                                                 ...prev,
@@ -1155,6 +1170,7 @@ export function ShogiMatch({
                                         id="gote-byoyomi"
                                         type="number"
                                         value={timeSettings.gote.byoyomiMs}
+                                        disabled={settingsLocked}
                                         onChange={(e) =>
                                             setTimeSettings((prev) => ({
                                                 ...prev,
