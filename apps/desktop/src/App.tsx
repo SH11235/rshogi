@@ -9,8 +9,7 @@ const createEngineClient = () =>
     });
 
 const engineOptions = [
-    { id: "native-a", label: "内蔵エンジン（スロットA）", createClient: createEngineClient },
-    { id: "native-b", label: "内蔵エンジン（スロットB）", createClient: createEngineClient },
+    { id: "native", label: "内蔵エンジン", createClient: createEngineClient, kind: "internal" },
 ];
 
 const panelEngine = createEngineClient();

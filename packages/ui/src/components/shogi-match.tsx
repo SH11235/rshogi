@@ -32,7 +32,7 @@ type EngineStatus = "idle" | "thinking" | "error";
 export type EngineOption = {
     id: string;
     label: string;
-    // 内蔵エンジンのスロット切り替えや将来の外部USI/NNUE切替を想定し、UI上の選択肢は残す。
+    // 将来の外部USI/NNUE切替を想定し、UI上の選択肢は残す。
     // client生成は遅延させ、必要な手番分だけインスタンス化する。
     createClient: () => EngineClient;
     kind?: "internal" | "external";
@@ -793,13 +793,23 @@ export function ShogiMatch({
         ? "合法手はRustエンジンの結果に基づいています。"
         : "局面を読み込み中です。";
 
+    const uiEngineOptions = useMemo(() => {
+        // 内蔵エンジンの A/B スロットは UI に露出させず、単一の「内蔵エンジン」として扱う。
+        const internal = engineOptions.find((opt) => opt.kind === "internal") ?? engineOptions[0];
+        const externals = engineOptions.filter((opt) => opt.kind === "external");
+        const list: EngineOption[] = [];
+        if (internal) list.push({ ...internal, id: internal.id, label: "内蔵エンジン" });
+        return [...list, ...externals];
+    }, [engineOptions]);
+
     const sideSelector = (side: Player) => {
         const setting = sides[side];
-        const engineList = engineOptions.map((opt) => (
+        const engineList = uiEngineOptions.map((opt) => (
             <option key={opt.id} value={opt.id}>
                 {opt.label}
             </option>
         ));
+        const resolvedEngineId = setting.engineId ?? uiEngineOptions[0]?.id;
         return (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
                 <label
@@ -819,7 +829,7 @@ export function ShogiMatch({
                                 [side]: {
                                     ...prev[side],
                                     role: e.target.value as SideRole,
-                                    engineId: prev[side].engineId ?? engineOptions[0]?.id,
+                                    engineId: prev[side].engineId ?? uiEngineOptions[0]?.id,
                                 },
                             }))
                         }
@@ -867,20 +877,20 @@ export function ShogiMatch({
                                 </span>
                             </TooltipTrigger>
                             <TooltipContent side="top">
-                                A/B
-                                は同じ内蔵エンジンへの別クライアントです。先手/後手などに割り当てるためのスロットです。
+                                内蔵エンジンは選択肢を1つにまとめています。先手/後手が両方エンジンの場合も内部で必要なクライアント数を起動します。
+                                将来の外部USI/NNUEエンジンを追加するときはここに選択肢が増えます。
                             </TooltipContent>
                         </Tooltip>
                     </div>
                     <select
-                        value={setting.engineId ?? engineOptions[0]?.id}
+                        value={resolvedEngineId}
                         onChange={(e) =>
                             setSides((prev) => ({
                                 ...prev,
                                 [side]: { ...prev[side], engineId: e.target.value },
                             }))
                         }
-                        disabled={setting.role !== "engine" || engineOptions.length === 0}
+                        disabled={setting.role !== "engine" || uiEngineOptions.length === 0}
                         style={{
                             padding: "8px",
                             borderRadius: "8px",

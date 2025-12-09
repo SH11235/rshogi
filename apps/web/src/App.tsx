@@ -7,8 +7,7 @@ const createEngineClient = () =>
     });
 
 const engineOptions = [
-    { id: "wasm-a", label: "内蔵エンジン（スロットA）", createClient: createEngineClient },
-    { id: "wasm-b", label: "内蔵エンジン（スロットB）", createClient: createEngineClient },
+    { id: "wasm", label: "内蔵エンジン", createClient: createEngineClient, kind: "internal" },
 ];
 
 const panelEngine = createEngineClient();
