@@ -402,6 +402,10 @@ export function ShogiMatch({
                 });
                 if (event.type === "bestmove") {
                     setEngineStatus((prev) => ({ ...prev, [id]: "idle" }));
+                    // 探索完了したハンドルはクリアして次回のキャンセルでstopを送らないようにする
+                    if (handlesRef.current[id]) {
+                        handlesRef.current[id] = null;
+                    }
                     if (activeSearch && activeSearch.engineId === id) {
                         lastEngineRequestPly.current = movesRef.current.length + 1;
                         applyMoveFromEngine(event.move);
@@ -410,6 +414,9 @@ export function ShogiMatch({
                 }
                 if (event.type === "error") {
                     setEngineStatus((prev) => ({ ...prev, [id]: "error" }));
+                    if (handlesRef.current[id]) {
+                        handlesRef.current[id] = null;
+                    }
                     setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
                 }
             }),
@@ -858,14 +865,6 @@ export function ShogiMatch({
                             />
                             盤面を反転
                         </label>
-                        <Button
-                            type="button"
-                            onClick={handleNewGame}
-                            variant="secondary"
-                            style={{ paddingInline: "12px" }}
-                        >
-                            新規対局
-                        </Button>
                     </div>
                 </div>
 
@@ -1089,35 +1088,7 @@ export function ShogiMatch({
                                 onClick={handleNewGame}
                                 style={{ paddingInline: "12px" }}
                             >
-                                対局開始 / リセット
-                            </Button>
-                            <Button
-                                type="button"
-                                onClick={() => {
-                                    const side = position.turn;
-                                    const engine = getEngineForSide(side);
-                                    if (!engine) {
-                                        setMessage("この手番は人間に設定されています。");
-                                        return;
-                                    }
-                                    startEngineTurn(side, engine.id).catch((error) => {
-                                        setEngineStatus((prev) => ({
-                                            ...prev,
-                                            [engine.id]: "error",
-                                        }));
-                                        setErrorLogs((prev) =>
-                                            [`engine error: ${String(error)}`, ...prev].slice(
-                                                0,
-                                                maxLogs,
-                                            ),
-                                        );
-                                    });
-                                }}
-                                disabled={!isEngineTurn(position.turn)}
-                                variant="secondary"
-                                style={{ paddingInline: "12px" }}
-                            >
-                                現手番のエンジンを実行
+                                新規対局（初期化）
                             </Button>
                             <Button
                                 type="button"
