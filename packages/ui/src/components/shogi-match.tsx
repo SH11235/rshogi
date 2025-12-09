@@ -270,6 +270,7 @@ export function ShogiMatch({
             }
         }
         handlesRef.current = {};
+        pendingSearchRef.current = {};
         setActiveSearch(null);
         setEngineStatus({});
     }, []);
@@ -415,7 +416,9 @@ export function ShogiMatch({
                         handlesRef.current[id] = null;
                     }
                     if (activeSearch && activeSearch.engineId === id) {
-                        lastEngineRequestPly.current = movesRef.current.length + 1;
+                        // 次の手番で再探索できるよう、現在の手数を記録
+                        lastEngineRequestPly.current = movesRef.current.length;
+                        pendingSearchRef.current[id] = false;
                         applyMoveFromEngine(event.move);
                         setActiveSearch(null);
                     }
@@ -425,6 +428,7 @@ export function ShogiMatch({
                     if (handlesRef.current[id]) {
                         handlesRef.current[id] = null;
                     }
+                    pendingSearchRef.current[id] = false;
                     setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
                 }
             }),
