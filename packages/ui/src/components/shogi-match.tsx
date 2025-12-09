@@ -262,7 +262,7 @@ export function ShogiMatch({
         });
     };
 
-    const stopAllEngines = async () => {
+    const stopAllEngines = useCallback(async () => {
         const entries = Object.entries(handlesRef.current);
         for (const [, handle] of entries) {
             if (handle) {
@@ -272,7 +272,7 @@ export function ShogiMatch({
         handlesRef.current = {};
         setActiveSearch(null);
         setEngineStatus({});
-    };
+    }, []);
 
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
@@ -431,18 +431,18 @@ export function ShogiMatch({
         );
 
         return () => {
-            for (const { id } of engineOptions) {
-                const handle = handlesRef.current[id];
-                if (handle) {
-                    handle.cancel().catch(() => undefined);
-                    handlesRef.current[id] = null;
-                }
-            }
             for (const unsubscribe of unsubs) {
                 unsubscribe();
             }
         };
     }, [activeSearch, applyMoveFromEngine, engineOptions, hasEngines, maxLogs]);
+
+    useEffect(() => {
+        return () => {
+            // アンマウント時のみ全エンジンを停止する。再レンダー間のcleanupでは stop を送らない。
+            stopAllEngines().catch(() => undefined);
+        };
+    }, [stopAllEngines]);
 
     useEffect(() => {
         if (!clocks.ticking) return;
