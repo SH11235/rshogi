@@ -23,6 +23,7 @@ import { Button } from "./button";
 import { Input } from "./input";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
 type SideRole = "human" | "engine";
@@ -758,7 +759,36 @@ export function ShogiMatch({
                         fontSize: "13px",
                     }}
                 >
-                    使用するエンジン
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                        <span>使用するエンジン</span>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <span
+                                    role="img"
+                                    aria-label="内蔵エンジンの補足"
+                                    style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        width: "18px",
+                                        height: "18px",
+                                        borderRadius: "999px",
+                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        background: "hsl(var(--card, 0 0% 100%))",
+                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                        fontSize: "11px",
+                                        cursor: "default",
+                                        lineHeight: 1,
+                                    }}
+                                >
+                                    i
+                                </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                                A/B は同じ内蔵エンジンへの別クライアントです。先手/後手などに割り当てるためのスロットです。
+                            </TooltipContent>
+                        </Tooltip>
+                    </div>
                     <select
                         value={setting.engineId ?? engineOptions[0]?.id}
                         onChange={(e) =>
@@ -782,61 +812,62 @@ export function ShogiMatch({
     };
 
     return (
-        <section
-            style={{
-                ...baseCard,
-                padding: "16px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "12px",
-            }}
-        >
-            <div
+        <TooltipProvider delayDuration={120}>
+            <section
                 style={{
+                    ...baseCard,
+                    padding: "16px",
                     display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
+                    flexDirection: "column",
                     gap: "12px",
                 }}
             >
-                <div>
-                    <div style={{ fontWeight: 700 }}>盤 UI + 対局</div>
-                    <div
-                        style={{
-                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                            fontSize: "13px",
-                        }}
-                    >
-                        先手・後手それぞれに「人間 /
-                        エンジン」を割り当てて試せます。クリック2回で移動、持ち駒はボタン→マスで打ち込み。
+                <div
+                    style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "12px",
+                    }}
+                >
+                    <div>
+                        <div style={{ fontWeight: 700 }}>盤 UI + 対局</div>
+                        <div
+                            style={{
+                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                fontSize: "13px",
+                            }}
+                        >
+                            先手・後手それぞれに「人間 /
+                            エンジン」を割り当てて試せます。クリック2回で移動、持ち駒はボタン→マスで打ち込み。
+                        </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                        <label
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px",
+                                fontSize: "13px",
+                            }}
+                        >
+                            <input
+                                type="checkbox"
+                                checked={flipBoard}
+                                onChange={(e) => setFlipBoard(e.target.checked)}
+                            />
+                            盤面を反転
+                        </label>
+                        <Button
+                            type="button"
+                            onClick={handleNewGame}
+                            variant="secondary"
+                            style={{ paddingInline: "12px" }}
+                        >
+                            新規対局
+                        </Button>
                     </div>
                 </div>
-                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                    <label
-                        style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "6px",
-                            fontSize: "13px",
-                        }}
-                    >
-                        <input
-                            type="checkbox"
-                            checked={flipBoard}
-                            onChange={(e) => setFlipBoard(e.target.checked)}
-                        />
-                        盤面を反転
-                    </label>
-                    <Button
-                        type="button"
-                        onClick={handleNewGame}
-                        variant="secondary"
-                        style={{ paddingInline: "12px" }}
-                    >
-                        新規対局
-                    </Button>
-                </div>
-            </div>
 
             <div
                 style={{
@@ -1252,5 +1283,6 @@ export function ShogiMatch({
                 </div>
             </div>
         </section>
+        </TooltipProvider>
     );
 }

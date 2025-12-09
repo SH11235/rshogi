@@ -13,8 +13,8 @@ const engineB = createTauriEngineClient({
 });
 
 const engineOptions = [
-    { id: "native-a", label: "内蔵エンジン A", client: engineA },
-    { id: "native-b", label: "内蔵エンジン B", client: engineB },
+    { id: "native-a", label: "内蔵エンジン（スロットA）", client: engineA },
+    { id: "native-b", label: "内蔵エンジン（スロットB）", client: engineB },
 ];
 
 function App() {

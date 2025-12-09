@@ -9,8 +9,8 @@ const engineB = createWasmEngineClient({
 });
 
 const engineOptions = [
-    { id: "wasm-a", label: "内蔵エンジン A", client: engineA },
-    { id: "wasm-b", label: "内蔵エンジン B", client: engineB },
+    { id: "wasm-a", label: "内蔵エンジン（スロットA）", client: engineA },
+    { id: "wasm-b", label: "内蔵エンジン（スロットB）", client: engineB },
 ];
 
 function App() {
