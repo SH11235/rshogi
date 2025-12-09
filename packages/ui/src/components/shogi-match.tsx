@@ -157,7 +157,7 @@ export function ShogiMatch({
         sente: { role: "human" },
         gote: { role: "engine", engineId: engineOptions[0]?.id },
     },
-    initialMainTimeMs = 5 * 60 * 1000,
+    initialMainTimeMs = 0,
     initialByoyomiMs = 5_000,
     maxLogs = 80,
     fetchLegalMoves,
