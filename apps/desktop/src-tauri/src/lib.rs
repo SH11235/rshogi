@@ -717,6 +717,7 @@ fn engine_search(
 
 #[tauri::command]
 fn engine_stop(state: State<EngineState>) -> Result<(), String> {
+    eprintln!("engine_stop: requested");
     stop_active_search(&state)
 }
 
