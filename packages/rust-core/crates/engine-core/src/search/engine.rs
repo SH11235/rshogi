@@ -541,8 +541,21 @@ impl Search {
 
         if worker.root_moves.is_empty() {
             worker.best_move = Move::NONE;
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "search_with_callback: root_moves is empty (search_moves_len={}, side_to_move={:?})",
+                worker.limits.search_moves.len(),
+                pos.side_to_move()
+            );
             return 0;
         }
+
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "search_with_callback: root_moves_len={} first_move={}",
+            worker.root_moves.len(),
+            worker.root_moves.get(0).map(|rm| rm.mv().to_usi()).unwrap_or_default()
+        );
 
         // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
         if worker.root_moves.len() == 1 {
