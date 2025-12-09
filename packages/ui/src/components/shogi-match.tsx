@@ -3,14 +3,17 @@ import {
     type BoardState,
     boardToMatrix,
     buildPositionString,
-    createInitialPositionState,
+    cloneBoard,
+    createEmptyHands,
+    getAllSquares,
+    getPositionService,
     type LastMove,
     movesToCsa,
     type PieceType,
     type Player,
     type PositionState,
     parseCsaMoves,
-    replayMoves,
+    parseMove,
     type Square,
 } from "@shogi/app-core";
 import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-client";
@@ -159,8 +162,19 @@ export function ShogiMatch({
     fetchLegalMoves,
 }: ShogiMatchProps): ReactElement {
     const hasEngines = engineOptions.length > 0;
+    const emptyBoard = useMemo<BoardState>(
+        () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
+        [],
+    );
     const [sides, setSides] = useState<{ sente: SideSetting; gote: SideSetting }>(defaultSides);
-    const [position, setPosition] = useState<PositionState>(createInitialPositionState());
+    const [position, setPosition] = useState<PositionState>({
+        board: emptyBoard,
+        hands: createEmptyHands(),
+        turn: "sente",
+        ply: 1,
+    });
+    const [initialBoard, setInitialBoard] = useState<BoardState | null>(null);
+    const [positionReady, setPositionReady] = useState(false);
     const [moves, setMoves] = useState<string[]>([]);
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
@@ -186,6 +200,19 @@ export function ShogiMatch({
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
+
+    useEffect(() => {
+        const service = getPositionService();
+        service
+            .getInitialBoard()
+            .then((pos) => {
+                setPosition(pos);
+                positionRef.current = pos;
+                setInitialBoard(cloneBoard(pos.board));
+                setPositionReady(true);
+            })
+            .catch((error) => setMessage(`初期局面の取得に失敗しました: ${String(error)}`));
+    }, []);
 
     const engineMap = useMemo(() => {
         const map = new Map<string, EngineOption>();
@@ -252,6 +279,7 @@ export function ShogiMatch({
     };
 
     const resumeAutoPlay = async () => {
+        if (!positionReady) return;
         setAutoPlay(true);
         setClocks((prev) => ({ ...prev, ticking: position.turn, lastUpdatedAt: Date.now() }));
         if (!isEngineTurn(position.turn)) return;
@@ -317,6 +345,7 @@ export function ShogiMatch({
 
     const startEngineTurn = useCallback(
         async (side: Player, engineId: string) => {
+            if (!positionReady) return;
             const engine = engineMap.get(engineId);
             if (!engine) return;
             const existing = handlesRef.current[engineId];
@@ -333,7 +362,7 @@ export function ShogiMatch({
             handlesRef.current[engineId] = handle;
             setActiveSearch({ side, engineId });
         },
-        [engineMap, ensureEngineReady, timeSettings],
+        [engineMap, ensureEngineReady, positionReady, timeSettings],
     );
 
     useEffect(() => {
@@ -426,7 +455,7 @@ export function ShogiMatch({
     }, [clocks.ticking]);
 
     useEffect(() => {
-        if (!autoPlay || !hasEngines) return;
+        if (!autoPlay || !hasEngines || !positionReady) return;
         const setting = sides[position.turn];
         if (setting.role !== "engine") return;
         const fallbackEngine = engineOptions[0];
@@ -456,13 +485,18 @@ export function ShogiMatch({
         maxLogs,
         moves.length,
         position.turn,
+        positionReady,
         sides,
         startEngineTurn,
     ]);
 
     const handleNewGame = async () => {
         await stopAllEngines();
-        setPosition(createInitialPositionState());
+        const initial = await getPositionService().getInitialBoard();
+        setPosition(initial);
+        positionRef.current = initial;
+        setInitialBoard(cloneBoard(initial.board));
+        setPositionReady(true);
         setMoves([]);
         setLastMove(undefined);
         setSelection(null);
@@ -471,16 +505,20 @@ export function ShogiMatch({
         lastEngineRequestPly.current = null;
         setActiveSearch(null);
         setAutoPlay(true);
+        legalCacheRef.current = null;
     };
 
     const getLegalSet = async (): Promise<Set<string> | null> => {
-        if (!fetchLegalMoves) return null;
+        if (!positionReady) return null;
+        const resolver =
+            fetchLegalMoves ??
+            (async (history: string[]) => getPositionService().getLegalMoves("startpos", history));
         const ply = movesRef.current.length;
         const cached = legalCacheRef.current;
         if (cached && cached.ply === ply) {
             return cached.moves;
         }
-        const list = await fetchLegalMoves(movesRef.current);
+        const list = await resolver(movesRef.current);
         const set = new Set(list);
         legalCacheRef.current = { ply, moves: set };
         return set;
@@ -488,6 +526,10 @@ export function ShogiMatch({
 
     const handleSquareSelect = async (square: string) => {
         setMessage(null);
+        if (!positionReady) {
+            setMessage("局面を読み込み中です。");
+            return;
+        }
         if (isEngineTurn(position.turn)) {
             setMessage("エンジンの手番です。");
             return;
@@ -536,6 +578,10 @@ export function ShogiMatch({
     };
 
     const handleHandSelect = (piece: PieceType) => {
+        if (!positionReady) {
+            setMessage("局面を読み込み中です。");
+            return;
+        }
         if (isEngineTurn(position.turn)) {
             setMessage("エンジンの手番です。");
             return;
@@ -544,30 +590,49 @@ export function ShogiMatch({
         setMessage(null);
     };
 
-    const importUsi = (raw: string) => {
+    const deriveLastMove = (move: string | undefined): LastMove | undefined => {
+        const parsed = move ? parseMove(move) : null;
+        if (!parsed) return undefined;
+        if (parsed.kind === "drop") {
+            return { from: null, to: parsed.to, dropPiece: parsed.piece, promotes: false };
+        }
+        return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
+    };
+
+    const importUsi = async (raw: string) => {
         const trimmed = raw.trim();
         if (!trimmed) return;
         const tokens = trimmed.includes("moves")
             ? (trimmed.split("moves")[1]?.trim().split(/\s+/) ?? [])
             : trimmed.split(/\s+/);
-        loadMoves(tokens);
+        await loadMoves(tokens);
     };
 
-    const loadMoves = (list: string[]) => {
+    const loadMoves = async (list: string[]) => {
         const filtered = list.filter(Boolean);
-        const { state, errors, lastMove: lm } = replayMoves(filtered);
-        setPosition(state);
-        setMoves(filtered);
-        setLastMove(lm);
-        setSelection(null);
-        setMessage(errors.length ? errors[0] : null);
-        resetClocks(true);
-        lastEngineRequestPly.current = null;
-        legalCacheRef.current = null;
+        const service = getPositionService();
+        try {
+            const result = await service.replayMovesStrict("startpos", filtered);
+            setPosition(result.position);
+            positionRef.current = result.position;
+            setMoves(result.applied);
+            setLastMove(deriveLastMove(result.applied.at(-1)));
+            setSelection(null);
+            setMessage(result.error ?? null);
+            resetClocks(true);
+            lastEngineRequestPly.current = null;
+            legalCacheRef.current = null;
+            setPositionReady(true);
+        } catch (error) {
+            setMessage(`棋譜の適用に失敗しました: ${String(error)}`);
+        }
     };
 
     const exportUsi = buildPositionString(moves);
-    const exportCsa = useMemo(() => movesToCsa(moves), [moves]);
+    const exportCsa = useMemo(
+        () => (positionReady && initialBoard ? movesToCsa(moves, {}, initialBoard) : ""),
+        [initialBoard, moves, positionReady],
+    );
 
     const handView = (owner: Player) => {
         const hand = position.hands[owner];
@@ -641,8 +706,9 @@ export function ShogiMatch({
         );
     };
 
-    const candidateNote =
-        "合法手生成 API 未提供のため、選択マスと持ち駒のみハイライト。打ち歩詰め等の厳密判定は未対応です。";
+    const candidateNote = positionReady
+        ? "合法手はRustエンジンの結果に基づいています。"
+        : "局面を読み込み中です。";
 
     const sideSelector = (side: Player) => {
         const setting = sides[side];
@@ -1108,7 +1174,9 @@ export function ShogiMatch({
                                 USI / SFEN (startpos moves)
                                 <textarea
                                     value={exportUsi}
-                                    onChange={(e) => importUsi(e.target.value)}
+                                    onChange={(e) => {
+                                        void importUsi(e.target.value);
+                                    }}
                                     rows={3}
                                     style={{
                                         width: "100%",
@@ -1122,7 +1190,15 @@ export function ShogiMatch({
                                 CSA
                                 <textarea
                                     value={exportCsa}
-                                    onChange={(e) => loadMoves(parseCsaMoves(e.target.value))}
+                                    onChange={(e) => {
+                                        if (!positionReady) return;
+                                        void loadMoves(
+                                            parseCsaMoves(
+                                                e.target.value,
+                                                initialBoard ?? undefined,
+                                            ),
+                                        );
+                                    }}
                                     rows={3}
                                     style={{
                                         width: "100%",

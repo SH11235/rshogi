@@ -4,7 +4,7 @@ import {
     wasm_get_legal_moves,
     wasm_parse_sfen_to_board,
     wasm_replay_moves_strict,
-} from "@shogi/engine-wasm/pkg/engine_wasm.js";
+} from "@shogi/engine-wasm";
 import type { PositionState } from "./board";
 import type { BoardStateJson, PositionService, ReplayResult } from "./position-service";
 import { boardJsonToPositionState, positionStateToBoardJson } from "./position-service";

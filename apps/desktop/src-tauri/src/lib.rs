@@ -726,28 +726,67 @@ fn engine_legal_moves(sfen: String, moves: Option<Vec<String>>) -> Result<Vec<St
     Ok(usi_moves)
 }
 
-#[tauri::command]
-pub fn get_initial_board() -> Result<BoardStateJson, String> {
+fn get_initial_board_impl() -> Result<BoardStateJson, String> {
     Ok(Position::initial_board_json())
 }
 
-#[tauri::command]
-pub fn parse_sfen_to_board(sfen: String) -> Result<BoardStateJson, String> {
+fn parse_sfen_to_board_impl(sfen: String) -> Result<BoardStateJson, String> {
     Position::parse_sfen_to_json(&sfen)
 }
 
-#[tauri::command]
-pub fn board_to_sfen(board: BoardStateJson) -> Result<String, String> {
+fn board_to_sfen_impl(board: BoardStateJson) -> Result<String, String> {
     let pos = Position::from_board_state_json(&board)?;
     Ok(pos.to_sfen())
 }
 
-#[tauri::command]
-pub fn engine_replay_moves_strict(
+fn engine_replay_moves_strict_impl(
     sfen: String,
     moves: Vec<String>,
 ) -> Result<ReplayResultJson, String> {
     Position::replay_moves_strict(&sfen, &moves)
+}
+
+#[tauri::command]
+fn get_initial_board() -> Result<BoardStateJson, String> {
+    get_initial_board_impl()
+}
+
+#[tauri::command]
+fn parse_sfen_to_board(sfen: String) -> Result<BoardStateJson, String> {
+    parse_sfen_to_board_impl(sfen)
+}
+
+#[tauri::command]
+fn board_to_sfen(board: BoardStateJson) -> Result<String, String> {
+    board_to_sfen_impl(board)
+}
+
+#[tauri::command]
+fn engine_replay_moves_strict(
+    sfen: String,
+    moves: Vec<String>,
+) -> Result<ReplayResultJson, String> {
+    engine_replay_moves_strict_impl(sfen, moves)
+}
+
+// テスト用にコマンド実装を公開
+pub fn get_initial_board_for_test() -> Result<BoardStateJson, String> {
+    get_initial_board_impl()
+}
+
+pub fn parse_sfen_to_board_for_test(sfen: String) -> Result<BoardStateJson, String> {
+    parse_sfen_to_board_impl(sfen)
+}
+
+pub fn board_to_sfen_for_test(board: BoardStateJson) -> Result<String, String> {
+    board_to_sfen_impl(board)
+}
+
+pub fn engine_replay_moves_strict_for_test(
+    sfen: String,
+    moves: Vec<String>,
+) -> Result<ReplayResultJson, String> {
+    engine_replay_moves_strict_impl(sfen, moves)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
