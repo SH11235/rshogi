@@ -4,6 +4,8 @@ import {
     BOARD_RANKS,
     type BoardState,
     boardFromMoves,
+    cloneBoard,
+    createEmptyHands,
     createInitialBoard,
     type Piece,
     type PieceType,
@@ -54,7 +56,22 @@ export interface CsaMetadata {
     goteName?: string;
 }
 
-export function movesToCsa(moves: string[], metadata: CsaMetadata = {}): string {
+const resolveInitialBoard = (initialBoard?: BoardState): BoardState => {
+    if (initialBoard) return cloneBoard(initialBoard);
+    try {
+        return createInitialBoard();
+    } catch (error) {
+        throw new Error(
+            `初期盤面を取得できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+};
+
+export function movesToCsa(
+    moves: string[],
+    metadata: CsaMetadata = {},
+    initialBoard?: BoardState,
+): string {
     const lines: string[] = [
         "V2.2",
         `N+${metadata.senteName ?? "Sente"}`,
@@ -62,7 +79,7 @@ export function movesToCsa(moves: string[], metadata: CsaMetadata = {}): string 
         "PI",
         "+",
     ];
-    let board = createInitialBoard();
+    let board = resolveInitialBoard(initialBoard);
     moves.forEach((move, index) => {
         const parsed = parseUsiMove(move);
         if (!parsed) {
@@ -82,13 +99,13 @@ export function movesToCsa(moves: string[], metadata: CsaMetadata = {}): string 
     return lines.join("\n");
 }
 
-export function parseCsaMoves(contents: string): string[] {
+export function parseCsaMoves(contents: string, initialBoard?: BoardState): string[] {
     const lines = contents
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter(Boolean);
     const moves: string[] = [];
-    let board = createInitialBoard();
+    let board = resolveInitialBoard(initialBoard);
     for (const line of lines) {
         if (!(line.startsWith("+") || line.startsWith("-"))) {
             continue;
@@ -114,9 +131,10 @@ export function parseCsaMoves(contents: string): string[] {
     return moves;
 }
 
-export function buildBoardFromCsa(contents: string): BoardState {
-    const moves = parseCsaMoves(contents);
-    return boardFromMoves(moves);
+export function buildBoardFromCsa(contents: string, initialBoard?: BoardState): BoardState {
+    const moves = parseCsaMoves(contents, initialBoard);
+    const start = resolveInitialBoard(initialBoard);
+    return boardFromMoves(moves, { board: start, hands: createEmptyHands(), turn: "sente" });
 }
 
 function toCsaSquare(square: Square): string {

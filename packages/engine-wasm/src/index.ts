@@ -273,3 +273,11 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         },
     };
 }
+
+export {
+    wasm_board_to_sfen,
+    wasm_get_initial_board,
+    wasm_get_legal_moves,
+    wasm_parse_sfen_to_board,
+    wasm_replay_moves_strict,
+} from "../pkg/engine_wasm.js";

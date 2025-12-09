@@ -1,11 +1,13 @@
 use std::cell::RefCell;
 use std::io::ErrorKind;
 
+use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::nnue::init_nnue_from_bytes;
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{
     init_search_module, LimitsType, Search, SearchInfo, SearchResult, SkillOptions,
 };
+use engine_core::types::json::BoardStateJson;
 use engine_core::types::{Move, Value};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -106,6 +108,30 @@ where
     } else {
         Ok(T::default())
     }
+}
+
+fn build_position_from_inputs(sfen: &str, moves_json: Option<String>) -> Result<Position, JsValue> {
+    let moves: Vec<String> = parse_json_or_default(moves_json)?;
+
+    build_position(sfen, &moves)
+}
+
+fn build_position(sfen: &str, moves: &[String]) -> Result<Position, JsValue> {
+    let mut position = Position::new();
+    if sfen.trim() == "startpos" {
+        position.set_sfen(SFEN_HIRATE).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    } else {
+        position.set_sfen(sfen).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    }
+
+    for mv in moves {
+        let parsed =
+            Move::from_usi(&mv).ok_or_else(|| JsValue::from_str(&format!("invalid move: {mv}")))?;
+        let gives_check = position.gives_check(parsed);
+        position.do_move(parsed, gives_check);
+    }
+
+    Ok(position)
 }
 
 #[allow(deprecated)]
@@ -210,6 +236,62 @@ pub fn set_event_handler(callback: Option<js_sys::Function>) {
 }
 
 #[wasm_bindgen]
+#[allow(deprecated)]
+pub fn wasm_get_initial_board() -> Result<JsValue, JsValue> {
+    let board = Position::initial_board_json();
+    JsValue::from_serde(&board).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+}
+
+#[wasm_bindgen]
+#[allow(deprecated)]
+pub fn wasm_parse_sfen_to_board(sfen: String) -> Result<JsValue, JsValue> {
+    let board = Position::parse_sfen_to_json(&sfen).map_err(|e| JsValue::from_str(&e))?;
+    JsValue::from_serde(&board).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+}
+
+#[wasm_bindgen]
+#[allow(deprecated)]
+pub fn wasm_board_to_sfen(board_json: JsValue) -> Result<String, JsValue> {
+    let board: BoardStateJson = board_json
+        .into_serde()
+        .map_err(|e| JsValue::from_str(&format!("Deserialization error: {e}")))?;
+    let pos = Position::from_board_state_json(&board).map_err(|e| JsValue::from_str(&e))?;
+    Ok(pos.to_sfen())
+}
+
+#[wasm_bindgen]
+#[allow(deprecated)]
+pub fn wasm_get_legal_moves(sfen: String, moves: Option<JsValue>) -> Result<JsValue, JsValue> {
+    let parsed_moves: Vec<String> = if let Some(value) = moves {
+        value
+            .into_serde()
+            .map_err(|e| JsValue::from_str(&format!("Deserialization error: {e}")))?
+    } else {
+        Vec::new()
+    };
+
+    let position = build_position(&sfen, &parsed_moves)?;
+    let mut list = MoveList::new();
+    generate_legal(&position, &mut list);
+    let legal_moves: Vec<String> = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
+
+    JsValue::from_serde(&legal_moves)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+}
+
+#[wasm_bindgen]
+#[allow(deprecated)]
+pub fn wasm_replay_moves_strict(sfen: String, moves: JsValue) -> Result<JsValue, JsValue> {
+    let parsed_moves: Vec<String> = moves
+        .into_serde()
+        .map_err(|e| JsValue::from_str(&format!("Deserialization error: {e}")))?;
+    let result =
+        Position::replay_moves_strict(&sfen, &parsed_moves).map_err(|e| JsValue::from_str(&e))?;
+    JsValue::from_serde(&result)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+}
+
+#[wasm_bindgen]
 pub fn init(opts_json: Option<String>) -> Result<(), JsValue> {
     let opts: InitOptions = parse_json_or_default(opts_json)?;
     init_search_module();
@@ -242,25 +324,10 @@ pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn load_position(sfen: &str, moves_json: Option<String>) -> Result<(), JsValue> {
-    let moves: Vec<String> = parse_json_or_default(moves_json)?;
+    let position = build_position_from_inputs(sfen, moves_json)?;
 
     with_engine_mut(|engine| {
-        if sfen.trim() == "startpos" {
-            engine
-                .position
-                .set_sfen(SFEN_HIRATE)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        } else {
-            engine.position.set_sfen(sfen).map_err(|e| JsValue::from_str(&e.to_string()))?;
-        }
-
-        for mv in moves {
-            let m = Move::from_usi(&mv)
-                .ok_or_else(|| JsValue::from_str(&format!("invalid move: {mv}")))?;
-            let gives_check = engine.position.gives_check(m);
-            engine.position.do_move(m, gives_check);
-        }
-
+        engine.position = position;
         Ok(())
     })
 }

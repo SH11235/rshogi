@@ -29,6 +29,7 @@ export interface PositionState {
     board: BoardState;
     hands: Hands;
     turn: Player;
+    ply?: number;
 }
 
 export interface LastMove {
@@ -54,39 +55,17 @@ const PROMOTED_FROM: Record<PieceType, PieceType> = {
     K: "K",
 };
 
+let initialPositionCache: PositionState | null = null;
+let initialPositionPromise: Promise<PositionState> | null = null;
+let fallbackInitialPosition: PositionState | null = null;
+
 export function createInitialBoard(): BoardState {
-    const state: BoardState = Object.fromEntries(ALL_SQUARES.map((sq) => [sq, null])) as BoardState;
-
-    const place = (square: Square, piece: Piece): void => {
-        state[square] = piece;
-    };
-
-    const sente: Player = "sente";
-    const gote: Player = "gote";
-
-    // Gote back rank
-    ["9a", "8a", "7a", "6a", "5a", "4a", "3a", "2a", "1a"].forEach((square, index) => {
-        const types: PieceType[] = ["L", "N", "S", "G", "K", "G", "S", "N", "L"];
-        place(square as Square, { owner: gote, type: types[index] });
-    });
-    place("2b", { owner: gote, type: "R" });
-    place("8b", { owner: gote, type: "B" });
-    BOARD_FILES.forEach((file) => {
-        place(`${file}c` as Square, { owner: gote, type: "P" });
-    });
-
-    // Sente setup
-    BOARD_FILES.forEach((file) => {
-        place(`${file}g` as Square, { owner: sente, type: "P" });
-    });
-    place("2h", { owner: sente, type: "R" });
-    place("8h", { owner: sente, type: "B" });
-    ["9i", "8i", "7i", "6i", "5i", "4i", "3i", "2i", "1i"].forEach((square, index) => {
-        const types: PieceType[] = ["L", "N", "S", "G", "K", "G", "S", "N", "L"];
-        place(square as Square, { owner: sente, type: types[index] });
-    });
-
-    return state;
+    if (initialPositionCache) {
+        return cloneBoard(initialPositionCache.board);
+    }
+    const fallback = getFallbackInitialPosition();
+    initialPositionCache = fallback;
+    return cloneBoard(fallback.board);
 }
 
 export function createEmptyHands(): Hands {
@@ -94,11 +73,42 @@ export function createEmptyHands(): Hands {
 }
 
 export function createInitialPositionState(): PositionState {
-    return {
-        board: createInitialBoard(),
-        hands: createEmptyHands(),
-        turn: "sente",
-    };
+    if (initialPositionCache) {
+        return clonePosition(initialPositionCache);
+    }
+    const fallback = getFallbackInitialPosition();
+    initialPositionCache = fallback;
+    return clonePosition(fallback);
+}
+
+export async function createInitialBoardAsync(): Promise<BoardState> {
+    const position = await ensureInitialPosition();
+    return cloneBoard(position.board);
+}
+
+export async function createInitialPositionStateAsync(): Promise<PositionState> {
+    const position = await ensureInitialPosition();
+    return clonePosition(position);
+}
+
+const clonePosition = (position: PositionState): PositionState => ({
+    board: cloneBoard(position.board),
+    hands: cloneHands(position.hands),
+    turn: position.turn,
+    ply: position.ply,
+});
+
+async function ensureInitialPosition(): Promise<PositionState> {
+    if (!initialPositionPromise) {
+        initialPositionPromise = (async () => {
+            const { getPositionService } = await import("./index");
+            const service = getPositionService();
+            const position = await service.getInitialBoard();
+            initialPositionCache = position;
+            return position;
+        })();
+    }
+    return initialPositionPromise;
 }
 
 export function cloneBoard(board: BoardState): BoardState {
@@ -108,6 +118,53 @@ export function cloneBoard(board: BoardState): BoardState {
         clone[square] = piece ? { ...piece } : null;
     });
     return clone;
+}
+
+const STARTPOS_BOARD_SFEN = "lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL";
+
+function getFallbackInitialPosition(): PositionState {
+    if (fallbackInitialPosition) return fallbackInitialPosition;
+    const board = buildBoardFromSfenBoard(STARTPOS_BOARD_SFEN);
+    fallbackInitialPosition = {
+        board,
+        hands: createEmptyHands(),
+        turn: "sente",
+        ply: 1,
+    };
+    return fallbackInitialPosition;
+}
+
+function buildBoardFromSfenBoard(boardPart: string): BoardState {
+    const rows = boardPart.split("/");
+    if (rows.length !== 9) {
+        throw new Error("invalid startpos board rows");
+    }
+    const board: BoardState = Object.fromEntries(ALL_SQUARES.map((sq) => [sq, null])) as BoardState;
+    rows.forEach((row, rankIdx) => {
+        let fileIdx = 0;
+        for (let i = 0; i < row.length; i++) {
+            const ch = row[i];
+            if (/\d/.test(ch)) {
+                fileIdx += Number(ch);
+                continue;
+            }
+            const isPromoted = ch === "+";
+            const symbol = isPromoted ? row[++i] : ch;
+            const owner: Player = symbol === symbol.toLowerCase() ? "gote" : "sente";
+            const upper = symbol.toUpperCase();
+            const type = upper as PieceType;
+            if (!PIECE_POOL.includes(type)) {
+                throw new Error(`unknown piece in startpos: ${symbol}`);
+            }
+            const square = `${BOARD_FILES[fileIdx]}${BOARD_RANKS[rankIdx]}` as Square;
+            board[square] = { owner, type, promoted: isPromoted || undefined };
+            fileIdx += 1;
+        }
+        if (fileIdx !== 9) {
+            throw new Error("invalid startpos row width");
+        }
+    });
+    return board;
 }
 
 function cloneHands(hands: Hands): Hands {
@@ -242,8 +299,15 @@ export function applyMoveWithState(
 export function replayMoves(
     moves: string[],
     opts: ApplyOptions = {},
+    initial?: PositionState,
 ): { state: PositionState; errors: string[]; lastMove?: LastMove } {
-    let state = createInitialPositionState();
+    const baseState = initial
+        ? clonePosition(initial)
+        : initialPositionCache
+          ? clonePosition(initialPositionCache)
+          : clonePosition(getFallbackInitialPosition());
+
+    let state = baseState;
     const errors: string[] = [];
     let lastMove: LastMove | undefined;
 
@@ -260,8 +324,8 @@ export function replayMoves(
     return { state, errors, lastMove };
 }
 
-export function boardFromMoves(moves: string[]): BoardState {
-    const { state } = replayMoves(moves);
+export function boardFromMoves(moves: string[], initial?: PositionState): BoardState {
+    const { state } = replayMoves(moves, {}, initial);
     return state.board;
 }
 

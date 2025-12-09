@@ -37,3 +37,5 @@ pub mod search;
 
 // 1手詰め探索
 pub mod mate;
+
+pub use position::json_conversion;

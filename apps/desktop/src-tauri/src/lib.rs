@@ -8,6 +8,7 @@ use engine_core::search::{
     init_search_module, LimitsType, Search, SearchInfo, SearchResult, SkillOptions, TimeOptions,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
+use engine_core::types::json::{BoardStateJson, ReplayResultJson};
 use engine_core::types::{Color, Move, Value};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State, Window};
@@ -725,6 +726,30 @@ fn engine_legal_moves(sfen: String, moves: Option<Vec<String>>) -> Result<Vec<St
     Ok(usi_moves)
 }
 
+#[tauri::command]
+pub fn get_initial_board() -> Result<BoardStateJson, String> {
+    Ok(Position::initial_board_json())
+}
+
+#[tauri::command]
+pub fn parse_sfen_to_board(sfen: String) -> Result<BoardStateJson, String> {
+    Position::parse_sfen_to_json(&sfen)
+}
+
+#[tauri::command]
+pub fn board_to_sfen(board: BoardStateJson) -> Result<String, String> {
+    let pos = Position::from_board_state_json(&board)?;
+    Ok(pos.to_sfen())
+}
+
+#[tauri::command]
+pub fn engine_replay_moves_strict(
+    sfen: String,
+    moves: Vec<String>,
+) -> Result<ReplayResultJson, String> {
+    Position::replay_moves_strict(&sfen, &moves)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -736,7 +761,11 @@ pub fn run() {
             engine_search,
             engine_stop,
             engine_option,
-            engine_legal_moves
+            engine_legal_moves,
+            get_initial_board,
+            parse_sfen_to_board,
+            board_to_sfen,
+            engine_replay_moves_strict
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
