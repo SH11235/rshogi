@@ -1,10 +1,10 @@
 @import "@shogi/design-system/theme.css";
 
-/* biome-ignore lint/css/noUnknownAtRule: Tailwind CSS directives */
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind directives */
 @tailwind base;
-/* biome-ignore lint/css/noUnknownAtRule: Tailwind CSS directives */
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind directives */
 @tailwind components;
-/* biome-ignore lint/css/noUnknownAtRule: Tailwind CSS directives */
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind directives */
 @tailwind utilities;
 
 :root {
