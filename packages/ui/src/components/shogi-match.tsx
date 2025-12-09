@@ -32,7 +32,9 @@ type EngineStatus = "idle" | "thinking" | "error";
 export type EngineOption = {
     id: string;
     label: string;
-    client: EngineClient;
+    // 内蔵エンジンのスロット切り替えや将来の外部USI/NNUE切替を想定し、UI上の選択肢は残す。
+    // client生成は遅延させ、必要な手番分だけインスタンス化する。
+    createClient: () => EngineClient;
     kind?: "internal" | "external";
 };
 
@@ -180,8 +182,14 @@ export function ShogiMatch({
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
     const [wantPromote, setWantPromote] = useState(false);
-    const [engineReady, setEngineReady] = useState<Record<string, boolean>>({});
-    const [engineStatus, setEngineStatus] = useState<Record<string, EngineStatus>>({});
+    const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
+        sente: false,
+        gote: false,
+    });
+    const [engineStatus, setEngineStatus] = useState<Record<Player, EngineStatus>>({
+        sente: "idle",
+        gote: "idle",
+    });
     const [message, setMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useState<ClockSettings>({
@@ -191,14 +199,34 @@ export function ShogiMatch({
     const [clocks, setClocks] = useState<TickState>(initialTick(timeSettings));
     const [eventLogs, setEventLogs] = useState<string[]>([]);
     const [errorLogs, setErrorLogs] = useState<string[]>([]);
-    const [activeSearch, setActiveSearch] = useState<{ side: Player; engineId: string } | null>(
-        null,
-    );
     const [isMatchRunning, setIsMatchRunning] = useState(false);
 
-    const handlesRef = useRef<Record<string, SearchHandle | null>>({});
-    const pendingSearchRef = useRef<Record<string, boolean>>({});
-    const lastEngineRequestPly = useRef<number | null>(null);
+    const handlesRef = useRef<Record<Player, SearchHandle | null>>({
+        sente: null,
+        gote: null,
+    });
+    const pendingSearchRef = useRef<Record<Player, boolean>>({ sente: false, gote: false });
+    const lastEngineRequestPly = useRef<Record<Player, number | null>>({
+        sente: null,
+        gote: null,
+    });
+    const engineInstancesRef = useRef<Record<Player, EngineClient | null>>({
+        sente: null,
+        gote: null,
+    });
+    const engineSubscriptionsRef = useRef<Record<Player, (() => void) | null>>({
+        sente: null,
+        gote: null,
+    });
+    const engineSelectionRef = useRef<Record<Player, string | null>>({
+        sente: null,
+        gote: null,
+    });
+    const engineReadyRef = useRef<Record<Player, boolean>>({
+        sente: false,
+        gote: false,
+    });
+    const activeSearchRef = useRef<{ side: Player; engineId: string } | null>(null);
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
@@ -224,33 +252,60 @@ export function ShogiMatch({
         return map;
     }, [engineOptions]);
 
+    const disposeEngineForSide = useCallback(async (side: Player) => {
+        const sub = engineSubscriptionsRef.current[side];
+        if (sub) {
+            sub();
+            engineSubscriptionsRef.current[side] = null;
+        }
+        const handle = handlesRef.current[side];
+        if (handle) {
+            await handle.cancel().catch(() => undefined);
+            handlesRef.current[side] = null;
+        }
+        pendingSearchRef.current[side] = false;
+        lastEngineRequestPly.current[side] = null;
+        if (activeSearchRef.current?.side === side) {
+            activeSearchRef.current = null;
+        }
+        const client = engineInstancesRef.current[side];
+        if (client) {
+            await client.stop().catch(() => undefined);
+            if (typeof client.dispose === "function") {
+                await client.dispose().catch(() => undefined);
+            }
+        }
+        engineInstancesRef.current[side] = null;
+        engineSelectionRef.current[side] = null;
+        engineReadyRef.current[side] = false;
+        setEngineReady((prev) => ({ ...prev, [side]: false }));
+        setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+    }, []);
+
     const grid = useMemo(() => {
         const g = boardToGrid(position.board);
         return flipBoard ? [...g].reverse().map((row) => [...row].reverse()) : g;
     }, [position.board, flipBoard]);
 
-    const getEngineForSide = (side: Player): EngineOption | undefined => {
-        if (!hasEngines) return undefined;
-        const setting = sides[side];
-        if (setting.role !== "engine") return undefined;
-        if (setting.engineId && engineMap.has(setting.engineId)) {
-            return engineMap.get(setting.engineId);
-        }
-        return engineOptions[0];
-    };
-
-    const isEngineTurn = (side: Player): boolean => {
-        return sides[side].role === "engine" && Boolean(getEngineForSide(side));
-    };
-
-    const ensureEngineReady = useCallback(
-        async (engineId: string, engine: EngineClient) => {
-            if (engineReady[engineId]) return;
-            await engine.init();
-            await engine.loadPosition("startpos");
-            setEngineReady((prev) => ({ ...prev, [engineId]: true }));
+    const getEngineForSide = useCallback(
+        (side: Player): EngineOption | undefined => {
+            if (!hasEngines) return undefined;
+            const setting = sides[side];
+            if (setting.role !== "engine") return undefined;
+            const fallback = engineOptions[0];
+            if (setting.engineId && engineMap.has(setting.engineId)) {
+                return engineMap.get(setting.engineId);
+            }
+            return fallback;
         },
-        [engineReady],
+        [engineMap, engineOptions, hasEngines, sides],
+    );
+
+    const isEngineTurn = useCallback(
+        (side: Player): boolean => {
+            return sides[side].role === "engine" && Boolean(getEngineForSide(side));
+        },
+        [getEngineForSide, sides],
     );
 
     const resetClocks = (startTick: boolean) => {
@@ -263,16 +318,17 @@ export function ShogiMatch({
     };
 
     const stopAllEngines = useCallback(async () => {
-        const entries = Object.entries(handlesRef.current);
-        for (const [, handle] of entries) {
+        for (const side of ["sente", "gote"] as Player[]) {
+            const handle = handlesRef.current[side];
             if (handle) {
                 await handle.cancel().catch(() => undefined);
+                handlesRef.current[side] = null;
             }
+            pendingSearchRef.current[side] = false;
         }
-        handlesRef.current = {};
-        pendingSearchRef.current = {};
-        setActiveSearch(null);
-        setEngineStatus({});
+        lastEngineRequestPly.current = { sente: null, gote: null };
+        activeSearchRef.current = null;
+        setEngineStatus({ sente: "idle", gote: "idle" });
     }, []);
 
     const pauseAutoPlay = async () => {
@@ -286,16 +342,11 @@ export function ShogiMatch({
         setIsMatchRunning(true);
         setClocks((prev) => ({ ...prev, ticking: position.turn, lastUpdatedAt: Date.now() }));
         if (!isEngineTurn(position.turn)) return;
-        const engineOpt = getEngineForSide(position.turn);
-        if (engineOpt) {
-            try {
-                await startEngineTurn(position.turn, engineOpt.id);
-            } catch (error) {
-                setEngineStatus((prev) => ({ ...prev, [engineOpt.id]: "error" }));
-                setErrorLogs((prev) =>
-                    [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs),
-                );
-            }
+        try {
+            await startEngineTurn(position.turn);
+        } catch (error) {
+            setEngineStatus((prev) => ({ ...prev, [position.turn]: "error" }));
+            setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
         }
     };
 
@@ -322,7 +373,7 @@ export function ShogiMatch({
             setSelection(null);
             setWantPromote(false);
             setMessage(null);
-            setActiveSearch(null);
+            activeSearchRef.current = null;
             legalCacheRef.current = null;
             updateClocksForNextTurn(nextPosition.turn);
         },
@@ -346,33 +397,103 @@ export function ShogiMatch({
         [applyMoveCommon, maxLogs],
     );
 
+    const attachSubscription = useCallback(
+        (side: Player, client: EngineClient, engineId: string) => {
+            if (engineSubscriptionsRef.current[side]) return;
+            const unsub = client.subscribe((event) => {
+                const label = `${side === "sente" ? "S" : "G"}:${engineId}`;
+                setEventLogs((prev) => {
+                    const next = [formatEvent(event, label), ...prev];
+                    return next.length > maxLogs ? next.slice(0, maxLogs) : next;
+                });
+                if (event.type === "bestmove") {
+                    setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+                    pendingSearchRef.current[side] = false;
+                    handlesRef.current[side] = null;
+                    const current = activeSearchRef.current;
+                    if (current && current.engineId === engineId && current.side === side) {
+                        lastEngineRequestPly.current[side] = movesRef.current.length;
+                        applyMoveFromEngine(event.move);
+                        activeSearchRef.current = null;
+                    }
+                }
+                if (event.type === "error") {
+                    setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
+                    handlesRef.current[side] = null;
+                    pendingSearchRef.current[side] = false;
+                    setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
+                }
+            });
+            engineSubscriptionsRef.current[side] = unsub;
+        },
+        [applyMoveFromEngine, maxLogs],
+    );
+
+    const ensureEngineReady = useCallback(
+        async (side: Player): Promise<{ client: EngineClient; engineId: string } | null> => {
+            const setting = sides[side];
+            if (setting.role !== "engine") return null;
+            const selectedId = setting.engineId ?? engineOptions[0]?.id;
+            if (!selectedId) return null;
+            const opt = engineMap.get(selectedId);
+            if (!opt) return null;
+
+            if (engineSelectionRef.current[side] && engineSelectionRef.current[side] !== opt.id) {
+                await disposeEngineForSide(side);
+            }
+
+            let client = engineInstancesRef.current[side];
+            if (!client) {
+                client = opt.createClient();
+                engineInstancesRef.current[side] = client;
+                engineSelectionRef.current[side] = opt.id;
+                engineReadyRef.current[side] = false;
+            }
+
+            attachSubscription(side, client, opt.id);
+
+            if (!engineReadyRef.current[side]) {
+                await client.init();
+                await client.loadPosition("startpos", movesRef.current);
+                engineReadyRef.current[side] = true;
+                setEngineReady((prev) => ({ ...prev, [side]: true }));
+            }
+
+            return { client, engineId: opt.id };
+        },
+        [attachSubscription, disposeEngineForSide, engineMap, engineOptions, sides],
+    );
+
     const startEngineTurn = useCallback(
-        async (side: Player, engineId: string) => {
+        async (side: Player) => {
             if (!positionReady) return;
-            if (pendingSearchRef.current[engineId]) return;
-            const engine = engineMap.get(engineId);
-            if (!engine) return;
-            const existing = handlesRef.current[engineId];
+            if (pendingSearchRef.current[side]) return;
+            const ready = await ensureEngineReady(side);
+            if (!ready) return;
+            const { client, engineId } = ready;
+            const existing = handlesRef.current[side];
             if (existing) {
-                // 既にこのエンジンが思考中ならそのまま継続（StrictModeで二重発火するのを防ぐ）
-                if (activeSearch && activeSearch.engineId === engineId) {
+                const current = activeSearchRef.current;
+                if (current && current.side === side && current.engineId === engineId) {
                     return;
                 }
                 await existing.cancel().catch(() => undefined);
             }
-            setEngineStatus((prev) => ({ ...prev, [engineId]: "thinking" }));
-            pendingSearchRef.current[engineId] = true;
-            await ensureEngineReady(engineId, engine.client);
-            await engine.client.loadPosition("startpos", movesRef.current);
-            const handle = await engine.client.search({
-                limits: { byoyomiMs: timeSettings[side].byoyomiMs },
-                ponder: false,
-            });
-            handlesRef.current[engineId] = handle;
-            setActiveSearch({ side, engineId });
-            pendingSearchRef.current[engineId] = false;
+            setEngineStatus((prev) => ({ ...prev, [side]: "thinking" }));
+            pendingSearchRef.current[side] = true;
+            try {
+                await client.loadPosition("startpos", movesRef.current);
+                const handle = await client.search({
+                    limits: { byoyomiMs: timeSettings[side].byoyomiMs },
+                    ponder: false,
+                });
+                handlesRef.current[side] = handle;
+                activeSearchRef.current = { side, engineId };
+            } finally {
+                pendingSearchRef.current[side] = false;
+            }
         },
-        [activeSearch, engineMap, ensureEngineReady, positionReady, timeSettings],
+        [ensureEngineReady, positionReady, timeSettings],
     );
 
     useEffect(() => {
@@ -385,68 +506,19 @@ export function ShogiMatch({
 
     useEffect(() => {
         for (const side of ["sente", "gote"] as Player[]) {
-            const setting = sides[side];
-            if (setting.role === "engine") continue;
-            const fallbackEngine = engineOptions[0];
-            const engineOpt = setting.engineId ? engineMap.get(setting.engineId) : fallbackEngine;
-            if (!engineOpt) continue;
-            const handle = handlesRef.current[engineOpt.id];
-            if (handle) {
-                handle.cancel().catch(() => undefined);
-                handlesRef.current[engineOpt.id] = null;
-            }
-            if (activeSearch?.side === side) {
-                setActiveSearch(null);
-            }
+            if (sides[side].role === "engine") continue;
+            disposeEngineForSide(side).catch(() => undefined);
         }
-    }, [activeSearch, engineMap, engineOptions, sides]);
-
-    useEffect(() => {
-        if (!hasEngines) return;
-        const unsubs = engineOptions.map(({ id, client }) =>
-            client.subscribe((event) => {
-                setEventLogs((prev) => {
-                    const next = [formatEvent(event, id), ...prev];
-                    return next.length > maxLogs ? next.slice(0, maxLogs) : next;
-                });
-                if (event.type === "bestmove") {
-                    setEngineStatus((prev) => ({ ...prev, [id]: "idle" }));
-                    // 探索完了したハンドルはクリアして次回のキャンセルでstopを送らないようにする
-                    if (handlesRef.current[id]) {
-                        handlesRef.current[id] = null;
-                    }
-                    if (activeSearch && activeSearch.engineId === id) {
-                        // 次の手番で再探索できるよう、現在の手数を記録
-                        lastEngineRequestPly.current = movesRef.current.length;
-                        pendingSearchRef.current[id] = false;
-                        applyMoveFromEngine(event.move);
-                        setActiveSearch(null);
-                    }
-                }
-                if (event.type === "error") {
-                    setEngineStatus((prev) => ({ ...prev, [id]: "error" }));
-                    if (handlesRef.current[id]) {
-                        handlesRef.current[id] = null;
-                    }
-                    pendingSearchRef.current[id] = false;
-                    setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
-                }
-            }),
-        );
-
-        return () => {
-            for (const unsubscribe of unsubs) {
-                unsubscribe();
-            }
-        };
-    }, [activeSearch, applyMoveFromEngine, engineOptions, hasEngines, maxLogs]);
+    }, [disposeEngineForSide, sides]);
 
     useEffect(() => {
         return () => {
-            // アンマウント時のみ全エンジンを停止する。再レンダー間のcleanupでは stop を送らない。
-            stopAllEngines().catch(() => undefined);
+            // アンマウント時のみ全エンジンを停止・解放する。
+            Promise.all(
+                (["sente", "gote"] as Player[]).map((side) => disposeEngineForSide(side)),
+            ).catch(() => undefined);
         };
-    }, [stopAllEngines]);
+    }, [disposeEngineForSide]);
 
     useEffect(() => {
         if (!clocks.ticking) return;
@@ -475,38 +547,29 @@ export function ShogiMatch({
     }, [clocks.ticking]);
 
     useEffect(() => {
-        if (!isMatchRunning || !hasEngines || !positionReady) return;
-        const setting = sides[position.turn];
-        if (setting.role !== "engine") return;
-        const fallbackEngine = engineOptions[0];
-        const engineOpt = setting.engineId
-            ? (engineMap.get(setting.engineId) ?? fallbackEngine)
-            : fallbackEngine;
+        if (!isMatchRunning || !positionReady) return;
+        const side = position.turn;
+        if (!isEngineTurn(side)) return;
+        const engineOpt = getEngineForSide(side);
         if (!engineOpt) return;
-        if (
-            activeSearch &&
-            activeSearch.side === position.turn &&
-            activeSearch.engineId === engineOpt.id
-        ) {
+        const current = activeSearchRef.current;
+        if (current && current.side === side && current.engineId === engineOpt.id) {
             return;
         }
-        if (lastEngineRequestPly.current === moves.length) return;
-        lastEngineRequestPly.current = moves.length;
-        startEngineTurn(position.turn, engineOpt.id).catch((error) => {
-            setEngineStatus((prev) => ({ ...prev, [engineOpt.id]: "error" }));
+        if (lastEngineRequestPly.current[side] === moves.length) return;
+        lastEngineRequestPly.current[side] = moves.length;
+        startEngineTurn(side).catch((error) => {
+            setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
             setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
         });
     }, [
-        activeSearch,
+        getEngineForSide,
+        isEngineTurn,
         isMatchRunning,
-        engineMap,
-        engineOptions,
-        hasEngines,
         maxLogs,
         moves.length,
         position.turn,
         positionReady,
-        sides,
         startEngineTurn,
     ]);
 
@@ -522,8 +585,8 @@ export function ShogiMatch({
         setSelection(null);
         setMessage(null);
         resetClocks(false);
-        lastEngineRequestPly.current = null;
-        setActiveSearch(null);
+        lastEngineRequestPly.current = { sente: null, gote: null };
+        activeSearchRef.current = null;
         setIsMatchRunning(false);
         legalCacheRef.current = null;
     };
@@ -640,7 +703,7 @@ export function ShogiMatch({
             setSelection(null);
             setMessage(result.error ?? null);
             resetClocks(true);
-            lastEngineRequestPly.current = null;
+            lastEngineRequestPly.current = { sente: null, gote: null };
             legalCacheRef.current = null;
             setPositionReady(true);
         } catch (error) {
@@ -1134,10 +1197,16 @@ export function ShogiMatch({
                                 }}
                             >
                                 状態:
-                                {engineOptions.map((opt) => {
-                                    const status = engineStatus[opt.id] ?? "idle";
-                                    const ready = engineReady[opt.id] ? "init済" : "未init";
-                                    return ` [${opt.label}: ${status}/${ready}]`;
+                                {(["sente", "gote"] as Player[]).map((side) => {
+                                    const roleLabel =
+                                        sides[side].role === "engine" ? "エンジン" : "人間";
+                                    if (sides[side].role !== "engine") {
+                                        return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel}]`;
+                                    }
+                                    const engineLabel = getEngineForSide(side)?.label ?? "未選択";
+                                    const ready = engineReady[side] ? "init済" : "未init";
+                                    const status = engineStatus[side];
+                                    return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel} ${engineLabel} ${status}/${ready}]`;
                                 })}
                                 {` | 対局: ${isMatchRunning ? "実行中" : "停止中"}`}
                             </div>

@@ -1,21 +1,19 @@
 import { createTauriEngineClient, getLegalMoves } from "@shogi/engine-tauri";
 import { EngineControlPanel, ShogiMatch } from "@shogi/ui";
 
-const engineA = createTauriEngineClient({
-    stopMode: "terminate",
-    useMockOnError: false,
-    debug: true,
-});
-const engineB = createTauriEngineClient({
-    stopMode: "terminate",
-    useMockOnError: false,
-    debug: true,
-});
+const createEngineClient = () =>
+    createTauriEngineClient({
+        stopMode: "terminate",
+        useMockOnError: false,
+        debug: true,
+    });
 
 const engineOptions = [
-    { id: "native-a", label: "内蔵エンジン（スロットA）", client: engineA },
-    { id: "native-b", label: "内蔵エンジン（スロットB）", client: engineB },
+    { id: "native-a", label: "内蔵エンジン（スロットA）", createClient: createEngineClient },
+    { id: "native-b", label: "内蔵エンジン（スロットB）", createClient: createEngineClient },
 ];
+
+const panelEngine = createEngineClient();
 
 function App() {
     return (
@@ -39,7 +37,7 @@ function App() {
                     engineOptions={engineOptions}
                     fetchLegalMoves={(moves) => getLegalMoves({ sfen: "startpos", moves })}
                 />
-                <EngineControlPanel engine={engineA} />
+                <EngineControlPanel engine={panelEngine} />
             </div>
         </main>
     );

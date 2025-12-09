@@ -1,17 +1,17 @@
 import { createWasmEngineClient } from "@shogi/engine-wasm";
 import { EngineControlPanel, ShogiMatch } from "@shogi/ui";
 
-const engineA = createWasmEngineClient({
-    stopMode: "terminate",
-});
-const engineB = createWasmEngineClient({
-    stopMode: "terminate",
-});
+const createEngineClient = () =>
+    createWasmEngineClient({
+        stopMode: "terminate",
+    });
 
 const engineOptions = [
-    { id: "wasm-a", label: "内蔵エンジン（スロットA）", client: engineA },
-    { id: "wasm-b", label: "内蔵エンジン（スロットB）", client: engineB },
+    { id: "wasm-a", label: "内蔵エンジン（スロットA）", createClient: createEngineClient },
+    { id: "wasm-b", label: "内蔵エンジン（スロットB）", createClient: createEngineClient },
 ];
+
+const panelEngine = createEngineClient();
 
 function App() {
     return (
@@ -32,7 +32,7 @@ function App() {
 
             <div className="flex flex-col gap-[14px]">
                 <ShogiMatch engineOptions={engineOptions} />
-                <EngineControlPanel engine={engineA} />
+                <EngineControlPanel engine={panelEngine} />
             </div>
         </main>
     );
