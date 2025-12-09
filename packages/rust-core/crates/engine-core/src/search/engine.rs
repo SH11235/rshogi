@@ -576,6 +576,17 @@ impl Search {
 
         // 反復深化
         for depth in 1..=max_depth {
+            #[cfg(debug_assertions)]
+            if depth <= 2 {
+                eprintln!(
+                    "search_with_callback: depth={} nodes={} search_end={} max_time={} stop_requested={}",
+                    depth,
+                    worker.nodes,
+                    worker.time_manager.search_end(),
+                    worker.time_manager.maximum(),
+                    worker.time_manager.stop_requested()
+                );
+            }
             // 前回のiterationで深さを伸ばせなかった場合のカウンター（YO準拠）
             if depth > 1 && !self.increase_depth {
                 self.search_again_counter += 1;

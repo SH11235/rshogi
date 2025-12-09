@@ -322,17 +322,26 @@ impl<'a> SearchWorker<'a> {
     #[inline]
     fn check_abort(&mut self) -> bool {
         if self.abort {
+            #[cfg(debug_assertions)]
+            eprintln!("check_abort: abort flag already set");
             return true;
         }
 
         // 外部からの停止要求
         if self.time_manager.stop_requested() {
+            #[cfg(debug_assertions)]
+            eprintln!("check_abort: stop requested");
             self.abort = true;
             return true;
         }
 
         // ノード数制限チェック
         if self.limits.nodes > 0 && self.nodes >= self.limits.nodes {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "check_abort: node limit reached nodes={} limit={}",
+                self.nodes, self.limits.nodes
+            );
             self.abort = true;
             return true;
         }
@@ -344,6 +353,12 @@ impl<'a> SearchWorker<'a> {
 
             // フェーズ1: search_end 設定済み → 即座に停止
             if self.time_manager.search_end() > 0 && elapsed >= self.time_manager.search_end() {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "check_abort: search_end reached elapsed={} search_end={}",
+                    elapsed,
+                    self.time_manager.search_end()
+                );
                 self.abort = true;
                 return true;
             }
