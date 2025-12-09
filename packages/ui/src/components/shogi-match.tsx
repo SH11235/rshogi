@@ -197,6 +197,7 @@ export function ShogiMatch({
     const [isMatchRunning, setIsMatchRunning] = useState(false);
 
     const handlesRef = useRef<Record<string, SearchHandle | null>>({});
+    const pendingSearchRef = useRef<Record<string, boolean>>({});
     const lastEngineRequestPly = useRef<number | null>(null);
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
@@ -347,13 +348,19 @@ export function ShogiMatch({
     const startEngineTurn = useCallback(
         async (side: Player, engineId: string) => {
             if (!positionReady) return;
+            if (pendingSearchRef.current[engineId]) return;
             const engine = engineMap.get(engineId);
             if (!engine) return;
             const existing = handlesRef.current[engineId];
             if (existing) {
+                // 既にこのエンジンが思考中ならそのまま継続（StrictModeで二重発火するのを防ぐ）
+                if (activeSearch && activeSearch.engineId === engineId) {
+                    return;
+                }
                 await existing.cancel().catch(() => undefined);
             }
             setEngineStatus((prev) => ({ ...prev, [engineId]: "thinking" }));
+            pendingSearchRef.current[engineId] = true;
             await ensureEngineReady(engineId, engine.client);
             await engine.client.loadPosition("startpos", movesRef.current);
             const handle = await engine.client.search({
@@ -362,8 +369,9 @@ export function ShogiMatch({
             });
             handlesRef.current[engineId] = handle;
             setActiveSearch({ side, engineId });
+            pendingSearchRef.current[engineId] = false;
         },
-        [engineMap, ensureEngineReady, positionReady, timeSettings],
+        [activeSearch, engineMap, ensureEngineReady, positionReady, timeSettings],
     );
 
     useEffect(() => {
