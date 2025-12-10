@@ -1,4 +1,5 @@
 import { createTauriEngineClient, getLegalMoves } from "@shogi/engine-tauri";
+import type { EngineOption } from "@shogi/ui";
 import { EngineControlPanel, PlaygroundPage, ShogiMatch } from "@shogi/ui";
 
 const createEngineClient = () =>
@@ -8,7 +9,7 @@ const createEngineClient = () =>
         debug: true,
     });
 
-const engineOptions = [
+const engineOptions: EngineOption[] = [
     { id: "native", label: "内蔵エンジン", createClient: createEngineClient, kind: "internal" },
 ];
 
@@ -22,7 +23,7 @@ function App() {
         >
             <ShogiMatch
                 engineOptions={engineOptions}
-                fetchLegalMoves={(moves) => getLegalMoves({ sfen: "startpos", moves })}
+                fetchLegalMoves={(sfen, moves) => getLegalMoves({ sfen, moves })}
             />
             <EngineControlPanel engine={panelEngine} />
         </PlaygroundPage>

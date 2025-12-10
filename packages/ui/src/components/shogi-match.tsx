@@ -2,13 +2,14 @@ import {
     applyMoveWithState,
     type BoardState,
     boardToMatrix,
-    buildPositionString,
     cloneBoard,
     createEmptyHands,
     getAllSquares,
     getPositionService,
+    type Hands,
     type LastMove,
     movesToCsa,
+    type Piece,
     type PieceType,
     type Player,
     type PositionState,
@@ -63,10 +64,11 @@ export interface ShogiMatchProps {
     initialMainTimeMs?: number;
     initialByoyomiMs?: number;
     maxLogs?: number;
-    fetchLegalMoves?: (moves: string[]) => Promise<string[]>;
+    fetchLegalMoves?: (sfen: string, moves: string[]) => Promise<string[]>;
 }
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
+const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
 const PIECE_LABELS: Record<PieceType, string> = {
     K: "玉",
     R: "飛",
@@ -77,6 +79,17 @@ const PIECE_LABELS: Record<PieceType, string> = {
     L: "香",
     P: "歩",
 };
+const PIECE_CAP: Record<PieceType, number> = {
+    P: 18,
+    L: 4,
+    N: 4,
+    S: 4,
+    G: 4,
+    B: 2,
+    R: 2,
+    K: 1,
+};
+const isPromotable = (type: PieceType): boolean => type !== "K" && type !== "G";
 
 const baseCard: CSSProperties = {
     background: "hsl(var(--card, 0 0% 100%))",
@@ -84,6 +97,55 @@ const baseCard: CSSProperties = {
     borderRadius: "12px",
     padding: "14px",
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
+};
+
+const cloneHandsState = (hands: Hands): Hands => ({
+    sente: { ...hands.sente },
+    gote: { ...hands.gote },
+});
+
+const clonePositionState = (pos: PositionState): PositionState => ({
+    board: cloneBoard(pos.board),
+    hands: cloneHandsState(pos.hands),
+    turn: pos.turn,
+    ply: pos.ply,
+});
+
+const addToHand = (hands: Hands, owner: Player, pieceType: PieceType): Hands => {
+    const next = cloneHandsState(hands);
+    const current = next[owner][pieceType] ?? 0;
+    next[owner][pieceType] = current + 1;
+    return next;
+};
+
+const consumeFromHand = (hands: Hands, owner: Player, pieceType: PieceType): Hands | null => {
+    const next = cloneHandsState(hands);
+    const current = next[owner][pieceType] ?? 0;
+    if (current <= 0) return null;
+    if (current === 1) {
+        delete next[owner][pieceType];
+    } else {
+        next[owner][pieceType] = current - 1;
+    }
+    return next;
+};
+
+const countPieces = (position: PositionState): Record<Player, Record<PieceType, number>> => {
+    const counts: Record<Player, Record<PieceType, number>> = {
+        sente: { K: 0, R: 0, B: 0, G: 0, S: 0, N: 0, L: 0, P: 0 },
+        gote: { K: 0, R: 0, B: 0, G: 0, S: 0, N: 0, L: 0, P: 0 },
+    };
+    for (const piece of Object.values(position.board)) {
+        if (!piece) continue;
+        counts[piece.owner][piece.type] += 1;
+    }
+    for (const owner of ["sente", "gote"] as Player[]) {
+        const hand = position.hands[owner];
+        for (const key of Object.keys(hand) as PieceType[]) {
+            counts[owner][key] += hand[key] ?? 0;
+        }
+    }
+    return counts;
 };
 
 function formatEvent(event: EngineEvent, engineId: string): string {
@@ -200,6 +262,14 @@ export function ShogiMatch({
     const [eventLogs, setEventLogs] = useState<string[]>([]);
     const [errorLogs, setErrorLogs] = useState<string[]>([]);
     const [isMatchRunning, setIsMatchRunning] = useState(false);
+    const [isEditMode, setIsEditMode] = useState(false);
+    const [editOwner, setEditOwner] = useState<Player>("sente");
+    const [editPieceType, setEditPieceType] = useState<PieceType>("P");
+    const [editPromoted, setEditPromoted] = useState(false);
+    const [editFromSquare, setEditFromSquare] = useState<Square | null>(null);
+    const [editTool, setEditTool] = useState<"place" | "erase">("place");
+    const [startSfen, setStartSfen] = useState<string>("startpos");
+    const [basePosition, setBasePosition] = useState<PositionState | null>(null);
 
     const handlesRef = useRef<Record<Player, SearchHandle | null>>({
         sente: null,
@@ -236,10 +306,17 @@ export function ShogiMatch({
         const service = getPositionService();
         service
             .getInitialBoard()
-            .then((pos) => {
+            .then(async (pos) => {
                 setPosition(pos);
                 positionRef.current = pos;
                 setInitialBoard(cloneBoard(pos.board));
+                setBasePosition(clonePositionState(pos));
+                try {
+                    const sfen = await service.boardToSfen(pos);
+                    setStartSfen(sfen);
+                } catch {
+                    setStartSfen("startpos");
+                }
                 setPositionReady(true);
             })
             .catch((error) => setMessage(`初期局面の取得に失敗しました: ${String(error)}`));
@@ -309,14 +386,32 @@ export function ShogiMatch({
         [getEngineForSide, sides],
     );
 
-    const resetClocks = (startTick: boolean) => {
-        setClocks({
-            sente: { mainMs: timeSettings.sente.mainMs, byoyomiMs: timeSettings.sente.byoyomiMs },
-            gote: { mainMs: timeSettings.gote.mainMs, byoyomiMs: timeSettings.gote.byoyomiMs },
-            ticking: startTick ? "sente" : null,
-            lastUpdatedAt: Date.now(),
-        });
-    };
+    const resetClocks = useCallback(
+        (startTick: boolean) => {
+            setClocks({
+                sente: {
+                    mainMs: timeSettings.sente.mainMs,
+                    byoyomiMs: timeSettings.sente.byoyomiMs,
+                },
+                gote: {
+                    mainMs: timeSettings.gote.mainMs,
+                    byoyomiMs: timeSettings.gote.byoyomiMs,
+                },
+                ticking: startTick ? "sente" : null,
+                lastUpdatedAt: Date.now(),
+            });
+        },
+        [timeSettings],
+    );
+
+    const refreshStartSfen = useCallback(async (pos: PositionState) => {
+        try {
+            const sfen = await getPositionService().boardToSfen(pos);
+            setStartSfen(sfen);
+        } catch {
+            setStartSfen("startpos");
+        }
+    }, []);
 
     const stopAllEngines = useCallback(async () => {
         for (const side of ["sente", "gote"] as Player[]) {
@@ -340,6 +435,9 @@ export function ShogiMatch({
 
     const resumeAutoPlay = async () => {
         if (!positionReady) return;
+        if (isEditMode) {
+            await finalizeEditedPosition();
+        }
         setIsMatchRunning(true);
         setClocks((prev) => ({ ...prev, ticking: position.turn, lastUpdatedAt: Date.now() }));
         if (!isEngineTurn(position.turn)) return;
@@ -350,6 +448,61 @@ export function ShogiMatch({
             setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
         }
     };
+
+    const finalizeEditedPosition = async () => {
+        if (isMatchRunning) return;
+        const current = positionRef.current;
+        setBasePosition(clonePositionState(current));
+        setInitialBoard(cloneBoard(current.board));
+        await refreshStartSfen(current);
+        legalCacheRef.current = null;
+        setIsEditMode(false);
+        setMessage("局面を確定しました。対局開始でこの局面から進行します。");
+    };
+
+    const resetToBasePosition = useCallback(async () => {
+        await stopAllEngines();
+        const service = getPositionService();
+        let next = basePosition ? clonePositionState(basePosition) : null;
+        if (!next) {
+            try {
+                const fetched = await service.getInitialBoard();
+                next = clonePositionState(fetched);
+                setBasePosition(clonePositionState(fetched));
+                try {
+                    const sfen = await service.boardToSfen(fetched);
+                    setStartSfen(sfen);
+                } catch {
+                    setStartSfen("startpos");
+                }
+            } catch (error) {
+                setMessage(`初期局面の再取得に失敗しました: ${String(error)}`);
+                return;
+            }
+        }
+        setPosition(next);
+        positionRef.current = next;
+        setInitialBoard(cloneBoard(next.board));
+        setPositionReady(true);
+        setMoves([]);
+        setLastMove(undefined);
+        setSelection(null);
+        setMessage(null);
+        resetClocks(false);
+        lastEngineRequestPly.current = { sente: null, gote: null };
+        setIsMatchRunning(false);
+        setIsEditMode(false);
+        setEditFromSquare(null);
+        setEditTool("place");
+        setEditPromoted(false);
+        setEditOwner("sente");
+        activeSearchRef.current = null;
+        setErrorLogs([]);
+        setEventLogs([]);
+        pendingSearchRef.current = { sente: false, gote: false };
+        legalCacheRef.current = null;
+        void refreshStartSfen(next);
+    }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines]);
 
     const updateClocksForNextTurn = useCallback(
         (nextTurn: Player) => {
@@ -455,14 +608,14 @@ export function ShogiMatch({
 
             if (!engineReadyRef.current[side]) {
                 await client.init();
-                await client.loadPosition("startpos", movesRef.current);
+                await client.loadPosition(startSfen, movesRef.current);
                 engineReadyRef.current[side] = true;
                 setEngineReady((prev) => ({ ...prev, [side]: true }));
             }
 
             return { client, engineId: opt.id };
         },
-        [attachSubscription, disposeEngineForSide, engineMap, engineOptions, sides],
+        [attachSubscription, disposeEngineForSide, engineMap, engineOptions, sides, startSfen],
     );
 
     const startEngineTurn = useCallback(
@@ -483,7 +636,7 @@ export function ShogiMatch({
             setEngineStatus((prev) => ({ ...prev, [side]: "thinking" }));
             pendingSearchRef.current[side] = true;
             try {
-                await client.loadPosition("startpos", movesRef.current);
+                await client.loadPosition(startSfen, movesRef.current);
                 const handle = await client.search({
                     limits: { byoyomiMs: timeSettings[side].byoyomiMs },
                     ponder: false,
@@ -494,7 +647,7 @@ export function ShogiMatch({
                 pendingSearchRef.current[side] = false;
             }
         },
-        [ensureEngineReady, positionReady, timeSettings],
+        [ensureEngineReady, positionReady, startSfen, timeSettings],
     );
 
     useEffect(() => {
@@ -575,28 +728,14 @@ export function ShogiMatch({
     ]);
 
     const handleNewGame = async () => {
-        await stopAllEngines();
-        const initial = await getPositionService().getInitialBoard();
-        setPosition(initial);
-        positionRef.current = initial;
-        setInitialBoard(cloneBoard(initial.board));
-        setPositionReady(true);
-        setMoves([]);
-        setLastMove(undefined);
-        setSelection(null);
-        setMessage(null);
-        resetClocks(false);
-        lastEngineRequestPly.current = { sente: null, gote: null };
-        activeSearchRef.current = null;
-        setIsMatchRunning(false);
-        legalCacheRef.current = null;
+        await resetToBasePosition();
     };
 
     const getLegalSet = async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
         const resolver =
-            fetchLegalMoves ??
-            (async (history: string[]) => getPositionService().getLegalMoves("startpos", history));
+            fetchLegalMoves?.bind(null, startSfen) ??
+            ((history: string[]) => getPositionService().getLegalMoves(startSfen, history));
         const ply = movesRef.current.length;
         const cached = legalCacheRef.current;
         if (cached && cached.ply === ply) {
@@ -608,8 +747,175 @@ export function ShogiMatch({
         return set;
     };
 
+    const applyEditedPosition = (nextPosition: PositionState) => {
+        setPosition(nextPosition);
+        positionRef.current = nextPosition;
+        setInitialBoard(cloneBoard(nextPosition.board));
+        setMoves([]);
+        movesRef.current = [];
+        setLastMove(undefined);
+        setSelection(null);
+        setMessage(null);
+        setEditFromSquare(null);
+        lastEngineRequestPly.current = { sente: null, gote: null };
+        activeSearchRef.current = null;
+        legalCacheRef.current = null;
+        setClocks((prev) => ({
+            ...prev,
+            ticking: null,
+            lastUpdatedAt: Date.now(),
+        }));
+        setIsMatchRunning(false);
+        void refreshStartSfen(nextPosition);
+    };
+
+    const clearBoardForEdit = () => {
+        if (isMatchRunning) return;
+        const emptyBoard = Object.fromEntries(
+            getAllSquares().map((sq) => [sq, null]),
+        ) as BoardState;
+        const next: PositionState = {
+            board: emptyBoard,
+            hands: createEmptyHands(),
+            turn: "sente",
+            ply: 1,
+        };
+        applyEditedPosition(next);
+        setMessage("盤面をクリアしました。");
+    };
+
+    const resetToStartposForEdit = async () => {
+        if (isMatchRunning) return;
+        try {
+            const service = getPositionService();
+            const pos = await service.getInitialBoard();
+            applyEditedPosition(clonePositionState(pos));
+            setInitialBoard(cloneBoard(pos.board));
+            setMessage("平手初期化しました。");
+        } catch (error) {
+            setMessage(`平手初期化に失敗しました: ${String(error)}`);
+        }
+    };
+
+    const updateTurnForEdit = (turn: Player) => {
+        if (isMatchRunning) return;
+        const current = positionRef.current;
+        applyEditedPosition({ ...current, turn });
+    };
+
+    const placePieceAt = (
+        square: Square,
+        piece: Piece | null,
+        options?: { fromSquare?: Square },
+    ): boolean => {
+        const current = positionRef.current;
+        const nextBoard = cloneBoard(current.board);
+        let workingHands = cloneHandsState(current.hands);
+
+        if (options?.fromSquare) {
+            nextBoard[options.fromSquare] = null;
+        }
+
+        const existing = nextBoard[square];
+        if (existing) {
+            const base = existing.type;
+            workingHands = addToHand(workingHands, existing.owner, base);
+        }
+
+        if (!piece) {
+            nextBoard[square] = null;
+            const nextPosition: PositionState = {
+                ...current,
+                board: nextBoard,
+                hands: workingHands,
+            };
+            applyEditedPosition(nextPosition);
+            return true;
+        }
+
+        const baseType = piece.type;
+        const consumedHands = consumeFromHand(workingHands, piece.owner, baseType);
+        const handsForPlacement = consumedHands ?? workingHands;
+        const countsBefore = countPieces({
+            ...current,
+            board: nextBoard,
+            hands: handsForPlacement,
+        });
+        const nextCount = countsBefore[piece.owner][baseType] + 1;
+        if (nextCount > PIECE_CAP[baseType]) {
+            setMessage(
+                `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
+            );
+            return false;
+        }
+        if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
+            setMessage("玉はそれぞれ1枚まで配置できます。");
+            return false;
+        }
+
+        nextBoard[square] = piece.promoted ? { ...piece, promoted: true } : { ...piece };
+        const finalHands = consumedHands ?? workingHands;
+        const nextPosition: PositionState = {
+            ...current,
+            board: nextBoard,
+            hands: finalHands,
+        };
+        applyEditedPosition(nextPosition);
+        return true;
+    };
+
     const handleSquareSelect = async (square: string) => {
         setMessage(null);
+        if (isEditMode) {
+            if (!positionReady) {
+                setMessage("局面を読み込み中です。");
+                return;
+            }
+            const sq = square as Square;
+            if (editFromSquare) {
+                const from = editFromSquare;
+                if (from === sq) {
+                    setEditFromSquare(null);
+                    return;
+                }
+                const moving = position.board[from];
+                if (!moving) {
+                    setEditFromSquare(null);
+                    return;
+                }
+                const ok = placePieceAt(sq, moving, { fromSquare: from });
+                if (ok) {
+                    setEditFromSquare(null);
+                }
+                return;
+            }
+
+            if (editTool === "erase") {
+                placePieceAt(sq, null);
+                return;
+            }
+
+            const pieceToPlace: Piece | null = editPieceType
+                ? {
+                      owner: editOwner,
+                      type: editPieceType,
+                      promoted: editPromoted || undefined,
+                  }
+                : null;
+
+            if (pieceToPlace) {
+                placePieceAt(sq, pieceToPlace);
+                return;
+            }
+
+            const current = position.board[sq];
+            if (current) {
+                setEditFromSquare(sq);
+                return;
+            }
+            setMessage("配置する駒を選んでください。");
+            return;
+        }
         if (!positionReady) {
             setMessage("局面を読み込み中です。");
             return;
@@ -666,6 +972,10 @@ export function ShogiMatch({
             setMessage("局面を読み込み中です。");
             return;
         }
+        if (isEditMode) {
+            setMessage("編集モード中は手番入力は無効です。盤面編集パネルを使ってください。");
+            return;
+        }
         if (isEngineTurn(position.turn)) {
             setMessage("エンジンの手番です。");
             return;
@@ -696,7 +1006,7 @@ export function ShogiMatch({
         const filtered = list.filter(Boolean);
         const service = getPositionService();
         try {
-            const result = await service.replayMovesStrict("startpos", filtered);
+            const result = await service.replayMovesStrict(startSfen, filtered);
             setPosition(result.position);
             positionRef.current = result.position;
             setMoves(result.applied);
@@ -712,7 +1022,7 @@ export function ShogiMatch({
         }
     };
 
-    const exportUsi = buildPositionString(moves);
+    const exportUsi = moves.length ? `${startSfen} moves ${moves.join(" ")}` : startSfen;
     const exportCsa = useMemo(
         () => (positionReady && initialBoard ? movesToCsa(moves, {}, initialBoard) : ""),
         [initialBoard, moves, positionReady],
@@ -721,7 +1031,7 @@ export function ShogiMatch({
     const handView = (owner: Player) => {
         const hand = position.hands[owner];
         const ownerSetting = sides[owner];
-        const isActive = position.turn === owner && ownerSetting.role === "human";
+        const isActive = !isEditMode && position.turn === owner && ownerSetting.role === "human";
         return (
             <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
                 {HAND_ORDER.map((piece) => {
@@ -891,7 +1201,9 @@ export function ShogiMatch({
                             }))
                         }
                         disabled={
-                            settingsLocked || setting.role !== "engine" || uiEngineOptions.length === 0
+                            settingsLocked ||
+                            setting.role !== "engine" ||
+                            uiEngineOptions.length === 0
                         }
                         style={{
                             padding: "8px",
@@ -1001,7 +1313,11 @@ export function ShogiMatch({
                                 <ShogiBoard
                                     grid={grid}
                                     selectedSquare={
-                                        selection?.kind === "square" ? selection.square : null
+                                        isEditMode && editFromSquare
+                                            ? editFromSquare
+                                            : selection?.kind === "square"
+                                              ? selection.square
+                                              : null
                                     }
                                     lastMove={
                                         lastMove
@@ -1012,14 +1328,16 @@ export function ShogiMatch({
                                         void handleSquareSelect(sq);
                                     }}
                                 />
-                                <div
-                                    style={{
-                                        fontSize: "12px",
-                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                    }}
-                                >
-                                    {candidateNote}
-                                </div>
+                                {candidateNote ? (
+                                    <div
+                                        style={{
+                                            fontSize: "12px",
+                                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                        }}
+                                    >
+                                        {candidateNote}
+                                    </div>
+                                ) : null}
                             </div>
                         </div>
 
@@ -1050,26 +1368,233 @@ export function ShogiMatch({
                     <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                         <div
                             style={{
-                        ...baseCard,
-                        padding: "12px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "10px",
-                    }}
-                >
-                    <div style={{ fontWeight: 700 }}>対局設定</div>
-                    {settingsLocked ? (
-                        <div
-                            style={{
-                                fontSize: "12px",
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                ...baseCard,
+                                padding: "12px",
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "10px",
                             }}
                         >
-                            対局中は設定を変更できません。停止すると編集できます。
+                            <div style={{ fontWeight: 700 }}>局面編集</div>
+                            <div
+                                style={{
+                                    fontSize: "12px",
+                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                }}
+                            >
+                                対局開始前のみ編集できます。王は重複不可、各駒は上限枚数まで配置できます。
+                            </div>
+                            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                                <Button
+                                    type="button"
+                                    onClick={() =>
+                                        setIsEditMode((prev) => {
+                                            const next = !prev;
+                                            if (!next) {
+                                                setEditFromSquare(null);
+                                                setEditTool("place");
+                                            }
+                                            return next;
+                                        })
+                                    }
+                                    disabled={isMatchRunning || !positionReady}
+                                    variant={isEditMode ? "secondary" : "outline"}
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    {isEditMode ? "編集モードを終了" : "編集モードを開始"}
+                                </Button>
+                                <Button
+                                    type="button"
+                                    onClick={finalizeEditedPosition}
+                                    disabled={isMatchRunning || !isEditMode || !positionReady}
+                                    variant="secondary"
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    変更を確定
+                                </Button>
+                                <Button
+                                    type="button"
+                                    onClick={resetToStartposForEdit}
+                                    disabled={isMatchRunning || !positionReady}
+                                    variant="outline"
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    平手に戻す
+                                </Button>
+                                <Button
+                                    type="button"
+                                    onClick={clearBoardForEdit}
+                                    disabled={isMatchRunning || !positionReady}
+                                    variant="outline"
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    盤面をクリア
+                                </Button>
+                            </div>
+                            <div
+                                style={{
+                                    display: "grid",
+                                    gridTemplateColumns: "1fr 1fr",
+                                    gap: "8px",
+                                    alignItems: "center",
+                                }}
+                            >
+                                <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                                    <span
+                                        style={{
+                                            fontSize: "12px",
+                                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                        }}
+                                    >
+                                        配置する先後
+                                    </span>
+                                    <label
+                                        style={{ display: "flex", gap: "4px", fontSize: "13px" }}
+                                    >
+                                        <input
+                                            type="radio"
+                                            name="edit-owner"
+                                            value="sente"
+                                            checked={editOwner === "sente"}
+                                            disabled={isMatchRunning}
+                                            onChange={() => setEditOwner("sente")}
+                                        />
+                                        先手
+                                    </label>
+                                    <label
+                                        style={{ display: "flex", gap: "4px", fontSize: "13px" }}
+                                    >
+                                        <input
+                                            type="radio"
+                                            name="edit-owner"
+                                            value="gote"
+                                            checked={editOwner === "gote"}
+                                            disabled={isMatchRunning}
+                                            onChange={() => setEditOwner("gote")}
+                                        />
+                                        後手
+                                    </label>
+                                </div>
+                                <label
+                                    style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "6px",
+                                        fontSize: "13px",
+                                    }}
+                                >
+                                    手番
+                                    <select
+                                        value={position.turn}
+                                        onChange={(e) =>
+                                            updateTurnForEdit(e.target.value as Player)
+                                        }
+                                        disabled={isMatchRunning}
+                                        style={{
+                                            padding: "6px",
+                                            borderRadius: "8px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    >
+                                        <option value="sente">先手</option>
+                                        <option value="gote">後手</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div
+                                style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    flexWrap: "wrap",
+                                    alignItems: "center",
+                                }}
+                            >
+                                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                                    {PIECE_SELECT_ORDER.map((type) => {
+                                        const selected =
+                                            editPieceType === type && editTool === "place";
+                                        return (
+                                            <Button
+                                                key={type}
+                                                type="button"
+                                                variant={selected ? "secondary" : "outline"}
+                                                onClick={() => {
+                                                    setEditTool("place");
+                                                    setEditPieceType(type);
+                                                    if (!isPromotable(type)) {
+                                                        setEditPromoted(false);
+                                                    }
+                                                }}
+                                                disabled={isMatchRunning}
+                                                style={{ paddingInline: "10px" }}
+                                            >
+                                                {PIECE_LABELS[type]}
+                                            </Button>
+                                        );
+                                    })}
+                                </div>
+                                <Button
+                                    type="button"
+                                    variant={editTool === "erase" ? "secondary" : "outline"}
+                                    onClick={() =>
+                                        setEditTool(editTool === "erase" ? "place" : "erase")
+                                    }
+                                    disabled={isMatchRunning}
+                                    style={{ paddingInline: "10px" }}
+                                >
+                                    {editTool === "erase" ? "削除モード" : "配置モード"}
+                                </Button>
+                                <label
+                                    style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "6px",
+                                        fontSize: "13px",
+                                    }}
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={editPromoted}
+                                        disabled={isMatchRunning || !isPromotable(editPieceType)}
+                                        onChange={(e) => setEditPromoted(e.target.checked)}
+                                    />
+                                    成りで配置
+                                </label>
+                            </div>
+                            {isEditMode ? (
+                                <div
+                                    style={{
+                                        fontSize: "12px",
+                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                    }}
+                                >
+                                    盤面クリックで配置、同じ駒なら移動として扱います。削除モードは駒を手駒に戻します。
+                                </div>
+                            ) : null}
                         </div>
-                    ) : null}
-                    {sideSelector("sente")}
-                    {sideSelector("gote")}
+
+                        <div
+                            style={{
+                                ...baseCard,
+                                padding: "12px",
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "10px",
+                            }}
+                        >
+                            <div style={{ fontWeight: 700 }}>対局設定</div>
+                            {settingsLocked ? (
+                                <div
+                                    style={{
+                                        fontSize: "12px",
+                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                    }}
+                                >
+                                    対局中は設定を変更できません。停止すると編集できます。
+                                </div>
+                            ) : null}
+                            {sideSelector("sente")}
+                            {sideSelector("gote")}
 
                             <div
                                 style={{
@@ -1294,7 +1819,7 @@ export function ShogiMatch({
                                 <label
                                     style={{ display: "flex", flexDirection: "column", gap: "4px" }}
                                 >
-                                    USI / SFEN (startpos moves)
+                                    USI / SFEN（現在の開始局面 + moves）
                                     <textarea
                                         value={exportUsi}
                                         onChange={(e) => {

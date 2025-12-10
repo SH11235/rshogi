@@ -1,4 +1,5 @@
 import { createWasmEngineClient } from "@shogi/engine-wasm";
+import type { EngineOption } from "@shogi/ui";
 import { EngineControlPanel, PlaygroundPage, ShogiMatch } from "@shogi/ui";
 
 const createEngineClient = () =>
@@ -6,7 +7,7 @@ const createEngineClient = () =>
         stopMode: "terminate",
     });
 
-const engineOptions = [
+const engineOptions: EngineOption[] = [
     { id: "wasm", label: "内蔵エンジン", createClient: createEngineClient, kind: "internal" },
 ];
 

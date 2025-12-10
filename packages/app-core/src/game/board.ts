@@ -340,12 +340,12 @@ export function boardToMatrix(board: BoardState): BoardMatrix {
 
 export type BoardMatrix = Array<Array<{ square: Square; piece: Piece | null }>>;
 
-export function buildPositionString(moves: string[]): string {
+export function buildPositionString(moves: string[], sfen = "startpos"): string {
     if (!moves.length) {
-        return "startpos";
+        return sfen;
     }
 
-    return `startpos moves ${moves.join(" ")}`;
+    return `${sfen} moves ${moves.join(" ")}`;
 }
 
 export function isPlayerPiece(piece: Piece | null, player: Player): boolean {
