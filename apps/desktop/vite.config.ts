@@ -10,26 +10,32 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig(async () => ({
     plugins: [react()],
     resolve: {
-        alias: {
-            "@shogi/app-core": path.resolve(rootDir, "../../packages/app-core/src"),
-            "@shogi/design-system": path.resolve(rootDir, "../../packages/design-system/src"),
-            "@shogi/ui": path.resolve(rootDir, "../../packages/ui/src"),
-            "@shogi/engine-client": path.resolve(rootDir, "../../packages/engine-client/src"),
-            "@shogi/engine-tauri": path.resolve(rootDir, "../../packages/engine-tauri/src"),
-        },
-    },
-    build: {
-        rollupOptions: {
-            external: ["@shogi/engine-wasm"],
-            output: {
-                globals: {
-                    "@shogi/engine-wasm": "ShogiEngineWasm",
-                },
+        alias: [
+            {
+                find: /^@shogi\/app-core\/game$/,
+                replacement: path.resolve(
+                    rootDir,
+                    "../../packages/app-core/src/game/index.tauri.ts",
+                ),
             },
-        },
-    },
-    optimizeDeps: {
-        exclude: ["@shogi/engine-wasm"],
+            {
+                find: /^@shogi\/app-core$/,
+                replacement: path.resolve(rootDir, "../../packages/app-core/src/index.tauri.ts"),
+            },
+            {
+                find: "@shogi/design-system",
+                replacement: path.resolve(rootDir, "../../packages/design-system/src"),
+            },
+            { find: "@shogi/ui", replacement: path.resolve(rootDir, "../../packages/ui/src") },
+            {
+                find: "@shogi/engine-client",
+                replacement: path.resolve(rootDir, "../../packages/engine-client/src"),
+            },
+            {
+                find: "@shogi/engine-tauri",
+                replacement: path.resolve(rootDir, "../../packages/engine-tauri/src"),
+            },
+        ],
     },
 
     // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

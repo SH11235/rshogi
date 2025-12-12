@@ -14,6 +14,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@shogi/app-core": "workspace:*",
     "@shogi/design-system": "workspace:*",
     "@shogi/engine-client": "workspace:*",
     "@shogi/engine-tauri": "workspace:*",
@@ -29,7 +30,7 @@
     "@vitejs/plugin-react": "^5.1.1",
     "autoprefixer": "^10.4.20",
     "tailwindcss": "^3.4.18",
-    "typescript": "~5.8.3",
+    "typescript": "~5.9.3",
     "vite": "^7.2.6",
     "@tauri-apps/cli": "^2"
   }

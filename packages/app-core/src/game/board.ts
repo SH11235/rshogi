@@ -1,3 +1,5 @@
+import { getPositionService } from "./position-service-registry";
+
 export const BOARD_FILES = ["9", "8", "7", "6", "5", "4", "3", "2", "1"] as const;
 export const BOARD_RANKS = ["a", "b", "c", "d", "e", "f", "g", "h", "i"] as const;
 
@@ -101,7 +103,6 @@ const clonePosition = (position: PositionState): PositionState => ({
 async function ensureInitialPosition(): Promise<PositionState> {
     if (!initialPositionPromise) {
         initialPositionPromise = (async () => {
-            const { getPositionService } = await import("./index");
             const service = getPositionService();
             const position = await service.getInitialBoard();
             initialPositionCache = position;
