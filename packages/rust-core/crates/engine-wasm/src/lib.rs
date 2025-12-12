@@ -126,7 +126,7 @@ fn build_position(sfen: &str, moves: &[String]) -> Result<Position, JsValue> {
 
     for mv in moves {
         let parsed =
-            Move::from_usi(&mv).ok_or_else(|| JsValue::from_str(&format!("invalid move: {mv}")))?;
+            Move::from_usi(mv).ok_or_else(|| JsValue::from_str(&format!("invalid move: {mv}")))?;
         let gives_check = position.gives_check(parsed);
         position.do_move(parsed, gives_check);
     }

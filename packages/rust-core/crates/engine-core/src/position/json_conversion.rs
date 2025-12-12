@@ -127,7 +127,7 @@ impl Position {
 
             let mut list = MoveList::new();
             generate_legal(&position, &mut list);
-            if !list.as_slice().iter().any(|legal| *legal == parsed) {
+            if !list.as_slice().contains(&parsed) {
                 error = Some(format!("illegal move: {mv}"));
                 break;
             }
