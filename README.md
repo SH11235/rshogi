@@ -17,6 +17,21 @@ Rust実装の将棋エンジンプロジェクトです。NNUE（Efficiently Upd
 - **pnpm**: パッケージマネージャー
 - **wasm-bindgen-cli**: WASMビルド用（WebAssembly対応の場合）
 
+### 開発環境のセットアップ
+
+#### Windows環境での重要な設定
+
+Windows環境で開発する場合、改行コードの自動変換を無効にする必要があります：
+
+```bash
+git config core.autocrlf false
+```
+
+**理由**：
+- 本プロジェクトでは全てのテキストファイルでLF改行を使用しています（`.gitattributes`で設定済み）
+- `core.autocrlf=true`の場合、`cargo fmt`実行時に改行コードの変換により、ファイル全体が変更されたように見える問題が発生します
+- 特にpre-commitフックでの自動フォーマット時に予期しない変更が発生する可能性があります
+
 ### WASMビルドの準備
 
 WebAssemblyビルドを実行する場合は、以下の設定が必要です：
