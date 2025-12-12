@@ -14,6 +14,8 @@
   - web: `@shogi/app-core` を `index.web.ts` に向ける（engine-tauri の alias/paths は削除）。
 - sideEffects:
   - `packages/app-core/package.json` で factory 登録がある出力ファイルを明示列挙し、ツリーシェイクで副作用が落ちるのを防止。
+- wasm ビルド時の時間計測:
+  - `engine-core` はブラウザ wasm (`wasm32-unknown-unknown`) のときだけ `web-time` を使い、それ以外は標準の `std::time::Instant` を利用する（`std::time::Instant` が未実装の wasm でのパニックを回避しつつ、ネイティブに web 系依存を持ち込まない）。
 
 ## ビルド/検証のメモ
 - web で wasm を更新する場合: `pnpm --filter @shogi/engine-wasm build:wasm` を実行し、`packages/engine-wasm/pkg` を再生成する。
