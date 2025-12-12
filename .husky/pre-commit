@@ -1,8 +1,13 @@
-
 #!/usr/bin/env sh
 
 echo "📝 Running lint-staged (format only)..."
-lint-staged
+
+# Windows Git Bash workaround for lint-staged
+if [ "$OSTYPE" = "msys" ] || [ "$OSTYPE" = "cygwin" ] || [ -n "$MSYSTEM" ]; then
+  powershell.exe -NoProfile -Command "pnpm exec lint-staged"
+else
+  pnpm exec lint-staged
+fi
 
 if git diff --cached --name-only -z --diff-filter=ACM | grep -qz '^packages/rust-core/.*\.rs$'; then
     echo "🦀 Rust files in packages/rust-core detected, running cargo fmt..."
