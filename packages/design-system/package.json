@@ -15,6 +15,7 @@
             "import": "./dist/index.js",
             "default": "./dist/index.js"
         },
+        "./theme.css": "./src/theme.css",
         "./tailwind.preset": "./tailwind.preset.ts",
         "./src/theme.css": "./src/theme.css"
     },
