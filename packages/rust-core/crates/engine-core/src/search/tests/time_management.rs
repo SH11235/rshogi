@@ -3,8 +3,8 @@
 //! best_move_changes（PV安定性判断）と合法手1つの500ms上限のテスト
 
 use crate::search::{LimitsType, TimeManagement, TimeOptions, DEFAULT_MAX_MOVES_TO_DRAW};
+use crate::time::Instant;
 use crate::types::Color;
-use instant::Instant;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;

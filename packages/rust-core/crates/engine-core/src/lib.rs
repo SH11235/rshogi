@@ -35,6 +35,9 @@ pub mod tt;
 //  探索
 pub mod search;
 
+// 時刻（Instant）抽象化
+pub(crate) mod time;
+
 // 1手詰め探索
 pub mod mate;
 

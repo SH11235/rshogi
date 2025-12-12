@@ -4,8 +4,8 @@
 //! 思考に費やす最適な時間を計算する。
 
 use super::{LimitsType, TimeOptions, TimePoint};
+use crate::time::Instant;
 use crate::types::Color;
-use instant::Instant;
 use log::debug;
 use rand::Rng;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,7 +75,7 @@ pub fn calculate_move_horizon(time_forfeit: bool, ply: i32) -> i32 {
 /// * `thread_count` - スレッド数（現在は1固定、マルチスレッド対応時に拡張）
 pub fn calculate_best_move_instability(tot_best_move_changes: f64, thread_count: usize) -> f64 {
     BEST_MOVE_INSTABILITY_BASE
-        + BEST_MOVE_INSTABILITY_FACTOR * tot_best_move_changes / thread_count as f64
+        + BEST_MOVE_INSTABILITY_FACTOR * tot_best_move_changes / thread_count.max(1) as f64
 }
 
 /// fallingEvalを計算（YaneuraOu準拠）
@@ -242,7 +242,7 @@ impl TimeManagement {
         let mut t = ((t0 + 999) / 1000 * 1000).max(self.minimum_thinking_time);
 
         // network_delayの値を引く
-        t -= self.network_delay;
+        t = t.saturating_sub(self.network_delay);
 
         // 元の値より小さいなら、もう1秒使う
         if t < t0 {
@@ -250,7 +250,8 @@ impl TimeManagement {
         }
 
         // remain_timeを上回ってはならない
-        t.min(self.remain_time)
+        t = t.min(self.remain_time);
+        t.max(0)
     }
 
     /// 今回の思考時間を決定する
@@ -267,7 +268,6 @@ impl TimeManagement {
         self.is_final_push = false;
         self.ponderhit.store(false, Ordering::Relaxed);
         self.single_move_limit = false;
-        self.previous_time_reduction = 0.85;
         self.stop_on_ponderhit = false;
         self.last_stop_threshold = None;
 
@@ -328,11 +328,7 @@ impl TimeManagement {
         let time_forfeit = increment == 0 && byoyomi == 0;
 
         // move_horizon の近似 (MoveHorizon = 160 をベースに補正)
-        let move_horizon = if time_forfeit {
-            160 + 40 - ply.min(40)
-        } else {
-            160 + 20 - ply.min(80)
-        };
+        let move_horizon = calculate_move_horizon(time_forfeit, ply);
 
         // 残り手数 (MTG)
         let mtg = (max_moves - ply + 2).min(move_horizon) / 2;
@@ -715,17 +711,7 @@ impl TimeManagement {
     pub fn on_ponderhit(&mut self) {
         self.set_ponderhit();
         let elapsed = self.elapsed();
-        let from_ponderhit = self.elapsed_from_ponderhit();
-
-        let t1 = elapsed.saturating_sub(from_ponderhit);
-        let t2 = if self.is_final_push {
-            self.minimum_time
-        } else {
-            self.minimum_time.saturating_sub(from_ponderhit)
-        };
-
-        let candidate = t1.max(t2);
-        self.search_end = self.round_up(candidate).saturating_add(from_ponderhit);
+        self.set_search_end(elapsed);
         self.ponderhit.store(false, Ordering::Relaxed);
     }
 

@@ -2,7 +2,7 @@
 //!
 //! USIプロトコルから呼び出すためのハイレベルインターフェース。
 
-use instant::Instant;
+use crate::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -697,7 +697,7 @@ impl Search {
                 let elapsed = start.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
                 let nps = if time_ms > 0 {
-                    worker.nodes * 1000 / time_ms
+                    worker.nodes.saturating_mul(1000) / time_ms
                 } else {
                     0
                 };
