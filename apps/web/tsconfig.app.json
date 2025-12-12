@@ -14,9 +14,7 @@
       "@shogi/engine-client": ["packages/engine-client/src"],
       "@shogi/engine-client/*": ["packages/engine-client/src/*"],
       "@shogi/engine-wasm": ["packages/engine-wasm/src"],
-      "@shogi/engine-wasm/*": ["packages/engine-wasm/src/*"],
-      "@shogi/engine-tauri": ["packages/engine-tauri/src"],
-      "@shogi/engine-tauri/*": ["packages/engine-tauri/src/*"]
+      "@shogi/engine-wasm/*": ["packages/engine-wasm/src/*"]
     }
   },
   "include": ["src"]
