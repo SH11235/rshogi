@@ -8,6 +8,7 @@ import type {
     SearchParams,
 } from "@shogi/engine-client";
 import { createMockEngineClient } from "@shogi/engine-client";
+import initWasmModule from "../pkg/engine_wasm.js";
 
 type WasmModuleSource = WebAssembly.Module | ArrayBuffer | Uint8Array | string;
 
@@ -68,6 +69,16 @@ function rememberInitOpts(opts?: WasmEngineInitOptions): WasmEngineInitOptions |
     }
     return { ...rest, wasmModule: preservedModule };
 }
+
+let wasmModuleReady: Promise<void> | null = null;
+
+export const ensureWasmModule = (wasmModule?: WasmModuleSource): Promise<void> => {
+    if (!wasmModuleReady) {
+        const moduleOrPath = wasmModule ?? new URL("../pkg/engine_wasm_bg.wasm", import.meta.url);
+        wasmModuleReady = initWasmModule({ module_or_path: moduleOrPath }).then(() => undefined);
+    }
+    return wasmModuleReady;
+};
 
 export function createWasmEngineClient(options: WasmEngineClientOptions = {}): EngineClient {
     const stopMode: EngineStopMode = options.stopMode ?? "terminate";
