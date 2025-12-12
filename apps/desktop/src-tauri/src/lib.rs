@@ -304,7 +304,7 @@ fn spawn_search(
     let mut legal_moves = MoveList::new();
     generate_legal(&position, &mut legal_moves);
     eprintln!("spawn_search: legal moves count = {}", legal_moves.len());
-    if legal_moves.len() > 0 {
+    if !legal_moves.is_empty() {
         eprintln!("spawn_search: first few legal moves:");
         for (i, m) in legal_moves.iter().take(5).enumerate() {
             eprintln!("  {}: {}", i, m.to_usi());
