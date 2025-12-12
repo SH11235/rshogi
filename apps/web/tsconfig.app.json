@@ -7,7 +7,6 @@
     "noEmit": true,
     "paths": {
       "@shogi/app-core": ["packages/app-core/src/index.web.ts"],
-      "@shogi/app-core/game": ["packages/app-core/src/game/index.web.ts"],
       "@shogi/design-system": ["packages/design-system/src"],
       "@shogi/design-system/*": ["packages/design-system/src/*"],
       "@shogi/ui": ["packages/ui/src"],

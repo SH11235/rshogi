@@ -12,7 +12,12 @@ import { boardJsonToPositionState, positionStateToBoardJson } from "./position-s
 
 export const createWasmPositionService = (): PositionService => {
     let ready: Promise<void> | null = null;
-    const ensureReady = () => (ready ??= ensureWasmModule());
+    const ensureReady = () => {
+        if (!ready) {
+            ready = ensureWasmModule();
+        }
+        return ready;
+    };
 
     const toPosition = (json: BoardStateJson): PositionState => boardJsonToPositionState(json);
 

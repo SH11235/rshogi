@@ -18,8 +18,7 @@
     "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {
-      "@shogi/app-core": ["packages/app-core/src"],
-      "@shogi/app-core/game": ["packages/app-core/src/game/index.ts"],
+      "@shogi/app-core": ["packages/app-core/src/index.ts"],
       "@shogi/design-system": ["packages/design-system/src"],
       "@shogi/design-system/*": ["packages/design-system/src/*"],
       "@shogi/ui": ["packages/ui/src"],

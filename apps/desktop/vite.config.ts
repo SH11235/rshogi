@@ -12,13 +12,6 @@ export default defineConfig(async () => ({
     resolve: {
         alias: [
             {
-                find: /^@shogi\/app-core\/game$/,
-                replacement: path.resolve(
-                    rootDir,
-                    "../../packages/app-core/src/game/index.tauri.ts",
-                ),
-            },
-            {
                 find: /^@shogi\/app-core$/,
                 replacement: path.resolve(rootDir, "../../packages/app-core/src/index.tauri.ts"),
             },

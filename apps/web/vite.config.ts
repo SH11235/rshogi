@@ -11,10 +11,6 @@ export default defineConfig({
     resolve: {
         alias: [
             {
-                find: /^@shogi\/app-core\/game$/,
-                replacement: path.resolve(rootDir, "../../packages/app-core/src/game/index.web.ts"),
-            },
-            {
                 find: /^@shogi\/app-core$/,
                 replacement: path.resolve(rootDir, "../../packages/app-core/src/index.web.ts"),
             },
