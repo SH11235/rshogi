@@ -3,7 +3,6 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,9 +15,21 @@ export default defineConfig(async () => ({
             "@shogi/design-system": path.resolve(rootDir, "../../packages/design-system/src"),
             "@shogi/ui": path.resolve(rootDir, "../../packages/ui/src"),
             "@shogi/engine-client": path.resolve(rootDir, "../../packages/engine-client/src"),
-            "@shogi/engine-wasm": path.resolve(rootDir, "../../packages/engine-wasm/src"),
             "@shogi/engine-tauri": path.resolve(rootDir, "../../packages/engine-tauri/src"),
         },
+    },
+    build: {
+        rollupOptions: {
+            external: ["@shogi/engine-wasm"],
+            output: {
+                globals: {
+                    "@shogi/engine-wasm": "ShogiEngineWasm",
+                },
+            },
+        },
+    },
+    optimizeDeps: {
+        exclude: ["@shogi/engine-wasm"],
     },
 
     // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
