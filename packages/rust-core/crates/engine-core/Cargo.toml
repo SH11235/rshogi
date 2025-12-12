@@ -19,8 +19,8 @@ serde.workspace = true
 [dev-dependencies]
 # Test dependencies
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-instant = { version = "0.1", features = ["wasm-bindgen"] }
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+web-time = "1"
 
 [features]
 default = []

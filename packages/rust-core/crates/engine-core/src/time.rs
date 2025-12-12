@@ -1,5 +1,5 @@
-#[cfg(target_arch = "wasm32")]
-pub use instant::Instant;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub use web_time::Instant;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use std::time::Instant;

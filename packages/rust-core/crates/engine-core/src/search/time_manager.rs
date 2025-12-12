@@ -217,6 +217,11 @@ impl TimeManagement {
         self.previous_time_reduction = value;
     }
 
+    #[cfg(test)]
+    pub fn previous_time_reduction_mut(&mut self) -> &mut f64 {
+        &mut self.previous_time_reduction
+    }
+
     /// 現在の time_reduction を取得
     pub fn previous_time_reduction(&self) -> f64 {
         self.previous_time_reduction
@@ -315,6 +320,8 @@ impl TimeManagement {
             self.minimum_time = r;
             self.optimum_time = r;
             self.maximum_time = r;
+            self.search_end = r;
+            self.last_stop_threshold = Some(r);
             return;
         }
 
@@ -802,6 +809,7 @@ mod tests {
         assert_eq!(tm.minimum(), 2500);
         assert_eq!(tm.optimum(), 2500);
         assert_eq!(tm.maximum(), 2500);
+        assert_eq!(tm.search_end(), 2500, "rtime は固定時間として search_end も設定されるべき");
     }
 
     #[test]
@@ -862,6 +870,23 @@ mod tests {
         let mut tm = create_time_manager();
         tm.set_previous_time_reduction(0.42);
         assert!((tm.previous_time_reduction() - 0.42).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_previous_time_reduction_is_preserved_through_init() {
+        let mut tm = create_time_manager();
+        tm.set_previous_time_reduction(0.42);
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60_000;
+        limits.set_start_time();
+
+        tm.init(&limits, Color::Black, 10, DEFAULT_MAX_MOVES_TO_DRAW);
+
+        assert!(
+            (tm.previous_time_reduction() - 0.42).abs() < 1e-9,
+            "init() で previous_time_reduction がリセットされないことを保証する"
+        );
     }
 
     #[test]

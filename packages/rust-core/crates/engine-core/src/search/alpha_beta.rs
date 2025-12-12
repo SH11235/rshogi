@@ -366,12 +366,15 @@ impl<'a> SearchWorker<'a> {
             // フェーズ2: search_end 未設定 → maximum超過時に設定
             if self.time_manager.search_end() == 0
                 && self.limits.use_time_management()
-                // YaneuraOu準拠: ponder中は時間切れ判定を行わない
-                && !self.limits.ponder
                 && elapsed > self.time_manager.maximum()
             {
                 self.time_manager.set_search_end(elapsed);
                 // 注: ここでは停止せず、次のチェックで秒境界で停止
+            }
+
+            // ponderhit フラグをポーリングし、検知したら終了時刻を再計算
+            if self.time_manager.take_ponderhit() {
+                self.time_manager.on_ponderhit();
             }
         }
 

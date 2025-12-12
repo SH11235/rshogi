@@ -598,7 +598,8 @@ impl Search {
 
             // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
             // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
-            if depth > 1 && !worker.limits.ponder && worker.time_manager.should_stop(depth) {
+            let is_pondering = worker.limits.ponder && worker.time_manager.search_end() == 0;
+            if depth > 1 && !is_pondering && worker.time_manager.should_stop(depth) {
                 break;
             }
 
