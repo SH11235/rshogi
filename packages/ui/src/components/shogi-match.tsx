@@ -300,6 +300,7 @@ export function ShogiMatch({
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
+    const matchEndedRef = useRef(false);
     const settingsLocked = isMatchRunning;
 
     useEffect(() => {
@@ -429,6 +430,8 @@ export function ShogiMatch({
 
     const endMatch = useCallback(
         async (nextMessage: string) => {
+            if (matchEndedRef.current) return;
+            matchEndedRef.current = true;
             setMessage(nextMessage);
             setIsMatchRunning(false);
             setClocks((prev) => ({ ...prev, ticking: null }));
@@ -444,6 +447,7 @@ export function ShogiMatch({
     };
 
     const resumeAutoPlay = async () => {
+        matchEndedRef.current = false;
         if (!positionReady) return;
         if (isEditMode) {
             await finalizeEditedPosition();
@@ -471,6 +475,7 @@ export function ShogiMatch({
     };
 
     const resetToBasePosition = useCallback(async () => {
+        matchEndedRef.current = false;
         await stopAllEngines();
         const service = getPositionService();
         let next = basePosition ? clonePositionState(basePosition) : null;
@@ -732,6 +737,7 @@ export function ShogiMatch({
     useEffect(() => {
         if (!clocks.ticking) return;
         const timer = setInterval(() => {
+            let expiredSide: Player | null = null;
             setClocks((prev) => {
                 if (!prev.ticking) return prev;
                 const now = Date.now();
@@ -745,15 +751,23 @@ export function ShogiMatch({
                     mainMs = 0;
                     byoyomiMs = Math.max(0, byoyomiMs - over);
                 }
+                if (mainMs <= 0 && byoyomiMs <= 0) {
+                    expiredSide = side;
+                }
                 return {
                     ...prev,
                     [side]: { mainMs: Math.max(0, mainMs), byoyomiMs },
                     lastUpdatedAt: now,
                 };
             });
+            if (expiredSide && isMatchRunning && !matchEndedRef.current) {
+                const loserLabel = expiredSide === "sente" ? "先手" : "後手";
+                const winnerLabel = expiredSide === "sente" ? "後手" : "先手";
+                void endMatch(`対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`);
+            }
         }, 200);
         return () => clearInterval(timer);
-    }, [clocks.ticking]);
+    }, [clocks.ticking, endMatch, isMatchRunning]);
 
     useEffect(() => {
         if (!isMatchRunning || !positionReady) return;
@@ -820,6 +834,7 @@ export function ShogiMatch({
             ticking: null,
             lastUpdatedAt: Date.now(),
         }));
+        matchEndedRef.current = false;
         setIsMatchRunning(false);
         void refreshStartSfen(nextPosition);
     };
