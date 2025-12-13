@@ -349,6 +349,11 @@ impl<'a> SearchWorker<'a> {
         // 時間制限チェック（1024ノードごと）
         // YaneuraOu準拠の2フェーズロジック
         if self.nodes & 1023 == 0 {
+            // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
+            if self.time_manager.take_ponderhit() {
+                self.time_manager.on_ponderhit();
+            }
+
             let elapsed = self.time_manager.elapsed();
 
             // フェーズ1: search_end 設定済み → 即座に停止
@@ -363,18 +368,15 @@ impl<'a> SearchWorker<'a> {
                 return true;
             }
 
-            // フェーズ2: search_end 未設定 → maximum超過時に設定
-            if self.time_manager.search_end() == 0
+            // フェーズ2: search_end 未設定 → maximum超過 or stop_on_ponderhit で設定
+            // ただし ponder 中は停止判定を行わない（YO準拠）
+            if !self.time_manager.is_pondering()
+                && self.time_manager.search_end() == 0
                 && self.limits.use_time_management()
-                && elapsed > self.time_manager.maximum()
+                && (elapsed > self.time_manager.maximum() || self.time_manager.stop_on_ponderhit())
             {
                 self.time_manager.set_search_end(elapsed);
                 // 注: ここでは停止せず、次のチェックで秒境界で停止
-            }
-
-            // ponderhit フラグをポーリングし、検知したら終了時刻を再計算
-            if self.time_manager.take_ponderhit() {
-                self.time_manager.on_ponderhit();
             }
         }
 

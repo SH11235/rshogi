@@ -598,7 +598,7 @@ impl Search {
 
             // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
             // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
-            let is_pondering = worker.limits.ponder && worker.time_manager.search_end() == 0;
+            let is_pondering = worker.time_manager.is_pondering();
             if depth > 1 && !is_pondering && worker.time_manager.should_stop(depth) {
                 break;
             }
@@ -768,13 +768,12 @@ impl Search {
                         worker.time_manager.elapsed(),
                         total_time,
                         nodes_effort,
-                        worker.limits.ponder,
                         worker.completed_depth,
                     );
 
                     // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
                     self.increase_depth =
-                        worker.limits.ponder || elapsed_time <= total_time * 0.5138;
+                        worker.time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
                 }
                 // tot_best_move_changes は decay 後の値を保持（時間管理を使わない場合も持ち回る）
                 self.tot_best_move_changes = tot_best_move_changes;

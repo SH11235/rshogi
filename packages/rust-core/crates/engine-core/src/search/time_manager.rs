@@ -170,6 +170,12 @@ pub struct TimeManagement {
     /// Ponder中に時間を使い切ったフラグ（stopOnPonderhit相当）
     stop_on_ponderhit: bool,
 
+    /// 動的な ponder 状態
+    ///
+    /// - `go ponder` で開始した場合は `true`
+    /// - `ponderhit` を受信したら `false` に落として通常探索へ移行する
+    is_pondering: bool,
+
     /// 直近の停止閾値（min(total_time, maximum_time)を保持）
     last_stop_threshold: Option<TimePoint>,
 }
@@ -198,6 +204,7 @@ impl TimeManagement {
             usi_ponder: false,
             stochastic_ponder: false,
             stop_on_ponderhit: false,
+            is_pondering: false,
             last_stop_threshold: None,
         }
     }
@@ -271,6 +278,7 @@ impl TimeManagement {
         self.ponderhit_time = self.start_time;
         self.search_end = 0;
         self.is_final_push = false;
+        self.is_pondering = limits.ponder;
         self.ponderhit.store(false, Ordering::Relaxed);
         self.single_move_limit = false;
         self.stop_on_ponderhit = false;
@@ -517,14 +525,15 @@ impl TimeManagement {
         elapsed: TimePoint,
         total_time: f64,
         nodes_effort: f64,
-        ponder: bool,
         completed_depth: i32,
     ) {
+        let is_pondering = self.is_pondering;
+
         // YaneuraOu: completedDepth>=10 && nodesEffort>=97056 && elapsed > totalTime*0.6540 なら search_end 設定
         if completed_depth >= 10
             && nodes_effort >= 97056.0
             && (elapsed as f64) > total_time * 0.6540
-            && !ponder
+            && !is_pondering
         {
             self.set_search_end(elapsed);
         }
@@ -539,7 +548,7 @@ impl TimeManagement {
 
         // total_time超過時の処理
         if (elapsed as f64) > total_time.min(self.maximum_time as f64) {
-            if ponder {
+            if is_pondering {
                 // ponder中は stop_on_ponderhit を立て、次のチェックで秒切り上げ終了時刻を設定
                 self.stop_on_ponderhit = true;
             } else {
@@ -558,7 +567,7 @@ impl TimeManagement {
             self.search_end,
             nodes_effort,
             completed_depth,
-            ponder,
+            is_pondering,
             self.is_final_push,
             self.single_move_limit,
             self.stop_on_ponderhit,
@@ -601,6 +610,12 @@ impl TimeManagement {
     #[inline]
     pub fn stop_on_ponderhit(&self) -> bool {
         self.stop_on_ponderhit
+    }
+
+    /// 現在 ponder 中か（動的状態）
+    #[inline]
+    pub fn is_pondering(&self) -> bool {
+        self.is_pondering
     }
 
     /// stop_on_ponderhit フラグをクリア（YOのfail-low時相当）
@@ -660,20 +675,28 @@ impl TimeManagement {
             return true;
         }
 
-        // stop_on_ponderhitが立っていて search_end 未設定ならここで設定する
+        // ponder中は時間による停止判定を行わない（USI/UCI仕様、YO準拠）
+        if self.is_pondering {
+            return false;
+        }
+
+        // stop_on_ponderhitが立っていて search_end 未設定ならここで設定する（YO準拠）
         if self.search_end == 0 && self.stop_on_ponderhit {
             self.set_search_end(elapsed);
         }
 
-        // search_endが設定されていればそれで判定
-        if self.search_end > 0 && elapsed >= self.search_end {
-            debug!(
-                target: "engine_core::search",
-                "stop check: search_end reached elapsed={} search_end={}",
-                elapsed,
-                self.search_end
-            );
-            return true;
+        // search_end が設定されている場合は、それを最優先に使う（YO準拠）
+        if self.search_end > 0 {
+            if elapsed >= self.search_end {
+                debug!(
+                    target: "engine_core::search",
+                    "stop check: search_end reached elapsed={} search_end={}",
+                    elapsed,
+                    self.search_end
+                );
+                return true;
+            }
+            return false;
         }
 
         // total_time由来の直近閾値
@@ -708,17 +731,21 @@ impl TimeManagement {
         self.ponderhit_time = Instant::now();
     }
 
-    /// ponderhitを検出した際に、現在時刻からminimum分を確保するよう終了時刻を再設定
+    /// ponderhitを検出した際の処理（YO準拠）
     ///
-    /// YaneuraOuの `TimeManagement::set_search_end()` を簡略化したもの。
-    /// e : go開始からの経過時間（現在のelapsed）
-    /// t1: ponder開始→ponderhitまでの消費時間を差し引いた思考時間
-    /// t2: 秒読み中なら minimum、それ以外なら minimum から ponderhit までを差し引いたもの
-    /// search_end: round_up(max(t1, t2)) + ponderhitまでの経過時間
+    /// - `ponderhit_time` を更新し、以後の `set_search_end()` の秒境界切り上げ計算に反映する。
+    /// - ponder状態を解除して通常探索へ移行する（`is_pondering=false`）。
+    /// - ponder中に時間を使い切っていた場合（`stop_on_ponderhit=true`）のみ、停止時刻を確定させる。
     pub fn on_ponderhit(&mut self) {
         self.set_ponderhit();
-        let elapsed = self.elapsed();
-        self.set_search_end(elapsed);
+        self.is_pondering = false;
+        self.last_stop_threshold = None;
+
+        // ponder中に時間を使い切っていた場合のみ、終了時刻を確定させる（YOの stopOnPonderhit 相当）
+        if self.search_end == 0 && self.stop_on_ponderhit {
+            let elapsed = self.elapsed();
+            self.set_search_end(elapsed);
+        }
         self.ponderhit.store(false, Ordering::Relaxed);
     }
 
@@ -898,7 +925,7 @@ mod tests {
         tm.minimum_time = 500;
         tm.search_end = 0;
 
-        tm.apply_iteration_timing(1200, 1000.0, 98000.0, false, 12);
+        tm.apply_iteration_timing(1200, 1000.0, 98000.0, 12);
 
         assert!(tm.search_end() > 0, "search_end should be set when nodes_effort threshold hit");
     }
@@ -1050,25 +1077,22 @@ mod tests {
     }
 
     #[test]
-    fn test_time_manager_on_ponderhit_sets_search_end() {
+    fn test_time_manager_on_ponderhit_switches_off_ponder_without_forcing_stop() {
         let stop = Arc::new(AtomicBool::new(false));
         let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
 
         let mut limits = LimitsType::new();
         limits.time[Color::Black.index()] = 5000; // 5秒
+        limits.ponder = true;
         limits.set_start_time();
 
         tm.init(&limits, Color::Black, 0, 256);
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        tm.last_stop_threshold = Some(1);
         tm.on_ponderhit();
 
-        // round_up(minimum) は network_delay を考慮して切り上げるので、search_end はその値以上になる
-        assert!(
-            tm.search_end >= tm.round_up(tm.minimum()),
-            "search_end {} should be >= rounded minimum {}",
-            tm.search_end,
-            tm.round_up(tm.minimum())
-        );
+        assert!(!tm.is_pondering(), "ponderhit後は通常探索へ移行するべき");
+        assert_eq!(tm.search_end(), 0, "stop_on_ponderhit が無ければ search_end は確定しない");
+        assert!(tm.last_stop_threshold.is_none(), "ponderhitで停止閾値をリセットする");
     }
 
     #[test]
@@ -1076,9 +1100,11 @@ mod tests {
         let mut tm = create_time_manager();
         let mut limits = LimitsType::new();
         limits.byoyomi[Color::Black.index()] = 4000;
+        limits.ponder = true;
         limits.set_start_time();
 
         tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+        tm.stop_on_ponderhit = true;
         tm.on_ponderhit();
 
         assert!(
@@ -1099,11 +1125,11 @@ mod tests {
         tm.search_end = 0;
 
         // depth未満では設定されない（stop_threshold 未満の経過時間で確認）
-        tm.apply_iteration_timing(900, 1000.0, 98000.0, false, 8);
+        tm.apply_iteration_timing(900, 1000.0, 98000.0, 8);
         assert_eq!(tm.search_end(), 0);
 
         // depth満たすと設定される
-        tm.apply_iteration_timing(1200, 1000.0, 98000.0, false, 12);
+        tm.apply_iteration_timing(1200, 1000.0, 98000.0, 12);
         assert!(tm.search_end() >= tm.round_up(tm.minimum()));
     }
 
