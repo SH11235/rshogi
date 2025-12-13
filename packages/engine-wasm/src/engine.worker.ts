@@ -42,7 +42,7 @@ let moduleReady: Promise<void> | null = null;
 const INFO_THROTTLE_MS = 50;
 
 let lastInfoPostedAt = Number.NEGATIVE_INFINITY;
-let pendingInfoByPv = new Map<number, EngineEvent>();
+const pendingInfoByPv = new Map<number, EngineEvent>();
 let pendingEvents: EngineEvent[] = [];
 
 const getNowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
