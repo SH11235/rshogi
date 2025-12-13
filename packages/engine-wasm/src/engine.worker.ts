@@ -1,5 +1,6 @@
 import type { EngineEvent, EngineInitOptions, SearchParams } from "@shogi/engine-client";
 import initWasm, {
+    apply_moves as applyMoves,
     dispose as disposeEngine,
     init as initEngine,
     load_model as loadModel,
@@ -17,6 +18,7 @@ type InitCommand = { type: "init"; opts?: EngineInitOptions; wasmModule?: WasmMo
 type WorkerCommand =
     | InitCommand
     | { type: "loadPosition"; sfen: string; moves?: string[] }
+    | { type: "applyMoves"; moves: string[] }
     | { type: "search"; params: SearchParams }
     | { type: "stop" }
     | { type: "dispose" }
@@ -37,8 +39,41 @@ let cachedModel: ModelCache | null = null;
 let lastInit: InitCommand | null = null;
 let moduleReady: Promise<void> | null = null;
 
+let pendingInfo: EngineEvent | null = null;
+let pendingEvents: EngineEvent[] = [];
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+const flushEvents = () => {
+    if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+    }
+    const batch: EngineEvent[] = [];
+    if (pendingInfo) {
+        batch.push(pendingInfo);
+        pendingInfo = null;
+    }
+    if (pendingEvents.length) {
+        batch.push(...pendingEvents);
+        pendingEvents = [];
+    }
+    if (!batch.length) return;
+    ctx.postMessage({ type: "events", payload: batch });
+};
+
+const scheduleFlush = () => {
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => flushEvents(), 50);
+};
+
 const postEvent = (event: EngineEvent) => {
-    ctx.postMessage({ type: "event", payload: event });
+    if (event.type === "info") {
+        pendingInfo = event;
+        scheduleFlush();
+        return;
+    }
+    pendingEvents.push(event);
+    flushEvents();
 };
 
 async function ensureModule(wasmModule?: WasmModuleSource) {
@@ -49,19 +84,6 @@ async function ensureModule(wasmModule?: WasmModuleSource) {
         });
     }
     await moduleReady;
-}
-
-function buildInitPayload(opts?: EngineInitOptions) {
-    if (!opts) return undefined;
-    const payload: Record<string, unknown> = {};
-    const typed = opts as { ttSizeMb?: number; multiPv?: number };
-    if (typeof typed.ttSizeMb === "number") {
-        payload.tt_size_mb = typed.ttSizeMb;
-    }
-    if (typeof typed.multiPv === "number") {
-        payload.multi_pv = typed.multiPv;
-    }
-    return Object.keys(payload).length ? payload : undefined;
 }
 
 async function loadModelIfNeeded(opts?: EngineInitOptions) {
@@ -86,11 +108,11 @@ async function loadModelIfNeeded(opts?: EngineInitOptions) {
 async function applyInit(command?: InitCommand) {
     await ensureModule(command?.wasmModule ?? lastInit?.wasmModule);
 
-    const payload = buildInitPayload(command?.opts ?? lastInit?.opts);
-    await initEngine(payload ? JSON.stringify(payload) : undefined);
+    const opts = command?.opts ?? lastInit?.opts;
+    await initEngine(opts ?? undefined);
     engineInitialized = true;
 
-    await loadModelIfNeeded(command?.opts ?? lastInit?.opts);
+    await loadModelIfNeeded(opts);
 }
 
 async function ensureEngineReady() {
@@ -111,18 +133,19 @@ ctx.onmessage = async (msg: { data: WorkerCommand }) => {
                 break;
             case "loadPosition":
                 await ensureEngineReady();
-                await loadPosition(
-                    command.sfen,
-                    command.moves ? JSON.stringify(command.moves) : undefined,
-                );
+                await loadPosition(command.sfen, command.moves ?? undefined);
+                break;
+            case "applyMoves":
+                await ensureEngineReady();
+                await applyMoves(command.moves);
                 break;
             case "search":
                 await ensureEngineReady();
-                await runSearch(JSON.stringify(command.params ?? {}));
+                await runSearch(command.params ?? undefined);
                 break;
             case "setOption":
                 await ensureEngineReady();
-                await setOption(command.name, JSON.stringify(command.value));
+                await setOption(command.name, command.value);
                 break;
             case "stop":
                 if (engineInitialized) {

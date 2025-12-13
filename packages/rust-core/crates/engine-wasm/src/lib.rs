@@ -9,9 +9,10 @@ use engine_core::search::{
 };
 use engine_core::types::json::BoardStateJson;
 use engine_core::types::{Move, Value};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_wasm_bindgen as swb;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 const DEFAULT_TT_SIZE_MB: usize = 64;
 
@@ -99,21 +100,173 @@ impl EngineState {
     }
 }
 
-fn parse_json_or_default<T>(raw: Option<String>) -> Result<T, JsValue>
-where
-    T: DeserializeOwned + Default,
-{
-    if let Some(text) = raw {
-        serde_json::from_str(&text).map_err(|err| JsValue::from_str(&err.to_string()))
-    } else {
-        Ok(T::default())
+fn get_optional_i64(object: &JsValue, key: &str) -> Result<Option<i64>, JsValue> {
+    let value = js_sys::Reflect::get(object, &JsValue::from_str(key))
+        .map_err(|_| JsValue::from_str(&format!("failed to read property {key}")))?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
     }
+    if let Some(raw) = value.as_f64() {
+        if !raw.is_finite() {
+            return Err(JsValue::from_str(&format!("{key} must be finite")));
+        }
+        if raw.fract() != 0.0 {
+            return Err(JsValue::from_str(&format!("{key} must be an integer")));
+        }
+        if raw < i64::MIN as f64 || raw > i64::MAX as f64 {
+            return Err(JsValue::from_str(&format!("{key} is out of range")));
+        }
+        return Ok(Some(raw as i64));
+    }
+    if let Some(text) = value.as_string() {
+        let parsed = text
+            .parse::<i64>()
+            .map_err(|_| JsValue::from_str(&format!("{key} must be a number (got {text})")))?;
+        return Ok(Some(parsed));
+    }
+    Err(JsValue::from_str(&format!("{key} must be a number")))
 }
 
-fn build_position_from_inputs(sfen: &str, moves_json: Option<String>) -> Result<Position, JsValue> {
-    let moves: Vec<String> = parse_json_or_default(moves_json)?;
+fn get_optional_usize(object: &JsValue, key: &str) -> Result<Option<usize>, JsValue> {
+    get_optional_i64(object, key).map(|value| value.and_then(|v| (v >= 0).then_some(v as usize)))
+}
 
-    build_position(sfen, &moves)
+fn get_optional_u64(object: &JsValue, key: &str) -> Result<Option<u64>, JsValue> {
+    get_optional_i64(object, key).map(|value| value.and_then(|v| (v >= 0).then_some(v as u64)))
+}
+
+fn get_optional_i32(object: &JsValue, key: &str) -> Result<Option<i32>, JsValue> {
+    let value = get_optional_i64(object, key)?;
+    value
+        .map(|v| i32::try_from(v).map_err(|_| JsValue::from_str(&format!("{key} is out of range"))))
+        .transpose()
+}
+
+fn get_optional_bool(object: &JsValue, key: &str) -> Result<Option<bool>, JsValue> {
+    let value = js_sys::Reflect::get(object, &JsValue::from_str(key))
+        .map_err(|_| JsValue::from_str(&format!("failed to read property {key}")))?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    if let Some(v) = value.as_bool() {
+        return Ok(Some(v));
+    }
+    if let Some(raw) = value.as_f64() {
+        if !raw.is_finite() {
+            return Err(JsValue::from_str(&format!("{key} must be finite")));
+        }
+        return Ok(Some(raw != 0.0));
+    }
+    if let Some(text) = value.as_string() {
+        let parsed = text
+            .parse::<bool>()
+            .map_err(|_| JsValue::from_str(&format!("{key} must be a boolean (got {text})")))?;
+        return Ok(Some(parsed));
+    }
+    Err(JsValue::from_str(&format!("{key} must be a boolean")))
+}
+
+fn parse_init_options(opts: Option<JsValue>) -> Result<InitOptions, JsValue> {
+    let Some(opts) = opts else {
+        return Ok(InitOptions::default());
+    };
+    if opts.is_null() || opts.is_undefined() {
+        return Ok(InitOptions::default());
+    }
+    let _obj: js_sys::Object = opts
+        .clone()
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("init options must be an object"))?;
+
+    Ok(InitOptions {
+        tt_size_mb: get_optional_usize(&opts, "ttSizeMb")?,
+        multi_pv: get_optional_usize(&opts, "multiPv")?,
+    })
+}
+
+fn parse_limits(value: JsValue) -> Result<JsLimits, JsValue> {
+    let _obj: js_sys::Object = value
+        .clone()
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("limits must be an object"))?;
+    Ok(JsLimits {
+        max_depth: get_optional_i32(&value, "maxDepth")?,
+        nodes: get_optional_u64(&value, "nodes")?,
+        byoyomi_ms: get_optional_i64(&value, "byoyomiMs")?,
+        movetime_ms: get_optional_i64(&value, "movetimeMs")?,
+    })
+}
+
+fn parse_search_params(params: Option<JsValue>) -> Result<JsSearchParams, JsValue> {
+    let Some(params) = params else {
+        return Ok(JsSearchParams::default());
+    };
+    if params.is_null() || params.is_undefined() {
+        return Ok(JsSearchParams::default());
+    }
+    let _obj: js_sys::Object = params
+        .clone()
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("search params must be an object"))?;
+
+    let limits = js_sys::Reflect::get(&params, &JsValue::from_str("limits"))
+        .map_err(|_| JsValue::from_str("failed to read property limits"))?;
+    let parsed_limits = if limits.is_null() || limits.is_undefined() {
+        None
+    } else {
+        Some(parse_limits(limits)?)
+    };
+
+    Ok(JsSearchParams {
+        limits: parsed_limits,
+        ponder: get_optional_bool(&params, "ponder")?,
+    })
+}
+
+fn parse_moves(value: Option<JsValue>) -> Result<Vec<String>, JsValue> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() || value.is_undefined() {
+        return Ok(Vec::new());
+    }
+    let array: js_sys::Array =
+        value.dyn_into().map_err(|_| JsValue::from_str("moves must be an array"))?;
+    let mut moves = Vec::with_capacity(array.length() as usize);
+    for mv in array.iter() {
+        let mv = mv
+            .as_string()
+            .ok_or_else(|| JsValue::from_str("moves must be an array of strings"))?;
+        moves.push(mv);
+    }
+    Ok(moves)
+}
+
+fn parse_set_option_value(value: Option<JsValue>) -> Result<serde_json::Value, JsValue> {
+    let Some(value) = value else {
+        return Ok(serde_json::Value::Null);
+    };
+    if value.is_null() || value.is_undefined() {
+        return Ok(serde_json::Value::Null);
+    }
+    if let Some(v) = value.as_bool() {
+        return Ok(serde_json::Value::Bool(v));
+    }
+    if let Some(v) = value.as_string() {
+        return Ok(serde_json::Value::String(v));
+    }
+    if let Some(raw) = value.as_f64() {
+        if !raw.is_finite() {
+            return Err(JsValue::from_str("setOption value must be finite"));
+        }
+        if raw.fract() == 0.0 && raw >= i64::MIN as f64 && raw <= i64::MAX as f64 {
+            return Ok(serde_json::Value::Number((raw as i64).into()));
+        }
+        let num = serde_json::Number::from_f64(raw)
+            .ok_or_else(|| JsValue::from_str("setOption value is not a valid JSON number"))?;
+        return Ok(serde_json::Value::Number(num));
+    }
+    Err(JsValue::from_str("setOption value must be string/number/boolean"))
 }
 
 fn build_position(sfen: &str, moves: &[String]) -> Result<Position, JsValue> {
@@ -134,11 +287,18 @@ fn build_position(sfen: &str, moves: &[String]) -> Result<Position, JsValue> {
     Ok(position)
 }
 
-#[allow(deprecated)]
+fn apply_move_to_position(position: &mut Position, mv: &str) -> Result<(), JsValue> {
+    let parsed =
+        Move::from_usi(mv).ok_or_else(|| JsValue::from_str(&format!("invalid move: {mv}")))?;
+    let gives_check = position.gives_check(parsed);
+    position.do_move(parsed, gives_check);
+    Ok(())
+}
+
 fn emit_event(event: EventPayload) {
     EVENT_CALLBACK.with(|callback| {
         if let Some(cb) = callback.borrow().as_ref() {
-            if let Ok(value) = JsValue::from_serde(&event) {
+            if let Ok(value) = swb::to_value(&event) {
                 let _ = cb.call1(&JsValue::NULL, &value);
             }
         }
@@ -236,64 +396,48 @@ pub fn set_event_handler(callback: Option<js_sys::Function>) {
 }
 
 #[wasm_bindgen]
-#[allow(deprecated)]
 pub fn wasm_get_initial_board() -> Result<JsValue, JsValue> {
     let board = Position::initial_board_json();
-    JsValue::from_serde(&board).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    swb::to_value(&board).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[wasm_bindgen]
-#[allow(deprecated)]
 pub fn wasm_parse_sfen_to_board(sfen: String) -> Result<JsValue, JsValue> {
     let board = Position::parse_sfen_to_json(&sfen).map_err(|e| JsValue::from_str(&e))?;
-    JsValue::from_serde(&board).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    swb::to_value(&board).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[wasm_bindgen]
-#[allow(deprecated)]
 pub fn wasm_board_to_sfen(board_json: JsValue) -> Result<String, JsValue> {
-    let board: BoardStateJson = board_json
-        .into_serde()
+    let board: BoardStateJson = swb::from_value(board_json)
         .map_err(|e| JsValue::from_str(&format!("Deserialization error: {e}")))?;
     let pos = Position::from_board_state_json(&board).map_err(|e| JsValue::from_str(&e))?;
     Ok(pos.to_sfen())
 }
 
 #[wasm_bindgen]
-#[allow(deprecated)]
 pub fn wasm_get_legal_moves(sfen: String, moves: Option<JsValue>) -> Result<JsValue, JsValue> {
-    let parsed_moves: Vec<String> = if let Some(value) = moves {
-        value
-            .into_serde()
-            .map_err(|e| JsValue::from_str(&format!("Deserialization error: {e}")))?
-    } else {
-        Vec::new()
-    };
+    let parsed_moves = parse_moves(moves)?;
 
     let position = build_position(&sfen, &parsed_moves)?;
     let mut list = MoveList::new();
     generate_legal(&position, &mut list);
     let legal_moves: Vec<String> = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
 
-    JsValue::from_serde(&legal_moves)
-        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    swb::to_value(&legal_moves).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[wasm_bindgen]
-#[allow(deprecated)]
 pub fn wasm_replay_moves_strict(sfen: String, moves: JsValue) -> Result<JsValue, JsValue> {
-    let parsed_moves: Vec<String> = moves
-        .into_serde()
-        .map_err(|e| JsValue::from_str(&format!("Deserialization error: {e}")))?;
+    let parsed_moves = parse_moves(Some(moves))?;
     let result =
         Position::replay_moves_strict(&sfen, &parsed_moves).map_err(|e| JsValue::from_str(&e))?;
-    JsValue::from_serde(&result)
-        .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+    swb::to_value(&result).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[wasm_bindgen]
-pub fn init(opts_json: Option<String>) -> Result<(), JsValue> {
-    let opts: InitOptions = parse_json_or_default(opts_json)?;
+pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
+    let opts = parse_init_options(opts)?;
     init_search_module();
     install_panic_hook();
 
@@ -323,8 +467,9 @@ pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
-pub fn load_position(sfen: &str, moves_json: Option<String>) -> Result<(), JsValue> {
-    let position = build_position_from_inputs(sfen, moves_json)?;
+pub fn load_position(sfen: &str, moves: Option<JsValue>) -> Result<(), JsValue> {
+    let moves = parse_moves(moves)?;
+    let position = build_position(sfen, &moves)?;
 
     with_engine_mut(|engine| {
         engine.position = position;
@@ -333,8 +478,20 @@ pub fn load_position(sfen: &str, moves_json: Option<String>) -> Result<(), JsVal
 }
 
 #[wasm_bindgen]
-pub fn search(params_json: Option<String>) -> Result<(), JsValue> {
-    let params: JsSearchParams = parse_json_or_default(params_json)?;
+pub fn apply_moves(moves: JsValue) -> Result<(), JsValue> {
+    let parsed_moves = parse_moves(Some(moves))?;
+
+    with_engine_mut(|engine| {
+        for mv in &parsed_moves {
+            apply_move_to_position(&mut engine.position, mv)?;
+        }
+        Ok(())
+    })
+}
+
+#[wasm_bindgen]
+pub fn search(params: Option<JsValue>) -> Result<(), JsValue> {
+    let params = parse_search_params(params)?;
 
     with_engine_mut(|engine| {
         let mut limits = LimitsType::new();
@@ -377,12 +534,8 @@ pub fn stop() {
 }
 
 #[wasm_bindgen]
-pub fn set_option(name: &str, value_json: Option<String>) -> Result<(), JsValue> {
-    let value: serde_json::Value = if let Some(raw) = value_json {
-        serde_json::from_str(&raw).map_err(|err| JsValue::from_str(&err.to_string()))?
-    } else {
-        serde_json::Value::Null
-    };
+pub fn set_option(name: &str, value: Option<JsValue>) -> Result<(), JsValue> {
+    let value = parse_set_option_value(value)?;
 
     with_engine_mut(|engine| {
         match name {

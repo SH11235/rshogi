@@ -38,6 +38,7 @@ type BackendKind = "worker" | "mock";
 type WorkerCommand =
     | { type: "init"; opts?: WasmEngineInitOptions; wasmModule?: WasmModuleSource }
     | { type: "loadPosition"; sfen: string; moves?: string[] }
+    | { type: "applyMoves"; moves: string[] }
     | { type: "search"; params: SearchParams }
     | { type: "stop" }
     | { type: "dispose" }
@@ -89,6 +90,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let worker: Worker | null = null;
     let initialized = false;
     let lastInitOpts: WasmEngineInitOptions | undefined;
+    let lastPosition: { sfen: string; movesLength: number; lastMove?: string } | null = null;
 
     const emit = (event: EngineEvent) => {
         for (const handler of listeners) {
@@ -124,9 +126,16 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         try {
             worker = (options.workerFactory ?? defaultWorkerFactory)();
             worker.onmessage = (msg) => {
-                const data = msg.data as { type: "event"; payload: EngineEvent };
+                const data = msg.data as
+                    | { type: "event"; payload: EngineEvent }
+                    | { type: "events"; payload: EngineEvent[] };
                 if (data?.type === "event" && data.payload) {
                     emit(data.payload);
+                }
+                if (data?.type === "events" && Array.isArray(data.payload)) {
+                    for (const event of data.payload) {
+                        emit(event);
+                    }
                 }
             };
             worker.onerror = (err) => {
@@ -163,6 +172,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             worker = null;
         }
         initialized = false;
+        lastPosition = null;
     };
 
     const ensureReady = () => {
@@ -181,6 +191,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         async init(opts?: WasmEngineInitOptions) {
             const wasmOpts = opts as WasmEngineInitOptions | undefined;
             lastInitOpts = rememberInitOpts(wasmOpts);
+            lastPosition = null;
             if (backend === "mock") {
                 await mock.init(opts);
                 return;
@@ -203,7 +214,32 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             if (!worker) {
                 return mock.loadPosition(sfen, moves);
             }
-            postToWorker({ type: "loadPosition", sfen, moves });
+            const normalizedMoves = moves ?? [];
+            const previous = lastPosition;
+            const shouldTryDelta = previous?.sfen === sfen;
+            const prevLen = previous?.movesLength ?? 0;
+
+            if (
+                shouldTryDelta &&
+                normalizedMoves.length >= prevLen &&
+                (prevLen === 0 || normalizedMoves[prevLen - 1] === previous?.lastMove)
+            ) {
+                const delta = normalizedMoves.slice(prevLen);
+                if (delta.length) {
+                    postToWorker({ type: "applyMoves", moves: delta });
+                }
+            } else {
+                postToWorker({ type: "loadPosition", sfen, moves: normalizedMoves });
+            }
+
+            lastPosition = {
+                sfen,
+                movesLength: normalizedMoves.length,
+                lastMove:
+                    normalizedMoves.length > 0
+                        ? normalizedMoves[normalizedMoves.length - 1]
+                        : undefined,
+            };
         },
         async search(params: SearchParams): Promise<SearchHandle> {
             if (backend === "mock") {
@@ -250,6 +286,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 });
                 terminateWorker();
             }
+            lastPosition = null;
         },
         async setOption(name: string, value: string | number | boolean) {
             if (backend === "mock") {
@@ -281,6 +318,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             }
             detachMock();
             listeners.clear();
+            lastPosition = null;
         },
     };
 }
