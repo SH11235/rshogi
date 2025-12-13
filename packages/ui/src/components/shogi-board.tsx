@@ -62,7 +62,8 @@ export function ShogiBoard({
                                     "relative aspect-square min-w-12 overflow-hidden rounded-md border border-[#c7a165] text-base font-semibold transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#f06c3c]/70 focus-visible:ring-offset-transparent",
                                     "bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.3),transparent_38%),radial-gradient(circle_at_80%_80%,rgba(255,255,255,0.18),transparent_40%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_6px_12px_rgba(0,0,0,0.15)] hover:-translate-y-[1px]",
                                     tone,
-                                    isSelected && "ring-2 ring-[#f06c3c]/70 ring-offset-1",
+                                    isSelected &&
+                                        "ring-2 ring-[hsl(var(--wafuu-shu))]/70 ring-offset-1 shadow-[0_0_12px_hsl(var(--wafuu-kin)/0.4)]",
                                     isLastMove && "outline outline-2 outline-[#f0b03c]/80",
                                 )}
                             >

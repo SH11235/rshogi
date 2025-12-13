@@ -1,4 +1,5 @@
 export * from "./components/button";
+export * from "./components/collapsible";
 export * from "./components/dialog";
 export * from "./components/engine-control-panel";
 export * from "./components/input";

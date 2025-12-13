@@ -23,6 +23,17 @@
     --font-sans:
         "Inter", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
         "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+
+    /* 和モダン配色トークン */
+    --wafuu-sumi: 220 15% 20%; /* 墨色 - メインテキスト・枠線 */
+    --wafuu-sumi-light: 220 12% 35%; /* 薄墨 - セカンダリテキスト */
+    --wafuu-shu: 10 75% 50%; /* 朱色 - アクセント */
+    --wafuu-shu-light: 10 65% 60%; /* 薄朱 - ホバー */
+    --wafuu-kin: 42 85% 60%; /* 金色 - ハイライト */
+    --wafuu-kincha: 30 30% 55%; /* 金茶 - 落ち着いたアクセント */
+    --wafuu-washi: 40 50% 96%; /* 和紙 - 背景 */
+    --wafuu-washi-warm: 35 45% 92%; /* 温かい和紙 - カード背景 */
+    --wafuu-border: 35 20% 80%; /* 和風ボーダー */
 }
 
 .dark {
@@ -46,6 +57,17 @@
     --destructive: 0 85% 60%;
     --destructive-foreground: 210 40% 98%;
     --ring: 27 96% 61%;
+
+    /* 和モダン配色トークン（ダークモード） */
+    --wafuu-sumi: 220 10% 85%; /* 墨色 - 明るく */
+    --wafuu-sumi-light: 220 8% 65%; /* 薄墨 */
+    --wafuu-shu: 10 70% 55%; /* 朱色 - 少し控えめ */
+    --wafuu-shu-light: 10 60% 65%; /* 薄朱 */
+    --wafuu-kin: 42 75% 55%; /* 金色 */
+    --wafuu-kincha: 30 25% 50%; /* 金茶 */
+    --wafuu-washi: 220 15% 12%; /* 和紙 - 暗い背景 */
+    --wafuu-washi-warm: 220 12% 16%; /* 温かい和紙 */
+    --wafuu-border: 220 10% 25%; /* 和風ボーダー */
 }
 
 *,

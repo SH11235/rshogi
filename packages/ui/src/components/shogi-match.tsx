@@ -21,6 +21,7 @@ import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-clie
 import type { CSSProperties, ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "./button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./collapsible";
 import { Input } from "./input";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
@@ -270,6 +271,7 @@ export function ShogiMatch({
     const [editTool, setEditTool] = useState<"place" | "erase">("place");
     const [startSfen, setStartSfen] = useState<string>("startpos");
     const [basePosition, setBasePosition] = useState<PositionState | null>(null);
+    const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
 
     const handlesRef = useRef<Record<Player, SearchHandle | null>>({
         sente: null,
@@ -1436,212 +1438,389 @@ export function ShogiMatch({
                     </div>
 
                     <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                        <div
-                            style={{
-                                ...baseCard,
-                                padding: "12px",
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "10px",
-                            }}
-                        >
-                            <div style={{ fontWeight: 700 }}>局面編集</div>
+                        <Collapsible open={isEditPanelOpen} onOpenChange={setIsEditPanelOpen}>
                             <div
                                 style={{
-                                    fontSize: "12px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                    background: "hsl(var(--wafuu-washi-warm))",
+                                    border: "2px solid hsl(var(--wafuu-border))",
+                                    borderRadius: "12px",
+                                    overflow: "hidden",
+                                    boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
                                 }}
                             >
-                                対局開始前のみ編集できます。王は重複不可、各駒は上限枚数まで配置できます。
-                            </div>
-                            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                                <Button
-                                    type="button"
-                                    onClick={() =>
-                                        setIsEditMode((prev) => {
-                                            const next = !prev;
-                                            if (!next) {
-                                                setEditFromSquare(null);
-                                                setEditTool("place");
-                                            }
-                                            return next;
-                                        })
-                                    }
-                                    disabled={isMatchRunning || !positionReady}
-                                    variant={isEditMode ? "secondary" : "outline"}
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    {isEditMode ? "編集モードを終了" : "編集モードを開始"}
-                                </Button>
-                                <Button
-                                    type="button"
-                                    onClick={finalizeEditedPosition}
-                                    disabled={isMatchRunning || !isEditMode || !positionReady}
-                                    variant="secondary"
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    変更を確定
-                                </Button>
-                                <Button
-                                    type="button"
-                                    onClick={resetToStartposForEdit}
-                                    disabled={isMatchRunning || !positionReady}
-                                    variant="outline"
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    平手に戻す
-                                </Button>
-                                <Button
-                                    type="button"
-                                    onClick={clearBoardForEdit}
-                                    disabled={isMatchRunning || !positionReady}
-                                    variant="outline"
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    盤面をクリア
-                                </Button>
-                            </div>
-                            <div
-                                style={{
-                                    display: "grid",
-                                    gridTemplateColumns: "1fr 1fr",
-                                    gap: "8px",
-                                    alignItems: "center",
-                                }}
-                            >
-                                <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-                                    <span
+                                <CollapsibleTrigger asChild>
+                                    <button
+                                        type="button"
+                                        aria-label="局面編集パネルを開閉"
                                         style={{
-                                            fontSize: "12px",
-                                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                            width: "100%",
+                                            padding: "14px 16px",
+                                            background:
+                                                "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
+                                            borderBottom: isEditPanelOpen
+                                                ? "1px solid hsl(var(--wafuu-border))"
+                                                : "none",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "space-between",
+                                            cursor: "pointer",
+                                            transition: "all 0.2s ease",
+                                            border: "none",
                                         }}
                                     >
-                                        配置する先後
-                                    </span>
-                                    <label
-                                        style={{ display: "flex", gap: "4px", fontSize: "13px" }}
-                                    >
-                                        <input
-                                            type="radio"
-                                            name="edit-owner"
-                                            value="sente"
-                                            checked={editOwner === "sente"}
-                                            disabled={isMatchRunning}
-                                            onChange={() => setEditOwner("sente")}
-                                        />
-                                        先手
-                                    </label>
-                                    <label
-                                        style={{ display: "flex", gap: "4px", fontSize: "13px" }}
-                                    >
-                                        <input
-                                            type="radio"
-                                            name="edit-owner"
-                                            value="gote"
-                                            checked={editOwner === "gote"}
-                                            disabled={isMatchRunning}
-                                            onChange={() => setEditOwner("gote")}
-                                        />
-                                        後手
-                                    </label>
-                                </div>
-                                <label
-                                    style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "6px",
-                                        fontSize: "13px",
-                                    }}
-                                >
-                                    手番
-                                    <select
-                                        value={position.turn}
-                                        onChange={(e) =>
-                                            updateTurnForEdit(e.target.value as Player)
-                                        }
-                                        disabled={isMatchRunning}
-                                        style={{
-                                            padding: "6px",
-                                            borderRadius: "8px",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        }}
-                                    >
-                                        <option value="sente">先手</option>
-                                        <option value="gote">後手</option>
-                                    </select>
-                                </label>
-                            </div>
-                            <div
-                                style={{
-                                    display: "flex",
-                                    gap: "8px",
-                                    flexWrap: "wrap",
-                                    alignItems: "center",
-                                }}
-                            >
-                                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                                    {PIECE_SELECT_ORDER.map((type) => {
-                                        const selected =
-                                            editPieceType === type && editTool === "place";
-                                        return (
-                                            <Button
-                                                key={type}
-                                                type="button"
-                                                variant={selected ? "secondary" : "outline"}
-                                                onClick={() => {
-                                                    setEditTool("place");
-                                                    setEditPieceType(type);
-                                                    if (!isPromotable(type)) {
-                                                        setEditPromoted(false);
-                                                    }
+                                        <div
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: "10px",
+                                            }}
+                                        >
+                                            <span
+                                                style={{
+                                                    fontSize: "18px",
+                                                    fontWeight: 700,
+                                                    color: "hsl(var(--wafuu-sumi))",
+                                                    letterSpacing: "0.05em",
                                                 }}
+                                            >
+                                                局面編集
+                                            </span>
+                                            {isEditMode && (
+                                                <span
+                                                    style={{
+                                                        fontSize: "11px",
+                                                        padding: "2px 8px",
+                                                        borderRadius: "6px",
+                                                        background: "hsl(var(--wafuu-shu))",
+                                                        color: "white",
+                                                        fontWeight: 600,
+                                                    }}
+                                                >
+                                                    編集中
+                                                </span>
+                                            )}
+                                        </div>
+                                        <span
+                                            style={{
+                                                fontSize: "20px",
+                                                color: "hsl(var(--wafuu-kincha))",
+                                                transform: isEditPanelOpen
+                                                    ? "rotate(180deg)"
+                                                    : "rotate(0deg)",
+                                                transition: "transform 0.2s ease",
+                                            }}
+                                        >
+                                            ▼
+                                        </span>
+                                    </button>
+                                </CollapsibleTrigger>
+                                <CollapsibleContent>
+                                    <div
+                                        style={{
+                                            padding: "16px",
+                                            display: "flex",
+                                            flexDirection: "column",
+                                            gap: "14px",
+                                        }}
+                                    >
+                                        <div
+                                            style={{
+                                                fontSize: "12px",
+                                                color: "hsl(var(--wafuu-sumi-light))",
+                                                padding: "10px",
+                                                background: "hsl(var(--wafuu-washi))",
+                                                borderRadius: "8px",
+                                                borderLeft: "3px solid hsl(var(--wafuu-kin))",
+                                            }}
+                                        >
+                                            対局開始前のみ編集できます。王は重複不可、各駒は上限枚数まで配置できます。
+                                        </div>
+                                        <div
+                                            style={{
+                                                display: "flex",
+                                                gap: "8px",
+                                                flexWrap: "wrap",
+                                            }}
+                                        >
+                                            <Button
+                                                type="button"
+                                                onClick={() =>
+                                                    setIsEditMode((prev) => {
+                                                        const next = !prev;
+                                                        if (!next) {
+                                                            setEditFromSquare(null);
+                                                            setEditTool("place");
+                                                        }
+                                                        return next;
+                                                    })
+                                                }
+                                                disabled={isMatchRunning || !positionReady}
+                                                variant={isEditMode ? "secondary" : "outline"}
+                                                style={{ paddingInline: "12px" }}
+                                            >
+                                                {isEditMode
+                                                    ? "編集モードを終了"
+                                                    : "編集モードを開始"}
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                onClick={finalizeEditedPosition}
+                                                disabled={
+                                                    isMatchRunning || !isEditMode || !positionReady
+                                                }
+                                                variant="secondary"
+                                                style={{ paddingInline: "12px" }}
+                                            >
+                                                変更を確定
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                onClick={resetToStartposForEdit}
+                                                disabled={isMatchRunning || !positionReady}
+                                                variant="outline"
+                                                style={{ paddingInline: "12px" }}
+                                            >
+                                                平手に戻す
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                onClick={clearBoardForEdit}
+                                                disabled={isMatchRunning || !positionReady}
+                                                variant="outline"
+                                                style={{ paddingInline: "12px" }}
+                                            >
+                                                盤面をクリア
+                                            </Button>
+                                        </div>
+                                        <div
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: "1fr 1fr",
+                                                gap: "8px",
+                                                alignItems: "center",
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    gap: "6px",
+                                                    alignItems: "center",
+                                                }}
+                                            >
+                                                <span
+                                                    style={{
+                                                        fontSize: "12px",
+                                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                                    }}
+                                                >
+                                                    配置する先後
+                                                </span>
+                                                <label
+                                                    style={{
+                                                        display: "flex",
+                                                        gap: "4px",
+                                                        fontSize: "13px",
+                                                    }}
+                                                >
+                                                    <input
+                                                        type="radio"
+                                                        name="edit-owner"
+                                                        value="sente"
+                                                        checked={editOwner === "sente"}
+                                                        disabled={isMatchRunning}
+                                                        onChange={() => setEditOwner("sente")}
+                                                    />
+                                                    先手
+                                                </label>
+                                                <label
+                                                    style={{
+                                                        display: "flex",
+                                                        gap: "4px",
+                                                        fontSize: "13px",
+                                                    }}
+                                                >
+                                                    <input
+                                                        type="radio"
+                                                        name="edit-owner"
+                                                        value="gote"
+                                                        checked={editOwner === "gote"}
+                                                        disabled={isMatchRunning}
+                                                        onChange={() => setEditOwner("gote")}
+                                                    />
+                                                    後手
+                                                </label>
+                                            </div>
+                                            <label
+                                                style={{
+                                                    display: "flex",
+                                                    alignItems: "center",
+                                                    gap: "6px",
+                                                    fontSize: "13px",
+                                                }}
+                                            >
+                                                手番
+                                                <select
+                                                    value={position.turn}
+                                                    onChange={(e) =>
+                                                        updateTurnForEdit(e.target.value as Player)
+                                                    }
+                                                    disabled={isMatchRunning}
+                                                    style={{
+                                                        padding: "6px",
+                                                        borderRadius: "8px",
+                                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                                    }}
+                                                >
+                                                    <option value="sente">先手</option>
+                                                    <option value="gote">後手</option>
+                                                </select>
+                                            </label>
+                                        </div>
+                                        <div
+                                            style={{
+                                                display: "flex",
+                                                gap: "8px",
+                                                flexWrap: "wrap",
+                                                alignItems: "center",
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    gap: "6px",
+                                                    flexWrap: "wrap",
+                                                }}
+                                            >
+                                                {PIECE_SELECT_ORDER.map((type) => {
+                                                    const selected =
+                                                        editPieceType === type &&
+                                                        editTool === "place";
+                                                    return (
+                                                        <Button
+                                                            key={type}
+                                                            type="button"
+                                                            variant={
+                                                                selected ? "secondary" : "outline"
+                                                            }
+                                                            onClick={() => {
+                                                                setEditTool("place");
+                                                                setEditPieceType(type);
+                                                                if (!isPromotable(type)) {
+                                                                    setEditPromoted(false);
+                                                                }
+                                                            }}
+                                                            disabled={isMatchRunning}
+                                                            style={{ paddingInline: "10px" }}
+                                                        >
+                                                            {PIECE_LABELS[type]}
+                                                        </Button>
+                                                    );
+                                                })}
+                                            </div>
+                                            <Button
+                                                type="button"
+                                                variant={
+                                                    editTool === "erase" ? "secondary" : "outline"
+                                                }
+                                                onClick={() =>
+                                                    setEditTool(
+                                                        editTool === "erase" ? "place" : "erase",
+                                                    )
+                                                }
                                                 disabled={isMatchRunning}
                                                 style={{ paddingInline: "10px" }}
                                             >
-                                                {PIECE_LABELS[type]}
+                                                {editTool === "erase" ? "削除モード" : "配置モード"}
                                             </Button>
-                                        );
-                                    })}
-                                </div>
-                                <Button
-                                    type="button"
-                                    variant={editTool === "erase" ? "secondary" : "outline"}
-                                    onClick={() =>
-                                        setEditTool(editTool === "erase" ? "place" : "erase")
-                                    }
-                                    disabled={isMatchRunning}
-                                    style={{ paddingInline: "10px" }}
-                                >
-                                    {editTool === "erase" ? "削除モード" : "配置モード"}
-                                </Button>
-                                <label
-                                    style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "6px",
-                                        fontSize: "13px",
-                                    }}
-                                >
-                                    <input
-                                        type="checkbox"
-                                        checked={editPromoted}
-                                        disabled={isMatchRunning || !isPromotable(editPieceType)}
-                                        onChange={(e) => setEditPromoted(e.target.checked)}
-                                    />
-                                    成りで配置
-                                </label>
+                                            <label
+                                                style={{
+                                                    display: "flex",
+                                                    alignItems: "center",
+                                                    gap: "6px",
+                                                    fontSize: "13px",
+                                                }}
+                                            >
+                                                <input
+                                                    type="checkbox"
+                                                    checked={editPromoted}
+                                                    disabled={
+                                                        isMatchRunning ||
+                                                        !isPromotable(editPieceType)
+                                                    }
+                                                    onChange={(e) =>
+                                                        setEditPromoted(e.target.checked)
+                                                    }
+                                                />
+                                                成りで配置
+                                            </label>
+                                        </div>
+                                        {isEditMode ? (
+                                            <div
+                                                style={{
+                                                    fontSize: "12px",
+                                                    color: "hsl(var(--wafuu-sumi-light))",
+                                                    padding: "12px",
+                                                    background: "hsl(var(--wafuu-washi))",
+                                                    borderRadius: "8px",
+                                                    borderLeft: "3px solid hsl(var(--wafuu-shu))",
+                                                }}
+                                            >
+                                                <div
+                                                    style={{
+                                                        fontWeight: 600,
+                                                        marginBottom: "6px",
+                                                        color: "hsl(var(--wafuu-sumi))",
+                                                    }}
+                                                >
+                                                    操作方法
+                                                </div>
+                                                <ul
+                                                    style={{
+                                                        margin: 0,
+                                                        paddingLeft: "20px",
+                                                        lineHeight: 1.6,
+                                                    }}
+                                                >
+                                                    <li>
+                                                        <strong>駒を配置:</strong> 駒種を選択 →
+                                                        盤面クリック
+                                                    </li>
+                                                    <li>
+                                                        <strong>駒を移動:</strong>{" "}
+                                                        盤面の駒をクリック → 移動先をクリック
+                                                    </li>
+                                                    <li>
+                                                        <strong>駒を削除:</strong>{" "}
+                                                        削除モードで盤面クリック（手駒に戻ります）
+                                                    </li>
+                                                    <li>
+                                                        <strong>選択解除:</strong>{" "}
+                                                        同じマスを再度クリック
+                                                    </li>
+                                                </ul>
+                                                {editFromSquare && (
+                                                    <div
+                                                        style={{
+                                                            marginTop: "8px",
+                                                            padding: "6px 10px",
+                                                            background:
+                                                                "hsl(var(--wafuu-kin) / 0.15)",
+                                                            borderRadius: "6px",
+                                                            color: "hsl(var(--wafuu-sumi))",
+                                                            fontSize: "11px",
+                                                            fontWeight: 600,
+                                                        }}
+                                                    >
+                                                        移動元: {editFromSquare} →
+                                                        移動先を選択してください
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                </CollapsibleContent>
                             </div>
-                            {isEditMode ? (
-                                <div
-                                    style={{
-                                        fontSize: "12px",
-                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                    }}
-                                >
-                                    盤面クリックで配置、同じ駒なら移動として扱います。削除モードは駒を手駒に戻します。
-                                </div>
-                            ) : null}
-                        </div>
+                        </Collapsible>
 
                         <div
                             style={{
