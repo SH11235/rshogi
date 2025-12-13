@@ -41,7 +41,7 @@ let moduleReady: Promise<void> | null = null;
 
 const INFO_THROTTLE_MS = 50;
 
-let lastInfoPostedAt = 0;
+let lastInfoPostedAt = Number.NEGATIVE_INFINITY;
 let pendingInfoByPv = new Map<number, EngineEvent>();
 let pendingEvents: EngineEvent[] = [];
 
@@ -147,6 +147,7 @@ ctx.onmessage = async (msg: { data: WorkerCommand }) => {
                 break;
             case "search":
                 await ensureEngineReady();
+                lastInfoPostedAt = Number.NEGATIVE_INFINITY;
                 await runSearch(command.params ?? undefined);
                 break;
             case "setOption":

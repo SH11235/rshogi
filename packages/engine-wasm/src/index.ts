@@ -93,6 +93,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let lastPosition: { sfen: string; moves: string[] } | null = null;
 
     const emit = (event: EngineEvent) => {
+        if (event.type === "error") {
+            lastPosition = null;
+        }
         for (const handler of listeners) {
             handler(event);
         }
