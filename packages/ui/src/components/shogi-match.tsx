@@ -306,23 +306,41 @@ export function ShogiMatch({
     const settingsLocked = isMatchRunning;
 
     useEffect(() => {
+        let cancelled = false;
         const service = getPositionService();
-        service
-            .getInitialBoard()
-            .then(async (pos) => {
+
+        const init = async () => {
+            try {
+                const pos = await service.getInitialBoard();
+                if (cancelled) return;
                 setPosition(pos);
                 positionRef.current = pos;
                 setInitialBoard(cloneBoard(pos.board));
                 setBasePosition(clonePositionState(pos));
                 try {
                     const sfen = await service.boardToSfen(pos);
-                    setStartSfen(sfen);
-                } catch {
-                    setStartSfen("startpos");
+                    if (!cancelled) {
+                        setStartSfen(sfen);
+                    }
+                } catch (error) {
+                    if (!cancelled) {
+                        setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
+                    }
                 }
-                setPositionReady(true);
-            })
-            .catch((error) => setMessage(`初期局面の取得に失敗しました: ${String(error)}`));
+                if (!cancelled) {
+                    setPositionReady(true);
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    setMessage(`初期局面の取得に失敗しました: ${String(error)}`);
+                }
+            }
+        };
+
+        void init();
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     const engineMap = useMemo(() => {
@@ -411,8 +429,9 @@ export function ShogiMatch({
         try {
             const sfen = await getPositionService().boardToSfen(pos);
             setStartSfen(sfen);
-        } catch {
-            setStartSfen("startpos");
+        } catch (error) {
+            setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
+            throw error;
         }
     }, []);
 
@@ -734,7 +753,9 @@ export function ShogiMatch({
                 (["sente", "gote"] as Player[]).map((side) => disposeEngineForSide(side)),
             ).catch(() => undefined);
         };
-    }, [disposeEngineForSide]);
+        // disposeEngineForSide は安定化済み。アンマウント時のみ実行したいので依存配列は空。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     useEffect(() => {
         if (!clocks.ticking) return;
