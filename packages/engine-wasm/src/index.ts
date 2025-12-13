@@ -90,7 +90,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let worker: Worker | null = null;
     let initialized = false;
     let lastInitOpts: WasmEngineInitOptions | undefined;
-    let lastPosition: { sfen: string; movesLength: number; lastMove?: string } | null = null;
+    let lastPosition: { sfen: string; moves: string[] } | null = null;
 
     const emit = (event: EngineEvent) => {
         for (const handler of listeners) {
@@ -216,30 +216,22 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             }
             const normalizedMoves = moves ?? [];
             const previous = lastPosition;
-            const shouldTryDelta = previous?.sfen === sfen;
-            const prevLen = previous?.movesLength ?? 0;
-
             if (
-                shouldTryDelta &&
-                normalizedMoves.length >= prevLen &&
-                (prevLen === 0 || normalizedMoves[prevLen - 1] === previous?.lastMove)
+                previous &&
+                previous.sfen === sfen &&
+                normalizedMoves.length >= previous.moves.length &&
+                previous.moves.every((mv, idx) => normalizedMoves[idx] === mv)
             ) {
-                const delta = normalizedMoves.slice(prevLen);
+                const delta = normalizedMoves.slice(previous.moves.length);
                 if (delta.length) {
                     postToWorker({ type: "applyMoves", moves: delta });
+                    previous.moves.push(...delta);
                 }
-            } else {
-                postToWorker({ type: "loadPosition", sfen, moves: normalizedMoves });
+                return;
             }
 
-            lastPosition = {
-                sfen,
-                movesLength: normalizedMoves.length,
-                lastMove:
-                    normalizedMoves.length > 0
-                        ? normalizedMoves[normalizedMoves.length - 1]
-                        : undefined,
-            };
+            postToWorker({ type: "loadPosition", sfen, moves: normalizedMoves });
+            lastPosition = { sfen, moves: normalizedMoves.slice() };
         },
         async search(params: SearchParams): Promise<SearchHandle> {
             if (backend === "mock") {

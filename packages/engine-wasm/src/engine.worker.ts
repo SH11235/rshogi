@@ -39,37 +39,43 @@ let cachedModel: ModelCache | null = null;
 let lastInit: InitCommand | null = null;
 let moduleReady: Promise<void> | null = null;
 
-let pendingInfo: EngineEvent | null = null;
+const INFO_THROTTLE_MS = 50;
+
+let lastInfoPostedAt = 0;
+let pendingInfoByPv = new Map<number, EngineEvent>();
 let pendingEvents: EngineEvent[] = [];
-let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+const getNowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
 const flushEvents = () => {
-    if (flushTimer) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-    }
     const batch: EngineEvent[] = [];
-    if (pendingInfo) {
-        batch.push(pendingInfo);
-        pendingInfo = null;
+
+    if (pendingInfoByPv.size) {
+        const infos = Array.from(pendingInfoByPv.entries())
+            .sort(([a], [b]) => a - b)
+            .map(([, event]) => event);
+        batch.push(...infos);
+        pendingInfoByPv.clear();
     }
+
     if (pendingEvents.length) {
         batch.push(...pendingEvents);
         pendingEvents = [];
     }
+
     if (!batch.length) return;
     ctx.postMessage({ type: "events", payload: batch });
 };
 
-const scheduleFlush = () => {
-    if (flushTimer) return;
-    flushTimer = setTimeout(() => flushEvents(), 50);
-};
-
 const postEvent = (event: EngineEvent) => {
     if (event.type === "info") {
-        pendingInfo = event;
-        scheduleFlush();
+        const pv = typeof event.multipv === "number" && event.multipv > 0 ? event.multipv : 1;
+        pendingInfoByPv.set(pv, event);
+        const now = getNowMs();
+        if (now - lastInfoPostedAt >= INFO_THROTTLE_MS) {
+            lastInfoPostedAt = now;
+            flushEvents();
+        }
         return;
     }
     pendingEvents.push(event);
