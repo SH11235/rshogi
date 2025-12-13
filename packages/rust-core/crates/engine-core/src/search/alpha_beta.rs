@@ -355,6 +355,7 @@ impl<'a> SearchWorker<'a> {
             }
 
             let elapsed = self.time_manager.elapsed();
+            let elapsed_effective = self.time_manager.elapsed_from_ponderhit();
 
             // フェーズ1: search_end 設定済み → 即座に停止
             if self.time_manager.search_end() > 0 && elapsed >= self.time_manager.search_end() {
@@ -373,7 +374,8 @@ impl<'a> SearchWorker<'a> {
             if !self.time_manager.is_pondering()
                 && self.time_manager.search_end() == 0
                 && self.limits.use_time_management()
-                && (elapsed > self.time_manager.maximum() || self.time_manager.stop_on_ponderhit())
+                && (elapsed_effective > self.time_manager.maximum()
+                    || self.time_manager.stop_on_ponderhit())
             {
                 self.time_manager.set_search_end(elapsed);
                 // 注: ここでは停止せず、次のチェックで秒境界で停止

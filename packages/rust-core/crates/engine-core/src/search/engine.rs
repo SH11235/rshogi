@@ -596,6 +596,11 @@ impl Search {
                 break;
             }
 
+            // ponderhitを検出した場合、時間再計算のみ行い探索は継続
+            if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
+                worker.time_manager.on_ponderhit();
+            }
+
             // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
             // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
             let is_pondering = worker.time_manager.is_pondering();
@@ -622,11 +627,6 @@ impl Search {
                     worker.time_manager.request_stop();
                     break;
                 }
-            }
-
-            // ponderhitを検出した場合、時間再計算のみ行い探索は継続
-            if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
-                worker.time_manager.on_ponderhit();
             }
 
             worker.root_depth = depth;
@@ -763,7 +763,7 @@ impl Search {
                     } else {
                         total_time
                     };
-                    let elapsed_time = worker.time_manager.elapsed() as f64;
+                    let elapsed_time = worker.time_manager.elapsed_from_ponderhit() as f64;
                     worker.time_manager.apply_iteration_timing(
                         worker.time_manager.elapsed(),
                         total_time,
