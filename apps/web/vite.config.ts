@@ -6,7 +6,12 @@ import { defineConfig } from "vite";
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+    // GitHub Pages (https://sh11235.github.io/shogi/) 向けの base パス設定
+    // - 開発時 (pnpm dev): "/" でローカルホストで動作
+    // - ビルド時 (pnpm build): "/shogi/" で GitHub Pages のリポジトリページに対応
+    // command === "build" による判定は Vite 公式の推奨方法で、環境変数の追加設定は不要
+    base: command === "build" ? "/shogi/" : "/",
     plugins: [react()],
     resolve: {
         alias: [
@@ -29,4 +34,4 @@ export default defineConfig({
             },
         ],
     },
-});
+}));
