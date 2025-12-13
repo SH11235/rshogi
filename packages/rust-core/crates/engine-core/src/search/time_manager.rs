@@ -747,7 +747,7 @@ impl TimeManagement {
 
     /// start_time 基準の経過時間から、ponderhit 前の消費時間を差し引いた実効経過時間を計算
     fn effective_elapsed(&self, elapsed_raw: TimePoint) -> TimePoint {
-        elapsed_raw.saturating_sub(self.ponderhit_offset())
+        elapsed_raw.saturating_sub(self.ponderhit_offset()).max(0)
     }
 
     /// ponderhitを検出した際の処理（YO準拠）
@@ -756,6 +756,12 @@ impl TimeManagement {
     /// - ponder状態を解除して通常探索へ移行する（`is_pondering=false`）。
     /// - ponder中に時間を使い切っていた場合（`stop_on_ponderhit=true`）のみ、停止時刻を確定させる。
     pub fn on_ponderhit(&mut self) {
+        // すでに通常探索なら時間基準を動かさない
+        if !self.is_pondering {
+            self.ponderhit.store(false, Ordering::Relaxed);
+            return;
+        }
+
         self.set_ponderhit();
         self.is_pondering = false;
         self.last_stop_threshold = None;
@@ -1136,6 +1142,28 @@ mod tests {
             !tm.should_stop_immediately(),
             "ponderhit後は ponder 前の経過時間に引きずられず継続できるべき"
         );
+    }
+
+    #[test]
+    fn test_on_ponderhit_ignored_when_not_pondering() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60000;
+        limits.ponder = false;
+        limits.start_time = Some(Instant::now() - Duration::from_millis(1500));
+
+        tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+        let before_elapsed = tm.elapsed_from_ponderhit();
+
+        tm.on_ponderhit(); // 非ponder時の不正通知を無害化
+
+        let after_elapsed = tm.elapsed_from_ponderhit();
+        assert!(after_elapsed >= before_elapsed, "非ponder時は時間基準をリセットしない");
+        assert_eq!(tm.search_end(), 0, "search_endを確定させない");
+        assert!(!tm.stop_on_ponderhit(), "stop_on_ponderhitも変更しない");
+        assert!(!tm.is_pondering(), "状態は通常探索のまま");
     }
 
     #[test]
