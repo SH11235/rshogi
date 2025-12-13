@@ -427,6 +427,16 @@ export function ShogiMatch({
         setEngineStatus({ sente: "idle", gote: "idle" });
     }, []);
 
+    const endMatch = useCallback(
+        async (nextMessage: string) => {
+            setMessage(nextMessage);
+            setIsMatchRunning(false);
+            setClocks((prev) => ({ ...prev, ticking: null }));
+            await stopAllEngines();
+        },
+        [stopAllEngines],
+    );
+
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
         setClocks((prev) => ({ ...prev, ticking: null }));
@@ -536,17 +546,20 @@ export function ShogiMatch({
 
     const applyMoveFromEngine = useCallback(
         (move: string) => {
-            const result = applyMoveWithState(positionRef.current, move, { validateTurn: false });
+            const trimmed = move.trim();
+            const result = applyMoveWithState(positionRef.current, trimmed, {
+                validateTurn: false,
+            });
             if (!result.ok) {
                 setErrorLogs((prev) =>
-                    [`engine move rejected: ${result.error ?? "unknown"}`, ...prev].slice(
-                        0,
-                        maxLogs,
-                    ),
+                    [
+                        `engine move rejected (${trimmed || "empty"}): ${result.error ?? "unknown"}`,
+                        ...prev,
+                    ].slice(0, maxLogs),
                 );
                 return;
             }
-            applyMoveCommon(result.next, move, result.lastMove);
+            applyMoveCommon(result.next, trimmed, result.lastMove);
         },
         [applyMoveCommon, maxLogs],
     );
@@ -567,7 +580,49 @@ export function ShogiMatch({
                     const current = activeSearchRef.current;
                     if (current && current.engineId === engineId && current.side === side) {
                         lastEngineRequestPly.current[side] = movesRef.current.length;
-                        applyMoveFromEngine(event.move);
+                        const trimmed = event.move.trim();
+                        const token = trimmed.toLowerCase();
+                        if (token === "resign" || token === "win" || token === "none") {
+                            activeSearchRef.current = null;
+                            const sideLabel = side === "sente" ? "先手" : "後手";
+                            const opponentLabel = side === "sente" ? "後手" : "先手";
+                            if (token === "win") {
+                                endMatch(`対局終了: ${sideLabel}が勝利宣言しました（win）。`).catch(
+                                    (err) => {
+                                        setErrorLogs((prev) =>
+                                            [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
+                                                0,
+                                                maxLogs,
+                                            ),
+                                        );
+                                    },
+                                );
+                            } else if (token === "resign") {
+                                endMatch(
+                                    `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`,
+                                ).catch((err) => {
+                                    setErrorLogs((prev) =>
+                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
+                                            0,
+                                            maxLogs,
+                                        ),
+                                    );
+                                });
+                            } else {
+                                endMatch(
+                                    `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`,
+                                ).catch((err) => {
+                                    setErrorLogs((prev) =>
+                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
+                                            0,
+                                            maxLogs,
+                                        ),
+                                    );
+                                });
+                            }
+                            return;
+                        }
+                        applyMoveFromEngine(trimmed);
                         activeSearchRef.current = null;
                     }
                 }
@@ -580,7 +635,7 @@ export function ShogiMatch({
             });
             engineSubscriptionsRef.current[side] = unsub;
         },
-        [applyMoveFromEngine, maxLogs],
+        [applyMoveFromEngine, endMatch, maxLogs],
     );
 
     const ensureEngineReady = useCallback(
