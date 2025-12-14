@@ -17,6 +17,11 @@ interface TauriIpc {
     invoke: InvokeFn;
     listen: ListenFn;
 }
+export interface LegalMovesParams {
+    sfen: string;
+    moves?: string[];
+    ipc?: Partial<TauriIpc>;
+}
 
 export interface TauriEngineClientOptions extends EngineInitOptions {
     /**
@@ -216,4 +221,20 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
             listeners.clear();
         },
     };
+}
+
+export async function getLegalMoves(params: LegalMovesParams): Promise<string[]> {
+    const ipc = {
+        invoke: params.ipc?.invoke ?? tauriInvoke,
+    };
+    try {
+        const result = await ipc.invoke<string[]>("engine_legal_moves", {
+            sfen: params.sfen,
+            moves: params.moves,
+        });
+        return result;
+    } catch (error) {
+        console.error("Failed to get legal moves:", error);
+        return [];
+    }
 }

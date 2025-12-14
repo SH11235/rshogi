@@ -20,10 +20,10 @@ const events = [];
 setEventHandler((event) => {
     events.push(event);
 });
-await initEngine(JSON.stringify({ tt_size_mb: 16, multi_pv: 1 }));
+await initEngine({ ttSizeMb: 16, multiPv: 1 });
 await loadPosition("startpos", undefined);
 
-runSearch(JSON.stringify({ limits: { maxDepth: 1 } }));
+runSearch({ limits: { maxDepth: 1 } });
 
 let bestmove = null;
 const timeoutAt = Date.now() + 5000;

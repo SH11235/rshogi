@@ -3,7 +3,14 @@
     "version": "0.1.0",
     "private": true,
     "type": "module",
-    "sideEffects": false,
+    "sideEffects": [
+        "./dist/index.js",
+        "./dist/index.web.js",
+        "./dist/index.tauri.js",
+        "./dist/game/index.js",
+        "./dist/game/index.web.js",
+        "./dist/game/index.tauri.js"
+    ],
     "main": "./dist/index.js",
     "module": "./dist/index.js",
     "types": "./dist/index.d.ts",
@@ -28,7 +35,7 @@
         "@tauri-apps/api": "^2.9.0"
     },
     "devDependencies": {
-        "@types/react": "^19.2.4",
+        "@types/react": "^19.2.7",
         "@types/react-dom": "^19.2.3",
         "typescript": "~5.9.3",
         "vitest": "^3.1.3"

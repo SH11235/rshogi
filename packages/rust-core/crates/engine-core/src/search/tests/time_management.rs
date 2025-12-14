@@ -3,11 +3,11 @@
 //! best_move_changes（PV安定性判断）と合法手1つの500ms上限のテスト
 
 use crate::search::{LimitsType, TimeManagement, TimeOptions, DEFAULT_MAX_MOVES_TO_DRAW};
+use crate::time::Instant;
 use crate::types::Color;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 // =============================================================================
 // ヘルパー関数
@@ -97,18 +97,19 @@ fn test_apply_iteration_timing_sets_stop_on_ponderhit() {
     let mut tm = create_time_manager();
     let mut limits = LimitsType::new();
     limits.time[Color::Black.index()] = 5000;
+    limits.ponder = true;
     limits.set_start_time();
     tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
     tm.reset_search_end();
 
-    tm.apply_iteration_timing(1600, 1200.0, 0.0, true, 12);
+    tm.apply_iteration_timing(1600, 1200.0, 0.0, 12);
 
     assert!(tm.stop_on_ponderhit(), "ponder中は stop_on_ponderhit が立つべき");
     assert_eq!(tm.search_end(), 0, "ponder中は search_end を設定しない");
 
     // ponder中はnodesEffort経路でもsearch_endを設定しない
     tm.reset_search_end();
-    tm.apply_iteration_timing(1200, 1000.0, 98000.0, true, 12);
+    tm.apply_iteration_timing(1200, 1000.0, 98000.0, 12);
     assert_eq!(tm.search_end(), 0);
 }
 
@@ -126,7 +127,7 @@ fn test_single_root_move_caps_stop_threshold() {
 
     tm.init_with_root_moves_count(&limits, Color::Black, 0, 256, 1);
     // total_time は大きく与えるが、single_move_limit により 500ms に丸められる
-    tm.apply_iteration_timing(600, 2000.0, 0.0, false, 12);
+    tm.apply_iteration_timing(600, 2000.0, 0.0, 12);
 
     assert!(tm.should_stop_immediately(), "500ms閾値を超えているので停止すべき");
 }

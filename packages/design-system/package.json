@@ -15,7 +15,8 @@
             "import": "./dist/index.js",
             "default": "./dist/index.js"
         },
-        "./tailwind.preset": "./tailwind.preset.mjs",
+        "./theme.css": "./src/theme.css",
+        "./tailwind.preset": "./tailwind.preset.ts",
         "./src/theme.css": "./src/theme.css"
     },
     "scripts": {
@@ -33,12 +34,12 @@
         "tailwindcss-animate": "^1.0.7"
     },
     "peerDependencies": {
-        "react": "^18.0.0 || ^19.0.0",
-        "react-dom": "^18.0.0 || ^19.0.0",
+        "react": ">=19 <20",
+        "react-dom": ">=19 <20",
         "tailwindcss": "^3.4.0"
     },
     "devDependencies": {
-        "@types/react": "^19.2.4",
+        "@types/react": "^19.2.7",
         "@types/react-dom": "^19.2.3",
         "typescript": "~5.9.3"
     }

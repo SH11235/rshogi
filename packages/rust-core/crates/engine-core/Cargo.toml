@@ -14,9 +14,13 @@ log.workspace = true
 once_cell.workspace = true
 rand.workspace = true
 rand_xoshiro.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 # Test dependencies
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+web-time = "1"
 
 [features]
 default = []

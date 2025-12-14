@@ -8,6 +8,7 @@ import type {
     SearchParams,
 } from "@shogi/engine-client";
 import { createMockEngineClient } from "@shogi/engine-client";
+import initWasmModule from "../pkg/engine_wasm.js";
 
 type WasmModuleSource = WebAssembly.Module | ArrayBuffer | Uint8Array | string;
 
@@ -35,12 +36,34 @@ export interface WasmEngineClientOptions {
 type BackendKind = "worker" | "mock";
 
 type WorkerCommand =
+    | {
+          type: "init";
+          opts?: WasmEngineInitOptions;
+          wasmModule?: WasmModuleSource;
+          requestId?: string;
+      }
+    | { type: "loadPosition"; sfen: string; moves?: string[]; requestId?: string }
+    | { type: "applyMoves"; moves: string[]; requestId?: string }
+    | { type: "search"; params: SearchParams; requestId?: string }
+    | { type: "stop"; requestId?: string }
+    | { type: "dispose"; requestId?: string }
+    | { type: "setOption"; name: string; value: string | number | boolean; requestId?: string };
+
+type WorkerCommandPayload =
     | { type: "init"; opts?: WasmEngineInitOptions; wasmModule?: WasmModuleSource }
     | { type: "loadPosition"; sfen: string; moves?: string[] }
+    | { type: "applyMoves"; moves: string[] }
     | { type: "search"; params: SearchParams }
     | { type: "stop" }
     | { type: "dispose" }
     | { type: "setOption"; name: string; value: string | number | boolean };
+
+type WorkerAck = { type: "ack"; requestId: string; error?: string };
+
+type WorkerMessage =
+    | { type: "event"; payload: EngineEvent }
+    | { type: "events"; payload: EngineEvent[] }
+    | WorkerAck;
 
 function defaultWorkerFactory(): Worker {
     // Use the emitted JS file; pointing at .ts breaks when consuming the built package.
@@ -69,6 +92,16 @@ function rememberInitOpts(opts?: WasmEngineInitOptions): WasmEngineInitOptions |
     return { ...rest, wasmModule: preservedModule };
 }
 
+let wasmModuleReady: Promise<void> | null = null;
+
+export const ensureWasmModule = (wasmModule?: WasmModuleSource): Promise<void> => {
+    if (!wasmModuleReady) {
+        const moduleOrPath = wasmModule ?? new URL("../pkg/engine_wasm_bg.wasm", import.meta.url);
+        wasmModuleReady = initWasmModule({ module_or_path: moduleOrPath }).then(() => undefined);
+    }
+    return wasmModuleReady;
+};
+
 export function createWasmEngineClient(options: WasmEngineClientOptions = {}): EngineClient {
     const stopMode: EngineStopMode = options.stopMode ?? "terminate";
     const mock = createMockEngineClient();
@@ -77,12 +110,34 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let backend: BackendKind = options.useMock ? "mock" : "worker";
     let worker: Worker | null = null;
     let initialized = false;
+    let initInFlight: Promise<void> | null = null;
     let lastInitOpts: WasmEngineInitOptions | undefined;
+    let lastPosition: { sfen: string; moves: string[] } | null = null;
 
     const emit = (event: EngineEvent) => {
+        if (event.type === "error") {
+            lastPosition = null;
+        }
         for (const handler of listeners) {
             handler(event);
         }
+    };
+
+    const pendingAcks = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+
+    const rejectAllPending = (error: unknown) => {
+        const err = error instanceof Error ? error : new Error(String(error));
+        for (const pending of pendingAcks.values()) {
+            pending.reject(err);
+        }
+        pendingAcks.clear();
+    };
+
+    const createRequestId = (): string => {
+        if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+            return (crypto as { randomUUID: () => string }).randomUUID();
+        }
+        return `${Date.now()}-${Math.random()}`;
     };
 
     let mockUnsubscribe: (() => void) | null = null;
@@ -103,6 +158,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     }
 
     const fallbackToMock = () => {
+        rejectAllPending(new Error("engine worker is unavailable"));
         terminateWorker();
         backend = "mock";
         attachMock();
@@ -112,10 +168,27 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         if (backend === "mock" || worker) return;
         try {
             worker = (options.workerFactory ?? defaultWorkerFactory)();
-            worker.onmessage = (msg) => {
-                const data = msg.data as { type: "event"; payload: EngineEvent };
+            worker.onmessage = (msg: MessageEvent) => {
+                const data = msg.data as WorkerMessage;
+                if (data?.type === "ack" && data.requestId) {
+                    const pending = pendingAcks.get(data.requestId);
+                    if (!pending) return;
+                    pendingAcks.delete(data.requestId);
+                    if (data.error) {
+                        pending.reject(new Error(data.error));
+                    } else {
+                        pending.resolve();
+                    }
+                    return;
+                }
                 if (data?.type === "event" && data.payload) {
                     emit(data.payload);
+                    return;
+                }
+                if (data?.type === "events" && Array.isArray(data.payload)) {
+                    for (const event of data.payload) {
+                        emit(event);
+                    }
                 }
             };
             worker.onerror = (err) => {
@@ -151,18 +224,76 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             }
             worker = null;
         }
+        rejectAllPending(new Error("engine worker terminated"));
         initialized = false;
+        initInFlight = null;
+        lastPosition = null;
     };
 
-    const ensureReady = () => {
+    const postToWorkerAwait = async (
+        command: WorkerCommandPayload,
+        timeoutMs = 30_000,
+    ): Promise<void> => {
+        if (!worker) {
+            throw new Error("Wasm engine worker is not initialized");
+        }
+        const requestId = createRequestId();
+        return new Promise<void>((resolve, reject) => {
+            const timeoutId =
+                timeoutMs > 0
+                    ? setTimeout(() => {
+                          const pending = pendingAcks.get(requestId);
+                          if (!pending) return;
+                          pendingAcks.delete(requestId);
+                          pending.reject(new Error(`Worker request timed out: ${command.type}`));
+                      }, timeoutMs)
+                    : null;
+
+            pendingAcks.set(requestId, {
+                resolve: () => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    resolve();
+                },
+                reject: (error) => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    reject(error);
+                },
+            });
+
+            try {
+                postToWorker({ ...command, requestId } as WorkerCommand);
+            } catch (error) {
+                pendingAcks.delete(requestId);
+                if (timeoutId) clearTimeout(timeoutId);
+                reject(error instanceof Error ? error : new Error(String(error)));
+            }
+        });
+    };
+
+    const ensureReady = async () => {
         if (backend === "worker" && !worker) {
             ensureWorker();
         }
-        if (backend === "worker" && worker && !initialized) {
-            const payload: WasmEngineInitOptions = lastInitOpts ?? { backend: "wasm" };
-            postToWorker({ type: "init", opts: payload, wasmModule: payload.wasmModule });
-            initialized = true;
+        if (backend !== "worker" || !worker) return;
+        if (initialized) return;
+        if (initInFlight) {
+            await initInFlight;
+            return;
         }
+
+        const payload: WasmEngineInitOptions = lastInitOpts ?? { backend: "wasm" };
+        initInFlight = postToWorkerAwait({
+            type: "init",
+            opts: payload,
+            wasmModule: payload.wasmModule,
+        })
+            .then(() => {
+                initialized = true;
+            })
+            .finally(() => {
+                initInFlight = null;
+            });
+        await initInFlight;
         // TODO: consider explicit worker state machine (uninitialized/ready/error) to simplify transitions.
     };
 
@@ -170,6 +301,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         async init(opts?: WasmEngineInitOptions) {
             const wasmOpts = opts as WasmEngineInitOptions | undefined;
             lastInitOpts = rememberInitOpts(wasmOpts);
+            lastPosition = null;
             if (backend === "mock") {
                 await mock.init(opts);
                 return;
@@ -181,24 +313,54 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 return;
             }
             const payload: WasmEngineInitOptions = wasmOpts ?? { backend: "wasm" };
-            postToWorker({ type: "init", opts: payload, wasmModule: wasmOpts?.wasmModule });
-            initialized = true;
+            initialized = false;
+            initInFlight = postToWorkerAwait({
+                type: "init",
+                opts: payload,
+                wasmModule: wasmOpts?.wasmModule,
+            })
+                .then(() => {
+                    initialized = true;
+                })
+                .finally(() => {
+                    initInFlight = null;
+                });
+            await initInFlight;
         },
         async loadPosition(sfen: string, moves?: string[]) {
             if (backend === "mock") {
                 return mock.loadPosition(sfen, moves);
             }
-            ensureReady();
+            await ensureReady();
             if (!worker) {
                 return mock.loadPosition(sfen, moves);
             }
-            postToWorker({ type: "loadPosition", sfen, moves });
+            const normalizedMoves = moves ?? [];
+            // TEMPORARY FIX: Disable incremental position loading to avoid state issues
+            // Always load the full position instead of applying incremental moves
+            void lastPosition; // Keep for reference but don't use
+            // if (
+            //     previous &&
+            //     previous.sfen === sfen &&
+            //     normalizedMoves.length >= previous.moves.length &&
+            //     previous.moves.every((mv, idx) => normalizedMoves[idx] === mv)
+            // ) {
+            //     const delta = normalizedMoves.slice(previous.moves.length);
+            //     if (delta.length) {
+            //         await postToWorkerAwait({ type: "applyMoves", moves: delta });
+            //         previous.moves.push(...delta);
+            //     }
+            //     return;
+            // }
+
+            await postToWorkerAwait({ type: "loadPosition", sfen, moves: normalizedMoves });
+            lastPosition = { sfen, moves: normalizedMoves.slice() };
         },
         async search(params: SearchParams): Promise<SearchHandle> {
             if (backend === "mock") {
                 return mock.search(params);
             }
-            ensureReady();
+            await ensureReady();
             if (!worker) {
                 return mock.search(params);
             }
@@ -239,16 +401,17 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 });
                 terminateWorker();
             }
+            lastPosition = null;
         },
         async setOption(name: string, value: string | number | boolean) {
             if (backend === "mock") {
                 return mock.setOption(name, value);
             }
-            ensureReady();
+            await ensureReady();
             if (!worker) {
                 return mock.setOption(name, value);
             }
-            postToWorker({ type: "setOption", name, value });
+            await postToWorkerAwait({ type: "setOption", name, value });
         },
         subscribe(handler: EngineEventHandler) {
             listeners.add(handler);
@@ -270,6 +433,15 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             }
             detachMock();
             listeners.clear();
+            lastPosition = null;
         },
     };
 }
+
+export {
+    wasm_board_to_sfen,
+    wasm_get_initial_board,
+    wasm_get_legal_moves,
+    wasm_parse_sfen_to_board,
+    wasm_replay_moves_strict,
+} from "../pkg/engine_wasm.js";

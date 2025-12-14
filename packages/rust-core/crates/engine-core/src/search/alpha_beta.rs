@@ -322,17 +322,26 @@ impl<'a> SearchWorker<'a> {
     #[inline]
     fn check_abort(&mut self) -> bool {
         if self.abort {
+            #[cfg(debug_assertions)]
+            eprintln!("check_abort: abort flag already set");
             return true;
         }
 
         // 外部からの停止要求
         if self.time_manager.stop_requested() {
+            #[cfg(debug_assertions)]
+            eprintln!("check_abort: stop requested");
             self.abort = true;
             return true;
         }
 
         // ノード数制限チェック
         if self.limits.nodes > 0 && self.nodes >= self.limits.nodes {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "check_abort: node limit reached nodes={} limit={}",
+                self.nodes, self.limits.nodes
+            );
             self.abort = true;
             return true;
         }
@@ -340,20 +349,33 @@ impl<'a> SearchWorker<'a> {
         // 時間制限チェック（1024ノードごと）
         // YaneuraOu準拠の2フェーズロジック
         if self.nodes & 1023 == 0 {
+            // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
+            if self.time_manager.take_ponderhit() {
+                self.time_manager.on_ponderhit();
+            }
+
             let elapsed = self.time_manager.elapsed();
+            let elapsed_effective = self.time_manager.elapsed_from_ponderhit();
 
             // フェーズ1: search_end 設定済み → 即座に停止
             if self.time_manager.search_end() > 0 && elapsed >= self.time_manager.search_end() {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "check_abort: search_end reached elapsed={} search_end={}",
+                    elapsed,
+                    self.time_manager.search_end()
+                );
                 self.abort = true;
                 return true;
             }
 
-            // フェーズ2: search_end 未設定 → maximum超過時に設定
-            if self.time_manager.search_end() == 0
+            // フェーズ2: search_end 未設定 → maximum超過 or stop_on_ponderhit で設定
+            // ただし ponder 中は停止判定を行わない（YO準拠）
+            if !self.time_manager.is_pondering()
+                && self.time_manager.search_end() == 0
                 && self.limits.use_time_management()
-                // YaneuraOu準拠: ponder中は時間切れ判定を行わない
-                && !self.limits.ponder
-                && elapsed > self.time_manager.maximum()
+                && (elapsed_effective > self.time_manager.maximum()
+                    || self.time_manager.stop_on_ponderhit())
             {
                 self.time_manager.set_search_end(elapsed);
                 // 注: ここでは停止せず、次のチェックで秒境界で停止

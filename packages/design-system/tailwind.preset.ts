@@ -1,7 +1,8 @@
+import type { Config } from "tailwindcss";
 import animate from "tailwindcss-animate";
 
-const preset = {
-    darkMode: ["class"],
+const preset: Omit<Config, "content"> = {
+    darkMode: "selector",
     content: [],
     theme: {
         container: {

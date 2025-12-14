@@ -2,11 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{
     init_search_module, LimitsType, Search, SearchInfo, SearchResult, SkillOptions, TimeOptions,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
+use engine_core::types::json::{BoardStateJson, ReplayResultJson};
 use engine_core::types::{Color, Move, Value};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State, Window};
@@ -292,9 +294,23 @@ fn spawn_search(
     limits: LimitsType,
 ) -> Result<ActiveSearch, String> {
     eprintln!(
-        "engine_search: spawning (depth={}, nodes_limit={}, movetime={}, ponder={})",
-        limits.depth, limits.nodes, limits.movetime, limits.ponder
+        "spawn_search: limits (depth={}, nodes={}, byoyomi={:?}, movetime={}, ponder={})",
+        limits.depth, limits.nodes, limits.byoyomi, limits.movetime, limits.ponder
     );
+    eprintln!("spawn_search: position SFEN = {}", position.to_sfen());
+
+    // Generate legal moves to debug
+    use engine_core::movegen::{generate_legal, MoveList};
+    let mut legal_moves = MoveList::new();
+    generate_legal(&position, &mut legal_moves);
+    eprintln!("spawn_search: legal moves count = {}", legal_moves.len());
+    if !legal_moves.is_empty() {
+        eprintln!("spawn_search: first few legal moves:");
+        for (i, m) in legal_moves.iter().take(5).enumerate() {
+            eprintln!("  {}: {}", i, m.to_usi());
+        }
+    }
+
     let stop_flag = search.stop_flag();
     let ponderhit_flag = search.ponderhit_flag();
 
@@ -302,6 +318,10 @@ fn spawn_search(
         .name("engine-search".into())
         .stack_size(SEARCH_STACK_SIZE)
         .spawn(move || {
+            eprintln!(
+                "search thread: calling search.go() with limits (depth={}, nodes={}, byoyomi={:?}, movetime={})",
+                limits.depth, limits.nodes, limits.byoyomi, limits.movetime
+            );
             let mut emitter = EngineEventEmitter::new(window);
             let result = search.go(
                 &mut position,
@@ -309,7 +329,7 @@ fn spawn_search(
                 Some(|info: &SearchInfo| emitter.emit_info(info)),
             );
             eprintln!(
-                "engine_search: finished bestmove={} ponder={}",
+                "engine_search: finished bestmove={} ponder={} depth={} nodes={} score={}",
                 if result.best_move == Move::NONE {
                     "resign".to_string()
                 } else {
@@ -319,7 +339,10 @@ fn spawn_search(
                     "-".to_string()
                 } else {
                     result.ponder_move.to_usi()
-                }
+                },
+                result.depth,
+                result.nodes,
+                result.score.raw()
             );
             emitter.emit_bestmove(&result);
             SearchTaskResult { search }
@@ -362,23 +385,38 @@ fn build_limits(params: &SearchParamsInput, options: &EngineOptions) -> LimitsTy
     let mut limits = LimitsType::default();
     limits.set_start_time();
 
+    eprintln!("build_limits: params.limits = {:?}", params.limits);
+
     if let Some(limits_input) = &params.limits {
         if let Some(depth) = limits_input.max_depth {
+            eprintln!("build_limits: setting depth = {}", depth);
             limits.depth = depth;
         }
         if let Some(nodes) = limits_input.nodes {
+            eprintln!("build_limits: setting nodes = {}", nodes);
             limits.nodes = nodes;
         }
         if let Some(byoyomi) = limits_input.byoyomi_ms {
+            eprintln!("build_limits: setting byoyomi = {}", byoyomi);
             limits.byoyomi = [byoyomi; Color::NUM];
+            eprintln!(
+                "build_limits: after setting, limits.byoyomi = {:?}",
+                limits.byoyomi
+            );
         }
         if let Some(movetime) = limits_input.movetime_ms {
+            eprintln!("build_limits: setting movetime = {}", movetime);
             limits.movetime = movetime;
         }
     }
 
     limits.ponder = params.ponder.unwrap_or(false);
     limits.multi_pv = options.multi_pv;
+
+    eprintln!(
+        "build_limits: final limits -> depth={}, nodes={}, time={:?}, byoyomi={:?}, movetime={}, ponder={}",
+        limits.depth, limits.nodes, limits.time, limits.byoyomi, limits.movetime, limits.ponder
+    );
 
     limits
 }
@@ -561,7 +599,10 @@ fn engine_position(
     sfen: String,
     moves: Option<Vec<String>>,
 ) -> Result<(), String> {
+    eprintln!("engine_position: sfen={}, moves={:?}", sfen, moves);
     let position = parse_position(&sfen, moves)?;
+
+    eprintln!("engine_position: resulting SFEN = {}", position.to_sfen());
 
     let mut inner = state
         .inner
@@ -597,9 +638,12 @@ fn engine_search(
 ) -> Result<(), String> {
     stop_active_search(&state)?;
 
-    let search_params: SearchParamsInput = match serde_json::from_value(params) {
+    eprintln!("engine_search: received params = {}", params);
+
+    let search_params: SearchParamsInput = match serde_json::from_value(params.clone()) {
         Ok(value) => value,
         Err(err) => {
+            eprintln!("engine_search: deserialization error: {}", err);
             let message = format!("Invalid search params: {err}");
             emit_event(
                 &window,
@@ -610,6 +654,8 @@ fn engine_search(
             return Err(message);
         }
     };
+
+    eprintln!("engine_search: parsed params = {:?}", search_params);
 
     let (position, options, search) = {
         let mut inner = state
@@ -622,6 +668,8 @@ fn engine_search(
         let search = inner.search.take().unwrap_or_else(|| inner.create_search());
         (position, options, search)
     };
+
+    eprintln!("engine_search: position SFEN = {}", position.to_sfen());
 
     let limits = build_limits(&search_params, &options);
     // Emit a starter info so the UI can confirm subscription before search results arrive.
@@ -669,7 +717,80 @@ fn engine_search(
 
 #[tauri::command]
 fn engine_stop(state: State<EngineState>) -> Result<(), String> {
+    eprintln!("engine_stop: requested");
     stop_active_search(&state)
+}
+
+#[tauri::command]
+fn engine_legal_moves(sfen: String, moves: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let position = parse_position(&sfen, moves)?;
+    let mut list = MoveList::new();
+    generate_legal(&position, &mut list);
+    let usi_moves = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
+    Ok(usi_moves)
+}
+
+fn get_initial_board_impl() -> Result<BoardStateJson, String> {
+    Ok(Position::initial_board_json())
+}
+
+fn parse_sfen_to_board_impl(sfen: String) -> Result<BoardStateJson, String> {
+    Position::parse_sfen_to_json(&sfen)
+}
+
+fn board_to_sfen_impl(board: BoardStateJson) -> Result<String, String> {
+    let pos = Position::from_board_state_json(&board)?;
+    Ok(pos.to_sfen())
+}
+
+fn engine_replay_moves_strict_impl(
+    sfen: String,
+    moves: Vec<String>,
+) -> Result<ReplayResultJson, String> {
+    Position::replay_moves_strict(&sfen, &moves)
+}
+
+#[tauri::command]
+fn get_initial_board() -> Result<BoardStateJson, String> {
+    get_initial_board_impl()
+}
+
+#[tauri::command]
+fn parse_sfen_to_board(sfen: String) -> Result<BoardStateJson, String> {
+    parse_sfen_to_board_impl(sfen)
+}
+
+#[tauri::command]
+fn board_to_sfen(board: BoardStateJson) -> Result<String, String> {
+    board_to_sfen_impl(board)
+}
+
+#[tauri::command]
+fn engine_replay_moves_strict(
+    sfen: String,
+    moves: Vec<String>,
+) -> Result<ReplayResultJson, String> {
+    engine_replay_moves_strict_impl(sfen, moves)
+}
+
+// テスト用にコマンド実装を公開
+pub fn get_initial_board_for_test() -> Result<BoardStateJson, String> {
+    get_initial_board_impl()
+}
+
+pub fn parse_sfen_to_board_for_test(sfen: String) -> Result<BoardStateJson, String> {
+    parse_sfen_to_board_impl(sfen)
+}
+
+pub fn board_to_sfen_for_test(board: BoardStateJson) -> Result<String, String> {
+    board_to_sfen_impl(board)
+}
+
+pub fn engine_replay_moves_strict_for_test(
+    sfen: String,
+    moves: Vec<String>,
+) -> Result<ReplayResultJson, String> {
+    engine_replay_moves_strict_impl(sfen, moves)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -682,7 +803,12 @@ pub fn run() {
             engine_position,
             engine_search,
             engine_stop,
-            engine_option
+            engine_option,
+            engine_legal_moves,
+            get_initial_board,
+            parse_sfen_to_board,
+            board_to_sfen,
+            engine_replay_moves_strict
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

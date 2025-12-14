@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 engine-core = { path = "../engine-core" }
 wasm-bindgen = { version = "0.2.106", features = ["serde-serialize"] }
 js-sys = "0.3.83"
+serde-wasm-bindgen = "0.6"
 serde.workspace = true
 serde_json.workspace = true
 

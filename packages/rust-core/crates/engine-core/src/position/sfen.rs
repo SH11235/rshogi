@@ -296,7 +296,7 @@ impl Position {
     }
 
     /// ハッシュ値を計算
-    fn compute_hash(&mut self) {
+    pub(crate) fn compute_hash(&mut self) {
         let mut board_key = 0u64;
         let mut hand_key = 0u64;
         let mut pawn_key = zobrist_no_pawns();
