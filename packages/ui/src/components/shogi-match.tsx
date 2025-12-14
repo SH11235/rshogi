@@ -753,9 +753,8 @@ export function ShogiMatch({
                 (["sente", "gote"] as Player[]).map((side) => disposeEngineForSide(side)),
             ).catch(() => undefined);
         };
-        // disposeEngineForSide は安定化済み。アンマウント時のみ実行したいので依存配列は空。
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+        // disposeEngineForSide は安定化済みなので、依存配列に含めても再実行されない。
+    }, [disposeEngineForSide]);
 
     useEffect(() => {
         if (!clocks.ticking) return;
