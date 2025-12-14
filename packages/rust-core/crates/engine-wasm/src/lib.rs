@@ -508,7 +508,6 @@ pub fn search(params: Option<JsValue>) -> Result<(), JsValue> {
             }
             if let Some(byo) = lim.byoyomi_ms {
                 limits.byoyomi = [byo, byo];
-                limits.time = [byo, byo];
             }
             if let Some(mt) = lim.movetime_ms {
                 limits.movetime = mt;
