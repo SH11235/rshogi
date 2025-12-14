@@ -13,16 +13,22 @@ import initWasm, {
 
 type WasmModuleSource = WebAssembly.Module | ArrayBuffer | Uint8Array | string;
 
-type InitCommand = { type: "init"; opts?: EngineInitOptions; wasmModule?: WasmModuleSource };
+type CommandBase = { requestId?: string };
+
+type InitCommand = CommandBase & {
+    type: "init";
+    opts?: EngineInitOptions;
+    wasmModule?: WasmModuleSource;
+};
 
 type WorkerCommand =
     | InitCommand
-    | { type: "loadPosition"; sfen: string; moves?: string[] }
-    | { type: "applyMoves"; moves: string[] }
-    | { type: "search"; params: SearchParams }
-    | { type: "stop" }
-    | { type: "dispose" }
-    | { type: "setOption"; name: string; value: string | number | boolean };
+    | (CommandBase & { type: "loadPosition"; sfen: string; moves?: string[] })
+    | (CommandBase & { type: "applyMoves"; moves: string[] })
+    | (CommandBase & { type: "search"; params: SearchParams })
+    | (CommandBase & { type: "stop" })
+    | (CommandBase & { type: "dispose" })
+    | (CommandBase & { type: "setOption"; name: string; value: string | number | boolean });
 
 type ModelCache = { uri: string; bytes: Uint8Array };
 
@@ -46,6 +52,17 @@ const pendingInfoByPv = new Map<number, EngineEvent>();
 let pendingEvents: EngineEvent[] = [];
 
 const getNowMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+type AckMessage = { type: "ack"; requestId: string; error?: string };
+
+const postAck = (requestId: string | undefined, error?: unknown) => {
+    if (!requestId) return;
+    const message: AckMessage = { type: "ack", requestId };
+    if (error) {
+        message.error = String(error);
+    }
+    ctx.postMessage(message);
+};
 
 const flushEvents = () => {
     const batch: EngineEvent[] = [];
@@ -128,47 +145,67 @@ async function ensureEngineReady() {
     }
 }
 
-ctx.onmessage = async (msg: { data: WorkerCommand }) => {
-    const command = msg.data;
+let commandQueue: Promise<void> = Promise.resolve();
+
+async function handleCommand(command: WorkerCommand) {
+    const requestId = command.requestId;
 
     try {
         switch (command.type) {
             case "init":
                 lastInit = command;
                 await applyInit(command);
+                postAck(requestId);
                 break;
             case "loadPosition":
                 await ensureEngineReady();
                 await loadPosition(command.sfen, command.moves ?? undefined);
+                postAck(requestId);
                 break;
             case "applyMoves":
                 await ensureEngineReady();
                 await applyMoves(command.moves);
+                postAck(requestId);
                 break;
             case "search":
                 await ensureEngineReady();
                 lastInfoPostedAt = Number.NEGATIVE_INFINITY;
+                postAck(requestId);
                 await runSearch(command.params ?? undefined);
                 break;
             case "setOption":
                 await ensureEngineReady();
                 await setOption(command.name, command.value);
+                postAck(requestId);
                 break;
             case "stop":
                 if (engineInitialized) {
                     stopEngine();
                 }
+                postAck(requestId);
                 break;
             case "dispose":
                 if (engineInitialized) {
                     disposeEngine();
                     engineInitialized = false;
                 }
+                postAck(requestId);
                 break;
             default:
+                postAck(requestId);
                 break;
         }
     } catch (error) {
+        postAck(requestId, error);
         postEvent({ type: "error", message: String(error) });
     }
+}
+
+ctx.onmessage = (msg: { data: WorkerCommand }) => {
+    const command = msg.data;
+    commandQueue = commandQueue
+        .then(() => handleCommand(command))
+        .catch((error) => {
+            postEvent({ type: "error", message: String(error) });
+        });
 };

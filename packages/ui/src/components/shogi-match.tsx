@@ -473,13 +473,42 @@ export function ShogiMatch({
         if (isEditMode) {
             await finalizeEditedPosition();
         }
+        const turn = position.turn;
+
+        if (isEngineTurn(turn)) {
+            try {
+                setMessage("エンジン初期化中…（初回は数秒かかる場合があります）");
+                const engineSides = (["sente", "gote"] as Player[]).filter((side) =>
+                    isEngineTurn(side),
+                );
+                if (engineSides.length >= 2) {
+                    await Promise.all(engineSides.map((side) => ensureEngineReady(side)));
+                } else {
+                    await ensureEngineReady(turn);
+                }
+                setMessage(null);
+            } catch (error) {
+                setEngineStatus((prev) => ({ ...prev, [turn]: "error" }));
+                setErrorLogs((prev) =>
+                    [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs),
+                );
+                setMessage(`エンジン初期化に失敗しました: ${String(error)}`);
+                return;
+            }
+        } else {
+            for (const side of ["sente", "gote"] as Player[]) {
+                if (!isEngineTurn(side)) continue;
+                ensureEngineReady(side).catch(() => undefined);
+            }
+        }
+
         setIsMatchRunning(true);
-        setClocks((prev) => ({ ...prev, ticking: position.turn, lastUpdatedAt: Date.now() }));
-        if (!isEngineTurn(position.turn)) return;
+        setClocks((prev) => ({ ...prev, ticking: turn, lastUpdatedAt: Date.now() }));
+        if (!isEngineTurn(turn)) return;
         try {
-            await startEngineTurn(position.turn);
+            await startEngineTurn(turn);
         } catch (error) {
-            setEngineStatus((prev) => ({ ...prev, [position.turn]: "error" }));
+            setEngineStatus((prev) => ({ ...prev, [turn]: "error" }));
             setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
         }
     };
@@ -757,7 +786,7 @@ export function ShogiMatch({
     }, [disposeEngineForSide]);
 
     useEffect(() => {
-        if (!clocks.ticking) return;
+        if (!isMatchRunning || !clocks.ticking) return;
         const timer = setInterval(() => {
             let expiredSide: Player | null = null;
             setClocks((prev) => {
@@ -1105,7 +1134,7 @@ export function ShogiMatch({
             setLastMove(deriveLastMove(result.applied.at(-1)));
             setSelection(null);
             setMessage(result.error ?? null);
-            resetClocks(true);
+            resetClocks(false);
             lastEngineRequestPly.current = { sente: null, gote: null };
             legalCacheRef.current = null;
             setPositionReady(true);
