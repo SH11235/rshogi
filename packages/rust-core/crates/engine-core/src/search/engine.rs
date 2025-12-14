@@ -2,9 +2,9 @@
 //!
 //! USIプロトコルから呼び出すためのハイレベルインターフェース。
 
+use crate::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::position::Position;
 use crate::tt::TranspositionTable;
@@ -541,8 +541,21 @@ impl Search {
 
         if worker.root_moves.is_empty() {
             worker.best_move = Move::NONE;
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "search_with_callback: root_moves is empty (search_moves_len={}, side_to_move={:?})",
+                worker.limits.search_moves.len(),
+                pos.side_to_move()
+            );
             return 0;
         }
+
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "search_with_callback: root_moves_len={} first_move={}",
+            worker.root_moves.len(),
+            worker.root_moves.get(0).map(|rm| rm.mv().to_usi()).unwrap_or_default()
+        );
 
         // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
         if worker.root_moves.len() == 1 {
@@ -563,6 +576,17 @@ impl Search {
 
         // 反復深化
         for depth in 1..=max_depth {
+            #[cfg(debug_assertions)]
+            if depth <= 2 {
+                eprintln!(
+                    "search_with_callback: depth={} nodes={} search_end={} max_time={} stop_requested={}",
+                    depth,
+                    worker.nodes,
+                    worker.time_manager.search_end(),
+                    worker.time_manager.maximum(),
+                    worker.time_manager.stop_requested()
+                );
+            }
             // 前回のiterationで深さを伸ばせなかった場合のカウンター（YO準拠）
             if depth > 1 && !self.increase_depth {
                 self.search_again_counter += 1;
@@ -572,9 +596,15 @@ impl Search {
                 break;
             }
 
+            // ponderhitを検出した場合、時間再計算のみ行い探索は継続
+            if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
+                worker.time_manager.on_ponderhit();
+            }
+
             // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
             // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
-            if depth > 1 && !worker.limits.ponder && worker.time_manager.should_stop(depth) {
+            let is_pondering = worker.time_manager.is_pondering();
+            if depth > 1 && !is_pondering && worker.time_manager.should_stop(depth) {
                 break;
             }
 
@@ -597,11 +627,6 @@ impl Search {
                     worker.time_manager.request_stop();
                     break;
                 }
-            }
-
-            // ponderhitを検出した場合、時間再計算のみ行い探索は継続
-            if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
-                worker.time_manager.on_ponderhit();
             }
 
             worker.root_depth = depth;
@@ -673,7 +698,7 @@ impl Search {
                 let elapsed = start.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
                 let nps = if time_ms > 0 {
-                    worker.nodes * 1000 / time_ms
+                    worker.nodes.saturating_mul(1000) / time_ms
                 } else {
                     0
                 };
@@ -738,18 +763,17 @@ impl Search {
                     } else {
                         total_time
                     };
-                    let elapsed_time = worker.time_manager.elapsed() as f64;
+                    let elapsed_time = worker.time_manager.elapsed_from_ponderhit() as f64;
                     worker.time_manager.apply_iteration_timing(
                         worker.time_manager.elapsed(),
                         total_time,
                         nodes_effort,
-                        worker.limits.ponder,
                         worker.completed_depth,
                     );
 
                     // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
                     self.increase_depth =
-                        worker.limits.ponder || elapsed_time <= total_time * 0.5138;
+                        worker.time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
                 }
                 // tot_best_move_changes は decay 後の値を保持（時間管理を使わない場合も持ち回る）
                 self.tot_best_move_changes = tot_best_move_changes;

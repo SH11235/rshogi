@@ -2,8 +2,8 @@
 //!
 //! USI `go` コマンドのパラメータを表現する。
 
+use crate::time::Instant;
 use crate::types::Color;
-use std::time::Instant;
 
 // =============================================================================
 // TimePoint
@@ -65,7 +65,7 @@ pub struct LimitsType {
     pub search_moves: Vec<crate::types::Move>,
 
     /// 探索開始時刻
-    pub start_time: Option<Instant>,
+    pub(crate) start_time: Option<Instant>,
 }
 
 impl Default for LimitsType {

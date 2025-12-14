@@ -4,12 +4,12 @@
 //! 思考に費やす最適な時間を計算する。
 
 use super::{LimitsType, TimeOptions, TimePoint};
+use crate::time::Instant;
 use crate::types::Color;
 use log::debug;
 use rand::Rng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 // =============================================================================
 // 定数
@@ -75,7 +75,7 @@ pub fn calculate_move_horizon(time_forfeit: bool, ply: i32) -> i32 {
 /// * `thread_count` - スレッド数（現在は1固定、マルチスレッド対応時に拡張）
 pub fn calculate_best_move_instability(tot_best_move_changes: f64, thread_count: usize) -> f64 {
     BEST_MOVE_INSTABILITY_BASE
-        + BEST_MOVE_INSTABILITY_FACTOR * tot_best_move_changes / thread_count as f64
+        + BEST_MOVE_INSTABILITY_FACTOR * tot_best_move_changes / thread_count.max(1) as f64
 }
 
 /// fallingEvalを計算（YaneuraOu準拠）
@@ -170,6 +170,12 @@ pub struct TimeManagement {
     /// Ponder中に時間を使い切ったフラグ（stopOnPonderhit相当）
     stop_on_ponderhit: bool,
 
+    /// 動的な ponder 状態
+    ///
+    /// - `go ponder` で開始した場合は `true`
+    /// - `ponderhit` を受信したら `false` に落として通常探索へ移行する
+    is_pondering: bool,
+
     /// 直近の停止閾値（min(total_time, maximum_time)を保持）
     last_stop_threshold: Option<TimePoint>,
 }
@@ -198,6 +204,7 @@ impl TimeManagement {
             usi_ponder: false,
             stochastic_ponder: false,
             stop_on_ponderhit: false,
+            is_pondering: false,
             last_stop_threshold: None,
         }
     }
@@ -215,6 +222,11 @@ impl TimeManagement {
     /// 前回の time_reduction をセット（YO準拠の持ち回り用）
     pub fn set_previous_time_reduction(&mut self, value: f64) {
         self.previous_time_reduction = value;
+    }
+
+    #[cfg(test)]
+    pub fn previous_time_reduction_mut(&mut self) -> &mut f64 {
+        &mut self.previous_time_reduction
     }
 
     /// 現在の time_reduction を取得
@@ -242,7 +254,7 @@ impl TimeManagement {
         let mut t = ((t0 + 999) / 1000 * 1000).max(self.minimum_thinking_time);
 
         // network_delayの値を引く
-        t -= self.network_delay;
+        t = t.saturating_sub(self.network_delay);
 
         // 元の値より小さいなら、もう1秒使う
         if t < t0 {
@@ -250,7 +262,8 @@ impl TimeManagement {
         }
 
         // remain_timeを上回ってはならない
-        t.min(self.remain_time)
+        t = t.min(self.remain_time);
+        t.max(0)
     }
 
     /// 今回の思考時間を決定する
@@ -265,9 +278,9 @@ impl TimeManagement {
         self.ponderhit_time = self.start_time;
         self.search_end = 0;
         self.is_final_push = false;
+        self.is_pondering = limits.ponder;
         self.ponderhit.store(false, Ordering::Relaxed);
         self.single_move_limit = false;
-        self.previous_time_reduction = 0.85;
         self.stop_on_ponderhit = false;
         self.last_stop_threshold = None;
 
@@ -315,6 +328,8 @@ impl TimeManagement {
             self.minimum_time = r;
             self.optimum_time = r;
             self.maximum_time = r;
+            self.search_end = r;
+            self.last_stop_threshold = Some(r);
             return;
         }
 
@@ -328,11 +343,7 @@ impl TimeManagement {
         let time_forfeit = increment == 0 && byoyomi == 0;
 
         // move_horizon の近似 (MoveHorizon = 160 をベースに補正)
-        let move_horizon = if time_forfeit {
-            160 + 40 - ply.min(40)
-        } else {
-            160 + 20 - ply.min(80)
-        };
+        let move_horizon = calculate_move_horizon(time_forfeit, ply);
 
         // 残り手数 (MTG)
         let mtg = (max_moves - ply + 2).min(move_horizon) / 2;
@@ -514,14 +525,16 @@ impl TimeManagement {
         elapsed: TimePoint,
         total_time: f64,
         nodes_effort: f64,
-        ponder: bool,
         completed_depth: i32,
     ) {
+        let is_pondering = self.is_pondering;
+        let effective_elapsed = self.effective_elapsed(elapsed);
+
         // YaneuraOu: completedDepth>=10 && nodesEffort>=97056 && elapsed > totalTime*0.6540 なら search_end 設定
         if completed_depth >= 10
             && nodes_effort >= 97056.0
-            && (elapsed as f64) > total_time * 0.6540
-            && !ponder
+            && (effective_elapsed as f64) > total_time * 0.6540
+            && !is_pondering
         {
             self.set_search_end(elapsed);
         }
@@ -535,8 +548,8 @@ impl TimeManagement {
         self.last_stop_threshold = Some(stop_threshold);
 
         // total_time超過時の処理
-        if (elapsed as f64) > total_time.min(self.maximum_time as f64) {
-            if ponder {
+        if (effective_elapsed as f64) > total_time.min(self.maximum_time as f64) {
+            if is_pondering {
                 // ponder中は stop_on_ponderhit を立て、次のチェックで秒切り上げ終了時刻を設定
                 self.stop_on_ponderhit = true;
             } else {
@@ -547,7 +560,7 @@ impl TimeManagement {
         debug!(
             target: "engine_core::search",
             "apply_iteration_timing: elapsed={}ms total_time={:.3} max_time={} min_time={} stop_threshold={:?} search_end={} nodes_effort={:.1} depth={} ponder={} final_push={} single_move_limit={} stop_on_ponderhit={}",
-            elapsed,
+            effective_elapsed,
             total_time,
             self.maximum_time,
             self.minimum_time,
@@ -555,7 +568,7 @@ impl TimeManagement {
             self.search_end,
             nodes_effort,
             completed_depth,
-            ponder,
+            is_pondering,
             self.is_final_push,
             self.single_move_limit,
             self.stop_on_ponderhit,
@@ -598,6 +611,12 @@ impl TimeManagement {
     #[inline]
     pub fn stop_on_ponderhit(&self) -> bool {
         self.stop_on_ponderhit
+    }
+
+    /// 現在 ponder 中か（動的状態）
+    #[inline]
+    pub fn is_pondering(&self) -> bool {
+        self.is_pondering
     }
 
     /// stop_on_ponderhit フラグをクリア（YOのfail-low時相当）
@@ -644,12 +663,16 @@ impl TimeManagement {
 
     /// should_stop/should_stop_immediately の共通判定処理
     fn should_stop_internal(&mut self, elapsed: TimePoint) -> bool {
+        // ponderhit までの経過時間を差し引いた「実効経過時間」
+        let effective_elapsed = self.effective_elapsed(elapsed);
+
         // 外部からの停止要求
         if self.stop.load(Ordering::Relaxed) {
             debug!(
                 target: "engine_core::search",
-                "stop check: external stop elapsed={} search_end={} last_stop_threshold={:?} max_time={}",
+                "stop check: external stop elapsed={} effective_elapsed={} search_end={} last_stop_threshold={:?} max_time={}",
                 elapsed,
+                effective_elapsed,
                 self.search_end,
                 self.last_stop_threshold,
                 self.maximum_time
@@ -657,29 +680,37 @@ impl TimeManagement {
             return true;
         }
 
-        // stop_on_ponderhitが立っていて search_end 未設定ならここで設定する
+        // ponder中は時間による停止判定を行わない（USI/UCI仕様、YO準拠）
+        if self.is_pondering {
+            return false;
+        }
+
+        // stop_on_ponderhitが立っていて search_end 未設定ならここで設定する（YO準拠）
         if self.search_end == 0 && self.stop_on_ponderhit {
             self.set_search_end(elapsed);
         }
 
-        // search_endが設定されていればそれで判定
-        if self.search_end > 0 && elapsed >= self.search_end {
-            debug!(
-                target: "engine_core::search",
-                "stop check: search_end reached elapsed={} search_end={}",
-                elapsed,
-                self.search_end
-            );
-            return true;
+        // search_end が設定されている場合は、それを最優先に使う（YO準拠）
+        if self.search_end > 0 {
+            if elapsed >= self.search_end {
+                debug!(
+                    target: "engine_core::search",
+                    "stop check: search_end reached elapsed={} search_end={}",
+                    elapsed,
+                    self.search_end
+                );
+                return true;
+            }
+            return false;
         }
 
         // total_time由来の直近閾値
         if let Some(threshold) = self.last_stop_threshold {
-            if elapsed >= threshold {
+            if effective_elapsed >= threshold {
                 debug!(
                     target: "engine_core::search",
-                    "stop check: last_stop_threshold reached elapsed={} threshold={}",
-                    elapsed,
+                    "stop check: last_stop_threshold reached effective_elapsed={} threshold={}",
+                    effective_elapsed,
                     threshold
                 );
                 return true;
@@ -687,11 +718,11 @@ impl TimeManagement {
         }
 
         // 最大時間を超えた（セーフティ）
-        if elapsed >= self.maximum_time {
+        if effective_elapsed >= self.maximum_time {
             debug!(
                 target: "engine_core::search",
-                "stop check: maximum_time reached elapsed={} max_time={}",
-                elapsed,
+                "stop check: maximum_time reached effective_elapsed={} max_time={}",
+                effective_elapsed,
                 self.maximum_time
             );
             return true;
@@ -705,27 +736,41 @@ impl TimeManagement {
         self.ponderhit_time = Instant::now();
     }
 
-    /// ponderhitを検出した際に、現在時刻からminimum分を確保するよう終了時刻を再設定
-    ///
-    /// YaneuraOuの `TimeManagement::set_search_end()` を簡略化したもの。
-    /// e : go開始からの経過時間（現在のelapsed）
-    /// t1: ponder開始→ponderhitまでの消費時間を差し引いた思考時間
-    /// t2: 秒読み中なら minimum、それ以外なら minimum から ponderhit までを差し引いたもの
-    /// search_end: round_up(max(t1, t2)) + ponderhitまでの経過時間
-    pub fn on_ponderhit(&mut self) {
-        self.set_ponderhit();
-        let elapsed = self.elapsed();
-        let from_ponderhit = self.elapsed_from_ponderhit();
-
-        let t1 = elapsed.saturating_sub(from_ponderhit);
-        let t2 = if self.is_final_push {
-            self.minimum_time
+    /// ponderhit_time までのオフセット（start_time 基準の経過ミリ秒）を取得
+    fn ponderhit_offset(&self) -> TimePoint {
+        if self.ponderhit_time >= self.start_time {
+            self.ponderhit_time.duration_since(self.start_time).as_millis() as TimePoint
         } else {
-            self.minimum_time.saturating_sub(from_ponderhit)
-        };
+            0
+        }
+    }
 
-        let candidate = t1.max(t2);
-        self.search_end = self.round_up(candidate).saturating_add(from_ponderhit);
+    /// start_time 基準の経過時間から、ponderhit 前の消費時間を差し引いた実効経過時間を計算
+    fn effective_elapsed(&self, elapsed_raw: TimePoint) -> TimePoint {
+        elapsed_raw.saturating_sub(self.ponderhit_offset()).max(0)
+    }
+
+    /// ponderhitを検出した際の処理（YO準拠）
+    ///
+    /// - `ponderhit_time` を更新し、以後の `set_search_end()` の秒境界切り上げ計算に反映する。
+    /// - ponder状態を解除して通常探索へ移行する（`is_pondering=false`）。
+    /// - ponder中に時間を使い切っていた場合（`stop_on_ponderhit=true`）のみ、停止時刻を確定させる。
+    pub fn on_ponderhit(&mut self) {
+        // すでに通常探索なら時間基準を動かさない
+        if !self.is_pondering {
+            self.ponderhit.store(false, Ordering::Relaxed);
+            return;
+        }
+
+        self.set_ponderhit();
+        self.is_pondering = false;
+        self.last_stop_threshold = None;
+
+        // ponder中に時間を使い切っていた場合のみ、終了時刻を確定させる（YOの stopOnPonderhit 相当）
+        if self.search_end == 0 && self.stop_on_ponderhit {
+            let elapsed = self.elapsed();
+            self.set_search_end(elapsed);
+        }
         self.ponderhit.store(false, Ordering::Relaxed);
     }
 
@@ -742,13 +787,8 @@ impl TimeManagement {
     /// - ponderhit時間を考慮した調整
     pub fn set_search_end(&mut self, elapsed_ms: TimePoint) {
         // start_time と ponderhit_time の差分（通常は0、ponder時のみ非0）
-        // ponderhit_time は init() で start_time に設定されるため、
-        // 通常の探索では duration = 0
-        let duration_start_to_ponderhit = if self.ponderhit_time >= self.start_time {
-            self.ponderhit_time.duration_since(self.start_time).as_millis() as TimePoint
-        } else {
-            0
-        };
+        // ponderhit_time は init() で start_time に設定されるため、通常の探索では duration = 0
+        let duration_start_to_ponderhit = self.ponderhit_offset();
 
         // YaneuraOuのロジックを完全再現
         // TimePoint t1 = e + startTime - ponderhitTime;
@@ -799,6 +839,7 @@ impl Default for TimeManagement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn create_time_manager() -> TimeManagement {
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
@@ -816,6 +857,7 @@ mod tests {
         assert_eq!(tm.minimum(), 2500);
         assert_eq!(tm.optimum(), 2500);
         assert_eq!(tm.maximum(), 2500);
+        assert_eq!(tm.search_end(), 2500, "rtime は固定時間として search_end も設定されるべき");
     }
 
     #[test]
@@ -879,6 +921,23 @@ mod tests {
     }
 
     #[test]
+    fn test_previous_time_reduction_is_preserved_through_init() {
+        let mut tm = create_time_manager();
+        tm.set_previous_time_reduction(0.42);
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60_000;
+        limits.set_start_time();
+
+        tm.init(&limits, Color::Black, 10, DEFAULT_MAX_MOVES_TO_DRAW);
+
+        assert!(
+            (tm.previous_time_reduction() - 0.42).abs() < 1e-9,
+            "init() で previous_time_reduction がリセットされないことを保証する"
+        );
+    }
+
+    #[test]
     fn test_apply_iteration_timing_sets_search_end_on_effort() {
         let mut tm = create_time_manager();
         tm.optimum_time = 1000;
@@ -887,7 +946,7 @@ mod tests {
         tm.minimum_time = 500;
         tm.search_end = 0;
 
-        tm.apply_iteration_timing(1200, 1000.0, 98000.0, false, 12);
+        tm.apply_iteration_timing(1200, 1000.0, 98000.0, 12);
 
         assert!(tm.search_end() > 0, "search_end should be set when nodes_effort threshold hit");
     }
@@ -998,12 +1057,14 @@ mod tests {
         tm.maximum_time = 5000;
         tm.optimum_time = 1000;
         tm.last_stop_threshold = Some(1500);
-        tm.start_time = Instant::now() - std::time::Duration::from_millis(1600);
+        tm.start_time = Instant::now() - Duration::from_millis(1600);
+        tm.ponderhit_time = tm.start_time;
         assert!(tm.should_stop(5), "elapsed beyond last_stop_threshold should stop");
 
         tm.search_end = 0;
         tm.last_stop_threshold = Some(2000);
-        tm.start_time = Instant::now() - std::time::Duration::from_millis(500);
+        tm.start_time = Instant::now() - Duration::from_millis(500);
+        tm.ponderhit_time = tm.start_time;
         assert!(!tm.should_stop(5), "elapsed below threshold should continue");
     }
 
@@ -1039,25 +1100,70 @@ mod tests {
     }
 
     #[test]
-    fn test_time_manager_on_ponderhit_sets_search_end() {
+    fn test_time_manager_on_ponderhit_switches_off_ponder_without_forcing_stop() {
         let stop = Arc::new(AtomicBool::new(false));
         let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
 
         let mut limits = LimitsType::new();
         limits.time[Color::Black.index()] = 5000; // 5秒
+        limits.ponder = true;
         limits.set_start_time();
 
         tm.init(&limits, Color::Black, 0, 256);
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        tm.last_stop_threshold = Some(1);
         tm.on_ponderhit();
 
-        // round_up(minimum) は network_delay を考慮して切り上げるので、search_end はその値以上になる
+        assert!(!tm.is_pondering(), "ponderhit後は通常探索へ移行するべき");
+        assert_eq!(tm.search_end(), 0, "stop_on_ponderhit が無ければ search_end は確定しない");
+        assert!(tm.last_stop_threshold.is_none(), "ponderhitで停止閾値をリセットする");
+    }
+
+    #[test]
+    fn test_ponderhit_does_not_consume_budget_from_long_ponder() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60000; // 1分
+        limits.ponder = true;
+        limits.start_time = Some(Instant::now() - Duration::from_millis(20_000));
+
+        tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+
+        // ponderhitを受信して通常探索へ移行
+        tm.on_ponderhit();
+        assert!(!tm.is_pondering(), "ponderhit後は通常探索に切り替わる");
+
+        let raw_elapsed = tm.elapsed();
+        tm.apply_iteration_timing(raw_elapsed, 5000.0, 0.0, 12);
+
+        assert_eq!(tm.search_end(), 0, "stop_on_ponderhitが無ければ search_end は確定しない");
         assert!(
-            tm.search_end >= tm.round_up(tm.minimum()),
-            "search_end {} should be >= rounded minimum {}",
-            tm.search_end,
-            tm.round_up(tm.minimum())
+            !tm.should_stop_immediately(),
+            "ponderhit後は ponder 前の経過時間に引きずられず継続できるべき"
         );
+    }
+
+    #[test]
+    fn test_on_ponderhit_ignored_when_not_pondering() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
+
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = 60000;
+        limits.ponder = false;
+        limits.start_time = Some(Instant::now() - Duration::from_millis(1500));
+
+        tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+        let before_elapsed = tm.elapsed_from_ponderhit();
+
+        tm.on_ponderhit(); // 非ponder時の不正通知を無害化
+
+        let after_elapsed = tm.elapsed_from_ponderhit();
+        assert!(after_elapsed >= before_elapsed, "非ponder時は時間基準をリセットしない");
+        assert_eq!(tm.search_end(), 0, "search_endを確定させない");
+        assert!(!tm.stop_on_ponderhit(), "stop_on_ponderhitも変更しない");
+        assert!(!tm.is_pondering(), "状態は通常探索のまま");
     }
 
     #[test]
@@ -1065,9 +1171,11 @@ mod tests {
         let mut tm = create_time_manager();
         let mut limits = LimitsType::new();
         limits.byoyomi[Color::Black.index()] = 4000;
+        limits.ponder = true;
         limits.set_start_time();
 
         tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+        tm.stop_on_ponderhit = true;
         tm.on_ponderhit();
 
         assert!(
@@ -1088,11 +1196,11 @@ mod tests {
         tm.search_end = 0;
 
         // depth未満では設定されない（stop_threshold 未満の経過時間で確認）
-        tm.apply_iteration_timing(900, 1000.0, 98000.0, false, 8);
+        tm.apply_iteration_timing(900, 1000.0, 98000.0, 8);
         assert_eq!(tm.search_end(), 0);
 
         // depth満たすと設定される
-        tm.apply_iteration_timing(1200, 1000.0, 98000.0, false, 12);
+        tm.apply_iteration_timing(1200, 1000.0, 98000.0, 12);
         assert!(tm.search_end() >= tm.round_up(tm.minimum()));
     }
 
