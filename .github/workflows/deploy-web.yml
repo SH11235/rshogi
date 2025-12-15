@@ -87,7 +87,7 @@ jobs:
           echo "Resolved node: $NODE_VERSION"
 
       - name: Set up Node
-        uses: actions/setup-node@v4  # v6 は存在しないため v4 を使用（他のワークフローと統一）
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ steps.versions.outputs.node }}
           cache: 'pnpm'

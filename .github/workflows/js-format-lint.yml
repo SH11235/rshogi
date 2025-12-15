@@ -43,7 +43,7 @@ jobs:
         run: |
           echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ steps.versions.outputs.node }}
           cache: pnpm
@@ -62,7 +62,7 @@ jobs:
         run: |
           echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ steps.versions.outputs.node }}
           cache: pnpm
