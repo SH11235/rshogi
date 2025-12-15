@@ -70,13 +70,15 @@ export function EditModePanel({
                             padding: "14px 16px",
                             background:
                                 "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
+                            borderTop: "none",
+                            borderLeft: "none",
+                            borderRight: "none",
                             borderBottom: isOpen ? "1px solid hsl(var(--wafuu-border))" : "none",
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "space-between",
                             cursor: "pointer",
                             transition: "all 0.2s ease",
-                            border: "none",
                         }}
                     >
                         <span
