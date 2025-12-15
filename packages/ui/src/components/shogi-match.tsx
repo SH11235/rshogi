@@ -303,6 +303,7 @@ export function ShogiMatch({
     const movesRef = useRef<string[]>(moves);
     const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
     const matchEndedRef = useRef(false);
+    const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
 
     useEffect(() => {
@@ -475,6 +476,13 @@ export function ShogiMatch({
             // 対局開始時に編集モードを終了し、パネルを閉じる
             setIsEditMode(false);
             setIsEditPanelOpen(false);
+            // 盤面セクションにスクロール
+            setTimeout(() => {
+                boardSectionRef.current?.scrollIntoView({
+                    behavior: "smooth",
+                    block: "start",
+                });
+            }, 100);
         }
         const turn = position.turn;
 
@@ -1411,31 +1419,8 @@ export function ShogiMatch({
                     }}
                 >
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                        <div style={{ ...baseCard, padding: "12px" }}>
-                            <div
-                                style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "center",
-                                }}
-                            >
-                                <div style={{ fontWeight: 700 }}>盤面</div>
-                                <label
-                                    style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "6px",
-                                        fontSize: "13px",
-                                    }}
-                                >
-                                    <input
-                                        type="checkbox"
-                                        checked={wantPromote}
-                                        onChange={(e) => setWantPromote(e.target.checked)}
-                                    />
-                                    成りにする
-                                </label>
-                            </div>
+                        <div ref={boardSectionRef} style={{ ...baseCard, padding: "12px" }}>
+                            <div style={{ fontWeight: 700, marginBottom: "8px" }}>盤面</div>
                             <div
                                 style={{
                                     marginTop: "8px",
