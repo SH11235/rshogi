@@ -48,9 +48,9 @@ export interface UseEngineManagerProps {
     /** 開始局面のSFEN */
     startSfen: string;
     /** 棋譜の ref */
-    movesRef: React.MutableRefObject<string[]>;
+    movesRef: { current: string[] };
     /** 局面の ref */
-    positionRef: React.MutableRefObject<PositionState>;
+    positionRef: { current: PositionState };
     /** 対局実行中かどうか */
     isMatchRunning: boolean;
     /** 局面が準備完了しているか */
@@ -124,6 +124,13 @@ export function useEngineManager({
     const [eventLogs, setEventLogs] = useState<string[]>([]);
     const [errorLogs, setErrorLogs] = useState<string[]>([]);
 
+    const addErrorLog = useCallback(
+        (message: string) => {
+            setErrorLogs((prev) => [message, ...prev].slice(0, maxLogs));
+        },
+        [maxLogs],
+    );
+
     const engineStatesRef = useRef<Record<Player, EngineState>>({
         sente: { client: null, subscription: null, selectedId: null, ready: false },
         gote: { client: null, subscription: null, selectedId: null, ready: false },
@@ -135,6 +142,10 @@ export function useEngineManager({
     });
 
     const activeSearchRef = useRef<ActiveSearch | null>(null);
+    const initializingRef = useRef<Record<Player, boolean>>({
+        sente: false,
+        gote: false,
+    });
 
     const engineMap = useMemo(() => {
         const map = new Map<string, EngineOption>();
@@ -162,36 +173,57 @@ export function useEngineManager({
         [sides],
     );
 
-    const disposeEngineForSide = useCallback(async (side: Player) => {
-        const engineState = engineStatesRef.current[side];
-        const searchState = searchStatesRef.current[side];
+    const disposeEngineForSide = useCallback(
+        async (side: Player) => {
+            const engineState = engineStatesRef.current[side];
+            const searchState = searchStatesRef.current[side];
 
-        if (searchState.handle) {
-            await searchState.handle.cancel().catch(() => undefined);
-            searchState.handle = null;
-        }
-
-        if (engineState.subscription) {
-            engineState.subscription();
-            engineState.subscription = null;
-        }
-
-        if (engineState.client) {
-            await engineState.client.stop().catch(() => undefined);
-            if (typeof engineState.client.dispose === "function") {
-                await engineState.client.dispose().catch(() => undefined);
+            try {
+                if (searchState.handle) {
+                    await searchState.handle.cancel();
+                }
+            } catch (error) {
+                console.error(`Failed to cancel search for ${side}:`, error);
+                addErrorLog(`検索キャンセルに失敗 (${side}): ${String(error)}`);
+            } finally {
+                searchState.handle = null;
+                searchState.pending = false;
+                searchState.requestPly = null;
             }
-            engineState.client = null;
-        }
 
-        engineState.selectedId = null;
-        engineState.ready = false;
-        searchState.pending = false;
-        searchState.requestPly = null;
+            try {
+                if (engineState.subscription) {
+                    engineState.subscription();
+                }
+            } catch (error) {
+                console.error(`Failed to unsubscribe engine for ${side}:`, error);
+                addErrorLog(`サブスクリプション解除に失敗 (${side}): ${String(error)}`);
+            } finally {
+                engineState.subscription = null;
+            }
 
-        setEngineReady((prev) => ({ ...prev, [side]: false }));
-        setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-    }, []);
+            try {
+                if (engineState.client) {
+                    await engineState.client.stop();
+                    if (typeof engineState.client.dispose === "function") {
+                        await engineState.client.dispose();
+                    }
+                }
+            } catch (error) {
+                console.error(`Failed to dispose engine for ${side}:`, error);
+                addErrorLog(`エンジン破棄に失敗 (${side}): ${String(error)}`);
+            } finally {
+                engineState.client = null;
+            }
+
+            engineState.selectedId = null;
+            engineState.ready = false;
+
+            setEngineReady((prev) => ({ ...prev, [side]: false }));
+            setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+        },
+        [addErrorLog],
+    );
 
     const stopAllEngines = useCallback(async () => {
         await Promise.all(
@@ -206,18 +238,32 @@ export function useEngineManager({
                 validateTurn: false,
             });
             if (!result.ok) {
-                setErrorLogs((prev) =>
-                    [
-                        `engine move rejected (${trimmed || "empty"}): ${result.error ?? "unknown"}`,
-                        ...prev,
-                    ].slice(0, maxLogs),
+                addErrorLog(
+                    `engine move rejected (${trimmed || "empty"}): ${result.error ?? "unknown"}`,
                 );
                 return;
             }
             onMoveFromEngine(trimmed);
         },
-        [maxLogs, onMoveFromEngine, positionRef],
+        [addErrorLog, onMoveFromEngine],
     );
+
+    const specialBestmoveMessage = useCallback((token: string, side: Player): string | null => {
+        const sideLabel = side === "sente" ? "先手" : "後手";
+        const opponentLabel = side === "sente" ? "後手" : "先手";
+        const normalized = token.toLowerCase();
+
+        if (normalized === "win") {
+            return `対局終了: ${sideLabel}が勝利宣言しました（win）。`;
+        }
+        if (normalized === "resign") {
+            return `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`;
+        }
+        if (normalized === "none") {
+            return `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`;
+        }
+        return null;
+    }, []);
 
     const attachSubscription = useCallback(
         (side: Player, client: EngineClient, engineId: string) => {
@@ -243,44 +289,12 @@ export function useEngineManager({
 
                         const trimmed = event.move.trim();
                         const token = trimmed.toLowerCase();
-                        if (token === "resign" || token === "win" || token === "none") {
+                        const specialMessage = specialBestmoveMessage(token, side);
+                        if (specialMessage) {
                             activeSearchRef.current = null;
-                            const sideLabel = side === "sente" ? "先手" : "後手";
-                            const opponentLabel = side === "sente" ? "後手" : "先手";
-                            if (token === "win") {
-                                onMatchEnd(
-                                    `対局終了: ${sideLabel}が勝利宣言しました（win）。`,
-                                ).catch((err) => {
-                                    setErrorLogs((prev) =>
-                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                            0,
-                                            maxLogs,
-                                        ),
-                                    );
-                                });
-                            } else if (token === "resign") {
-                                onMatchEnd(
-                                    `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`,
-                                ).catch((err) => {
-                                    setErrorLogs((prev) =>
-                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                            0,
-                                            maxLogs,
-                                        ),
-                                    );
-                                });
-                            } else {
-                                onMatchEnd(
-                                    `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`,
-                                ).catch((err) => {
-                                    setErrorLogs((prev) =>
-                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                            0,
-                                            maxLogs,
-                                        ),
-                                    );
-                                });
-                            }
+                            onMatchEnd(specialMessage).catch((err) => {
+                                addErrorLog(`対局終了処理でエラー: ${String(err)}`);
+                            });
                             return;
                         }
                         applyMoveFromEngine(trimmed);
@@ -294,13 +308,13 @@ export function useEngineManager({
                     searchState.handle = null;
                     searchState.pending = false;
 
-                    setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
+                    addErrorLog(event.message);
                 }
             });
 
             engineState.subscription = unsub;
         },
-        [applyMoveFromEngine, maxLogs, movesRef, onMatchEnd],
+        [addErrorLog, applyMoveFromEngine, movesRef, onMatchEnd, specialBestmoveMessage],
     );
 
     const ensureEngineReady = useCallback(
@@ -312,34 +326,43 @@ export function useEngineManager({
             const opt = engineMap.get(selectedId);
             if (!opt) return null;
 
+            if (initializingRef.current[side]) {
+                return null;
+            }
+            initializingRef.current[side] = true;
+
             const engineState = engineStatesRef.current[side];
 
-            // エンジンが変更された場合は既存のエンジンを破棄
-            if (engineState.selectedId && engineState.selectedId !== opt.id) {
-                await disposeEngineForSide(side);
+            try {
+                // エンジンが変更された場合は既存のエンジンを破棄
+                if (engineState.selectedId && engineState.selectedId !== opt.id) {
+                    await disposeEngineForSide(side);
+                }
+
+                // エンジンクライアントの取得または作成
+                let client = engineState.client;
+                if (!client) {
+                    client = opt.createClient();
+                    engineState.client = client;
+                    engineState.selectedId = opt.id;
+                    engineState.ready = false;
+                }
+
+                // サブスクリプションのアタッチ
+                attachSubscription(side, client, opt.id);
+
+                // エンジンの初期化と局面読み込み
+                if (!engineState.ready) {
+                    await client.init();
+                    await client.loadPosition(startSfen, movesRef.current);
+                    engineState.ready = true;
+                    setEngineReady((prev) => ({ ...prev, [side]: true }));
+                }
+
+                return { client, engineId: opt.id };
+            } finally {
+                initializingRef.current[side] = false;
             }
-
-            // エンジンクライアントの取得または作成
-            let client = engineState.client;
-            if (!client) {
-                client = opt.createClient();
-                engineState.client = client;
-                engineState.selectedId = opt.id;
-                engineState.ready = false;
-            }
-
-            // サブスクリプションのアタッチ
-            attachSubscription(side, client, opt.id);
-
-            // エンジンの初期化と局面読み込み
-            if (!engineState.ready) {
-                await client.init();
-                await client.loadPosition(startSfen, movesRef.current);
-                engineState.ready = true;
-                setEngineReady((prev) => ({ ...prev, [side]: true }));
-            }
-
-            return { client, engineId: opt.id };
         },
         [
             attachSubscription,
@@ -397,18 +420,24 @@ export function useEngineManager({
     useEffect(() => {
         for (const side of ["sente", "gote"] as Player[]) {
             if (sides[side].role === "engine") continue;
-            disposeEngineForSide(side).catch(() => undefined);
+            disposeEngineForSide(side).catch((error) => {
+                console.error(`Failed to dispose engine on role change for ${side}:`, error);
+                addErrorLog(`エンジン破棄に失敗 (${side}): ${String(error)}`);
+            });
         }
-    }, [disposeEngineForSide, sides]);
+    }, [addErrorLog, disposeEngineForSide, sides]);
 
     // アンマウント時に全エンジンを破棄
     useEffect(() => {
         return () => {
             Promise.all(
                 (["sente", "gote"] as Player[]).map((side) => disposeEngineForSide(side)),
-            ).catch(() => undefined);
+            ).catch((error) => {
+                console.error("Failed to dispose engines on unmount:", error);
+                addErrorLog(`エンジン破棄に失敗 (unmount): ${String(error)}`);
+            });
         };
-    }, [disposeEngineForSide]);
+    }, [addErrorLog, disposeEngineForSide]);
 
     // エンジンターンの自動開始
     useEffect(() => {
@@ -430,13 +459,13 @@ export function useEngineManager({
 
         startEngineTurn(side).catch((error) => {
             setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-            setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
+            addErrorLog(`engine error: ${String(error)}`);
         });
     }, [
+        addErrorLog,
         getEngineForSide,
         isEngineTurn,
         isMatchRunning,
-        maxLogs,
         movesRef,
         positionReady,
         positionRef,

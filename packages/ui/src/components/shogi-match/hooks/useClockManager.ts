@@ -38,7 +38,9 @@ export interface UseClockManagerProps {
     /** 時間切れ時に呼ばれるコールバック */
     onTimeExpired: (side: Player) => Promise<void>;
     /** matchEndedRef (時間切れ判定の重複防止用) */
-    matchEndedRef: React.MutableRefObject<boolean>;
+    matchEndedRef: { current: boolean };
+    /** 時計処理のエラー通知（任意） */
+    onClockError?: (message: string) => void;
 }
 
 /**
@@ -97,14 +99,21 @@ export function useClockManager({
     isMatchRunning,
     onTimeExpired,
     matchEndedRef,
+    onClockError,
 }: UseClockManagerProps): UseClockManagerReturn {
     const [clocks, setClocks] = useState<TickState>(() => initialTick(timeSettings));
+    const clocksRef = useRef<TickState>(clocks);
 
     // onTimeExpired を ref に保存（依存配列の安定化）
     const onTimeExpiredRef = useRef(onTimeExpired);
     useEffect(() => {
         onTimeExpiredRef.current = onTimeExpired;
     }, [onTimeExpired]);
+
+    // 最新の時計状態を ref に保持（setInterval 内で参照するため）
+    useEffect(() => {
+        clocksRef.current = clocks;
+    }, [clocks]);
 
     /**
      * 時計をリセットする
@@ -164,48 +173,44 @@ export function useClockManager({
         if (!isMatchRunning || !clocks.ticking) return;
 
         const timer = setInterval(() => {
-            let expiredSide: Player | null = null;
+            const prev = clocksRef.current;
+            if (!prev.ticking) return;
 
-            setClocks((prev) => {
-                if (!prev.ticking) return prev;
+            const now = Date.now();
+            const delta = now - prev.lastUpdatedAt;
+            const side = prev.ticking;
+            const current = prev[side];
 
-                const now = Date.now();
-                const delta = now - prev.lastUpdatedAt;
-                const side = prev.ticking;
-                const current = prev[side];
+            let mainMs = current.mainMs - delta;
+            let byoyomiMs = current.byoyomiMs;
 
-                let mainMs = current.mainMs - delta;
-                let byoyomiMs = current.byoyomiMs;
+            if (mainMs < 0) {
+                const over = Math.abs(mainMs);
+                mainMs = 0;
+                byoyomiMs = Math.max(0, byoyomiMs - over);
+            }
 
-                // 持ち時間が負になった分を秒読み時間から減少
-                if (mainMs < 0) {
-                    const over = Math.abs(mainMs);
-                    mainMs = 0;
-                    byoyomiMs = Math.max(0, byoyomiMs - over);
-                }
+            const expiredSide = mainMs <= 0 && byoyomiMs <= 0 ? side : null;
 
-                // 両方の時間が尽きたかチェック
-                if (mainMs <= 0 && byoyomiMs <= 0) {
-                    expiredSide = side;
-                }
+            const nextState: TickState = {
+                ...prev,
+                [side]: { mainMs: Math.max(0, mainMs), byoyomiMs },
+                lastUpdatedAt: now,
+            };
 
-                return {
-                    ...prev,
-                    [side]: { mainMs: Math.max(0, mainMs), byoyomiMs },
-                    lastUpdatedAt: now,
-                };
-            });
+            clocksRef.current = nextState;
+            setClocks(nextState);
 
-            // 時間切れの処理（setClocks の外で実行）
             if (expiredSide && isMatchRunning && !matchEndedRef.current) {
-                onTimeExpiredRef
-                    .current(expiredSide)
-                    .catch((err) => console.error("時間切れ処理エラー:", err));
+                onTimeExpiredRef.current(expiredSide).catch((err) => {
+                    console.error("時間切れ処理エラー:", err);
+                    onClockError?.(`時間切れ処理エラー: ${String(err)}`);
+                });
             }
         }, CLOCK_UPDATE_INTERVAL_MS);
 
         return () => clearInterval(timer);
-    }, [clocks.ticking, isMatchRunning, matchEndedRef]);
+    }, [clocks.ticking, isMatchRunning, matchEndedRef, onClockError]);
 
     return {
         clocks,

@@ -54,12 +54,13 @@ export function MatchSettingsPanel({
 }: MatchSettingsPanelProps): ReactElement {
     const sideSelector = (side: Player) => {
         const setting = sides[side];
+        const hasEngineOptions = uiEngineOptions.length > 0;
         const engineList = uiEngineOptions.map((opt) => (
             <option key={opt.id} value={opt.id}>
                 {opt.label}
             </option>
         ));
-        const resolvedEngineId = setting.engineId ?? uiEngineOptions[0]?.id;
+        const resolvedEngineId = setting.engineId ?? uiEngineOptions[0]?.id ?? "";
         return (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
                 <label
@@ -73,16 +74,21 @@ export function MatchSettingsPanel({
                     {side === "sente" ? "先手" : "後手"} の操作
                     <select
                         value={setting.role}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                            const nextRole = e.target.value as SideRole;
+                            const fallbackEngineId = uiEngineOptions[0]?.id;
                             onSidesChange({
                                 ...sides,
                                 [side]: {
                                     ...sides[side],
-                                    role: e.target.value as SideRole,
-                                    engineId: sides[side].engineId ?? uiEngineOptions[0]?.id,
+                                    role: nextRole,
+                                    engineId:
+                                        nextRole === "engine"
+                                            ? (sides[side].engineId ?? fallbackEngineId)
+                                            : undefined,
                                 },
-                            })
-                        }
+                            });
+                        }}
                         disabled={settingsLocked}
                         style={{
                             padding: "8px",
@@ -141,11 +147,7 @@ export function MatchSettingsPanel({
                                 [side]: { ...sides[side], engineId: e.target.value },
                             })
                         }
-                        disabled={
-                            settingsLocked ||
-                            setting.role !== "engine" ||
-                            uiEngineOptions.length === 0
-                        }
+                        disabled={settingsLocked || setting.role !== "engine" || !hasEngineOptions}
                         style={{
                             padding: "8px",
                             borderRadius: "8px",
@@ -154,6 +156,16 @@ export function MatchSettingsPanel({
                     >
                         {engineList}
                     </select>
+                    {!hasEngineOptions ? (
+                        <span
+                            style={{
+                                fontSize: "12px",
+                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                            }}
+                        >
+                            利用可能なエンジンがありません
+                        </span>
+                    ) : null}
                 </label>
             </div>
         );

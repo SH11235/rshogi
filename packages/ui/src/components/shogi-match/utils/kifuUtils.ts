@@ -21,11 +21,24 @@ export function parseUsiInput(raw: string): string[] {
     if (!trimmed) return [];
 
     // "moves" キーワードが含まれる場合は、その後の部分のみを抽出
-    if (trimmed.includes("moves")) {
-        const afterMoves = trimmed.split("moves")[1]?.trim();
+    const movesIndex = trimmed.search(/\bmoves\b/);
+    if (movesIndex !== -1) {
+        const afterMoves = trimmed.slice(movesIndex + "moves".length).trim();
         return afterMoves ? afterMoves.split(/\s+/) : [];
     }
 
-    // "moves" がない場合は、全体を空白で分割
+    // "moves" がない場合で startpos/sfen 系は手なしとみなす
+    const tokens = trimmed.split(/\s+/);
+    if (tokens[0] === "position") {
+        const second = tokens[1];
+        if (second === "startpos" || second === "sfen") {
+            return [];
+        }
+    }
+    if (tokens[0] === "startpos" || tokens[0] === "sfen") {
+        return [];
+    }
+
+    // その他はそのまま空白区切りで解釈
     return trimmed.split(/\s+/);
 }

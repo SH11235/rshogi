@@ -90,14 +90,28 @@ export function MatchControls({
             >
                 状態:
                 {(["sente", "gote"] as Player[]).map((side) => {
+                    const sideLabel = side === "sente" ? "先手" : "後手";
                     const roleLabel = sides[side].role === "engine" ? "エンジン" : "人間";
                     if (sides[side].role !== "engine") {
-                        return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel}]`;
+                        return (
+                            <span key={side} aria-label={`${sideLabel}は${roleLabel}`}>
+                                {" "}
+                                [{sideLabel}: {roleLabel}]
+                            </span>
+                        );
                     }
                     const engineLabel = getEngineForSide(side)?.label ?? "未選択";
                     const ready = engineReady[side] ? "init済" : "未init";
                     const status = engineStatus[side];
-                    return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel} ${engineLabel} ${status}/${ready}]`;
+                    return (
+                        <span
+                            key={side}
+                            aria-label={`${sideLabel}は${roleLabel} (${engineLabel}) ステータス ${status} 準備${ready}`}
+                        >
+                            {" "}
+                            [{sideLabel}: {roleLabel} {engineLabel} {status}/{ready}]
+                        </span>
+                    );
                 })}
                 {` | 対局: ${isMatchRunning ? "実行中" : "停止中"}`}
             </div>
