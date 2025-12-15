@@ -6,7 +6,7 @@ import { Input } from "../../input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../tooltip";
 import type { ClockSettings } from "../hooks/useClockManager";
 
-export type SideRole = "human" | "engine";
+type SideRole = "human" | "engine";
 
 export type SideSetting = {
     role: SideRole;
@@ -20,7 +20,7 @@ export type EngineOption = {
     kind?: "internal" | "external";
 };
 
-export interface MatchSettingsPanelProps {
+interface MatchSettingsPanelProps {
     // パネル表示状態
     isOpen: boolean;
     onOpenChange: (open: boolean) => void;

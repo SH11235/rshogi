@@ -8,7 +8,7 @@ const baseCard = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
-export interface EngineLogsPanelProps {
+interface EngineLogsPanelProps {
     /** イベントログのリスト */
     eventLogs: string[];
     /** エラーログのリスト */

@@ -8,7 +8,7 @@ const baseCard = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
-export interface KifuIOPanelProps {
+interface KifuIOPanelProps {
     /** 現在の手数のリスト */
     moves: string[];
     /** エクスポート用のUSI文字列 */

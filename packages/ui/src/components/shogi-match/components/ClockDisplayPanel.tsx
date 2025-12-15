@@ -11,7 +11,7 @@ const baseCard = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
-export interface ClockDisplayPanelProps {
+interface ClockDisplayPanelProps {
     /** 時計の状態 */
     clocks: TickState;
 }

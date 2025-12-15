@@ -23,7 +23,7 @@ interface ActiveSearch {
     engineId: string;
 }
 
-export interface BestmoveHandlerParams {
+interface BestmoveHandlerParams {
     move: string;
     side: Player;
     engineId: string;
@@ -31,7 +31,7 @@ export interface BestmoveHandlerParams {
     movesCount: number;
 }
 
-export interface BestmoveHandlerResult {
+interface BestmoveHandlerResult {
     action: "apply_move" | "end_match" | "skip";
     move?: string;
     message?: string;
@@ -39,21 +39,21 @@ export interface BestmoveHandlerResult {
     shouldUpdateRequestPly: boolean;
 }
 
-export type EngineOption = {
+type EngineOption = {
     id: string;
     label: string;
     createClient: () => EngineClient;
     kind?: "internal" | "external";
 };
 
-export type SideRole = "human" | "engine";
+type SideRole = "human" | "engine";
 
-export type SideSetting = {
+type SideSetting = {
     role: SideRole;
     engineId?: string;
 };
 
-export interface UseEngineManagerProps {
+interface UseEngineManagerProps {
     /** 先手/後手の設定 */
     sides: { sente: SideSetting; gote: SideSetting };
     /** エンジンオプション */
@@ -78,7 +78,7 @@ export interface UseEngineManagerProps {
     maxLogs?: number;
 }
 
-export interface UseEngineManagerReturn {
+interface UseEngineManagerReturn {
     /** エンジンの準備状態 */
     engineReady: Record<Player, boolean>;
     /** エンジンのステータス */
