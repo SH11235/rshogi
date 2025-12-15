@@ -19,15 +19,14 @@ import {
 import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-client";
 import type { CSSProperties, ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-// TODO: usePositionEditor を統合する（Phase 3b）
-// import { usePositionEditor } from "./shogi-match/hooks/usePositionEditor";
-import { Button } from "./button";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
 import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
+import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
+import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
     type EngineOption,
     MatchSettingsPanel,
@@ -81,8 +80,6 @@ export interface ShogiMatchProps {
 const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
-
-const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 
 const baseCard: CSSProperties = {
     background: "hsl(var(--card, 0 0% 100%))",
@@ -1157,44 +1154,6 @@ export function ShogiMatch({
         [initialBoard, moves, positionReady],
     );
 
-    const handView = (owner: Player) => {
-        const hand = position.hands[owner];
-        const ownerSetting = sides[owner];
-        const isActive = !isEditMode && position.turn === owner && ownerSetting.role === "human";
-        return (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                {HAND_ORDER.map((piece) => {
-                    const count = hand[piece] ?? 0;
-                    const selected = selection?.kind === "hand" && selection.piece === piece;
-                    return (
-                        <button
-                            key={`${owner}-${piece}`}
-                            type="button"
-                            onClick={() => handleHandSelect(piece)}
-                            disabled={count <= 0 || !isActive}
-                            style={{
-                                minWidth: "52px",
-                                padding: "6px 10px",
-                                borderRadius: "10px",
-                                border: selected
-                                    ? "2px solid hsl(var(--primary, 15 86% 55%))"
-                                    : "1px solid hsl(var(--border, 0 0% 86%))",
-                                background:
-                                    count > 0
-                                        ? "hsl(var(--secondary, 210 40% 96%))"
-                                        : "transparent",
-                                color: "hsl(var(--foreground, 222 47% 11%))",
-                                cursor: count > 0 && isActive ? "pointer" : "not-allowed",
-                            }}
-                        >
-                            {PIECE_LABELS[piece]} × {count}
-                        </button>
-                    );
-                })}
-            </div>
-        );
-    };
-
     const importCsa = async (csa: string) => {
         if (!positionReady) return;
         await loadMoves(parseCsaMoves(csa, initialBoard ?? undefined));
@@ -1331,9 +1290,37 @@ export function ShogiMatch({
                                     手番: {position.turn === "sente" ? "先手" : "後手"}
                                 </div>
                             </div>
-                            <div style={{ marginTop: "8px" }}>{handView("sente")}</div>
+                            <div style={{ marginTop: "8px" }}>
+                                <HandPiecesDisplay
+                                    owner="sente"
+                                    hand={position.hands.sente}
+                                    selectedPiece={
+                                        selection?.kind === "hand" ? selection.piece : null
+                                    }
+                                    isActive={
+                                        !isEditMode &&
+                                        position.turn === "sente" &&
+                                        sides.sente.role === "human"
+                                    }
+                                    onHandSelect={handleHandSelect}
+                                />
+                            </div>
                             <div style={{ marginTop: "14px", fontWeight: 700 }}>後手の持ち駒</div>
-                            <div style={{ marginTop: "8px" }}>{handView("gote")}</div>
+                            <div style={{ marginTop: "8px" }}>
+                                <HandPiecesDisplay
+                                    owner="gote"
+                                    hand={position.hands.gote}
+                                    selectedPiece={
+                                        selection?.kind === "hand" ? selection.piece : null
+                                    }
+                                    isActive={
+                                        !isEditMode &&
+                                        position.turn === "gote" &&
+                                        sides.gote.role === "human"
+                                    }
+                                    onHandSelect={handleHandSelect}
+                                />
+                            </div>
                         </div>
                     </div>
 
@@ -1356,91 +1343,30 @@ export function ShogiMatch({
                             positionReady={positionReady}
                         />
 
-                        <div
-                            style={{
-                                ...baseCard,
-                                padding: "12px",
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "10px",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    display: "flex",
-                                    gap: "8px",
-                                    flexWrap: "wrap",
-                                    alignItems: "center",
-                                }}
-                            >
-                                <Button
-                                    type="button"
-                                    onClick={handleNewGame}
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    新規対局（初期化）
-                                </Button>
-                                <Button
-                                    type="button"
-                                    onClick={pauseAutoPlay}
-                                    variant="outline"
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    停止（自動進行オフ）
-                                </Button>
-                                <Button
-                                    type="button"
-                                    onClick={resumeAutoPlay}
-                                    variant="secondary"
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    対局開始 / 再開
-                                </Button>
-                            </div>
-                            <div
-                                style={{
-                                    fontSize: "12px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                状態:
-                                {(["sente", "gote"] as Player[]).map((side) => {
-                                    const roleLabel =
-                                        sides[side].role === "engine" ? "エンジン" : "人間";
-                                    if (sides[side].role !== "engine") {
-                                        return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel}]`;
-                                    }
-                                    const engineLabel = getEngineForSide(side)?.label ?? "未選択";
-                                    const ready = engineReady[side] ? "init済" : "未init";
-                                    const status = engineStatus[side];
-                                    return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel} ${engineLabel} ${status}/${ready}]`;
-                                })}
-                                {` | 対局: ${isMatchRunning ? "実行中" : "停止中"}`}
-                            </div>
-                            {message ? (
-                                <div
-                                    style={{
-                                        color: "hsl(var(--destructive, 0 72% 51%))",
-                                        fontSize: "13px",
-                                    }}
-                                >
-                                    {message}
-                                </div>
-                            ) : null}
+                        <MatchControls
+                            onNewGame={handleNewGame}
+                            onPause={pauseAutoPlay}
+                            onResume={resumeAutoPlay}
+                            sides={sides}
+                            engineReady={engineReady}
+                            engineStatus={engineStatus}
+                            isMatchRunning={isMatchRunning}
+                            message={message}
+                            getEngineForSide={getEngineForSide}
+                        />
 
-                            <MatchSettingsPanel
-                                isOpen={isSettingsPanelOpen}
-                                onOpenChange={setIsSettingsPanelOpen}
-                                sides={sides}
-                                onSidesChange={setSides}
-                                timeSettings={timeSettings}
-                                onTimeSettingsChange={setTimeSettings}
-                                currentTurn={position.turn}
-                                onTurnChange={updateTurnForEdit}
-                                uiEngineOptions={uiEngineOptions}
-                                settingsLocked={settingsLocked}
-                            />
-                        </div>
+                        <MatchSettingsPanel
+                            isOpen={isSettingsPanelOpen}
+                            onOpenChange={setIsSettingsPanelOpen}
+                            sides={sides}
+                            onSidesChange={setSides}
+                            timeSettings={timeSettings}
+                            onTimeSettingsChange={setTimeSettings}
+                            currentTurn={position.turn}
+                            onTurnChange={updateTurnForEdit}
+                            uiEngineOptions={uiEngineOptions}
+                            settingsLocked={settingsLocked}
+                        />
 
                         <ClockDisplayPanel clocks={clocks} />
 
