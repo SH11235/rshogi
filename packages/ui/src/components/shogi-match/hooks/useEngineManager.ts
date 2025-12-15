@@ -211,6 +211,7 @@ export function useEngineManager({
     });
 
     const activeSearchRef = useRef<ActiveSearch | null>(null);
+    const isMatchRunningRef = useRef(isMatchRunning);
     const initializingRef = useRef<Record<Player, boolean>>({
         sente: false,
         gote: false,
@@ -223,6 +224,10 @@ export function useEngineManager({
         }
         return map;
     }, [engineOptions]);
+
+    useEffect(() => {
+        isMatchRunningRef.current = isMatchRunning;
+    }, [isMatchRunning]);
 
     const getEngineForSide = useCallback(
         (side: Player): EngineOption | undefined => {
@@ -328,6 +333,18 @@ export function useEngineManager({
                 if (event.type === "bestmove") {
                     const searchState = searchStatesRef.current[side];
 
+                    // 対局終了後に届いたbestmoveは無視する
+                    if (!isMatchRunningRef.current) {
+                        searchState.pending = false;
+                        searchState.handle = null;
+                        searchState.requestPly = null;
+                        if (activeSearchRef.current?.side === side) {
+                            activeSearchRef.current = null;
+                        }
+                        setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+                        return;
+                    }
+
                     // 状態のリセット
                     setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
                     searchState.pending = false;
@@ -374,6 +391,10 @@ export function useEngineManager({
                     setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
                     searchState.handle = null;
                     searchState.pending = false;
+                    searchState.requestPly = null;
+                    if (activeSearchRef.current?.side === side) {
+                        activeSearchRef.current = null;
+                    }
 
                     addErrorLog(event.message);
                 }
