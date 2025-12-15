@@ -6,7 +6,6 @@ import {
     createEmptyHands,
     getAllSquares,
     getPositionService,
-    type Hands,
     type LastMove,
     movesToCsa,
     type Piece,
@@ -17,77 +16,37 @@ import {
     parseMove,
     type Square,
 } from "@shogi/app-core";
-import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-client";
 import type { CSSProperties, ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button } from "./button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./collapsible";
-import { Input } from "./input";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
+import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
+import { EditModePanel } from "./shogi-match/components/EditModePanel";
+import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
+import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
+import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
+import { MatchControls } from "./shogi-match/components/MatchControls";
+import {
+    type EngineOption,
+    MatchSettingsPanel,
+    type SideSetting,
+} from "./shogi-match/components/MatchSettingsPanel";
+import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
+import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
+import type { PromotionSelection } from "./shogi-match/types";
+import {
+    addToHand,
+    cloneHandsState,
+    consumeFromHand,
+    countPieces,
+} from "./shogi-match/utils/boardUtils";
+import { PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
+import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
+import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
+import { determinePromotion } from "./shogi-match/utils/promotionLogic";
+import { TooltipProvider } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
-type PromotionSelection = {
-    from: Square;
-    to: Square;
-    piece: Piece; // 駒情報を追加（UI表示・検証用）
-};
-/**
- * 成り判定の結果を表す型
- * - 'none': 成れない（成り手が存在しない）
- * - 'optional': 任意成り（基本移動と成り移動の両方が合法）
- * - 'forced': 強制成り（成り移動のみ合法）
- */
-type PromotionDecision = "none" | "optional" | "forced";
-type SideRole = "human" | "engine";
-type EngineStatus = "idle" | "thinking" | "error";
-
-interface SearchState {
-    handle: SearchHandle | null;
-    pending: boolean;
-    requestPly: number | null;
-}
-
-interface EngineState {
-    client: EngineClient | null;
-    subscription: (() => void) | null;
-    selectedId: string | null;
-    ready: boolean;
-}
-
-interface ActiveSearch {
-    side: Player;
-    engineId: string;
-}
-
-export type EngineOption = {
-    id: string;
-    label: string;
-    // 将来の外部USI/NNUE切替を想定し、UI上の選択肢は残す。
-    // client生成は遅延させ、必要な手番分だけインスタンス化する。
-    createClient: () => EngineClient;
-    kind?: "internal" | "external";
-};
-
-type SideSetting = {
-    role: SideRole;
-    engineId?: string;
-};
-
-type ClockSettings = Record<Player, { mainMs: number; byoyomiMs: number }>;
-
-interface ClockState {
-    mainMs: number;
-    byoyomiMs: number;
-}
-
-interface TickState {
-    sente: ClockState;
-    gote: ClockState;
-    ticking: Player | null;
-    lastUpdatedAt: number;
-}
 
 export interface ShogiMatchProps {
     engineOptions: EngineOption[];
@@ -101,32 +60,7 @@ export interface ShogiMatchProps {
 // デフォルト値の定数
 const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
-const CLOCK_UPDATE_INTERVAL_MS = 200; // クロック更新インターバル
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
-
-const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
-const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
-const PIECE_LABELS: Record<PieceType, string> = {
-    K: "玉",
-    R: "飛",
-    B: "角",
-    G: "金",
-    S: "銀",
-    N: "桂",
-    L: "香",
-    P: "歩",
-};
-const PIECE_CAP: Record<PieceType, number> = {
-    P: 18,
-    L: 4,
-    N: 4,
-    S: 4,
-    G: 4,
-    B: 2,
-    R: 2,
-    K: 1,
-};
-const isPromotable = (type: PieceType): boolean => type !== "K" && type !== "G";
 
 const baseCard: CSSProperties = {
     background: "hsl(var(--card, 0 0% 100%))",
@@ -136,96 +70,12 @@ const baseCard: CSSProperties = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
-const cloneHandsState = (hands: Hands): Hands => ({
-    sente: { ...hands.sente },
-    gote: { ...hands.gote },
-});
-
 const clonePositionState = (pos: PositionState): PositionState => ({
     board: cloneBoard(pos.board),
     hands: cloneHandsState(pos.hands),
     turn: pos.turn,
     ply: pos.ply,
 });
-
-const addToHand = (hands: Hands, owner: Player, pieceType: PieceType): Hands => {
-    const next = cloneHandsState(hands);
-    const current = next[owner][pieceType] ?? 0;
-    next[owner][pieceType] = current + 1;
-    return next;
-};
-
-const consumeFromHand = (hands: Hands, owner: Player, pieceType: PieceType): Hands | null => {
-    const next = cloneHandsState(hands);
-    const current = next[owner][pieceType] ?? 0;
-    if (current <= 0) return null;
-    if (current === 1) {
-        delete next[owner][pieceType];
-    } else {
-        next[owner][pieceType] = current - 1;
-    }
-    return next;
-};
-
-const countPieces = (position: PositionState): Record<Player, Record<PieceType, number>> => {
-    const counts: Record<Player, Record<PieceType, number>> = {
-        sente: { K: 0, R: 0, B: 0, G: 0, S: 0, N: 0, L: 0, P: 0 },
-        gote: { K: 0, R: 0, B: 0, G: 0, S: 0, N: 0, L: 0, P: 0 },
-    };
-    for (const piece of Object.values(position.board)) {
-        if (!piece) continue;
-        counts[piece.owner][piece.type] += 1;
-    }
-    for (const owner of ["sente", "gote"] as Player[]) {
-        const hand = position.hands[owner];
-        for (const key of Object.keys(hand) as PieceType[]) {
-            counts[owner][key] += hand[key] ?? 0;
-        }
-    }
-    return counts;
-};
-
-function formatEvent(event: EngineEvent, engineId: string): string {
-    const prefix = `[${engineId}] `;
-    if (event.type === "bestmove") {
-        return (
-            prefix +
-            (event.ponder
-                ? `bestmove ${event.move} (ponder ${event.ponder})`
-                : `bestmove ${event.move}`)
-        );
-    }
-    if (event.type === "info") {
-        const score =
-            event.scoreMate !== undefined
-                ? `mate ${event.scoreMate}`
-                : event.scoreCp !== undefined
-                  ? `cp ${event.scoreCp}`
-                  : "";
-        return (
-            prefix +
-            [
-                `info depth ${event.depth ?? "-"}`,
-                event.nodes !== undefined ? `nodes ${event.nodes}` : null,
-                event.nps !== undefined ? `nps ${event.nps}` : null,
-                score ? `score ${score}` : null,
-            ]
-                .filter(Boolean)
-                .join(" ")
-        );
-    }
-    return `${prefix}error ${event.message}`;
-}
-
-function formatTime(ms: number): string {
-    if (ms < 0) ms = 0;
-    const totalSeconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60)
-        .toString()
-        .padStart(2, "0");
-    const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-    return `${minutes}:${seconds}`;
-}
 
 function boardToGrid(board: BoardState): ShogiBoardCell[][] {
     const matrix = boardToMatrix(board);
@@ -243,15 +93,6 @@ function boardToGrid(board: BoardState): ShogiBoardCell[][] {
     );
 }
 
-function initialTick(settings: ClockSettings): TickState {
-    return {
-        sente: { mainMs: settings.sente.mainMs, byoyomiMs: settings.sente.byoyomiMs },
-        gote: { mainMs: settings.gote.mainMs, byoyomiMs: settings.gote.byoyomiMs },
-        ticking: null,
-        lastUpdatedAt: Date.now(),
-    };
-}
-
 export function ShogiMatch({
     engineOptions,
     defaultSides = {
@@ -263,7 +104,6 @@ export function ShogiMatch({
     maxLogs = DEFAULT_MAX_LOGS,
     fetchLegalMoves,
 }: ShogiMatchProps): ReactElement {
-    const hasEngines = engineOptions.length > 0;
     const emptyBoard = useMemo<BoardState>(
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
         [],
@@ -281,23 +121,12 @@ export function ShogiMatch({
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
     const [promotionSelection, setPromotionSelection] = useState<PromotionSelection | null>(null);
-    const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
-        sente: false,
-        gote: false,
-    });
-    const [engineStatus, setEngineStatus] = useState<Record<Player, EngineStatus>>({
-        sente: "idle",
-        gote: "idle",
-    });
     const [message, setMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useState<ClockSettings>({
         sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
         gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
     });
-    const [clocks, setClocks] = useState<TickState>(initialTick(timeSettings));
-    const [eventLogs, setEventLogs] = useState<string[]>([]);
-    const [errorLogs, setErrorLogs] = useState<string[]>([]);
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
     const [editOwner, setEditOwner] = useState<Player>("sente");
@@ -310,23 +139,117 @@ export function ShogiMatch({
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
 
-    // エンジン状態管理用の統合されたRef
-    const searchStatesRef = useRef<Record<Player, SearchState>>({
-        sente: { handle: null, pending: false, requestPly: null },
-        gote: { handle: null, pending: false, requestPly: null },
-    });
-    const engineStatesRef = useRef<Record<Player, EngineState>>({
-        sente: { client: null, subscription: null, selectedId: null, ready: false },
-        gote: { client: null, subscription: null, selectedId: null, ready: false },
-    });
-    const activeSearchRef = useRef<ActiveSearch | null>(null);
-
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
-    const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
+    const legalCache = useMemo(() => new LegalMoveCache(), []);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
+
+    // endMatch のための ref（循環依存を回避）
+    const endMatchRef = useRef<((message: string) => Promise<void>) | null>(null);
+
+    const handleClockError = useCallback((message: string) => {
+        setMessage(message);
+    }, []);
+
+    const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
+
+    // 時計管理フックを使用
+    const { clocks, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
+        useClockManager({
+            timeSettings,
+            isMatchRunning,
+            onTimeExpired: async (side) => {
+                const loserLabel = side === "sente" ? "先手" : "後手";
+                const winnerLabel = side === "sente" ? "後手" : "先手";
+                await endMatchRef.current?.(
+                    `対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`,
+                );
+            },
+            matchEndedRef,
+            onClockError: handleClockError,
+        });
+
+    // 対局終了処理（エンジン管理フックから呼ばれる）
+    const endMatch = useCallback(
+        async (nextMessage: string) => {
+            if (matchEndedRef.current) return;
+            matchEndedRef.current = true;
+            setMessage(nextMessage);
+            setIsMatchRunning(false);
+            stopTicking();
+            try {
+                await stopAllEnginesRef.current();
+            } catch (error) {
+                console.error("エンジン停止に失敗しました:", error);
+                setMessage(
+                    (prev) =>
+                        prev ??
+                        `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
+                );
+            }
+        },
+        [stopTicking],
+    );
+
+    // endMatchRef を更新
+    endMatchRef.current = endMatch;
+
+    const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
+
+    // エンジン管理フックを使用
+    const {
+        engineReady,
+        engineStatus,
+        eventLogs,
+        errorLogs,
+        stopAllEngines,
+        getEngineForSide,
+        isEngineTurn,
+        logEngineError,
+    } = useEngineManager({
+        sides,
+        engineOptions,
+        timeSettings,
+        startSfen,
+        movesRef,
+        positionRef,
+        isMatchRunning,
+        positionReady,
+        onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
+        onMatchEnd: endMatch,
+        maxLogs,
+    });
+    stopAllEnginesRef.current = stopAllEngines;
+
+    // エンジンからの手を受け取って適用するコールバック
+    const handleMoveFromEngine = useCallback(
+        (move: string) => {
+            if (matchEndedRef.current) return;
+            const result = applyMoveWithState(positionRef.current, move, {
+                validateTurn: false,
+            });
+            if (!result.ok) {
+                logEngineError(
+                    `engine move rejected (${move || "empty"}): ${result.error ?? "unknown"}`,
+                );
+                return;
+            }
+            // 局面を更新
+            setPosition(result.next);
+            positionRef.current = result.next;
+            setMoves((prev) => [...prev, move]);
+            movesRef.current = [...movesRef.current, move];
+            setLastMove(result.lastMove);
+            setSelection(null);
+            setMessage(null);
+            legalCache.clear();
+            updateClocksForNextTurn(result.next.turn);
+        },
+        [legalCache, logEngineError, updateClocksForNextTurn],
+    );
+    handleMoveFromEngineRef.current = handleMoveFromEngine;
 
     useEffect(() => {
         let cancelled = false;
@@ -366,99 +289,10 @@ export function ShogiMatch({
         };
     }, []);
 
-    const engineMap = useMemo(() => {
-        const map = new Map<string, EngineOption>();
-        for (const opt of engineOptions) {
-            map.set(opt.id, opt);
-        }
-        return map;
-    }, [engineOptions]);
-
-    const disposeEngineForSide = useCallback(async (side: Player) => {
-        const engineState = engineStatesRef.current[side];
-        const searchState = searchStatesRef.current[side];
-
-        // サブスクリプションのクリーンアップ
-        if (engineState.subscription) {
-            engineState.subscription();
-            engineState.subscription = null;
-        }
-
-        // 検索ハンドルのキャンセル
-        if (searchState.handle) {
-            await searchState.handle.cancel().catch(() => undefined);
-            searchState.handle = null;
-        }
-
-        // 検索状態のクリア
-        searchState.pending = false;
-        searchState.requestPly = null;
-
-        // アクティブ検索のクリア
-        if (activeSearchRef.current?.side === side) {
-            activeSearchRef.current = null;
-        }
-
-        // エンジンクライアントの停止と破棄
-        if (engineState.client) {
-            await engineState.client.stop().catch(() => undefined);
-            if (typeof engineState.client.dispose === "function") {
-                await engineState.client.dispose().catch(() => undefined);
-            }
-        }
-
-        // エンジン状態のクリア
-        engineState.client = null;
-        engineState.selectedId = null;
-        engineState.ready = false;
-
-        setEngineReady((prev) => ({ ...prev, [side]: false }));
-        setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-    }, []);
-
     const grid = useMemo(() => {
         const g = boardToGrid(position.board);
         return flipBoard ? [...g].reverse().map((row) => [...row].reverse()) : g;
     }, [position.board, flipBoard]);
-
-    const getEngineForSide = useCallback(
-        (side: Player): EngineOption | undefined => {
-            if (!hasEngines) return undefined;
-            const setting = sides[side];
-            if (setting.role !== "engine") return undefined;
-            const fallback = engineOptions[0];
-            if (setting.engineId && engineMap.has(setting.engineId)) {
-                return engineMap.get(setting.engineId);
-            }
-            return fallback;
-        },
-        [engineMap, engineOptions, hasEngines, sides],
-    );
-
-    const isEngineTurn = useCallback(
-        (side: Player): boolean => {
-            return sides[side].role === "engine" && Boolean(getEngineForSide(side));
-        },
-        [getEngineForSide, sides],
-    );
-
-    const resetClocks = useCallback(
-        (startTick: boolean) => {
-            setClocks({
-                sente: {
-                    mainMs: timeSettings.sente.mainMs,
-                    byoyomiMs: timeSettings.sente.byoyomiMs,
-                },
-                gote: {
-                    mainMs: timeSettings.gote.mainMs,
-                    byoyomiMs: timeSettings.gote.byoyomiMs,
-                },
-                ticking: startTick ? "sente" : null,
-                lastUpdatedAt: Date.now(),
-            });
-        },
-        [timeSettings],
-    );
 
     const refreshStartSfen = useCallback(async (pos: PositionState) => {
         try {
@@ -470,42 +304,9 @@ export function ShogiMatch({
         }
     }, []);
 
-    const stopAllEngines = useCallback(async () => {
-        for (const side of ["sente", "gote"] as Player[]) {
-            const searchState = searchStatesRef.current[side];
-
-            // 検索ハンドルのキャンセル
-            if (searchState.handle) {
-                await searchState.handle.cancel().catch(() => undefined);
-                searchState.handle = null;
-            }
-
-            // 検索状態のクリア
-            searchState.pending = false;
-            searchState.requestPly = null;
-        }
-
-        // アクティブ検索のクリア
-        activeSearchRef.current = null;
-
-        setEngineStatus({ sente: "idle", gote: "idle" });
-    }, []);
-
-    const endMatch = useCallback(
-        async (nextMessage: string) => {
-            if (matchEndedRef.current) return;
-            matchEndedRef.current = true;
-            setMessage(nextMessage);
-            setIsMatchRunning(false);
-            setClocks((prev) => ({ ...prev, ticking: null }));
-            await stopAllEngines();
-        },
-        [stopAllEngines],
-    );
-
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
-        setClocks((prev) => ({ ...prev, ticking: null }));
+        stopTicking();
         await stopAllEngines();
     };
 
@@ -527,44 +328,10 @@ export function ShogiMatch({
                 block: "start",
             });
         }, 100);
-        const turn = position.turn;
 
-        if (isEngineTurn(turn)) {
-            try {
-                setMessage("エンジン初期化中…（初回は数秒かかる場合があります）");
-                const engineSides = (["sente", "gote"] as Player[]).filter((side) =>
-                    isEngineTurn(side),
-                );
-                if (engineSides.length >= 2) {
-                    await Promise.all(engineSides.map((side) => ensureEngineReady(side)));
-                } else {
-                    await ensureEngineReady(turn);
-                }
-                setMessage(null);
-            } catch (error) {
-                setEngineStatus((prev) => ({ ...prev, [turn]: "error" }));
-                setErrorLogs((prev) =>
-                    [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs),
-                );
-                setMessage(`エンジン初期化に失敗しました: ${String(error)}`);
-                return;
-            }
-        } else {
-            for (const side of ["sente", "gote"] as Player[]) {
-                if (!isEngineTurn(side)) continue;
-                ensureEngineReady(side).catch(() => undefined);
-            }
-        }
-
+        // エンジン管理は useEngineManager フックが自動的に処理する
         setIsMatchRunning(true);
-        setClocks((prev) => ({ ...prev, ticking: turn, lastUpdatedAt: Date.now() }));
-        if (!isEngineTurn(turn)) return;
-        try {
-            await startEngineTurn(turn);
-        } catch (error) {
-            setEngineStatus((prev) => ({ ...prev, [turn]: "error" }));
-            setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
-        }
+        startTicking(position.turn);
     };
 
     const finalizeEditedPosition = async () => {
@@ -573,7 +340,7 @@ export function ShogiMatch({
         setBasePosition(clonePositionState(current));
         setInitialBoard(cloneBoard(current.board));
         await refreshStartSfen(current);
-        legalCacheRef.current = null;
+        legalCache.clear();
         setIsEditMode(false);
         setMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
@@ -609,12 +376,6 @@ export function ShogiMatch({
         setMessage(null);
         resetClocks(false);
 
-        // 検索状態のリセット
-        searchStatesRef.current.sente.requestPly = null;
-        searchStatesRef.current.gote.requestPly = null;
-        searchStatesRef.current.sente.pending = false;
-        searchStatesRef.current.gote.pending = false;
-
         setIsMatchRunning(false);
         setIsEditMode(true);
         setEditFromSquare(null);
@@ -622,321 +383,24 @@ export function ShogiMatch({
         setEditPromoted(false);
         setEditOwner("sente");
         setEditPieceType(null);
-
-        activeSearchRef.current = null;
-
-        setErrorLogs([]);
-        setEventLogs([]);
-        legalCacheRef.current = null;
+        legalCache.clear();
         void refreshStartSfen(next);
-    }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines]);
-
-    const updateClocksForNextTurn = useCallback(
-        (nextTurn: Player) => {
-            setClocks((prev) => ({
-                ...prev,
-                [nextTurn]: {
-                    mainMs: prev[nextTurn].mainMs,
-                    byoyomiMs: timeSettings[nextTurn].byoyomiMs,
-                },
-                ticking: nextTurn,
-                lastUpdatedAt: Date.now(),
-            }));
-        },
-        [timeSettings],
-    );
+    }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines, legalCache.clear]);
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove) => {
             setPosition(nextPosition);
+            positionRef.current = nextPosition;
             setMoves((prev) => [...prev, mv]);
+            movesRef.current = [...movesRef.current, mv];
             setLastMove(last);
             setSelection(null);
             setMessage(null);
-            activeSearchRef.current = null;
-            legalCacheRef.current = null;
+            legalCache.clear();
             updateClocksForNextTurn(nextPosition.turn);
         },
-        [updateClocksForNextTurn],
+        [legalCache, updateClocksForNextTurn],
     );
-
-    const applyMoveFromEngine = useCallback(
-        (move: string) => {
-            const trimmed = move.trim();
-            const result = applyMoveWithState(positionRef.current, trimmed, {
-                validateTurn: false,
-            });
-            if (!result.ok) {
-                setErrorLogs((prev) =>
-                    [
-                        `engine move rejected (${trimmed || "empty"}): ${result.error ?? "unknown"}`,
-                        ...prev,
-                    ].slice(0, maxLogs),
-                );
-                return;
-            }
-            applyMoveCommon(result.next, trimmed, result.lastMove);
-        },
-        [applyMoveCommon, maxLogs],
-    );
-
-    const attachSubscription = useCallback(
-        (side: Player, client: EngineClient, engineId: string) => {
-            const engineState = engineStatesRef.current[side];
-            if (engineState.subscription) return;
-
-            const unsub = client.subscribe((event) => {
-                const label = `${side === "sente" ? "S" : "G"}:${engineId}`;
-                setEventLogs((prev) => {
-                    const next = [formatEvent(event, label), ...prev];
-                    return next.length > maxLogs ? next.slice(0, maxLogs) : next;
-                });
-                if (event.type === "bestmove") {
-                    const searchState = searchStatesRef.current[side];
-
-                    setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-                    searchState.pending = false;
-                    searchState.handle = null;
-
-                    const current = activeSearchRef.current;
-                    if (current && current.engineId === engineId && current.side === side) {
-                        searchState.requestPly = movesRef.current.length;
-
-                        const trimmed = event.move.trim();
-                        const token = trimmed.toLowerCase();
-                        if (token === "resign" || token === "win" || token === "none") {
-                            activeSearchRef.current = null;
-                            const sideLabel = side === "sente" ? "先手" : "後手";
-                            const opponentLabel = side === "sente" ? "後手" : "先手";
-                            if (token === "win") {
-                                endMatch(`対局終了: ${sideLabel}が勝利宣言しました（win）。`).catch(
-                                    (err) => {
-                                        setErrorLogs((prev) =>
-                                            [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                                0,
-                                                maxLogs,
-                                            ),
-                                        );
-                                    },
-                                );
-                            } else if (token === "resign") {
-                                endMatch(
-                                    `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`,
-                                ).catch((err) => {
-                                    setErrorLogs((prev) =>
-                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                            0,
-                                            maxLogs,
-                                        ),
-                                    );
-                                });
-                            } else {
-                                endMatch(
-                                    `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`,
-                                ).catch((err) => {
-                                    setErrorLogs((prev) =>
-                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                            0,
-                                            maxLogs,
-                                        ),
-                                    );
-                                });
-                            }
-                            return;
-                        }
-                        applyMoveFromEngine(trimmed);
-                        activeSearchRef.current = null;
-                    }
-                }
-                if (event.type === "error") {
-                    const searchState = searchStatesRef.current[side];
-
-                    setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-                    searchState.handle = null;
-                    searchState.pending = false;
-
-                    setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
-                }
-            });
-
-            engineState.subscription = unsub;
-        },
-        [applyMoveFromEngine, endMatch, maxLogs],
-    );
-
-    const ensureEngineReady = useCallback(
-        async (side: Player): Promise<{ client: EngineClient; engineId: string } | null> => {
-            const setting = sides[side];
-            if (setting.role !== "engine") return null;
-            const selectedId = setting.engineId ?? engineOptions[0]?.id;
-            if (!selectedId) return null;
-            const opt = engineMap.get(selectedId);
-            if (!opt) return null;
-
-            const engineState = engineStatesRef.current[side];
-
-            // エンジンが変更された場合は既存のエンジンを破棄
-            if (engineState.selectedId && engineState.selectedId !== opt.id) {
-                await disposeEngineForSide(side);
-            }
-
-            // エンジンクライアントの取得または作成
-            let client = engineState.client;
-            if (!client) {
-                client = opt.createClient();
-                engineState.client = client;
-                engineState.selectedId = opt.id;
-                engineState.ready = false;
-            }
-
-            // サブスクリプションのアタッチ
-            attachSubscription(side, client, opt.id);
-
-            // エンジンの初期化と局面読み込み
-            if (!engineState.ready) {
-                await client.init();
-                await client.loadPosition(startSfen, movesRef.current);
-                engineState.ready = true;
-                setEngineReady((prev) => ({ ...prev, [side]: true }));
-            }
-
-            return { client, engineId: opt.id };
-        },
-        [attachSubscription, disposeEngineForSide, engineMap, engineOptions, sides, startSfen],
-    );
-
-    const startEngineTurn = useCallback(
-        async (side: Player) => {
-            if (!positionReady) return;
-
-            const searchState = searchStatesRef.current[side];
-
-            // 既に検索リクエストが送信待ちの場合はスキップ
-            if (searchState.pending) return;
-
-            const ready = await ensureEngineReady(side);
-            if (!ready) return;
-            const { client, engineId } = ready;
-
-            // 既存の検索ハンドルがある場合の処理
-            if (searchState.handle) {
-                const current = activeSearchRef.current;
-                if (current && current.side === side && current.engineId === engineId) {
-                    return;
-                }
-                await searchState.handle.cancel().catch(() => undefined);
-            }
-
-            setEngineStatus((prev) => ({ ...prev, [side]: "thinking" }));
-            searchState.pending = true;
-
-            try {
-                await client.loadPosition(startSfen, movesRef.current);
-                const handle = await client.search({
-                    limits: { byoyomiMs: timeSettings[side].byoyomiMs },
-                    ponder: false,
-                });
-
-                searchState.handle = handle;
-                activeSearchRef.current = { side, engineId };
-            } finally {
-                searchState.pending = false;
-            }
-        },
-        [ensureEngineReady, positionReady, startSfen, timeSettings],
-    );
-
-    useEffect(() => {
-        positionRef.current = position;
-    }, [position]);
-
-    useEffect(() => {
-        movesRef.current = moves;
-    }, [moves]);
-
-    useEffect(() => {
-        for (const side of ["sente", "gote"] as Player[]) {
-            if (sides[side].role === "engine") continue;
-            disposeEngineForSide(side).catch(() => undefined);
-        }
-    }, [disposeEngineForSide, sides]);
-
-    useEffect(() => {
-        return () => {
-            // アンマウント時のみ全エンジンを停止・解放する。
-            Promise.all(
-                (["sente", "gote"] as Player[]).map((side) => disposeEngineForSide(side)),
-            ).catch(() => undefined);
-        };
-        // disposeEngineForSide は安定化済みなので、依存配列に含めても再実行されない。
-    }, [disposeEngineForSide]);
-
-    useEffect(() => {
-        if (!isMatchRunning || !clocks.ticking) return;
-        const timer = setInterval(() => {
-            let expiredSide: Player | null = null;
-            setClocks((prev) => {
-                if (!prev.ticking) return prev;
-                const now = Date.now();
-                const delta = now - prev.lastUpdatedAt;
-                const side = prev.ticking;
-                const current = prev[side];
-                let mainMs = current.mainMs - delta;
-                let byoyomiMs = current.byoyomiMs;
-                if (mainMs < 0) {
-                    const over = Math.abs(mainMs);
-                    mainMs = 0;
-                    byoyomiMs = Math.max(0, byoyomiMs - over);
-                }
-                if (mainMs <= 0 && byoyomiMs <= 0) {
-                    expiredSide = side;
-                }
-                return {
-                    ...prev,
-                    [side]: { mainMs: Math.max(0, mainMs), byoyomiMs },
-                    lastUpdatedAt: now,
-                };
-            });
-            if (expiredSide && isMatchRunning && !matchEndedRef.current) {
-                const loserLabel = expiredSide === "sente" ? "先手" : "後手";
-                const winnerLabel = expiredSide === "sente" ? "後手" : "先手";
-                void endMatch(`対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`);
-            }
-        }, CLOCK_UPDATE_INTERVAL_MS);
-        return () => clearInterval(timer);
-    }, [clocks.ticking, endMatch, isMatchRunning]);
-
-    useEffect(() => {
-        if (!isMatchRunning || !positionReady) return;
-        const side = position.turn;
-        if (!isEngineTurn(side)) return;
-        const engineOpt = getEngineForSide(side);
-        if (!engineOpt) return;
-
-        const searchState = searchStatesRef.current[side];
-        const current = activeSearchRef.current;
-
-        if (current && current.side === side && current.engineId === engineOpt.id) {
-            return;
-        }
-        if (searchState.requestPly === moves.length) return;
-
-        searchState.requestPly = moves.length;
-
-        startEngineTurn(side).catch((error) => {
-            setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-            setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
-        });
-    }, [
-        getEngineForSide,
-        isEngineTurn,
-        isMatchRunning,
-        maxLogs,
-        moves.length,
-        position.turn,
-        positionReady,
-        startEngineTurn,
-    ]);
 
     const handleNewGame = async () => {
         await resetToBasePosition();
@@ -944,45 +408,15 @@ export function ShogiMatch({
 
     const getLegalSet = async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
-        const resolver =
-            fetchLegalMoves?.bind(null, startSfen) ??
-            ((history: string[]) => getPositionService().getLegalMoves(startSfen, history));
         const ply = movesRef.current.length;
-        const cached = legalCacheRef.current;
-        if (cached && cached.ply === ply) {
-            return cached.moves;
-        }
-        const list = await resolver(movesRef.current);
-        const set = new Set(list);
-        legalCacheRef.current = { ply, moves: set };
-        return set;
+        const resolver = async () => {
+            if (fetchLegalMoves) {
+                return fetchLegalMoves(startSfen, movesRef.current);
+            }
+            return getPositionService().getLegalMoves(startSfen, movesRef.current);
+        };
+        return legalCache.getOrResolve(ply, resolver);
     };
-
-    /**
-     * 指定された移動が成れるかを判定する
-     * @param legalMoves - 合法手のセット
-     * @param from - 移動元マス
-     * @param to - 移動先マス
-     * @returns 成り判定の結果
-     */
-    const determinePromotion = useCallback(
-        (legalMoves: Set<string>, from: string, to: string): PromotionDecision => {
-            const baseMove = `${from}${to}`;
-            const promoteMove = `${baseMove}+`;
-
-            const hasBase = legalMoves.has(baseMove);
-            const hasPromote = legalMoves.has(promoteMove);
-
-            if (hasBase && hasPromote) {
-                return "optional"; // 両方存在 → 任意成り
-            }
-            if (hasPromote) {
-                return "forced"; // 成りのみ存在 → 強制成り
-            }
-            return "none"; // 成れない
-        },
-        [],
-    );
 
     const applyEditedPosition = (nextPosition: PositionState) => {
         setPosition(nextPosition);
@@ -995,18 +429,8 @@ export function ShogiMatch({
         setMessage(null);
         setEditFromSquare(null);
 
-        // 検索状態のリセット
-        searchStatesRef.current.sente.requestPly = null;
-        searchStatesRef.current.gote.requestPly = null;
-
-        activeSearchRef.current = null;
-
-        legalCacheRef.current = null;
-        setClocks((prev) => ({
-            ...prev,
-            ticking: null,
-            lastUpdatedAt: Date.now(),
-        }));
+        legalCache.clear();
+        stopTicking();
         matchEndedRef.current = false;
         setIsMatchRunning(false);
         void refreshStartSfen(nextPosition);
@@ -1317,11 +741,8 @@ export function ShogiMatch({
     };
 
     const importUsi = async (raw: string) => {
-        const trimmed = raw.trim();
-        if (!trimmed) return;
-        const tokens = trimmed.includes("moves")
-            ? (trimmed.split("moves")[1]?.trim().split(/\s+/) ?? [])
-            : trimmed.split(/\s+/);
+        const tokens = parseUsiInput(raw);
+        if (tokens.length === 0) return;
         await loadMoves(tokens);
     };
 
@@ -1338,11 +759,7 @@ export function ShogiMatch({
             setMessage(result.error ?? null);
             resetClocks(false);
 
-            // 検索状態のリセット
-            searchStatesRef.current.sente.requestPly = null;
-            searchStatesRef.current.gote.requestPly = null;
-
-            legalCacheRef.current = null;
+            legalCache.clear();
             setPositionReady(true);
         } catch (error) {
             setMessage(`棋譜の適用に失敗しました: ${String(error)}`);
@@ -1355,76 +772,9 @@ export function ShogiMatch({
         [initialBoard, moves, positionReady],
     );
 
-    const handView = (owner: Player) => {
-        const hand = position.hands[owner];
-        const ownerSetting = sides[owner];
-        const isActive = !isEditMode && position.turn === owner && ownerSetting.role === "human";
-        return (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                {HAND_ORDER.map((piece) => {
-                    const count = hand[piece] ?? 0;
-                    const selected = selection?.kind === "hand" && selection.piece === piece;
-                    return (
-                        <button
-                            key={`${owner}-${piece}`}
-                            type="button"
-                            onClick={() => handleHandSelect(piece)}
-                            disabled={count <= 0 || !isActive}
-                            style={{
-                                minWidth: "52px",
-                                padding: "6px 10px",
-                                borderRadius: "10px",
-                                border: selected
-                                    ? "2px solid hsl(var(--primary, 15 86% 55%))"
-                                    : "1px solid hsl(var(--border, 0 0% 86%))",
-                                background:
-                                    count > 0
-                                        ? "hsl(var(--secondary, 210 40% 96%))"
-                                        : "transparent",
-                                color: "hsl(var(--foreground, 222 47% 11%))",
-                                cursor: count > 0 && isActive ? "pointer" : "not-allowed",
-                            }}
-                        >
-                            {PIECE_LABELS[piece]} × {count}
-                        </button>
-                    );
-                })}
-            </div>
-        );
-    };
-
-    const renderClock = (side: Player) => {
-        const clock = clocks[side];
-        const ticking = clocks.ticking === side;
-        return (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span
-                    style={{
-                        fontWeight: 700,
-                        color:
-                            side === "sente"
-                                ? "hsl(var(--primary, 15 86% 55%))"
-                                : "hsl(var(--accent, 37 94% 50%))",
-                    }}
-                >
-                    {side === "sente" ? "先手" : "後手"}
-                </span>
-                <span style={{ fontVariantNumeric: "tabular-nums", fontSize: "16px" }}>
-                    {formatTime(clock.mainMs)} + {formatTime(clock.byoyomiMs)}
-                </span>
-                {ticking ? (
-                    <span
-                        style={{
-                            display: "inline-block",
-                            width: "10px",
-                            height: "10px",
-                            borderRadius: "50%",
-                            background: "hsl(var(--primary, 15 86% 55%))",
-                        }}
-                    />
-                ) : null}
-            </div>
-        );
+    const importCsa = async (csa: string) => {
+        if (!positionReady) return;
+        await loadMoves(parseCsaMoves(csa, initialBoard ?? undefined));
     };
 
     const candidateNote = positionReady ? null : "局面を読み込み中です。";
@@ -1437,113 +787,6 @@ export function ShogiMatch({
         if (internal) list.push({ ...internal, id: internal.id, label: "内蔵エンジン" });
         return [...list, ...externals];
     }, [engineOptions]);
-
-    const sideSelector = (side: Player) => {
-        const setting = sides[side];
-        const engineList = uiEngineOptions.map((opt) => (
-            <option key={opt.id} value={opt.id}>
-                {opt.label}
-            </option>
-        ));
-        const resolvedEngineId = setting.engineId ?? uiEngineOptions[0]?.id;
-        return (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <label
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        fontSize: "13px",
-                    }}
-                >
-                    {side === "sente" ? "先手" : "後手"} の操作
-                    <select
-                        value={setting.role}
-                        onChange={(e) =>
-                            setSides((prev) => ({
-                                ...prev,
-                                [side]: {
-                                    ...prev[side],
-                                    role: e.target.value as SideRole,
-                                    engineId: prev[side].engineId ?? uiEngineOptions[0]?.id,
-                                },
-                            }))
-                        }
-                        disabled={settingsLocked}
-                        style={{
-                            padding: "8px",
-                            borderRadius: "8px",
-                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                        }}
-                    >
-                        <option value="human">人間</option>
-                        <option value="engine">エンジン</option>
-                    </select>
-                </label>
-                <label
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        fontSize: "13px",
-                    }}
-                >
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                        <span>使用するエンジン</span>
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <span
-                                    role="img"
-                                    aria-label="内蔵エンジンの補足"
-                                    style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        width: "18px",
-                                        height: "18px",
-                                        borderRadius: "999px",
-                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        background: "hsl(var(--card, 0 0% 100%))",
-                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                        fontSize: "11px",
-                                        cursor: "default",
-                                        lineHeight: 1,
-                                    }}
-                                >
-                                    i
-                                </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                                内蔵エンジンは選択肢を1つにまとめています。先手/後手が両方エンジンの場合も内部で必要なクライアント数を起動します。
-                                将来の外部USI/NNUEエンジンを追加するときはここに選択肢が増えます。
-                            </TooltipContent>
-                        </Tooltip>
-                    </div>
-                    <select
-                        value={resolvedEngineId}
-                        onChange={(e) =>
-                            setSides((prev) => ({
-                                ...prev,
-                                [side]: { ...prev[side], engineId: e.target.value },
-                            }))
-                        }
-                        disabled={
-                            settingsLocked ||
-                            setting.role !== "engine" ||
-                            uiEngineOptions.length === 0
-                        }
-                        style={{
-                            padding: "8px",
-                            borderRadius: "8px",
-                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                        }}
-                    >
-                        {engineList}
-                    </select>
-                </label>
-            </div>
-        );
-    };
 
     return (
         <TooltipProvider delayDuration={TOOLTIP_DELAY_DURATION_MS}>
@@ -1665,716 +908,96 @@ export function ShogiMatch({
                                     手番: {position.turn === "sente" ? "先手" : "後手"}
                                 </div>
                             </div>
-                            <div style={{ marginTop: "8px" }}>{handView("sente")}</div>
+                            <div style={{ marginTop: "8px" }}>
+                                <HandPiecesDisplay
+                                    owner="sente"
+                                    hand={position.hands.sente}
+                                    selectedPiece={
+                                        selection?.kind === "hand" ? selection.piece : null
+                                    }
+                                    isActive={
+                                        !isEditMode &&
+                                        position.turn === "sente" &&
+                                        sides.sente.role === "human"
+                                    }
+                                    onHandSelect={handleHandSelect}
+                                />
+                            </div>
                             <div style={{ marginTop: "14px", fontWeight: 700 }}>後手の持ち駒</div>
-                            <div style={{ marginTop: "8px" }}>{handView("gote")}</div>
+                            <div style={{ marginTop: "8px" }}>
+                                <HandPiecesDisplay
+                                    owner="gote"
+                                    hand={position.hands.gote}
+                                    selectedPiece={
+                                        selection?.kind === "hand" ? selection.piece : null
+                                    }
+                                    isActive={
+                                        !isEditMode &&
+                                        position.turn === "gote" &&
+                                        sides.gote.role === "human"
+                                    }
+                                    onHandSelect={handleHandSelect}
+                                />
+                            </div>
                         </div>
                     </div>
 
                     <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                        <Collapsible open={isEditPanelOpen} onOpenChange={setIsEditPanelOpen}>
-                            <div
-                                style={{
-                                    background: "hsl(var(--wafuu-washi-warm))",
-                                    border: "2px solid hsl(var(--wafuu-border))",
-                                    borderRadius: "12px",
-                                    overflow: "hidden",
-                                    boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
-                                }}
-                            >
-                                <CollapsibleTrigger asChild>
-                                    <button
-                                        type="button"
-                                        aria-label="局面編集パネルを開閉"
-                                        style={{
-                                            width: "100%",
-                                            padding: "14px 16px",
-                                            background:
-                                                "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
-                                            borderBottom: isEditPanelOpen
-                                                ? "1px solid hsl(var(--wafuu-border))"
-                                                : "none",
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "space-between",
-                                            cursor: "pointer",
-                                            transition: "all 0.2s ease",
-                                            border: "none",
-                                        }}
-                                    >
-                                        <span
-                                            style={{
-                                                fontSize: "18px",
-                                                fontWeight: 700,
-                                                color: "hsl(var(--wafuu-sumi))",
-                                                letterSpacing: "0.05em",
-                                            }}
-                                        >
-                                            局面編集
-                                        </span>
-                                        <span
-                                            style={{
-                                                fontSize: "20px",
-                                                color: "hsl(var(--wafuu-kincha))",
-                                                transform: isEditPanelOpen
-                                                    ? "rotate(180deg)"
-                                                    : "rotate(0deg)",
-                                                transition: "transform 0.2s ease",
-                                            }}
-                                        >
-                                            ▼
-                                        </span>
-                                    </button>
-                                </CollapsibleTrigger>
-                                <CollapsibleContent>
-                                    <div
-                                        style={{
-                                            padding: "16px",
-                                            display: "flex",
-                                            flexDirection: "column",
-                                            gap: "14px",
-                                        }}
-                                    >
-                                        <div
-                                            style={{
-                                                fontSize: "12px",
-                                                color: "hsl(var(--wafuu-sumi-light))",
-                                                padding: "10px",
-                                                background: "hsl(var(--wafuu-washi))",
-                                                borderRadius: "8px",
-                                                borderLeft: "3px solid hsl(var(--wafuu-kin))",
-                                            }}
-                                        >
-                                            盤面をクリックして局面を編集できます。対局開始前のみ有効です。王は重複不可、各駒は上限枚数まで配置できます。
-                                        </div>
-                                        <div
-                                            style={{
-                                                display: "flex",
-                                                gap: "8px",
-                                                flexWrap: "wrap",
-                                            }}
-                                        >
-                                            <Button
-                                                type="button"
-                                                onClick={resetToStartposForEdit}
-                                                disabled={isMatchRunning || !positionReady}
-                                                variant="outline"
-                                                style={{ paddingInline: "12px" }}
-                                            >
-                                                平手に戻す
-                                            </Button>
-                                            <Button
-                                                type="button"
-                                                onClick={clearBoardForEdit}
-                                                disabled={isMatchRunning || !positionReady}
-                                                variant="outline"
-                                                style={{ paddingInline: "12px" }}
-                                            >
-                                                盤面をクリア
-                                            </Button>
-                                        </div>
-                                        <div
-                                            style={{
-                                                display: "flex",
-                                                gap: "6px",
-                                                alignItems: "center",
-                                            }}
-                                        >
-                                            <span
-                                                style={{
-                                                    fontSize: "12px",
-                                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                                }}
-                                            >
-                                                配置する先後
-                                            </span>
-                                            <label
-                                                style={{
-                                                    display: "flex",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                <input
-                                                    type="radio"
-                                                    name="edit-owner"
-                                                    value="sente"
-                                                    checked={editOwner === "sente"}
-                                                    disabled={isMatchRunning}
-                                                    onChange={() => setEditOwner("sente")}
-                                                />
-                                                先手
-                                            </label>
-                                            <label
-                                                style={{
-                                                    display: "flex",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                <input
-                                                    type="radio"
-                                                    name="edit-owner"
-                                                    value="gote"
-                                                    checked={editOwner === "gote"}
-                                                    disabled={isMatchRunning}
-                                                    onChange={() => setEditOwner("gote")}
-                                                />
-                                                後手
-                                            </label>
-                                        </div>
-                                        <div
-                                            style={{
-                                                display: "flex",
-                                                gap: "8px",
-                                                flexWrap: "wrap",
-                                                alignItems: "center",
-                                            }}
-                                        >
-                                            <div
-                                                style={{
-                                                    display: "flex",
-                                                    gap: "6px",
-                                                    flexWrap: "wrap",
-                                                }}
-                                            >
-                                                {PIECE_SELECT_ORDER.map((type) => {
-                                                    const selected =
-                                                        editPieceType === type &&
-                                                        editTool === "place";
-                                                    return (
-                                                        <Button
-                                                            key={type}
-                                                            type="button"
-                                                            variant={
-                                                                selected ? "secondary" : "outline"
-                                                            }
-                                                            onClick={() => {
-                                                                if (selected) {
-                                                                    // 選択中の駒を再度クリック：選択解除
-                                                                    setEditPieceType(null);
-                                                                } else {
-                                                                    setEditTool("place");
-                                                                    setEditPieceType(type);
-                                                                    if (!isPromotable(type)) {
-                                                                        setEditPromoted(false);
-                                                                    }
-                                                                }
-                                                            }}
-                                                            disabled={isMatchRunning}
-                                                            style={{ paddingInline: "10px" }}
-                                                        >
-                                                            {PIECE_LABELS[type]}
-                                                        </Button>
-                                                    );
-                                                })}
-                                            </div>
-                                            <Button
-                                                type="button"
-                                                variant={
-                                                    editTool === "erase" ? "secondary" : "outline"
-                                                }
-                                                onClick={() => {
-                                                    if (editTool === "erase") {
-                                                        // 削除モードを解除
-                                                        setEditTool("place");
-                                                    } else {
-                                                        // 削除モードに切り替え
-                                                        setEditTool("erase");
-                                                        setEditPieceType(null);
-                                                    }
-                                                }}
-                                                disabled={isMatchRunning}
-                                                style={{ paddingInline: "10px" }}
-                                            >
-                                                削除モード
-                                            </Button>
-                                            <label
-                                                style={{
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    gap: "6px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                <input
-                                                    type="checkbox"
-                                                    checked={editPromoted}
-                                                    disabled={
-                                                        isMatchRunning ||
-                                                        !editPieceType ||
-                                                        !isPromotable(editPieceType)
-                                                    }
-                                                    onChange={(e) =>
-                                                        setEditPromoted(e.target.checked)
-                                                    }
-                                                />
-                                                成りで配置
-                                            </label>
-                                        </div>
-                                        <div
-                                            style={{
-                                                fontSize: "12px",
-                                                color: "hsl(var(--wafuu-sumi-light))",
-                                                padding: "12px",
-                                                background: "hsl(var(--wafuu-washi))",
-                                                borderRadius: "8px",
-                                                borderLeft: "3px solid hsl(var(--wafuu-shu))",
-                                            }}
-                                        >
-                                            <div
-                                                style={{
-                                                    fontWeight: 600,
-                                                    marginBottom: "6px",
-                                                    color: "hsl(var(--wafuu-sumi))",
-                                                }}
-                                            >
-                                                操作方法
-                                            </div>
-                                            <ul
-                                                style={{
-                                                    margin: 0,
-                                                    paddingLeft: "20px",
-                                                    lineHeight: 1.6,
-                                                }}
-                                            >
-                                                <li>
-                                                    <strong>駒を配置:</strong> 駒ボタンを選択 →
-                                                    盤面をクリック
-                                                </li>
-                                                <li>
-                                                    <strong>駒を移動:</strong>{" "}
-                                                    駒ボタン未選択の状態で盤面の駒をクリック →
-                                                    移動先をクリック
-                                                </li>
-                                                <li>
-                                                    <strong>駒を削除:</strong>{" "}
-                                                    削除モードボタンを押して盤面をクリック（手駒に戻ります）
-                                                </li>
-                                                <li>
-                                                    <strong>選択解除:</strong>{" "}
-                                                    駒ボタンや削除モードボタンを再度クリック、または同じマスを再度クリック
-                                                </li>
-                                            </ul>
-                                            {editFromSquare && (
-                                                <div
-                                                    style={{
-                                                        marginTop: "8px",
-                                                        padding: "6px 10px",
-                                                        background: "hsl(var(--wafuu-kin) / 0.15)",
-                                                        borderRadius: "6px",
-                                                        color: "hsl(var(--wafuu-sumi))",
-                                                        fontSize: "11px",
-                                                        fontWeight: 600,
-                                                    }}
-                                                >
-                                                    移動元: {editFromSquare} →
-                                                    移動先を選択してください
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </CollapsibleContent>
-                            </div>
-                        </Collapsible>
+                        <EditModePanel
+                            isOpen={isEditPanelOpen}
+                            onOpenChange={setIsEditPanelOpen}
+                            editOwner={editOwner}
+                            editPieceType={editPieceType}
+                            editPromoted={editPromoted}
+                            editFromSquare={editFromSquare}
+                            editTool={editTool}
+                            setEditOwner={setEditOwner}
+                            setEditPieceType={setEditPieceType}
+                            setEditPromoted={setEditPromoted}
+                            setEditTool={setEditTool}
+                            onResetToStartpos={resetToStartposForEdit}
+                            onClearBoard={clearBoardForEdit}
+                            isMatchRunning={isMatchRunning}
+                            positionReady={positionReady}
+                        />
 
-                        <div
-                            style={{
-                                ...baseCard,
-                                padding: "12px",
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "10px",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    display: "flex",
-                                    gap: "8px",
-                                    flexWrap: "wrap",
-                                    alignItems: "center",
-                                }}
-                            >
-                                <Button
-                                    type="button"
-                                    onClick={handleNewGame}
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    新規対局（初期化）
-                                </Button>
-                                <Button
-                                    type="button"
-                                    onClick={pauseAutoPlay}
-                                    variant="outline"
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    停止（自動進行オフ）
-                                </Button>
-                                <Button
-                                    type="button"
-                                    onClick={resumeAutoPlay}
-                                    variant="secondary"
-                                    style={{ paddingInline: "12px" }}
-                                >
-                                    対局開始 / 再開
-                                </Button>
-                            </div>
-                            <div
-                                style={{
-                                    fontSize: "12px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                状態:
-                                {(["sente", "gote"] as Player[]).map((side) => {
-                                    const roleLabel =
-                                        sides[side].role === "engine" ? "エンジン" : "人間";
-                                    if (sides[side].role !== "engine") {
-                                        return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel}]`;
-                                    }
-                                    const engineLabel = getEngineForSide(side)?.label ?? "未選択";
-                                    const ready = engineReady[side] ? "init済" : "未init";
-                                    const status = engineStatus[side];
-                                    return ` [${side === "sente" ? "先手" : "後手"}: ${roleLabel} ${engineLabel} ${status}/${ready}]`;
-                                })}
-                                {` | 対局: ${isMatchRunning ? "実行中" : "停止中"}`}
-                            </div>
-                            {message ? (
-                                <div
-                                    style={{
-                                        color: "hsl(var(--destructive, 0 72% 51%))",
-                                        fontSize: "13px",
-                                    }}
-                                >
-                                    {message}
-                                </div>
-                            ) : null}
+                        <MatchControls
+                            onNewGame={handleNewGame}
+                            onPause={pauseAutoPlay}
+                            onResume={resumeAutoPlay}
+                            sides={sides}
+                            engineReady={engineReady}
+                            engineStatus={engineStatus}
+                            isMatchRunning={isMatchRunning}
+                            message={message}
+                            getEngineForSide={getEngineForSide}
+                        />
 
-                            <Collapsible
-                                open={isSettingsPanelOpen}
-                                onOpenChange={setIsSettingsPanelOpen}
-                            >
-                                <CollapsibleTrigger asChild>
-                                    <button
-                                        type="button"
-                                        aria-label="対局設定パネルを開閉"
-                                        style={{
-                                            width: "100%",
-                                            padding: "8px",
-                                            background: "hsl(var(--secondary))",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                            borderRadius: "8px",
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "space-between",
-                                            cursor: "pointer",
-                                            fontSize: "14px",
-                                            fontWeight: 600,
-                                        }}
-                                    >
-                                        <span>対局設定</span>
-                                        <span
-                                            style={{
-                                                transform: isSettingsPanelOpen
-                                                    ? "rotate(180deg)"
-                                                    : "rotate(0deg)",
-                                                transition: "transform 0.2s ease",
-                                            }}
-                                        >
-                                            ▼
-                                        </span>
-                                    </button>
-                                </CollapsibleTrigger>
-                                <CollapsibleContent>
-                                    <div
-                                        style={{
-                                            display: "flex",
-                                            flexDirection: "column",
-                                            gap: "10px",
-                                            paddingTop: "10px",
-                                        }}
-                                    >
-                                        {settingsLocked ? (
-                                            <div
-                                                style={{
-                                                    fontSize: "12px",
-                                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                                }}
-                                            >
-                                                対局中は設定を変更できません。停止すると編集できます。
-                                            </div>
-                                        ) : null}
-                                        <label
-                                            style={{
-                                                display: "flex",
-                                                flexDirection: "column",
-                                                gap: "4px",
-                                                fontSize: "13px",
-                                            }}
-                                        >
-                                            手番（開始時にどちらが指すか）
-                                            <select
-                                                value={position.turn}
-                                                onChange={(e) =>
-                                                    updateTurnForEdit(e.target.value as Player)
-                                                }
-                                                disabled={isMatchRunning}
-                                                style={{
-                                                    padding: "8px",
-                                                    borderRadius: "8px",
-                                                    border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                                }}
-                                            >
-                                                <option value="sente">先手</option>
-                                                <option value="gote">後手</option>
-                                            </select>
-                                        </label>
-                                        {sideSelector("sente")}
-                                        {sideSelector("gote")}
+                        <MatchSettingsPanel
+                            isOpen={isSettingsPanelOpen}
+                            onOpenChange={setIsSettingsPanelOpen}
+                            sides={sides}
+                            onSidesChange={setSides}
+                            timeSettings={timeSettings}
+                            onTimeSettingsChange={setTimeSettings}
+                            currentTurn={position.turn}
+                            onTurnChange={updateTurnForEdit}
+                            uiEngineOptions={uiEngineOptions}
+                            settingsLocked={settingsLocked}
+                        />
 
-                                        <div
-                                            style={{
-                                                display: "grid",
-                                                gridTemplateColumns: "1fr 1fr",
-                                                gap: "8px",
-                                            }}
-                                        >
-                                            <label
-                                                htmlFor="sente-main"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                先手 持ち時間 (ms)
-                                                <Input
-                                                    id="sente-main"
-                                                    type="number"
-                                                    value={timeSettings.sente.mainMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            sente: {
-                                                                ...prev.sente,
-                                                                mainMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                            <label
-                                                htmlFor="sente-byoyomi"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                先手 秒読み (ms)
-                                                <Input
-                                                    id="sente-byoyomi"
-                                                    type="number"
-                                                    value={timeSettings.sente.byoyomiMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            sente: {
-                                                                ...prev.sente,
-                                                                byoyomiMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                            <label
-                                                htmlFor="gote-main"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                後手 持ち時間 (ms)
-                                                <Input
-                                                    id="gote-main"
-                                                    type="number"
-                                                    value={timeSettings.gote.mainMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            gote: {
-                                                                ...prev.gote,
-                                                                mainMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                            <label
-                                                htmlFor="gote-byoyomi"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                後手 秒読み (ms)
-                                                <Input
-                                                    id="gote-byoyomi"
-                                                    type="number"
-                                                    value={timeSettings.gote.byoyomiMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            gote: {
-                                                                ...prev.gote,
-                                                                byoyomiMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                        </div>
-                                    </div>
-                                </CollapsibleContent>
-                            </Collapsible>
-                        </div>
+                        <ClockDisplayPanel clocks={clocks} />
 
-                        <div style={{ ...baseCard, padding: "12px" }}>
-                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>時計</div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                                {renderClock("sente")}
-                                {renderClock("gote")}
-                            </div>
-                        </div>
+                        <KifuIOPanel
+                            moves={moves}
+                            exportUsi={exportUsi}
+                            exportCsa={exportCsa}
+                            onImportUsi={importUsi}
+                            onImportCsa={importCsa}
+                            positionReady={positionReady}
+                        />
 
-                        <div style={{ ...baseCard, padding: "12px" }}>
-                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>
-                                棋譜 / 入出力
-                            </div>
-                            <div
-                                style={{
-                                    fontSize: "13px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                先手から {moves.length} 手目
-                            </div>
-                            <ol
-                                style={{
-                                    paddingLeft: "18px",
-                                    maxHeight: "160px",
-                                    overflow: "auto",
-                                    margin: "8px 0",
-                                }}
-                            >
-                                {moves.map((mv, idx) => (
-                                    <li
-                                        key={`${idx}-${mv}`}
-                                        style={{
-                                            fontFamily: "ui-monospace, monospace",
-                                            fontSize: "13px",
-                                        }}
-                                    >
-                                        {idx + 1}. {mv}
-                                    </li>
-                                ))}
-                            </ol>
-                            <div
-                                style={{ display: "grid", gridTemplateColumns: "1fr", gap: "8px" }}
-                            >
-                                <label
-                                    style={{ display: "flex", flexDirection: "column", gap: "4px" }}
-                                >
-                                    USI / SFEN（現在の開始局面 + moves）
-                                    <textarea
-                                        value={exportUsi}
-                                        onChange={(e) => {
-                                            void importUsi(e.target.value);
-                                        }}
-                                        rows={3}
-                                        style={{
-                                            width: "100%",
-                                            padding: "8px",
-                                            borderRadius: "8px",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        }}
-                                    />
-                                </label>
-                                <label
-                                    style={{ display: "flex", flexDirection: "column", gap: "4px" }}
-                                >
-                                    CSA
-                                    <textarea
-                                        value={exportCsa}
-                                        onChange={(e) => {
-                                            if (!positionReady) return;
-                                            void loadMoves(
-                                                parseCsaMoves(
-                                                    e.target.value,
-                                                    initialBoard ?? undefined,
-                                                ),
-                                            );
-                                        }}
-                                        rows={3}
-                                        style={{
-                                            width: "100%",
-                                            padding: "8px",
-                                            borderRadius: "8px",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        }}
-                                    />
-                                </label>
-                            </div>
-                        </div>
-
-                        <div style={{ ...baseCard, padding: "12px" }}>
-                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>エンジンログ</div>
-                            <ul
-                                style={{
-                                    listStyle: "none",
-                                    padding: 0,
-                                    margin: 0,
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    maxHeight: "160px",
-                                    overflow: "auto",
-                                }}
-                            >
-                                {eventLogs.map((log, idx) => (
-                                    <li
-                                        key={`${idx}-${log}`}
-                                        style={{
-                                            fontFamily: "ui-monospace, monospace",
-                                            fontSize: "12px",
-                                        }}
-                                    >
-                                        {log}
-                                    </li>
-                                ))}
-                            </ul>
-                            {errorLogs.length ? (
-                                <div
-                                    style={{
-                                        marginTop: "8px",
-                                        color: "hsl(var(--destructive, 0 72% 51%))",
-                                        fontSize: "12px",
-                                    }}
-                                >
-                                    {errorLogs[0]}
-                                </div>
-                            ) : null}
-                        </div>
+                        <EngineLogsPanel eventLogs={eventLogs} errorLogs={errorLogs} />
                     </div>
                 </div>
             </section>
