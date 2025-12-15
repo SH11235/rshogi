@@ -263,7 +263,7 @@ export function ShogiMatch({
     const [eventLogs, setEventLogs] = useState<string[]>([]);
     const [errorLogs, setErrorLogs] = useState<string[]>([]);
     const [isMatchRunning, setIsMatchRunning] = useState(false);
-    const [isEditMode, setIsEditMode] = useState(false);
+    const [isEditMode, setIsEditMode] = useState(true);
     const [editOwner, setEditOwner] = useState<Player>("sente");
     const [editPieceType, setEditPieceType] = useState<PieceType | null>(null);
     const [editPromoted, setEditPromoted] = useState(false);
@@ -472,6 +472,9 @@ export function ShogiMatch({
         if (!positionReady) return;
         if (isEditMode) {
             await finalizeEditedPosition();
+            // 対局開始時に編集モードを終了し、パネルを閉じる
+            setIsEditMode(false);
+            setIsEditPanelOpen(false);
         }
         const turn = position.turn;
 
@@ -556,11 +559,12 @@ export function ShogiMatch({
         resetClocks(false);
         lastEngineRequestPly.current = { sente: null, gote: null };
         setIsMatchRunning(false);
-        setIsEditMode(false);
+        setIsEditMode(true);
         setEditFromSquare(null);
         setEditTool("place");
         setEditPromoted(false);
         setEditOwner("sente");
+        setEditPieceType(null);
         activeSearchRef.current = null;
         setErrorLogs([]);
         setEventLogs([]);
@@ -991,6 +995,10 @@ export function ShogiMatch({
             if (!positionReady) {
                 setMessage("局面を読み込み中です。");
                 return;
+            }
+            // 編集パネルが閉じていたら自動的に開く
+            if (!isEditPanelOpen) {
+                setIsEditPanelOpen(true);
             }
             const sq = square as Square;
 
@@ -1522,38 +1530,16 @@ export function ShogiMatch({
                                             border: "none",
                                         }}
                                     >
-                                        <div
+                                        <span
                                             style={{
-                                                display: "flex",
-                                                alignItems: "center",
-                                                gap: "10px",
+                                                fontSize: "18px",
+                                                fontWeight: 700,
+                                                color: "hsl(var(--wafuu-sumi))",
+                                                letterSpacing: "0.05em",
                                             }}
                                         >
-                                            <span
-                                                style={{
-                                                    fontSize: "18px",
-                                                    fontWeight: 700,
-                                                    color: "hsl(var(--wafuu-sumi))",
-                                                    letterSpacing: "0.05em",
-                                                }}
-                                            >
-                                                局面編集
-                                            </span>
-                                            {isEditMode && (
-                                                <span
-                                                    style={{
-                                                        fontSize: "11px",
-                                                        padding: "2px 8px",
-                                                        borderRadius: "6px",
-                                                        background: "hsl(var(--wafuu-shu))",
-                                                        color: "white",
-                                                        fontWeight: 600,
-                                                    }}
-                                                >
-                                                    編集中
-                                                </span>
-                                            )}
-                                        </div>
+                                            局面編集
+                                        </span>
                                         <span
                                             style={{
                                                 fontSize: "20px",
@@ -1587,7 +1573,7 @@ export function ShogiMatch({
                                                 borderLeft: "3px solid hsl(var(--wafuu-kin))",
                                             }}
                                         >
-                                            対局開始前のみ編集できます。王は重複不可、各駒は上限枚数まで配置できます。
+                                            盤面をクリックして局面を編集できます。対局開始前のみ有効です。王は重複不可、各駒は上限枚数まで配置できます。
                                         </div>
                                         <div
                                             style={{
@@ -1596,40 +1582,6 @@ export function ShogiMatch({
                                                 flexWrap: "wrap",
                                             }}
                                         >
-                                            <Button
-                                                type="button"
-                                                onClick={() =>
-                                                    setIsEditMode((prev) => {
-                                                        const next = !prev;
-                                                        if (!next) {
-                                                            // 編集モード終了時に選択状態をリセット
-                                                            setEditFromSquare(null);
-                                                            setEditTool("place");
-                                                            setEditPieceType(null);
-                                                            setEditPromoted(false);
-                                                        }
-                                                        return next;
-                                                    })
-                                                }
-                                                disabled={isMatchRunning || !positionReady}
-                                                variant={isEditMode ? "secondary" : "outline"}
-                                                style={{ paddingInline: "12px" }}
-                                            >
-                                                {isEditMode
-                                                    ? "編集モードを終了"
-                                                    : "編集モードを開始"}
-                                            </Button>
-                                            <Button
-                                                type="button"
-                                                onClick={finalizeEditedPosition}
-                                                disabled={
-                                                    isMatchRunning || !isEditMode || !positionReady
-                                                }
-                                                variant="secondary"
-                                                style={{ paddingInline: "12px" }}
-                                            >
-                                                変更を確定
-                                            </Button>
                                             <Button
                                                 type="button"
                                                 onClick={resetToStartposForEdit}
@@ -1788,70 +1740,67 @@ export function ShogiMatch({
                                                 成りで配置
                                             </label>
                                         </div>
-                                        {isEditMode ? (
+                                        <div
+                                            style={{
+                                                fontSize: "12px",
+                                                color: "hsl(var(--wafuu-sumi-light))",
+                                                padding: "12px",
+                                                background: "hsl(var(--wafuu-washi))",
+                                                borderRadius: "8px",
+                                                borderLeft: "3px solid hsl(var(--wafuu-shu))",
+                                            }}
+                                        >
                                             <div
                                                 style={{
-                                                    fontSize: "12px",
-                                                    color: "hsl(var(--wafuu-sumi-light))",
-                                                    padding: "12px",
-                                                    background: "hsl(var(--wafuu-washi))",
-                                                    borderRadius: "8px",
-                                                    borderLeft: "3px solid hsl(var(--wafuu-shu))",
+                                                    fontWeight: 600,
+                                                    marginBottom: "6px",
+                                                    color: "hsl(var(--wafuu-sumi))",
                                                 }}
                                             >
+                                                操作方法
+                                            </div>
+                                            <ul
+                                                style={{
+                                                    margin: 0,
+                                                    paddingLeft: "20px",
+                                                    lineHeight: 1.6,
+                                                }}
+                                            >
+                                                <li>
+                                                    <strong>駒を配置:</strong> 駒ボタンを選択 →
+                                                    盤面をクリック
+                                                </li>
+                                                <li>
+                                                    <strong>駒を移動:</strong>{" "}
+                                                    駒ボタン未選択の状態で盤面の駒をクリック →
+                                                    移動先をクリック
+                                                </li>
+                                                <li>
+                                                    <strong>駒を削除:</strong>{" "}
+                                                    削除モードボタンを押して盤面をクリック（手駒に戻ります）
+                                                </li>
+                                                <li>
+                                                    <strong>選択解除:</strong>{" "}
+                                                    駒ボタンや削除モードボタンを再度クリック、または同じマスを再度クリック
+                                                </li>
+                                            </ul>
+                                            {editFromSquare && (
                                                 <div
                                                     style={{
-                                                        fontWeight: 600,
-                                                        marginBottom: "6px",
+                                                        marginTop: "8px",
+                                                        padding: "6px 10px",
+                                                        background: "hsl(var(--wafuu-kin) / 0.15)",
+                                                        borderRadius: "6px",
                                                         color: "hsl(var(--wafuu-sumi))",
+                                                        fontSize: "11px",
+                                                        fontWeight: 600,
                                                     }}
                                                 >
-                                                    操作方法
+                                                    移動元: {editFromSquare} →
+                                                    移動先を選択してください
                                                 </div>
-                                                <ul
-                                                    style={{
-                                                        margin: 0,
-                                                        paddingLeft: "20px",
-                                                        lineHeight: 1.6,
-                                                    }}
-                                                >
-                                                    <li>
-                                                        <strong>駒を配置:</strong> 駒ボタンを選択 →
-                                                        盤面をクリック
-                                                    </li>
-                                                    <li>
-                                                        <strong>駒を移動:</strong>{" "}
-                                                        駒ボタン未選択の状態で盤面の駒をクリック →
-                                                        移動先をクリック
-                                                    </li>
-                                                    <li>
-                                                        <strong>駒を削除:</strong>{" "}
-                                                        削除モードボタンを押して盤面をクリック（手駒に戻ります）
-                                                    </li>
-                                                    <li>
-                                                        <strong>選択解除:</strong>{" "}
-                                                        駒ボタンや削除モードボタンを再度クリック、または同じマスを再度クリック
-                                                    </li>
-                                                </ul>
-                                                {editFromSquare && (
-                                                    <div
-                                                        style={{
-                                                            marginTop: "8px",
-                                                            padding: "6px 10px",
-                                                            background:
-                                                                "hsl(var(--wafuu-kin) / 0.15)",
-                                                            borderRadius: "6px",
-                                                            color: "hsl(var(--wafuu-sumi))",
-                                                            fontSize: "11px",
-                                                            fontWeight: 600,
-                                                        }}
-                                                    >
-                                                        移動元: {editFromSquare} →
-                                                        移動先を選択してください
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ) : null}
+                                            )}
+                                        </div>
                                     </div>
                                 </CollapsibleContent>
                             </div>
