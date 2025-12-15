@@ -6,7 +6,6 @@ import {
     createEmptyHands,
     getAllSquares,
     getPositionService,
-    type Hands,
     type LastMove,
     movesToCsa,
     type Piece,
@@ -20,26 +19,29 @@ import {
 import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-client";
 import type { CSSProperties, ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// TODO: usePositionEditor を統合する（Phase 3b）
+// import { usePositionEditor } from "./shogi-match/hooks/usePositionEditor";
 import { Button } from "./button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./collapsible";
 import { Input } from "./input";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
+import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
+import type { PromotionSelection } from "./shogi-match/types";
+import {
+    addToHand,
+    cloneHandsState,
+    consumeFromHand,
+    countPieces,
+} from "./shogi-match/utils/boardUtils";
+import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
+import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
+import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
+import { determinePromotion } from "./shogi-match/utils/promotionLogic";
+import { formatTime } from "./shogi-match/utils/timeFormat";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
-type PromotionSelection = {
-    from: Square;
-    to: Square;
-    piece: Piece; // 駒情報を追加（UI表示・検証用）
-};
-/**
- * 成り判定の結果を表す型
- * - 'none': 成れない（成り手が存在しない）
- * - 'optional': 任意成り（基本移動と成り移動の両方が合法）
- * - 'forced': 強制成り（成り移動のみ合法）
- */
-type PromotionDecision = "none" | "optional" | "forced";
 type SideRole = "human" | "engine";
 type EngineStatus = "idle" | "thinking" | "error";
 
@@ -75,20 +77,6 @@ type SideSetting = {
     engineId?: string;
 };
 
-type ClockSettings = Record<Player, { mainMs: number; byoyomiMs: number }>;
-
-interface ClockState {
-    mainMs: number;
-    byoyomiMs: number;
-}
-
-interface TickState {
-    sente: ClockState;
-    gote: ClockState;
-    ticking: Player | null;
-    lastUpdatedAt: number;
-}
-
 export interface ShogiMatchProps {
     engineOptions: EngineOption[];
     defaultSides?: { sente: SideSetting; gote: SideSetting };
@@ -101,32 +89,10 @@ export interface ShogiMatchProps {
 // デフォルト値の定数
 const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
-const CLOCK_UPDATE_INTERVAL_MS = 200; // クロック更新インターバル
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
-const PIECE_LABELS: Record<PieceType, string> = {
-    K: "玉",
-    R: "飛",
-    B: "角",
-    G: "金",
-    S: "銀",
-    N: "桂",
-    L: "香",
-    P: "歩",
-};
-const PIECE_CAP: Record<PieceType, number> = {
-    P: 18,
-    L: 4,
-    N: 4,
-    S: 4,
-    G: 4,
-    B: 2,
-    R: 2,
-    K: 1,
-};
-const isPromotable = (type: PieceType): boolean => type !== "K" && type !== "G";
 
 const baseCard: CSSProperties = {
     background: "hsl(var(--card, 0 0% 100%))",
@@ -136,54 +102,12 @@ const baseCard: CSSProperties = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
-const cloneHandsState = (hands: Hands): Hands => ({
-    sente: { ...hands.sente },
-    gote: { ...hands.gote },
-});
-
 const clonePositionState = (pos: PositionState): PositionState => ({
     board: cloneBoard(pos.board),
     hands: cloneHandsState(pos.hands),
     turn: pos.turn,
     ply: pos.ply,
 });
-
-const addToHand = (hands: Hands, owner: Player, pieceType: PieceType): Hands => {
-    const next = cloneHandsState(hands);
-    const current = next[owner][pieceType] ?? 0;
-    next[owner][pieceType] = current + 1;
-    return next;
-};
-
-const consumeFromHand = (hands: Hands, owner: Player, pieceType: PieceType): Hands | null => {
-    const next = cloneHandsState(hands);
-    const current = next[owner][pieceType] ?? 0;
-    if (current <= 0) return null;
-    if (current === 1) {
-        delete next[owner][pieceType];
-    } else {
-        next[owner][pieceType] = current - 1;
-    }
-    return next;
-};
-
-const countPieces = (position: PositionState): Record<Player, Record<PieceType, number>> => {
-    const counts: Record<Player, Record<PieceType, number>> = {
-        sente: { K: 0, R: 0, B: 0, G: 0, S: 0, N: 0, L: 0, P: 0 },
-        gote: { K: 0, R: 0, B: 0, G: 0, S: 0, N: 0, L: 0, P: 0 },
-    };
-    for (const piece of Object.values(position.board)) {
-        if (!piece) continue;
-        counts[piece.owner][piece.type] += 1;
-    }
-    for (const owner of ["sente", "gote"] as Player[]) {
-        const hand = position.hands[owner];
-        for (const key of Object.keys(hand) as PieceType[]) {
-            counts[owner][key] += hand[key] ?? 0;
-        }
-    }
-    return counts;
-};
 
 function formatEvent(event: EngineEvent, engineId: string): string {
     const prefix = `[${engineId}] `;
@@ -217,16 +141,6 @@ function formatEvent(event: EngineEvent, engineId: string): string {
     return `${prefix}error ${event.message}`;
 }
 
-function formatTime(ms: number): string {
-    if (ms < 0) ms = 0;
-    const totalSeconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60)
-        .toString()
-        .padStart(2, "0");
-    const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-    return `${minutes}:${seconds}`;
-}
-
 function boardToGrid(board: BoardState): ShogiBoardCell[][] {
     const matrix = boardToMatrix(board);
     return matrix.map((row) =>
@@ -241,15 +155,6 @@ function boardToGrid(board: BoardState): ShogiBoardCell[][] {
                 : null,
         })),
     );
-}
-
-function initialTick(settings: ClockSettings): TickState {
-    return {
-        sente: { mainMs: settings.sente.mainMs, byoyomiMs: settings.sente.byoyomiMs },
-        gote: { mainMs: settings.gote.mainMs, byoyomiMs: settings.gote.byoyomiMs },
-        ticking: null,
-        lastUpdatedAt: Date.now(),
-    };
 }
 
 export function ShogiMatch({
@@ -295,7 +200,6 @@ export function ShogiMatch({
         sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
         gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
     });
-    const [clocks, setClocks] = useState<TickState>(initialTick(timeSettings));
     const [eventLogs, setEventLogs] = useState<string[]>([]);
     const [errorLogs, setErrorLogs] = useState<string[]>([]);
     const [isMatchRunning, setIsMatchRunning] = useState(false);
@@ -323,10 +227,23 @@ export function ShogiMatch({
 
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
-    const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
+    const legalCache = useMemo(() => new LegalMoveCache(), []);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
+
+    // 時計管理フックを使用
+    const { clocks, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
+        useClockManager({
+            timeSettings,
+            isMatchRunning,
+            onTimeExpired: async (side) => {
+                const loserLabel = side === "sente" ? "先手" : "後手";
+                const winnerLabel = side === "sente" ? "後手" : "先手";
+                await endMatch(`対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`);
+            },
+            matchEndedRef,
+        });
 
     useEffect(() => {
         let cancelled = false;
@@ -442,24 +359,6 @@ export function ShogiMatch({
         [getEngineForSide, sides],
     );
 
-    const resetClocks = useCallback(
-        (startTick: boolean) => {
-            setClocks({
-                sente: {
-                    mainMs: timeSettings.sente.mainMs,
-                    byoyomiMs: timeSettings.sente.byoyomiMs,
-                },
-                gote: {
-                    mainMs: timeSettings.gote.mainMs,
-                    byoyomiMs: timeSettings.gote.byoyomiMs,
-                },
-                ticking: startTick ? "sente" : null,
-                lastUpdatedAt: Date.now(),
-            });
-        },
-        [timeSettings],
-    );
-
     const refreshStartSfen = useCallback(async (pos: PositionState) => {
         try {
             const sfen = await getPositionService().boardToSfen(pos);
@@ -497,15 +396,15 @@ export function ShogiMatch({
             matchEndedRef.current = true;
             setMessage(nextMessage);
             setIsMatchRunning(false);
-            setClocks((prev) => ({ ...prev, ticking: null }));
+            stopTicking();
             await stopAllEngines();
         },
-        [stopAllEngines],
+        [stopAllEngines, stopTicking],
     );
 
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
-        setClocks((prev) => ({ ...prev, ticking: null }));
+        stopTicking();
         await stopAllEngines();
     };
 
@@ -557,7 +456,7 @@ export function ShogiMatch({
         }
 
         setIsMatchRunning(true);
-        setClocks((prev) => ({ ...prev, ticking: turn, lastUpdatedAt: Date.now() }));
+        startTicking(turn);
         if (!isEngineTurn(turn)) return;
         try {
             await startEngineTurn(turn);
@@ -573,7 +472,7 @@ export function ShogiMatch({
         setBasePosition(clonePositionState(current));
         setInitialBoard(cloneBoard(current.board));
         await refreshStartSfen(current);
-        legalCacheRef.current = null;
+        legalCache.clear();
         setIsEditMode(false);
         setMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
@@ -627,24 +526,9 @@ export function ShogiMatch({
 
         setErrorLogs([]);
         setEventLogs([]);
-        legalCacheRef.current = null;
+        legalCache.clear();
         void refreshStartSfen(next);
-    }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines]);
-
-    const updateClocksForNextTurn = useCallback(
-        (nextTurn: Player) => {
-            setClocks((prev) => ({
-                ...prev,
-                [nextTurn]: {
-                    mainMs: prev[nextTurn].mainMs,
-                    byoyomiMs: timeSettings[nextTurn].byoyomiMs,
-                },
-                ticking: nextTurn,
-                lastUpdatedAt: Date.now(),
-            }));
-        },
-        [timeSettings],
-    );
+    }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines, legalCache.clear]);
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove) => {
@@ -654,10 +538,10 @@ export function ShogiMatch({
             setSelection(null);
             setMessage(null);
             activeSearchRef.current = null;
-            legalCacheRef.current = null;
+            legalCache.clear();
             updateClocksForNextTurn(nextPosition.turn);
         },
-        [updateClocksForNextTurn],
+        [updateClocksForNextTurn, legalCache.clear],
     );
 
     const applyMoveFromEngine = useCallback(
@@ -872,41 +756,6 @@ export function ShogiMatch({
     }, [disposeEngineForSide]);
 
     useEffect(() => {
-        if (!isMatchRunning || !clocks.ticking) return;
-        const timer = setInterval(() => {
-            let expiredSide: Player | null = null;
-            setClocks((prev) => {
-                if (!prev.ticking) return prev;
-                const now = Date.now();
-                const delta = now - prev.lastUpdatedAt;
-                const side = prev.ticking;
-                const current = prev[side];
-                let mainMs = current.mainMs - delta;
-                let byoyomiMs = current.byoyomiMs;
-                if (mainMs < 0) {
-                    const over = Math.abs(mainMs);
-                    mainMs = 0;
-                    byoyomiMs = Math.max(0, byoyomiMs - over);
-                }
-                if (mainMs <= 0 && byoyomiMs <= 0) {
-                    expiredSide = side;
-                }
-                return {
-                    ...prev,
-                    [side]: { mainMs: Math.max(0, mainMs), byoyomiMs },
-                    lastUpdatedAt: now,
-                };
-            });
-            if (expiredSide && isMatchRunning && !matchEndedRef.current) {
-                const loserLabel = expiredSide === "sente" ? "先手" : "後手";
-                const winnerLabel = expiredSide === "sente" ? "後手" : "先手";
-                void endMatch(`対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`);
-            }
-        }, CLOCK_UPDATE_INTERVAL_MS);
-        return () => clearInterval(timer);
-    }, [clocks.ticking, endMatch, isMatchRunning]);
-
-    useEffect(() => {
         if (!isMatchRunning || !positionReady) return;
         const side = position.turn;
         if (!isEngineTurn(side)) return;
@@ -944,45 +793,15 @@ export function ShogiMatch({
 
     const getLegalSet = async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
-        const resolver =
-            fetchLegalMoves?.bind(null, startSfen) ??
-            ((history: string[]) => getPositionService().getLegalMoves(startSfen, history));
         const ply = movesRef.current.length;
-        const cached = legalCacheRef.current;
-        if (cached && cached.ply === ply) {
-            return cached.moves;
-        }
-        const list = await resolver(movesRef.current);
-        const set = new Set(list);
-        legalCacheRef.current = { ply, moves: set };
-        return set;
+        const resolver = async () => {
+            if (fetchLegalMoves) {
+                return fetchLegalMoves(startSfen, movesRef.current);
+            }
+            return getPositionService().getLegalMoves(startSfen, movesRef.current);
+        };
+        return legalCache.getOrResolve(ply, resolver);
     };
-
-    /**
-     * 指定された移動が成れるかを判定する
-     * @param legalMoves - 合法手のセット
-     * @param from - 移動元マス
-     * @param to - 移動先マス
-     * @returns 成り判定の結果
-     */
-    const determinePromotion = useCallback(
-        (legalMoves: Set<string>, from: string, to: string): PromotionDecision => {
-            const baseMove = `${from}${to}`;
-            const promoteMove = `${baseMove}+`;
-
-            const hasBase = legalMoves.has(baseMove);
-            const hasPromote = legalMoves.has(promoteMove);
-
-            if (hasBase && hasPromote) {
-                return "optional"; // 両方存在 → 任意成り
-            }
-            if (hasPromote) {
-                return "forced"; // 成りのみ存在 → 強制成り
-            }
-            return "none"; // 成れない
-        },
-        [],
-    );
 
     const applyEditedPosition = (nextPosition: PositionState) => {
         setPosition(nextPosition);
@@ -1001,12 +820,8 @@ export function ShogiMatch({
 
         activeSearchRef.current = null;
 
-        legalCacheRef.current = null;
-        setClocks((prev) => ({
-            ...prev,
-            ticking: null,
-            lastUpdatedAt: Date.now(),
-        }));
+        legalCache.clear();
+        stopTicking();
         matchEndedRef.current = false;
         setIsMatchRunning(false);
         void refreshStartSfen(nextPosition);
@@ -1317,11 +1132,8 @@ export function ShogiMatch({
     };
 
     const importUsi = async (raw: string) => {
-        const trimmed = raw.trim();
-        if (!trimmed) return;
-        const tokens = trimmed.includes("moves")
-            ? (trimmed.split("moves")[1]?.trim().split(/\s+/) ?? [])
-            : trimmed.split(/\s+/);
+        const tokens = parseUsiInput(raw);
+        if (tokens.length === 0) return;
         await loadMoves(tokens);
     };
 
@@ -1342,7 +1154,7 @@ export function ShogiMatch({
             searchStatesRef.current.sente.requestPly = null;
             searchStatesRef.current.gote.requestPly = null;
 
-            legalCacheRef.current = null;
+            legalCache.clear();
             setPositionReady(true);
         } catch (error) {
             setMessage(`棋譜の適用に失敗しました: ${String(error)}`);

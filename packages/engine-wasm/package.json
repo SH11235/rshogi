@@ -26,7 +26,7 @@
         "lint": "pnpm --workspace-root exec biome check .",
         "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
         "typecheck": "tsc -p tsconfig.json",
-        "test": "pnpm run build:wasm && node ./test/startpos-e2e.mjs"
+        "test": "vitest"
     },
     "dependencies": {
         "@shogi/engine-client": "workspace:*"
