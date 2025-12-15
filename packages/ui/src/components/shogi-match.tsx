@@ -153,6 +153,8 @@ export function ShogiMatch({
         setMessage(message);
     }, []);
 
+    const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
+
     // 時計管理フックを使用
     const { clocks, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
         useClockManager({
@@ -177,7 +179,16 @@ export function ShogiMatch({
             setMessage(nextMessage);
             setIsMatchRunning(false);
             stopTicking();
-            // エンジンの停止は useEngineManager が isMatchRunning の変化を検知して自動的に行う
+            try {
+                await stopAllEnginesRef.current();
+            } catch (error) {
+                console.error("エンジン停止に失敗しました:", error);
+                setMessage(
+                    (prev) =>
+                        prev ??
+                        `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
+                );
+            }
         },
         [stopTicking],
     );
@@ -210,10 +221,12 @@ export function ShogiMatch({
         onMatchEnd: endMatch,
         maxLogs,
     });
+    stopAllEnginesRef.current = stopAllEngines;
 
     // エンジンからの手を受け取って適用するコールバック
     const handleMoveFromEngine = useCallback(
         (move: string) => {
+            if (matchEndedRef.current) return;
             const result = applyMoveWithState(positionRef.current, move, {
                 validateTurn: false,
             });
