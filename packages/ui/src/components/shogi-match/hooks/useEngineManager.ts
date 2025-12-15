@@ -23,6 +23,22 @@ interface ActiveSearch {
     engineId: string;
 }
 
+export interface BestmoveHandlerParams {
+    move: string;
+    side: Player;
+    engineId: string;
+    activeSearch: ActiveSearch | null;
+    movesCount: number;
+}
+
+export interface BestmoveHandlerResult {
+    action: "apply_move" | "end_match" | "skip";
+    move?: string;
+    message?: string;
+    shouldClearActive: boolean;
+    shouldUpdateRequestPly: boolean;
+}
+
 export type EngineOption = {
     id: string;
     label: string;
@@ -99,6 +115,58 @@ export function formatEvent(event: EngineEvent, label: string): string {
         return `[${label}] error: ${event.message}`;
     }
     return `[${label}] unknown event`;
+}
+
+export function determineBestmoveAction(params: BestmoveHandlerParams): BestmoveHandlerResult {
+    const { move, side, engineId, activeSearch } = params;
+
+    // Active Searchのマッチング確認
+    if (!activeSearch || activeSearch.engineId !== engineId || activeSearch.side !== side) {
+        return {
+            action: "skip",
+            shouldClearActive: false,
+            shouldUpdateRequestPly: false,
+        };
+    }
+
+    // トークン処理
+    const trimmed = move.trim();
+    const token = trimmed.toLowerCase();
+
+    // 特殊メッセージの確認
+    const sideLabel = side === "sente" ? "先手" : "後手";
+    const opponentLabel = side === "sente" ? "後手" : "先手";
+
+    switch (token) {
+        case "win":
+            return {
+                action: "end_match",
+                message: `対局終了: ${sideLabel}が勝利宣言しました（win）。`,
+                shouldClearActive: true,
+                shouldUpdateRequestPly: true,
+            };
+        case "resign":
+            return {
+                action: "end_match",
+                message: `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`,
+                shouldClearActive: true,
+                shouldUpdateRequestPly: true,
+            };
+        case "none":
+            return {
+                action: "end_match",
+                message: `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`,
+                shouldClearActive: true,
+                shouldUpdateRequestPly: true,
+            };
+        default:
+            return {
+                action: "apply_move",
+                move: trimmed,
+                shouldClearActive: true,
+                shouldUpdateRequestPly: true,
+            };
+    }
 }
 
 export function useEngineManager({
@@ -190,9 +258,8 @@ export function useEngineManager({
                 searchState.handle = null;
                 searchState.pending = false;
                 searchState.requestPly = null;
-                if (activeSearchRef.current?.side === side) {
-                    activeSearchRef.current = null;
-                }
+                // activeSearchRefを無条件でクリア（条件判定を削除して堅牢化）
+                activeSearchRef.current = null;
             }
 
             try {
@@ -247,23 +314,6 @@ export function useEngineManager({
         [addErrorLog, onMoveFromEngine],
     );
 
-    const specialBestmoveMessage = useCallback((token: string, side: Player): string | null => {
-        const sideLabel = side === "sente" ? "先手" : "後手";
-        const opponentLabel = side === "sente" ? "後手" : "先手";
-        const normalized = token.toLowerCase();
-
-        if (normalized === "win") {
-            return `対局終了: ${sideLabel}が勝利宣言しました（win）。`;
-        }
-        if (normalized === "resign") {
-            return `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`;
-        }
-        if (normalized === "none") {
-            return `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`;
-        }
-        return null;
-    }, []);
-
     const attachSubscription = useCallback(
         (side: Player, client: EngineClient, engineId: string) => {
             const engineState = engineStatesRef.current[side];
@@ -278,26 +328,44 @@ export function useEngineManager({
                 if (event.type === "bestmove") {
                     const searchState = searchStatesRef.current[side];
 
+                    // 状態のリセット
                     setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
                     searchState.pending = false;
                     searchState.handle = null;
 
-                    const current = activeSearchRef.current;
-                    if (current && current.engineId === engineId && current.side === side) {
-                        searchState.requestPly = movesRef.current.length;
+                    // Bestmove処理ロジック
+                    const result = determineBestmoveAction({
+                        move: event.move,
+                        side,
+                        engineId,
+                        activeSearch: activeSearchRef.current,
+                        movesCount: movesRef.current.length,
+                    });
 
-                        const trimmed = event.move.trim();
-                        const token = trimmed.toLowerCase();
-                        const specialMessage = specialBestmoveMessage(token, side);
-                        if (specialMessage) {
-                            activeSearchRef.current = null;
-                            onMatchEnd(specialMessage).catch((err) => {
-                                addErrorLog(`対局終了処理でエラー: ${String(err)}`);
-                            });
-                            return;
-                        }
-                        applyMoveFromEngine(trimmed);
+                    // 結果に応じた副作用の実行
+                    if (result.shouldClearActive) {
                         activeSearchRef.current = null;
+                    }
+                    if (result.shouldUpdateRequestPly) {
+                        searchState.requestPly = movesRef.current.length;
+                    }
+
+                    switch (result.action) {
+                        case "end_match":
+                            if (result.message) {
+                                onMatchEnd(result.message).catch((err) => {
+                                    addErrorLog(`対局終了処理でエラー: ${String(err)}`);
+                                });
+                            }
+                            break;
+                        case "apply_move":
+                            if (result.move) {
+                                applyMoveFromEngine(result.move);
+                            }
+                            break;
+                        case "skip":
+                            // 何もしない（古い検索結果の無視）
+                            break;
                     }
                 }
                 if (event.type === "error") {
@@ -313,7 +381,7 @@ export function useEngineManager({
 
             engineState.subscription = unsub;
         },
-        [addErrorLog, applyMoveFromEngine, maxLogs, movesRef, onMatchEnd, specialBestmoveMessage],
+        [addErrorLog, applyMoveFromEngine, maxLogs, movesRef, onMatchEnd],
     );
 
     const ensureEngineReady = useCallback(

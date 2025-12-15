@@ -2,7 +2,7 @@ import type { PositionState } from "@shogi/app-core";
 import type { EngineEvent } from "@shogi/engine-client";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatEvent, useEngineManager } from "./useEngineManager";
+import { determineBestmoveAction, formatEvent, useEngineManager } from "./useEngineManager";
 
 describe("formatEvent", () => {
     it("bestmove イベントを正しくフォーマットする", () => {
@@ -250,5 +250,142 @@ describe("useEngineManager", () => {
         expect(onMatchEnd).toHaveBeenCalledTimes(1);
         const message = onMatchEnd.mock.calls[0][0] as string;
         expect(message).toContain("投了しました");
+    });
+});
+
+describe("determineBestmoveAction", () => {
+    it("通常の手の場合、apply_moveアクションを返す", () => {
+        const result = determineBestmoveAction({
+            move: "7g7f",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: { side: "sente", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("apply_move");
+        expect(result.move).toBe("7g7f");
+        expect(result.shouldClearActive).toBe(true);
+        expect(result.shouldUpdateRequestPly).toBe(true);
+    });
+
+    it("win トークンの場合、end_matchアクションを返す", () => {
+        const result = determineBestmoveAction({
+            move: "win",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: { side: "sente", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("end_match");
+        expect(result.message).toContain("勝利宣言");
+        expect(result.shouldClearActive).toBe(true);
+        expect(result.shouldUpdateRequestPly).toBe(true);
+    });
+
+    it("resign トークンの場合、end_matchアクションを返す", () => {
+        const result = determineBestmoveAction({
+            move: "resign",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: { side: "sente", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("end_match");
+        expect(result.message).toContain("投了しました");
+        expect(result.shouldClearActive).toBe(true);
+    });
+
+    it("none トークンの場合、end_matchアクションを返す", () => {
+        const result = determineBestmoveAction({
+            move: "none",
+            side: "gote",
+            engineId: "engine1",
+            activeSearch: { side: "gote", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("end_match");
+        expect(result.message).toContain("合法手なし");
+        expect(result.shouldClearActive).toBe(true);
+    });
+
+    it("activeSearchが一致しない場合、skipアクションを返す", () => {
+        const result = determineBestmoveAction({
+            move: "7g7f",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: { side: "gote", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("skip");
+        expect(result.shouldClearActive).toBe(false);
+        expect(result.shouldUpdateRequestPly).toBe(false);
+    });
+
+    it("activeSearchがnullの場合、skipアクションを返す", () => {
+        const result = determineBestmoveAction({
+            move: "7g7f",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: null,
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("skip");
+        expect(result.shouldClearActive).toBe(false);
+    });
+
+    it("engineIdが一致しない場合、skipアクションを返す", () => {
+        const result = determineBestmoveAction({
+            move: "7g7f",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: { side: "sente", engineId: "engine2" },
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("skip");
+        expect(result.shouldClearActive).toBe(false);
+    });
+
+    it("大文字小文字を区別せずにトークンを判定する", () => {
+        const resultWin = determineBestmoveAction({
+            move: "WIN",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: { side: "sente", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(resultWin.action).toBe("end_match");
+        expect(resultWin.message).toContain("勝利宣言");
+
+        const resultResign = determineBestmoveAction({
+            move: "RESIGN",
+            side: "gote",
+            engineId: "engine1",
+            activeSearch: { side: "gote", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(resultResign.action).toBe("end_match");
+        expect(resultResign.message).toContain("投了しました");
+    });
+
+    it("空白を含む手をトリムする", () => {
+        const result = determineBestmoveAction({
+            move: "  7g7f  ",
+            side: "sente",
+            engineId: "engine1",
+            activeSearch: { side: "sente", engineId: "engine1" },
+            movesCount: 5,
+        });
+
+        expect(result.action).toBe("apply_move");
+        expect(result.move).toBe("7g7f");
     });
 });
