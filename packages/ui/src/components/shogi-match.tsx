@@ -827,6 +827,7 @@ export function ShogiMatch({
                 });
 
                 searchState.handle = handle;
+                activeSearchRef.current = { side, engineId };
             } finally {
                 searchState.pending = false;
             }

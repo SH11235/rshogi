@@ -378,11 +378,12 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                     if (stopMode === "terminate") {
                         terminateWorker();
                     } else {
-                        // TODO: 探索中の wasm を協調停止できるようにする（SAB/Atomics などで停止フラグを即時伝搬）。
+                        // TODO(将来): SharedArrayBuffer/Atomics を使った協調停止の実装。
+                        // 探索中の wasm を協調停止できるようにする（SAB/Atomics などで停止フラグを即時伝搬）。
                         // 現状 runSearch がブロッキングで stop メッセージを処理できないため terminate にフォールバックする。
                         // NOTE: cooperative モードは未実装のため、terminate で代替している。
                         if (typeof console !== "undefined") {
-                            console.debug(MSG_COOPERATIVE_STOP_NOT_SUPPORTED);
+                            console.warn(MSG_COOPERATIVE_STOP_NOT_SUPPORTED);
                         }
                         terminateWorker();
                     }
@@ -397,10 +398,11 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             if (stopMode === "terminate") {
                 terminateWorker();
             } else {
-                // TODO: 協調停止対応を追加する。現状 stop メッセージが探索中に処理されないので terminate にフォールバック。
+                // TODO(将来): SharedArrayBuffer/Atomics を使った協調停止の実装。
+                // 協調停止対応を追加する。現状 stop メッセージが探索中に処理されないので terminate にフォールバック。
                 // NOTE: cooperative モードは未実装のため、terminate で代替している。
                 if (typeof console !== "undefined") {
-                    console.debug(MSG_COOPERATIVE_STOP_NOT_SUPPORTED);
+                    console.warn(MSG_COOPERATIVE_STOP_NOT_SUPPORTED);
                 }
                 terminateWorker();
             }
