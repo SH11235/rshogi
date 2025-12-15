@@ -478,14 +478,16 @@ export function ShogiMatch({
             // 対局開始時に編集モードを終了し、パネルを閉じる
             setIsEditMode(false);
             setIsEditPanelOpen(false);
-            // 盤面セクションにスクロール
-            setTimeout(() => {
-                boardSectionRef.current?.scrollIntoView({
-                    behavior: "smooth",
-                    block: "start",
-                });
-            }, 100);
         }
+        // 対局開始時に設定パネルを閉じる
+        setIsSettingsPanelOpen(false);
+        // 盤面セクションにスクロール
+        setTimeout(() => {
+            boardSectionRef.current?.scrollIntoView({
+                behavior: "smooth",
+                block: "start",
+            });
+        }, 100);
         const turn = position.turn;
 
         if (isEngineTurn(turn)) {
