@@ -1,4 +1,12 @@
 import {
+    type BoardStateJson,
+    boardJsonToPositionState,
+    type PositionService,
+    type PositionState,
+    positionStateToBoardJson,
+    type ReplayResult,
+} from "@shogi/app-core";
+import {
     ensureWasmModule,
     wasm_board_to_sfen,
     wasm_get_initial_board,
@@ -6,9 +14,6 @@ import {
     wasm_parse_sfen_to_board,
     wasm_replay_moves_strict,
 } from "@shogi/engine-wasm";
-import type { PositionState } from "./board";
-import type { BoardStateJson, PositionService, ReplayResult } from "./position-service";
-import { boardJsonToPositionState, positionStateToBoardJson } from "./position-service";
 
 export const createWasmPositionService = (): PositionService => {
     let ready: Promise<void> | null = null;

@@ -14,6 +14,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@shogi/app-core": "workspace:*",
     "@shogi/design-system": "workspace:*",
     "@shogi/engine-tauri": "workspace:*",
     "@shogi/ui": "workspace:*",
