@@ -12,7 +12,7 @@ export type ClockSettings = Record<Player, { mainMs: number; byoyomiMs: number }
 /**
  * 時計の状態
  */
-export interface ClockState {
+interface ClockState {
     mainMs: number;
     byoyomiMs: number;
 }
@@ -30,7 +30,7 @@ export interface TickState {
 /**
  * useClockManager の props
  */
-export interface UseClockManagerProps {
+interface UseClockManagerProps {
     /** 時間設定 */
     timeSettings: ClockSettings;
     /** 対局が実行中かどうか */
@@ -46,7 +46,7 @@ export interface UseClockManagerProps {
 /**
  * useClockManager の返り値
  */
-export interface UseClockManagerReturn {
+interface UseClockManagerReturn {
     /** 現在の時計状態 */
     clocks: TickState;
     /** 時計をリセットする */

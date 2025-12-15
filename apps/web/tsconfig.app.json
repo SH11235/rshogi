@@ -6,13 +6,10 @@
     "moduleDetection": "force",
     "noEmit": true,
     "paths": {
-      "@shogi/app-core": ["packages/app-core/src/index.web.ts"],
       "@shogi/design-system": ["packages/design-system/src"],
       "@shogi/design-system/*": ["packages/design-system/src/*"],
       "@shogi/ui": ["packages/ui/src"],
       "@shogi/ui/*": ["packages/ui/src/*"],
-      "@shogi/engine-client": ["packages/engine-client/src"],
-      "@shogi/engine-client/*": ["packages/engine-client/src/*"],
       "@shogi/engine-wasm": ["packages/engine-wasm/src"],
       "@shogi/engine-wasm/*": ["packages/engine-wasm/src/*"]
     }

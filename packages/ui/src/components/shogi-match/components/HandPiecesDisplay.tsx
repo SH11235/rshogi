@@ -4,7 +4,7 @@ import { PIECE_LABELS } from "../utils/constants";
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 
-export interface HandPiecesDisplayProps {
+interface HandPiecesDisplayProps {
     /** 持ち駒を持つプレイヤー */
     owner: Player;
     /** 持ち駒の状態 */

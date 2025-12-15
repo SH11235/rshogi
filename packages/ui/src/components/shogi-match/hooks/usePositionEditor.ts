@@ -52,7 +52,7 @@ export interface UsePositionEditorProps {
 /**
  * usePositionEditor の返り値
  */
-export interface UsePositionEditorReturn {
+interface UsePositionEditorReturn {
     // 編集状態
     isEditMode: boolean;
     editOwner: Player;

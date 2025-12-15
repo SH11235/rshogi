@@ -6,7 +6,7 @@ import { isPromotable, PIECE_LABELS } from "../utils/constants";
 
 const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
 
-export interface EditModePanelProps {
+interface EditModePanelProps {
     // パネル表示状態
     isOpen: boolean;
     onOpenChange: (open: boolean) => void;

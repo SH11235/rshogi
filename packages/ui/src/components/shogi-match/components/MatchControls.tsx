@@ -13,7 +13,7 @@ const baseCard = {
 
 type EngineStatus = "idle" | "thinking" | "error";
 
-export interface MatchControlsProps {
+interface MatchControlsProps {
     /** 新規対局ボタンのクリックハンドラ */
     onNewGame: () => void;
     /** 停止ボタンのクリックハンドラ */
