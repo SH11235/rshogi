@@ -94,7 +94,7 @@ export function MatchControls({
                     const roleLabel = sides[side].role === "engine" ? "エンジン" : "人間";
                     if (sides[side].role !== "engine") {
                         return (
-                            <span key={side} aria-label={`${sideLabel}は${roleLabel}`}>
+                            <span key={side}>
                                 {" "}
                                 [{sideLabel}: {roleLabel}]
                             </span>
@@ -104,10 +104,7 @@ export function MatchControls({
                     const ready = engineReady[side] ? "init済" : "未init";
                     const status = engineStatus[side];
                     return (
-                        <span
-                            key={side}
-                            aria-label={`${sideLabel}は${roleLabel} (${engineLabel}) ステータス ${status} 準備${ready}`}
-                        >
+                        <span key={side}>
                             {" "}
                             [{sideLabel}: {roleLabel} {engineLabel} {status}/{ready}]
                         </span>

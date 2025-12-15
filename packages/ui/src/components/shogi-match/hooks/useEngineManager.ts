@@ -317,7 +317,7 @@ export function useEngineManager({
 
             engineState.subscription = unsub;
         },
-        [addErrorLog, applyMoveFromEngine, movesRef, onMatchEnd, specialBestmoveMessage],
+        [addErrorLog, applyMoveFromEngine, maxLogs, movesRef, onMatchEnd, specialBestmoveMessage],
     );
 
     const ensureEngineReady = useCallback(

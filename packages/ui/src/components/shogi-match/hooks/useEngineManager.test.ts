@@ -112,7 +112,11 @@ describe("useEngineManager", () => {
         const search = vi.fn().mockResolvedValue({ cancel });
         const stop = vi.fn().mockResolvedValue(undefined);
         const dispose = vi.fn().mockResolvedValue(undefined);
-        const emit = (event: EngineEvent) => listeners.forEach((fn) => fn(event));
+        const emit = (event: EngineEvent) => {
+            for (const fn of listeners) {
+                fn(event);
+            }
+        };
 
         return {
             client: {

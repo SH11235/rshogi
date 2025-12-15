@@ -70,7 +70,11 @@ export class LegalMoveCache {
         resolver: (ply: number) => Promise<string[]>,
     ): Promise<Set<string>> {
         if (this.isCached(ply)) {
-            return this.getCached()!; // isCached が true なら null ではない
+            const cached = this.getCached();
+            if (!cached) {
+                throw new Error("Cache should exist when isCached returns true");
+            }
+            return cached;
         }
 
         const list = await resolver(ply);
