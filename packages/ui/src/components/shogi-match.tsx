@@ -22,10 +22,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // TODO: usePositionEditor を統合する（Phase 3b）
 // import { usePositionEditor } from "./shogi-match/hooks/usePositionEditor";
 import { Button } from "./button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./collapsible";
-import { Input } from "./input";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
+import { EditModePanel } from "./shogi-match/components/EditModePanel";
+import {
+    MatchSettingsPanel,
+    type SideSetting,
+    type EngineOption,
+} from "./shogi-match/components/MatchSettingsPanel";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import type { PromotionSelection } from "./shogi-match/types";
 import {
@@ -34,15 +38,14 @@ import {
     consumeFromHand,
     countPieces,
 } from "./shogi-match/utils/boardUtils";
-import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
+import { PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
 import { formatTime } from "./shogi-match/utils/timeFormat";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
+import { TooltipProvider } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
-type SideRole = "human" | "engine";
 type EngineStatus = "idle" | "thinking" | "error";
 
 interface SearchState {
@@ -63,20 +66,6 @@ interface ActiveSearch {
     engineId: string;
 }
 
-export type EngineOption = {
-    id: string;
-    label: string;
-    // 将来の外部USI/NNUE切替を想定し、UI上の選択肢は残す。
-    // client生成は遅延させ、必要な手番分だけインスタンス化する。
-    createClient: () => EngineClient;
-    kind?: "internal" | "external";
-};
-
-type SideSetting = {
-    role: SideRole;
-    engineId?: string;
-};
-
 export interface ShogiMatchProps {
     engineOptions: EngineOption[];
     defaultSides?: { sente: SideSetting; gote: SideSetting };
@@ -92,7 +81,6 @@ const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
-const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
 
 const baseCard: CSSProperties = {
     background: "hsl(var(--card, 0 0% 100%))",
@@ -1250,113 +1238,6 @@ export function ShogiMatch({
         return [...list, ...externals];
     }, [engineOptions]);
 
-    const sideSelector = (side: Player) => {
-        const setting = sides[side];
-        const engineList = uiEngineOptions.map((opt) => (
-            <option key={opt.id} value={opt.id}>
-                {opt.label}
-            </option>
-        ));
-        const resolvedEngineId = setting.engineId ?? uiEngineOptions[0]?.id;
-        return (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <label
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        fontSize: "13px",
-                    }}
-                >
-                    {side === "sente" ? "先手" : "後手"} の操作
-                    <select
-                        value={setting.role}
-                        onChange={(e) =>
-                            setSides((prev) => ({
-                                ...prev,
-                                [side]: {
-                                    ...prev[side],
-                                    role: e.target.value as SideRole,
-                                    engineId: prev[side].engineId ?? uiEngineOptions[0]?.id,
-                                },
-                            }))
-                        }
-                        disabled={settingsLocked}
-                        style={{
-                            padding: "8px",
-                            borderRadius: "8px",
-                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                        }}
-                    >
-                        <option value="human">人間</option>
-                        <option value="engine">エンジン</option>
-                    </select>
-                </label>
-                <label
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        fontSize: "13px",
-                    }}
-                >
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                        <span>使用するエンジン</span>
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <span
-                                    role="img"
-                                    aria-label="内蔵エンジンの補足"
-                                    style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        width: "18px",
-                                        height: "18px",
-                                        borderRadius: "999px",
-                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        background: "hsl(var(--card, 0 0% 100%))",
-                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                        fontSize: "11px",
-                                        cursor: "default",
-                                        lineHeight: 1,
-                                    }}
-                                >
-                                    i
-                                </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                                内蔵エンジンは選択肢を1つにまとめています。先手/後手が両方エンジンの場合も内部で必要なクライアント数を起動します。
-                                将来の外部USI/NNUEエンジンを追加するときはここに選択肢が増えます。
-                            </TooltipContent>
-                        </Tooltip>
-                    </div>
-                    <select
-                        value={resolvedEngineId}
-                        onChange={(e) =>
-                            setSides((prev) => ({
-                                ...prev,
-                                [side]: { ...prev[side], engineId: e.target.value },
-                            }))
-                        }
-                        disabled={
-                            settingsLocked ||
-                            setting.role !== "engine" ||
-                            uiEngineOptions.length === 0
-                        }
-                        style={{
-                            padding: "8px",
-                            borderRadius: "8px",
-                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                        }}
-                    >
-                        {engineList}
-                    </select>
-                </label>
-            </div>
-        );
-    };
-
     return (
         <TooltipProvider delayDuration={TOOLTIP_DELAY_DURATION_MS}>
             <section
@@ -1484,311 +1365,23 @@ export function ShogiMatch({
                     </div>
 
                     <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                        <Collapsible open={isEditPanelOpen} onOpenChange={setIsEditPanelOpen}>
-                            <div
-                                style={{
-                                    background: "hsl(var(--wafuu-washi-warm))",
-                                    border: "2px solid hsl(var(--wafuu-border))",
-                                    borderRadius: "12px",
-                                    overflow: "hidden",
-                                    boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
-                                }}
-                            >
-                                <CollapsibleTrigger asChild>
-                                    <button
-                                        type="button"
-                                        aria-label="局面編集パネルを開閉"
-                                        style={{
-                                            width: "100%",
-                                            padding: "14px 16px",
-                                            background:
-                                                "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
-                                            borderBottom: isEditPanelOpen
-                                                ? "1px solid hsl(var(--wafuu-border))"
-                                                : "none",
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "space-between",
-                                            cursor: "pointer",
-                                            transition: "all 0.2s ease",
-                                            border: "none",
-                                        }}
-                                    >
-                                        <span
-                                            style={{
-                                                fontSize: "18px",
-                                                fontWeight: 700,
-                                                color: "hsl(var(--wafuu-sumi))",
-                                                letterSpacing: "0.05em",
-                                            }}
-                                        >
-                                            局面編集
-                                        </span>
-                                        <span
-                                            style={{
-                                                fontSize: "20px",
-                                                color: "hsl(var(--wafuu-kincha))",
-                                                transform: isEditPanelOpen
-                                                    ? "rotate(180deg)"
-                                                    : "rotate(0deg)",
-                                                transition: "transform 0.2s ease",
-                                            }}
-                                        >
-                                            ▼
-                                        </span>
-                                    </button>
-                                </CollapsibleTrigger>
-                                <CollapsibleContent>
-                                    <div
-                                        style={{
-                                            padding: "16px",
-                                            display: "flex",
-                                            flexDirection: "column",
-                                            gap: "14px",
-                                        }}
-                                    >
-                                        <div
-                                            style={{
-                                                fontSize: "12px",
-                                                color: "hsl(var(--wafuu-sumi-light))",
-                                                padding: "10px",
-                                                background: "hsl(var(--wafuu-washi))",
-                                                borderRadius: "8px",
-                                                borderLeft: "3px solid hsl(var(--wafuu-kin))",
-                                            }}
-                                        >
-                                            盤面をクリックして局面を編集できます。対局開始前のみ有効です。王は重複不可、各駒は上限枚数まで配置できます。
-                                        </div>
-                                        <div
-                                            style={{
-                                                display: "flex",
-                                                gap: "8px",
-                                                flexWrap: "wrap",
-                                            }}
-                                        >
-                                            <Button
-                                                type="button"
-                                                onClick={resetToStartposForEdit}
-                                                disabled={isMatchRunning || !positionReady}
-                                                variant="outline"
-                                                style={{ paddingInline: "12px" }}
-                                            >
-                                                平手に戻す
-                                            </Button>
-                                            <Button
-                                                type="button"
-                                                onClick={clearBoardForEdit}
-                                                disabled={isMatchRunning || !positionReady}
-                                                variant="outline"
-                                                style={{ paddingInline: "12px" }}
-                                            >
-                                                盤面をクリア
-                                            </Button>
-                                        </div>
-                                        <div
-                                            style={{
-                                                display: "flex",
-                                                gap: "6px",
-                                                alignItems: "center",
-                                            }}
-                                        >
-                                            <span
-                                                style={{
-                                                    fontSize: "12px",
-                                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                                }}
-                                            >
-                                                配置する先後
-                                            </span>
-                                            <label
-                                                style={{
-                                                    display: "flex",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                <input
-                                                    type="radio"
-                                                    name="edit-owner"
-                                                    value="sente"
-                                                    checked={editOwner === "sente"}
-                                                    disabled={isMatchRunning}
-                                                    onChange={() => setEditOwner("sente")}
-                                                />
-                                                先手
-                                            </label>
-                                            <label
-                                                style={{
-                                                    display: "flex",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                <input
-                                                    type="radio"
-                                                    name="edit-owner"
-                                                    value="gote"
-                                                    checked={editOwner === "gote"}
-                                                    disabled={isMatchRunning}
-                                                    onChange={() => setEditOwner("gote")}
-                                                />
-                                                後手
-                                            </label>
-                                        </div>
-                                        <div
-                                            style={{
-                                                display: "flex",
-                                                gap: "8px",
-                                                flexWrap: "wrap",
-                                                alignItems: "center",
-                                            }}
-                                        >
-                                            <div
-                                                style={{
-                                                    display: "flex",
-                                                    gap: "6px",
-                                                    flexWrap: "wrap",
-                                                }}
-                                            >
-                                                {PIECE_SELECT_ORDER.map((type) => {
-                                                    const selected =
-                                                        editPieceType === type &&
-                                                        editTool === "place";
-                                                    return (
-                                                        <Button
-                                                            key={type}
-                                                            type="button"
-                                                            variant={
-                                                                selected ? "secondary" : "outline"
-                                                            }
-                                                            onClick={() => {
-                                                                if (selected) {
-                                                                    // 選択中の駒を再度クリック：選択解除
-                                                                    setEditPieceType(null);
-                                                                } else {
-                                                                    setEditTool("place");
-                                                                    setEditPieceType(type);
-                                                                    if (!isPromotable(type)) {
-                                                                        setEditPromoted(false);
-                                                                    }
-                                                                }
-                                                            }}
-                                                            disabled={isMatchRunning}
-                                                            style={{ paddingInline: "10px" }}
-                                                        >
-                                                            {PIECE_LABELS[type]}
-                                                        </Button>
-                                                    );
-                                                })}
-                                            </div>
-                                            <Button
-                                                type="button"
-                                                variant={
-                                                    editTool === "erase" ? "secondary" : "outline"
-                                                }
-                                                onClick={() => {
-                                                    if (editTool === "erase") {
-                                                        // 削除モードを解除
-                                                        setEditTool("place");
-                                                    } else {
-                                                        // 削除モードに切り替え
-                                                        setEditTool("erase");
-                                                        setEditPieceType(null);
-                                                    }
-                                                }}
-                                                disabled={isMatchRunning}
-                                                style={{ paddingInline: "10px" }}
-                                            >
-                                                削除モード
-                                            </Button>
-                                            <label
-                                                style={{
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    gap: "6px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                <input
-                                                    type="checkbox"
-                                                    checked={editPromoted}
-                                                    disabled={
-                                                        isMatchRunning ||
-                                                        !editPieceType ||
-                                                        !isPromotable(editPieceType)
-                                                    }
-                                                    onChange={(e) =>
-                                                        setEditPromoted(e.target.checked)
-                                                    }
-                                                />
-                                                成りで配置
-                                            </label>
-                                        </div>
-                                        <div
-                                            style={{
-                                                fontSize: "12px",
-                                                color: "hsl(var(--wafuu-sumi-light))",
-                                                padding: "12px",
-                                                background: "hsl(var(--wafuu-washi))",
-                                                borderRadius: "8px",
-                                                borderLeft: "3px solid hsl(var(--wafuu-shu))",
-                                            }}
-                                        >
-                                            <div
-                                                style={{
-                                                    fontWeight: 600,
-                                                    marginBottom: "6px",
-                                                    color: "hsl(var(--wafuu-sumi))",
-                                                }}
-                                            >
-                                                操作方法
-                                            </div>
-                                            <ul
-                                                style={{
-                                                    margin: 0,
-                                                    paddingLeft: "20px",
-                                                    lineHeight: 1.6,
-                                                }}
-                                            >
-                                                <li>
-                                                    <strong>駒を配置:</strong> 駒ボタンを選択 →
-                                                    盤面をクリック
-                                                </li>
-                                                <li>
-                                                    <strong>駒を移動:</strong>{" "}
-                                                    駒ボタン未選択の状態で盤面の駒をクリック →
-                                                    移動先をクリック
-                                                </li>
-                                                <li>
-                                                    <strong>駒を削除:</strong>{" "}
-                                                    削除モードボタンを押して盤面をクリック（手駒に戻ります）
-                                                </li>
-                                                <li>
-                                                    <strong>選択解除:</strong>{" "}
-                                                    駒ボタンや削除モードボタンを再度クリック、または同じマスを再度クリック
-                                                </li>
-                                            </ul>
-                                            {editFromSquare && (
-                                                <div
-                                                    style={{
-                                                        marginTop: "8px",
-                                                        padding: "6px 10px",
-                                                        background: "hsl(var(--wafuu-kin) / 0.15)",
-                                                        borderRadius: "6px",
-                                                        color: "hsl(var(--wafuu-sumi))",
-                                                        fontSize: "11px",
-                                                        fontWeight: 600,
-                                                    }}
-                                                >
-                                                    移動元: {editFromSquare} →
-                                                    移動先を選択してください
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </CollapsibleContent>
-                            </div>
-                        </Collapsible>
+                        <EditModePanel
+                            isOpen={isEditPanelOpen}
+                            onOpenChange={setIsEditPanelOpen}
+                            editOwner={editOwner}
+                            editPieceType={editPieceType}
+                            editPromoted={editPromoted}
+                            editFromSquare={editFromSquare}
+                            editTool={editTool}
+                            setEditOwner={setEditOwner}
+                            setEditPieceType={setEditPieceType}
+                            setEditPromoted={setEditPromoted}
+                            setEditTool={setEditTool}
+                            onResetToStartpos={resetToStartposForEdit}
+                            onClearBoard={clearBoardForEdit}
+                            isMatchRunning={isMatchRunning}
+                            positionReady={positionReady}
+                        />
 
                         <div
                             style={{
@@ -1862,203 +1455,18 @@ export function ShogiMatch({
                                 </div>
                             ) : null}
 
-                            <Collapsible
-                                open={isSettingsPanelOpen}
+                            <MatchSettingsPanel
+                                isOpen={isSettingsPanelOpen}
                                 onOpenChange={setIsSettingsPanelOpen}
-                            >
-                                <CollapsibleTrigger asChild>
-                                    <button
-                                        type="button"
-                                        aria-label="対局設定パネルを開閉"
-                                        style={{
-                                            width: "100%",
-                                            padding: "8px",
-                                            background: "hsl(var(--secondary))",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                            borderRadius: "8px",
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "space-between",
-                                            cursor: "pointer",
-                                            fontSize: "14px",
-                                            fontWeight: 600,
-                                        }}
-                                    >
-                                        <span>対局設定</span>
-                                        <span
-                                            style={{
-                                                transform: isSettingsPanelOpen
-                                                    ? "rotate(180deg)"
-                                                    : "rotate(0deg)",
-                                                transition: "transform 0.2s ease",
-                                            }}
-                                        >
-                                            ▼
-                                        </span>
-                                    </button>
-                                </CollapsibleTrigger>
-                                <CollapsibleContent>
-                                    <div
-                                        style={{
-                                            display: "flex",
-                                            flexDirection: "column",
-                                            gap: "10px",
-                                            paddingTop: "10px",
-                                        }}
-                                    >
-                                        {settingsLocked ? (
-                                            <div
-                                                style={{
-                                                    fontSize: "12px",
-                                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                                }}
-                                            >
-                                                対局中は設定を変更できません。停止すると編集できます。
-                                            </div>
-                                        ) : null}
-                                        <label
-                                            style={{
-                                                display: "flex",
-                                                flexDirection: "column",
-                                                gap: "4px",
-                                                fontSize: "13px",
-                                            }}
-                                        >
-                                            手番（開始時にどちらが指すか）
-                                            <select
-                                                value={position.turn}
-                                                onChange={(e) =>
-                                                    updateTurnForEdit(e.target.value as Player)
-                                                }
-                                                disabled={isMatchRunning}
-                                                style={{
-                                                    padding: "8px",
-                                                    borderRadius: "8px",
-                                                    border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                                }}
-                                            >
-                                                <option value="sente">先手</option>
-                                                <option value="gote">後手</option>
-                                            </select>
-                                        </label>
-                                        {sideSelector("sente")}
-                                        {sideSelector("gote")}
-
-                                        <div
-                                            style={{
-                                                display: "grid",
-                                                gridTemplateColumns: "1fr 1fr",
-                                                gap: "8px",
-                                            }}
-                                        >
-                                            <label
-                                                htmlFor="sente-main"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                先手 持ち時間 (ms)
-                                                <Input
-                                                    id="sente-main"
-                                                    type="number"
-                                                    value={timeSettings.sente.mainMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            sente: {
-                                                                ...prev.sente,
-                                                                mainMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                            <label
-                                                htmlFor="sente-byoyomi"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                先手 秒読み (ms)
-                                                <Input
-                                                    id="sente-byoyomi"
-                                                    type="number"
-                                                    value={timeSettings.sente.byoyomiMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            sente: {
-                                                                ...prev.sente,
-                                                                byoyomiMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                            <label
-                                                htmlFor="gote-main"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                後手 持ち時間 (ms)
-                                                <Input
-                                                    id="gote-main"
-                                                    type="number"
-                                                    value={timeSettings.gote.mainMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            gote: {
-                                                                ...prev.gote,
-                                                                mainMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                            <label
-                                                htmlFor="gote-byoyomi"
-                                                style={{
-                                                    display: "flex",
-                                                    flexDirection: "column",
-                                                    gap: "4px",
-                                                    fontSize: "13px",
-                                                }}
-                                            >
-                                                後手 秒読み (ms)
-                                                <Input
-                                                    id="gote-byoyomi"
-                                                    type="number"
-                                                    value={timeSettings.gote.byoyomiMs}
-                                                    disabled={settingsLocked}
-                                                    onChange={(e) =>
-                                                        setTimeSettings((prev) => ({
-                                                            ...prev,
-                                                            gote: {
-                                                                ...prev.gote,
-                                                                byoyomiMs: Number(e.target.value),
-                                                            },
-                                                        }))
-                                                    }
-                                                />
-                                            </label>
-                                        </div>
-                                    </div>
-                                </CollapsibleContent>
-                            </Collapsible>
+                                sides={sides}
+                                onSidesChange={setSides}
+                                timeSettings={timeSettings}
+                                onTimeSettingsChange={setTimeSettings}
+                                currentTurn={position.turn}
+                                onTurnChange={updateTurnForEdit}
+                                uiEngineOptions={uiEngineOptions}
+                                settingsLocked={settingsLocked}
+                            />
                         </div>
 
                         <div style={{ ...baseCard, padding: "12px" }}>

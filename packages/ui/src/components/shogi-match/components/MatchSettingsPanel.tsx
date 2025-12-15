@@ -1,0 +1,354 @@
+import type { Player } from "@shogi/app-core";
+import type { EngineClient } from "@shogi/engine-client";
+import type { ReactElement } from "react";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
+import { Input } from "../../input";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../../tooltip";
+import type { ClockSettings } from "../hooks/useClockManager";
+
+export type SideRole = "human" | "engine";
+
+export type SideSetting = {
+    role: SideRole;
+    engineId?: string;
+};
+
+export type EngineOption = {
+    id: string;
+    label: string;
+    createClient: () => EngineClient;
+    kind?: "internal" | "external";
+};
+
+export interface MatchSettingsPanelProps {
+    // パネル表示状態
+    isOpen: boolean;
+    onOpenChange: (open: boolean) => void;
+
+    // 設定値
+    sides: { sente: SideSetting; gote: SideSetting };
+    onSidesChange: (sides: { sente: SideSetting; gote: SideSetting }) => void;
+    timeSettings: ClockSettings;
+    onTimeSettingsChange: (settings: ClockSettings) => void;
+    currentTurn: Player;
+    onTurnChange: (turn: Player) => void;
+
+    // エンジン情報
+    uiEngineOptions: EngineOption[];
+
+    // 制約
+    settingsLocked: boolean;
+}
+
+export function MatchSettingsPanel({
+    isOpen,
+    onOpenChange,
+    sides,
+    onSidesChange,
+    timeSettings,
+    onTimeSettingsChange,
+    currentTurn,
+    onTurnChange,
+    uiEngineOptions,
+    settingsLocked,
+}: MatchSettingsPanelProps): ReactElement {
+    const sideSelector = (side: Player) => {
+        const setting = sides[side];
+        const engineList = uiEngineOptions.map((opt) => (
+            <option key={opt.id} value={opt.id}>
+                {opt.label}
+            </option>
+        ));
+        const resolvedEngineId = setting.engineId ?? uiEngineOptions[0]?.id;
+        return (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                <label
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "4px",
+                        fontSize: "13px",
+                    }}
+                >
+                    {side === "sente" ? "先手" : "後手"} の操作
+                    <select
+                        value={setting.role}
+                        onChange={(e) =>
+                            onSidesChange({
+                                ...sides,
+                                [side]: {
+                                    ...sides[side],
+                                    role: e.target.value as SideRole,
+                                    engineId: sides[side].engineId ?? uiEngineOptions[0]?.id,
+                                },
+                            })
+                        }
+                        disabled={settingsLocked}
+                        style={{
+                            padding: "8px",
+                            borderRadius: "8px",
+                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                        }}
+                    >
+                        <option value="human">人間</option>
+                        <option value="engine">エンジン</option>
+                    </select>
+                </label>
+                <label
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "4px",
+                        fontSize: "13px",
+                    }}
+                >
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                        <span>使用するエンジン</span>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <span
+                                    role="img"
+                                    aria-label="内蔵エンジンの補足"
+                                    style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        width: "18px",
+                                        height: "18px",
+                                        borderRadius: "999px",
+                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        background: "hsl(var(--card, 0 0% 100%))",
+                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                        fontSize: "11px",
+                                        cursor: "default",
+                                        lineHeight: 1,
+                                    }}
+                                >
+                                    i
+                                </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                                内蔵エンジンは選択肢を1つにまとめています。先手/後手が両方エンジンの場合も内部で必要なクライアント数を起動します。
+                                将来の外部USI/NNUEエンジンを追加するときはここに選択肢が増えます。
+                            </TooltipContent>
+                        </Tooltip>
+                    </div>
+                    <select
+                        value={resolvedEngineId}
+                        onChange={(e) =>
+                            onSidesChange({
+                                ...sides,
+                                [side]: { ...sides[side], engineId: e.target.value },
+                            })
+                        }
+                        disabled={
+                            settingsLocked ||
+                            setting.role !== "engine" ||
+                            uiEngineOptions.length === 0
+                        }
+                        style={{
+                            padding: "8px",
+                            borderRadius: "8px",
+                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                        }}
+                    >
+                        {engineList}
+                    </select>
+                </label>
+            </div>
+        );
+    };
+
+    return (
+        <Collapsible open={isOpen} onOpenChange={onOpenChange}>
+            <CollapsibleTrigger asChild>
+                <button
+                    type="button"
+                    aria-label="対局設定パネルを開閉"
+                    style={{
+                        width: "100%",
+                        padding: "8px",
+                        background: "hsl(var(--secondary))",
+                        border: "1px solid hsl(var(--border, 0 0% 86%))",
+                        borderRadius: "8px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        cursor: "pointer",
+                        fontSize: "14px",
+                        fontWeight: 600,
+                    }}
+                >
+                    <span>対局設定</span>
+                    <span
+                        style={{
+                            transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
+                            transition: "transform 0.2s ease",
+                        }}
+                    >
+                        ▼
+                    </span>
+                </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "10px",
+                        paddingTop: "10px",
+                    }}
+                >
+                    {settingsLocked ? (
+                        <div
+                            style={{
+                                fontSize: "12px",
+                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                            }}
+                        >
+                            対局中は設定を変更できません。停止すると編集できます。
+                        </div>
+                    ) : null}
+                    <label
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "4px",
+                            fontSize: "13px",
+                        }}
+                    >
+                        手番（開始時にどちらが指すか）
+                        <select
+                            value={currentTurn}
+                            onChange={(e) => onTurnChange(e.target.value as Player)}
+                            disabled={settingsLocked}
+                            style={{
+                                padding: "8px",
+                                borderRadius: "8px",
+                                border: "1px solid hsl(var(--border, 0 0% 86%))",
+                            }}
+                        >
+                            <option value="sente">先手</option>
+                            <option value="gote">後手</option>
+                        </select>
+                    </label>
+                    {sideSelector("sente")}
+                    {sideSelector("gote")}
+
+                    <div
+                        style={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr 1fr",
+                            gap: "8px",
+                        }}
+                    >
+                        <label
+                            htmlFor="sente-main"
+                            style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "4px",
+                                fontSize: "13px",
+                            }}
+                        >
+                            先手 持ち時間 (ms)
+                            <Input
+                                id="sente-main"
+                                type="number"
+                                value={timeSettings.sente.mainMs}
+                                disabled={settingsLocked}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        sente: {
+                                            ...timeSettings.sente,
+                                            mainMs: Number(e.target.value),
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                        <label
+                            htmlFor="sente-byoyomi"
+                            style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "4px",
+                                fontSize: "13px",
+                            }}
+                        >
+                            先手 秒読み (ms)
+                            <Input
+                                id="sente-byoyomi"
+                                type="number"
+                                value={timeSettings.sente.byoyomiMs}
+                                disabled={settingsLocked}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        sente: {
+                                            ...timeSettings.sente,
+                                            byoyomiMs: Number(e.target.value),
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                        <label
+                            htmlFor="gote-main"
+                            style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "4px",
+                                fontSize: "13px",
+                            }}
+                        >
+                            後手 持ち時間 (ms)
+                            <Input
+                                id="gote-main"
+                                type="number"
+                                value={timeSettings.gote.mainMs}
+                                disabled={settingsLocked}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        gote: {
+                                            ...timeSettings.gote,
+                                            mainMs: Number(e.target.value),
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                        <label
+                            htmlFor="gote-byoyomi"
+                            style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "4px",
+                                fontSize: "13px",
+                            }}
+                        >
+                            後手 秒読み (ms)
+                            <Input
+                                id="gote-byoyomi"
+                                type="number"
+                                value={timeSettings.gote.byoyomiMs}
+                                disabled={settingsLocked}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        gote: {
+                                            ...timeSettings.gote,
+                                            byoyomiMs: Number(e.target.value),
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                    </div>
+                </div>
+            </CollapsibleContent>
+        </Collapsible>
+    );
+}
