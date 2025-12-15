@@ -66,6 +66,22 @@ export function ShogiBoard({
                                 <button
                                     type="button"
                                     onClick={(e) => onSelect?.(cell.id, e.shiftKey)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" && e.shiftKey) {
+                                            // Shift+Enter で即座に成る
+                                            e.preventDefault();
+                                            onSelect?.(cell.id, true);
+                                        } else if (e.key === "Escape") {
+                                            // Escape でキャンセル
+                                            e.preventDefault();
+                                            onSelect?.(cell.id, false);
+                                        }
+                                    }}
+                                    aria-label={
+                                        cell.piece
+                                            ? `${cell.id} ${cell.piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[cell.piece.type] ?? cell.piece.type}${cell.piece.promoted ? "成" : ""}。Shift+クリックで成って移動`
+                                            : `${cell.id} 空マス`
+                                    }
                                     className={cn(
                                         "relative h-full w-full overflow-hidden rounded-md border border-[#c7a165] text-base font-semibold transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#f06c3c]/70 focus-visible:ring-offset-transparent",
                                         "bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.3),transparent_38%),radial-gradient(circle_at_80%_80%,rgba(255,255,255,0.18),transparent_40%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_6px_12px_rgba(0,0,0,0.15)] hover:-translate-y-[1px]",
@@ -97,14 +113,31 @@ export function ShogiBoard({
                                     </span>
                                 </button>
                                 {isPromotionSquare && onPromotionChoice && (
-                                    <div className="absolute inset-0 z-10 flex flex-col gap-[2px] p-[2px]">
+                                    <div
+                                        className="absolute inset-0 z-10 flex flex-col gap-[2px] p-[2px]"
+                                        role="dialog"
+                                        aria-label="成り選択"
+                                        aria-live="assertive"
+                                    >
                                         <button
                                             type="button"
                                             onClick={(e) => {
                                                 e.stopPropagation();
                                                 onPromotionChoice(true);
                                             }}
-                                            className="flex-1 rounded-t-md bg-gradient-to-b from-[#f06c3c] to-[#e05528] text-[14px] font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl active:scale-95"
+                                            onKeyDown={(e) => {
+                                                if (e.key === "Enter" || e.key === " ") {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    onPromotionChoice(true);
+                                                } else if (e.key === "Escape") {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    onPromotionChoice(false);
+                                                }
+                                            }}
+                                            aria-label="成る"
+                                            className="flex-1 rounded-t-md bg-gradient-to-b from-[#f06c3c] to-[#e05528] text-[14px] font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2"
                                         >
                                             成
                                         </button>
@@ -114,7 +147,19 @@ export function ShogiBoard({
                                                 e.stopPropagation();
                                                 onPromotionChoice(false);
                                             }}
-                                            className="flex-1 rounded-b-md bg-gradient-to-b from-[#4a90e2] to-[#357abd] text-[12px] font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl active:scale-95"
+                                            onKeyDown={(e) => {
+                                                if (e.key === "Enter" || e.key === " ") {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    onPromotionChoice(false);
+                                                } else if (e.key === "Escape") {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    onPromotionChoice(false);
+                                                }
+                                            }}
+                                            aria-label="成らない"
+                                            className="flex-1 rounded-b-md bg-gradient-to-b from-[#4a90e2] to-[#357abd] text-[12px] font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2"
                                         >
                                             不成
                                         </button>

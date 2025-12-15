@@ -28,7 +28,18 @@ import { ShogiBoard } from "./shogi-board";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
-type PromotionSelection = { from: Square; to: Square };
+type PromotionSelection = {
+    from: Square;
+    to: Square;
+    piece: Piece; // 駒情報を追加（UI表示・検証用）
+};
+/**
+ * 成り判定の結果を表す型
+ * - 'none': 成れない（成り手が存在しない）
+ * - 'optional': 任意成り（基本移動と成り移動の両方が合法）
+ * - 'forced': 強制成り（成り移動のみ合法）
+ */
+type PromotionDecision = "none" | "optional" | "forced";
 type SideRole = "human" | "engine";
 type EngineStatus = "idle" | "thinking" | "error";
 
@@ -947,11 +958,31 @@ export function ShogiMatch({
         return set;
     };
 
-    const canPromote = (legalMoves: Set<string>, from: string, to: string): boolean => {
-        const baseMove = `${from}${to}`;
-        const promoteMove = `${baseMove}+`;
-        return legalMoves.has(baseMove) && legalMoves.has(promoteMove);
-    };
+    /**
+     * 指定された移動が成れるかを判定する
+     * @param legalMoves - 合法手のセット
+     * @param from - 移動元マス
+     * @param to - 移動先マス
+     * @returns 成り判定の結果
+     */
+    const determinePromotion = useCallback(
+        (legalMoves: Set<string>, from: string, to: string): PromotionDecision => {
+            const baseMove = `${from}${to}`;
+            const promoteMove = `${baseMove}+`;
+
+            const hasBase = legalMoves.has(baseMove);
+            const hasPromote = legalMoves.has(promoteMove);
+
+            if (hasBase && hasPromote) {
+                return "optional"; // 両方存在 → 任意成り
+            }
+            if (hasPromote) {
+                return "forced"; // 成りのみ存在 → 強制成り
+            }
+            return "none"; // 成れない
+        },
+        [],
+    );
 
     const applyEditedPosition = (nextPosition: PositionState) => {
         setPosition(nextPosition);
@@ -1174,37 +1205,58 @@ export function ShogiMatch({
 
             const from = selection.square;
             const to = square;
+            const piece = position.board[from as Square];
 
-            // 成れるかチェック
-            if (canPromote(legal, from, to)) {
-                // Shift+クリック：即座に成って移動
-                if (shiftKey) {
-                    const moveStr = `${from}${to}+`;
-                    const result = applyMoveWithState(position, moveStr, { validateTurn: true });
-                    if (!result.ok) {
-                        setMessage(result.error ?? "指し手を適用できませんでした");
-                        return;
-                    }
-                    applyMoveCommon(result.next, moveStr, result.lastMove);
+            // 成り判定を実行
+            const promotion = determinePromotion(legal, from, to);
+
+            // 【ケース1】成れない場合 → 基本移動を試行
+            if (promotion === "none") {
+                const moveStr = `${from}${to}`;
+                if (!legal.has(moveStr)) {
+                    setMessage("合法手ではありません");
                     return;
                 }
-                // 通常クリック：成り選択状態にセット
-                setPromotionSelection({ from: from as Square, to: to as Square });
+                const result = applyMoveWithState(position, moveStr, { validateTurn: true });
+                if (!result.ok) {
+                    setMessage(result.error ?? "指し手を適用できませんでした");
+                    return;
+                }
+                applyMoveCommon(result.next, moveStr, result.lastMove);
                 return;
             }
 
-            // 成れない移動：即座に移動
-            const moveStr = `${from}${to}`;
-            if (!legal.has(moveStr)) {
-                setMessage("合法手ではありません");
+            // 【ケース2】強制成り → 自動的に成って移動（ダイアログなし）
+            if (promotion === "forced") {
+                const moveStr = `${from}${to}+`;
+                const result = applyMoveWithState(position, moveStr, { validateTurn: true });
+                if (!result.ok) {
+                    setMessage(result.error ?? "指し手を適用できませんでした");
+                    return;
+                }
+                applyMoveCommon(result.next, moveStr, result.lastMove);
                 return;
             }
-            const result = applyMoveWithState(position, moveStr, { validateTurn: true });
-            if (!result.ok) {
-                setMessage(result.error ?? "指し手を適用できませんでした");
+
+            // 【ケース3】任意成り（promotion === 'optional'）
+            // Shift+クリック：即座に成って移動
+            if (shiftKey) {
+                const moveStr = `${from}${to}+`;
+                const result = applyMoveWithState(position, moveStr, { validateTurn: true });
+                if (!result.ok) {
+                    setMessage(result.error ?? "指し手を適用できませんでした");
+                    return;
+                }
+                applyMoveCommon(result.next, moveStr, result.lastMove);
                 return;
             }
-            applyMoveCommon(result.next, moveStr, result.lastMove);
+
+            // 通常クリック：成り選択ダイアログを表示
+            if (!piece) {
+                setMessage("駒が見つかりません");
+                return;
+            }
+            setPromotionSelection({ from: from as Square, to: to as Square, piece });
             return;
         }
 
