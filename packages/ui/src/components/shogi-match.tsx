@@ -185,6 +185,32 @@ export function ShogiMatch({
     // endMatchRef を更新
     endMatchRef.current = endMatch;
 
+    const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
+
+    // エンジン管理フックを使用
+    const {
+        engineReady,
+        engineStatus,
+        eventLogs,
+        errorLogs,
+        stopAllEngines,
+        getEngineForSide,
+        isEngineTurn,
+        logEngineError,
+    } = useEngineManager({
+        sides,
+        engineOptions,
+        timeSettings,
+        startSfen,
+        movesRef,
+        positionRef,
+        isMatchRunning,
+        positionReady,
+        onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
+        onMatchEnd: endMatch,
+        maxLogs,
+    });
+
     // エンジンからの手を受け取って適用するコールバック
     const handleMoveFromEngine = useCallback(
         (move: string) => {
@@ -192,6 +218,9 @@ export function ShogiMatch({
                 validateTurn: false,
             });
             if (!result.ok) {
+                logEngineError(
+                    `engine move rejected (${move || "empty"}): ${result.error ?? "unknown"}`,
+                );
                 return;
             }
             // 局面を更新
@@ -205,31 +234,9 @@ export function ShogiMatch({
             legalCache.clear();
             updateClocksForNextTurn(result.next.turn);
         },
-        [legalCache, updateClocksForNextTurn],
+        [legalCache, logEngineError, updateClocksForNextTurn],
     );
-
-    // エンジン管理フックを使用
-    const {
-        engineReady,
-        engineStatus,
-        eventLogs,
-        errorLogs,
-        stopAllEngines,
-        getEngineForSide,
-        isEngineTurn,
-    } = useEngineManager({
-        sides,
-        engineOptions,
-        timeSettings,
-        startSfen,
-        movesRef,
-        positionRef,
-        isMatchRunning,
-        positionReady,
-        onMoveFromEngine: handleMoveFromEngine,
-        onMatchEnd: endMatch,
-        maxLogs,
-    });
+    handleMoveFromEngineRef.current = handleMoveFromEngine;
 
     useEffect(() => {
         let cancelled = false;

@@ -1,20 +1,8 @@
 import type { PositionState } from "@shogi/app-core";
 import type { EngineEvent } from "@shogi/engine-client";
 import { act, renderHook } from "@testing-library/react";
-import type { MutableRefObject } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatEvent, useEngineManager } from "./useEngineManager";
-
-const applyMoveWithStateMock = vi.fn();
-
-vi.mock("@shogi/app-core", async () => {
-    const actual = await vi.importActual<typeof import("@shogi/app-core")>("@shogi/app-core");
-    return {
-        ...actual,
-        applyMoveWithState: (...args: Parameters<typeof actual.applyMoveWithState>) =>
-            applyMoveWithStateMock(...args),
-    };
-});
 
 describe("formatEvent", () => {
     it("bestmove イベントを正しくフォーマットする", () => {
@@ -142,8 +130,8 @@ describe("useEngineManager", () => {
         sides,
         mockClient,
     }: {
-        positionRef: MutableRefObject<PositionState>;
-        movesRef: MutableRefObject<string[]>;
+        positionRef: { current: PositionState };
+        movesRef: { current: string[] };
         onMoveFromEngine: (move: string) => void;
         onMatchEnd: (message: string) => Promise<void>;
         sides: {
@@ -181,12 +169,8 @@ describe("useEngineManager", () => {
 
     it("エンジンを初期化し探索を開始する", async () => {
         const mockClient = createMockEngineClient();
-        const positionRef = { current: { ...basePosition, turn: "sente" } };
+        const positionRef = { current: { ...basePosition, turn: "sente" as const } };
         const movesRef = { current: [] as string[] };
-        applyMoveWithStateMock.mockReturnValue({
-            ok: true,
-            next: positionRef.current,
-        });
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
 
@@ -213,12 +197,8 @@ describe("useEngineManager", () => {
 
     it("bestmove の通常手を適用してコールバックを呼び出す", async () => {
         const mockClient = createMockEngineClient();
-        const positionRef = { current: { ...basePosition, turn: "sente" } };
+        const positionRef = { current: { ...basePosition, turn: "sente" as const } };
         const movesRef = { current: [] as string[] };
-        applyMoveWithStateMock.mockReturnValue({
-            ok: true,
-            next: positionRef.current,
-        });
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
 
@@ -245,12 +225,8 @@ describe("useEngineManager", () => {
 
     it("bestmove の resign で対局終了コールバックを呼ぶ", async () => {
         const mockClient = createMockEngineClient();
-        const positionRef = { current: { ...basePosition, turn: "sente" } };
+        const positionRef = { current: { ...basePosition, turn: "sente" as const } };
         const movesRef = { current: [] as string[] };
-        applyMoveWithStateMock.mockReturnValue({
-            ok: true,
-            next: positionRef.current,
-        });
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
 

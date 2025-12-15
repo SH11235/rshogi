@@ -202,10 +202,16 @@ export function useClockManager({
             setClocks(nextState);
 
             if (expiredSide && isMatchRunning && !matchEndedRef.current) {
-                onTimeExpiredRef.current(expiredSide).catch((err) => {
+                try {
+                    const result = onTimeExpiredRef.current(expiredSide);
+                    Promise.resolve(result).catch((err) => {
+                        console.error("時間切れ処理エラー:", err);
+                        onClockError?.(`時間切れ処理エラー: ${String(err)}`);
+                    });
+                } catch (err) {
                     console.error("時間切れ処理エラー:", err);
                     onClockError?.(`時間切れ処理エラー: ${String(err)}`);
-                });
+                }
             }
         }, CLOCK_UPDATE_INTERVAL_MS);
 

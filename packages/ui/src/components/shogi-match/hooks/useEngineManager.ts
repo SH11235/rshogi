@@ -1,5 +1,4 @@
 import type { Player, PositionState } from "@shogi/app-core";
-import { applyMoveWithState } from "@shogi/app-core";
 import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClockSettings } from "./useClockManager";
@@ -78,6 +77,8 @@ export interface UseEngineManagerReturn {
     getEngineForSide: (side: Player) => EngineOption | undefined;
     /** 指定手番がエンジンかどうか */
     isEngineTurn: (turn: Player) => boolean;
+    /** エンジンエラーログを追加する（親でバリデーションした結果の通知用） */
+    logEngineError: (message: string) => void;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -237,13 +238,8 @@ export function useEngineManager({
     const applyMoveFromEngine = useCallback(
         (move: string) => {
             const trimmed = move.trim();
-            const result = applyMoveWithState(positionRef.current, trimmed, {
-                validateTurn: false,
-            });
-            if (!result.ok) {
-                addErrorLog(
-                    `engine move rejected (${trimmed || "empty"}): ${result.error ?? "unknown"}`,
-                );
+            if (!trimmed) {
+                addErrorLog("engine returned empty move");
                 return;
             }
             onMoveFromEngine(trimmed);
@@ -483,5 +479,6 @@ export function useEngineManager({
         stopAllEngines,
         getEngineForSide,
         isEngineTurn,
+        logEngineError: addErrorLog,
     };
 }
