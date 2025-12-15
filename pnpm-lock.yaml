@@ -112,6 +112,9 @@ importers:
 
   packages/app-core:
     dependencies:
+      '@shogi/engine-wasm':
+        specifier: workspace:*
+        version: link:../engine-wasm
       '@tauri-apps/api':
         specifier: ^2.9.0
         version: 2.9.0
