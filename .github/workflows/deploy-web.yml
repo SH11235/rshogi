@@ -35,8 +35,8 @@ permissions:
 
 # Allow one concurrent deployment
 concurrency:
-  group: 'pages-${{ github.ref }}'
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  group: 'pages'
+  cancel-in-progress: true
 
 env:
   CI: true
@@ -80,13 +80,14 @@ jobs:
           NODE_VERSION=$(node -p "require('./package.json').volta.node" 2>/dev/null || echo "")
           if [ -z "$NODE_VERSION" ]; then
             echo "Error: Failed to resolve node version from package.json"
+            echo "Please ensure package.json exists and has a 'volta.node' field"
             exit 1
           fi
           echo "node=$NODE_VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved node: $NODE_VERSION"
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4  # v6 は存在しないため v4 を使用（他のワークフローと統一）
         with:
           node-version: ${{ steps.versions.outputs.node }}
           cache: 'pnpm'
@@ -126,8 +127,10 @@ jobs:
         id: cache-wasm-bindgen
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/wasm-bindgen
-          key: wasm-bindgen-${{ env.WASM_BINDGEN_VERSION }}
+          path: |
+            ~/.cargo/bin/wasm-bindgen
+            ~/.cargo/bin/wasm-bindgen-test-runner
+          key: wasm-bindgen-cli-${{ env.WASM_BINDGEN_VERSION }}-${{ runner.os }}
 
       - name: Install wasm-bindgen-cli
         if: steps.cache-wasm-bindgen.outputs.cache-hit != 'true'
@@ -139,7 +142,7 @@ jobs:
           workspaces: packages/rust-core
           cache-on-failure: true
           shared-key: "rust-wasm-build"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
