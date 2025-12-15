@@ -189,6 +189,9 @@ export function useEngineManager({
                 searchState.handle = null;
                 searchState.pending = false;
                 searchState.requestPly = null;
+                if (activeSearchRef.current?.side === side) {
+                    activeSearchRef.current = null;
+                }
             }
 
             try {

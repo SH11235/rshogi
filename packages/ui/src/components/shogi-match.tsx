@@ -149,6 +149,10 @@ export function ShogiMatch({
     // endMatch のための ref（循環依存を回避）
     const endMatchRef = useRef<((message: string) => Promise<void>) | null>(null);
 
+    const handleClockError = useCallback((message: string) => {
+        setMessage(message);
+    }, []);
+
     // 時計管理フックを使用
     const { clocks, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
         useClockManager({
@@ -162,6 +166,7 @@ export function ShogiMatch({
                 );
             },
             matchEndedRef,
+            onClockError: handleClockError,
         });
 
     // 対局終了処理（エンジン管理フックから呼ばれる）
