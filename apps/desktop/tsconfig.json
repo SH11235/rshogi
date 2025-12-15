@@ -4,13 +4,10 @@
     "types": ["react", "react-dom"],
     "noEmit": true,
     "paths": {
-      "@shogi/app-core": ["packages/app-core/src/index.tauri.ts"],
       "@shogi/design-system": ["packages/design-system/src"],
       "@shogi/design-system/*": ["packages/design-system/src/*"],
       "@shogi/ui": ["packages/ui/src"],
       "@shogi/ui/*": ["packages/ui/src/*"],
-      "@shogi/engine-client": ["packages/engine-client/src"],
-      "@shogi/engine-client/*": ["packages/engine-client/src/*"],
       "@shogi/engine-tauri": ["packages/engine-tauri/src"],
       "@shogi/engine-tauri/*": ["packages/engine-tauri/src/*"]
     }
