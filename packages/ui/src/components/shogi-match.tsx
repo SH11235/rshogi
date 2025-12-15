@@ -265,7 +265,7 @@ export function ShogiMatch({
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(false);
     const [editOwner, setEditOwner] = useState<Player>("sente");
-    const [editPieceType, setEditPieceType] = useState<PieceType>("P");
+    const [editPieceType, setEditPieceType] = useState<PieceType | null>(null);
     const [editPromoted, setEditPromoted] = useState(false);
     const [editFromSquare, setEditFromSquare] = useState<Square | null>(null);
     const [editTool, setEditTool] = useState<"place" | "erase">("place");
@@ -993,9 +993,12 @@ export function ShogiMatch({
                 return;
             }
             const sq = square as Square;
+
+            // 移動元が選択されている場合：移動先として処理
             if (editFromSquare) {
                 const from = editFromSquare;
                 if (from === sq) {
+                    // 同じマスをクリック：選択解除
                     setEditFromSquare(null);
                     return;
                 }
@@ -1011,30 +1014,32 @@ export function ShogiMatch({
                 return;
             }
 
+            // 削除モード：駒を削除
             if (editTool === "erase") {
                 placePieceAt(sq, null);
                 return;
             }
 
-            const pieceToPlace: Piece | null = editPieceType
-                ? {
-                      owner: editOwner,
-                      type: editPieceType,
-                      promoted: editPromoted || undefined,
-                  }
-                : null;
-
-            if (pieceToPlace) {
+            // 駒ボタンが選択されている場合：配置
+            if (editPieceType) {
+                const pieceToPlace: Piece = {
+                    owner: editOwner,
+                    type: editPieceType,
+                    promoted: editPromoted || undefined,
+                };
                 placePieceAt(sq, pieceToPlace);
                 return;
             }
 
+            // 駒ボタン未選択：盤上の駒をクリックで移動元として選択
             const current = position.board[sq];
             if (current) {
                 setEditFromSquare(sq);
                 return;
             }
-            setMessage("配置する駒を選んでください。");
+
+            // 空マスをクリックした場合
+            setMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
             return;
         }
         if (!positionReady) {
@@ -1597,8 +1602,11 @@ export function ShogiMatch({
                                                     setIsEditMode((prev) => {
                                                         const next = !prev;
                                                         if (!next) {
+                                                            // 編集モード終了時に選択状態をリセット
                                                             setEditFromSquare(null);
                                                             setEditTool("place");
+                                                            setEditPieceType(null);
+                                                            setEditPromoted(false);
                                                         }
                                                         return next;
                                                     })
@@ -1643,86 +1651,52 @@ export function ShogiMatch({
                                         </div>
                                         <div
                                             style={{
-                                                display: "grid",
-                                                gridTemplateColumns: "1fr 1fr",
-                                                gap: "8px",
+                                                display: "flex",
+                                                gap: "6px",
                                                 alignItems: "center",
                                             }}
                                         >
-                                            <div
+                                            <span
                                                 style={{
-                                                    display: "flex",
-                                                    gap: "6px",
-                                                    alignItems: "center",
+                                                    fontSize: "12px",
+                                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
                                                 }}
                                             >
-                                                <span
-                                                    style={{
-                                                        fontSize: "12px",
-                                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                                    }}
-                                                >
-                                                    配置する先後
-                                                </span>
-                                                <label
-                                                    style={{
-                                                        display: "flex",
-                                                        gap: "4px",
-                                                        fontSize: "13px",
-                                                    }}
-                                                >
-                                                    <input
-                                                        type="radio"
-                                                        name="edit-owner"
-                                                        value="sente"
-                                                        checked={editOwner === "sente"}
-                                                        disabled={isMatchRunning}
-                                                        onChange={() => setEditOwner("sente")}
-                                                    />
-                                                    先手
-                                                </label>
-                                                <label
-                                                    style={{
-                                                        display: "flex",
-                                                        gap: "4px",
-                                                        fontSize: "13px",
-                                                    }}
-                                                >
-                                                    <input
-                                                        type="radio"
-                                                        name="edit-owner"
-                                                        value="gote"
-                                                        checked={editOwner === "gote"}
-                                                        disabled={isMatchRunning}
-                                                        onChange={() => setEditOwner("gote")}
-                                                    />
-                                                    後手
-                                                </label>
-                                            </div>
+                                                配置する先後
+                                            </span>
                                             <label
                                                 style={{
                                                     display: "flex",
-                                                    alignItems: "center",
-                                                    gap: "6px",
+                                                    gap: "4px",
                                                     fontSize: "13px",
                                                 }}
                                             >
-                                                手番
-                                                <select
-                                                    value={position.turn}
-                                                    onChange={(e) =>
-                                                        updateTurnForEdit(e.target.value as Player)
-                                                    }
+                                                <input
+                                                    type="radio"
+                                                    name="edit-owner"
+                                                    value="sente"
+                                                    checked={editOwner === "sente"}
                                                     disabled={isMatchRunning}
-                                                    style={{
-                                                        padding: "6px",
-                                                        borderRadius: "8px",
-                                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                                    }}
-                                                >
-                                                    <option value="sente">先手</option>
-                                                    <option value="gote">後手</option>
-                                                </select>
+                                                    onChange={() => setEditOwner("sente")}
+                                                />
+                                                先手
+                                            </label>
+                                            <label
+                                                style={{
+                                                    display: "flex",
+                                                    gap: "4px",
+                                                    fontSize: "13px",
+                                                }}
+                                            >
+                                                <input
+                                                    type="radio"
+                                                    name="edit-owner"
+                                                    value="gote"
+                                                    checked={editOwner === "gote"}
+                                                    disabled={isMatchRunning}
+                                                    onChange={() => setEditOwner("gote")}
+                                                />
+                                                後手
                                             </label>
                                         </div>
                                         <div
@@ -1752,10 +1726,15 @@ export function ShogiMatch({
                                                                 selected ? "secondary" : "outline"
                                                             }
                                                             onClick={() => {
-                                                                setEditTool("place");
-                                                                setEditPieceType(type);
-                                                                if (!isPromotable(type)) {
-                                                                    setEditPromoted(false);
+                                                                if (selected) {
+                                                                    // 選択中の駒を再度クリック：選択解除
+                                                                    setEditPieceType(null);
+                                                                } else {
+                                                                    setEditTool("place");
+                                                                    setEditPieceType(type);
+                                                                    if (!isPromotable(type)) {
+                                                                        setEditPromoted(false);
+                                                                    }
                                                                 }
                                                             }}
                                                             disabled={isMatchRunning}
@@ -1771,15 +1750,20 @@ export function ShogiMatch({
                                                 variant={
                                                     editTool === "erase" ? "secondary" : "outline"
                                                 }
-                                                onClick={() =>
-                                                    setEditTool(
-                                                        editTool === "erase" ? "place" : "erase",
-                                                    )
-                                                }
+                                                onClick={() => {
+                                                    if (editTool === "erase") {
+                                                        // 削除モードを解除
+                                                        setEditTool("place");
+                                                    } else {
+                                                        // 削除モードに切り替え
+                                                        setEditTool("erase");
+                                                        setEditPieceType(null);
+                                                    }
+                                                }}
                                                 disabled={isMatchRunning}
                                                 style={{ paddingInline: "10px" }}
                                             >
-                                                {editTool === "erase" ? "削除モード" : "配置モード"}
+                                                削除モード
                                             </Button>
                                             <label
                                                 style={{
@@ -1794,6 +1778,7 @@ export function ShogiMatch({
                                                     checked={editPromoted}
                                                     disabled={
                                                         isMatchRunning ||
+                                                        !editPieceType ||
                                                         !isPromotable(editPieceType)
                                                     }
                                                     onChange={(e) =>
@@ -1831,20 +1816,21 @@ export function ShogiMatch({
                                                     }}
                                                 >
                                                     <li>
-                                                        <strong>駒を配置:</strong> 駒種を選択 →
-                                                        盤面クリック
+                                                        <strong>駒を配置:</strong> 駒ボタンを選択 →
+                                                        盤面をクリック
                                                     </li>
                                                     <li>
                                                         <strong>駒を移動:</strong>{" "}
-                                                        盤面の駒をクリック → 移動先をクリック
+                                                        駒ボタン未選択の状態で盤面の駒をクリック →
+                                                        移動先をクリック
                                                     </li>
                                                     <li>
                                                         <strong>駒を削除:</strong>{" "}
-                                                        削除モードで盤面クリック（手駒に戻ります）
+                                                        削除モードボタンを押して盤面をクリック（手駒に戻ります）
                                                     </li>
                                                     <li>
                                                         <strong>選択解除:</strong>{" "}
-                                                        同じマスを再度クリック
+                                                        駒ボタンや削除モードボタンを再度クリック、または同じマスを再度クリック
                                                     </li>
                                                 </ul>
                                                 {editFromSquare && (
@@ -1891,6 +1877,29 @@ export function ShogiMatch({
                                     対局中は設定を変更できません。停止すると編集できます。
                                 </div>
                             ) : null}
+                            <label
+                                style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "4px",
+                                    fontSize: "13px",
+                                }}
+                            >
+                                手番（開始時にどちらが指すか）
+                                <select
+                                    value={position.turn}
+                                    onChange={(e) => updateTurnForEdit(e.target.value as Player)}
+                                    disabled={isMatchRunning}
+                                    style={{
+                                        padding: "8px",
+                                        borderRadius: "8px",
+                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                    }}
+                                >
+                                    <option value="sente">先手</option>
+                                    <option value="gote">後手</option>
+                                </select>
+                            </label>
                             {sideSelector("sente")}
                             {sideSelector("gote")}
 
