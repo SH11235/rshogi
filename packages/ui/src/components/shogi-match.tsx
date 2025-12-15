@@ -32,6 +32,24 @@ type PromotionSelection = { from: Square; to: Square };
 type SideRole = "human" | "engine";
 type EngineStatus = "idle" | "thinking" | "error";
 
+interface SearchState {
+    handle: SearchHandle | null;
+    pending: boolean;
+    requestPly: number | null;
+}
+
+interface EngineState {
+    client: EngineClient | null;
+    subscription: (() => void) | null;
+    selectedId: string | null;
+    ready: boolean;
+}
+
+interface ActiveSearch {
+    side: Player;
+    engineId: string;
+}
+
 export type EngineOption = {
     id: string;
     label: string;
@@ -68,6 +86,12 @@ export interface ShogiMatchProps {
     maxLogs?: number;
     fetchLegalMoves?: (sfen: string, moves: string[]) => Promise<string[]>;
 }
+
+// デフォルト値の定数
+const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
+const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
+const CLOCK_UPDATE_INTERVAL_MS = 200; // クロック更新インターバル
+const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
@@ -224,8 +248,8 @@ export function ShogiMatch({
         gote: { role: "engine", engineId: engineOptions[0]?.id },
     },
     initialMainTimeMs = 0,
-    initialByoyomiMs = 5_000,
-    maxLogs = 80,
+    initialByoyomiMs = DEFAULT_BYOYOMI_MS,
+    maxLogs = DEFAULT_MAX_LOGS,
     fetchLegalMoves,
 }: ShogiMatchProps): ReactElement {
     const hasEngines = engineOptions.length > 0;
@@ -275,32 +299,17 @@ export function ShogiMatch({
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
 
-    const handlesRef = useRef<Record<Player, SearchHandle | null>>({
-        sente: null,
-        gote: null,
+    // エンジン状態管理用の統合されたRef
+    const searchStatesRef = useRef<Record<Player, SearchState>>({
+        sente: { handle: null, pending: false, requestPly: null },
+        gote: { handle: null, pending: false, requestPly: null },
     });
-    const pendingSearchRef = useRef<Record<Player, boolean>>({ sente: false, gote: false });
-    const lastEngineRequestPly = useRef<Record<Player, number | null>>({
-        sente: null,
-        gote: null,
+    const engineStatesRef = useRef<Record<Player, EngineState>>({
+        sente: { client: null, subscription: null, selectedId: null, ready: false },
+        gote: { client: null, subscription: null, selectedId: null, ready: false },
     });
-    const engineInstancesRef = useRef<Record<Player, EngineClient | null>>({
-        sente: null,
-        gote: null,
-    });
-    const engineSubscriptionsRef = useRef<Record<Player, (() => void) | null>>({
-        sente: null,
-        gote: null,
-    });
-    const engineSelectionRef = useRef<Record<Player, string | null>>({
-        sente: null,
-        gote: null,
-    });
-    const engineReadyRef = useRef<Record<Player, boolean>>({
-        sente: false,
-        gote: false,
-    });
-    const activeSearchRef = useRef<{ side: Player; engineId: string } | null>(null);
+    const activeSearchRef = useRef<ActiveSearch | null>(null);
+
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCacheRef = useRef<{ ply: number; moves: Set<string> } | null>(null);
@@ -355,31 +364,43 @@ export function ShogiMatch({
     }, [engineOptions]);
 
     const disposeEngineForSide = useCallback(async (side: Player) => {
-        const sub = engineSubscriptionsRef.current[side];
-        if (sub) {
-            sub();
-            engineSubscriptionsRef.current[side] = null;
+        const engineState = engineStatesRef.current[side];
+        const searchState = searchStatesRef.current[side];
+
+        // サブスクリプションのクリーンアップ
+        if (engineState.subscription) {
+            engineState.subscription();
+            engineState.subscription = null;
         }
-        const handle = handlesRef.current[side];
-        if (handle) {
-            await handle.cancel().catch(() => undefined);
-            handlesRef.current[side] = null;
+
+        // 検索ハンドルのキャンセル
+        if (searchState.handle) {
+            await searchState.handle.cancel().catch(() => undefined);
+            searchState.handle = null;
         }
-        pendingSearchRef.current[side] = false;
-        lastEngineRequestPly.current[side] = null;
+
+        // 検索状態のクリア
+        searchState.pending = false;
+        searchState.requestPly = null;
+
+        // アクティブ検索のクリア
         if (activeSearchRef.current?.side === side) {
             activeSearchRef.current = null;
         }
-        const client = engineInstancesRef.current[side];
-        if (client) {
-            await client.stop().catch(() => undefined);
-            if (typeof client.dispose === "function") {
-                await client.dispose().catch(() => undefined);
+
+        // エンジンクライアントの停止と破棄
+        if (engineState.client) {
+            await engineState.client.stop().catch(() => undefined);
+            if (typeof engineState.client.dispose === "function") {
+                await engineState.client.dispose().catch(() => undefined);
             }
         }
-        engineInstancesRef.current[side] = null;
-        engineSelectionRef.current[side] = null;
-        engineReadyRef.current[side] = false;
+
+        // エンジン状態のクリア
+        engineState.client = null;
+        engineState.selectedId = null;
+        engineState.ready = false;
+
         setEngineReady((prev) => ({ ...prev, [side]: false }));
         setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
     }, []);
@@ -440,15 +461,22 @@ export function ShogiMatch({
 
     const stopAllEngines = useCallback(async () => {
         for (const side of ["sente", "gote"] as Player[]) {
-            const handle = handlesRef.current[side];
-            if (handle) {
-                await handle.cancel().catch(() => undefined);
-                handlesRef.current[side] = null;
+            const searchState = searchStatesRef.current[side];
+
+            // 検索ハンドルのキャンセル
+            if (searchState.handle) {
+                await searchState.handle.cancel().catch(() => undefined);
+                searchState.handle = null;
             }
-            pendingSearchRef.current[side] = false;
+
+            // 検索状態のクリア
+            searchState.pending = false;
+            searchState.requestPly = null;
         }
-        lastEngineRequestPly.current = { sente: null, gote: null };
+
+        // アクティブ検索のクリア
         activeSearchRef.current = null;
+
         setEngineStatus({ sente: "idle", gote: "idle" });
     }, []);
 
@@ -569,7 +597,13 @@ export function ShogiMatch({
         setSelection(null);
         setMessage(null);
         resetClocks(false);
-        lastEngineRequestPly.current = { sente: null, gote: null };
+
+        // 検索状態のリセット
+        searchStatesRef.current.sente.requestPly = null;
+        searchStatesRef.current.gote.requestPly = null;
+        searchStatesRef.current.sente.pending = false;
+        searchStatesRef.current.gote.pending = false;
+
         setIsMatchRunning(false);
         setIsEditMode(true);
         setEditFromSquare(null);
@@ -577,10 +611,11 @@ export function ShogiMatch({
         setEditPromoted(false);
         setEditOwner("sente");
         setEditPieceType(null);
+
         activeSearchRef.current = null;
+
         setErrorLogs([]);
         setEventLogs([]);
-        pendingSearchRef.current = { sente: false, gote: false };
         legalCacheRef.current = null;
         void refreshStartSfen(next);
     }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines]);
@@ -636,7 +671,9 @@ export function ShogiMatch({
 
     const attachSubscription = useCallback(
         (side: Player, client: EngineClient, engineId: string) => {
-            if (engineSubscriptionsRef.current[side]) return;
+            const engineState = engineStatesRef.current[side];
+            if (engineState.subscription) return;
+
             const unsub = client.subscribe((event) => {
                 const label = `${side === "sente" ? "S" : "G"}:${engineId}`;
                 setEventLogs((prev) => {
@@ -644,12 +681,16 @@ export function ShogiMatch({
                     return next.length > maxLogs ? next.slice(0, maxLogs) : next;
                 });
                 if (event.type === "bestmove") {
+                    const searchState = searchStatesRef.current[side];
+
                     setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-                    pendingSearchRef.current[side] = false;
-                    handlesRef.current[side] = null;
+                    searchState.pending = false;
+                    searchState.handle = null;
+
                     const current = activeSearchRef.current;
                     if (current && current.engineId === engineId && current.side === side) {
-                        lastEngineRequestPly.current[side] = movesRef.current.length;
+                        searchState.requestPly = movesRef.current.length;
+
                         const trimmed = event.move.trim();
                         const token = trimmed.toLowerCase();
                         if (token === "resign" || token === "win" || token === "none") {
@@ -697,13 +738,17 @@ export function ShogiMatch({
                     }
                 }
                 if (event.type === "error") {
+                    const searchState = searchStatesRef.current[side];
+
                     setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-                    handlesRef.current[side] = null;
-                    pendingSearchRef.current[side] = false;
+                    searchState.handle = null;
+                    searchState.pending = false;
+
                     setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
                 }
             });
-            engineSubscriptionsRef.current[side] = unsub;
+
+            engineState.subscription = unsub;
         },
         [applyMoveFromEngine, endMatch, maxLogs],
     );
@@ -717,24 +762,30 @@ export function ShogiMatch({
             const opt = engineMap.get(selectedId);
             if (!opt) return null;
 
-            if (engineSelectionRef.current[side] && engineSelectionRef.current[side] !== opt.id) {
+            const engineState = engineStatesRef.current[side];
+
+            // エンジンが変更された場合は既存のエンジンを破棄
+            if (engineState.selectedId && engineState.selectedId !== opt.id) {
                 await disposeEngineForSide(side);
             }
 
-            let client = engineInstancesRef.current[side];
+            // エンジンクライアントの取得または作成
+            let client = engineState.client;
             if (!client) {
                 client = opt.createClient();
-                engineInstancesRef.current[side] = client;
-                engineSelectionRef.current[side] = opt.id;
-                engineReadyRef.current[side] = false;
+                engineState.client = client;
+                engineState.selectedId = opt.id;
+                engineState.ready = false;
             }
 
+            // サブスクリプションのアタッチ
             attachSubscription(side, client, opt.id);
 
-            if (!engineReadyRef.current[side]) {
+            // エンジンの初期化と局面読み込み
+            if (!engineState.ready) {
                 await client.init();
                 await client.loadPosition(startSfen, movesRef.current);
-                engineReadyRef.current[side] = true;
+                engineState.ready = true;
                 setEngineReady((prev) => ({ ...prev, [side]: true }));
             }
 
@@ -746,30 +797,39 @@ export function ShogiMatch({
     const startEngineTurn = useCallback(
         async (side: Player) => {
             if (!positionReady) return;
-            if (pendingSearchRef.current[side]) return;
+
+            const searchState = searchStatesRef.current[side];
+
+            // 既に検索リクエストが送信待ちの場合はスキップ
+            if (searchState.pending) return;
+
             const ready = await ensureEngineReady(side);
             if (!ready) return;
             const { client, engineId } = ready;
-            const existing = handlesRef.current[side];
-            if (existing) {
+
+            // 既存の検索ハンドルがある場合の処理
+            if (searchState.handle) {
                 const current = activeSearchRef.current;
                 if (current && current.side === side && current.engineId === engineId) {
                     return;
                 }
-                await existing.cancel().catch(() => undefined);
+                await searchState.handle.cancel().catch(() => undefined);
             }
+
             setEngineStatus((prev) => ({ ...prev, [side]: "thinking" }));
-            pendingSearchRef.current[side] = true;
+            searchState.pending = true;
+
             try {
                 await client.loadPosition(startSfen, movesRef.current);
                 const handle = await client.search({
                     limits: { byoyomiMs: timeSettings[side].byoyomiMs },
                     ponder: false,
                 });
-                handlesRef.current[side] = handle;
+
+                searchState.handle = handle;
                 activeSearchRef.current = { side, engineId };
             } finally {
-                pendingSearchRef.current[side] = false;
+                searchState.pending = false;
             }
         },
         [ensureEngineReady, positionReady, startSfen, timeSettings],
@@ -831,7 +891,7 @@ export function ShogiMatch({
                 const winnerLabel = expiredSide === "sente" ? "後手" : "先手";
                 void endMatch(`対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`);
             }
-        }, 200);
+        }, CLOCK_UPDATE_INTERVAL_MS);
         return () => clearInterval(timer);
     }, [clocks.ticking, endMatch, isMatchRunning]);
 
@@ -841,12 +901,17 @@ export function ShogiMatch({
         if (!isEngineTurn(side)) return;
         const engineOpt = getEngineForSide(side);
         if (!engineOpt) return;
+
+        const searchState = searchStatesRef.current[side];
         const current = activeSearchRef.current;
+
         if (current && current.side === side && current.engineId === engineOpt.id) {
             return;
         }
-        if (lastEngineRequestPly.current[side] === moves.length) return;
-        lastEngineRequestPly.current[side] = moves.length;
+        if (searchState.requestPly === moves.length) return;
+
+        searchState.requestPly = moves.length;
+
         startEngineTurn(side).catch((error) => {
             setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
             setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
@@ -898,8 +963,13 @@ export function ShogiMatch({
         setSelection(null);
         setMessage(null);
         setEditFromSquare(null);
-        lastEngineRequestPly.current = { sente: null, gote: null };
+
+        // 検索状態のリセット
+        searchStatesRef.current.sente.requestPly = null;
+        searchStatesRef.current.gote.requestPly = null;
+
         activeSearchRef.current = null;
+
         legalCacheRef.current = null;
         setClocks((prev) => ({
             ...prev,
@@ -1215,7 +1285,11 @@ export function ShogiMatch({
             setSelection(null);
             setMessage(result.error ?? null);
             resetClocks(false);
-            lastEngineRequestPly.current = { sente: null, gote: null };
+
+            // 検索状態のリセット
+            searchStatesRef.current.sente.requestPly = null;
+            searchStatesRef.current.gote.requestPly = null;
+
             legalCacheRef.current = null;
             setPositionReady(true);
         } catch (error) {
@@ -1420,7 +1494,7 @@ export function ShogiMatch({
     };
 
     return (
-        <TooltipProvider delayDuration={120}>
+        <TooltipProvider delayDuration={TOOLTIP_DELAY_DURATION_MS}>
             <section
                 style={{
                     ...baseCard,
