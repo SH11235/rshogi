@@ -34,6 +34,7 @@ import {
 
 // EngineOption 型を外部に再エクスポート
 export type { EngineOption };
+
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
 import type { PromotionSelection } from "./shogi-match/types";
