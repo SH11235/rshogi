@@ -60,7 +60,7 @@ export interface UseClockManagerReturn {
 /**
  * TickState を初期化する
  */
-function initialTick(settings: ClockSettings): TickState {
+export function initialTick(settings: ClockSettings): TickState {
     return {
         sente: { mainMs: settings.sente.mainMs, byoyomiMs: settings.sente.byoyomiMs },
         gote: { mainMs: settings.gote.mainMs, byoyomiMs: settings.gote.byoyomiMs },

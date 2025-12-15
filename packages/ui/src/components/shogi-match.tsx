@@ -16,7 +16,6 @@ import {
     parseMove,
     type Square,
 } from "@shogi/app-core";
-import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-client";
 import type { CSSProperties, ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "./shogi-board";
@@ -33,6 +32,7 @@ import {
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
+import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
 import type { PromotionSelection } from "./shogi-match/types";
 import {
     addToHand,
@@ -47,25 +47,6 @@ import { determinePromotion } from "./shogi-match/utils/promotionLogic";
 import { TooltipProvider } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
-type EngineStatus = "idle" | "thinking" | "error";
-
-interface SearchState {
-    handle: SearchHandle | null;
-    pending: boolean;
-    requestPly: number | null;
-}
-
-interface EngineState {
-    client: EngineClient | null;
-    subscription: (() => void) | null;
-    selectedId: string | null;
-    ready: boolean;
-}
-
-interface ActiveSearch {
-    side: Player;
-    engineId: string;
-}
 
 export interface ShogiMatchProps {
     engineOptions: EngineOption[];
@@ -96,38 +77,6 @@ const clonePositionState = (pos: PositionState): PositionState => ({
     ply: pos.ply,
 });
 
-function formatEvent(event: EngineEvent, engineId: string): string {
-    const prefix = `[${engineId}] `;
-    if (event.type === "bestmove") {
-        return (
-            prefix +
-            (event.ponder
-                ? `bestmove ${event.move} (ponder ${event.ponder})`
-                : `bestmove ${event.move}`)
-        );
-    }
-    if (event.type === "info") {
-        const score =
-            event.scoreMate !== undefined
-                ? `mate ${event.scoreMate}`
-                : event.scoreCp !== undefined
-                  ? `cp ${event.scoreCp}`
-                  : "";
-        return (
-            prefix +
-            [
-                `info depth ${event.depth ?? "-"}`,
-                event.nodes !== undefined ? `nodes ${event.nodes}` : null,
-                event.nps !== undefined ? `nps ${event.nps}` : null,
-                score ? `score ${score}` : null,
-            ]
-                .filter(Boolean)
-                .join(" ")
-        );
-    }
-    return `${prefix}error ${event.message}`;
-}
-
 function boardToGrid(board: BoardState): ShogiBoardCell[][] {
     const matrix = boardToMatrix(board);
     return matrix.map((row) =>
@@ -155,7 +104,6 @@ export function ShogiMatch({
     maxLogs = DEFAULT_MAX_LOGS,
     fetchLegalMoves,
 }: ShogiMatchProps): ReactElement {
-    const hasEngines = engineOptions.length > 0;
     const emptyBoard = useMemo<BoardState>(
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
         [],
@@ -173,22 +121,12 @@ export function ShogiMatch({
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
     const [promotionSelection, setPromotionSelection] = useState<PromotionSelection | null>(null);
-    const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
-        sente: false,
-        gote: false,
-    });
-    const [engineStatus, setEngineStatus] = useState<Record<Player, EngineStatus>>({
-        sente: "idle",
-        gote: "idle",
-    });
     const [message, setMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useState<ClockSettings>({
         sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
         gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
     });
-    const [eventLogs, setEventLogs] = useState<string[]>([]);
-    const [errorLogs, setErrorLogs] = useState<string[]>([]);
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
     const [editOwner, setEditOwner] = useState<Player>("sente");
@@ -201,23 +139,15 @@ export function ShogiMatch({
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
 
-    // エンジン状態管理用の統合されたRef
-    const searchStatesRef = useRef<Record<Player, SearchState>>({
-        sente: { handle: null, pending: false, requestPly: null },
-        gote: { handle: null, pending: false, requestPly: null },
-    });
-    const engineStatesRef = useRef<Record<Player, EngineState>>({
-        sente: { client: null, subscription: null, selectedId: null, ready: false },
-        gote: { client: null, subscription: null, selectedId: null, ready: false },
-    });
-    const activeSearchRef = useRef<ActiveSearch | null>(null);
-
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCache = useMemo(() => new LegalMoveCache(), []);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
+
+    // endMatch のための ref（循環依存を回避）
+    const endMatchRef = useRef<((message: string) => Promise<void>) | null>(null);
 
     // 時計管理フックを使用
     const { clocks, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
@@ -227,10 +157,74 @@ export function ShogiMatch({
             onTimeExpired: async (side) => {
                 const loserLabel = side === "sente" ? "先手" : "後手";
                 const winnerLabel = side === "sente" ? "後手" : "先手";
-                await endMatch(`対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`);
+                await endMatchRef.current?.(
+                    `対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`,
+                );
             },
             matchEndedRef,
         });
+
+    // 対局終了処理（エンジン管理フックから呼ばれる）
+    const endMatch = useCallback(
+        async (nextMessage: string) => {
+            if (matchEndedRef.current) return;
+            matchEndedRef.current = true;
+            setMessage(nextMessage);
+            setIsMatchRunning(false);
+            stopTicking();
+            // エンジンの停止は useEngineManager が isMatchRunning の変化を検知して自動的に行う
+        },
+        [stopTicking],
+    );
+
+    // endMatchRef を更新
+    endMatchRef.current = endMatch;
+
+    // エンジンからの手を受け取って適用するコールバック
+    const handleMoveFromEngine = useCallback(
+        (move: string) => {
+            const result = applyMoveWithState(positionRef.current, move, {
+                validateTurn: false,
+            });
+            if (!result.ok) {
+                return;
+            }
+            // 局面を更新
+            setPosition(result.next);
+            positionRef.current = result.next;
+            setMoves((prev) => [...prev, move]);
+            movesRef.current = [...movesRef.current, move];
+            setLastMove(result.lastMove);
+            setSelection(null);
+            setMessage(null);
+            legalCache.clear();
+            updateClocksForNextTurn(result.next.turn);
+        },
+        [legalCache, updateClocksForNextTurn],
+    );
+
+    // エンジン管理フックを使用
+    const {
+        engineReady,
+        engineStatus,
+        eventLogs,
+        errorLogs,
+        stopAllEngines,
+        getEngineForSide,
+        isEngineTurn,
+    } = useEngineManager({
+        sides,
+        engineOptions,
+        timeSettings,
+        startSfen,
+        movesRef,
+        positionRef,
+        isMatchRunning,
+        positionReady,
+        onMoveFromEngine: handleMoveFromEngine,
+        onMatchEnd: endMatch,
+        maxLogs,
+    });
 
     useEffect(() => {
         let cancelled = false;
@@ -270,81 +264,10 @@ export function ShogiMatch({
         };
     }, []);
 
-    const engineMap = useMemo(() => {
-        const map = new Map<string, EngineOption>();
-        for (const opt of engineOptions) {
-            map.set(opt.id, opt);
-        }
-        return map;
-    }, [engineOptions]);
-
-    const disposeEngineForSide = useCallback(async (side: Player) => {
-        const engineState = engineStatesRef.current[side];
-        const searchState = searchStatesRef.current[side];
-
-        // サブスクリプションのクリーンアップ
-        if (engineState.subscription) {
-            engineState.subscription();
-            engineState.subscription = null;
-        }
-
-        // 検索ハンドルのキャンセル
-        if (searchState.handle) {
-            await searchState.handle.cancel().catch(() => undefined);
-            searchState.handle = null;
-        }
-
-        // 検索状態のクリア
-        searchState.pending = false;
-        searchState.requestPly = null;
-
-        // アクティブ検索のクリア
-        if (activeSearchRef.current?.side === side) {
-            activeSearchRef.current = null;
-        }
-
-        // エンジンクライアントの停止と破棄
-        if (engineState.client) {
-            await engineState.client.stop().catch(() => undefined);
-            if (typeof engineState.client.dispose === "function") {
-                await engineState.client.dispose().catch(() => undefined);
-            }
-        }
-
-        // エンジン状態のクリア
-        engineState.client = null;
-        engineState.selectedId = null;
-        engineState.ready = false;
-
-        setEngineReady((prev) => ({ ...prev, [side]: false }));
-        setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-    }, []);
-
     const grid = useMemo(() => {
         const g = boardToGrid(position.board);
         return flipBoard ? [...g].reverse().map((row) => [...row].reverse()) : g;
     }, [position.board, flipBoard]);
-
-    const getEngineForSide = useCallback(
-        (side: Player): EngineOption | undefined => {
-            if (!hasEngines) return undefined;
-            const setting = sides[side];
-            if (setting.role !== "engine") return undefined;
-            const fallback = engineOptions[0];
-            if (setting.engineId && engineMap.has(setting.engineId)) {
-                return engineMap.get(setting.engineId);
-            }
-            return fallback;
-        },
-        [engineMap, engineOptions, hasEngines, sides],
-    );
-
-    const isEngineTurn = useCallback(
-        (side: Player): boolean => {
-            return sides[side].role === "engine" && Boolean(getEngineForSide(side));
-        },
-        [getEngineForSide, sides],
-    );
 
     const refreshStartSfen = useCallback(async (pos: PositionState) => {
         try {
@@ -355,39 +278,6 @@ export function ShogiMatch({
             throw error;
         }
     }, []);
-
-    const stopAllEngines = useCallback(async () => {
-        for (const side of ["sente", "gote"] as Player[]) {
-            const searchState = searchStatesRef.current[side];
-
-            // 検索ハンドルのキャンセル
-            if (searchState.handle) {
-                await searchState.handle.cancel().catch(() => undefined);
-                searchState.handle = null;
-            }
-
-            // 検索状態のクリア
-            searchState.pending = false;
-            searchState.requestPly = null;
-        }
-
-        // アクティブ検索のクリア
-        activeSearchRef.current = null;
-
-        setEngineStatus({ sente: "idle", gote: "idle" });
-    }, []);
-
-    const endMatch = useCallback(
-        async (nextMessage: string) => {
-            if (matchEndedRef.current) return;
-            matchEndedRef.current = true;
-            setMessage(nextMessage);
-            setIsMatchRunning(false);
-            stopTicking();
-            await stopAllEngines();
-        },
-        [stopAllEngines, stopTicking],
-    );
 
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
@@ -413,44 +303,10 @@ export function ShogiMatch({
                 block: "start",
             });
         }, 100);
-        const turn = position.turn;
 
-        if (isEngineTurn(turn)) {
-            try {
-                setMessage("エンジン初期化中…（初回は数秒かかる場合があります）");
-                const engineSides = (["sente", "gote"] as Player[]).filter((side) =>
-                    isEngineTurn(side),
-                );
-                if (engineSides.length >= 2) {
-                    await Promise.all(engineSides.map((side) => ensureEngineReady(side)));
-                } else {
-                    await ensureEngineReady(turn);
-                }
-                setMessage(null);
-            } catch (error) {
-                setEngineStatus((prev) => ({ ...prev, [turn]: "error" }));
-                setErrorLogs((prev) =>
-                    [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs),
-                );
-                setMessage(`エンジン初期化に失敗しました: ${String(error)}`);
-                return;
-            }
-        } else {
-            for (const side of ["sente", "gote"] as Player[]) {
-                if (!isEngineTurn(side)) continue;
-                ensureEngineReady(side).catch(() => undefined);
-            }
-        }
-
+        // エンジン管理は useEngineManager フックが自動的に処理する
         setIsMatchRunning(true);
-        startTicking(turn);
-        if (!isEngineTurn(turn)) return;
-        try {
-            await startEngineTurn(turn);
-        } catch (error) {
-            setEngineStatus((prev) => ({ ...prev, [turn]: "error" }));
-            setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
-        }
+        startTicking(position.turn);
     };
 
     const finalizeEditedPosition = async () => {
@@ -495,12 +351,6 @@ export function ShogiMatch({
         setMessage(null);
         resetClocks(false);
 
-        // 検索状態のリセット
-        searchStatesRef.current.sente.requestPly = null;
-        searchStatesRef.current.gote.requestPly = null;
-        searchStatesRef.current.sente.pending = false;
-        searchStatesRef.current.gote.pending = false;
-
         setIsMatchRunning(false);
         setIsEditMode(true);
         setEditFromSquare(null);
@@ -508,11 +358,6 @@ export function ShogiMatch({
         setEditPromoted(false);
         setEditOwner("sente");
         setEditPieceType(null);
-
-        activeSearchRef.current = null;
-
-        setErrorLogs([]);
-        setEventLogs([]);
         legalCache.clear();
         void refreshStartSfen(next);
     }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines, legalCache.clear]);
@@ -520,259 +365,17 @@ export function ShogiMatch({
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove) => {
             setPosition(nextPosition);
+            positionRef.current = nextPosition;
             setMoves((prev) => [...prev, mv]);
+            movesRef.current = [...movesRef.current, mv];
             setLastMove(last);
             setSelection(null);
             setMessage(null);
-            activeSearchRef.current = null;
             legalCache.clear();
             updateClocksForNextTurn(nextPosition.turn);
         },
-        [updateClocksForNextTurn, legalCache.clear],
+        [legalCache, updateClocksForNextTurn],
     );
-
-    const applyMoveFromEngine = useCallback(
-        (move: string) => {
-            const trimmed = move.trim();
-            const result = applyMoveWithState(positionRef.current, trimmed, {
-                validateTurn: false,
-            });
-            if (!result.ok) {
-                setErrorLogs((prev) =>
-                    [
-                        `engine move rejected (${trimmed || "empty"}): ${result.error ?? "unknown"}`,
-                        ...prev,
-                    ].slice(0, maxLogs),
-                );
-                return;
-            }
-            applyMoveCommon(result.next, trimmed, result.lastMove);
-        },
-        [applyMoveCommon, maxLogs],
-    );
-
-    const attachSubscription = useCallback(
-        (side: Player, client: EngineClient, engineId: string) => {
-            const engineState = engineStatesRef.current[side];
-            if (engineState.subscription) return;
-
-            const unsub = client.subscribe((event) => {
-                const label = `${side === "sente" ? "S" : "G"}:${engineId}`;
-                setEventLogs((prev) => {
-                    const next = [formatEvent(event, label), ...prev];
-                    return next.length > maxLogs ? next.slice(0, maxLogs) : next;
-                });
-                if (event.type === "bestmove") {
-                    const searchState = searchStatesRef.current[side];
-
-                    setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-                    searchState.pending = false;
-                    searchState.handle = null;
-
-                    const current = activeSearchRef.current;
-                    if (current && current.engineId === engineId && current.side === side) {
-                        searchState.requestPly = movesRef.current.length;
-
-                        const trimmed = event.move.trim();
-                        const token = trimmed.toLowerCase();
-                        if (token === "resign" || token === "win" || token === "none") {
-                            activeSearchRef.current = null;
-                            const sideLabel = side === "sente" ? "先手" : "後手";
-                            const opponentLabel = side === "sente" ? "後手" : "先手";
-                            if (token === "win") {
-                                endMatch(`対局終了: ${sideLabel}が勝利宣言しました（win）。`).catch(
-                                    (err) => {
-                                        setErrorLogs((prev) =>
-                                            [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                                0,
-                                                maxLogs,
-                                            ),
-                                        );
-                                    },
-                                );
-                            } else if (token === "resign") {
-                                endMatch(
-                                    `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`,
-                                ).catch((err) => {
-                                    setErrorLogs((prev) =>
-                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                            0,
-                                            maxLogs,
-                                        ),
-                                    );
-                                });
-                            } else {
-                                endMatch(
-                                    `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`,
-                                ).catch((err) => {
-                                    setErrorLogs((prev) =>
-                                        [`対局終了処理でエラー: ${String(err)}`, ...prev].slice(
-                                            0,
-                                            maxLogs,
-                                        ),
-                                    );
-                                });
-                            }
-                            return;
-                        }
-                        applyMoveFromEngine(trimmed);
-                        activeSearchRef.current = null;
-                    }
-                }
-                if (event.type === "error") {
-                    const searchState = searchStatesRef.current[side];
-
-                    setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-                    searchState.handle = null;
-                    searchState.pending = false;
-
-                    setErrorLogs((prev) => [event.message, ...prev].slice(0, maxLogs));
-                }
-            });
-
-            engineState.subscription = unsub;
-        },
-        [applyMoveFromEngine, endMatch, maxLogs],
-    );
-
-    const ensureEngineReady = useCallback(
-        async (side: Player): Promise<{ client: EngineClient; engineId: string } | null> => {
-            const setting = sides[side];
-            if (setting.role !== "engine") return null;
-            const selectedId = setting.engineId ?? engineOptions[0]?.id;
-            if (!selectedId) return null;
-            const opt = engineMap.get(selectedId);
-            if (!opt) return null;
-
-            const engineState = engineStatesRef.current[side];
-
-            // エンジンが変更された場合は既存のエンジンを破棄
-            if (engineState.selectedId && engineState.selectedId !== opt.id) {
-                await disposeEngineForSide(side);
-            }
-
-            // エンジンクライアントの取得または作成
-            let client = engineState.client;
-            if (!client) {
-                client = opt.createClient();
-                engineState.client = client;
-                engineState.selectedId = opt.id;
-                engineState.ready = false;
-            }
-
-            // サブスクリプションのアタッチ
-            attachSubscription(side, client, opt.id);
-
-            // エンジンの初期化と局面読み込み
-            if (!engineState.ready) {
-                await client.init();
-                await client.loadPosition(startSfen, movesRef.current);
-                engineState.ready = true;
-                setEngineReady((prev) => ({ ...prev, [side]: true }));
-            }
-
-            return { client, engineId: opt.id };
-        },
-        [attachSubscription, disposeEngineForSide, engineMap, engineOptions, sides, startSfen],
-    );
-
-    const startEngineTurn = useCallback(
-        async (side: Player) => {
-            if (!positionReady) return;
-
-            const searchState = searchStatesRef.current[side];
-
-            // 既に検索リクエストが送信待ちの場合はスキップ
-            if (searchState.pending) return;
-
-            const ready = await ensureEngineReady(side);
-            if (!ready) return;
-            const { client, engineId } = ready;
-
-            // 既存の検索ハンドルがある場合の処理
-            if (searchState.handle) {
-                const current = activeSearchRef.current;
-                if (current && current.side === side && current.engineId === engineId) {
-                    return;
-                }
-                await searchState.handle.cancel().catch(() => undefined);
-            }
-
-            setEngineStatus((prev) => ({ ...prev, [side]: "thinking" }));
-            searchState.pending = true;
-
-            try {
-                await client.loadPosition(startSfen, movesRef.current);
-                const handle = await client.search({
-                    limits: { byoyomiMs: timeSettings[side].byoyomiMs },
-                    ponder: false,
-                });
-
-                searchState.handle = handle;
-                activeSearchRef.current = { side, engineId };
-            } finally {
-                searchState.pending = false;
-            }
-        },
-        [ensureEngineReady, positionReady, startSfen, timeSettings],
-    );
-
-    useEffect(() => {
-        positionRef.current = position;
-    }, [position]);
-
-    useEffect(() => {
-        movesRef.current = moves;
-    }, [moves]);
-
-    useEffect(() => {
-        for (const side of ["sente", "gote"] as Player[]) {
-            if (sides[side].role === "engine") continue;
-            disposeEngineForSide(side).catch(() => undefined);
-        }
-    }, [disposeEngineForSide, sides]);
-
-    useEffect(() => {
-        return () => {
-            // アンマウント時のみ全エンジンを停止・解放する。
-            Promise.all(
-                (["sente", "gote"] as Player[]).map((side) => disposeEngineForSide(side)),
-            ).catch(() => undefined);
-        };
-        // disposeEngineForSide は安定化済みなので、依存配列に含めても再実行されない。
-    }, [disposeEngineForSide]);
-
-    useEffect(() => {
-        if (!isMatchRunning || !positionReady) return;
-        const side = position.turn;
-        if (!isEngineTurn(side)) return;
-        const engineOpt = getEngineForSide(side);
-        if (!engineOpt) return;
-
-        const searchState = searchStatesRef.current[side];
-        const current = activeSearchRef.current;
-
-        if (current && current.side === side && current.engineId === engineOpt.id) {
-            return;
-        }
-        if (searchState.requestPly === moves.length) return;
-
-        searchState.requestPly = moves.length;
-
-        startEngineTurn(side).catch((error) => {
-            setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-            setErrorLogs((prev) => [`engine error: ${String(error)}`, ...prev].slice(0, maxLogs));
-        });
-    }, [
-        getEngineForSide,
-        isEngineTurn,
-        isMatchRunning,
-        maxLogs,
-        moves.length,
-        position.turn,
-        positionReady,
-        startEngineTurn,
-    ]);
 
     const handleNewGame = async () => {
         await resetToBasePosition();
@@ -800,12 +403,6 @@ export function ShogiMatch({
         setSelection(null);
         setMessage(null);
         setEditFromSquare(null);
-
-        // 検索状態のリセット
-        searchStatesRef.current.sente.requestPly = null;
-        searchStatesRef.current.gote.requestPly = null;
-
-        activeSearchRef.current = null;
 
         legalCache.clear();
         stopTicking();
@@ -1136,10 +733,6 @@ export function ShogiMatch({
             setSelection(null);
             setMessage(result.error ?? null);
             resetClocks(false);
-
-            // 検索状態のリセット
-            searchStatesRef.current.sente.requestPly = null;
-            searchStatesRef.current.gote.requestPly = null;
 
             legalCache.clear();
             setPositionReady(true);
