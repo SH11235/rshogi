@@ -102,7 +102,12 @@ export const ensureWasmModule = (wasmModule?: WasmModuleSource): Promise<void> =
     return wasmModuleReady;
 };
 
+const MSG_COOPERATIVE_STOP_NOT_SUPPORTED =
+    "cooperative stop is not yet supported for wasm; falling back to terminate";
+const DEFAULT_WORKER_TIMEOUT_MS = 30_000; // Worker リクエストのタイムアウト（30秒）
+
 export function createWasmEngineClient(options: WasmEngineClientOptions = {}): EngineClient {
+    // NOTE: stopMode のデフォルトは "terminate"。"cooperative" は未実装のため内部で terminate にフォールバックする。
     const stopMode: EngineStopMode = options.stopMode ?? "terminate";
     const mock = createMockEngineClient();
     const listeners = new Set<EngineEventHandler>();
@@ -232,7 +237,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
 
     const postToWorkerAwait = async (
         command: WorkerCommandPayload,
-        timeoutMs = 30_000,
+        timeoutMs = DEFAULT_WORKER_TIMEOUT_MS,
     ): Promise<void> => {
         if (!worker) {
             throw new Error("Wasm engine worker is not initialized");
@@ -375,11 +380,10 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                     } else {
                         // TODO: 探索中の wasm を協調停止できるようにする（SAB/Atomics などで停止フラグを即時伝搬）。
                         // 現状 runSearch がブロッキングで stop メッセージを処理できないため terminate にフォールバックする。
-                        emit({
-                            type: "error",
-                            message:
-                                "cooperative stop is not yet supported for wasm; falling back to terminate",
-                        });
+                        // NOTE: cooperative モードは未実装のため、terminate で代替している。
+                        if (typeof console !== "undefined") {
+                            console.debug(MSG_COOPERATIVE_STOP_NOT_SUPPORTED);
+                        }
                         terminateWorker();
                     }
                 },
@@ -394,11 +398,10 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 terminateWorker();
             } else {
                 // TODO: 協調停止対応を追加する。現状 stop メッセージが探索中に処理されないので terminate にフォールバック。
-                emit({
-                    type: "error",
-                    message:
-                        "cooperative stop is not yet supported for wasm; falling back to terminate",
-                });
+                // NOTE: cooperative モードは未実装のため、terminate で代替している。
+                if (typeof console !== "undefined") {
+                    console.debug(MSG_COOPERATIVE_STOP_NOT_SUPPORTED);
+                }
                 terminateWorker();
             }
             lastPosition = null;
