@@ -2,7 +2,7 @@ import type { PieceType, Player, Square } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { Button } from "../../button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
-import { PIECE_LABELS, isPromotable } from "../utils/constants";
+import { isPromotable, PIECE_LABELS } from "../utils/constants";
 
 const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
 

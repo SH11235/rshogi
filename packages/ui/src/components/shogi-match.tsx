@@ -24,11 +24,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "./button";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
+import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
+import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
+import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
 import {
+    type EngineOption,
     MatchSettingsPanel,
     type SideSetting,
-    type EngineOption,
 } from "./shogi-match/components/MatchSettingsPanel";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import type { PromotionSelection } from "./shogi-match/types";
@@ -42,7 +45,6 @@ import { PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
-import { formatTime } from "./shogi-match/utils/timeFormat";
 import { TooltipProvider } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -1193,38 +1195,9 @@ export function ShogiMatch({
         );
     };
 
-    const renderClock = (side: Player) => {
-        const clock = clocks[side];
-        const ticking = clocks.ticking === side;
-        return (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span
-                    style={{
-                        fontWeight: 700,
-                        color:
-                            side === "sente"
-                                ? "hsl(var(--primary, 15 86% 55%))"
-                                : "hsl(var(--accent, 37 94% 50%))",
-                    }}
-                >
-                    {side === "sente" ? "先手" : "後手"}
-                </span>
-                <span style={{ fontVariantNumeric: "tabular-nums", fontSize: "16px" }}>
-                    {formatTime(clock.mainMs)} + {formatTime(clock.byoyomiMs)}
-                </span>
-                {ticking ? (
-                    <span
-                        style={{
-                            display: "inline-block",
-                            width: "10px",
-                            height: "10px",
-                            borderRadius: "50%",
-                            background: "hsl(var(--primary, 15 86% 55%))",
-                        }}
-                    />
-                ) : null}
-            </div>
-        );
+    const importCsa = async (csa: string) => {
+        if (!positionReady) return;
+        await loadMoves(parseCsaMoves(csa, initialBoard ?? undefined));
     };
 
     const candidateNote = positionReady ? null : "局面を読み込み中です。";
@@ -1469,132 +1442,18 @@ export function ShogiMatch({
                             />
                         </div>
 
-                        <div style={{ ...baseCard, padding: "12px" }}>
-                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>時計</div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                                {renderClock("sente")}
-                                {renderClock("gote")}
-                            </div>
-                        </div>
+                        <ClockDisplayPanel clocks={clocks} />
 
-                        <div style={{ ...baseCard, padding: "12px" }}>
-                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>
-                                棋譜 / 入出力
-                            </div>
-                            <div
-                                style={{
-                                    fontSize: "13px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                先手から {moves.length} 手目
-                            </div>
-                            <ol
-                                style={{
-                                    paddingLeft: "18px",
-                                    maxHeight: "160px",
-                                    overflow: "auto",
-                                    margin: "8px 0",
-                                }}
-                            >
-                                {moves.map((mv, idx) => (
-                                    <li
-                                        key={`${idx}-${mv}`}
-                                        style={{
-                                            fontFamily: "ui-monospace, monospace",
-                                            fontSize: "13px",
-                                        }}
-                                    >
-                                        {idx + 1}. {mv}
-                                    </li>
-                                ))}
-                            </ol>
-                            <div
-                                style={{ display: "grid", gridTemplateColumns: "1fr", gap: "8px" }}
-                            >
-                                <label
-                                    style={{ display: "flex", flexDirection: "column", gap: "4px" }}
-                                >
-                                    USI / SFEN（現在の開始局面 + moves）
-                                    <textarea
-                                        value={exportUsi}
-                                        onChange={(e) => {
-                                            void importUsi(e.target.value);
-                                        }}
-                                        rows={3}
-                                        style={{
-                                            width: "100%",
-                                            padding: "8px",
-                                            borderRadius: "8px",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        }}
-                                    />
-                                </label>
-                                <label
-                                    style={{ display: "flex", flexDirection: "column", gap: "4px" }}
-                                >
-                                    CSA
-                                    <textarea
-                                        value={exportCsa}
-                                        onChange={(e) => {
-                                            if (!positionReady) return;
-                                            void loadMoves(
-                                                parseCsaMoves(
-                                                    e.target.value,
-                                                    initialBoard ?? undefined,
-                                                ),
-                                            );
-                                        }}
-                                        rows={3}
-                                        style={{
-                                            width: "100%",
-                                            padding: "8px",
-                                            borderRadius: "8px",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        }}
-                                    />
-                                </label>
-                            </div>
-                        </div>
+                        <KifuIOPanel
+                            moves={moves}
+                            exportUsi={exportUsi}
+                            exportCsa={exportCsa}
+                            onImportUsi={importUsi}
+                            onImportCsa={importCsa}
+                            positionReady={positionReady}
+                        />
 
-                        <div style={{ ...baseCard, padding: "12px" }}>
-                            <div style={{ fontWeight: 700, marginBottom: "6px" }}>エンジンログ</div>
-                            <ul
-                                style={{
-                                    listStyle: "none",
-                                    padding: 0,
-                                    margin: 0,
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    maxHeight: "160px",
-                                    overflow: "auto",
-                                }}
-                            >
-                                {eventLogs.map((log, idx) => (
-                                    <li
-                                        key={`${idx}-${log}`}
-                                        style={{
-                                            fontFamily: "ui-monospace, monospace",
-                                            fontSize: "12px",
-                                        }}
-                                    >
-                                        {log}
-                                    </li>
-                                ))}
-                            </ul>
-                            {errorLogs.length ? (
-                                <div
-                                    style={{
-                                        marginTop: "8px",
-                                        color: "hsl(var(--destructive, 0 72% 51%))",
-                                        fontSize: "12px",
-                                    }}
-                                >
-                                    {errorLogs[0]}
-                                </div>
-                            ) : null}
-                        </div>
+                        <EngineLogsPanel eventLogs={eventLogs} errorLogs={errorLogs} />
                     </div>
                 </div>
             </section>
