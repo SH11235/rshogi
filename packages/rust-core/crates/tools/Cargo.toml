@@ -19,7 +19,7 @@ chrono.workspace = true
 engine-core = { path = "../engine-core" }
 
 # Additional dependencies
-sysinfo = "0.33"
+sysinfo = "0.37"
 
 [[bin]]
 name = "benchmark"

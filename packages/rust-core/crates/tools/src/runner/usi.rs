@@ -123,7 +123,11 @@ impl UsiEngine {
                     println!("    {line}");
                 }
             } else if line.starts_with("bestmove") {
-                let bestmove = line.split_whitespace().nth(1).unwrap_or("none").to_string();
+                let bestmove =
+                    line.split_whitespace().nth(1).map(|s| s.to_string()).unwrap_or_else(|| {
+                        eprintln!("Warning: Invalid bestmove format: {line}");
+                        "none".to_string()
+                    });
 
                 return Ok(BenchResult {
                     sfen: sfen.to_string(),
@@ -158,22 +162,38 @@ impl InfoSnapshot {
             match tokens[i] {
                 "depth" => {
                     if i + 1 < tokens.len() {
-                        self.depth = tokens[i + 1].parse().unwrap_or(self.depth);
+                        if let Ok(val) = tokens[i + 1].parse() {
+                            self.depth = val;
+                        } else {
+                            eprintln!("Warning: Failed to parse depth: {}", tokens[i + 1]);
+                        }
                     }
                 }
                 "nodes" => {
                     if i + 1 < tokens.len() {
-                        self.nodes = tokens[i + 1].parse().unwrap_or(self.nodes);
+                        if let Ok(val) = tokens[i + 1].parse() {
+                            self.nodes = val;
+                        } else {
+                            eprintln!("Warning: Failed to parse nodes: {}", tokens[i + 1]);
+                        }
                     }
                 }
                 "nps" => {
                     if i + 1 < tokens.len() {
-                        self.nps = tokens[i + 1].parse().unwrap_or(self.nps);
+                        if let Ok(val) = tokens[i + 1].parse() {
+                            self.nps = val;
+                        } else {
+                            eprintln!("Warning: Failed to parse nps: {}", tokens[i + 1]);
+                        }
                     }
                 }
                 "hashfull" => {
                     if i + 1 < tokens.len() {
-                        self.hashfull = tokens[i + 1].parse().unwrap_or(self.hashfull);
+                        if let Ok(val) = tokens[i + 1].parse() {
+                            self.hashfull = val;
+                        } else {
+                            eprintln!("Warning: Failed to parse hashfull: {}", tokens[i + 1]);
+                        }
                     }
                 }
                 _ => {}
