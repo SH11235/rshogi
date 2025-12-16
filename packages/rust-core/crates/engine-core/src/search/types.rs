@@ -252,7 +252,11 @@ impl<const N: usize> Default for SmallMoveList<N> {
     }
 }
 
-/// 探索用の固定長指し手リスト（YaneuraOu SEARCHEDLIST_CAPACITY相当）
+/// quiets_tried / captures_tried 用の型エイリアス
+/// 
+/// alpha-beta探索で試行した静的手(quiets)と捕獲手(captures)を記録するための
+/// 固定長リスト。統計更新（history, capture_history等）に使用される。
+pub type SearchedMoveList = SmallMoveList<SEARCHED_MOVES_CAPACITY>;
 pub const SEARCHED_MOVES_CAPACITY: usize = 32;
 
 /// quiets_tried / captures_tried 用の型エイリアス
