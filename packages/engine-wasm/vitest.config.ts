@@ -1,0 +1,14 @@
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+    test: {
+        environment: "node",
+        globals: true,
+    },
+    resolve: {
+        alias: {
+            "../pkg/engine_wasm.js": new URL("./src/__mocks__/engine-wasm-pkg.ts", import.meta.url)
+                .pathname,
+        },
+    },
+});

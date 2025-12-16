@@ -10,10 +10,10 @@ import {
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
-type InvokeFn = typeof tauriInvoke;
-type ListenFn = typeof tauriListen;
+export type InvokeFn = typeof tauriInvoke;
+export type ListenFn = typeof tauriListen;
 
-interface TauriIpc {
+export interface TauriIpc {
     invoke: InvokeFn;
     listen: ListenFn;
 }

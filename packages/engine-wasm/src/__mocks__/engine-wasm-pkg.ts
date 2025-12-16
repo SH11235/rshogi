@@ -1,0 +1,28 @@
+// Mock for ../pkg/engine_wasm.js
+// This mock is used in tests to avoid loading the actual WASM module
+
+import { vi } from "vitest";
+
+// vitest 4.0のMock型の制限により、モック関数の型定義にはanyを使用
+// これらのモック関数は実際の使用箇所で適切な型が推論される
+
+// Mock the WASM module initialization
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockDefault: any = vi.fn().mockResolvedValue({});
+export default mockDefault;
+
+// Mock WASM functions
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_get_initial_board: any = vi.fn().mockReturnValue({});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_parse_sfen_to_board: any = vi.fn().mockReturnValue({});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_board_to_sfen: any = vi.fn().mockReturnValue("startpos");
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_get_legal_moves: any = vi.fn().mockReturnValue([]);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_replay_moves_strict: any = vi.fn().mockReturnValue({
+    applied: [],
+    last_ply: 0,
+    board: {},
+});

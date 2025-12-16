@@ -10,5 +10,6 @@
             "@shogi/design-system/*": ["../../packages/design-system/dist/*"]
         }
     },
-    "include": ["src"]
+    "include": ["src"],
+    "exclude": ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"]
 }
