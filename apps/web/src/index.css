@@ -1,20 +1,14 @@
-/* Tailwind CSS 4.x の新記法: @import でインポート */
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 import */
-@import "tailwindcss";
-
-/* Tailwind v4: @config と @source は @import の後に配置 */
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 config */
-@config "../tailwind.config.ts";
-
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 source */
-@source "./**/*.{ts,tsx}";
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 source */
-@source "../index.html";
-/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 source */
-@source "../../../packages/ui/src/**/*.{ts,tsx}";
-
-/* theme.css は @import "tailwindcss" の後に読み込む（@layer base を使用するため） */
+/* Tailwind CSS 4.x - source()でワークスペースルートを基準にする */
+@import "tailwindcss" source("../../..");
+/* theme.css は @layer base を使用するため tailwindcss の後に読み込む */
 @import "@shogi/design-system/theme.css";
+
+/* Tailwind v4: preset読み込み用 */
+@config "../tailwind.config.ts";
+/* ソースファイル指定（ワークスペースルートからの相対パス） */
+@source "apps/web/src/**/*.{ts,tsx}";
+@source "apps/web/index.html";
+@source "packages/ui/src/**/*.{ts,tsx}";
 
 /* アプリ固有のベーススタイル */
 @layer base {
