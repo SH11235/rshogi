@@ -1,3 +1,4 @@
+import type { Player } from "@shogi/app-core";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ClockSettings, initialTick, useClockManager } from "./useClockManager";
@@ -45,11 +46,11 @@ describe("initialTick", () => {
 
 describe("useClockManager", () => {
     let matchEndedRef: React.MutableRefObject<boolean>;
-    let onTimeExpired: ReturnType<typeof vi.fn>;
+    let onTimeExpired: (side: Player) => Promise<void>;
 
     beforeEach(() => {
         matchEndedRef = { current: false };
-        onTimeExpired = vi.fn();
+        onTimeExpired = vi.fn(async (_side: Player) => {});
         vi.useFakeTimers();
     });
 
