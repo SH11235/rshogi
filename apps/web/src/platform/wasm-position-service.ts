@@ -1,4 +1,13 @@
 import {
+    type BoardStateJson,
+    boardJsonToPositionState,
+    type PositionService,
+    type PositionState,
+    positionStateToBoardJson,
+    type ReplayResult,
+    type ReplayResultJson,
+} from "@shogi/app-core";
+import {
     ensureWasmModule,
     wasm_board_to_sfen,
     wasm_get_initial_board,
@@ -6,9 +15,6 @@ import {
     wasm_parse_sfen_to_board,
     wasm_replay_moves_strict,
 } from "@shogi/engine-wasm";
-import type { PositionState } from "./board";
-import type { BoardStateJson, PositionService, ReplayResult } from "./position-service";
-import { boardJsonToPositionState, positionStateToBoardJson } from "./position-service";
 
 export const createWasmPositionService = (): PositionService => {
     let ready: Promise<void> | null = null;
@@ -49,12 +55,7 @@ export const createWasmPositionService = (): PositionService => {
 
         async replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult> {
             await ensureReady();
-            const result = wasm_replay_moves_strict(sfen, moves) as {
-                applied: string[];
-                last_ply: number;
-                board: BoardStateJson;
-                error?: string;
-            };
+            const result = wasm_replay_moves_strict(sfen, moves) as ReplayResultJson;
             return {
                 applied: result.applied,
                 lastPly: result.last_ply,

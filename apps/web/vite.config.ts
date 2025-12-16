@@ -17,7 +17,7 @@ export default defineConfig(({ command }) => ({
         alias: [
             {
                 find: /^@shogi\/app-core$/,
-                replacement: path.resolve(rootDir, "../../packages/app-core/src/index.web.ts"),
+                replacement: path.resolve(rootDir, "../../packages/app-core/src"),
             },
             {
                 find: /^@shogi\/design-system$/,

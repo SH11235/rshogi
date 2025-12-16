@@ -1,12 +1,13 @@
+import {
+    type BoardStateJson,
+    boardJsonToPositionState,
+    type PositionService,
+    type PositionState,
+    positionStateToBoardJson,
+    type ReplayResult,
+    type ReplayResultJson,
+} from "@shogi/app-core";
 import { invoke } from "@tauri-apps/api/core";
-import type { PositionState } from "./board";
-import type {
-    BoardStateJson,
-    PositionService,
-    ReplayResult,
-    ReplayResultJson,
-} from "./position-service";
-import { boardJsonToPositionState, positionStateToBoardJson } from "./position-service";
 
 export const createTauriPositionService = (): PositionService => {
     const toPosition = (json: BoardStateJson): PositionState => boardJsonToPositionState(json);

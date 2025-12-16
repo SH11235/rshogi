@@ -29,6 +29,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@shogi/app-core':
+        specifier: workspace:*
+        version: link:../../packages/app-core
       '@shogi/design-system':
         specifier: workspace:*
         version: link:../../packages/design-system
@@ -78,6 +81,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@shogi/app-core':
+        specifier: workspace:*
+        version: link:../../packages/app-core
       '@shogi/design-system':
         specifier: workspace:*
         version: link:../../packages/design-system
@@ -123,13 +129,6 @@ importers:
         version: 7.2.6(@types/node@24.10.1)(jiti@2.6.1)(lightningcss@1.30.2)(yaml@2.8.2)
 
   packages/app-core:
-    dependencies:
-      '@shogi/engine-wasm':
-        specifier: workspace:*
-        version: link:../engine-wasm
-      '@tauri-apps/api':
-        specifier: ^2.9.0
-        version: 2.9.0
     devDependencies:
       typescript:
         specifier: ~5.9.3

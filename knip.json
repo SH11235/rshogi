@@ -1,14 +1,4 @@
 {
     "$schema": "https://unpkg.com/knip@5/schema.json",
-    "ignore": ["**/postcss.config.js"],
-    "workspaces": {
-        "packages/app-core": {
-            "entry": [
-                "src/index.web.ts",
-                "src/index.tauri.ts",
-                "src/game/index.web.ts",
-                "src/game/index.tauri.ts"
-            ]
-        }
-    }
+    "ignore": ["**/postcss.config.js"]
 }
