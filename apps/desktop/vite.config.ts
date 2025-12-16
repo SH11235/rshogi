@@ -12,6 +12,10 @@ export default defineConfig(async () => ({
     resolve: {
         alias: [
             {
+                find: "@shogi/app-core",
+                replacement: path.resolve(rootDir, "../../packages/app-core/src"),
+            },
+            {
                 find: "@shogi/design-system",
                 replacement: path.resolve(rootDir, "../../packages/design-system/src"),
             },
