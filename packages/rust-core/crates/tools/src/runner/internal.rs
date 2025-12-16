@@ -129,3 +129,70 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
         results: all_results,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(limit_type: LimitType, limit: u64) -> BenchmarkConfig {
+        BenchmarkConfig {
+            threads: vec![1],
+            tt_mb: 16,
+            limit_type,
+            limit,
+            sfens: None,
+            iterations: 1,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn test_benchmark_with_default_positions() {
+        let config = test_config(LimitType::Depth, 5);
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok(), "Benchmark failed: {:?}", result.err());
+
+        let report = result.unwrap();
+
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].threads, 1);
+        assert_eq!(report.results[0].results.len(), 4, "Should have 4 default positions");
+
+        for (i, bench_result) in report.results[0].results.iter().enumerate() {
+            assert!(!bench_result.sfen.is_empty(), "Position {i}: SFEN should not be empty");
+            assert!(bench_result.depth >= 1, "Position {i}: Depth should be at least 1");
+            assert!(bench_result.nodes > 0, "Position {i}: Nodes should be positive");
+            assert_ne!(bench_result.bestmove, "none", "Position {i}: Bestmove should be valid");
+        }
+    }
+
+    #[test]
+    fn test_benchmark_multiple_iterations() {
+        let mut config = test_config(LimitType::Depth, 3);
+        config.iterations = 2;
+
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok());
+
+        let report = result.unwrap();
+        // 2 iterations × 4 positions = 8 results
+        assert_eq!(report.results[0].results.len(), 8);
+    }
+
+    #[test]
+    fn test_benchmark_nodes_limit() {
+        let config = test_config(LimitType::Nodes, 1000);
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok());
+
+        let report = result.unwrap();
+        for bench_result in &report.results[0].results {
+            // ノード数が制限値付近であること（多少のオーバーランは許容）
+            assert!(
+                bench_result.nodes <= 2000,
+                "Nodes {} should be close to limit 1000",
+                bench_result.nodes
+            );
+        }
+    }
+}
