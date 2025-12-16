@@ -21,7 +21,8 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
     init_search_module();
 
     // 評価関数設定
-    // MaterialLevel設定
+    // 注意: MaterialLevelはNNUE初期化前に設定する必要がある
+    //       （NNUE未使用時のフォールバックとして使用されるため）
     if let Some(level) = MaterialLevel::from_value(config.eval_config.material_level) {
         set_material_level(level);
         println!("MaterialLevel set to: {}", config.eval_config.material_level);
@@ -38,13 +39,15 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
             Ok(()) => {
                 println!("NNUE initialized from: {}", nnue_path.display());
             }
-            Err(e) => {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // 既に初期化済みの場合はスキップ（OnceLock）
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    println!("NNUE already initialized, skipping");
-                } else {
-                    return Err(anyhow::anyhow!("Failed to initialize NNUE: {e}"));
-                }
+                println!("NNUE already initialized, skipping");
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to initialize NNUE from '{}': {e}",
+                    nnue_path.display()
+                ));
             }
         }
     }
@@ -228,5 +231,28 @@ mod tests {
                 bench_result.nodes
             );
         }
+    }
+
+    #[test]
+    fn test_material_level_configuration() {
+        let mut config = test_config(LimitType::Nodes, 10000);
+        config.eval_config.material_level = 1;
+
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok());
+
+        let report = result.unwrap();
+        assert!(report.eval_info.is_some());
+        assert_eq!(report.eval_info.unwrap().material_level, 1);
+    }
+
+    #[test]
+    fn test_invalid_material_level_uses_default() {
+        let mut config = test_config(LimitType::Nodes, 10000);
+        config.eval_config.material_level = 99; // 不正な値
+
+        // 不正な値でも実行は成功し、デフォルト値が使用されるべき
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok());
     }
 }

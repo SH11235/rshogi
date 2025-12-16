@@ -13,12 +13,16 @@ use crate::utils::format_number;
 /// 評価関数情報（JSON出力用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalInfo {
-    /// NNUE評価が有効か
+    /// NNUE評価が有効かどうか
+    /// - `true`: NNUEファイルが指定され、NNUE評価を使用
+    /// - `false`: Material評価のみを使用
     pub nnue_enabled: bool,
-    /// NNUEファイルパス（使用時のみ）
+    /// 使用されたNNUEファイルのパス
+    /// NNUE評価が無効の場合は `None`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nnue_file: Option<String>,
-    /// Material評価レベル
+    /// Material評価レベル（1, 2, 3, 4, 7, 8, 9）
+    /// レベルが高いほど、より詳細な評価を行う（ただしNPSは低下する）
     pub material_level: u8,
 }
 

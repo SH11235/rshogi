@@ -288,7 +288,11 @@ impl UsiEngine {
                 if let Ok(v) = value.parse::<u8>() {
                     if let Some(level) = MaterialLevel::from_value(v) {
                         set_material_level(level);
+                    } else {
+                        eprintln!("info string Warning: Invalid MaterialLevel value {v}, ignored");
                     }
+                } else {
+                    eprintln!("info string Warning: MaterialLevel parse error for '{value}'");
                 }
             }
             _ => {

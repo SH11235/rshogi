@@ -22,6 +22,8 @@ pub enum MaterialLevel {
 
 impl MaterialLevel {
     /// レベル値から MaterialLevel を取得
+    ///
+    /// 注意: レベル5, 6は未実装（YaneuraOu互換性のため欠番）
     pub fn from_value(v: u8) -> Option<Self> {
         match v {
             1 => Some(MaterialLevel::Lv1),
@@ -54,11 +56,19 @@ pub const DEFAULT_MATERIAL_LEVEL: MaterialLevel = MaterialLevel::Lv9;
 
 /// ランタイムで切り替え可能なMaterial評価レベル
 /// 値は MaterialLevel::value() の戻り値 (1, 2, 3, 4, 7, 8, 9)
+///
+/// 注意: Ordering::Relaxed を使用しているが、MaterialLevel は探索開始前
+/// （USI isready / ベンチマーク開始時）に設定される想定のため問題ない。
+/// 探索中に変更されることは想定していない。
 static MATERIAL_LEVEL: AtomicU8 = AtomicU8::new(9);
 
 /// 現在のMaterial評価レベルを取得
 pub fn get_material_level() -> MaterialLevel {
     let v = MATERIAL_LEVEL.load(Ordering::Relaxed);
+    debug_assert!(
+        MaterialLevel::from_value(v).is_some(),
+        "Invalid MaterialLevel value in AtomicU8: {v}"
+    );
     MaterialLevel::from_value(v).unwrap_or(DEFAULT_MATERIAL_LEVEL)
 }
 
@@ -551,5 +561,47 @@ mod tests {
 
         // 初期局面はほぼ互角（MaterialLvにより0から僅かにずれる場合がある）
         assert!(value.raw().abs() < 200);
+    }
+
+    #[test]
+    fn test_material_level_value_roundtrip() {
+        let levels = [
+            MaterialLevel::Lv1,
+            MaterialLevel::Lv2,
+            MaterialLevel::Lv3,
+            MaterialLevel::Lv4,
+            MaterialLevel::Lv7,
+            MaterialLevel::Lv8,
+            MaterialLevel::Lv9,
+        ];
+
+        for level in levels {
+            let value = level.value();
+            let restored = MaterialLevel::from_value(value).unwrap();
+            assert_eq!(level, restored);
+        }
+    }
+
+    #[test]
+    fn test_material_level_invalid_values() {
+        // 欠番と範囲外の値
+        assert!(MaterialLevel::from_value(0).is_none());
+        assert!(MaterialLevel::from_value(5).is_none()); // 欠番
+        assert!(MaterialLevel::from_value(6).is_none()); // 欠番
+        assert!(MaterialLevel::from_value(10).is_none());
+    }
+
+    #[test]
+    fn test_get_set_material_level() {
+        let original = get_material_level();
+
+        set_material_level(MaterialLevel::Lv1);
+        assert_eq!(get_material_level(), MaterialLevel::Lv1);
+
+        set_material_level(MaterialLevel::Lv9);
+        assert_eq!(get_material_level(), MaterialLevel::Lv9);
+
+        // 元に戻す
+        set_material_level(original);
     }
 }

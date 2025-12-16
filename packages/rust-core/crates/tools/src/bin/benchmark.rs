@@ -64,8 +64,19 @@ struct Cli {
     nnue_file: Option<PathBuf>,
 
     /// Material評価レベル（1, 2, 3, 4, 7, 8, 9）
-    #[arg(long, default_value = "9")]
+    #[arg(long, default_value = "9", value_parser = validate_material_level)]
     material_level: u8,
+}
+
+/// Material評価レベルのバリデーション
+fn validate_material_level(s: &str) -> Result<u8, String> {
+    let v = s.parse::<u8>().map_err(|_| format!("'{s}' is not a valid number"))?;
+
+    if matches!(v, 1 | 2 | 3 | 4 | 7 | 8 | 9) {
+        Ok(v)
+    } else {
+        Err(format!("Material level must be one of: 1, 2, 3, 4, 7, 8, 9 (got {v})"))
+    }
 }
 
 /// CLI用の制限タイプ（clap ValueEnum対応）
