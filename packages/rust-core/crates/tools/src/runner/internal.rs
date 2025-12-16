@@ -91,7 +91,16 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
                     })
                     .with_context(|| "Failed to spawn search thread")?
                     .join()
-                    .map_err(|_| anyhow::anyhow!("Search thread panicked"))?;
+                    .map_err(|e| {
+                        let panic_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        anyhow::anyhow!("Search thread panicked: {panic_msg}")
+                    })?;
 
                 if config.verbose {
                     println!(

@@ -23,11 +23,18 @@ struct UsiEngine {
 
 impl UsiEngine {
     /// エンジンプロセスを起動してUSI初期化
-    fn spawn(engine_path: &Path, tt_mb: u32, threads: usize) -> Result<Self> {
+    fn spawn(engine_path: &Path, tt_mb: u32, threads: usize, verbose: bool) -> Result<Self> {
+        // verbose モードでは stderr を表示（デバッグ用）
+        let stderr_config = if verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
+
         let mut child = Command::new(engine_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr_config)
             .spawn()
             .with_context(|| format!("Failed to spawn engine: {}", engine_path.display()))?;
 
@@ -74,11 +81,16 @@ impl UsiEngine {
 
     /// 特定の応答を待つ（タイムアウト付き）
     fn wait_for(&mut self, expected: &str, timeout: Duration) -> Result<()> {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            if let Ok(line) = self.rx.recv_timeout(Duration::from_millis(100)) {
-                if line.starts_with(expected) {
-                    return Ok(());
+        let deadline = Instant::now() + timeout;
+
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                Ok(line) if line.starts_with(expected) => return Ok(()),
+                Ok(_) => continue, // 別の応答が来た
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("Engine disconnected while waiting for '{expected}'")
                 }
             }
         }
@@ -179,7 +191,7 @@ pub fn run_usi_benchmark(config: &BenchmarkConfig, engine_path: &Path) -> Result
     for threads in &config.threads {
         println!("=== Threads: {} ===", threads);
 
-        let mut engine = UsiEngine::spawn(engine_path, config.tt_mb, *threads)?;
+        let mut engine = UsiEngine::spawn(engine_path, config.tt_mb, *threads, config.verbose)?;
         let mut thread_results = Vec::new();
 
         for iteration in 0..config.iterations {

@@ -99,7 +99,7 @@ fn generate_output_filename(engine_name: &str, threads: &[usize]) -> String {
     let timestamp = Local::now().format("%Y%m%d%H%M%S");
     let threads_str = threads.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("-");
 
-    // ファイル名に使えない文字を除去
+    // ファイル名に使えない文字を除去（パスインジェクション対策含む）
     let safe_engine_name: String = engine_name
         .chars()
         .map(|c| {
@@ -111,35 +111,42 @@ fn generate_output_filename(engine_name: &str, threads: &[usize]) -> String {
         })
         .collect();
 
+    // 空文字列または長すぎる場合の対策
+    let safe_engine_name = if safe_engine_name.is_empty() {
+        "unknown".to_string()
+    } else if safe_engine_name.len() > 100 {
+        safe_engine_name[..100].to_string()
+    } else {
+        safe_engine_name
+    };
+
     format!("{timestamp}_{safe_engine_name}_{threads_str}.json")
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // エンジン名を取得（ファイル名生成用）
-    let engine_name = if cli.internal || cli.engine.is_none() {
-        "internal".to_string()
-    } else {
-        cli.engine
-            .as_ref()
-            .unwrap()
+    // 実行モード判定（if let パターンで unwrap を回避）
+    let (report, engine_name) = if cli.internal {
+        // 明示的に内部APIモードを指定
+        println!("Running internal API mode...");
+        let report = runner::internal::run_internal_benchmark(&cli.to_config())?;
+        (report, "internal".to_string())
+    } else if let Some(engine_path) = &cli.engine {
+        // USIモード
+        println!("Running USI mode with engine: {}", engine_path.display());
+        let report = runner::usi::run_usi_benchmark(&cli.to_config(), engine_path)?;
+        let name = engine_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
-            .to_string()
-    };
-
-    // 実行モード判定
-    let report = if cli.internal || cli.engine.is_none() {
-        // 内部APIモード
-        println!("Running internal API mode...");
-        runner::internal::run_internal_benchmark(&cli.to_config())?
+            .to_string();
+        (report, name)
     } else {
-        // USIモード
-        let engine_path = cli.engine.as_ref().unwrap();
-        println!("Running USI mode with engine: {}", engine_path.display());
-        runner::usi::run_usi_benchmark(&cli.to_config(), engine_path)?
+        // デフォルト: 内部APIモード
+        println!("Running internal API mode...");
+        let report = runner::internal::run_internal_benchmark(&cli.to_config())?;
+        (report, "internal".to_string())
     };
 
     // 出力ディレクトリを作成（存在しない場合）
