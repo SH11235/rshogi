@@ -5,15 +5,9 @@ import {
     type PositionState,
     positionStateToBoardJson,
     type ReplayResult,
+    type ReplayResultJson,
 } from "@shogi/app-core";
 import { invoke } from "@tauri-apps/api/core";
-
-type ReplayResultJson = {
-    applied: string[];
-    last_ply: number;
-    board: BoardStateJson;
-    error?: string;
-};
 
 export const createTauriPositionService = (): PositionService => {
     const toPosition = (json: BoardStateJson): PositionState => boardJsonToPositionState(json);

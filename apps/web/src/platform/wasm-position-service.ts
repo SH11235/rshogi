@@ -5,6 +5,7 @@ import {
     type PositionState,
     positionStateToBoardJson,
     type ReplayResult,
+    type ReplayResultJson,
 } from "@shogi/app-core";
 import {
     ensureWasmModule,
@@ -54,12 +55,7 @@ export const createWasmPositionService = (): PositionService => {
 
         async replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult> {
             await ensureReady();
-            const result = wasm_replay_moves_strict(sfen, moves) as {
-                applied: string[];
-                last_ply: number;
-                board: BoardStateJson;
-                error?: string;
-            };
+            const result = wasm_replay_moves_strict(sfen, moves) as ReplayResultJson;
             return {
                 applied: result.applied,
                 lastPly: result.last_ply,
