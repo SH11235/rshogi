@@ -1,14 +1,10 @@
-/* Tailwind CSS 4.x - source()でワークスペースルートを基準にする */
-@import "tailwindcss" source("../../..");
+/* Tailwind CSS 4.x */
+@import "tailwindcss";
 /* theme.css は @layer base を使用するため tailwindcss の後に読み込む */
 @import "@shogi/design-system/theme.css";
 
-/* Tailwind v4: preset読み込み用 */
+/* Tailwind v4: preset と content 設定を読み込む */
 @config "../tailwind.config.ts";
-/* ソースファイル指定（ワークスペースルートからの相対パス） */
-@source "apps/desktop/src/**/*.{ts,tsx}";
-@source "apps/desktop/index.html";
-@source "packages/ui/src/**/*.{ts,tsx}";
 
 /* アプリ固有のベーススタイル */
 @layer base {
