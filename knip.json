@@ -1,4 +1,3 @@
 {
-    "$schema": "https://unpkg.com/knip@5/schema.json",
-    "ignore": ["**/index.css"]
+    "$schema": "https://unpkg.com/knip@5/schema.json"
 }
