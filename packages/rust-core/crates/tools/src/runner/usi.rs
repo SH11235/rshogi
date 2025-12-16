@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::config::{BenchmarkConfig, LimitType};
+use crate::config::{BenchmarkConfig, EvalConfig, LimitType};
 use crate::positions::load_positions;
-use crate::report::{BenchResult, BenchmarkReport, ThreadResult};
+use crate::report::{BenchResult, BenchmarkReport, EvalInfo, ThreadResult};
 use crate::system::collect_system_info;
 
 /// USIエンジンクライアント
@@ -44,7 +44,21 @@ impl Drop for UsiEngine {
 
 impl UsiEngine {
     /// エンジンプロセスを起動してUSI初期化
-    fn spawn(engine_path: &Path, tt_mb: u32, threads: usize, verbose: bool) -> Result<Self> {
+    ///
+    /// # 評価オプションについて
+    /// `eval_config` で指定された評価設定は、以下のUSIオプションとして送信されます：
+    /// - `MaterialLevel`: Material評価レベル（1, 2, 3, 4, 7, 8, 9）
+    /// - `EvalFile`: NNUEファイルパス（指定時のみ）
+    ///
+    /// 注意: これらのオプション名はエンジン依存です。対象エンジンが異なる
+    /// オプション名を使用している場合、設定は無視される可能性があります。
+    fn spawn(
+        engine_path: &Path,
+        tt_mb: u32,
+        threads: usize,
+        eval_config: &EvalConfig,
+        verbose: bool,
+    ) -> Result<Self> {
         // verbose モードでは stderr を表示（デバッグ用）
         let stderr_config = if verbose {
             Stdio::inherit()
@@ -91,6 +105,14 @@ impl UsiEngine {
         // オプション設定
         engine.send(&format!("setoption name USI_Hash value {tt_mb}"))?;
         engine.send(&format!("setoption name Threads value {threads}"))?;
+
+        // 評価オプション設定
+        engine
+            .send(&format!("setoption name MaterialLevel value {}", eval_config.material_level))?;
+        if let Some(nnue_path) = &eval_config.nnue_file {
+            engine.send(&format!("setoption name EvalFile value {}", nnue_path.display()))?;
+        }
+
         engine.send("isready")?;
         engine.wait_for("readyok", Duration::from_secs(30))?;
 
@@ -250,7 +272,13 @@ pub fn run_usi_benchmark(config: &BenchmarkConfig, engine_path: &Path) -> Result
     for threads in &config.threads {
         println!("=== Threads: {} ===", threads);
 
-        let mut engine = UsiEngine::spawn(engine_path, config.tt_mb, *threads, config.verbose)?;
+        let mut engine = UsiEngine::spawn(
+            engine_path,
+            config.tt_mb,
+            *threads,
+            &config.eval_config,
+            config.verbose,
+        )?;
         let mut thread_results = Vec::new();
 
         for iteration in 0..config.iterations {
@@ -293,7 +321,7 @@ pub fn run_usi_benchmark(config: &BenchmarkConfig, engine_path: &Path) -> Result
         system_info: collect_system_info(),
         engine_name,
         engine_path: Some(engine_path.display().to_string()),
-        eval_info: None, // USI経由では評価関数情報は外部エンジン依存
+        eval_info: Some(EvalInfo::from(&config.eval_config)),
         results: all_results,
     })
 }

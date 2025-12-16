@@ -34,4 +34,3 @@ panic = "unwind"
 overflow-checks = true    # オーバーフロー検出
 lto = "thin"             # 最適化は維持
 panic = "unwind"
-codegen-units = 1        # テスト: より最適化される可能性
