@@ -3,5 +3,5 @@ import type { Config } from "tailwindcss";
 
 export default {
     presets: [preset],
-    content: ["./index.html", "./src/**/*.{ts,tsx}", "../../packages/ui/src/**/*.{ts,tsx}"],
+    content: ["./src/**/*.{ts,tsx}", "./index.html", "../../packages/ui/src/**/*.{ts,tsx}"],
 } satisfies Config;

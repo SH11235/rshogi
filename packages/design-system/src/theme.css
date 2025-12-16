@@ -1,93 +1,102 @@
-:root {
-    color-scheme: light;
-    --background: 0 0% 100%;
-    --foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 47.4% 11.2%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 47.4% 11.2%;
-    --primary: 15 86% 55%;
-    --primary-foreground: 355.7 100% 97.3%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --accent: 37 94% 50%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 100%;
-    --ring: 15 86% 55%;
-    --radius: 0.65rem;
-    --font-sans:
-        "Inter", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
-        "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+/* Tailwind v4: CSS変数は @theme で定義、または :root で定義して @layer base に入れる */
+/* 注意: このファイルは @import "tailwindcss" の後に読み込む必要がある */
 
-    /* 和モダン配色トークン */
-    --wafuu-sumi: 220 15% 20%; /* 墨色 - メインテキスト・枠線 */
-    --wafuu-sumi-light: 220 12% 35%; /* 薄墨 - セカンダリテキスト */
-    --wafuu-shu: 10 75% 50%; /* 朱色 - アクセント */
-    --wafuu-shu-light: 10 65% 60%; /* 薄朱 - ホバー */
-    --wafuu-kin: 42 85% 60%; /* 金色 - ハイライト */
-    --wafuu-kincha: 30 30% 55%; /* 金茶 - 落ち着いたアクセント */
-    --wafuu-washi: 40 50% 96%; /* 和紙 - 背景 */
-    --wafuu-washi-warm: 35 45% 92%; /* 温かい和紙 - カード背景 */
-    --wafuu-border: 35 20% 80%; /* 和風ボーダー */
-}
+@layer base {
+    :root {
+        color-scheme: light;
+        --background: 0 0% 100%;
+        --foreground: 222.2 47.4% 11.2%;
+        --muted: 210 40% 96.1%;
+        --muted-foreground: 215.4 16.3% 46.9%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 222.2 47.4% 11.2%;
+        --border: 214.3 31.8% 91.4%;
+        --input: 214.3 31.8% 91.4%;
+        --card: 0 0% 100%;
+        --card-foreground: 222.2 47.4% 11.2%;
+        --primary: 15 86% 55%;
+        --primary-foreground: 355.7 100% 97.3%;
+        --secondary: 210 40% 96.1%;
+        --secondary-foreground: 222.2 47.4% 11.2%;
+        --accent: 37 94% 50%;
+        --accent-foreground: 210 40% 98%;
+        --destructive: 0 72% 51%;
+        --destructive-foreground: 0 0% 100%;
+        --ring: 15 86% 55%;
+        --radius: 0.65rem;
+        --font-sans:
+            "Inter", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+            "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
 
-.dark {
-    color-scheme: dark;
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --primary: 15 86% 58%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --accent: 30 88% 61%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 85% 60%;
-    --destructive-foreground: 210 40% 98%;
-    --ring: 27 96% 61%;
+        /* 和モダン配色トークン */
+        --wafuu-sumi: 220 15% 20%; /* 墨色 - メインテキスト・枠線 */
+        --wafuu-sumi-light: 220 12% 35%; /* 薄墨 - セカンダリテキスト */
+        --wafuu-shu: 10 75% 50%; /* 朱色 - アクセント */
+        --wafuu-shu-light: 10 65% 60%; /* 薄朱 - ホバー */
+        --wafuu-kin: 42 85% 60%; /* 金色 - ハイライト */
+        --wafuu-kincha: 30 30% 55%; /* 金茶 - 落ち着いたアクセント */
+        --wafuu-washi: 40 50% 96%; /* 和紙 - 背景 */
+        --wafuu-washi-warm: 35 45% 92%; /* 温かい和紙 - カード背景 */
+        --wafuu-border: 35 20% 80%; /* 和風ボーダー */
+    }
 
-    /* 和モダン配色トークン（ダークモード） */
-    --wafuu-sumi: 220 10% 85%; /* 墨色 - 明るく */
-    --wafuu-sumi-light: 220 8% 65%; /* 薄墨 */
-    --wafuu-shu: 10 70% 55%; /* 朱色 - 少し控えめ */
-    --wafuu-shu-light: 10 60% 65%; /* 薄朱 */
-    --wafuu-kin: 42 75% 55%; /* 金色 */
-    --wafuu-kincha: 30 25% 50%; /* 金茶 */
-    --wafuu-washi: 220 15% 12%; /* 和紙 - 暗い背景 */
-    --wafuu-washi-warm: 220 12% 16%; /* 温かい和紙 */
-    --wafuu-border: 220 10% 25%; /* 和風ボーダー */
-}
+    .dark {
+        color-scheme: dark;
+        --background: 222.2 84% 4.9%;
+        --foreground: 210 40% 98%;
+        --muted: 217.2 32.6% 17.5%;
+        --muted-foreground: 215 20.2% 65.1%;
+        --popover: 222.2 84% 4.9%;
+        --popover-foreground: 210 40% 98%;
+        --border: 217.2 32.6% 17.5%;
+        --input: 217.2 32.6% 17.5%;
+        --card: 222.2 84% 4.9%;
+        --card-foreground: 210 40% 98%;
+        --primary: 15 86% 58%;
+        --primary-foreground: 210 40% 98%;
+        --secondary: 217.2 32.6% 17.5%;
+        --secondary-foreground: 210 40% 98%;
+        --accent: 30 88% 61%;
+        --accent-foreground: 222.2 47.4% 11.2%;
+        --destructive: 0 85% 60%;
+        --destructive-foreground: 210 40% 98%;
+        --ring: 27 96% 61%;
 
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-    border-color: hsl(var(--border));
-}
+        /* 和モダン配色トークン（ダークモード） */
+        --wafuu-sumi: 220 10% 85%; /* 墨色 - 明るく */
+        --wafuu-sumi-light: 220 8% 65%; /* 薄墨 */
+        --wafuu-shu: 10 70% 55%; /* 朱色 - 少し控えめ */
+        --wafuu-shu-light: 10 60% 65%; /* 薄朱 */
+        --wafuu-kin: 42 75% 55%; /* 金色 */
+        --wafuu-kincha: 30 25% 50%; /* 金茶 */
+        --wafuu-washi: 220 15% 12%; /* 和紙 - 暗い背景 */
+        --wafuu-washi-warm: 220 12% 16%; /* 温かい和紙 */
+        --wafuu-border: 220 10% 25%; /* 和風ボーダー */
+    }
 
-body {
-    margin: 0;
-    min-height: 100vh;
-    font-family: var(--font-sans);
-    background-color: hsl(var(--background));
-    color: hsl(var(--foreground));
-    text-rendering: optimizeLegibility;
-    -webkit-font-smoothing: antialiased;
-}
+    *,
+    *::before,
+    *::after {
+        box-sizing: border-box;
+        border-color: hsl(var(--border));
+    }
 
-a {
-    color: inherit;
-    text-decoration: none;
+    body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: var(--font-sans);
+        /* 和風グラデーション背景 */
+        background:
+            radial-gradient(circle at 20% 20%, rgba(255, 214, 170, 0.26), transparent 32%),
+            radial-gradient(circle at 80% 0%, rgba(255, 155, 106, 0.18), transparent 28%),
+            hsl(var(--background));
+        color: hsl(var(--foreground));
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    a {
+        color: inherit;
+        text-decoration: none;
+    }
 }
