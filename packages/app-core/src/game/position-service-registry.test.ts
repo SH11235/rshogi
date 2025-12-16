@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createInitialBoard } from "./board";
 import type { PositionService } from "./position-service";
 import { getPositionService, setPositionServiceFactory } from "./position-service-registry";
 
@@ -13,14 +14,14 @@ describe("position-service-registry", () => {
             const mockService: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
                 async parseSfen(_sfen: string) {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
@@ -36,7 +37,7 @@ describe("position-service-registry", () => {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as Record<string, never>,
+                            board: createInitialBoard(),
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },
@@ -57,14 +58,14 @@ describe("position-service-registry", () => {
             const mockService: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
                 async parseSfen(_sfen: string) {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
@@ -80,7 +81,7 @@ describe("position-service-registry", () => {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as Record<string, never>,
+                            board: createInitialBoard(),
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },
@@ -104,14 +105,14 @@ describe("position-service-registry", () => {
             const mockService1: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
                 async parseSfen(_sfen: string) {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
@@ -127,7 +128,7 @@ describe("position-service-registry", () => {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as Record<string, never>,
+                            board: createInitialBoard(),
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },
@@ -138,14 +139,14 @@ describe("position-service-registry", () => {
             const mockService2: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
                 async parseSfen(_sfen: string) {
                     return {
-                        board: {} as Record<string, never>,
+                        board: createInitialBoard(),
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
@@ -161,7 +162,7 @@ describe("position-service-registry", () => {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as Record<string, never>,
+                            board: createInitialBoard(),
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },

@@ -16,15 +16,21 @@ describe("ThemeProvider", () => {
         localStorageRemoveSpy = vi.spyOn(window.localStorage, "removeItem");
 
         // matchMedia のモック
-        matchMediaMock = vi.fn().mockImplementation((query: string) => ({
-            matches: false,
-            media: query,
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
-            addListener: vi.fn(),
-            removeListener: vi.fn(),
-        }));
-        window.matchMedia = matchMediaMock;
+        matchMediaMock = vi.fn(
+            (query: string): MediaQueryList => ({
+                matches: false,
+                media: query,
+                addEventListener: vi.fn(),
+                removeEventListener: vi.fn(),
+                addListener: vi.fn(),
+                removeListener: vi.fn(),
+                dispatchEvent: vi.fn(),
+                onchange: null,
+            }),
+        );
+        // vi.fn() の型が window.matchMedia と互換性がないため、
+        // mockImplementation を使うために型アサーションが必要
+        window.matchMedia = matchMediaMock as typeof window.matchMedia;
     });
 
     afterEach(() => {

@@ -200,12 +200,17 @@ describe("createMockEngineClient", () => {
             vi.advanceTimersByTime(10);
 
             expect(infoEvent).not.toBeNull();
-            if (infoEvent && infoEvent.type === "info") {
-                expect(infoEvent.depth).toBe(1);
-                expect(infoEvent.scoreCp).toBe(0);
-                expect(infoEvent.nodes).toBe(128);
-                expect(infoEvent.nps).toBe(1024);
-                expect(infoEvent.pv).toEqual([]);
+
+            // TypeScript の型ガードで適切に絞り込む
+            if (infoEvent !== null) {
+                expect(infoEvent.type).toBe("info");
+                if (infoEvent.type === "info") {
+                    expect(infoEvent.depth).toBe(1);
+                    expect(infoEvent.scoreCp).toBe(0);
+                    expect(infoEvent.nodes).toBe(128);
+                    expect(infoEvent.nps).toBe(1024);
+                    expect(infoEvent.pv).toEqual([]);
+                }
             }
         });
     });

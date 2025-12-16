@@ -1,21 +1,21 @@
 import type { EngineEvent } from "@shogi/engine-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTauriEngineClient, getLegalMoves } from "./index";
+import { createTauriEngineClient, getLegalMoves, type TauriIpc } from "./index";
 
 describe("createTauriEngineClient", () => {
-    // vitest 4.0のMock型はジェネリック関数のすべての型引数を保持できないため、
-    // モック変数にはanyを使用。実際の使用箇所では正しい型が推論される。
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let mockInvoke: any;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let mockListen: any;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let mockUnlisten: any;
+    let mockInvoke: ReturnType<typeof vi.fn>;
+    let mockListen: ReturnType<typeof vi.fn>;
+    let mockUnlisten: ReturnType<typeof vi.fn>;
+    let mockIpc: TauriIpc;
 
     beforeEach(() => {
         mockInvoke = vi.fn();
         mockListen = vi.fn();
         mockUnlisten = vi.fn();
+        mockIpc = {
+            invoke: mockInvoke as TauriIpc["invoke"],
+            listen: mockListen as TauriIpc["listen"],
+        };
     });
 
     afterEach(() => {
@@ -28,7 +28,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             await client.init();
@@ -42,7 +42,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
                 threads: 4,
                 ttSizeMb: 1024,
             });
@@ -59,7 +59,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             await client.loadPosition("startpos", ["7g7f"]);
@@ -75,7 +75,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             await client.init();
@@ -92,7 +92,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             await client.stop();
@@ -105,7 +105,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             await client.setOption("threads", 4);
@@ -120,7 +120,7 @@ describe("createTauriEngineClient", () => {
     describe("イベント購読", () => {
         it("subscribe でイベントリスナーを登録する", () => {
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             const handler = vi.fn();
@@ -133,14 +133,15 @@ describe("createTauriEngineClient", () => {
             let eventCallback: ((evt: { payload: EngineEvent }) => void) | null = null;
 
             mockInvoke.mockResolvedValue(undefined);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            mockListen.mockImplementation((_eventName: any, callback: any) => {
-                eventCallback = callback;
-                return Promise.resolve(mockUnlisten);
-            });
+            mockListen.mockImplementation(
+                (_eventName: string, callback: (evt: { payload: EngineEvent }) => void) => {
+                    eventCallback = callback;
+                    return Promise.resolve(mockUnlisten);
+                },
+            );
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             const handler = vi.fn();
@@ -164,14 +165,15 @@ describe("createTauriEngineClient", () => {
             let eventCallback: ((evt: { payload: EngineEvent }) => void) | null = null;
 
             mockInvoke.mockResolvedValue(undefined);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            mockListen.mockImplementation((_eventName: any, callback: any) => {
-                eventCallback = callback;
-                return Promise.resolve(mockUnlisten);
-            });
+            mockListen.mockImplementation(
+                (_eventName: string, callback: (evt: { payload: EngineEvent }) => void) => {
+                    eventCallback = callback;
+                    return Promise.resolve(mockUnlisten);
+                },
+            );
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             const handler = vi.fn();
@@ -201,7 +203,7 @@ describe("createTauriEngineClient", () => {
             mockInvoke.mockRejectedValue(new Error("IPC failed"));
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
                 useMockOnError: true,
             });
 
@@ -214,7 +216,7 @@ describe("createTauriEngineClient", () => {
             mockInvoke.mockRejectedValue(new Error("IPC failed"));
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
                 useMockOnError: false,
             });
 
@@ -227,7 +229,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockRejectedValue(new Error("Listen failed"));
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
                 useMockOnError: true,
             });
 
@@ -245,7 +247,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
             });
 
             await client.init();
@@ -262,7 +264,7 @@ describe("createTauriEngineClient", () => {
             mockListen.mockResolvedValue(mockUnlisten);
 
             const client = createTauriEngineClient({
-                ipc: { invoke: mockInvoke, listen: mockListen },
+                ipc: mockIpc,
                 eventName: "custom://event",
             });
 
@@ -274,12 +276,14 @@ describe("createTauriEngineClient", () => {
 });
 
 describe("getLegalMoves", () => {
-    // vitest 4.0のMock型の制限により、ジェネリック関数のモックにはanyを使用
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let mockInvoke: any;
+    let mockInvoke: ReturnType<typeof vi.fn>;
+    let mockIpc: Partial<TauriIpc>;
 
     beforeEach(() => {
         mockInvoke = vi.fn();
+        mockIpc = {
+            invoke: mockInvoke as TauriIpc["invoke"],
+        };
     });
 
     afterEach(() => {
@@ -291,7 +295,7 @@ describe("getLegalMoves", () => {
 
         const result = await getLegalMoves({
             sfen: "startpos",
-            ipc: { invoke: mockInvoke },
+            ipc: mockIpc,
         });
 
         expect(mockInvoke).toHaveBeenCalledWith("engine_legal_moves", {
@@ -307,7 +311,7 @@ describe("getLegalMoves", () => {
         const result = await getLegalMoves({
             sfen: "startpos",
             moves: ["7g7f"],
-            ipc: { invoke: mockInvoke },
+            ipc: mockIpc,
         });
 
         expect(mockInvoke).toHaveBeenCalledWith("engine_legal_moves", {
@@ -322,7 +326,7 @@ describe("getLegalMoves", () => {
 
         const result = await getLegalMoves({
             sfen: "startpos",
-            ipc: { invoke: mockInvoke },
+            ipc: mockIpc,
         });
 
         expect(result).toEqual([]);

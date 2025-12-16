@@ -4,16 +4,12 @@ import { createWasmEngineClient } from "./index";
 
 describe("createWasmEngineClient", () => {
     let mockWorker: {
-        // vitest 4.0のMock型の制限により、モック関数にはanyを使用
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        postMessage: any;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        terminate: any;
+        postMessage: ReturnType<typeof vi.fn>;
+        terminate: ReturnType<typeof vi.fn>;
         onmessage: ((event: MessageEvent) => void) | null;
         onerror: ((error: ErrorEvent) => void) | null;
     };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let mockWorkerFactory: any;
+    let mockWorkerFactory: () => Worker;
 
     beforeEach(() => {
         mockWorker = {
