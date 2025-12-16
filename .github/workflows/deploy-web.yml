@@ -167,7 +167,7 @@ jobs:
         timeout-minutes: 10
         run: |
           echo "Building Web App..."
-          if ! pnpm --filter web build; then
+          if ! pnpm --filter web... build; then
             echo "Error: Web app build failed"
             ls -la apps/web/dist 2>/dev/null || echo "dist directory not found"
             exit 1
