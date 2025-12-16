@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EngineEvent, EngineInfoEvent } from "./index";
+import type { EngineEvent } from "./index";
 import { createMockEngineClient } from "./index";
 
 describe("createMockEngineClient", () => {
@@ -201,16 +201,16 @@ describe("createMockEngineClient", () => {
 
             expect(infoEvent).not.toBeNull();
 
-            // TypeScript の型ガードが union type を正しく絞り込めないため、
-            // type assertion が必要（subscribe コールバック内で型が推論される前に代入されるため）
+            // TypeScript の型ガードで適切に絞り込む
             if (infoEvent !== null) {
-                const info = infoEvent as EngineInfoEvent;
-                expect(info.type).toBe("info");
-                expect(info.depth).toBe(1);
-                expect(info.scoreCp).toBe(0);
-                expect(info.nodes).toBe(128);
-                expect(info.nps).toBe(1024);
-                expect(info.pv).toEqual([]);
+                expect(infoEvent.type).toBe("info");
+                if (infoEvent.type === "info") {
+                    expect(infoEvent.depth).toBe(1);
+                    expect(infoEvent.scoreCp).toBe(0);
+                    expect(infoEvent.nodes).toBe(128);
+                    expect(infoEvent.nps).toBe(1024);
+                    expect(infoEvent.pv).toEqual([]);
+                }
             }
         });
     });
