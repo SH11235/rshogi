@@ -22,7 +22,7 @@ use super::movepicker::piece_value;
 use super::tt_history::TTMoveHistory;
 use super::types::{
     draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves,
-    StackArray,
+    SearchedMoveList, StackArray,
 };
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -754,29 +754,37 @@ impl<'a> SearchWorker<'a> {
             return None;
         }
 
-        let cont_tables = self.build_cont_tables(ply);
-        let mp = MovePicker::new_probcut(
-            pos,
-            tt_ctx.mv,
-            threshold,
-            &self.main_history,
-            &self.low_ply_history,
-            &self.capture_history,
-            cont_tables,
-            &self.pawn_history,
-            ply,
-            self.generate_all_legal_moves,
-        );
-        let mut probcut_moves = Vec::new();
-        for mv in mp {
-            probcut_moves.push(mv);
-        }
-
         let dynamic_reduction = (static_eval - beta).raw() / 300;
         let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
 
-        // YaneuraOu準拠: 全捕獲手を試す（PV:2手/NonPV:4手の制限を撤廃）
-        for mv in probcut_moves {
+        // 固定長バッファに収集（借用チェッカーの制約回避）
+        let probcut_moves = {
+            let cont_tables = self.build_cont_tables(ply);
+            let mp = MovePicker::new_probcut(
+                pos,
+                tt_ctx.mv,
+                threshold,
+                &self.main_history,
+                &self.low_ply_history,
+                &self.capture_history,
+                cont_tables,
+                &self.pawn_history,
+                ply,
+                self.generate_all_legal_moves,
+            );
+
+            let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+            let mut len = 0;
+            for mv in mp {
+                buf[len] = mv;
+                len += 1;
+            }
+            (buf, len)
+        };
+        let (buf, len) = probcut_moves;
+
+        // YaneuraOu準拠: 全捕獲手を試す
+        for &mv in buf[..len].iter() {
             if !pos.is_legal(mv) {
                 continue;
             }
@@ -1481,8 +1489,8 @@ impl<'a> SearchWorker<'a> {
         let mut best_value = Value::new(-32001);
         let mut best_move = Move::NONE;
         let mut move_count = 0;
-        let mut quiets_tried: Vec<Move> = Vec::new();
-        let mut captures_tried: Vec<Move> = Vec::new();
+        let mut quiets_tried = SearchedMoveList::new();
+        let mut captures_tried = SearchedMoveList::new();
         let mover = pos.side_to_move();
 
         let (ordered_moves, tt_move) =
@@ -1909,7 +1917,7 @@ impl<'a> SearchWorker<'a> {
                 // 他のquiet手にはペナルティ
                 // YaneuraOu: update_quiet_histories(move, -quietMalus * 1115 / 1024)
                 let scaled_malus = malus * 1115 / 1024;
-                for &m in &quiets_tried {
+                for &m in quiets_tried.iter() {
                     if m != best_move {
                         // MainHistory
                         self.main_history.update(us, m, -scaled_malus);
@@ -1967,7 +1975,7 @@ impl<'a> SearchWorker<'a> {
             // YaneuraOu: 他の捕獲手へのペナルティ（capture best以外の全捕獲手）
             // captureMalus = min(708*depth-148, 2287) - 29*capturesSearched.size()
             let cap_malus = capture_malus(depth, captures_tried.len());
-            for &m in &captures_tried {
+            for &m in captures_tried.iter() {
                 if m != best_move {
                     let moved_pc = pos.moved_piece(m);
                     let cont_pc = if m.is_promotion() {

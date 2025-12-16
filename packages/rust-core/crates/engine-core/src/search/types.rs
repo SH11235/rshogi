@@ -183,6 +183,74 @@ pub fn init_stack_array() -> StackArray {
 }
 
 // =============================================================================
+// SmallMoveList（固定長の指し手リスト）
+// =============================================================================
+
+/// 固定長の指し手リスト
+///
+/// YaneuraOu準拠のSEARCHEDLIST_CAPACITY（32手）をベースに設計。
+/// ヒープ割り当てを避け、探索ホットパスでの性能を向上させる。
+///
+/// 目的は「そのノードで試した全手の保存」ではなく、
+/// 「統計更新のための代表集合」の保存。
+pub struct SmallMoveList<const N: usize> {
+    buf: [Move; N],
+    len: usize,
+}
+
+impl<const N: usize> SmallMoveList<N> {
+    /// 空のSmallMoveListを作成
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            buf: [Move::NONE; N],
+            len: 0,
+        }
+    }
+
+    /// 指し手を追加
+    ///
+    /// 容量を超えた場合は無視する（YaneuraOu準拠: 32手を超える分は記録しない）
+    #[inline]
+    pub fn push(&mut self, mv: Move) {
+        if self.len < N {
+            self.buf[self.len] = mv;
+            self.len += 1;
+        }
+    }
+
+    /// 現在の要素数
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// 空かどうか
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// イテレータを返す
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &Move> {
+        self.buf[..self.len].iter()
+    }
+}
+
+impl<const N: usize> Default for SmallMoveList<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 探索用の固定長指し手リスト（YaneuraOu SEARCHEDLIST_CAPACITY相当）
+pub const SEARCHED_MOVES_CAPACITY: usize = 32;
+
+/// quiets_tried / captures_tried 用の型エイリアス
+pub type SearchedMoveList = SmallMoveList<SEARCHED_MOVES_CAPACITY>;
+
+// =============================================================================
 // RootMove（ルート手の情報）
 // =============================================================================
 
@@ -682,5 +750,63 @@ mod tests {
         assert_eq!(rm.average_score.raw(), 20); // (100 + -60) / 2
                                                 // mean_squared_score は value * |value| を平均するため符号を保持する
         assert_eq!(rm.mean_squared_score, Some((10_000 - 3_600) / 2));
+    }
+
+    #[test]
+    fn test_small_move_list_basic() {
+        let mut list: SmallMoveList<4> = SmallMoveList::new();
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("2g2f").unwrap();
+
+        list.push(mv1);
+        assert_eq!(list.len(), 1);
+        assert!(!list.is_empty());
+
+        list.push(mv2);
+        assert_eq!(list.len(), 2);
+
+        let moves: Vec<_> = list.iter().copied().collect();
+        assert_eq!(moves, vec![mv1, mv2]);
+    }
+
+    #[test]
+    fn test_small_move_list_capacity_limit() {
+        let mut list: SmallMoveList<2> = SmallMoveList::new();
+
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("2g2f").unwrap();
+        let mv3 = Move::from_usi("3g3f").unwrap();
+
+        list.push(mv1);
+        list.push(mv2);
+        assert_eq!(list.len(), 2);
+
+        // 容量を超えても追加は無視される
+        list.push(mv3);
+        assert_eq!(list.len(), 2);
+
+        let moves: Vec<_> = list.iter().copied().collect();
+        assert_eq!(moves, vec![mv1, mv2]);
+    }
+
+    #[test]
+    fn test_searched_move_list() {
+        let mut list = SearchedMoveList::new();
+        assert_eq!(list.len(), 0);
+
+        // SEARCHED_MOVES_CAPACITYまで追加可能
+        for i in 0..SEARCHED_MOVES_CAPACITY {
+            let mv = Move::from_usi("7g7f").unwrap();
+            list.push(mv);
+            assert_eq!(list.len(), i + 1);
+        }
+
+        // 容量を超えると無視される
+        let mv = Move::from_usi("2g2f").unwrap();
+        list.push(mv);
+        assert_eq!(list.len(), SEARCHED_MOVES_CAPACITY);
     }
 }
